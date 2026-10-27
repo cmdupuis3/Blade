@@ -554,7 +554,7 @@ let H: Array<Float64 like AssetIdx, HourIdx> = [
     [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3.0, 1.0, 4.0, 1.0, 5.0, 9.0]]
 function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 = mean((a - mean(a)) * (b - mean(b)))
 let X = method_for(R, H) <@> cov |> compute
-// ERROR: BL3999
+// ERROR: BL3027
 ```
 
 *A commutativity claim that is false.* The kernel below is not symmetric in

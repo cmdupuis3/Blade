@@ -496,12 +496,12 @@ to the co-iterated pair per iteration, equivalent to the flattened
 Two shapes are refused rather than guessed at:
 
 - A `where` clause (`comm`, `omp`, ...) together with a `Tuple<N>` kernel
-  parameter is refused (`BL3999`): `comm`/`anticomm` address parameters by
+  parameter is refused (`BL3034`): `comm`/`anticomm` address parameters by
   position and the parallel strategies by name, and realizing a `Tuple<N>`
   parameter as its `k` row parameters renumbers both. Write the parameters
   flat to use a `where` clause.
 - `zip(...)` cannot appear beside another array in one operand pack —
-  `(A, zip(B, C))` is refused (`BL3999`), both loop orientations. Co-iterating
+  `(A, zip(B, C))` is refused (`BL3033`), both loop orientations. Co-iterating
   a zip nested inside an outer loop is a real feature, just not implemented
   yet; hoist the zip to its own `<@>`, or pass its arrays as separate
   operands.
@@ -635,7 +635,7 @@ proofs.md §Binomial).
   maps, decompacts and passes to functions like a stored one (and is refused
   by `reduce` the way a stored one is). A count that stops inside a group, or
   completes a group with records after it left unread, has no residual class
-  and is refused (BL3999); `decompact(A, d)` first. The `S(i)` remainder above
+  and is refused (BL3026); `decompact(A, d)` first. The `S(i)` remainder above
   is the spec-level reading, not a value today.
 
 **Nested/mixed symmetry** (spec level, **(planned)**): `NestedSymIdx<n>` (symmetric pairs of
@@ -843,7 +843,7 @@ default read refuse (BL8015) in every lane; a finite Zarr/Icechunk
 (§4.5), built as `compound(raw, mask(raw, present))` over one raw read that
 the program never sees, and `nc.present` is that mask
 ([features/sql.md §2a](features/sql.md)). A compile-time fold of such a variable
-(`let static ... |> read`) refuses too, at compile time, under BL3999 (the code of
+(`let static ... |> read`) refuses too, at compile time, under BL4002 (the code of
 every `let static` fold failure) with the same sentence.
 
 ### 3.9 Symmetry lives in the index type
@@ -1247,7 +1247,7 @@ by arithmetic are ONE variable -- there is no promotion type -- so `function
 add(x, y) = x + y` takes one type per call, and its arguments must agree
 EXACTLY: no argument converts implicitly, in either order and literals
 included, so `add(2.5, 1)` and `add(1, 2.5)` are both refused at the second
-(BL3999), as is an Int64 and a Float64 variable -- the caller writes
+(BL3024), as is an Int64 and a Float64 variable -- the caller writes
 `add(2.5, 1.0)` or `add(2.5, Float64(n))`. The one exception is `^`, whose
 exponent is polymorphic (§2.4): `function pw(x, n) = x ^ n` keeps two
 variables and is typed as its base, so `pw(2.0, 3)` is the squared-out 8.0,
@@ -1959,7 +1959,7 @@ the identity — resolving it to the surrounding operation's identity is
 recursion, the tuple-pattern spelling `let (head, tail) = args`, and an `nth`
 recursion-depth variable are **(planned)**: today each is refused with a
 diagnostic naming the built form -- the missing base arm (BL7004), the cons
-pattern (BL3999), an explicit depth parameter (BL3999).) Nested tuples preserve structure (`arity` counts
+pattern (BL3004), an explicit depth parameter (BL3033).) Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
 `(B, C)` is one tuple-typed argument, distinct from

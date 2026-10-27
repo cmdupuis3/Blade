@@ -8197,7 +8197,7 @@ and private emitReduceCore (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (init
 /// REACHABILITY, stated plainly: no Blade program can currently deliver a
 /// compact operand to a fold. `reduce()` over compact symmetric/antisymmetric
 /// storage -- and over a computation whose OUTPUT is compact -- is a FRONT-END
-/// refusal at five sites in TypeCheckInfer (BL3999: "folding the canonical
+/// refusal at five sites in TypeCheckInfer (BL3026: "folding the canonical
 /// cells and folding the logical (mirrored) cells differ ... decompact(A, d)
 /// first"), because the surface has never decided which of the two folds
 /// `reduce` means. So this arm is the back end holding up its end of a
@@ -8213,7 +8213,7 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
     // the structural license AND the build's polarity. Structure alone must
     // never brick in a REPRO build -- under BLADE_FP_REPRO=1 the serial
     // canonical walk is the only walk, which is what keeps the byte-identity
-    // oracles (which pin that build) honest the day BL3999's refusal lifts.
+    // oracles (which pin that build) honest the day BL3026's refusal lifts.
     let brickable = foldFmfLicensed c cl
     let fmf = foldFmfDecorable c cl
     let combine (dst: string) (cur: Val) (cell: Val) =

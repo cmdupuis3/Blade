@@ -175,7 +175,7 @@ let private ompDepthCases : (string * string * string) list =
       // that the licence survives that expansion AND keeps its depth meaning:
       // one level licensed of a two-row node is a plain `parallel for`, both
       // levels licensed is `collapse(2)`. Before the split, BOTH of these were
-      // a hard BL3999 refusal (any where-clause + any tuple param).
+      // a hard BL3034 refusal (any where-clause + any tuple param).
       ("tuple_param_depth_1_no_collapse",
        "let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n" +
        "let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]\n" +

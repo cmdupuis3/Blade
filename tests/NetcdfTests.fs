@@ -1958,7 +1958,7 @@ let b = ps
               | Some (Error e) -> check "netcdf: stream refusal runs" false e)
          | Error e -> skipOrFail "netcdf stream refusal" e)
         // The static fold refuses BEFORE folding, in its own phase (the `let static` assertion,
-        // BL3999),
+        // BL4002),
         // with the runtime sentence.
         (match lower (prog "let static V = m.vars.fill |> nc.read") with
          | Ok _ -> check "netcdf: static fold of a filled variable refused" false "lowered without error"

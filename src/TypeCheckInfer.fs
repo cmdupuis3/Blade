@@ -246,7 +246,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // Produced by the parser, eliminated by the Unfold pass before
     // typechecking; reaching here means the pipeline skipped unfolding.
     | ExprKind.ExprStatic _ ->
-        Error (Other "internal: static former survived unfolding (the Unfold pass did not run)")
+        Error (InternalErr "internal: static former survived unfolding (the Unfold pass did not run)")
 
     // ---- Recursive array definitions ----
     // Only legal as the immediate Value of a `let rec` binding; the binding
@@ -254,7 +254,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // bound name for self-reference). Reaching it here means it appeared in
     // ordinary expression position.
     | ExprKind.ExprRecArray def ->
-        Error (Other $"recursive array '{def.Name}': a recursive array definition is only legal as the body of `let rec {def.Name}: ... = match {def.Name} with ...`")
+        Error (RecArrayFormErr $"recursive array '{def.Name}': a recursive array definition is only legal as the body of `let rec {def.Name}: ... = match {def.Name} with ...`")
 
     // ---- Variables ----
     | ExprKind.ExprVar name ->
@@ -303,8 +303,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      let tAlias = mkTyped (TExprVar (alias, aliasVi.VarId, aliasVi.Identity)) aliasVi.Type
                      let tField = mkTyped (TExprField (tAlias, "load_compound", 0)) compoundTy
                      Ok (mkTyped (TExprApp (tField, [tVar; tMask])) compoundTy)
-                 | Error msg -> Error (Other msg))
-            | _ -> Error (Other "load_compound expects two array arguments: the variable and an integer mask")))
+                 | Error msg -> Error (BuiltinArgErr msg))
+            | _ -> Error (BuiltinArgErr "load_compound expects two array arguments: the variable and an integer mask")))
 
     // ---- Provider read: alias.read(view) / view |> alias.read ----
     // Both spellings arrive as this application (the pipe desugars to an
@@ -346,7 +346,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let tField = mkTyped (TExprField (tAlias, verb, 0)) tE.Type
                 Ok (mkTyped (TExprApp (tField, [tE])) tE.Type)
             | _ ->
-                Error (Other $"`{alias}.read_present` / `{alias}.present` read a DENSE stored variable (`store.vars.<name>`); packed, orbit and compound variables have no masked read"))
+                Error (BuiltinArgErr $"`{alias}.read_present` / `{alias}.present` read a DENSE stored variable (`store.vars.<name>`); packed, orbit and compound variables have no masked read"))
 
     // ---- A masked read ProviderDesugar did not rewrite ----
     // Unreachable from a checked program (the desugar refuses every position
@@ -354,7 +354,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // error if a funnel ever skips the pass.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, ("read_present" | "present" as verb)) }, _)
         when (providerAliasName env alias).IsSome ->
-        Error (Other $"`{alias}.{verb}` must be the whole value of a module-level binding (`let t = store.vars.<name> |> {alias}.{verb}`)")
+        Error (BuiltinArgErr $"`{alias}.{verb}` must be the whole value of a module-level binding (`let t = store.vars.<name> |> {alias}.{verb}`)")
 
     // ---- Windowed packed read: alias.read_window(view, lo, hi) ----
     // Materializes only the cells with every coordinate in [lo, hi): a
@@ -726,7 +726,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferBinaryIntrinsic env name aExpr bExpr
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args)
             when isBinaryIntrinsic name && (lookupVar name env).IsNone ->
-        Error (Other (sprintf "%s takes exactly 2 arguments (got %d): %s"
+        Error (ArgCountErr (sprintf "%s takes exactly 2 arguments (got %d): %s"
                         name args.Length
                         (if name = "atan2" then "atan2(y, x) is the quadrant-correct angle of the point (x, y)"
                          else "log_base(x, b) is log x / log b")))
@@ -782,10 +782,10 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                  // class...") would read as nonsense about the user's plain
                  // array. Answer in its own words instead.
                  | _ ->
-                     Error (Other $"leaves(A) takes a TREE-slotted array and retypes its flat leaf pool onto the derived dense leaf axis LeafIdx<shape>. This argument's type is {ppIRType (env.Subst.Resolve tArr.Type)}, which has no tree slot -- it is already an ordinary dense array, so there is nothing to retype: use it directly."))
-            | _ -> Error (Other "leaves(A) takes a tree-slotted ARRAY: it retypes the tree's flat leaf pool onto its derived dense leaf axis (LeafIdx<shape>), which is an ordinary Idx over the leaf count. This argument is not an array."))
+                     Error (BuiltinArgErr $"leaves(A) takes a TREE-slotted array and retypes its flat leaf pool onto the derived dense leaf axis LeafIdx<shape>. This argument's type is {ppIRType (env.Subst.Resolve tArr.Type)}, which has no tree slot -- it is already an ordinary dense array, so there is nothing to retype: use it directly."))
+            | _ -> Error (BuiltinArgErr "leaves(A) takes a tree-slotted ARRAY: it retypes the tree's flat leaf pool onto its derived dense leaf axis (LeafIdx<shape>), which is an ordinary Idx over the leaf count. This argument is not an array."))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "leaves" }, args) when (lookupVar "leaves" env).IsNone ->
-        Error (Other $"leaves takes exactly 1 argument (got {args.Length}): leaves(T) retypes one tree-slotted array onto its leaf axis.")
+        Error (ArgCountErr $"leaves takes exactly 1 argument (got {args.Length}): leaves(T) retypes one tree-slotted array onto its leaf axis.")
     // ---- fma(a, b, c): fused multiply-add ----
     // a*b + c rounded ONCE. Plain-call intrinsic, shadowable like abs/complex.
     // Float64 scalars only (checkExpr against Float64, so a unit-carrying or
@@ -807,21 +807,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
              (match aliases |> List.map Option.get with
               | [ a ] -> inferSegments env a
               | [ a0; a1 ] -> inferSegmentsGrid env [ a0; a1 ]
-              | _ -> Error (Other $"segments({x}): tile groupings of rank {aliases.Length} are not supported (rank 1 and 2)"))
+              | _ -> Error (SegmentedDomainErr $"segments({x}): tile groupings of rank {aliases.Length} are not supported (rank 1 and 2)"))
          | true, aliases ->
              let missing = aliases |> List.mapi (fun i a -> if a.IsNone then Some (string i) else None) |> List.choose id
-             Error (Other $"""segments({x}): slot(s) {String.concat ", " missing} of '{x}' are not declared `Chunked`; annotate every slot with a `Chunked<..>` alias, or name the aliases: segments(C0[, C1])""")
-         | _ -> Error (Other $"segments({x}): '{x}' has no annotation naming `Chunked<..>` slots; annotate it (`let {x}: Array<T like C0, C1> = ..`) or name the aliases: segments(C0[, C1])"))
+             Error (SegmentedDomainErr $"""segments({x}): slot(s) {String.concat ", " missing} of '{x}' are not declared `Chunked`; annotate every slot with a `Chunked<..>` alias, or name the aliases: segments(C0[, C1])""")
+         | _ -> Error (SegmentedDomainErr $"segments({x}): '{x}' has no annotation naming `Chunked<..>` slots; annotate it (`let {x}: Array<T like C0, C1> = ..`) or name the aliases: segments(C0[, C1])"))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "segments" }, [ { Kind = ExprKind.ExprVar alias } ]) when (lookupVar "segments" env).IsNone ->
         inferSegments env alias
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "segments" }, [ { Kind = ExprKind.ExprVar a0 }; { Kind = ExprKind.ExprVar a1 } ]) when (lookupVar "segments" env).IsNone ->
         inferSegmentsGrid env [ a0; a1 ]
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "segments" }, _) when (lookupVar "segments" env).IsNone ->
-        Error (Other "segments takes the name of a `Chunked<..>` index alias, or two of them for the tile grouping of a rank-2 array")
+        Error (SegmentedDomainErr "segments takes the name of a `Chunked<..>` index alias, or two of them for the tile grouping of a rank-2 array")
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "files" }, [ { Kind = ExprKind.ExprVar alias } ]) when (lookupVar "files" env).IsNone ->
         inferFiles env alias
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "files" }, _) when (lookupVar "files" env).IsNone ->
-        Error (Other "files takes exactly one argument: the name of a file-segmented `Chunked<..>` index alias")
+        Error (SegmentedDomainErr "files takes exactly one argument: the name of a file-segmented `Chunked<..>` index alias")
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "ungroup" }, [ { Kind = ExprKind.ExprArrayLit rows }; { Kind = ExprKind.ExprVar alias } ]) when (lookupVar "ungroup" env).IsNone ->
         inferUngroupRows env rows alias
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "ungroup" }, [ g ]) when (lookupVar "ungroup" env).IsNone ->
@@ -829,7 +829,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "ungroup" }, [ g; { Kind = ExprKind.ExprVar alias } ]) when (lookupVar "ungroup" env).IsNone ->
         inferUngroup env g (Some alias)
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "ungroup" }, _) when (lookupVar "ungroup" env).IsNone ->
-        Error (Other "ungroup takes a segment-grouped array, optionally followed by the name of its `Chunked<..>` axis: ungroup(G) or ungroup(G, A)")
+        Error (SegmentedDomainErr "ungroup takes a segment-grouped array, optionally followed by the name of its `Chunked<..>` axis: ungroup(G) or ungroup(G, A)")
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "fma" }, [aExpr; bExpr; cExpr]) when (lookupVar "fma" env).IsNone ->
         let f64 = IRTScalar ETFloat64
         checkExpr env f64 aExpr |> Result.bind (fun tA ->
@@ -837,7 +837,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         checkExpr env f64 cExpr |> Result.map (fun tC ->
             mkTyped (TExprFma (tA, tB, tC)) f64)))
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "fma" }, args) when (lookupVar "fma" env).IsNone ->
-        Error (Other (sprintf "fma takes exactly 3 arguments (got %d): fma(a, b, c) is a*b + c rounded once"
+        Error (ArgCountErr (sprintf "fma takes exactly 3 arguments (got %d): fma(a, b, c) is a*b + c rounded once"
                         args.Length))
 
     // ---- complex(re, im): complex literal constructor ----
@@ -981,12 +981,12 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             if indexed && List.length rest >= 2 then List.splitAt 2 rest
             else ([], rest)
         if indexed && addrArgs.Length <> 2 then
-            Error (Other $"rand.{kind}: expected rand.{kind}(key, stream, offset, ..., shape) -- the stream key and the sample offset follow the key")
+            Error (ArgCountErr $"rand.{kind}: expected rand.{kind}(key, stream, offset, ..., shape) -- the stream key and the sample offset follow the key")
         else
         // Surface order is key, [stream, offset], [weights], scalar pars.., shape.
         let nLead = nPars + (if hasWeights then 1 else 0)
         if List.length rest <= nLead then
-            Error (Other $"rand.{kind}: expected {nLead} distribution parameter(s) and a shape")
+            Error (ArgCountErr $"rand.{kind}: expected {nLead} distribution parameter(s) and a shape")
         else
         let leadArgs, dimArgs = List.splitAt nLead rest
         let weightsArg = if hasWeights then Some (List.head leadArgs) else None
@@ -1004,7 +1004,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | ExprKind.ExprLit (LitInt n) -> Error $"rand.{kind}: shape extents must be positive (got {n})"
                 | _ -> Error $"rand.{kind}: shape must be a static positive int (or list of them)")
         match dimResults |> List.fold (fun acc r -> match acc, r with Ok xs, Ok x -> Ok (xs @ [x]) | Error e, _ -> Error e | _, Error e -> Error e) (Ok []) with
-        | Error e -> Error (Other e)
+        | Error e -> Error (BuiltinArgErr e)
         | Ok dims ->
             // The weights channel: inferred (not checked against a demand --
             // its extent is what we are trying to LEARN), then required to be a
@@ -1019,7 +1019,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | ArrayElem arrTy ->
                     let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
                     if rank <> 1 then
-                        Error (Other $"rand.{kind}: weights must be a rank-1 array (got rank {rank})")
+                        Error (BuiltinArgErr $"rand.{kind}: weights must be a rank-1 array (got rank {rank})")
                     else
                         match env.Subst.Resolve(arrTy.ElemType) with
                         | AnyPrimElem ETFloat64 ->
@@ -1027,19 +1027,19 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             | [ix] ->
                                 match ix.Extent with
                                 | IRLit (IRLitInt k) when k > int64 System.Int32.MaxValue ->
-                                    Error (Other $"rand.{kind}: weights extent {k} is too large (at most {System.Int32.MaxValue})")
+                                    Error (BuiltinArgErr $"rand.{kind}: weights extent {k} is too large (at most {System.Int32.MaxValue})")
                                 | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
                                 | IRLit (IRLitInt k) ->
-                                    Error (Other $"rand.{kind}: weights extent must be positive (got {k})")
+                                    Error (BuiltinArgErr $"rand.{kind}: weights extent must be positive (got {k})")
                                 | _ ->
-                                    Error (Other $"rand.{kind}: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled")
-                            | _ -> Error (Other $"rand.{kind}: weights must be a rank-1 Float64 array")
+                                    Error (StaticValueErr $"rand.{kind}: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled")
+                            | _ -> Error (BuiltinArgErr $"rand.{kind}: weights must be a rank-1 Float64 array")
                         | AnyPrimElem et ->
-                            Error (Other ($"rand.{kind}: weights must have Float64 elements (got {ppIRType (IRTScalar et)})"))
+                            Error (BuiltinArgErr ($"rand.{kind}: weights must have Float64 elements (got {ppIRType (IRTScalar et)})"))
                         | _ ->
-                            Error (Other $"rand.{kind}: weights must be a rank-1 Float64 array")
+                            Error (BuiltinArgErr $"rand.{kind}: weights must be a rank-1 Float64 array")
                 | _ ->
-                    Error (Other $"rand.{kind}: weights must be a rank-1 Float64 array, not a scalar")
+                    Error (BuiltinArgErr $"rand.{kind}: weights must be a rank-1 Float64 array, not a scalar")
             let weightsResult : TypeResult<(TypedExpr * int) option> =
                 match weightsArg with
                 | None -> Ok None
@@ -1069,7 +1069,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             Some $"rand.{kind}: the sample offset must be non-negative (got {o})"
                         | _ -> None
                     (match literalBad with
-                     | Some m -> Error (Other m)
+                     | Some m -> Error (BuiltinArgErr m)
                      | None ->
                         checkExpr env (IRTScalar ETInt64) sE |> Result.bind (fun tS ->
                         checkExpr env (IRTScalar ETInt64) oE |> Result.map (fun tO -> Some (tS, tO))))
@@ -1180,7 +1180,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     inferExpr env wE |> Result.bind (fun tw ->
                         match env.Subst.Resolve tw.Type with
                         | ArrayElem { IndexTypes = [ { Extent = IRLit (IRLitInt k) } ] } when k > 0L -> Ok (Some (tw, int k))
-                        | _ -> Error (Other "rand.categorical_at: the weights must be a rank-1 Float64 array of static extent"))
+                        | _ -> Error (BuiltinArgErr "rand.categorical_at: the weights must be a rank-1 Float64 array of static extent"))
             tW |> Result.map (fun tWeights ->
                 let ty = if isCat then IRTScalar ETInt64 else IRTScalar ETFloat64
                 mkTyped (TExprRandGen (kind, tKey, tPars, tWeights, Some (tS, tI), [], None)) ty)))))
@@ -1222,7 +1222,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             |> Result.map (fun tData ->
                 mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail, None)) (IRTScalar ETBool))
          | _ ->
-            Error (Other "display.emit: internal marker arguments must be literals (this is a compiler bug -- write display.emit(mime, data) instead of calling __display_emit directly)"))
+            Error (BuiltinArgErr "display.emit: internal marker arguments must be literals (this is a compiler bug -- write display.emit(mime, data) instead of calling __display_emit directly)"))
 
     // ---- __display_emit_id(head, quoted, id, data, metaTail): display module ----
     // `display.emit`'s twin with a caller-chosen `meta.id`. Same three
@@ -1239,7 +1239,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             |> Result.map (fun tData ->
                 mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail, Some tId)) (IRTScalar ETBool)))
          | _ ->
-            Error (Other "display.emit_id: internal marker arguments must be literals (this is a compiler bug -- write display.emit_id(mime, id, data) instead of calling __display_emit_id directly)"))
+            Error (BuiltinArgErr "display.emit_id: internal marker arguments must be literals (this is a compiler bug -- write display.emit_id(mime, id, data) instead of calling __display_emit_id directly)"))
 
     // ---- __display_json_array(A): display module JSON serialization ----
     // A rank-1 or rank-2 PLAIN-DENSE numeric array rendered as JSON text
@@ -1296,7 +1296,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             match env.Subst.Resolve tArr.Type with
             | ArrayElem at when at.IndexTypes.Length >= 1 && at.IndexTypes.Length <= 2 ->
                 if not (at.IndexTypes |> List.forall isPlainDenseIx) then
-                    Error (Other "display.json_array: the array must be plain dense on every axis (compact symmetric/ragged storage has no JSON layout) -- decompact(A, d) first")
+                    Error (BuiltinArgErr "display.json_array: the array must be plain dense on every axis (compact symmetric/ragged storage has no JSON layout) -- decompact(A, d) first")
                 else
                     (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
                      | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32)
@@ -1307,11 +1307,11 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      | IRTInfer _ ->
                          Ok (mkTyped (TExprDisplayJson (at.IndexTypes.Length, tArr)) (IRTScalar ETString))
                      | other ->
-                         Error (Other $"display.json_array: element type must be numeric (Float64/Float32/Int64/Int32), got {ppIRType other}"))
+                         Error (BuiltinArgErr $"display.json_array: element type must be numeric (Float64/Float32/Int64/Int32), got {ppIRType other}"))
             | ArrayElem at ->
-                Error (Other $"display.json_array: rank-1 and rank-2 arrays only (got rank {at.IndexTypes.Length})")
+                Error (BuiltinArgErr $"display.json_array: rank-1 and rank-2 arrays only (got rank {at.IndexTypes.Length})")
             | other ->
-                Error (Other $"display.json_array: expected a rank-1 or rank-2 numeric array, got {ppIRType other}"))
+                Error (BuiltinArgErr $"display.json_array: expected a rank-1 or rank-2 numeric array, got {ppIRType other}"))
 
     // ---- __display_unit_label(x): elaboration-time unit/quantity label ----
     // Collapses to a STRING LITERAL naming the operand's unit signature: the
@@ -1349,7 +1349,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) ->
                 Ok (mkTyped (TExprDisplayNum tNum) (IRTScalar ETString))
             | other ->
-                Error (Other $"display.json_num: expected a numeric scalar, got {ppIRType other}"))
+                Error (BuiltinArgErr $"display.json_num: expected a numeric scalar, got {ppIRType other}"))
 
     // ---- __display_json_string(s): display module String JSON rendering ----
     // A String rendered as a QUOTED, escaped JSON string -- quotes included,
@@ -1364,7 +1364,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | IRTScalar ETString ->
                 Ok (mkTyped (TExprDisplayStr tStr) (IRTScalar ETString))
             | other ->
-                Error (Other $"display.json_string: expected a String, got {ppIRType other}"))
+                Error (BuiltinArgErr $"display.json_string: expected a String, got {ppIRType other}"))
 
     // ---- cumulant(d, k): dist component projection, order-guarded ----
     // The order guard as a TYPE error (ppl/NOTES.md typed-Dist arc): k must
@@ -1461,7 +1461,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
              let sp = mergeSpan (List.head groups).Span (List.last groups).Span
              let spliced = mkExpr sp (ExprTuple (groups |> List.collect fragment))
              inferExpr env (mkExpr expr.Span (ExprApp (baseExpr, [ spliced ])))
-         | None -> Error (Other "unreachable: tree view spine guard"))
+         | None -> Error (InternalErr "unreachable: tree view spine guard"))
 
     | ExprKind.ExprApp (func, args) ->
         // CHAINED FACTORY SUGAR first: `f(x)(a : q1)(b : q2)` flattens to
@@ -1570,7 +1570,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 args |> List.mapi (fun i a -> (i, a))
                      |> List.choose (fun (i, a) -> match a.Kind with ExprKind.ExprWildcard -> Some i | _ -> None)
             if wildPositions.Length > 1 then
-                Error (Other "function partial application takes a single `_` placeholder only (formalism 6.2.3) -- bind the rest with prefix partial application or a lambda")
+                Error (InvalidApplicationErr "function partial application takes a single `_` placeholder only (formalism 6.2.3) -- bind the rest with prefix partial application or a lambda")
             elif args.Length <> paramTys.Length then
                 Error (PlaceholderNeedsAllBound (args.Length, paramTys.Length))
             else
@@ -1745,7 +1745,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         | _ -> None
                     | _ -> None
                 match dischargeErr with
-                | Some msg -> Error (Other msg)
+                | Some msg -> Error (ConstraintErr msg)
                 | None ->
                     // A declared GENERIC function passed to a head that is not
                     // itself a declared function (a lambda, a function-typed
@@ -2120,14 +2120,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 | _ -> None)
         match unresolvedSlot with
         | Some n ->
-            Error (Other $"range<...>: the extent '{n}' is not known at compile time, and a range has no runtime object to read one from -- it is a virtual iteration space, so its bounds must come from the type. '{n}' names neither a value in scope nor a declared index type. Declare it as an index type (`type {n} = Idx<N>`, then `range<{n}>`), bind it with `let static {n} = N`, or write the extent literally.")
+            Error (StaticValueErr $"range<...>: the extent '{n}' is not known at compile time, and a range has no runtime object to read one from -- it is a virtual iteration space, so its bounds must come from the type. '{n}' names neither a value in scope nor a declared index type. Declare it as an index type (`type {n} = Idx<N>`, then `range<{n}>`), bind it with `let static {n} = N`, or write the extent literally.")
         | None ->
         if hasCompound && idxs.Length > 1 then
-            Error (Other "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
+            Error (IndexTypeErr "range<CompoundIdx<m>, ...>: a compound range slot cannot be combined with other index types in one range<> (formalism 4.5)")
         elif hasSparse && idxs.Length > 1 then
             // Same whole-iteration-space rule as the compound slot: the key
             // enumeration IS the space.
-            Error (Other "range<SparseIdx<keys>, ...>: a sparse range slot cannot be combined with other index types in one range<> (formalism 3.5)")
+            Error (IndexTypeErr "range<SparseIdx<keys>, ...>: a sparse range slot cannot be combined with other index types in one range<> (formalism 3.5)")
         else
         // Each listed index type becomes one virtual slot; downstream the slots
         // uncurry into nested loop levels. The element type is taken from the
@@ -2289,8 +2289,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 (match compoundViewType (env.Builder.FreshId()) denseArr maskArr (IRLit IRLitUnit) with
                  | Ok compoundTy ->
                      Ok (mkTyped (TExprCompound (tDense, tMask)) compoundTy)
-                 | Error msg -> Error (Other msg))
-            | _ -> Error (Other "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
+                 | Error msg -> Error (BuiltinArgErr msg))
+            | _ -> Error (BuiltinArgErr "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
 
     | ExprKind.ExprSparse (values, keys) ->
         // sparse(values, keys): bundle a values array whose LEADING dimension
@@ -2310,7 +2310,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             | ArrayElem valuesArr ->
                 (match valuesArr.IndexTypes with
                  | [] ->
-                     Error (Other "sparse(values, keys): values must be an array whose leading dimension is the key axis (one cell per key, in key order)")
+                     Error (BuiltinArgErr "sparse(values, keys): values must be an array whose leading dimension is the key axis (one cell per key, in key order)")
                  | keyAxis :: trailing when (max 1 keyAxis.Rank) = 1 ->
                      (match resolveSparseKeysSource env keys with
                       | Ok (source, rank) ->
@@ -2325,10 +2325,10 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                           // identity is preserved for downstream reads).
                           let sparseTy = mkArrayArrow (sparseIdx :: trailing) valuesArr.ElemType valuesArr.Identity
                           Ok (mkTyped (TExprSparse (tValues, tKeys)) sparseTy)
-                      | Error msg -> Error (Other msg))
+                      | Error msg -> Error (BuiltinArgErr msg))
                  | keyAxis :: _ ->
-                     Error (Other $"sparse(values, keys): the LEADING values dimension is the key axis and must be a plain rank-1 index; got a rank-{keyAxis.Rank} (compact/tabulated) slot. Trailing dimensions may be any shape."))
-            | _ -> Error (Other "sparse(values, keys) expects a values array (leading dim = key axis, remaining dims trailing) and a key list (a `let static` tuple list or a rank-1 tuple-array variable)")))
+                     Error (BuiltinArgErr $"sparse(values, keys): the LEADING values dimension is the key axis and must be a plain rank-1 index; got a rank-{keyAxis.Rank} (compact/tabulated) slot. Trailing dimensions may be any shape."))
+            | _ -> Error (BuiltinArgErr "sparse(values, keys) expects a values array (leading dim = key axis, remaining dims trailing) and a key list (a `let static` tuple list or a rank-1 tuple-array variable)")))
 
     // intersect(A, B) / union(A, B) -- set operations on arrays
     | ExprKind.ExprIntersect (a, b) | ExprKind.ExprUnion (a, b) ->
@@ -2395,7 +2395,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env key |> Result.bind (fun tKey ->
             requireArrayArg env tArr "sort" |> Result.bind (fun arrTy ->
                 if arrTy.IndexTypes.Length <> 1 then
-                    Error (Other "sort() requires a rank-1 array (multi-rank sort not yet supported)")
+                    Error (NotYetSupportedErr "sort() requires a rank-1 array (multi-rank sort not yet supported)")
                 else
                     let srcIdx = arrTy.IndexTypes.[0]
                     // Fresh anonymous index, same extent as source. Sort doesn't
@@ -2446,9 +2446,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 (match joinLegListOf env array with
                  | Some legs -> inferReductionJoin env legs array
                  | None ->
-                    Error (Other "reduce(..., (<&!>)) folds a LIST OF LEGS into one traversal, so its operand must be an array literal of reductions -- written inline, `reduce([prodsum(a, b), reduce(c, (+))], (<&!>))`, or bound to a name by a literal. Use `object_for(<&!>) <@> (r1, r2, ...)` for the pack spelling."))
+                    Error (ReductionFormErr "reduce(..., (<&!>)) folds a LIST OF LEGS into one traversal, so its operand must be an array literal of reductions -- written inline, `reduce([prodsum(a, b), reduce(c, (+))], (<&!>))`, or bound to a name by a literal. Use `object_for(<&!>) <@> (r1, r2, ...)` for the pack spelling."))
              | _ ->
-                Error (Other "reduce(..., (<&!>)) takes neither an init nor `axes = n`: the join carries each leg's OWN fold and seed, so there is nothing shared to seed, and every leg folds its whole traversal."))
+                Error (ReductionFormErr "reduce(..., (<&!>)) takes neither an init nor `axes = n`: the join carries each leg's OWN fold and seed, so there is nothing shared to seed, and every leg folds its whole traversal."))
          | _ -> inferReduce env array kernel init axes)
     | ExprKind.ExprExtents array ->
         inferExtents env array
@@ -2509,7 +2509,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // `nth` (the recursion-depth variable) is PLANNED (formalism 8.2): it
     // used to type as the literal 0 at every depth, a silently wrong value.
     | ExprKind.ExprNth ->
-        Error (Other "`nth` (the recursion-depth variable) is planned, not built: it used to evaluate to 0 at every depth. Count the depth with an explicit parameter, or read the pack size with `arity(args)`.")
+        Error (NotYetSupportedErr "`nth` (the recursion-depth variable) is planned, not built: it used to evaluate to 0 at every depth. Count the depth with an explicit parameter, or read the pack size with `arity(args)`.")
     | ExprKind.ExprZero ->
         // zero gets a fresh type variable -- unifies with int, float, bool context
         let ty = env.Subst.Fresh()
@@ -2625,10 +2625,10 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
              | Some (Ok ls), Some (Ok rs) -> Some (Ok (ls @ rs))
              | Some (Error e), _ | _, Some (Error e) -> Some (Error e)
              | _ ->
-                Some (Error (Other "reduce() over a fused tree requires every <&!> leaf to be an unforced `method_for/object_for <@> kernel` application")))
+                Some (Error (ReductionFormErr "reduce() over a fused tree requires every <&!> leaf to be an unforced `method_for/object_for <@> kernel` application")))
         | TExprApply info when not info.IsComposeApply -> Some (Ok [r])
         | TExprApply _ ->
-            Some (Error (Other "reduce() over a composed (>>@/@>>) application is not supported yet -- force it with `|> compute` and reduce the resulting array"))
+            Some (Error (NotYetSupportedErr "reduce() over a composed (>>@/@>>) application is not supported yet -- force it with `|> compute` and reduce the resulting array"))
         | _ -> None
     // ---- Don't splice a SECOND copy of an already-materialized let --------
     // The fusion above resolves through bindings and splices the RESOLVED
@@ -2794,11 +2794,11 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         let packed =
                             arr.IndexTypes |> List.exists (fun ix -> not ix.Symmetry.IsSymNone)
                         if packed then
-                            Error (Other "reduce() over a computation with compact symmetric/antisymmetric/Hermitian output is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and decompact(A, d) first for the logical fold.")
+                            Error (CompactStorageErr "reduce() over a computation with compact symmetric/antisymmetric/Hermitian output is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and decompact(A, d) first for the logical fold.")
                         else Ok arr.ElemType
                      | IRTScalar _ as s -> Ok s
-                     | _ -> Error (Other "reduce() over a deferred computation needs an array-producing kernel application"))
-                | _ -> Error (Other "reduce(): internal -- fusion leaf is not an apply")
+                     | _ -> Error (ReductionFormErr "reduce() over a deferred computation needs an array-producing kernel application"))
+                | _ -> Error (InternalErr "reduce(): internal -- fusion leaf is not an apply")
             leaves |> List.map leafElem |> sequenceResults |> Result.bind (fun elems ->
             let elem0 = elems.Head
             // LEGS THAT DIFFER ONLY IN UNIT. A shared fold kernel is ONE typed
@@ -2906,9 +2906,9 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                         let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 1L) | _ -> TExprLit (LitFloat 1.0)
                         Ok (mkTyped lit elem0)
                      | TExprSection _ ->
-                        Error (Other "reduce() over a deferred computation requires an explicit init for this kernel (3-arg form `reduce(c, op, init)`) -- only (+) and (*) carry implicit identities")
+                        Error (ReductionFormErr "reduce() over a deferred computation requires an explicit init for this kernel (3-arg form `reduce(c, op, init)`) -- only (+) and (*) carry implicit identities")
                      | _ ->
-                        Error (Other "reduce() over a deferred computation requires an explicit init for a lambda kernel (3-arg form `reduce(c, op, init)`) -- a fused fold cannot seed from its first element"))
+                        Error (ReductionFormErr "reduce() over a deferred computation requires an explicit init for a lambda kernel (3-arg form `reduce(c, op, init)`) -- a fused fold cannot seed from its first element"))
             seed |> Result.map (fun tSeed ->
             let rebuilt =
                 match leaves with
@@ -2987,7 +2987,7 @@ and joinLegSurface (env: TypeEnv) (idx: int) (leg: Expr) : Result<Expr * Expr * 
         let src = match args with [one] -> one | many -> mkExpr sp (ExprKind.ExprZip many)
         Ok (mapOver src parms body, mkExpr sp (ExprKind.ExprSection OpAdd), None)
     | ExprKind.ExprReduce (_, _, _, Some _) ->
-        Error (Other "a reduction-join leg cannot carry `axes = n`: a join folds every leg to a SCALAR over one shared traversal, and a partial fold answers an array. Force the partial fold with `|> compute` and join over its result, or drop the `axes` clause.")
+        Error (ReductionFormErr "a reduction-join leg cannot carry `axes = n`: a join folds every leg to a SCALAR over one shared traversal, and a partial fold answers an array. Force the partial fold with `|> compute` and join over its result, or drop the `axes` clause.")
     | ExprKind.ExprReduce (arr, kernel, init, None) ->
         inferExpr env arr |> Result.map (fun tA ->
             match (resolveTypedExpr env tA).Kind with
@@ -2997,7 +2997,7 @@ and joinLegSurface (env: TypeEnv) (idx: int) (leg: Expr) : Result<Expr * Expr * 
             // identity map over it reads the same cells in the same order.
             | _ -> (mapOver arr [par 0] (v (par 0).Name), kernel, init))
     | _ ->
-        Error (Other "a reduction-join leg must be a REDUCTION: `prodsum(...)` or `reduce(...)`. `<&!>` joins the traversals of reductions into one loop; an expression that is not a reduction has no accumulator to join.")
+        Error (ReductionFormErr "a reduction-join leg must be a REDUCTION: `prodsum(...)` or `reduce(...)`. `<&!>` joins the traversals of reductions into one loop; an expression that is not a reduction has no accumulator to join.")
 
 /// Form 2's leg list: an array literal written inline, or a name bound to one
 /// (recovered from `JoinLegLists`, the surface side channel). Anything else
@@ -3044,7 +3044,7 @@ and joinLegListOf (env: TypeEnv) (arr: Expr) : Expr list option =
 and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResult<TypedExpr> =
     let sp = site.Span
     if legs.IsEmpty then
-        Error (Other "a reduction join needs at least one leg: `object_for(<&!>) <@> (r1, r2, ...)` (or `reduce([r1, r2, ...], (<&!>))`) joins reductions over one traversal, and an empty join names neither an index space nor an element type.")
+        Error (ReductionFormErr "a reduction join needs at least one leg: `object_for(<&!>) <@> (r1, r2, ...)` (or `reduce([r1, r2, ...], (<&!>))`) joins reductions over one traversal, and an empty join names neither an index space nor an element type.")
     else
     legs |> List.mapi (joinLegSurface env) |> sequenceResults |> Result.bind (fun parts ->
     parts |> List.map (fun (leaf, _, _) -> inferExpr env leaf) |> sequenceResults
@@ -3082,14 +3082,14 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
                 let packed =
                     arr.IndexTypes |> List.exists (fun ix -> not ix.Symmetry.IsSymNone)
                 if packed then
-                    Error (Other $"reduction-join leg {i + 1} traverses compact symmetric/antisymmetric/Hermitian storage: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and `decompact(A, d)` first for the logical fold.")
+                    Error (CompactStorageErr $"reduction-join leg {i + 1} traverses compact symmetric/antisymmetric/Hermitian storage: folding the canonical cells and folding the logical (mirrored) cells differ. Force with `|> compute` and `decompact(A, d)` first for the logical fold.")
                 else Ok (arr.ElemType, arr.IndexTypes)
              | _ ->
-                Error (Other $"reduction-join leg {i + 1} does not traverse an index space -- a join leg needs an array-producing kernel application to fold over."))
+                Error (ReductionFormErr $"reduction-join leg {i + 1} does not traverse an index space -- a join leg needs an array-producing kernel application to fold over."))
         | TExprApply _ ->
-            Error (Other $"reduction-join leg {i + 1} reduces a COMPOSED (>>@/@>>) application, which is not supported yet -- force it with `|> compute` and join over the resulting array.")
+            Error (NotYetSupportedErr $"reduction-join leg {i + 1} reduces a COMPOSED (>>@/@>>) application, which is not supported yet -- force it with `|> compute` and join over the resulting array.")
         | _ ->
-            Error (Other $"reduction-join leg {i + 1} could not be resolved to a traversal -- a join leg must be `prodsum(...)` or `reduce(<computation or array>, op)`.")
+            Error (ReductionFormErr $"reduction-join leg {i + 1} could not be resolved to a traversal -- a join leg must be `prodsum(...)` or `reduce(<computation or array>, op)`.")
     tResolved |> List.mapi leafShape |> sequenceResults |> Result.bind (fun shapes ->
     // ---- JOINT INDEX SPACE -------------------------------------------------
     // A join emits ONE loop nest, so every leg must walk the SAME cell grid:
@@ -3101,12 +3101,12 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
     let spaceErr =
         shapes |> List.mapi (fun i s -> (i, s)) |> List.tryPick (fun (i, (_, ixs)) ->
             if ixs.Length <> ix0.Length then
-                Some (Other $"reduction-join legs do not share an index space: leg 1 traverses a rank-{ix0.Length} space and leg {i + 1} traverses a rank-{ixs.Length} one. Every leg of a join folds the SAME cell grid.")
+                Some (ReductionFormErr $"reduction-join legs do not share an index space: leg 1 traverses a rank-{ix0.Length} space and leg {i + 1} traverses a rank-{ixs.Length} one. Every leg of a join folds the SAME cell grid.")
             else
                 List.zip ix0 ixs |> List.mapi (fun d (a, b) -> (d, a, b)) |> List.tryPick (fun (d, a, b) ->
                     match tryEvalIntIR a.Extent, tryEvalIntIR b.Extent with
                     | Some na, Some nb when na <> nb ->
-                        Some (Other $"reduction-join legs do not share an index space: axis {d} has extent {na} in leg 1 and {nb} in leg {i + 1}. Every leg of a join folds the SAME cell grid.")
+                        Some (ReductionFormErr $"reduction-join legs do not share an index space: axis {d} has extent {na} in leg 1 and {nb} in leg {i + 1}. Every leg of a join folds the SAME cell grid.")
                     | _ -> None))
     match spaceErr with
     | Some e -> Error e
@@ -3153,9 +3153,9 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
             | TExprSection OpAdd -> Ok (markAdd (mkTyped (lit ()) elem))
             | TExprSection OpMul -> Ok (mkTyped (one ()) elem)
             | TExprSection _ ->
-                Error (Other $"reduction-join leg {i + 1} needs an explicit init (`reduce(x, op, init)`): only (+) and (*) carry implicit identities, and a joined fold cannot seed from its first element.")
+                Error (ReductionFormErr $"reduction-join leg {i + 1} needs an explicit init (`reduce(x, op, init)`): only (+) and (*) carry implicit identities, and a joined fold cannot seed from its first element.")
             | _ ->
-                Error (Other $"reduction-join leg {i + 1} needs an explicit init (`reduce(x, op, init)`) for a lambda or named fold kernel -- a joined fold cannot seed from its first element."))
+                Error (ReductionFormErr $"reduction-join leg {i + 1} needs an explicit init (`reduce(x, op, init)`) for a lambda or named fold kernel -- a joined fold cannot seed from its first element."))
     List.init legs.Length seedFor |> sequenceResults |> Result.map (fun seeds ->
     match tLeaves with
     | [one] ->
@@ -3179,7 +3179,7 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
 /// `|> compute`) are folded, never stored, so the WHOLE reduce inference runs
 /// inside `FoldOperandApplies.within` their spans: the BL4010 storage
 /// suggestion stands down for exactly those applies (pinning `where comm` on a
-/// fold leaf is the BL3999 compact-fold refusal, or the `axes = n` rank
+/// fold leaf is the BL3026 compact-fold refusal, or the `axes = n` rank
 /// refusal, not a storage choice). The whole body and not just the first
 /// operand inference, because the operand is inferred again on the main path
 /// and inside the rank-k desugar's synthesized block -- same Expr, same spans.
@@ -3206,7 +3206,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             match ae.Kind with
             | ExprKind.ExprLit (LitInt n) -> Ok (Some (int n))
             | _ ->
-                Error (Other "reduce: `axes = n` requires an integer literal -- the result rank is rank(A) - n, so a symbolic axis count (a variable, a parameter, or an expression) has no static result type (deferred)")
+                Error (ReductionFormErr "reduce: `axes = n` requires an integer literal -- the result rank is rank(A) - n, so a symbolic axis count (a variable, a parameter, or an expression) has no static result type (deferred)")
     axisCountR |> Result.bind (fun axisCountOpt ->
     // The operand, inferred ONCE for this whole function. Everything below
     // that needs the operand's shape -- the rank probe, the element type, the
@@ -3295,7 +3295,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
     // logical (mirrored) cells, docs/plans/plan-compact-sym-folds.md section
     // 4.3's recommended meaning -- the value `reduce(decompact(S, 0), op[,
     // init], axes = r)` already had. (A PARTIAL fold over a compact group
-    // stays the BL3999 refusal: which half of the group it folds is the open
+    // stays the BL3026 refusal: which half of the group it folds is the open
     // question.) For the builtin `(+)` it is rewritten into the spelling that
     // names the logical traversal -- r nested folds over `range<I>` reading
     // `S(i_1, .., i_r)`, the seed on the outermost fold only (the dense
@@ -3343,11 +3343,11 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
     let axisRangeErr =
         match axisCountOpt with
         | Some n when n < 1 ->
-            Some (Other $"reduce: `axes = {n}` is out of range -- the axis count must be at least 1 (a zero-axis fold is the identity on A, so it has no fold to perform)")
+            Some (ReductionFormErr $"reduce: `axes = {n}` is out of range -- the axis count must be at least 1 (a zero-axis fold is the identity on A, so it has no fold to perform)")
         | Some n ->
             (match rk with
              | Some r when n > r ->
-                Some (Other $"reduce: `axes = {n}` exceeds the operand's rank {r} -- the axis count must satisfy 1 <= n <= rank(A), and n = {r} is the full fold to a scalar")
+                Some (ReductionFormErr $"reduce: `axes = {n}` exceeds the operand's rank {r} -- the axis count must satisfy 1 <= n <= rank(A), and n = {r} is the full fold to a scalar")
              | _ -> None)
         | None -> None
     match axisRangeErr with
@@ -3401,7 +3401,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             | Ok (ArrayElem at) when at.IndexTypes.Length >= n ->
                 if at.IndexTypes |> List.skip (at.IndexTypes.Length - n)
                                  |> List.exists (fun ix -> ix.Symmetry <> SymNone) then
-                    Error (Other "reduce() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
+                    Error (CompactStorageErr "reduce() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
                 else Ok ()
             | _ -> Ok ()
         // EMPTY GROUPS. Same reason as the units gate: the rank-1 form's
@@ -3459,7 +3459,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
         // a deeper product the row kernel would answer an ARRAY (the partial
         // fold of a rank-(r-1) slice), the rank-raising row map, whose result
         // index records do not yet agree with the row-mode route's (measured:
-        // `t - tr` between the two spellings fails BL3999 on the second
+        // `t - tr` between the two spellings fails BL3027 on the second
         // axis); a rank-3 product keeps the materialized route.
         let outerProductRewrite () : TypeResult<TypedExpr> option =
             if n <> 1 then None else
@@ -3550,7 +3550,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             if n = 1 then Ok None
             else
                 let bail () =
-                    Error (Other $"reduce: `axes = {n}` over a rank-{r} operand needs the folded slice to be dense (plain, untagged, non-compact) with static extents and a unitless scalar element -- write the row-wise form explicitly instead: `method_for(A) <@> lambda(row: <the slice type>) -> reduce(row, op, axes = {n}) |> compute`")
+                    Error (ReductionFormErr $"reduce: `axes = {n}` over a rank-{r} operand needs the folded slice to be dense (plain, untagged, non-compact) with static extents and a unitless scalar element -- write the row-wise form explicitly instead: `method_for(A) <@> lambda(row: <the slice type>) -> reduce(row, op, axes = {n}) |> compute`")
                 match tArrCache.Force() |> Result.map (fun t -> env.Subst.Resolve t.Type) with
                 | Ok (ArrayElem at) when at.IndexTypes.Length = r ->
                     let innerDims = at.IndexTypes |> List.skip (r - n)
@@ -3675,11 +3675,11 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
         | None -> None
         | Some q ->
             if axisCountOpt.IsSome then
-                Some (Error (Other "reduce: an array-valued kernel folds the LEADING axis (its elements are whole slices), so `axes = n` -- which counts INNERMOST axes -- cannot combine with it. Drop the axes argument, or fold cells with a scalar kernel."))
+                Some (Error (ReductionFormErr "reduce: an array-valued kernel folds the LEADING axis (its elements are whole slices), so `axes = n` -- which counts INNERMOST axes -- cannot combine with it. Drop the axes argument, or fold cells with a scalar kernel."))
             elif q <> r - 1 then
-                Some (Error (Other $"reduce: this kernel combines rank-{q} slices, but a rank-{r} operand's leading-axis slices have rank {r - 1}. Only the leading-axis fold (slice rank = rank(A) - 1) is supported; peel or reshape for anything deeper."))
+                Some (Error (ReductionFormErr $"reduce: this kernel combines rank-{q} slices, but a rank-{r} operand's leading-axis slices have rank {r - 1}. Only the leading-axis fold (slice rank = rank(A) - 1) is supported; peel or reshape for anything deeper."))
             elif kernelParallel then
-                Some (Error (Other "reduce: the leading-axis fold is sequential by construction (each step consumes the previous accumulator), so a `where omp/cuda/mpi` clause on its kernel licenses nothing and would be dropped silently. Remove the clause; the per-step slice combine is an ordinary elementwise apply and may carry its own licence inside the kernel body."))
+                Some (Error (WhereClauseErr "reduce: the leading-axis fold is sequential by construction (each step consumes the previous accumulator), so a `where omp/cuda/mpi` clause on its kernel licenses nothing and would be dropped silently. Remove the clause; the per-step slice combine is an ordinary elementwise apply and may carry its own licence inside the kernel body."))
             else
             match tArrCache.Force() |> Result.map (fun t -> env.Subst.Resolve t.Type) with
             | Ok (ArrayElem at) when at.IndexTypes.Length = r ->
@@ -3693,12 +3693,12 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                 // below, since a surviving ragged member/dep/compound slot
                 // lives in the trailing positions.
                 if lead.Symmetry <> SymNone then
-                    Some (Error (Other "reduce: leading-axis fold over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical slices and folding the logical (mirrored) slices differ. decompact(A, d) first for the logical fold."))
+                    Some (Error (CompactStorageErr "reduce: leading-axis fold over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical slices and folding the logical (mirrored) slices differ. decompact(A, d) first for the logical fold."))
                 elif lead.IxKind <> IxKPlain && lead.IxKind <> IxKGroupOuter then
-                    Some (Error (Other "reduce: leading-axis fold needs a plain dense (or group-outer) leading axis -- ragged, compound, or sparse leading slices have no uniform slice shape to combine. Fold each row to a scalar instead, or restructure."))
+                    Some (Error (ReductionFormErr "reduce: leading-axis fold needs a plain dense (or group-outer) leading axis -- ragged, compound, or sparse leading slices have no uniform slice shape to combine. Fold each row to a scalar instead, or restructure."))
                 elif at.IndexTypes.Tail |> List.exists (fun ix ->
                         ix.IxKind <> IxKPlain || ix.Symmetry <> SymNone || ix.Rank <> 1) then
-                    Some (Error (Other "reduce: leading-axis fold needs plain dense trailing axes (the slices being combined must share one rectangular shape) -- ragged, grouped, compact, or multi-rank trailing axes do not. Fold each row to a scalar instead, or restructure."))
+                    Some (Error (ReductionFormErr "reduce: leading-axis fold needs plain dense trailing axes (the slices being combined must share one rectangular shape) -- ragged, grouped, compact, or multi-rank trailing axes do not. Fold each row to a scalar instead, or restructure."))
                 else
                 let staticLead = tryEvalIntIR lead.Extent
                 match staticLead with
@@ -3882,7 +3882,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                         | None, ExprKind.ExprSection OpMul -> oneOf ()
                         | _ -> None
                     match seedOpt with
-                    | None -> Some (Error (Other "reduce over a rank >= 2 array needs an explicit init (3-arg reduce) unless the kernel is a (+) or (*) section"))
+                    | None -> Some (Error (ReductionFormErr "reduce over a rank >= 2 array needs an explicit init (3-arg reduce) unless the kernel is a (+) or (*) section"))
                     | Some seed ->
                         let uid = env.Builder.FreshId()
                         // A NAMED operand is read in place: `let __rksrc = A`
@@ -4051,7 +4051,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             // is NOT a rank-1 axis -- reduce would walk extents[0] handing
             // out row pointers (compiled garbage). Also ambiguous (canonical
             // vs logical cells). Reject until a semantics is chosen.
-            Error (Other "reduce() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
+            Error (CompactStorageErr "reduce() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
         | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
             // Static guarantee: reject if we can prove the extent is 0 AND no
             // init was supplied. With an init, the empty fold is defined (it
@@ -4095,10 +4095,10 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
             // above declined -- non-dense axes, non-static extents, or a
             // non-scalar element. A partial fold (n < rank) never lands here:
             // it was rewritten into the row-mode apply before this point.
-            Error (Other (sprintf "reduce: the full fold (`axes = %d`) over a rank-%d operand needs dense (plain, non-compact) axes with static extents and scalar elements; fold one axis at a time instead (`reduce(A, op)` folds the innermost axis into a rank-%d result)"
+            Error (ReductionFormErr (sprintf "reduce: the full fold (`axes = %d`) over a rank-%d operand needs dense (plain, non-compact) axes with static extents and scalar elements; fold one axis at a time instead (`reduce(A, op)` folds the innermost axis into a rank-%d result)"
                                   at.IndexTypes.Length at.IndexTypes.Length (at.IndexTypes.Length - 1)))
         | _ ->
-            Error (Other "reduce() requires an array as first argument"))))))
+            Error (ReductionFormErr "reduce() requires an array as first argument"))))))
 
 /// Unit soundness of a fold, checked at the rank-1 reduce site. `reduce`
 /// types its result as the array's ELEMENT type, right only if the kernel
@@ -4195,7 +4195,7 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
             | [] ->
                 (match elemTy with
                  | Some e -> Ok e
-                 | None -> Error (Other "prodsum() requires at least one array argument"))
+                 | None -> Error (ArgCountErr "prodsum() requires at least one array argument"))
             | t :: more ->
                 // A `T^k` parameter is an arity-k inference VAR, not an
                 // IRTArray (Subst.LookupOrCreateTypeVar): the caret pins the
@@ -4234,7 +4234,7 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                                            | SymNone -> false) ->
                     // Same ambiguity as reduce over compact storage: canonical
                     // vs logical cells differ. Mirror its guidance.
-                    Error (Other "prodsum() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
+                    Error (CompactStorageErr "prodsum() over compact symmetric/antisymmetric/Hermitian storage is not supported: folding the canonical cells and folding the logical (mirrored) cells differ. decompact(A, d) first for the logical fold.")
                 | ArrayElem arrTy when arrTy.IndexTypes.Length = 1 ->
                     // Provably mismatched static extents are an error now;
                     // unknown extents are trusted (codegen loops over the
@@ -4305,14 +4305,14 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                                (match staticN with Some _ -> staticN | None -> thisN)
                                more))
                 | ArrayElem _ ->
-                    Error (Other "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
+                    Error (ReductionFormErr "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
                 // A `T^k` operand with k <> 1: the caret already declared the
                 // rank, so this is the same refusal as a concrete rank-k array
                 // and reads better than "requires array arguments" would.
                 | IRTInfer vid when (env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k <> 1)) ->
-                    Error (Other "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
+                    Error (ReductionFormErr "prodsum() supports only rank-1 arrays (fibers); pass each operand's innermost slice")
                 | _ ->
-                    Error (Other "prodsum() requires array arguments"))
+                    Error (ReductionFormErr "prodsum() requires array arguments"))
         go None None tArgs |> Result.map (fun elemTy ->
             // WIDEST OPERAND LEADS. `IRProdSum` carries no result type of its
             // own: codegen sizes the accumulator from the FIRST operand
@@ -4373,7 +4373,7 @@ and inferDistPack (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
             let order = tArgs.Length
             Ok (mkTyped (TExprTuple tArgs) (IRTDist (order, a1.ElemType, a1.IndexTypes)))
         | t ->
-            Error (Other $"__dist_pack: components must be arrays (kappa_1 lowered to {ppIRType t}) -- this intrinsic is emitted by the PPL elaboration stage, not written by hand"))
+            Error (BuiltinArgErr $"__dist_pack: components must be arrays (kappa_1 lowered to {ppIRType t}) -- this intrinsic is emitted by the PPL elaboration stage, not written by hand"))
 
 /// cumulant(d, k): the order-k component of a Dist value, as an ordinary
 /// array. THE ORDER GUARD AS A TYPE ERROR: k must be a static int (the
@@ -4387,7 +4387,7 @@ and inferCumulantProj (env: TypeEnv) (dExpr: Expr) (kExpr: Expr) : TypeResult<Ty
         | IRTDist (order, elem, axes) ->
             (match evalStaticIntExpr env kExpr with
              | None ->
-                 Error (Other "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
+                 Error (StaticValueErr "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
              | Some k when k < 1 ->
                  Error (CumulantOrderPositive k)
              | Some k when k > order ->
@@ -4462,7 +4462,7 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                 else
                     let rec walk slotIdx acc remaining =
                         match remaining with
-                        | [] -> Error (Other $"decompact: dimension {dd} out of range (internal)")
+                        | [] -> Error (InternalErr $"decompact: dimension {dd} out of range (internal)")
                         | (ix: IRIndexType) :: rest ->
                             let ar = max 1 ix.Rank
                             if dd < acc + ar then Ok (slotIdx, ar, dd - acc)
@@ -4499,14 +4499,14 @@ and inferDecompact (env: TypeEnv) array d : TypeResult<TypedExpr> =
                     // symmetric fission scatter (the gather form). Antisym /
                     // Hermitian fission with leading free dims is not yet
                     // emitted, so reject rather than miscompile.
-                    Error (Other "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
+                    Error (NotYetSupportedErr "decompact: surrounding free dimensions are currently supported only for symmetric groups; antisymmetric/Hermitian groups with preceding free dimensions are not yet wired.")
                 elif ix.Symmetry = SymHermitian && r >= 3 then
                     // Rank-2 Hermitian (the only Hermitian arrays a producer
                     // makes today, via gram) dissolves to a dense nxn with the
                     // lower triangle conjugated -- handled below. Rank >= 3
                     // Hermitian has no producer yet and its compact-residual
                     // conjugate semantics aren't worked out, so reject.
-                    Error (Other "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
+                    Error (NotYetSupportedErr "decompact: rank >= 3 SymHermitian is not yet supported (no producer exists for rank >= 3 Hermitian arrays; gram produces rank-2 Hermitian, which decompacts to a dense conjugate-mirrored matrix).")
                 else
                     // SYMMETRIC: general fission, any rank/cut, via the
                     // gather materializer. ANTISYMMETRIC: rank 2 dissolves to
@@ -4586,7 +4586,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                     | Some a, Some b -> a <> b
                     | _ -> false
                 if innerMismatch then
-                    Error (Other "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
+                    Error (ExtentErr "gram(A, B): the contracted (trailing) dimensions of A and B must match.")
                 else
                 // ONE element type, both operands, and the operands must
                 // ALREADY agree on it. The old rule picked "the complex one,
@@ -4609,7 +4609,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                     | _ -> false
                 match unify env.Subst (stripUnits lTy.ElemType) (stripUnits rTy.ElemType) with
                 | Error _ ->
-                    Error (Other (sprintf "gram(A, B): the operands must share one element type, got %s and %s. Convert one operand explicitly (e.g. `Float64(B)` / `Complex128(A)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType)))))
+                    Error (BuiltinArgErr (sprintf "gram(A, B): the operands must share one element type, got %s and %s. Convert one operand explicitly (e.g. `Float64(B)` / `Complex128(A)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType)))))
                 | Ok () ->
                     // The contraction sum_k A[i][k]*conj(B[j][k]) is
                     // multiplicative, so the result's unit signature follows
@@ -4669,11 +4669,11 @@ and inferGramApply (env: TypeEnv) leftE rightE vecE : TypeResult<TypedExpr> =
         requireArrayArgMinRank env tX "gram_apply" 1 |> Result.bind (fun xTy ->
             let dimsOf (t: IRArrayType) = t.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
             if dimsOf lTy <> 2 || dimsOf rTy <> 2 then
-                Error (Other $"gram_apply(A, B, x): A and B must be rank-2 (matrix) arrays; got rank-{dimsOf lTy} and rank-{dimsOf rTy}. gram_apply contracts B's trailing axis with x and A's trailing axis with the result: A (m x n), B (p x n), x (p) -> y (m).")
+                Error (BuiltinArgErr $"gram_apply(A, B, x): A and B must be rank-2 (matrix) arrays; got rank-{dimsOf lTy} and rank-{dimsOf rTy}. gram_apply contracts B's trailing axis with x and A's trailing axis with the result: A (m x n), B (p x n), x (p) -> y (m).")
             elif lTy.IndexTypes.Length <> 2 || rTy.IndexTypes.Length <> 2 then
-                Error (Other "gram_apply(A, B, x): A and B must carry two PLAIN index axes; a compact symmetric/antisymmetric/Hermitian rank-2 group is not a factor. decompact(A, d) first.")
+                Error (CompactStorageErr "gram_apply(A, B, x): A and B must carry two PLAIN index axes; a compact symmetric/antisymmetric/Hermitian rank-2 group is not a factor. decompact(A, d) first.")
             elif xTy.IndexTypes.Length <> 1 || xTy.IndexTypes.Head.Rank <> 1 || xTy.IndexTypes.Head.Symmetry <> SymNone then
-                Error (Other "gram_apply(A, B, x): x must be a rank-1 array over one plain axis (B's leading axis).")
+                Error (BuiltinArgErr "gram_apply(A, B, x): x must be a rank-1 array over one plain axis (B's leading axis).")
             else
                 let lOuter = lTy.IndexTypes.[0].Extent
                 let lInner = lTy.IndexTypes.[1].Extent
@@ -4685,14 +4685,14 @@ and inferGramApply (env: TypeEnv) leftE rightE vecE : TypeResult<TypedExpr> =
                     | Some va, Some vb -> va <> vb
                     | _ -> false
                 if staticDisagree lInner rInner then
-                    Error (Other "gram_apply(A, B, x): the contracted (trailing) dimensions of A and B must match.")
+                    Error (ExtentErr "gram_apply(A, B, x): the contracted (trailing) dimensions of A and B must match.")
                 elif staticDisagree rOuter xExt then
-                    Error (Other "gram_apply(A, B, x): x must have B's leading extent (B is p x n, so x has p cells).")
+                    Error (ExtentErr "gram_apply(A, B, x): x must have B's leading extent (B is p x n, so x has p cells).")
                 else
                 let sameElem (a: IRType) (b: IRType) = unify env.Subst (stripUnits a) (stripUnits b)
                 match sameElem lTy.ElemType rTy.ElemType |> Result.bind (fun () -> sameElem lTy.ElemType xTy.ElemType) with
                 | Error _ ->
-                    Error (Other (sprintf "gram_apply(A, B, x): the operands must share one element type, got %s, %s and %s. Convert explicitly (e.g. `Float64(B)`, `Complex128(x)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits xTy.ElemType)))))
+                    Error (BuiltinArgErr (sprintf "gram_apply(A, B, x): the operands must share one element type, got %s, %s and %s. Convert explicitly (e.g. `Float64(B)`, `Complex128(x)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits xTy.ElemType)))))
                 | Ok () ->
                     let outBare = env.Subst.Resolve (stripUnits lTy.ElemType)
                     unitRulesForOp OpMul (getUnits lTy.ElemType) (getUnits rTy.ElemType) |> Result.bind (fun u1 ->
@@ -4725,11 +4725,11 @@ and inferMatmul (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
             let plainRank2 (a: IRArrayType) =
                 a.IndexTypes.Length = 2 && a.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1)
             if not (plainRank2 lTy) || not (plainRank2 rTy) then
-                Error (Other "matmul: both arguments must be rank-2 dense matrices (m x k and k x n, two plain index axes each).")
+                Error (BuiltinArgErr "matmul: both arguments must be rank-2 dense matrices (m x k and k x n, two plain index axes each).")
             else
             let isFloat64 (t: IRType) = match t with IRTScalar ETFloat64 -> true | _ -> false
             if not (isFloat64 lTy.ElemType) || not (isFloat64 rTy.ElemType) then
-                Error (Other "matmul: both arguments must have Float64 elements (Array<Float64 like Idx<m>, Idx<k>>).")
+                Error (BuiltinArgErr "matmul: both arguments must have Float64 elements (Array<Float64 like Idx<m>, Idx<k>>).")
             else
                 let lInner = lTy.IndexTypes.[1].Extent
                 let rOuter = rTy.IndexTypes.[0].Extent
@@ -4738,7 +4738,7 @@ and inferMatmul (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                     | Some a, Some b -> a <> b
                     | _ -> false
                 if innerMismatch then
-                    Error (Other "matmul(A, B): A's trailing dimension and B's leading dimension must match.")
+                    Error (ExtentErr "matmul(A, B): A's trailing dimension and B's leading dimension must match.")
                 else
                     // Dense m x n: two independent plain axes, exactly the
                     // shape the synthesized routine's return type declared.
@@ -4789,10 +4789,10 @@ and inferEigh (env: TypeEnv) (operandE: Expr) : TypeResult<TypedExpr> =
                         | Some a, Some b -> a <> b
                         | _ -> false
                     if squareMismatch then
-                        Error (Other "eigh: the argument must be SQUARE (n x n); symmetry is assumed, not checked.")
+                        Error (ExtentErr "eigh: the argument must be SQUARE (n x n); symmetry is assumed, not checked.")
                     else Ok i0.Extent
                 | _ ->
-                    Error (Other "eigh: the argument must be rank-2 square -- either two plain axes (Array<Float64 like Idx<n>, Idx<n>>) or one compact arity-2 group (Array<Float64 like SymIdx<2, n>>).")
+                    Error (BuiltinArgErr "eigh: the argument must be rank-2 square -- either two plain axes (Array<Float64 like Idx<n>, Idx<n>>) or one compact arity-2 group (Array<Float64 like SymIdx<2, n>>).")
             shapeResult |> Result.bind (fun nExtent ->
                 match Blade.LinAlgPatterns.classifyEigh aTy with
                 | None ->
@@ -4804,9 +4804,9 @@ and inferEigh (env: TypeEnv) (operandE: Expr) : TypeResult<TypedExpr> =
                         | IRTScalar (ETComplex64 | ETComplex128) -> true
                         | _ -> false
                     if aTy.IsVirtual then
-                        Error (Other "eigh: the argument must be a materialized array -- a virtual (range / reverse) view has no pool for the eigensolver to read; bind it with |> compute first.")
+                        Error (BuiltinArgErr "eigh: the argument must be a materialized array -- a virtual (range / reverse) view has no pool for the eigensolver to read; bind it with |> compute first.")
                     elif (Blade.LinAlgPatterns.precisionOf aTy.ElemType).IsNone then
-                        Error (Other "eigh: the element type has no eigensolver -- expected Float32, Float64, Complex64 or Complex128.")
+                        Error (BuiltinArgErr "eigh: the element type has no eigensolver -- expected Float32, Float64, Complex64 or Complex128.")
                     else
                         match aTy.IndexTypes with
                         | [ ix ] when ix.Rank = 2 && ix.Symmetry = SymSymmetric && isComplexElem ->
@@ -4818,11 +4818,11 @@ and inferEigh (env: TypeEnv) (operandE: Expr) : TypeResult<TypedExpr> =
                             // and no `zspev`; the right routine is the general
                             // `zgeev`, which is a different operation with a
                             // different result TYPE.
-                            Error (Other "eigh: a COMPLEX SYMMETRIC matrix (A = A^T, without conjugation) is not Hermitian and has no symmetric eigensolver -- its spectrum is complex and its eigenvectors are not orthogonal. Use eig for the general decomposition, or declare the operand Hermitian storage.")
+                            Error (BuiltinArgErr "eigh: a COMPLEX SYMMETRIC matrix (A = A^T, without conjugation) is not Hermitian and has no symmetric eigensolver -- its spectrum is complex and its eigenvectors are not orthogonal. Use eig for the general decomposition, or declare the operand Hermitian storage.")
                         | [ ix ] when ix.Rank = 2 && ix.Symmetry = SymAntisymmetric ->
-                            Error (Other "eigh: an ANTISYMMETRIC (skew) operand has a purely imaginary spectrum and no symmetric eigensolver. Use eig on its decompacted form.")
+                            Error (BuiltinArgErr "eigh: an ANTISYMMETRIC (skew) operand has a purely imaginary spectrum and no symmetric eigensolver. Use eig on its decompacted form.")
                         | _ ->
-                            Error (Other "eigh: the argument's index structure has no eigensolver route -- expected a plain dense n x n matrix or a rank-2 symmetric/Hermitian compact group.")
+                            Error (BuiltinArgErr "eigh: the argument's index structure has no eigensolver route -- expected a plain dense n x n matrix or a rank-2 symmetric/Hermitian compact group.")
                 | Some _ ->
                     // THE MIXED-ELEMENT RESULT. Q inherits the operand's element
                     // type; LAM does NOT -- a symmetric/Hermitian matrix has REAL
@@ -4890,15 +4890,15 @@ and inferSolve (env: TypeEnv) (matrixE: Expr) (rhsE: Expr) : TypeResult<TypedExp
             let plainRank1 (a: IRArrayType) =
                 a.IndexTypes.Length = 1 && a.IndexTypes.Head.Rank <= 1
             if not (plainRank2 aTy) then
-                Error (Other "solve: A must be a rank-2 dense SQUARE matrix (two plain index axes, Array<Float64 like Idx<n>, Idx<n>>).")
+                Error (BuiltinArgErr "solve: A must be a rank-2 dense SQUARE matrix (two plain index axes, Array<Float64 like Idx<n>, Idx<n>>).")
             elif not (plainRank1 bTy) then
-                Error (Other "solve: b must be a rank-1 dense vector (Array<Float64 like Idx<n>>).")
+                Error (BuiltinArgErr "solve: b must be a rank-1 dense vector (Array<Float64 like Idx<n>>).")
             elif aTy.IsVirtual || bTy.IsVirtual then
-                Error (Other "solve: both arguments must be materialized arrays -- a virtual (range / reverse) view has no pool for the factorization to read; bind it with |> compute first.")
+                Error (BuiltinArgErr "solve: both arguments must be materialized arrays -- a virtual (range / reverse) view has no pool for the factorization to read; bind it with |> compute first.")
             else
             let isFloat64 (t: IRType) = match t with IRTScalar ETFloat64 -> true | _ -> false
             if not (isFloat64 aTy.ElemType) || not (isFloat64 bTy.ElemType) then
-                Error (Other "solve: both arguments must have Float64 elements (Array<Float64 like Idx<n>, Idx<n>> and Array<Float64 like Idx<n>>).")
+                Error (BuiltinArgErr "solve: both arguments must have Float64 elements (Array<Float64 like Idx<n>, Idx<n>> and Array<Float64 like Idx<n>>).")
             else
                 // EXTENT AGREEMENT, checked only where BOTH sides are statically
                 // known -- the same discipline `inferMatmul`'s contracted-extent
@@ -4915,9 +4915,9 @@ and inferSolve (env: TypeEnv) (matrixE: Expr) (rhsE: Expr) : TypeResult<TypedExp
                     | Some a, Some b -> a <> b
                     | _ -> false
                 if disagree n0 n1 then
-                    Error (Other "solve: A must be SQUARE (n x n); its two extents disagree.")
+                    Error (ExtentErr "solve: A must be SQUARE (n x n); its two extents disagree.")
                 elif disagree n0 bn then
-                    Error (Other "solve(A, b): b's extent must match A's dimension (A is n x n, b must be length n).")
+                    Error (ExtentErr "solve(A, b): b's extent must match A's dimension (A is n x n, b must be length n).")
                 else
                     // x is a fresh DENSE rank-1 pool of A's leading extent --
                     // taken from A, not from b, because A's is the extent the
@@ -4944,11 +4944,11 @@ and inferLu (env: TypeEnv) (matrixE: Expr) : TypeResult<TypedExpr> =
             let plainRank2 (a: IRArrayType) =
                 a.IndexTypes.Length = 2 && a.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1)
             if not (plainRank2 aTy) then
-                Error (Other "lu: A must be a rank-2 dense SQUARE matrix (two plain index axes, Array<Float64 like Idx<n>, Idx<n>>).")
+                Error (BuiltinArgErr "lu: A must be a rank-2 dense SQUARE matrix (two plain index axes, Array<Float64 like Idx<n>, Idx<n>>).")
             elif aTy.IsVirtual then
-                Error (Other "lu: A must be a materialized array -- a virtual (range / reverse) view has no pool for the factorization to read; bind it with |> compute first.")
+                Error (BuiltinArgErr "lu: A must be a materialized array -- a virtual (range / reverse) view has no pool for the factorization to read; bind it with |> compute first.")
             elif (match aTy.ElemType with IRTScalar ETFloat64 -> false | _ -> true) then
-                Error (Other "lu: A must have Float64 elements (Array<Float64 like Idx<n>, Idx<n>>).")
+                Error (BuiltinArgErr "lu: A must have Float64 elements (Array<Float64 like Idx<n>, Idx<n>>).")
             else
                 let n0 = aTy.IndexTypes.[0].Extent
                 let n1 = aTy.IndexTypes.[1].Extent
@@ -4957,7 +4957,7 @@ and inferLu (env: TypeEnv) (matrixE: Expr) : TypeResult<TypedExpr> =
                     | Some a, Some b -> a <> b
                     | _ -> false
                 if disagree n0 n1 then
-                    Error (Other "lu: A must be SQUARE (n x n); its two extents disagree.")
+                    Error (ExtentErr "lu: A must be SQUARE (n x n); its two extents disagree.")
                 else
                     let freshSlot (ext: IRExpr) =
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = ext
@@ -4986,15 +4986,15 @@ and inferLuSolve (env: TypeEnv) (luE: Expr) (pivE: Expr) (rhsE: Expr) (transpose
             let isF64 (t: IRType) = match t with IRTScalar ETFloat64 -> true | _ -> false
             let isI64 (t: IRType) = match t with IRTScalar ETInt64 -> true | _ -> false
             if not (plainRank2 lTy) then
-                Error (Other $"{what}: LU must be the rank-2 dense square factor `m.lu(A)` returns (Array<Float64 like Idx<n>, Idx<n>>).")
+                Error (BuiltinArgErr $"{what}: LU must be the rank-2 dense square factor `m.lu(A)` returns (Array<Float64 like Idx<n>, Idx<n>>).")
             elif not (plainRank1 pTy) || not (isI64 pTy.ElemType) then
-                Error (Other $"{what}: piv must be the rank-1 Int64 pivot vector `m.lu(A)` returns (Array<Int64 like Idx<n>>).")
+                Error (BuiltinArgErr $"{what}: piv must be the rank-1 Int64 pivot vector `m.lu(A)` returns (Array<Int64 like Idx<n>>).")
             elif not (plainRank1 bTy) then
-                Error (Other $"{what}: b must be a rank-1 dense vector (Array<Float64 like Idx<n>>).")
+                Error (BuiltinArgErr $"{what}: b must be a rank-1 dense vector (Array<Float64 like Idx<n>>).")
             elif lTy.IsVirtual || pTy.IsVirtual || bTy.IsVirtual then
-                Error (Other $"{what}: every argument must be a materialized array; bind a virtual view with |> compute first.")
+                Error (BuiltinArgErr $"{what}: every argument must be a materialized array; bind a virtual view with |> compute first.")
             elif not (isF64 lTy.ElemType) || not (isF64 bTy.ElemType) then
-                Error (Other $"{what}: LU and b must have Float64 elements.")
+                Error (BuiltinArgErr $"{what}: LU and b must have Float64 elements.")
             else
                 let n0 = lTy.IndexTypes.[0].Extent
                 let n1 = lTy.IndexTypes.[1].Extent
@@ -5005,11 +5005,11 @@ and inferLuSolve (env: TypeEnv) (luE: Expr) (pivE: Expr) (rhsE: Expr) (transpose
                     | Some a, Some b -> a <> b
                     | _ -> false
                 if disagree n0 n1 then
-                    Error (Other $"{what}: LU must be SQUARE (n x n); its two extents disagree.")
+                    Error (ExtentErr $"{what}: LU must be SQUARE (n x n); its two extents disagree.")
                 elif disagree n0 pn then
-                    Error (Other $"{what}: piv's extent must match the factor's dimension (LU is n x n, piv must be length n).")
+                    Error (ExtentErr $"{what}: piv's extent must match the factor's dimension (LU is n x n, piv must be length n).")
                 elif disagree n0 bn then
-                    Error (Other $"{what}(LU, piv, b): b's extent must match the factor's dimension (LU is n x n, b must be length n).")
+                    Error (ExtentErr $"{what}(LU, piv, b): b's extent must match the factor's dimension (LU is n x n, b must be length n).")
                 else
                     let freshSlot (ext: IRExpr) =
                         { Id = env.Builder.FreshId(); Rank = 1; Extent = ext
@@ -5071,7 +5071,7 @@ and stackJoinOperandTypes
 and inferStack (env: TypeEnv) (exprs: Expr list) : TypeResult<TypedExpr> =
     exprs |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tExprs ->
         if tExprs.IsEmpty then
-            Error (Other "stack() needs at least one array: stack(A1, ..., An) adds a fresh leading axis of extent n.")
+            Error (ArgCountErr "stack() needs at least one array: stack(A1, ..., An) adds a fresh leading axis of extent n.")
         else
         stackJoinOperandTypes env "stack" tExprs (fun i g -> StackNeedsArrays (i, g))
         |> Result.bind (fun arrTys ->
@@ -5186,7 +5186,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                 else
                     let rec walk slotIdx acc remaining =
                         match remaining with
-                        | [] -> Error (Other $"transpose: axis {d} out of range (internal)")
+                        | [] -> Error (InternalErr $"transpose: axis {d} out of range (internal)")
                         | (ix: IRIndexType) :: rest ->
                             let ar = max 1 ix.Rank
                             if d < acc + ar then Ok (slotIdx, ar, d - acc)
@@ -5221,7 +5221,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                             // move materializer handles cross-slot rank-1 only).
                             Error (TransposeWithinGroup ar1)
                          | TRequiresDecompaction reason ->
-                            Error (Other $"transpose: {reason}"))
+                            Error (CompactStorageErr $"transpose: {reason}"))
                     else
                         // Different slots. The structure-preserving case is two
                         // plain (arity-1 SymNone) axes -> physical data move.
@@ -5243,7 +5243,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                         else
                             let culprit, cd, car, cix =
                                 if not (plain ar1 ix1) then "first", d1, ar1, ix1 else "second", d2, ar2, ix2
-                            Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %s index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd (match cix.Symmetry with SymSymmetric -> "symmetric" | SymAntisymmetric -> "antisymmetric" | SymHermitian -> "Hermitian" | SymWreath -> "orbit" | SymNone -> "plain") car))))))
+                            Error (CompactStorageErr (sprintf "transpose: the %s axis (dim %d) is bound in a %s index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd (match cix.Symmetry with SymSymmetric -> "symmetric" | SymAntisymmetric -> "antisymmetric" | SymHermitian -> "Hermitian" | SymWreath -> "orbit" | SymNone -> "plain") car))))))
 
 
 
@@ -5266,16 +5266,16 @@ and inferGroupBy (env: TypeEnv) values grouping : TypeResult<TypedExpr> =
                 let aliases = aliasKey.Split(',') |> List.ofArray
                 let segs = aliases |> List.choose (fun a -> Map.tryFind a env.Segmentations)
                 if arrTy.IndexTypes.Length <> 2 then
-                    Error (Other $"group_by over segments({aliasKey}): the values must be a rank-2 array over those two axes (got rank {arrTy.IndexTypes.Length})")
+                    Error (SegmentedDomainErr $"group_by over segments({aliasKey}): the values must be a rank-2 array over those two axes (got rank {arrTy.IndexTypes.Length})")
                 elif segs.Length <> 2 then
-                    Error (Other $"group_by over segments({aliasKey}): an alias is no longer in scope")
+                    Error (SegmentedDomainErr $"group_by over segments({aliasKey}): an alias is no longer in scope")
                 else
                     let slotMatches (d: int) =
                         let ix = arrTy.IndexTypes.[d]
                         let src = segs.[d].Source
                         ix.Id = src.Id || (ix.Tag.IsSome && ix.Tag = src.Tag) || (match ix.Extent, src.Extent with IRLit (IRLitInt a), IRLit (IRLitInt b) -> a = b && ix.Tag.IsNone | _ -> false)
                     if not (slotMatches 0 && slotMatches 1) then
-                        Error (Other $"group_by over segments({aliasKey}): the values' slots must be the segmented axes {aliasKey}, in that order")
+                        Error (SegmentedDomainErr $"group_by over segments({aliasKey}): the values' slots must be the segmented axes {aliasKey}, in that order")
                     else
                         let member_ = {
                             Id = env.Builder.FreshId(); Rank = 1
@@ -5339,7 +5339,7 @@ and inferGroupBy (env: TypeEnv) values grouping : TypeResult<TypedExpr> =
 and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
     match keys with
     | [] ->
-        Error (Other "group_keys requires at least one key array; got empty argument list")
+        Error (ArgCountErr "group_keys requires at least one key array; got empty argument list")
     | [singleKey] ->
         // Existing single-key path, unchanged.
         inferExpr env singleKey |> Result.bind (fun tKeys ->
@@ -5484,8 +5484,8 @@ and inferSegments (env: TypeEnv) (alias: string) : TypeResult<TypedExpr> =
     | None ->
         (match Map.tryFind alias env.TypeDefs with
          | Some (TDIIndexType _) ->
-             Error (Other $"segments({alias}): '{alias}' is an index type but not a `Chunked<..>` one; declare `type {alias}2 = Chunked<{alias}, edge>` and take segments of that")
-         | _ -> Error (Other $"segments({alias}): '{alias}' is not a `Chunked<..>` index alias in scope"))
+             Error (SegmentedDomainErr $"segments({alias}): '{alias}' is an index type but not a `Chunked<..>` one; declare `type {alias}2 = Chunked<{alias}, edge>` and take segments of that")
+         | _ -> Error (SegmentedDomainErr $"segments({alias}): '{alias}' is not a `Chunked<..>` index alias in scope"))
     | Some seg ->
         let offsets = segmentationOffsets seg
         let labels = segmentationLabels seg
@@ -5513,7 +5513,7 @@ and inferSegmentsGrid (env: TypeEnv) (aliases: string list) : TypeResult<TypedEx
     match segs with
     | [ Some s0; Some s1 ] ->
         if (segmentationLabels s0).IsSome || (segmentationLabels s1).IsSome then
-            Error (Other "segments(C0, C1): a tile grouping over a FILE-tiled axis (a two-dimensional store mosaic) has no declaration form yet; both slots must be regular or store-inherited grids")
+            Error (SegmentedDomainErr "segments(C0, C1): a tile grouping over a FILE-tiled axis (a two-dimensional store mosaic) has no declaration form yet; both slots must be regular or store-inherited grids")
         else
         let b0 = segmentationOffsets s0
         let b1 = segmentationOffsets s1
@@ -5528,7 +5528,7 @@ and inferSegmentsGrid (env: TypeEnv) (aliases: string list) : TypeResult<TypedEx
         Ok (mkTyped (TExprSegmentsGrid (aliases, [ b0; b1 ])) gkType)
     | _ ->
         let missing = List.zip aliases segs |> List.filter (fun (_, s) -> s.IsNone) |> List.map fst
-        Error (Other $"""segments({String.concat ", " aliases}): {String.concat ", " missing} is not a `Chunked<..>` index alias in scope""")
+        Error (SegmentedDomainErr $"""segments({String.concat ", " aliases}): {String.concat ", " missing} is not a `Chunked<..>` index alias in scope""")
 
 /// files(A): the FILE-level grouping of a file-segmented axis (§2.7): one
 /// run per store, in declaration order, the outer slot labelled by the
@@ -5537,7 +5537,7 @@ and inferSegmentsGrid (env: TypeEnv) (aliases: string list) : TypeResult<TypedEx
 /// which for such an axis is the innermost (per-file chunk) level.
 and inferFiles (env: TypeEnv) (alias: string) : TypeResult<TypedExpr> =
     match Map.tryFind alias env.Segmentations with
-    | None -> Error (Other $"files({alias}): '{alias}' is not a `Chunked<..>` index alias in scope")
+    | None -> Error (SegmentedDomainErr $"files({alias}): '{alias}' is not a `Chunked<..>` index alias in scope")
     | Some seg ->
         match segmentationFileOffsets seg, segmentationLabels seg with
         | Some offsets, Some labels ->
@@ -5550,7 +5550,7 @@ and inferFiles (env: TypeEnv) (alias: string) : TypeResult<TypedExpr> =
             }
             let gkType = IRTGroupKeys (outer, seg.Source, Some (labels |> List.map EVString))
             Ok (mkTyped (TExprSegments (alias, offsets, Some labels)) gkType)
-        | _ -> Error (Other $"files({alias}): '{alias}' has no file level; it is a regular chunk grid -- use segments({alias})")
+        | _ -> Error (SegmentedDomainErr $"files({alias}): '{alias}' has no file level; it is a regular chunk grid -- use segments({alias})")
 
 /// ungroup([r1, .., rF], A): the per-file arrays of a file-segmented axis
 /// assembled over the axis (§2.7). This is how a variable that lives in
@@ -5559,19 +5559,19 @@ and inferFiles (env: TypeEnv) (alias: string) : TypeResult<TypedExpr> =
 /// bare name over its own store's axis with that store's extent.
 and inferUngroupRows (env: TypeEnv) (rows: Expr list) (alias: string) : TypeResult<TypedExpr> =
     match Map.tryFind alias env.Segmentations with
-    | None -> Error (Other $"ungroup([..], {alias}): '{alias}' is not a `Chunked<..>` index alias in scope")
+    | None -> Error (SegmentedDomainErr $"ungroup([..], {alias}): '{alias}' is not a `Chunked<..>` index alias in scope")
     | Some seg ->
         match segmentationFileOffsets seg with
-        | None -> Error (Other $"ungroup([..], {alias}): '{alias}' has no file level; ungroup takes a grouped array for a regular chunk grid")
+        | None -> Error (SegmentedDomainErr $"ungroup([..], {alias}): '{alias}' has no file level; ungroup takes a grouped array for a regular chunk grid")
         | Some offsets ->
             let extents = offsets |> List.pairwise |> List.map (fun (lo, hi) -> hi - lo)
             if rows.Length <> extents.Length then
-                Error (Other $"ungroup([..], {alias}): {alias} tiles {extents.Length} store(s) but {rows.Length} row(s) were given")
+                Error (SegmentedDomainErr $"ungroup([..], {alias}): {alias} tiles {extents.Length} store(s) but {rows.Length} row(s) were given")
             else
             rows |> List.map (fun r ->
                 match r.Kind with
                 | ExprKind.ExprVar _ -> inferExpr env r
-                | _ -> Error (Other "ungroup([..], A): each row must be a bare name (bind each store's array first)"))
+                | _ -> Error (SegmentedDomainErr "ungroup([..], A): each row must be a bare name (bind each store's array first)"))
             |> List.fold (fun acc r -> acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [ x ]))) (Ok [])
             |> Result.bind (fun tRows ->
                 let checkRow (i: int) (tr: TypedExpr) : TypeResult<unit> =
@@ -5579,9 +5579,9 @@ and inferUngroupRows (env: TypeEnv) (rows: Expr list) (alias: string) : TypeResu
                     | ArrayElem at when not at.IndexTypes.IsEmpty ->
                         (match at.IndexTypes.Head.Extent with
                          | IRLit (IRLitInt n) when n = extents.[i] -> Ok ()
-                         | IRLit (IRLitInt n) -> Error (Other $"ungroup([..], {alias}): row {i} has extent {n} but store {i} of {alias} has extent {extents.[i]}")
+                         | IRLit (IRLitInt n) -> Error (SegmentedDomainErr $"ungroup([..], {alias}): row {i} has extent {n} but store {i} of {alias} has extent {extents.[i]}")
                          | _ -> Ok ())
-                    | _ -> Error (Other $"ungroup([..], {alias}): row {i} is not an array")
+                    | _ -> Error (SegmentedDomainErr $"ungroup([..], {alias}): row {i} is not an array")
                 tRows |> List.mapi checkRow
                 |> List.fold (fun acc r -> acc |> Result.bind (fun () -> r)) (Ok ())
                 |> Result.bind (fun () ->
@@ -5590,7 +5590,7 @@ and inferUngroupRows (env: TypeEnv) (rows: Expr list) (alias: string) : TypeResu
                         let rest = at.IndexTypes |> List.tail
                         let resultType = mkArrayArrow (seg.Source :: rest) at.ElemType None
                         Ok (mkTyped (TExprUngroupRows (tRows, offsets, seg.Source)) resultType)
-                    | _ -> Error (Other "ungroup([..], A): rows must be arrays")))
+                    | _ -> Error (SegmentedDomainErr "ungroup([..], A): rows must be arrays")))
 
 /// ungroup(G[, A]): rows of a segment-grouped array reassembled over the
 /// source axis (§2.3, §3.3) -- the only materializing operation of the
@@ -5610,18 +5610,18 @@ and inferUngroup (env: TypeEnv) (grouped: Expr) (aliasOpt: string option) : Type
                 | None ->
                     match env.SegmentedOuters.TryGetValue outer.Id with
                     | true, a -> Ok a
-                    | _ -> Error (Other "ungroup(G): G is not (directly) the result of `group_by(_, segments(A))`; if it derives from one, name the axis: ungroup(G, A)")
+                    | _ -> Error (SegmentedDomainErr "ungroup(G): G is not (directly) the result of `group_by(_, segments(A))`; if it derives from one, name the axis: ungroup(G, A)")
             alias |> Result.bind (fun a ->
                 if a.Contains "," then
                     // a grid grouping's result: two axes come back
                     let aliases = a.Split(',') |> List.ofArray
                     let segs = aliases |> List.choose (fun x -> Map.tryFind x env.Segmentations)
-                    if segs.Length <> 2 then Error (Other $"ungroup: the tile grouping's axes {a} are not both in scope")
+                    if segs.Length <> 2 then Error (SegmentedDomainErr $"ungroup: the tile grouping's axes {a} are not both in scope")
                     else
                         let bounds = segs |> List.map segmentationOffsets
                         let g = int64 ((bounds.[0].Length - 1) * (bounds.[1].Length - 1))
                         (match outer.Extent with
-                         | IRLit (IRLitInt n) when n <> g -> Error (Other $"ungroup: the outer slot has {n} tiles but segments({a}) has {g}")
+                         | IRLit (IRLitInt n) when n <> g -> Error (SegmentedDomainErr $"ungroup: the outer slot has {n} tiles but segments({a}) has {g}")
                          | _ ->
                              let sources = segs |> List.map (fun s -> s.Source)
                              let rest = arrTy.IndexTypes |> List.skip 2
@@ -5629,19 +5629,19 @@ and inferUngroup (env: TypeEnv) (grouped: Expr) (aliasOpt: string option) : Type
                              Ok (mkTyped (TExprUngroupGrid (tG, sources, bounds)) resultType))
                 else
                 match Map.tryFind a env.Segmentations with
-                | None -> Error (Other $"ungroup(_, {a}): '{a}' is not a `Chunked<..>` index alias in scope")
+                | None -> Error (SegmentedDomainErr $"ungroup(_, {a}): '{a}' is not a `Chunked<..>` index alias in scope")
                 | Some seg ->
                     let g = int64 (List.length (segmentationOffsets seg) - 1)
                     let outerOk = (match outer.Extent with IRLit (IRLitInt n) -> n = g | _ -> true)
                     if not outerOk then
-                        Error (Other $"ungroup: the outer slot has {outer.Extent} groups but '{a}' has {g} segments")
+                        Error (SegmentedDomainErr $"ungroup: the outer slot has {outer.Extent} groups but '{a}' has {g} segments")
                     elif member_.IxKind <> IxKGroupMember && member_.IxKind <> IxKRagged && member_.IxKind <> IxKRaggedInline then
-                        Error (Other "ungroup: the second slot must be the ragged member slot of a group_by result")
+                        Error (SegmentedDomainErr "ungroup: the second slot must be the ragged member slot of a group_by result")
                     else
                         let rest = arrTy.IndexTypes |> List.skip 2
                         let resultType = mkArrayArrow (seg.Source :: rest) arrTy.ElemType None
                         Ok (mkTyped (TExprUngroup (tG, seg.Source)) resultType))
-        | _ -> Error (Other "ungroup expects a segment-grouped array (rank >= 2: groups x members)"))
+        | _ -> Error (SegmentedDomainErr "ungroup expects a segment-grouped array (rank >= 2: groups x members)"))
 
 and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
     let gridRefusal =
@@ -5654,7 +5654,7 @@ and inferGroupBucket (env: TypeEnv) (grouping: Expr) : TypeResult<TypedExpr> =
                   | _ -> false)
              | None -> false)
         | _ -> false
-    if gridRefusal then Error (Other "group_bucket over a tile grouping (`segments(C0, C1)`) is not supported: its source is two-dimensional; use extents(gk) for the tile sizes") else
+    if gridRefusal then Error (SegmentedDomainErr "group_bucket over a tile grouping (`segments(C0, C1)`) is not supported: its source is two-dimensional; use extents(gk) for the tile sizes") else
     requireGroupingName env "group_bucket" grouping
     |> Result.map (fun (tGk, _, sourceIdx) ->
         // Reuse the source slot verbatim (same Id, tag and extent): the bucket
@@ -5702,7 +5702,7 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
         let litCount k = mkTyped (TExprLit (LitInt (int64 k))) tC.Type
         match n with
         | None ->
-            Error (Other "replicate count must be a compile-time integer (a literal, `let static`, or static-function call)")
+            Error (StaticValueErr "replicate count must be a compile-time integer (a literal, `let static`, or static-function call)")
         | Some 1 ->
             // replicate(1, c) == c
             Ok tB
@@ -5729,7 +5729,7 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
                     mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
             Ok (mkTyped (TExprReplicate (litCount n, tB)) resultType)
         | _ ->
-            Error (Other (match n with Some k -> $"replicate count must be >= 1, got {k}" | None -> "replicate count must be a compile-time integer >= 1"))))
+            Error (BuiltinArgErr (match n with Some k -> $"replicate count must be >= 1, got {k}" | None -> "replicate count must be a compile-time integer >= 1"))))
 
 // ---- Reynolds ----
 
@@ -5756,7 +5756,7 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
                     Ok (mkTyped (TExprIndex (tT, [tI], identity))
                                 (mkArrayLike { arrTy with IndexTypes = remaining }))
                 else
-                    Error (Other "array indexing: too many indices for array rank")
+                    Error (ArgCountErr "array indexing: too many indices for array rank")
         | IRTTuple ts when (match tI.Kind with TExprLit (LitInt k) -> k >= 0L && int k < ts.Length | _ -> false) ->
             // A LITERAL projection of a tuple whose element types are known
             // names that element's type. Answering a fresh variable here
@@ -6051,7 +6051,7 @@ and inferExtents (env: TypeEnv) array : TypeResult<TypedExpr> =
                         | IxKCompound | IxKCompoundDynamic | IxKSparse -> true
                         | _ -> false)
                 if raggedFamilySlot then
-                    Error (Other "extents() on a ragged, grouped, or multi-rank compound/sparse array has no scalar answer for the masked/keyed/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound/sparse (which is its cardinality).")
+                    Error (BuiltinArgErr "extents() on a ragged, grouped, or multi-rank compound/sparse array has no scalar answer for the masked/keyed/ragged dimensions. Use extents(row) on a peeled or indexed row, the lengths array, or extents on a rank-1 compound/sparse (which is its cardinality).")
                 else
                 // Multi-rank: tuple of Int64s, one per dimension
                 let n = arrTy.IndexTypes.Length
@@ -6825,9 +6825,9 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                          // space, which is well-defined for a mask over a grid
                          // but has no canonical shape for an arbitrary key set
                          // (the keys' bounding box is not part of the type).
-                         Error (Other "<|:> with a SparseIdx left operand is not yet supported (a sparse key set has no product-space shape for the dense fallback to cover).")
+                         Error (NotYetSupportedErr "<|:> with a SparseIdx left operand is not yet supported (a sparse key set has no product-space shape for the dense fallback to cover).")
                      | _ ->
-                         Error (Other "<|:> left operand must be a plain dense array or a compound(A, mask) array; ragged/dynamic-compound left operands are not supported."))
+                         Error (BuiltinArgErr "<|:> left operand must be a plain dense array or a compound(A, mask) array; ragged/dynamic-compound left operands are not supported."))
             | _ ->
                 Error (FallbackNeedsArrays (describe tL.Type, describe tR.Type))))
 
@@ -7025,7 +7025,7 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                 | _ -> None
             match caretRankClash with
             | Some (k, j) ->
-                Error (Other ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able"
+                Error (IndexSpaceErr ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able"
                               + $": the left operand is a rank-{k} parameter (`^{k}`) and the right operand a rank-{j} one, so no call can give them one shape. "
                               + "For every pair of cells, use the outer operator (`a [+] b`); to combine a row with each row of a matrix, map over the matrix's rows."))
             | None ->
@@ -7257,7 +7257,7 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                 // The base the result's range is spelled over: the operands'
                 // shared named index type, or their shared static extent. A
                 // base this site cannot spell (a runtime extent, two different
-                // bases) leaves the old path, whose gates refuse (BL3999 across
+                // bases) leaves the old path, whose gates refuse (BL3027 across
                 // two records; BL4015's joint-parity arm on one record).
                 let signBase =
                     match signRule with
@@ -7344,7 +7344,7 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                             Blade.TypeLower.indexShapeClashDetail
                                 "the left operand" "the right operand" aL.IndexTypes aR.IndexTypes
                         | _ -> ""
-                    Error (Other ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able" + detail))
+                    Error (IndexSpaceErr ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able" + detail))
             else
             // Elementwise op on ARRAY <-> SCALAR (`A + a`, `2.0 / A`,
             // `A > t`): re-synthesize as a 1-param kernel map over the array
@@ -8130,7 +8130,7 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
         | _ -> false
     match op, lTy, rTy with
     | OpMul, IRTDist _, IRTDist _ ->
-        Error (Other "dist * dist is not defined: cumulants are additive under independent sums and multilinear under scalar scaling; products of random variables need the moment (Wick/Faa di Bruno) machinery")
+        Error (DistAlgebraErr "dist * dist is not defined: cumulants are additive under independent sums and multilinear under scalar scaling; products of random variables need the moment (Wick/Faa di Bruno) machinery")
     | OpMul, IRTDist (order, _, _), c when isScalarish c ->
         inferExpr env (Blade.Ppl.Elaborate.DistSynth.scaleExpr (env.Builder.FreshId()) right left order)
     | OpMul, c, IRTDist (order, _, _) when isScalarish c ->
@@ -8146,7 +8146,7 @@ and inferDistBinOp (env: TypeEnv) (op: BinOp) (left: Expr) (right: Expr) (lTy: I
         let provL = provenanceOfSurface env left
         let provR = provenanceOfSurface env right
         if Set.isEmpty provL || Set.isEmpty provR then
-            Error (Other "dist + / -: cannot establish the operands' provenance -- combine dist bindings (or expressions built from them) so independence of their sources can be verified")
+            Error (DistAlgebraErr "dist + / -: cannot establish the operands' provenance -- combine dist bindings (or expressions built from them) so independence of their sources can be verified")
         else
             let missing =
                 [ for s1 in provL do
@@ -8466,7 +8466,7 @@ and convertScaleTo (env: TypeEnv) (context: string) (dst: UnitSig) (t: TypedExpr
     // differentiated function.
     | Some src when unitCompatible src dst && not (unitSameScale src dst)
                     && Blade.Constraints.inAdBody () ->
-        Error (Other (sprintf
+        Error (UnitMagnitudeErr (sprintf
                 "%s relates %s and %s inside a differentiated body (a function synthesized by ad.grad / ad.jvp): the magnitudes differ by the factor %s, and the derivative of that conversion is the factor itself, which the surface-level AD transform does not see. Convert outside the differentiated function, or declare its parameters and result in one magnitude"
                 context (ppUnitSig src) (ppUnitSig dst) (ppUnitScale (unitConversionFactor src dst))))
     | Some src when unitCompatible src dst && not (unitSameScale src dst) ->
@@ -8481,12 +8481,12 @@ and convertScaleTo (env: TypeEnv) (context: string) (dst: UnitSig) (t: TypedExpr
                 && abs factor.Num <= bigint System.Int64.MaxValue
             if exact then scaled et (LitInt (int64 factor.Num))
             else
-                Error (Other (sprintf
+                Error (UnitMagnitudeErr (sprintf
                         "converting %s to %s in %s would scale an integer by %s, which is not a whole number; use a float element type, or annotate the result as %s"
                         (ppUnitSig src) (ppUnitSig dst) context (ppUnitScale factor) (ppUnitSig src)))
         | IRTScalar ((ETFloat32 | ETFloat64) as et) -> scaled et (LitFloat (scaleToFloat factor))
         | other ->
-            Error (Other (sprintf
+            Error (UnitMagnitudeErr (sprintf
                     "%s relates %s and %s, which differ by the factor %s, but a %s value cannot carry a unit conversion"
                     context (ppUnitSig src) (ppUnitSig dst) (ppUnitScale factor) (IRPrint.ppIRType other)))
     | _ -> Ok t
@@ -8499,7 +8499,7 @@ and convertScaleTo (env: TypeEnv) (context: string) (dst: UnitSig) (t: TypedExpr
 and requireSameScale (context: string) (expected: UnitSig) (actual: UnitSig) : TypeResult<unit> =
     if unitSameScale expected actual then Ok ()
     else
-        Error (Other (sprintf
+        Error (UnitMagnitudeErr (sprintf
                 "%s relates %s and %s: same dimensions, but magnitudes differing by the factor %s. Blade inserts a unit conversion only in scalar +, -, and comparisons; here the operands must already share a magnitude"
                 context (ppUnitSig expected) (ppUnitSig actual)
                 (ppUnitScale (unitConversionFactor actual expected))))
@@ -9023,7 +9023,7 @@ and inferArithType (builder: IRBuilder) mode op leftTy rightTy (rExpr: TypedExpr
             |> List.fold (fun acc (a, b) -> acc |> Result.bind (fun () -> tupleCompareCheck a b)) (Ok ())
         | IRTTuple _, _ | _, IRTTuple _ -> Error (TypeMismatch (l, r))
         | ArrayElem _, _ | _, ArrayElem _ ->
-            Error (Other "comparison of tuples whose components are arrays: an Array component \
+            Error (TypeMismatchErr "comparison of tuples whose components are arrays: an Array component \
 compares as its data POINTER, not element-wise, so two structurally equal arrays would answer \
 `false`. Compare the array components directly (`x == y` is elementwise and yields an array of \
 Bool) and combine the results, or compare tuples of scalars.")
@@ -9109,7 +9109,7 @@ Bool) and combine the results, or compare tuples of scalars.")
         // to scalar promotion and silently type nonsense.
         match lBare, rBare with
         | IRTDist _, _ | _, IRTDist _ ->
-            Error (Other "operators on Dist values are not yet typed in this position (checker-level dist operator dispatch is in progress): combine dists where they are constructed (module-level d1 + d2, d1 - d2, c * d), or project a component with cumulant(d, k)")
+            Error (NotYetSupportedErr "operators on Dist values are not yet typed in this position (checker-level dist operator dispatch is in progress): combine dists where they are constructed (module-level d1 + d2, d1 - d2, c * d), or project a component with cumulant(d, k)")
         | _ ->
         // (Both-array Elementwise ops never reach here anymore: inferBinOp
         // re-synthesizes them as the zip co-iteration pipeline, which
@@ -9558,7 +9558,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         let resolvedInner = resolveTypedExpr env innerKernel
         match resolvedInner.Kind with
         | TExprLambda li -> buildApplyInfo env mfInfo.Arrays mfInfo.Identities mfInfo.ArrayTypes mfInfo.SDimsPerArray mfInfo.SharedIndexTypes li tLeft tRight true isReynoldsAntisym
-        | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
+        | _ -> Error (BuiltinArgErr "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
 
     | TExprMethodFor mfInfo, TExprZero ->
         // M <@> zero: synthesize a lambda that returns 0 for each index point.
@@ -9615,7 +9615,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                     | TExprTuple es -> es
                     | _ -> [tRight]
         if elems.Length < 2 then
-            Error (Other "object_for(<combinator>) requires at least 2 arguments")
+            Error (ArgCountErr "object_for(<combinator>) requires at least 2 arguments")
         else
             match op with
             | OpApply ->
@@ -9624,7 +9624,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 let pairs = elems |> List.map (fun e ->
                     match e.Kind with
                     | TExprTuple [loop; kernel] -> Ok (loop, kernel)
-                    | _ -> Error (Other "object_for(<@>) expects (loop, kernel) pairs"))
+                    | _ -> Error (BuiltinArgErr "object_for(<@>) expects (loop, kernel) pairs"))
                 pairs |> sequenceResults |> Result.bind (fun pairList ->
                     pairList |> List.map (fun (loop, kernel) -> inferApply env loop kernel)
                     |> sequenceResults
@@ -9710,7 +9710,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // rather than return the wrong grid. An all-zip pack
         // (`(zip(A,B), zip(C,D))`) is a plain co-iteration and stays legal.
         if hasZip && (resolvedExprs |> List.exists (fun e -> not e.Kind.IsTExprZip)) then
-            Error (Other zipInMultiArrayPackMsg)
+            Error (NotYetSupportedErr zipInMultiArrayPackMsg)
         else
 
         let (flatArrays, sharedRecords) =
@@ -9830,7 +9830,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
             match resolvedInnerK.Kind with
             | TExprLambda li ->
                 buildApplyInfo env flatArrays identities arrayTypes sDimsPerArray sharedRecords li tLeft objInfo.Kernel true isReynoldsAntisym
-            | _ -> Error (Other "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
+            | _ -> Error (BuiltinArgErr "reynolds() requires a lambda kernel, but the inner expression could not be resolved to a lambda")
         | TExprZero ->
             // object_for(zero) <@> arrays: synthesize zero-returning lambda.
             // Extract primitive for literal choice.
@@ -10267,7 +10267,7 @@ and buildApplyInfo (env: TypeEnv)
         if declaredTotalWidth = declaredParamCount then None
         elif not (List.isEmpty lambdaInfo.CommGroups)
              || not (List.isEmpty lambdaInfo.AntisymGroups) then
-            Some (Other "a `comm`/`anticomm` clause on a kernel that also declares a `Tuple<N>` parameter is not supported: those clauses address parameters by POSITION, and a tuple parameter is expanded into its k row parameters (renumbering every later position). `comm` between two PAIRS has no settled meaning to remap to. Write the parameters flat (one per operand) to use `comm`/`anticomm` here. (The parallel strategies -- `omp`/`cuda`/`mpi` -- ARE supported on a tuple parameter: they resolve by name to the operand node.)")
+            Some (WhereClauseErr "a `comm`/`anticomm` clause on a kernel that also declares a `Tuple<N>` parameter is not supported: those clauses address parameters by POSITION, and a tuple parameter is expanded into its k row parameters (renumbering every later position). `comm` between two PAIRS has no settled meaning to remap to. Write the parameters flat (one per operand) to use `comm`/`anticomm` here. (The parallel strategies -- `omp`/`cuda`/`mpi` -- ARE supported on a tuple parameter: they resolve by name to the operand node.)")
         else None
     match tupleParamWhereClash with
     | Some e -> Error e
@@ -10621,7 +10621,7 @@ and buildApplyInfo (env: TypeEnv)
     let isCoIterApply = not (List.isEmpty sharedIndexTypes)
     // FOLD LEAVES STORE NOTHING. An apply that is the direct operand of a
     // `reduce` (see `FoldOperandApplies`) has no output storage to compact, and
-    // pinning `where comm` there is refused (BL3999, reduce over a compact
+    // pinning `where comm` there is refused (BL3026, reduce over a compact
     // computation) -- the suggestion would be both false ("DENSE today") and
     // unactionable (an unfixable build break under --strict-pins).
     let isFoldLeaf = FoldOperandApplies.contains tLoop.Span || FoldOperandApplies.contains tKernel.Span
@@ -11094,7 +11094,7 @@ and buildApplyInfo (env: TypeEnv)
         && (kernelInputRanks |> List.exists (fun r -> r = 0))
 
     if mixedRowElementAnnotations then
-        Error (Other "co-iterating ragged or grouped arrays needs every kernel parameter to bind the same way: all ROWS (each annotated rank-1 -- `T^1`, `T<unit>^1`, or `Array<T like RaggedIdx<_>>`) or all ELEMENTS (none annotated rank-1). One offsets table drives the shared walk, so a row parameter beside an element parameter has no single step to take. Annotate every parameter, or none.")
+        Error (IndexSpaceErr "co-iterating ragged or grouped arrays needs every kernel parameter to bind the same way: all ROWS (each annotated rank-1 -- `T^1`, `T<unit>^1`, or `Array<T like RaggedIdx<_>>`) or all ELEMENTS (none annotated rank-1). One offsets table drives the shared walk, so a row parameter beside an element parameter has no single step to take. Annotate every parameter, or none.")
     else
 
     // Infer T-dimensions from the kernel's resolved return type (section 9.2).
@@ -11903,7 +11903,7 @@ and buildApplyInfo (env: TypeEnv)
             if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
             Error err
         | None ->
-        // KERNEL CO-ITERATION AGREEMENT (BL3016 extent / BL3999 name), the
+        // KERNEL CO-ITERATION AGREEMENT (BL3016 extent / BL3027 name), the
         // `<@>` twin of the call-site ladder's coIterClash. A kernel body that
         // zips its parameters -- directly, through elementwise maps, or by
         // forwarding them to a function that does (the eta wrapper of a named
@@ -12062,7 +12062,7 @@ and buildApplyInfo (env: TypeEnv)
                                         Some (HaloOffsetOutsideSet (o, h.Offsets, targetName))
                                     | None, Some h when h.IsCompound ->
                                         let set = h.Offsets |> List.map string |> String.concat ", "
-                                        Some (Other $"halo window read over a masked domain: the offset must be an integer literal (one of [{set}], e.g. w(0)). Over a CompoundIdx inner the window walks the PRESENT cells, so the neighbor's coordinate is looked up in the rank table -- a runtime offset cannot be shown to stay inside the interior the way a dense ordinal can.")
+                                        Some (HaloFormErr $"halo window read over a masked domain: the offset must be an integer literal (one of [{set}], e.g. w(0)). Over a CompoundIdx inner the window walks the PRESENT cells, so the neighbor's coordinate is looked up in the rank table -- a runtime offset cannot be shown to stay inside the interior the way a dense ordinal can.")
                                     | _ -> None
                                 match outside with
                                 | Some e -> Some e
@@ -12720,7 +12720,7 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
     // clause here would promise reproducibility the emission cannot keep.
     match whereClause with
     | Some wc when wc.Repro ->
-        Error (Other "`where repro` is carried by named function declarations only (`function f(...) where repro = ...`): a lambda kernel inlines into its call sites, where the reproducibility attribute cannot travel. Name the kernel and call it.")
+        Error (WhereClauseErr "`where repro` is carried by named function declarations only (`function f(...) where repro = ...`): a lambda kernel inlines into its call sites, where the reproducibility attribute cannot travel. Name the kernel and call it.")
     | _ ->
     match parms |> List.tryPick (fun p -> p.Type |> Option.bind (caretHeadError env)) with
     | Some e -> Error e
@@ -12856,7 +12856,7 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
             // that escaped into it (its only legitimate role is a compound-index
             // coordinate), rather than letting it reach lowering.
             if exprContainsWildcard tBody then
-                Error (Other
+                Error (WildcardErr
                     "wildcard `_` is not a value: it cannot be a lambda's body. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
             else
             // #17: a parallel body may not reach an outer write through a call
@@ -13316,7 +13316,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // precedence trap: `a * (re, im) : T` binds the cast OUTSIDE the
     // multiply, and the bare tuple operand would miscompile).
     | ExprKind.ExprTuple [_; _], IRTScalar (ETComplex64 | ETComplex128) ->
-        Error (Other "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
+        Error (TypeMismatchErr "complex values are constructed with complex(re, im); the tuple form `(re, im) : Complex128` is no longer supported")
 
     // Match in a checking position: push the expected type into each arm so a
     // literal/scalar arm can flex to it (bidirectional match -- see checkMatch).
@@ -13427,7 +13427,7 @@ and internal inferIndexCast (env: TypeEnv) (e: Expr) (annoTy: IRType) (tag: stri
         | IRTScalar (ETInt32 | ETInt64) ->
             match ext with
             | None ->
-                Error (Other $"a cast of a computed integer to the index type '{tag}' is a checked conversion, and checking it needs '{tag}'s extent at compile time, which is not known here. Iterate with range<{tag}> to produce '{tag}' values, or give '{tag}' a static extent.")
+                Error (StaticValueErr $"a cast of a computed integer to the index type '{tag}' is a checked conversion, and checking it needs '{tag}'s extent at compile time, which is not known here. Iterate with range<{tag}> to produce '{tag}' values, or give '{tag}' a static extent.")
             | Some n -> Ok (checkedIndexConversion env tE annoTy tag n span)
         // A position (arithmetic on an index value) typed by its operand is
         // an integer all the same.
@@ -13885,7 +13885,7 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
     // than let it reach lowering.
     let rejectEscapedWildcard (tv: TypedExpr) : TypeResult<TypedExpr> =
         if exprContainsWildcard tv then
-            Error (Other
+            Error (WildcardErr
                 "wildcard `_` is not a value: it can only appear as a compound-index coordinate (e.g. B((a, _, c))), not bound in a let. A tuple carrying a hole like (a, _, c) has no meaning on its own.")
         else Ok tv
     // (An aliased grouping -- `let gk2 = gk` -- is the BL3017 sweep's job:
@@ -13921,9 +13921,9 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
         | Some err -> Error err
         | None ->
         if irTypeHasRaggedNoPrior annotTy then
-            Error (Other "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
+            Error (IndexTypeErr "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
         elif irTypeHasBadDistOrder annotTy then
-            Error (Other "Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>")
+            Error (StaticValueErr "Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>")
         elif irTypeHasTagWildcard annotTy then
             Error (TagWildcardNotParam
                        (match binding.Pattern.Kind with
@@ -13946,7 +13946,7 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
         else
         let badAxis = irTypeUnknownAxisPath annotTy
         if badAxis.IsSome then
-            Error (Other (unknownAxisPathMessage badAxis.Value))
+            Error (UnknownAxisPathErr (unknownAxisPathMessage badAxis.Value))
         else
         let wreath = irTypeWreathLevels annotTy
         if wreath.IsSome then
@@ -14063,7 +14063,7 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
                  checkExpr env annotTy synth |> Result.bind (fun tv ->
                      rejectEscapedWildcard { tv with Type = annotTy })
              | _ ->
-                 Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex (a struct, String or tuple element needs a static shape of at most 65536 cells). Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
+                 Error (BuiltinArgErr "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex (a struct, String or tuple element needs a static shape of at most 65536 cells). Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
         | _ ->
         // THE ascription conversion seam, and the one that makes an
         // annotation choose the magnitude: `let c: Float64<hour> = <days>`.
@@ -14275,7 +14275,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
     recArrayLower env annot annotTy def span None
     |> Result.bind (function
         | RecFullTyped tv -> Ok tv
-        | RecWindowStmts _ -> Error (Other $"recursive array '{def.Name}': internal error -- a full desugar returned windowed statements"))
+        | RecWindowStmts _ -> Error (InternalErr $"recursive array '{def.Name}': internal error -- a full desugar returned windowed statements"))
 
 /// The recursion's desugar. `window = None`: today's full buffer, checked and
 /// returned as the binding's value. `window = Some (K, R)` (decided by
@@ -14337,9 +14337,9 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             | _ -> None
         match extentOf at.IndexTypes.Head with
         | None ->
-            Error (Other $"recursive array '{def.Name}': the leading (recursion) axis must have a static extent -- dynamic-extent recurrences are not supported")
+            Error (RecArrayFormErr $"recursive array '{def.Name}': the leading (recursion) axis must have a static extent -- dynamic-extent recurrences are not supported")
         | Some n when n < 1L ->
-            Error (Other $"recursive array '{def.Name}': the recursion axis extent must be >= 1 (got {n})")
+            Error (RecArrayFormErr $"recursive array '{def.Name}': the recursion axis extent must be >= 1 (got {n})")
         | Some n ->
         // Element zero expression for the buffer pre-fill: Float/Int
         // literals, complex(0, 0) for complex elements. (Record/tuple
@@ -14361,12 +14361,12 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             | IRTScalar ETComplex128 | IRTScalar ETComplex64 ->
                 Ok (synAt (ExprApp (synAt (ExprVar "complex"),
                                     [synAt (ExprLit (LitFloat 0.0)); synAt (ExprLit (LitFloat 0.0))])))
-            | _ -> Error (Other $"recursive array '{def.Name}': only Float/Int/Complex element types are supported (record/tuple slices land with the IR-level alloc)")
+            | _ -> Error (RecArrayFormErr $"recursive array '{def.Name}': only Float/Int/Complex element types are supported (record/tuple slices land with the IR-level alloc)")
         // Trailing (slice) axes must be static too -- they drive the
         // desugared copy nest and the zero-fill literal.
         let trailingOpt = at.IndexTypes.Tail |> List.map extentOf
         if trailingOpt |> List.exists Option.isNone then
-            Error (Other $"recursive array '{def.Name}': all slice-axis extents must be static")
+            Error (RecArrayFormErr $"recursive array '{def.Name}': all slice-axis extents must be static")
         else
         let trailing = trailingOpt |> List.map Option.get
         zeroElem () |> Result.bind (fun zed ->
@@ -14477,7 +14477,7 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         if window.IsSome && bufSlots.IsNone then
             // Unreachable: recArrayWindowDecision demotes a non-`Array<...>`
             // annotation, since the ring's head slot is rebuilt from its slots.
-            Error (Other $"recursive array '{def.Name}': internal error -- cannot window an annotation without literal Array slots")
+            Error (InternalErr $"recursive array '{def.Name}': internal error -- cannot window an annotation without literal Array slots")
         else
         let zerosValue = zerosOver "z" bufSlots (ringSize :: trailing)
         let bufLet = StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar bufName); Type = Some bufAnnot; Value = zerosValue }
@@ -14813,7 +14813,7 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         | Some _ when guard'.IsSome || guardIsBestEffort ->
             // Unreachable: recArrayWindowDecision demotes a `while` guard and
             // the freeze-idiom shape (its epilogue repeats the last row).
-            Error (Other $"recursive array '{def.Name}': internal error -- a guarded recursion reached the windowed desugar")
+            Error (InternalErr $"recursive array '{def.Name}': internal error -- a guarded recursion reached the windowed desugar")
         | Some _ ->
             Ok (RecWindowStmts ((bufLet :: zeroSliceStmts) @ snapStmts @ seedStmts @ sweepStmts))
         | None ->
@@ -14846,7 +14846,7 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                     // truthy (mirrors the match-arm guard rule).
                     unify env.Subst grdB.Type (IRTScalar ETBool)
                     |> Result.mapError (fun _ ->
-                        Other $"recursive array '{def.Name}': a `while` guard must be Bool -- the condition after `while` is a predicate (comparisons and boolean operators), not a value")
+                        RecArrayFormErr $"recursive array '{def.Name}': a `while` guard must be Bool -- the condition after `while` is a predicate (comparisons and boolean operators), not a value")
                     |> Result.bind (fun () ->
                         let boolT = IRTScalar ETBool
                         let grdVarT = mkTypedSpan (TExprVar (grdName, grdB.VarId, None)) boolT span
@@ -14874,7 +14874,7 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                                     TStmtForIn (vn, vid, lo, hi, ins [] body)
                                 | st -> st)
                         if not inserted then
-                            Error (Other $"recursive array '{def.Name}': internal error -- the while-guard early exit could not be placed in the recursion loop")
+                            Error (InternalErr $"recursive array '{def.Name}': internal error -- the while-guard early exit could not be placed in the recursion loop")
                         else
                         // The budget abort is the `while` spelling's CONTRACT.
                         // A recognized freeze idiom gets the same break and
@@ -14892,14 +14892,14 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                         let abortT = TStmtExpr (mkTypedSpan (TExprConstraintCheck (convT, "BL8010", abortMsg)) IRTUnit span)
                         Ok { tv with Kind = TExprBlock (tstmts' @ [abortT], fin) })
                 | _ ->
-                    Error (Other $"recursive array '{def.Name}': internal error -- while-guard scaffolding missing from the checked block")
-            | _ -> Error (Other $"recursive array '{def.Name}': internal error -- checked recursive-array value is not a block")
+                    Error (InternalErr $"recursive array '{def.Name}': internal error -- while-guard scaffolding missing from the checked block")
+            | _ -> Error (InternalErr $"recursive array '{def.Name}': internal error -- checked recursive-array value is not a block")
         checkExpr env annotTy block |> Result.bind (fun tv ->
             match guard' with
             | None -> Ok (RecFullTyped { tv with Type = annotTy })
             | Some _ -> injectGuardControl tv |> Result.map (fun tv2 -> RecFullTyped { tv2 with Type = annotTy })))
     | _ ->
-        Error (Other $"recursive array '{def.Name}': the annotation must be an Array type (`let rec {def.Name}: Array<T like Step, ...> = ...`)")
+        Error (RecArrayFormErr $"recursive array '{def.Name}': the annotation must be an Array type (`let rec {def.Name}: Array<T like Step, ...> = ...`)")
 
 /// Bind the primary name of a let binding (single name or placeholder) with
 /// let-generalization. Only ReadOnly bindings are generalized -- assignable
@@ -15364,7 +15364,7 @@ and matchWith env scrutinee cases (resultTy: IRType)
                         inferExpr caseEnv g |> Result.bind (fun tg ->
                             unify env.Subst tg.Type (IRTScalar ETBool)
                             |> Result.mapError (fun _ ->
-                                Other "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
+                                TypeMismatchErr "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
                             |> Result.map (fun () -> Some tg)))
                     |> Option.defaultValue (Ok None)
                 tGuard |> Result.bind (fun guardOpt ->
@@ -15968,7 +15968,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
             match bodyErr with
             | Some e -> Error e
             | None -> Ok (TStmtForIn (varName, varId, tLo, tHi, List.ofSeq typedBodyStmts))
-    | _ -> Error (Other "for-in range must use a..b syntax")
+    | _ -> Error (BuiltinArgErr "for-in range must use a..b syntax")
 
 /// A TREE-slotted operand in a loop former. A tree array's cells are its leaves
 /// and the flat pool IS a rank-1 dense array, so iterating it is meaningful --
@@ -16032,7 +16032,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                         | _ -> false))
             | _ -> false
         if allGrouped && arrayTypes.Length > 1 && not (sameGroupKeysBinding ()) then
-            Error (Other "co-iterating grouped arrays requires every operand to be grouped by the SAME group_keys binding (one offsets table drives the shared row walk). Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` to each group_by; grouping each operand with its own group_keys call gives two independent partitions with no row correspondence.")
+            Error (IndexSpaceErr "co-iterating grouped arrays requires every operand to be grouped by the SAME group_keys binding (one offsets table drives the shared row walk). Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` to each group_by; grouping each operand with its own group_keys call gives two independent partitions with no row correspondence.")
         else Ok ()
     // Detect method_for(zip(A, B, ...)) -- expand zip into co-iteration
     match arrays with
@@ -16132,7 +16132,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
         // share. `for (A, zip(B, C))` desugars through here too.
         | _ when arrays.Length > 1
                  && (tArrays |> List.exists (fun ta -> (resolveTypedExpr env ta).Kind.IsTExprZip)) ->
-            Error (Other zipInMultiArrayPackMsg)
+            Error (NotYetSupportedErr zipInMultiArrayPackMsg)
         | _ ->
         // ---- SPINE EXPANSION (docs/plan-tuples-vs-arg-packs.md 6c) ----
         // The loop-former side of the ONE pack site: rule 3's one-level splice,
@@ -16159,7 +16159,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             // now carry a zip into a multi-operand pack.
             if leafArrays.Length > 1
                && (leafArrays |> List.exists (fun ta -> (resolveTypedExprDeep env ta).Kind.IsTExprZip)) then
-                Error (Other zipInMultiArrayPackMsg)
+                Error (NotYetSupportedErr zipInMultiArrayPackMsg)
             else
             let identities = leafArrays |> List.map (fun ta ->
                 match ta.Kind with
@@ -16653,7 +16653,7 @@ and internal synthesizeElementBoundChecks (env: TypeEnv) (annot: TypeExpr) (subj
     match elementBoundOf env annot with
     | None -> Ok []
     | Some (_, _, depth) when depth > 1 ->
-        Error (Other ($"the bound on the element type of '{subjectName}' is not enforced: it sits {depth} array levels deep, and the guard synthesis walks one. Flatten to a single Array<T<min=.., max=..> like I, J, ...> annotation, whose elements ARE checked."))
+        Error (ConstraintErr ($"the bound on the element type of '{subjectName}' is not enforced: it sits {depth} array levels deep, and the guard synthesis walks one. Flatten to a single Array<T<min=.., max=..> like I, J, ...> annotation, whose elements ARE checked."))
     | Some (lo, hi, _) ->
         inferExpr env targetSurface |> Result.bind (fun tSubj ->
         match env.Subst.Resolve tSubj.Type with
@@ -16663,11 +16663,11 @@ and internal synthesizeElementBoundChecks (env: TypeEnv) (annot: TypeExpr) (subj
                     ix.IxKind <> IxKPlain || ix.Symmetry <> SymNone)
             match exotic with
             | Some ix ->
-                Error (Other (sprintf "the bound on the element type of '%s' is not enforced: the array has a %s axis, whose stored cells are not a dense loop nest (folding canonical vs logical cells differs, and ragged/compound axes have no rectangular extent). Bound the element of a dense array, or check the values explicitly."
-                                      subjectName
-                                      (match ix.Symmetry with
-                                       | SymNone -> "ragged, grouped, or compound"
-                                       | _ -> "compact symmetric/antisymmetric/Hermitian")))
+                Error (ConstraintErr (sprintf "the bound on the element type of '%s' is not enforced: the array has a %s axis, whose stored cells are not a dense loop nest (folding canonical vs logical cells differs, and ragged/compound axes have no rectangular extent). Bound the element of a dense array, or check the values explicitly."
+                                              subjectName
+                                              (match ix.Symmetry with
+                                               | SymNone -> "ragged, grouped, or compound"
+                                               | _ -> "compact symmetric/antisymmetric/Hermitian")))
             | None ->
             let span = targetSurface.Span
             let mkT k ty = mkTypedSpan k ty span
@@ -16793,9 +16793,9 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                     // every slot plain dense (a sole packed/compound slot is
                     // fine -- its Rank levels walk the flat canonical cells).
                     if coIterableRecords at.IndexTypes then Ok at.IndexTypes
-                    else Error (Other "for (...) in range<...>: a multi-slot iteration space must consist of plain dense index types (a packed or compound slot cannot share the product with other slots)")
+                    else Error (IndexSpaceErr "for (...) in range<...>: a multi-slot iteration space must consist of plain dense index types (a packed or compound slot cannot share the product with other slots)")
                 | resolved ->
-                    Error (Other $"the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) -- it supplies the shared iteration index; got {ppIRType resolved}. Drop the `in` clause to co-iterate stored arrays (for (A, B) == method_for(A, B)), or use method_for(zip(A, B)) to zip them.")
+                    Error (BuiltinArgErr $"the `in` clause of `for (...) in <source>` must be a virtual array (range<...>, reverse<...>, or blocked<...>) -- it supplies the shared iteration index; got {ppIRType resolved}. Drop the `in` clause to co-iterate stored arrays (for (A, B) == method_for(A, B)), or use method_for(zip(A, B)) to zip them.")
             sharedRecordsRes |> Result.bind (fun sharedRecords ->
 
             let identities = List.map2 (fun (arr: Expr) (ta: TypedExpr) ->
@@ -16848,7 +16848,7 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                         let idxParamCount = idxSlotTypes.Length
                         let wantsIndices = lambdaInfo.Params.Length = nOperands + idxParamCount
                         if not wantsIndices && lambdaInfo.Params.Length <> nOperands then
-                            Error (Other $"for (...) in co-iteration kernel takes {nOperands} parameter(s) (one per co-iterated array) or {nOperands + idxParamCount} (values plus the {idxParamCount} shared iteration indices), got {lambdaInfo.Params.Length}")
+                            Error (ArgCountErr $"for (...) in co-iteration kernel takes {nOperands} parameter(s) (one per co-iterated array) or {nOperands + idxParamCount} (values plus the {idxParamCount} shared iteration indices), got {lambdaInfo.Params.Length}")
                         else
                         // Bind the kernel params to their iterated types: value
                         // params to the operands' ELEMENT types, index params to
@@ -17845,7 +17845,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     else
     let badAxis = (paramTypes @ [retType]) |> List.tryPick irTypeUnknownAxisPath
     if badAxis.IsSome then
-        Error (Other (unknownAxisPathMessage badAxis.Value))
+        Error (UnknownAxisPathErr (unknownAxisPathMessage badAxis.Value))
     else
     let badIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadIrrepsDetail
     if badIrreps.IsSome then
@@ -18005,7 +18005,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             | Some h ->
                 match h.Validate shownName paramNames cargs with
                 | Ok () -> None
-                | Error msg -> Some (Other msg))
+                | Error msg -> Some (ConstraintErr msg))
     match conjunctErr with
     | Some e ->
         env.Subst.PopTypeVarScope(savedScope)
@@ -18174,7 +18174,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         // clause silently mean nothing.
         if funcDecl.IsStatic
            && (funcDecl.WhereClause |> Option.map (_.Repro) |> Option.defaultValue false) then
-            Error (Other $"function '{shownName}': `where repro` cannot apply to a `static function` -- a static function evaluates at compile time (in the compiler's own arithmetic), so there is no emitted body for the reproducibility attribute to govern")
+            Error (WhereClauseErr $"function '{shownName}': `where repro` cannot apply to a `static function` -- a static function evaluates at compile time (in the compiler's own arithmetic), so there is no emitted body for the reproducibility attribute to govern")
         else
         // When a return type is annotated, drive the body bidirectionally
         // via checkExpr. This pushes the expected type into literal and
@@ -18195,7 +18195,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // survives into it has escaped its only legitimate role (a compound-
             // index coordinate). Reject cleanly here rather than at lowering.
             if exprContainsWildcard tBody then
-                Error (Other
+                Error (WildcardErr
                     "wildcard `_` is not a value: it cannot be a function's returned value. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
             else
             // Belt-and-suspenders: even after checkExpr, run unify on the
@@ -18683,7 +18683,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
 /// source does.
 and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : TypeResult<TypedExpr> =
     match env.ArrowDeclSources.TryGetValue fid with
-    | false, _ -> Error (Other "internal: an arrow-parameter declaration's array instance was asked for, but its source was not recorded")
+    | false, _ -> Error (InternalErr "internal: an arrow-parameter declaration's array instance was asked for, but its source was not recorded")
     | true, (srcDecl, srcEnv, baseFixed, origin) ->
     let fixedTys =
         arrays |> Map.fold (fun acc i t ->
@@ -18758,7 +18758,7 @@ and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : Ty
 /// `[sharing-partition v1] <f>: applied [partition [0,0] of (x, y); ...]`.
 and checkSharingVariant (env: TypeEnv) (fid: IRId) (cls: Map<int, int>) : TypeResult<TypedExpr> =
     match env.SharingDeclSources.TryGetValue fid with
-    | false, _ -> Error (Other "internal: a sharing instance was asked for, but its source was not recorded")
+    | false, _ -> Error (InternalErr "internal: a sharing instance was asked for, but its source was not recorded")
     | true, (srcDecl, srcEnv, rel, _) ->
     let partition = sharingPartitionText rel cls
     let key = $"{fid}|{partition}"
@@ -18919,9 +18919,9 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | TyNamed (n, []) ->
                         (match Map.tryFind n env.TypeDefs with
                          | Some (TDIIndexType (_, idx, _)) -> Ok idx
-                         | _ -> Error (Other $"Chunked<{n}, ..>: '{n}' is not a registered index type; declare it first (`type {n} = Idx<n>` or a store axis)"))
+                         | _ -> Error (SegmentedDomainErr $"Chunked<{n}, ..>: '{n}' is not a registered index type; declare it first (`type {n} = Idx<n>` or a store axis)"))
                     | TyIdx _ -> Ok (lowerIndexType env 0 inner)
-                    | _ -> Error (Other "Chunked<I, ..>: the inner type must name an index type (an `Idx<n>` alias or a store axis)")
+                    | _ -> Error (SegmentedDomainErr "Chunked<I, ..>: the inner type must name an index type (an `Idx<n>` alias or a store axis)")
                 innerRecord |> Result.bind (fun idx ->
                     let extent =
                         match idx.Extent with
@@ -18929,13 +18929,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                         | e -> tryEvalIntIR e
                     match extent with
                     | None ->
-                        Error (Other $"Chunked<..>: the axis '{name}' segments must have a static extent; its extent is not known at compile time")
+                        Error (SegmentedDomainErr $"Chunked<..>: the axis '{name}' segments must have a static extent; its extent is not known at compile time")
                     | Some n ->
                         let levels =
                             match spec.Kind with
                             | ExprKind.ExprLit (LitInt k) when k >= 1L && k <= n -> Ok [ SegRegular k ]
                             | ExprKind.ExprLit (LitInt k) ->
-                                Error (Other $"Chunked<.., {k}>: the chunk edge must be between 1 and the axis extent {n}")
+                                Error (SegmentedDomainErr $"Chunked<.., {k}>: the chunk edge must be between 1 and the axis extent {n}")
                             | ExprKind.ExprVar "store" ->
                                 // provider inheritance: the inner must be a store axis
                                 // `<binding>.index.<dim>`, whose chunk edge the load
@@ -18947,12 +18947,12 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                                      let dim = String.concat "." (parts |> Array.skip 2)
                                      (match Blade.ProviderRegistry.DimChunks.tryFind binding dim with
                                       | Some edge when edge >= 1L && edge <= n -> Ok [ SegRegular edge ]
-                                      | Some edge -> Error (Other $"Chunked<{path}, store>: the store chunks '{dim}' at {edge}, outside 1..{n}")
+                                      | Some edge -> Error (SegmentedDomainErr $"Chunked<{path}, store>: the store chunks '{dim}' at {edge}, outside 1..{n}")
                                       | None when Blade.ProviderRegistry.DimChunks.hasStore binding ->
-                                          Error (Other $"Chunked<{path}, store>: the store does not chunk '{dim}' uniformly across its variables (or does not chunk it at all); write the edge as a literal")
+                                          Error (SegmentedDomainErr $"Chunked<{path}, store>: the store does not chunk '{dim}' uniformly across its variables (or does not chunk it at all); write the edge as a literal")
                                       | None ->
-                                          Error (Other $"Chunked<{path}, store>: '{binding}' is not a store binding whose provider exposes chunk edges (zarr does); write the edge as a literal"))
-                                 | _ -> Error (Other "Chunked<I, store> inherits the chunk grid of a STORE axis: the inner must be `<store>.index.<dim>`"))
+                                          Error (SegmentedDomainErr $"Chunked<{path}, store>: '{binding}' is not a store binding whose provider exposes chunk edges (zarr does); write the edge as a literal"))
+                                 | _ -> Error (SegmentedDomainErr "Chunked<I, store> inherits the chunk grid of a STORE axis: the inner must be `<store>.index.<dim>`"))
                             | ExprKind.ExprArrayLit entries ->
                                 // the FILE level (§2.7, decisions D1/D5): stores tiling the
                                 // dimension named by the inner store axis, in order, each
@@ -18963,45 +18963,45 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                                     match inner with
                                     | TyNamed (path, []) when path.Split('.').Length >= 3 && path.Split('.').[1] = "index" ->
                                         Ok (String.concat "." (path.Split('.') |> Array.skip 2))
-                                    | _ -> Error (Other "Chunked<I, [[store, chunking], ..]>: the inner must be a store axis `<store>.index.<dim>` naming the dimension the stores tile")
+                                    | _ -> Error (SegmentedDomainErr "Chunked<I, [[store, chunking], ..]>: the inner must be a store axis `<store>.index.<dim>` naming the dimension the stores tile")
                                 dimName |> Result.bind (fun dim ->
                                     let parseEntry (e: Expr) : TypeResult<string * Expr option> =
                                         match e.Kind with
                                         | ExprKind.ExprArrayLit [ { Kind = ExprKind.ExprVar s }; f ] -> Ok (s, Some f)
                                         | ExprKind.ExprArrayLit [ { Kind = ExprKind.ExprVar s } ] -> Ok (s, None)
                                         | ExprKind.ExprVar s -> Ok (s, None)
-                                        | _ -> Error (Other "Chunked<I, [..]>: each entry is `[store, chunking]` (chunking a literal edge or `store`) or a bare store name")
+                                        | _ -> Error (SegmentedDomainErr "Chunked<I, [..]>: each entry is `[store, chunking]` (chunking a literal edge or `store`) or a bare store name")
                                     let resolveEntry (s: string, f: Expr option) : TypeResult<string * int64 * int64 option> =
                                         let extent =
                                             match Blade.ProviderRegistry.IdeStores.tryFind s with
-                                            | None -> Error (Other $"Chunked<I, [..]>: '{s}' is not a data-provider store binding in scope")
+                                            | None -> Error (SegmentedDomainErr $"Chunked<I, [..]>: '{s}' is not a data-provider store binding in scope")
                                             | Some pm ->
                                                 (match pm.Types |> List.tryPick (function IRTDIndexType (n, idx) when n = dim -> Some idx | _ -> None) with
                                                  | Some idx ->
                                                      (match idx.Extent with
                                                       | IRLit (IRLitInt n) -> Ok n
-                                                      | _ -> Error (Other $"Chunked<I, [..]>: the store '{s}' has no static extent for '{dim}'"))
-                                                 | None -> Error (Other $"Chunked<I, [..]>: the store '{s}' has no dimension '{dim}'"))
+                                                      | _ -> Error (SegmentedDomainErr $"Chunked<I, [..]>: the store '{s}' has no static extent for '{dim}'"))
+                                                 | None -> Error (SegmentedDomainErr $"Chunked<I, [..]>: the store '{s}' has no dimension '{dim}'"))
                                         extent |> Result.bind (fun ext ->
                                             match f with
                                             | None -> Ok (s, ext, None)
                                             | Some { Kind = ExprKind.ExprLit (LitInt k) } when k >= 1L && k <= ext -> Ok (s, ext, Some k)
                                             | Some { Kind = ExprKind.ExprLit (LitInt k) } ->
-                                                Error (Other $"Chunked<I, [..]>: the chunk edge {k} for '{s}' is outside 1..{ext}")
+                                                Error (SegmentedDomainErr $"Chunked<I, [..]>: the chunk edge {k} for '{s}' is outside 1..{ext}")
                                             | Some { Kind = ExprKind.ExprVar "store" } ->
                                                 (match Blade.ProviderRegistry.DimChunks.tryFind s dim with
                                                  | Some k -> Ok (s, ext, Some k)
-                                                 | None -> Error (Other $"Chunked<I, [..]>: the store '{s}' does not chunk '{dim}' uniformly (or its provider exposes no chunk edges); write its edge as a literal"))
-                                            | Some _ -> Error (Other "Chunked<I, [..]>: a file's chunking is a literal edge or `store`"))
+                                                 | None -> Error (SegmentedDomainErr $"Chunked<I, [..]>: the store '{s}' does not chunk '{dim}' uniformly (or its provider exposes no chunk edges); write its edge as a literal"))
+                                            | Some _ -> Error (SegmentedDomainErr "Chunked<I, [..]>: a file's chunking is a literal edge or `store`"))
                                     entries |> List.map parseEntry
                                     |> List.fold (fun acc r -> acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [ x ]))) (Ok [])
                                     |> Result.bind (fun parsed ->
-                                        if parsed.IsEmpty then Error (Other "Chunked<I, [..]>: at least one store is needed")
+                                        if parsed.IsEmpty then Error (SegmentedDomainErr "Chunked<I, [..]>: at least one store is needed")
                                         else
                                             parsed |> List.map resolveEntry
                                             |> List.fold (fun acc r -> acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [ x ]))) (Ok [])
                                             |> Result.map (fun files -> [ SegFiles files ])))
-                            | _ -> Error (Other "Chunked<I, spec>: the spec must be a literal chunk edge, `store`, or a list of [store, chunking] pairs")
+                            | _ -> Error (SegmentedDomainErr "Chunked<I, spec>: the spec must be a literal chunk edge, `store`, or a list of [store, chunking] pairs")
                         levels |> Result.map (fun lv ->
                             match lv with
                             | [ SegFiles files ] ->
@@ -19041,7 +19041,7 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 // static n = 0 - 4; type I = Idx<n>`), which folds only here.
                 match (match idx.Extent with IROrbitClass _ -> None | e -> Blade.IRPrint.tryEvalIntIR e) with
                 | Some v when v < 0L ->
-                    Error (Other $"type '{name}': an index type's extent is a count of positions and must be non-negative, but it folds to {v}.")
+                    Error (IndexTypeErr $"type '{name}': an index type's extent is a count of positions and must be non-negative, but it folds to {v}.")
                 | _ ->
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's

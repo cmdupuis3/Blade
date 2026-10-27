@@ -143,7 +143,7 @@ let private readAndFoldUncached (provider: string) (path: string) (varName: stri
             else
             // The provider boundary rule BEFORE anything folds: a missing cell
             // (NaN / +-Inf, a NetCDF sentinel) must not become a compile-time
-            // constant. The fold's own failure (the `let static` assertion, BL3999,
+            // constant. The fold's own failure (the `let static` assertion, BL4002,
             // the code of every compile-time fold failure) carries the runtime
             // refusal's sentence, so one ERROR-CONTAINS pin matches either.
             match Blade.ProviderRegistry.checkPayload (spec.MissingRuleOf path varName) varName path data.DimLengths data.Payload with

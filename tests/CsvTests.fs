@@ -825,7 +825,7 @@ let static B = b.vars.data |> c.read
     // ---------------------------------------------------------------
     // 11. The provider boundary rule (BL8015) and the masked read, BOTH
     //     lanes: a Float64 table's nan / inf cells are refused by `read`
-    //     (and by the static fold, BL3999 with the same sentence), the
+    //     (and by the static fold, BL4002 with the same sentence), the
     //     masked read returns the present cells, and a write of a NaN /
     //     infinite cell is refused (the CSV round trip stays honest).
     // ---------------------------------------------------------------

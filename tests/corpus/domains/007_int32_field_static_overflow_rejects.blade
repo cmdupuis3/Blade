@@ -5,7 +5,7 @@
 // so `Int<min=0, max=n-1>` (Int32 fields) accepts a static n -- but the
 // conversion is CHECKED: 3,000,000,000 does not fit Int32, so the
 // declaration is refused (BL4001) with the fix -- `Int64<min=0, max=big>`
-// fields. The follow-on BL3999 at `range<Wide>` is the struct's absence.
+// fields. The follow-on BL3028 at `range<Wide>` is the struct's absence.
 let static big = 3000000000
 
 static struct Wide {

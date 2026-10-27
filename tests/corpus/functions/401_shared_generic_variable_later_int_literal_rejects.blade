@@ -1,5 +1,5 @@
 // TEST: A later Int64 literal does not adapt to a shared Float64 variable (rejects)
-// ERROR: BL3999 @ 9:18
+// ERROR: BL3024 @ 9:18
 // ERROR-CONTAINS: must agree EXACTLY
 // `add(2.5, 1)` used to compute 3.5: the monomorph built from argument 1 was
 // `double add(double, double)`, and the Int64 widened into it -- while

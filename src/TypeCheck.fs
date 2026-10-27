@@ -494,14 +494,14 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->
                     let msg =
                         $"""`let static {(f.Names |> String.concat ", ")}` does not evaluate at compile time: {f.Reason}. `let static` asserts a compile-time value -- use plain `let` for values computed at runtime."""
-                    locateError f.Span env' (Other msg))
+                    locateError f.Span env' (StaticEvalErr msg))
             env', errs
         | Error msg ->
             let span =
                 modul.Decls
                 |> List.tryPick (fun d -> match d.Value with DeclStatic _ -> Some d.Span | _ -> None)
                 |> Option.defaultValue noSpan
-            env, [locateError span env (Other msg)]
+            env, [locateError span env (StaticEvalErr msg)]
     // Pre-pass: register static functions and static values with placeholder types
     // so forward references and mutual recursion resolve correctly.
     let preEnv =
@@ -609,7 +609,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         // the decl's span.
         let mixedFindings = collectMixedEnumIdxInDecl d.Value
         for _ in mixedFindings do
-            let err = Other "Inline EnumIdx<[...]> has mixed value kinds (integer and string literals in the same list). The runtime backing must be one or the other (int64_t or std::string)."
+            let err = IndexTypeErr "Inline EnumIdx<[...]> has mixed value kinds (integer and string literals in the same list). The runtime backing must be one or the other (int64_t or std::string)."
             let ce = locateError d.Span currentEnv err
             errors <- ce :: errors
 
@@ -1130,7 +1130,7 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     if not validationErrors.IsEmpty then
         let compileErrors =
             validationErrors |> List.map (fun e ->
-                { Error = Other e.Message; Span = e.Span; Context = [e.DeclName]; Code = Some "BL4003" })
+                { Error = IndexTypeErr e.Message; Span = e.Span; Context = [e.DeclName]; Code = Some "BL4003" })
         Error compileErrors
     else
         let (tp, builder, errors, warnings) = checkProgram program
@@ -1159,7 +1159,7 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
             Blade.DeduceRep.RepCheckDisagreements.get ()
             |> List.map (fun (owner, detail, span) ->
                 { Error =
-                    Other $"internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '{owner}': {detail}. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)"
+                    InternalErr $"internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '{owner}': {detail}. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)"
                   Span = span
                   Context = [ "equiv certificate validation" ]
                   Code = Some "BL9004" })

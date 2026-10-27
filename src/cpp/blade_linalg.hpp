@@ -422,7 +422,7 @@ namespace blade_linalg {
     // the plain product.
     //
     // ONLY THE `d` INSTANCE IS REACHABLE TODAY. `TypeCheck.inferMatmul` requires Float64 elements at the SURFACE
-    // (BL3999), so an f32/complex call is rejected before codegen. The other three exist because widening matmul's
+    // (BL3007), so an f32/complex call is rejected before codegen. The other three exist because widening matmul's
     // surface is a LANGUAGE decision (what should a complex `matmul(A, B)` mean -- A*B, or A*B^H?), and when that
     // decision is taken the binding should already be here, already plain-product.
 

@@ -1,5 +1,5 @@
 // TEST: ML Ops perm_weight_dim Bad N (rejects)
-// ERROR: BL3999
+// ERROR: BL4002
 import ml as ml
 // ============================================================================
 // The v1 S_n surface requires a STATIC N >= K + L
@@ -17,7 +17,7 @@ import ml as ml
 // rather than quietly switch, so the truncated-basis variant is a NAMED
 // DEFERRAL and this is a compile-time error carrying both counts.
 //
-// The refusal reports through the BL3999 static-evaluation channel — a
+// The refusal reports through the BL4002 static-evaluation channel — a
 // `let static` that cannot fold — exactly like ml-ops/015's K-cap probe. The
 // ops (ml.derive_perm_linear / ml.derive_perm_bias, stage 5a-ii) will carry
 // the identical text through the elaboration channel, from the same shared
