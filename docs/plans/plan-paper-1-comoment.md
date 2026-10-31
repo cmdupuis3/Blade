@@ -6,6 +6,25 @@ quotient containers, double-coset canonicalization, histomorphisms, Eberl's AFP
 oracle model. Two corrections: the model qualifier on Thm 5 (§6 item 6) and
 the DMWF name against Gibbons' metamorphism.
 
+**Status 2026-10-27: DRAFT REVISED against master `5960337a`** (263 commits after
+the draft's base). What changed in the draft: §3.3 alias and sharing-partition
+listings (a never-written `let R2 = R` is one array; an unannotated helper packs
+for `f(R, R)`), the interleaved `(R, S, R)` listing with its BL4010 (E14 FIXED
+`f882eb22`, D9 decided: formalism §8.3), a dense ascription is now accepted
+(declared layout), the compound type `SymIdx<3, <XIdx, YIdx>>` with per-dimension
+reads (E15 FIXED `70fb8a71`), a new §4.4 "Operand keys: aliases and transposes"
+(the S_k × C₂ structural map, certificates, why `f(X, transpose(X))` is dense),
+§4.5 restated from `BladeAttain` (the neighbour rule proved sound and NOT optimal;
+`surface_comm_optimal`), §4.6/§4.7 the float-licence and black-box-model
+qualifiers (`rounded_licence_coarse`, `structured_kernel_beats_bound`), type
+soundness for the structure-first fragment (`BladeSurface.v`: progress,
+preservation, `typed_app_is_quotient`), the tower at 2 205 statements, the
+FP-default-fastest policy (§5), and §6 rewritten around the Blade-vs-Fortran
+suite (comoment3: 1.34×/1.36× over gfortran/ifx experts serially, 1.55×/1.35×
+on 8 threads; stats.csv-verified). 21 listings pass `blade test docs paper-1`.
+New engineering item E16 in §10. Claim-hygiene items 2 and 5 below are
+superseded by the draft's §4.5 and §4.7.
+
 **Status 2026-10-07: VENUE DECIDED, JFP** (author, 2026-10-07; ECOOP R2 stays the
 conference alternative). The author's framing note of the same day: symmetry
 tracking matters most under DOMAIN DECOMPOSITION of comoment problems, where the
@@ -531,8 +550,10 @@ listing or a claim.
 | E14 | interleaved identical operands in a comm group are regrouped: `method_for(R, S, R) <@> k` emits the nest (R, R, S) and permutes the output axes to match, silently; contradicts formalism §8.3 / §8.4 step 4, quickstart-2, and `<*>` as shape concatenation; no corpus test covers the shape | §4.4 and §8 of the draft state the neighbouring-run rule; a reader's `K(0, 1, 2)` is not f(R₀, S₁, R₂) | P0 semantics (decision D9) |
 | E15 | a six-subscript read `G3(x₁, y₁, x₂, y₂, x₃, y₃)` into a compound symmetric output passes `blade check` and is BL9002 at g++; the three-subscript flat read works | L2′ can only be shown with flat grid positions | P1 bug |
 
-Status 2026-10-05: E1, E2, E3, E5 fixed on master (`76c1714a`, `9de90481`,
-`4fe4e1a4`); E4 open (D3); E14, E15 new. 2026-10-12: E14 FIXED on master per D9
+| E16 | the never-written-alias proof (`[alias-identity v1]`) declines when the statement names a definition that reaches into another module: `method_for(R, R2) <@> cov` stays dense because `cov` calls the imported `mean`, while the same with a lambda or a same-module kernel packs | the paper's own `cov` cannot show alias transparency; §3.3 states the rule honestly | P1 (plan-identity-transpose §2.6 accepts a conservative proof; imports are the gap) |
+
+Status 2026-10-27: E1, E2, E3, E5, E14 (`f882eb22`), E15 (`70fb8a71`) fixed on
+master; E4 open (D3); E16 new. 2026-10-12: E14 FIXED on master per D9
 (dense in operand order + BL4010 advisory; corpus symmetry/077–079).
 
 **Doc corrections to land with or before the paper:** quickstart-1 lines
