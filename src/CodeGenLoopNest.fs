@@ -1507,7 +1507,418 @@ let compoundOutputSubscript (bindings: LoopIndexBinding list) (outName: string) 
         | [tb] -> $".data[{cb.IndexName} * {outName}.trailing_stride + {tb.IndexName}]"
         | tbs -> $""".data[{cb.IndexName} * {outName}.trailing_stride + {(tbs |> List.map (fun b -> b.IndexName) |> String.concat " + ")}]"""
 
-let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+/// A segment caller owns these windows; no global Array alias exists. The
+/// certificate is tied to the final kernel and exact scalar peel sites.
+type internal Rank1WindowReads = private {
+    Kernel: IRExpr
+    Bindings: LoopIndexBinding list
+    Reads: (IRExpr * IRExpr * int64 * string) list
+    Peels: (ElementBinding * string) list
+}
+
+/// Pure, complete admission before any source sentinel is masked or rendered.
+/// The closed scalar grammar also refuses array escapes and hidden side forms.
+let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
+                                    (sources: (IRId * string * ProviderReadSpec * string) list)
+                                    (reachLo: int64) (reachHi: int64) (start: int64)
+                                    (sideTypes: IRType list) : Result<Rank1WindowReads, string> =
+    let scalar ty =
+        let rec go = function
+            | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) -> true
+            | IRTIdxTagged (t, _) | IRTUnitAnnotated (t, _) -> go t
+            | _ -> false
+        go ty
+    let literal = function IRLit (IRLitInt n) -> n >= 0L | _ -> false
+    // Only passive scalar/plain-index types: no dependent/sparse/ragged side
+    // tables or hidden executable extents. Identities/tags are provenance.
+    let rec passiveType = function
+        | IRTScalar _ -> true
+        | IRTUnitAnnotated (t, _) -> passiveType t
+        | IRTIdxTagged (t, tag) ->
+            passiveType t && (match tag with IRefAnon (_, e) -> literal e | _ -> true)
+        | IRTArrow (slots, result, _) ->
+            passiveType result && (slots |> List.forall (function
+                | SIdx ix | SIdxVirt ix ->
+                    ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty && literal ix.Extent
+                | SVal _ -> false))
+        | _ -> false
+    let literalExtents ty =
+        passiveType ty && (Blade.Optimize.irTypeExtentExprs ty |> List.forall literal)
+    let sourceIds = sources |> List.map (fun (id, _, _, _) -> id) |> Set.ofList
+    let mutable reads = []
+    let mutable peels = []
+    let mutable why = None
+    let refuse msg = if why.IsNone then why <- Some msg
+    let types = sideTypes @ [cg.OutputType] @ (cg.KernelParams |> List.map (_.Type))
+                @ (cg.Captures |> List.map (_.Type))
+                @ (sources |> List.map (fun (_, _, s, _) -> mkArrayLike s.VarType))
+    if types |> List.exists (literalExtents >> not) then refuse "nonliteral type/extent payload"
+    if cg.HasReynolds || cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome || cg.ShareDecl.IsSome then
+        refuse "Reynolds, fold or shared-value form"
+    match cg.OutputType with
+    | ArrayElem at when arrayRank at = 1 && scalar at.ElemType
+                        && isFreeableDenseArrayType at && not at.IsVirtual -> ()
+    | _ -> refuse "requires a dense rank-one scalar-cell output"
+    let level =
+        match cg.Bindings with
+        | [b] when b.FusedRank.IsNone && b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                   && b.Level = 0 && b.ExtentDimRef = 0 ->
+            if not (b.Elements |> List.forall (fun e -> scalar e.ArrayElemType && literalExtents e.ArrayElemType)) then
+                refuse "unsupported operand element type"
+            match sources with
+            | (_, _, s, _) :: _ ->
+                match s.VarType.IndexTypes with
+                | [ix] ->
+                    match ix.Extent, b.Extent with
+                    | IRLit (IRLitInt n), IRLit (IRLitInt m)
+                        when bigint m = bigint n - (bigint reachHi - bigint reachLo) && m >= 0L -> ()
+                    | _ -> refuse "loop extent disagrees with the certified window geometry"
+                | _ -> refuse "unsupported source rank"
+            | [] -> refuse "no rank-one source evidence"
+            Some b
+        | _ -> refuse "requires one unshifted dense loop level"; None
+    for c in cg.Captures do
+        // A normal `let A` may be reassignable in its enclosing scope. Its
+        // capture descriptor is allowed ONLY because the complete body proof
+        // below consumes every A occurrence as a read, never forwards/writes it.
+        if not (sourceIds.Contains c.Id) && (c.IsMutable || not (scalar c.Type)) then
+            refuse "unsupported mutable/array capture"
+    for (_, vn, spec, win) in sources do
+        if spec.VarType.IsVirtual then refuse "virtual source storage is not certified"
+        match spec.VarType.IndexTypes with
+        | [ix] when ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty && scalar spec.VarType.ElemType ->
+            match ix.Extent with
+            | IRLit (IRLitInt n) when n >= 0L -> ()
+            | _ -> refuse "requires a checked static source extent"
+        | _ -> refuse "requires plain dense rank-one source storage"
+        match kind, level with
+        | "elementwise", Some b ->
+            let sites = b.Elements |> List.filter (fun e -> e.ArrayName = vn)
+            if sites.IsEmpty then refuse "streamed operand has no scalar peel"
+            for e in sites do
+                if e.Virtual <> RealArray || e.ArrayRank <> 1 || e.RankComponent <> 0 || e.DimIndex <> 0 then
+                    refuse "unsupported streamed operand peel"
+                else peels <- (e, win) :: peels
+        | "stencil", Some b ->
+            match b.Elements, cg.KernelParams with
+            | [e], [p] when e.ParamVarId = p.VarId ->
+                match e.Virtual with
+                | VirtualRange (Some (IRLit (IRLitInt s))) when s = start -> ()
+                | VirtualRange None when start = 0L -> ()
+                | _ -> refuse "unsupported halo center binding"
+            | _ -> refuse "requires one dense halo window parameter"
+        | _ -> refuse "unsupported rank-one segment form"
+    // Bounds/offsets are kept as Int64. IRAccess.Offset's int conversion is
+    // deliberately NOT used as evidence for a potentially huge literal.
+    let signedOffset = function
+        | IRLit (IRLitInt n) -> Some n
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) when n <> System.Int64.MinValue -> Some (-n)
+        | _ -> None
+    let windowMatches w =
+        match level, cg.KernelParams with
+        | Some b, [p] ->
+            let sameParam =
+                match w with
+                | IRVar (id, _) -> id = p.VarId
+                | IRParam (nm, idx, _) -> nm = p.Name && idx = p.Index
+                | _ -> false
+            sameParam && Blade.IRAccess.denseHaloTagOf w = (b.Elements |> List.tryHead |> Option.bind (_.SlotTag))
+            && (Blade.IRAccess.denseHaloTagOf w).IsSome
+        | _ -> false
+    let rec body (ids: Set<IRId>) (paramNames: Set<string>) (visiting: Set<IRId>) e =
+        let go = body ids paramNames visiting
+        match e with
+        | IRLit (IRLitInt _ | IRLitFloat _ | IRLitFloat32 _ | IRLitBool _) -> true
+        | IRVar (id, ty) -> ids.Contains id && not (sourceIds.Contains id) && scalar ty && literalExtents ty
+        | IRParam (nm, _, ty) -> paramNames.Contains nm && scalar ty && literalExtents ty
+        | IRBinOp (IRElementwise, _, a, b, _) -> go a && go b
+        | IRUnaryOp (_, a) -> go a
+        | IRIf (c, a, b) -> go c && go a && go b
+        | IRLet (id, v, b) -> go v && body (ids.Add id) paramNames visiting b
+        | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, _)], _)
+            when kind = "stencil" && sourceIds.Contains aid && windowMatches w && literalExtents ty ->
+            match signedOffset off, sources |> List.tryFind (fun (id, _, _, _) -> id = aid) with
+            | Some o, Some (_, _, _, win) when o >= reachLo && o <= reachHi ->
+                reads <- (e, w, o, win) :: reads
+                true
+            | _ -> false
+        | IRApp (f, args, ret) when scalar ret && literalExtents ret ->
+            match resolveCallable f with
+            | Some cl when cl.Captures.IsEmpty && not (visiting.Contains cl.Id)
+                           && cl.Params.Length = args.Length && scalar cl.RetType && literalExtents cl.RetType
+                           && (cl.Params |> List.forall (fun p -> scalar p.Type && literalExtents p.Type))
+                           && (Blade.Optimize.embeddedExtentExprs cl.Body |> List.forall literal) ->
+                (args |> List.forall go)
+                && body (cl.Params |> List.map (_.VarId) |> Set.ofList)
+                        (cl.Params |> List.map (_.Name) |> Set.ofList) (visiting.Add cl.Id) cl.Body
+            | _ -> false
+        | _ -> false
+    let ids = (cg.KernelParams |> List.map (_.VarId)) @ (cg.Captures |> List.map (_.Id)) |> Set.ofList
+    let names = cg.KernelParams |> List.map (_.Name) |> Set.ofList
+    if not (body ids names Set.empty cg.KernelExpr) then
+        refuse "uncertified source read, escape, callee or scalar expression"
+    // Callee bodies cannot consume this caller's reference-keyed substitutions.
+    // Only capture-free scalar callees were accepted above; require all halo
+    // recipes to belong to the final rendered tree, not a callee body.
+    let nodes = ResizeArray<IRExpr>()
+    iterIRExpr (fun node -> nodes.Add node) cg.KernelExpr
+    if reads |> List.exists (fun (node, _, _, _) -> not (nodes |> Seq.exists (fun n -> obj.ReferenceEquals(n, node)))) then
+        refuse "a callee contains a streamed load"
+    let extentRoots = Blade.Optimize.embeddedExtentExprs cg.KernelExpr
+    if extentRoots |> List.exists (function IRLit (IRLitInt n) when n >= 0L -> false | _ -> true) then
+        refuse "nonliteral embedded type/extent payload"
+    if kind = "stencil" && reads.IsEmpty then refuse "no certified halo loads"
+    match why with
+    | Some msg -> Error msg
+    | None -> Ok { Kernel = cg.KernelExpr; Bindings = cg.Bindings; Reads = reads; Peels = peels }
+
+/// Per-emission proof for exactly two plain scalar zip operands. Only this
+/// module constructs it; the segment owner consumes the same checked value.
+type internal Rank2BandPeels = private {
+    FinalCodeGen: LoopNestCodeGen
+    OuterNames: Map<int, string>
+    Sources: (IRId * string * ProviderReadSpec * string) list
+    CapacityRows: int64
+    Columns: int64
+    OuterPeels: (ElementBinding * string) list
+    FinalParams: Map<int, string>
+    Callees: (IRExpr * IRCallable) list
+}
+
+/// Nonadmission is an ordinary I1 fallback, never a new language refusal.
+/// Metadata is loaded for this compile-time check, not pinned as an immutable
+/// source version. The ordinary provider still loads/validates in its own path.
+let internal tryCertifyRank2BandPeels (info: ApplyInfo) (cg: LoopNestCodeGen)
+                                    (sources: (IRId * string * ProviderReadSpec * string) list)
+                                    (runs: int64 list) (names: Map<int, string>)
+                                    : Result<Rank2BandPeels, string> =
+    try
+        let require condition why = if not condition then invalidOp why
+        let f64 = IRTScalar ETFloat64
+        let literal = function IRLit (IRLitInt n) when n > 0L -> Some n | _ -> None
+        let plain (ix: IRIndexType) =
+            ix.Rank = 1 && ix.Kind = SDimension && ix.Symmetry = SymNone
+            && ix.IxKind = IxKPlain && ix.Dependencies.IsEmpty && ix.Tag.IsNone
+            && (literal ix.Extent).IsSome
+        let dense (at: IRArrayType) =
+            not at.IsVirtual && at.ElemType = f64 && at.IndexTypes.Length = 2
+            && (at.IndexTypes |> List.forall plain) && isFreeableDenseArrayType at
+        require (cg.MpiSlab && cg.Captures.IsEmpty && cg.KernelParams.Length = 2
+                 && cg.InputArrayNames.Length = 2 && cg.SpeedupFactor = 1L && cg.OutputSymmVec = [1; 2]
+                 && not cg.HasReynolds && not cg.IsAntisymmetric && not cg.OmpRequested
+                 && cg.FoldWrapper.IsNone && cg.FoldChunk.IsNone && cg.ShareDecl.IsNone
+                 && cg.RowEpilogue.IsNone && cg.FlatEpilogue.IsNone && cg.CompactRowEpilogue.IsNone
+                 && cg.FoldOmpDecline.IsNone)
+                "requires the final ordinary capture-free scalar zip renderer"
+        require (info.IsCoIteration && info.Arrays.Length = 2 && info.ArrayTypes.Length = 2
+                 && info.Identities.Length = 2 && info.SharedIndexTypes.Length = 2
+                 && info.KernelInputRanks = [0; 0] && info.KernelOutputRank = 0
+                 && info.KernelTDims.IsEmpty && info.SDimsPerArray = [2; 2]
+                 && info.SymcomStates = [SCNeither; SCNeither; SCNeither; SCNeither]
+                 && info.TriangularLevels = [false; false; false; false] && not info.HasReynolds
+                 && info.SpeedupFactor = 1L && info.ReynoldsSpeedup = 1L
+                 && info.OutputType = cg.OutputType)
+                "unsupported zip metadata"
+        match info.Loop with
+        | IRMethodFor loop ->
+            require (loop.Arrays = info.Arrays && loop.ArrayTypes = info.ArrayTypes
+                     && loop.Identities = info.Identities && loop.SDimsPerArray = [2; 2]
+                     && loop.TotalSDims = 4 && loop.SharedIndexTypes = info.SharedIndexTypes)
+                    "method_for payload differs from the zip"
+        | _ -> invalidOp "requires direct method_for zip provenance"
+        let output =
+            match cg.OutputType with
+            | ArrayElem at when dense at && at.Identity.IsNone
+                                && at.IndexTypes = info.SharedIndexTypes -> at
+            | _ -> invalidOp "requires the exact plain shared output axes"
+        let n = (literal output.IndexTypes.[0].Extent).Value
+        let m = (literal output.IndexTypes.[1].Extent).Value
+        // Conservative for supported 32/64-bit targets: bounds provider int
+        // narrowing, all padded chunk strides/bytes, size_t and ptrdiff_t,
+        // window/output cells and the retained owned output row skeleton.
+        let fitsBytes cells = cells > 0I && cells * 8I <= bigint System.Int32.MaxValue
+        require (fitsBytes (bigint n * bigint m) && fitsBytes (bigint n))
+                "shape/allocation exceeds conservative checked arithmetic"
+        require (sources.Length >= 1 && sources.Length <= 2
+                 && (sources |> List.map (fun (id, _, _, _) -> id) |> List.distinct).Length = sources.Length
+                 && (sources |> List.map (fun (_, vn, _, _) -> vn) |> List.distinct).Length = sources.Length)
+                "ambiguous source identities"
+        let mutable edge = None
+        for sourceIndex, (id, vn, spec, win) in List.indexed sources do
+            require (Map.tryFind id names = Some vn && vn <> cg.OutputName
+                     && win = $"{cg.OutputName}__win{sourceIndex}"
+                     && spec.Provider = "zarr" && spec.Streamed && not spec.AllowMissing
+                     && System.IO.Path.IsPathFullyQualified spec.FilePath
+                     && System.IO.Directory.Exists spec.FilePath
+                     && spec.Window.IsNone && spec.MaskName.IsNone && spec.MaskType.IsNone
+                     && dense spec.VarType && spec.VarType.IndexTypes = info.SharedIndexTypes)
+                    "source capability/type does not match the final zip"
+            let store = Blade.ZarrProvider.load spec.FilePath
+            let meta =
+                Blade.ZarrProvider.tryFindArray store spec.VarName
+                |> Option.defaultWith (fun () -> invalidOp "source metadata is absent")
+            require (store.Version = 2 && meta.Version = 2 && meta.Blade.IsNone
+                     && meta.Codec = Blade.ZarrProvider.CodecIdentity
+                     && meta.Dtype.Code = "f8" && meta.Dtype.ByteSize = 8
+                     && meta.Dtype.Elem = ETFloat64 && meta.Dtype.IsFloat
+                     && meta.Shape = [n; m] && meta.Chunks.Length = 2
+                     && (meta.Chunks |> List.forall (fun c -> c > 0L && c <= int64 System.Int32.MaxValue))
+                     && fitsBytes (meta.Chunks |> List.fold (fun a c -> a * bigint c) 1I))
+                    "requires representable local v2 identity Float64 chunks"
+            let k = meta.Chunks.Head
+            require (edge.IsNone || edge = Some k) "source chunk edges differ"
+            edge <- Some k
+        let k = edge.Value
+        let w = min n k
+        require (fitsBytes (bigint w * bigint m) && runs.Length >= 2 && runs.Head = 0L && List.last runs = n)
+                "invalid run capacity/endpoints"
+        for lo, hi in List.pairwise runs do
+            // No new boundary table or unchecked lo+K arithmetic.
+            require (lo >= 0L && lo < n && hi > lo && hi <= n
+                     && lo % k = 0L && bigint hi = min (bigint n) (bigint lo + bigint k))
+                    "run descriptor differs from the physical chunk grid"
+        let sourceForPosition pos =
+            match info.Arrays.[pos] with
+            | IRVar (id, ty) ->
+                let (_, vn, spec, win) =
+                    sources |> List.tryFind (fun (sid, _, _, _) -> sid = id)
+                    |> Option.defaultWith (fun () -> invalidOp "operand has no streamed source evidence")
+                require (ty = mkArrayLike spec.VarType && info.ArrayTypes.[pos] = spec.VarType
+                         && cg.InputArrayNames.[pos] = vn
+                         && info.Identities.[pos] = AIDVariable vn)
+                        "operand identity/type/name differs"
+                vn, win
+            | _ -> invalidOp "requires direct streamed operands"
+        let operands = [sourceForPosition 0; sourceForPosition 1]
+        require ((operands |> List.map fst |> List.distinct) = (sources |> List.map (fun (_, vn, _, _) -> vn)))
+                "ordered/deduplicated sources differ"
+        let outer, inner =
+            match cg.Bindings with
+            | [a; b] -> a, b
+            | _ -> invalidOp "requires exactly two final levels"
+        for level, binding in List.indexed cg.Bindings do
+            require (binding.Level = level && binding.Extent = output.IndexTypes.[level].Extent
+                     && binding.ExtentArrayRef = cg.InputArrayNames.Head && binding.ExtentDimRef = level
+                     && binding.BoundDependencies.IsEmpty && binding.StrictOffset = 0
+                     && binding.FusedRank.IsNone && not binding.IsParallel && binding.State = SCNeither
+                     && binding.Elements.Length = 2)
+                    "unsupported final bounds or extra peel sites"
+        require (outer.IndexName <> inner.IndexName && outer.IndexName <> "" && inner.IndexName <> "")
+                "ambiguous loop coordinates"
+        let restrictSites = restrictPeelSites cg.Bindings
+        let mutable peels = []
+        let mutable finalParams = Map.empty
+        for pos in 0..1 do
+            let p = cg.KernelParams.[pos]
+            let vn, win = operands.[pos]
+            require (p.Type = f64 && p.Index = pos
+                     && (cg.KernelParams |> List.filter (fun q -> q.VarId = p.VarId)).Length = 1
+                     && not (sources |> List.exists (fun (id, _, _, _) -> id = p.VarId)))
+                    "ambiguous/non-Float64 scalar parameter"
+            let site level (binding: LoopIndexBinding) =
+                let e = binding.Elements.[pos]
+                require (e.ArrayPosition = pos && e.ArrayName = vn && e.ParamName = p.Name
+                         && e.ParamVarId = p.VarId && e.ArrayRank = 2 && e.ArrayElemType = f64
+                         && e.RankComponent = level && e.DimIndex = level
+                         && e.Virtual = RealArray && e.SlotTag.IsNone)
+                        "final peel identity/provenance differs"
+                e
+            let a = site 0 outer
+            site 1 inner |> ignore
+            require (restrictSites.Contains (0, pos)) "outer row is not consumed by exactly one scalar successor"
+            peels <- peels @ [(a, win)]
+            finalParams <- Map.add p.VarId ($"{vn}__{outer.IndexName}__{inner.IndexName}") finalParams
+        let flags (f: IRCallable) =
+            not f.IsStatic && not f.IsArityPoly && f.ArityParam.IsNone && f.Parallelism.IsEmpty
+            && not f.IsOmpParallel && not f.IsCudaKernel && not f.IsMpiParallel
+            && not f.IsCommutative && f.CommGroups.IsEmpty && f.AntisymGroups.IsEmpty
+            && f.Captures.IsEmpty && f.RetType = f64
+            && (f.Params |> List.forall (fun p ->
+                p.Type = f64 && not (sources |> List.exists (fun (id, _, _, _) -> id = p.VarId))))
+            && (f.Params |> List.map (_.VarId) |> List.distinct).Length = f.Params.Length
+            && (f.Params |> List.map (_.Name) |> List.distinct).Length = f.Params.Length
+            && (f.Params |> List.mapi (fun i p -> p.Index = i) |> List.forall id)
+        let mutable callees = []
+        let rec body (kparams: IRParam list) (locals: Set<IRId>) (visiting: Set<IRId>) e =
+            let go = body kparams locals visiting
+            match e with
+            | IRLit (IRLitFloat _) -> true
+            | IRVar (id, ty) ->
+                ty = f64 && ((kparams |> List.exists (fun p -> p.VarId = id)) || locals.Contains id)
+                && not (sources |> List.exists (fun (sid, _, _, _) -> sid = id))
+            | IRParam (nm, i, ty) -> ty = f64 && (kparams |> List.exists (fun p -> p.Name = nm && p.Index = i))
+            | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv), a, b, _) ->
+                typeOf e = f64 && go a && go b
+            | IRUnaryOp (IRNeg, a) -> typeOf e = f64 && go a
+            | IRLet (id, value, rest) ->
+                not (locals.Contains id) && not (kparams |> List.exists (fun p -> p.VarId = id))
+                && not (sources |> List.exists (fun (sid, _, _, _) -> sid = id))
+                && typeOf e = f64 && go value && body kparams (locals.Add id) visiting rest
+            | IRApp (f, args, ret) when ret = f64 ->
+                match resolveCallable f with
+                | Some cl when flags cl && not (visiting.Contains cl.Id) && args.Length = cl.Params.Length ->
+                    let referenceMatches =
+                        match f with
+                        | IRVar (id, ty) -> id = cl.Id && ty = mkFuncArrow (cl.Params |> List.map (_.Type)) cl.RetType
+                        | _ -> false
+                    callees <- (f, cl) :: callees
+                    referenceMatches && (args |> List.forall go)
+                    && body cl.Params Set.empty (visiting.Add cl.Id) cl.Body
+                | _ -> false
+            | _ -> false
+        require (body cg.KernelParams Set.empty Set.empty cg.KernelExpr
+                 && (Blade.Optimize.embeddedExtentExprs cg.KernelExpr).IsEmpty)
+                "uncertified scalar body/capture/type payload"
+        match resolveKernel info.Kernel with
+        | Some rk ->
+            let referenceMatches =
+                match info.Kernel with
+                | IRVar (id, ty) -> id = rk.Callable.Id && ty = mkFuncArrow (cg.KernelParams |> List.map (_.Type)) f64
+                | _ -> false
+            require (flags rk.Callable && rk.Callable.Params = cg.KernelParams
+                     && referenceMatches && obj.ReferenceEquals(rk.Callable.Body, cg.KernelExpr))
+                    "kernel metadata/body differs from the final scalar renderer"
+            callees <- (info.Kernel, rk.Callable) :: callees
+        | None -> invalidOp "unresolved kernel"
+        Ok {
+            FinalCodeGen = cg
+            OuterNames = names
+            Sources = sources
+            CapacityRows = w
+            Columns = m
+            OuterPeels = peels
+            FinalParams = finalParams
+            Callees = callees
+        }
+    with ex -> Error ex.Message
+
+/// Checked owner contract: only the same ordered source windows/capacity can
+/// consume this certificate after its renderer succeeded.
+let internal rank2BandOwnsWindows (plan: Rank2BandPeels)
+                                 (outputName: string) (sources: (string * ProviderReadSpec) list) (capacity: int64) =
+    outputName = plan.FinalCodeGen.OutputName && capacity = plan.CapacityRows
+    && sources = (plan.Sources |> List.map (fun (_, vn, spec, _) -> vn, spec))
+    && (plan.Sources |> List.mapi (fun k (_, _, _, win) -> win = $"{outputName}__win{k}") |> List.forall id)
+
+let private rank2BandStillValid (plan: Rank2BandPeels) (cg: LoopNestCodeGen) (names: Map<int, string>)
+                                (streamed: Map<string, ProviderReadSpec>) =
+    obj.ReferenceEquals(plan.FinalCodeGen, cg) && plan.OuterNames = names
+    && (plan.Sources |> List.forall (fun (id, vn, _, _) -> Map.tryFind id names = Some vn && not (streamed.ContainsKey vn)))
+    && (plan.Callees |> List.forall (fun (expr, cl) ->
+        match resolveCallable expr with Some now -> obj.ReferenceEquals(now, cl) | None -> false))
+
+let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (bandPeels: Rank2BandPeels option)
+                                   (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen)
+                                   (outerNames: Map<int, string>) (indent: int) : string list =
+    match windowReads with
+    | Some p when not (obj.ReferenceEquals(p.Kernel, codeGen.KernelExpr))
+                  || not codeGen.MpiSlab
+                  || p.Bindings.Length <> codeGen.Bindings.Length
+                  || not (List.forall2 (fun a b -> obj.ReferenceEquals(a, b)) p.Bindings codeGen.Bindings) ->
+        invalidOp "rank-one window certificate belongs to a different kernel"
+    | _ -> ()
     let ind n = String.replicate n "    "
     let mutable lines = []
     let mutable depth = indent
@@ -2099,7 +2510,18 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                     Map.tryFind elem.ArrayPosition currentNames
                     |> Option.defaultValue elem.ArrayName
                 let rawRow = Set.contains (levelIdx, elem.ArrayPosition) restrictSites
-                let (code, newName) = genElementBindingPeel rawRow binding elem currentName
+                let (code, newName) =
+                    match windowReads |> Option.bind (fun p -> p.Peels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                    | Some (_, win) ->
+                        let newName = $"{currentName}__{binding.IndexName}"
+                        ($"{(elemTypeToCpp elem.ArrayElemType)} {newName} = {win}[static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo))];", newName)
+                    | None ->
+                        match bandPeels |> Option.bind (fun p -> p.OuterPeels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                        | Some (_, win) ->
+                            let newName = $"{currentName}__{binding.IndexName}"
+                            let columns = bandPeels.Value.Columns
+                            ($"double* BLADE_RESTRICT {newName} = {win} + static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo)) * {columns}UL;", newName)
+                        | None -> genElementBindingPeel rawRow binding elem currentName
                 if Map.tryFind newName declaredNames <> Some code then
                     lines <- lines @ [ind depth + code]
                 declaredNames <- Map.add newName code declaredNames
@@ -2111,6 +2533,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 | RealArray ->
                     paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
     
+    match bandPeels with
+    | Some p when paramFinalNames <> p.FinalParams ->
+        invalidOp "rank-two band certificate did not consume every final scalar peel"
+    | _ -> ()
     // Build name map for kernel body from final peeled names
     // Start from outer scope, then overlay kernel params (kernel params take priority)
     let nameMap = paramFinalNames |> Map.fold (fun acc k v -> Map.add k v acc) outerNames
@@ -2157,7 +2583,15 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // rendered array-literal body left a spurious `#error` behind in an
     // otherwise perfectly good program.
     let reynoldsResult =
-        lazy (genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+        lazy (
+            match windowReads with
+            | Some p ->
+                let subst =
+                    p.Reads |> List.map (fun (node, w, offset, win) ->
+                        let center = exprToCpp nameMap w
+                        node, $"{win}[static_cast<size_t>((static_cast<int64_t>({center}) + ({offset}LL)) - static_cast<int64_t>(__w_lo))]")
+                { CppExpr = exprToCppWithSubst subst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
+            | None -> genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
     if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
         lines <- lines @ [ind depth + $"// Reynolds: {reynoldsResult.Value.UniqueTerms}/{reynoldsResult.Value.TotalPerms} perms unique (dedup {reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms}x)"]
     // When the output row was hoisted, the write goes through the
@@ -2435,6 +2869,23 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
 /// The ordinary (no streamed sources) nest emitter -- every existing call
 /// site goes through here; only genApplyCombinator's provider-aware paths
 /// use genLoopNestStreamed directly.
+let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+    genLoopNestStreamedCore None None streamed codeGen outerNames indent
+
+/// Only the segment caller that certified the final body/peels supplies this.
+let internal genLoopNestWindowed (plan: Rank1WindowReads) (streamed: Map<string, ProviderReadSpec>)
+                                (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
+    genLoopNestStreamedCore (Some plan) None streamed codeGen outerNames indent
+
+/// Stale proof is rejected before entering the mutating renderer. Callers may
+/// then render the ordinary I1 route with all source owners still present.
+let internal tryGenLoopNestRank2Band (plan: Rank2BandPeels) (streamed: Map<string, ProviderReadSpec>)
+                                   (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int)
+                                   : Result<string list, string> =
+    if not (rank2BandStillValid plan codeGen outerNames streamed) then
+        Error "stale final rank-two band certificate"
+    else Ok (genLoopNestStreamedCore None (Some plan) streamed codeGen outerNames indent)
+
 let genLoopNest (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     genLoopNestStreamed Map.empty codeGen outerNames indent
 
@@ -2726,12 +3177,22 @@ let tryGenFlatEpilogueNest (ep: FlatEpilogue) (outName: string) (outPool: string
 ///
 /// `operandTypes` is `ApplyInfo.ArrayTypes`, positionally parallel to
 /// `codeGen.InputArrayNames` (both are indexed by `ElementBinding.ArrayPosition`).
-let tryGenFlatElementwiseNest
+/// The flat elementwise path's PLAN (its gates, operand pointers, body and
+/// pragma), shared by the single-map renderer below and the sibling-map
+/// sweep (round 4 wave 2, PM04), which writes several outputs in one loop.
+type internal FlatPlan =
+    { Depth: int; AllDense: bool; Cells: int64; ShapeNote: string
+      OutPool: string; OutElem: string; OutDecl: string
+      OperandDecls: string list; OperandPools: string list
+      Body: string; AllParallel: bool; ThreadsOn: bool; ProducerWrites: bool
+      Pragma: string; PragmaMarker: string list; Head: string list }
+
+let internal flatElementwisePlanOf
         (streamed: Map<string, ProviderReadSpec>)
         (operandTypes: IRArrayType list)
         (codeGen: LoopNestCodeGen)
         (outerNames: Map<int, string>)
-        (indent: int) : string list option =
+        (indent: int) : FlatPlan option =
     let ind n = String.replicate n "    "
     let bindings = codeGen.Bindings
     let depth = List.length bindings
@@ -2922,27 +3383,315 @@ let tryGenFlatElementwiseNest
                 @ [ ind (indent + 1) + $"{outElem}* BLADE_RESTRICT {outPool} = nested_array_utilities::pool_base({codeGen.OutputName}.data);" ]
                 @ (operandDecls |> List.map (fun d -> ind (indent + 1) + d))
                 @ [ ind (indent + 1) + $"const size_t __fp_cells = {cells}UL;" ]
-            let epilogue =
-                match codeGen.FlatEpilogue with
-                | Some ep when depth = 1 && allDense ->
-                    (match tryGenFlatEpilogueNest ep codeGen.OutputName outPool outElem body.CppExpr cells allParallel threadsOn producerWrites pragmaMarker head (codeGen.InputArrayNames |> List.map poolOf) indent with
-                     | Some ls -> ep.OnEmitted (); Some ls
-                     | None -> None)
-                | _ -> None
-            match epilogue with
-            | Some lines -> Some lines
-            | None ->
-            if allParallel then
-                recordOmpConstruct codeGen.OutputName pragma "flat elementwise sweep over the whole pool"
-            Some (
-                head
-                @ pragmaMarker
-                @ (if pragma = "" then [] else [ ind (indent + 1) + pragma ])
-                @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
-                    ind (indent + 2) + $"{outPool}[__fk] = {body.CppExpr};"
-                    ind indent + "}" ])
+            Some { Depth = depth; AllDense = allDense; Cells = cells; ShapeNote = shapeNote
+                   OutPool = outPool; OutElem = outElem
+                   OutDecl = $"{outElem}* BLADE_RESTRICT {outPool} = nested_array_utilities::pool_base({codeGen.OutputName}.data);"
+                   OperandDecls = operandDecls; OperandPools = codeGen.InputArrayNames |> List.map poolOf
+                   Body = body.CppExpr; AllParallel = allParallel; ThreadsOn = threadsOn
+                   ProducerWrites = producerWrites; Pragma = pragma; PragmaMarker = pragmaMarker; Head = head }
         | Some _ -> None
     | _ -> None
+
+/// The flat elementwise nest (above's plan, rendered): one loop over the
+/// contiguous pool, or the planned rank-1 cell epilogue riding it.
+let tryGenFlatElementwiseNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    let ind n = String.replicate n "    "
+    match flatElementwisePlanOf streamed operandTypes codeGen outerNames indent with
+    | None -> None
+    | Some fp ->
+    let epilogue =
+        match codeGen.FlatEpilogue with
+        | Some ep when fp.Depth = 1 && fp.AllDense ->
+            (match tryGenFlatEpilogueNest ep codeGen.OutputName fp.OutPool fp.OutElem fp.Body fp.Cells fp.AllParallel fp.ThreadsOn fp.ProducerWrites fp.PragmaMarker fp.Head fp.OperandPools indent with
+             | Some ls -> ep.OnEmitted (); Some ls
+             | None -> None)
+        | _ -> None
+    match epilogue with
+    | Some lines -> Some lines
+    | None ->
+    if fp.AllParallel then
+        recordOmpConstruct codeGen.OutputName fp.Pragma "flat elementwise sweep over the whole pool"
+    Some (
+        fp.Head
+        @ fp.PragmaMarker
+        @ (if fp.Pragma = "" then [] else [ ind (indent + 1) + fp.Pragma ])
+        @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
+            ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"
+            ind indent + "}" ])
+
+// --- Sibling maps (round 4 wave 2, PM04; Blade.Optimize.planSiblingMaps) -----
+// The C++ realization of a planned group: every member's site emits its own
+// prechecks, extents, allocation and registrations as usual; at the LOOP slot
+// of genApplyCombinator, a member before the last stashes its final nest
+// record and emits no loop, and the LAST member emits ONE sweep writing every
+// member's cells. The whole group is PREFLIGHTED at its first member (every
+// member's nest record built from its IR with a throwaway builder, every
+// gate checked) before any loop is suppressed; a member whose actual record
+// still fails at its own site (not expected: the gates are the preflight's)
+// flushes the stashed loops individually right there, in member order,
+// before its own -- the loops still only move DOWN, which the admission
+// licenses -- and the record says so. A stash still open when its last
+// member's arm returns is flushed after it the same way.
+
+type internal SibStash =
+    { SName: string; SCodeGen: LoopNestCodeGen; SNames: Map<int, string>
+      SOperandTypes: IRArrayType list; SIndent: int }
+
+type internal SibEmission =
+    { Group: Blade.Optimize.SiblingMapGroup
+      mutable Committed: bool
+      mutable Stash: SibStash list
+      mutable Completed: bool }
+
+let internal siblingEmissionStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<int, SibEmission>>()
+let internal siblingEmissionCell () : System.Collections.Generic.Dictionary<int, SibEmission> =
+    let v = siblingEmissionStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<int, SibEmission>()
+        siblingEmissionStorage.Value <- fresh
+        fresh
+    else v
+/// The member being emitted, keyed by its C++ output name (the apply emitter
+/// knows the name, not the let id): (group id, member position).
+let internal siblingPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, int * int>>()
+let internal siblingPendingCell () : System.Collections.Generic.Dictionary<string, int * int> =
+    let v = siblingPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, int * int>()
+        siblingPendingStorage.Value <- fresh
+        fresh
+    else v
+
+let internal siblingSubject (g: Blade.Optimize.SiblingMapGroup) = $"""{g.Region}: {String.concat ", " g.Names}"""
+
+/// The halo member's single level, when its record is exactly the planned
+/// walk: one level of the member's extent, one window element starting at
+/// the member's first centre, no fold / slab / Reynolds / shared-value mode.
+let internal siblingHaloLevel (cg: LoopNestCodeGen) (start: int64) (extent: int64) : (LoopIndexBinding * ElementBinding) option =
+    match cg.Bindings with
+    | [ b ] when b.FusedRank.IsNone && b.BoundDependencies.IsEmpty && b.StrictOffset = 0
+                 && b.Extent = IRLit (IRLitInt extent)
+                 && cg.FoldWrapper.IsNone && cg.FoldChunk.IsNone && not cg.MpiSlab && not cg.HasReynolds
+                 && cg.ShareDecl.IsNone && cg.RowEpilogue.IsNone && cg.CompactRowEpilogue.IsNone ->
+        (match b.Elements with
+         | [ e ] ->
+             (match e.Virtual with
+              | VirtualRange (Some (IRLit (IRLitInt s))) when s = start -> Some (b, e)
+              | VirtualRange None when start = 0L -> Some (b, e)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// Does this member's FINAL nest record admit the group's sweep?
+let internal siblingMemberGate (g: Blade.Optimize.SiblingMapGroup) (j: int) (operandTypes: IRArrayType list)
+                               (cg: LoopNestCodeGen) (names: Map<int, string>) (indent: int) : Result<unit, string> =
+    if cg.RowEpilogue.IsSome || cg.CompactRowEpilogue.IsSome then Error "a row epilogue rides this member's nest"
+    else
+    match g.Kind with
+    | Blade.Optimize.SibFlat cells ->
+        if cg.FlatEpilogue.IsSome then Error "a cell epilogue rides this member's flat sweep"
+        else
+        match flatElementwisePlanOf Map.empty operandTypes cg names indent with
+        | Some fp when fp.Cells = cells && fp.AllDense && not fp.ProducerWrites -> Ok ()
+        | Some _ -> Error "the member's flat sweep differs from the group's (cells, storage or a writing kernel)"
+        | None -> Error "the member does not take the flat elementwise path"
+    | Blade.Optimize.SibHalo _ ->
+        match siblingHaloLevel cg (List.item j g.Starts) (List.item j g.Extents) with
+        | Some _ -> Ok ()
+        | None -> Error "the member's nest is not the planned single-level halo walk"
+
+/// One member's own loop, rendered as it would have been without the group
+/// (the fallback flush): the flat sweep, else the nest.
+let internal siblingSingleLoop (s: SibStash) : string list =
+    match tryGenFlatElementwiseNest Map.empty s.SOperandTypes s.SCodeGen s.SNames s.SIndent with
+    | Some lines -> lines
+    | None -> genLoopNestStreamed Map.empty s.SCodeGen s.SNames s.SIndent
+
+/// THE FUSED SWEEP over every member (stash, in member order).
+let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibStash list) : string list =
+    let ind n = String.replicate n "    "
+    let indent = (List.last members).SIndent
+    let k = members.Length
+    match g.Kind with
+    | Blade.Optimize.SibFlat cells ->
+        let fps = members |> List.map (fun s -> (s, (flatElementwisePlanOf Map.empty s.SOperandTypes s.SCodeGen s.SNames s.SIndent).Value))
+        let (_, fp0) = List.head fps
+        let distinct (xs: string list) = xs |> List.distinct
+        for (s, fp) in fps do
+            if fp.AllParallel then
+                recordOmpConstruct s.SName fp.Pragma $"flat elementwise sweep shared by {k} sibling outputs (one team)"
+        [ ind indent + $"// sibling maps: {k} outputs in one flat sweep of {cells} cells [{fp0.ShapeNote}] (each cell its own kernel)"
+          ind indent + "{" ]
+        @ (fps |> List.map (fun (_, fp) -> ind (indent + 1) + fp.OutDecl))
+        @ (fps |> List.collect (fun (_, fp) -> fp.OperandDecls) |> distinct |> List.map (fun d -> ind (indent + 1) + d))
+        @ [ ind (indent + 1) + $"const size_t __fp_cells = {cells}UL;" ]
+        @ (fps |> List.collect (fun (_, fp) -> fp.PragmaMarker) |> distinct)
+        @ (if fp0.Pragma = "" then [] else [ ind (indent + 1) + fp0.Pragma ])
+        @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++) {" ]
+        @ (fps |> List.map (fun (_, fp) -> ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"))
+        @ [ ind (indent + 1) + "}"
+            ind indent + "}" ]
+    | Blade.Optimize.SibHalo (inner, baseN) ->
+        // per member: its level, its first centre and extent, its block body
+        let blocks =
+            members |> List.mapi (fun j s ->
+                let start = List.item j g.Starts
+                let ext = List.item j g.Extents
+                let (b, e) = (siblingHaloLevel s.SCodeGen start ext).Value
+                let (code, _) = genElementBindingPeel false b e e.ArrayName
+                let paramFinalNames = Map.ofList [ (e.ParamVarId, e.ParamName) ]
+                let nameMap = paramFinalNames |> Map.fold (fun acc key v -> Map.add key v acc) s.SNames
+                let nameMap = withCaptureNames EnclosingNamesWin s.SCodeGen.Captures nameMap
+                let body = genKernelExprWithReynolds s.SCodeGen.KernelExpr s.SCodeGen.KernelParams false false nameMap paramFinalNames
+                (start, start + ext, b, fun (d: int) ->
+                    [ ind d + "{"
+                      ind (d + 1) + $"const size_t {b.IndexName} = __sib_c - {start}UL;"
+                      ind (d + 1) + code
+                      ind (d + 1) + $"{s.SCodeGen.OutputName}[{b.IndexName}] = {body.CppExpr};"
+                      ind d + "}" ]))
+        let points = blocks |> List.collect (fun (a, z, _, _) -> [ a; z ]) |> List.distinct |> List.sort
+        let segments = List.pairwise points |> List.filter (fun (a, z) -> z > a)
+        let (_, _, b0, _) = List.head blocks
+        let cg0 = (List.head members).SCodeGen
+        let lo = blocks |> List.map (fun (a, _, _, _) -> a) |> List.max
+        let hi = blocks |> List.map (fun (_, z, _, _) -> z) |> List.min
+        // the pragma rides the segment where EVERY member is active (the
+        // intersection); the fringes are a few cells each and stay serial
+        let pragmaPrefix = genNestPragma cg0.Bindings (ind indent)
+        for s in members do
+            recordOmpConstruct s.SName pragmaPrefix $"sibling halo walk shared by {k} outputs, centres [{lo}, {hi}) (one team)"
+        let marker =
+            let reason = if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason () else "the omp(...) depth licenses no level of this nest"
+            ompSuppressedMarker cg0.OmpRequested (pragmaPrefix <> "") reason (ind indent)
+        let axis = if inner = "" then "anonymous" else inner
+        [ ind indent + $"// sibling maps: {k} halo outputs in one walk over the {axis} axis ({baseN} cells), centres peeled into {segments.Length} segment(s) by member domain (each cell its own kernel)" ]
+        @ (segments |> List.collect (fun (a, z) ->
+            let active = blocks |> List.filter (fun (s0, z0, _, _) -> s0 <= a && z <= z0)
+            if active.IsEmpty then []
+            else
+                let shared = active.Length = blocks.Length
+                (if shared then marker else [])
+                @ [ ind indent + (if shared then pragmaPrefix else "") + $"for (size_t __sib_c = {a}UL; __sib_c < {z}UL; __sib_c++) {{" ]
+                @ (active |> List.collect (fun (_, _, _, render) -> render (indent + 1)))
+                @ [ ind indent + "}" ]))
+        |> fun ls -> ignore b0; ls
+
+/// The hook at genApplyCombinator's loop slot.
+type internal SiblingLoopDecision =
+    | SibNormal
+    | SibReplace of string list
+    | SibPrefix of string list
+
+let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<string, ProviderReadSpec>)
+                             (operandTypes: IRArrayType list) (cg: LoopNestCodeGen) (names: Map<int, string>) (indent: int) : SiblingLoopDecision =
+    match (siblingPendingCell ()).TryGetValue name with
+    | false, _ -> SibNormal
+    | true, (gid, j) ->
+    match (siblingEmissionCell ()).TryGetValue gid with
+    | true, st when st.Committed && not st.Completed ->
+        let g = st.Group
+        let subject = siblingSubject g
+        let gate =
+            if not routeFree then Error "the member's apply took a dispatched, sliced, tiled or segmented route"
+            elif not (Map.isEmpty streamed) then Error "a streamed provider operand"
+            elif ompTestModeEnabled () then Error "omp test mode instruments the single nests"
+            else siblingMemberGate g j operandTypes cg names indent
+        let me = { SName = name; SCodeGen = cg; SNames = names; SOperandTypes = operandTypes; SIndent = indent }
+        match gate with
+        | Error why ->
+            st.Completed <- true
+            Blade.Optimize.recordSiblingMaps subject
+                (Blade.Effects.Declined $"C++ lane: {why} at member {j + 1} ({name}); the earlier members' loops run here, individually, before its own (they only move down)") []
+            SibPrefix (st.Stash |> List.collect siblingSingleLoop)
+        | Ok () when j < g.Members.Length - 1 ->
+            st.Stash <- st.Stash @ [ me ]
+            SibReplace [ String.replicate indent "    " + $"// sibling maps: {name}'s cells are written by the shared sweep at {List.last g.Names}" ]
+        | Ok () ->
+            st.Completed <- true
+            let lines = siblingFusedLoop g (st.Stash @ [ me ])
+            Blade.Optimize.recordSiblingMaps subject Blade.Effects.Applied
+                [ (match g.Kind with
+                   | Blade.Optimize.SibFlat _ -> $"C++ lane: one flat sweep writes {g.Members.Length} outputs"
+                   | Blade.Optimize.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain")
+                  "each member's prechecks, allocation and registrations stayed at its own site" ]
+            SibReplace lines
+    | _ -> SibNormal
+
+/// The arms' entry (CodeGen's function-body arm, genComputeBinding's top-level
+/// arm): at the group's FIRST member, preflight the whole group and commit or
+/// decline it for this emission; mark the member pending for the apply hook.
+let internal siblingArmBegin (id: IRId) (name: string) (preflight: Blade.Optimize.SiblingMapGroup -> Result<unit, string>) : unit =
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | None -> ()
+    | Some (g, j) ->
+        let cell = siblingEmissionCell ()
+        if j = 0 then
+            let ok =
+                match preflight g with
+                | Ok () -> true
+                | Error why ->
+                    Blade.Optimize.recordSiblingMaps (siblingSubject g)
+                        (Blade.Effects.Declined $"C++ lane: preflight -- {why}; every member keeps its own loop") []
+                    false
+            cell.[g.GroupId] <- { Group = g; Committed = ok; Stash = []; Completed = false }
+        match cell.TryGetValue g.GroupId with
+        | true, st when st.Committed && not st.Completed -> (siblingPendingCell ()).[name] <- (g.GroupId, j)
+        | _ -> ()
+
+/// The arms' exit: clears the pending mark; after the LAST member, a group
+/// whose sweep was never emitted (its apply took another path) flushes the
+/// stashed loops right after it.
+let internal siblingArmEnd (id: IRId) (name: string) : string list =
+    (siblingPendingCell ()).Remove name |> ignore
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | Some (g, j) when j = g.Members.Length - 1 ->
+        match (siblingEmissionCell ()).TryGetValue g.GroupId with
+        | true, st when st.Committed && not st.Completed ->
+            st.Completed <- true
+            Blade.Optimize.recordSiblingMaps (siblingSubject g)
+                (Blade.Effects.Declined $"C++ lane: the last member ({name}) never reached the shared sweep; the earlier members' loops run right after it, individually") []
+            st.Stash |> List.collect siblingSingleLoop
+        | _ -> []
+    | _ -> []
+
+/// THE PREFLIGHT at the group's first member: every member's nest record
+/// rebuilt from its planned apply (a throwaway builder, placeholder operand
+/// names) and checked against the member gate, the flat members' pragmas
+/// equal -- before any loop is suppressed.
+let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
+    if ompTestModeEnabled () then Error "omp test mode instruments the single nests"
+    else
+    let built =
+        g.Applies |> List.mapi (fun j info ->
+            let names = info.Arrays |> List.mapi (fun i _ -> $"__sibpf{j}_{i}")
+            let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info names $"__sibpf{j}" (IRBuilder()))
+            (j, info, cg))
+    match built |> List.tryPick (fun (j, info, cg) ->
+            match siblingMemberGate g j info.ArrayTypes cg Map.empty 0 with
+            | Error why -> Some $"member {j + 1}: {why}"
+            | Ok () -> None) with
+    | Some why -> Error why
+    | None ->
+    match g.Kind with
+    | Blade.Optimize.SibFlat _ ->
+        let pragmas =
+            built |> List.map (fun (_, info, cg) ->
+                (flatElementwisePlanOf Map.empty info.ArrayTypes cg Map.empty 0) |> Option.map (fun fp -> fp.Pragma))
+        if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' flat sweeps take different pragmas"
+        else Ok ()
+    | Blade.Optimize.SibHalo _ ->
+        // one team for the shared segment: every member's own nest must take
+        // the SAME pragma (a member whose depth licenses no level stays serial)
+        let pragmas = built |> List.map (fun (_, _, cg) -> genNestPragma cg.Bindings "")
+        if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' halo walks take different pragmas"
+        else Ok ()
 
 /// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
 /// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it
@@ -3745,6 +4494,10 @@ let runtimeHeaderNames : string list =
       // BLADE_FRAME macro. Header-only, host-only (device passes see
       // no-op stubs); deployed unconditionally and included by every program.
       "blade_runtime.hpp"
+      // Explicit private-spool artifacts include this protocol header. Keep
+      // deployment/cache/cleanup on the shared registry like other runtimes;
+      // deploying its bytes alone grants no disk or compiler admission.
+      "blade_private_spool.hpp"
       // The run record (BLADE_RUN_RECORD): the baked input manifest paired
       // at exit with what the run observed and how it ended. Header-only,
       // host-only; deployed unconditionally and included by every program.
@@ -5124,6 +5877,26 @@ let suppressAllocName (n: string) : unit =
     | None -> ()
     | Some frame -> frame.SuppressNames <- Set.add n frame.SuppressNames
 
+/// SCRATCH REUSE (PM60, run-time shapes): a reuser whose declaration now
+/// aliases its donor's data no longer owns a pool -- but it may still own the
+/// run-time extents table its site `new`-ed (`size_t* r_extents = new
+/// size_t[R]`), which the donor's free does not release. Spare the backing
+/// and KEEP that table's `delete[]` in the frame (same position, same owner,
+/// so an escaping owner still spares it); a reuser with a static extents
+/// table is suppressed whole, exactly as before.
+let spareReusedBacking (n: string) : unit =
+    match currentAllocScope () with
+    | None -> ()
+    | Some frame ->
+        let mutable kept = false
+        frame.Allocs <-
+            frame.Allocs |> List.map (fun a ->
+                match a with
+                | PoolAlloc (name, _, _, Some ex, owner) when name = n && not kept ->
+                    kept <- true
+                    RawAlloc (ex, owner)
+                | a -> a)
+        if not kept then frame.SuppressNames <- Set.add n frame.SuppressNames
 /// A cursor into the live frame's registration list, and its companion that
 /// spares EVERYTHING registered after it (`suppressAllocsSince`).
 ///
@@ -5249,7 +6022,7 @@ let peekAllocScopeFrees (ind: string) : string list =
     | Some frame -> renderFrameFrees ind frame
 
 /// A7c (gap G69, W2-4 review finding 2): free ONE pool now, at an inlined
-/// callee's return-boundary event (IR.IRReleasePools), and spare it from
+/// callee's IRReleasePools return event, and spare it from
 /// the scope's own frees.
 ///   * a live frame that tracks `n` (a function body / loop scope): its own
 ///     rendered free, the name then suppressed (no double free at scope exit);
@@ -5274,6 +6047,31 @@ let freeAllocNow (ind: string) (n: string) (fallback: string) : string list =
                     frame.SuppressNames <- Set.add n frame.SuppressNames
                     lines
                 | None -> []
+
+/// IRReleasePools is a statement, shared by the module, function and loop
+/// renderers. Reuse is excluded for lifetime regions by the planner. Missing
+/// pool names are a compiler error, never a silently retained allocation.
+let releaseInlinePools (ind: string) (names: Map<IRId, string>) (pools: IRExpr list) (call: string) : string list =
+    // BL7005 (the user's decision): this lane RETAINED an opt-in A7c kept
+    // inline; once per region. Other regions (join-driven inlines, early
+    // releases) never warn.
+    Blade.Optimize.noteReleaseRetained "cpp" pools call
+    pools |> List.rev |> List.collect (function
+        | IRVar (pid, pty) ->
+            let n =
+                match Map.tryFind pid names with
+                | Some n -> n
+                | None -> failwith $"IRReleasePools: pool v{pid} has no emitted name"
+            let elem =
+                match stripUnits pty with
+                | ArrayElem at when arrayRank at = 1 -> elemTypeToCpp at.ElemType
+                | _ -> failwith "IRReleasePools: only owned rank-one dense pools are supported"
+            let lines = freeAllocNow ind n $"deallocate<typename promote<{elem}, 1>::type, nullptr>({n}.data, {n}.extents);"
+            if lines.IsEmpty then
+                failwith $"IRReleasePools: pool {n} is not owned by the current allocation frame"
+            $"{ind}// lifetime region `{call}` (an inlined call or an early release) closes here; its pool `{n}` is released at that return boundary" :: lines
+        | _ -> failwith "IRReleasePools: an owned pool must be a binding reference")
+
 /// Generate code to allocate and initialize an array from literal values
 /// `sourceName` is the binding's BLADE name, for the runtime guard's message
 /// (the C++ spelling `varName` can be a rename, `a_extents_` / `M__x`).

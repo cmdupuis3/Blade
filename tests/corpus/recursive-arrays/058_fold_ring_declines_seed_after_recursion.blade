@@ -1,0 +1,21 @@
+// TEST: Fold Ring Declines Seed After Recursion
+// ============================================================================
+// PM35 decline control (Codex review round 1): the fold's seed calls a lambda
+// that reads `offset`, bound AFTER the recursion; moving the seed ahead of the
+// recursion would read it before its binding. Seeds must be closed scalar
+// expressions over values bound before the recursion, so this declines.
+// ============================================================================
+type T = Idx<11>
+
+function late_seed(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) + 1.0
+    let offset = a + 3.0
+    reduce(s, (+), (lambda(x: Float64) -> x + offset)(0.0))
+}
+
+let v = late_seed(1.0)
+// EXPECT: v = 70.0

@@ -1,0 +1,22 @@
+// TEST: Fold Ring Declines Future Offset Past Extent
+// ============================================================================
+// PM35 decline control (Codex review round 2): `prefix(n + c)` reads a future
+// row -- zero history, never selected -- only while `n + c` cannot wrap
+// around Int64 (near Int64.MaxValue it wraps, the guard holds, and a ring
+// would turn an out-of-range read into a valid slot holding another row). The
+// audit admits a future offset only up to the recursion's extent; this one is
+// past it, so the ring declines and the trajectory is stored whole.
+// ============================================================================
+type T = Idx<11>
+
+function future(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n + 12) + 1.0
+    reduce(s, (+))
+}
+
+let v = future(1.0)
+// EXPECT: v = 11.0

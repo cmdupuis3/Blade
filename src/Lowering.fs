@@ -3641,7 +3641,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _ | IRZip _ | IRAlign _
             | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _
             | IRArrayNegate _ | IRArrayConjugate _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
-            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRRank _ | IRExtent _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRRank _ | IRExtent _
             | IRRaggedLookup _ | IRCompoundMask _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
             | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ ->
                 Some Set.empty
@@ -3947,7 +3947,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             | IRDisplayStr _ -> seq (childrenOf e) barrier
             // inert markers and constants
             | IRSegments _ | IRSegmentsGrid _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
-            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _
+            | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _
             | IROpaqueExtent -> None
             | IRRaggedLookup a | IRCompoundMask a | IRCompoundProject (a, _) -> seq [ a ] None
             // statements: their operands, then they may fail / branch
@@ -4157,10 +4157,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.OrbitActionTable.reset ()
     Optimize.MemberHoistTable.reset ()
     Optimize.GroupAggTable.reset ()
+    Optimize.SiblingMapTable.reset ()
     Optimize.EpilogueLegTable.reset ()
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
     Optimize.AliasElideTable.reset ()
+    Optimize.GroupViewTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -4297,10 +4299,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // (Optimize.moduleReferencedIds: the SAME traversal the census walks --
     // binding values, every side-table operand executed at a binding's site,
     // function bodies and captures, declared and embedded types, provider
-    // sources): the compaction planner's positions census (T4b) runs per
-    // module, so a compound named in ANOTHER module (an import) must reach it
-    // as an uncertified use. Computed only for a multi-module program with a
-    // compound to plan.
+    // sources): compaction and private-transpose admission run per module,
+    // so ANOTHER module's references must reach them as uncertified uses.
+    // Computed lazily once for a multi-module program.
     let moduleRefs =
         lazy (irModules |> List.map (fun m -> (m.Name, Optimize.moduleReferencedIds m)))
     // Call elision's program-wide value-reference census (a callee in another
@@ -4334,6 +4335,20 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // every unseeded fold's seed by its EFFECTIVE route (gap G74), before any
         // optimizer pass reads a seed (the repro twins of gap G80 are in place)
         let irModule = resolveUnseededSeedsModule (foldedProgramFuncs.Force()) irModule
+        // Every id another module names: the transpose normal form's and the
+        // read-only alias plan's never-written closure treats such a name as
+        // unjudged (Blade.Optimize.aliasWriteClosure). This is also PM19's and
+        // C04's COMPLETE foreign-demand evidence. A private transpose has no
+        // CompoundInits entry, so that shortcut would silently erase foreign
+        // binding/type/side-payload observers.
+        let foreignRefs =
+            if irModules.Length < 2 then Set.empty
+            else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
+        // PM19 terminal selection must run before IRLift/CSE and every
+        // schedule side table (the transpose normal form's alias plan
+        // included). It reads explicit seeds only, after their resolution
+        // above; a removed private mask can never orphan a membership plan.
+        let irModule = Optimize.fuseSelectedTerminalModule env.Builder programFuncs foreignRefs irModule
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
         // resolves symbolic ranks per specialization), elementwise-chain
@@ -4352,21 +4367,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // CANNOT see an optimizer bug (both print the same wrong answer); the
         // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
         // compares every gate OFF against every gate ON.
-        // Every id another module names: the transpose normal form's and the
-        // read-only alias plan's never-written closure treats such a name as
-        // unjudged (Blade.Optimize.aliasWriteClosure).
-        let foreignAll =
-            lazy (if irModules.Length < 2 then Set.empty
-                  else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany)
         // The transpose normal form (Blade.Optimize.normalizeTransposesModule,
         // P2 of docs/plans/plan-identity-transpose-compute.md): a chain of
         // transposes composes to one permutation, an identity disappears. A
-        // semantic normal form every lane consumes; first, so the passes
-        // below see the base. Gate: BLADE_TRANSPOSE_ELIDE.
-        let irModule = Optimize.normalizeTransposesModule env.Builder programFuncs (foreignAll.Force()) (irModules.Length < 2) irModule
+        // semantic normal form every lane consumes; first among the optimizer
+        // passes, so the passes below (C04's private transpose partial folds
+        // included) see the base. Gate: BLADE_TRANSPOSE_ELIDE.
+        let irModule = Optimize.normalizeTransposesModule env.Builder programFuncs foreignRefs (irModules.Length < 2) irModule
         // (a single-module program: compute elision's top-level mode reads the
         // print selection's names, which name the program's own bindings)
-        let irModule = Optimize.optimizeModule env.Builder programFuncs (irModules.Length < 2) irModule
+        let irModule = Optimize.optimizeModuleWithForeignCensus env.Builder programFuncs (irModules.Length < 2) foreignRefs irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
@@ -4420,9 +4430,6 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // mask -> compound -> fold chain's side table, read by both emitters;
         // the interpreter runs the tree as written. Gate:
         // BLADE_COMPACTION_FUSION.
-        let foreignRefs =
-            if irModules.Length < 2 || irModule.CompoundInits.IsEmpty then Set.empty
-            else moduleRefs.Force() |> List.filter (fun (n, _) -> n <> irModule.Name) |> List.map snd |> Set.unionMany
         Optimize.planCompactionFusion programFuncs foreignRefs irModule
         // Hash equijoin (Blade.Optimize.planEquiJoin, round 3 W3-2, item
         // T2): an inline rank-2 equijoin compound becomes a stable CSR build
@@ -4458,12 +4465,29 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // alias, the identity transpose chain). A side table, both emitters;
         // the interpreter keeps its copy. Last, over the final tree. Gate:
         // BLADE_TRANSPOSE_ELIDE.
-        Optimize.planAliasElision programFuncs (foreignAll.Force()) irModule
+        Optimize.planAliasElision programFuncs (foreignRefs) irModule
+        // The structural group view (Blade.Optimize.planStructuralGroupView,
+        // PM57): a top-level group_by over contiguous segments whose source,
+        // grouped array and derived values are never written reads its rows
+        // in the source's storage (and its ungroup shares it). Verdicts only;
+        // the C++ emitter records the decision. Gate: BLADE_GROUP_VIEW.
+        Optimize.planStructuralGroupView programFuncs (foreignRefs) irModule
         // The checker's stored-alias identity verdicts (plan 2.1 second step,
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.
-        Optimize.recordAliasIdentity programFuncs (foreignAll.Force()) irModule
+        Optimize.recordAliasIdentity programFuncs (foreignRefs) irModule
+        // Sibling maps (Blade.Optimize.planSiblingMaps, round 4 wave 2, PM04):
+        // two to eight stored maps of one spine over one input index space share
+        // ONE traversal, fused at the last sibling; side table, both emitters;
+        // the interpreter runs the maps as written. LAST of the plans: it reads
+        // every other plan's claims and the scratch-reuse decisions, and the
+        // early pool-release schedule below reads its protected ids. Gate:
+        // BLADE_SIBLING_MAPS.
+        Optimize.planSiblingMaps programFuncs foreignRefs (irModules.Length < 2) irModule
         irModule)
+    // A05 consumes every module's final executable/type/side payload and ALL
+    // established owners. No planner runs after these typed resource barriers.
+    let irModules = EarlyPoolRelease.scheduleModules builder irModules
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out
     // of a never-instantiated generic keeps that generic's type vars in its

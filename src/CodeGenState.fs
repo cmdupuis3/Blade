@@ -85,6 +85,11 @@ and TilePlan = {
     Hoisted: bool
 }
 
+type ProgramEmissionOptions = { PrivateSpool: PrivateSpoolPolicy option }
+let defaultProgramEmissionOptions : ProgramEmissionOptions = { PrivateSpool = None }
+
+type PrivateSpoolEmission = { Plan: Blade.OptimizePrivateSpool.Plan; Committed: bool }
+
 type CodeGenContext = {
     /// Map from IR variable IDs to C++ variable names
     VarNames: Map<IRId, string>
@@ -128,6 +133,18 @@ type CodeGenContext = {
     /// Streamed provider reads whose prologue is already emitted, keyed by cpp name:
     /// a hit means inline a fiber read at the S/T boundary instead of peeling.
     StreamedArrays: Map<string, ProviderReadSpec>
+    /// Whole-PROGRAM demand census for certified terminals (the rank-1 streamed
+    /// reduction join and the stored sparse wildcard scalar fold):
+    /// the sole assembler has merged every module. Low-level genModule callers
+    /// have None. Context-owned; no ambient flag or omitted resident allocation.
+    StreamTerminalModule: IRModule option
+    /// Explicit whole-program policy/certificate only. Never inherited by
+    /// generic module APIs; commit is immutable context state at the producer.
+    PrivateSpoolRegion: PrivateSpoolEmission option
+    /// An explicit capability for the CURRENT ordinary module-level provider
+    /// binding only. genModuleBinding grants/restores it; nested bindings and
+    /// generic provider API calls have no scope/cleanup proof for PM43.
+    TopLevelProviderRead: IRId option
     /// Groupings emitted by genSegmentsBinding (structural: static offsets,
     /// identity accessor), by cpp name. A group_by over a STREAMED rank-1
     /// variable and one of these reads per run (docs/plans/structural/07 §3.4).
@@ -683,20 +700,10 @@ type MaterializedAlloc =
 /// emitted pragmas produce GENUINE parallel regions, not just syntactic ones.
 /// OFF by default (toggled on only by the harness, else it pollutes output).
 /// AsyncLocal so parallel test tasks don't race on the flag.
-let internal ompTestModeStorage =
-    System.Threading.AsyncLocal<bool ref>()
+let ompTestModeCell () : bool ref = Blade.Toolchain.ompCoverageModeCell ()
 
-let ompTestModeCell () : bool ref =
-    let v = ompTestModeStorage.Value
-    if isNull (box v) then
-        let fresh = ref false
-        ompTestModeStorage.Value <- fresh
-        fresh
-    else v
-
-/// Set/clear OpenMP test-mode for the current async flow (called by the harness).
-let setOmpTestMode (on: bool) : unit =
-    freshCell ompTestModeStorage on
+/// Admission and rendering read the same per-flow coverage capability.
+let setOmpTestMode (on: bool) : unit = Blade.Toolchain.setOmpCoverageMode on
 
 /// Split-timing mode: when on, main() emits TWO timing checkpoints -- input-data
 /// setup and computation -- instead of one whole-body clock, so the differential
@@ -1655,12 +1662,12 @@ let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnost
 // at a call site). ProviderReadSpec.Streamed has always promised a loud
 // codegen error there instead; this is it.
 //
-// The renderers see only a name map, not the context, and `A` IS legitimately
-// declared in two scopes: a lifted free function receives a capture as a
-// parameter named `A`, and a segment run declares a window alias named `A`.
-// So the check is by the BINDING's id and emitted name, and those two scopes
-// mask the name while they emit (`maskStreamedNames`, restored on Dispose --
-// bind it with `use`).
+// The renderers see only a name map, not the context. A lifted free function
+// legitimately receives a capture parameter named `A`; that formal scope masks
+// the binding's id/emitted name while rendering (`maskStreamedNames`, restored
+// on Dispose -- bind it with `use`). Segment-window aliases are different:
+// ordinary element peels use them directly, but arbitrary source-value access
+// must retain this guard because a reused window is not the full source array.
 //
 // The refusal is DEFERRED: a render returns a sentinel identifier and queues
 // the message, and `settleStreamedValueLeaks` turns it into a BL7004 refusal
@@ -1837,7 +1844,7 @@ let isUnitExpr (expr: IRExpr) : bool =
     match expr with
     | IRLit IRLitUnit -> true
     | IRAssign _ -> true
-    | IRForRange _ -> true
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ -> true
     | _ -> false
 
 let emptyContext () = {
@@ -1852,6 +1859,9 @@ let emptyContext () = {
     ProviderReads = Map.empty
     ProviderWrites = Map.empty
     StreamedArrays = Map.empty
+    StreamTerminalModule = None
+    PrivateSpoolRegion = None
+    TopLevelProviderRead = None
     StructuralGroupings = Set.empty
     GridGroupings = Map.empty
     RandomInits = Map.empty

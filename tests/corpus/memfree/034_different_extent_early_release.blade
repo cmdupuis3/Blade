@@ -1,0 +1,37 @@
+// TEST: PM02 early release preserves snapshots and two live different-extent results
+// A05 source census only; analytic expectations, never executed by the coder.
+// Both scalar observations precede a final map over independent stored y.
+type Short = Idx<7>
+type Long = Idx<11>
+function release_candidate(x: Array<Float64 like Short>, y: Array<Float64 like Long>) -> Array<Float64 like Long> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let old_sum = reduce(p, (+))
+    let middle = p(3)
+    let bias = old_sum + middle
+    y * 0.5 + bias
+}
+let x0: Array<Float64 like Short> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let y0: Array<Float64 like Long> = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+let x1: Array<Float64 like Short> = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+let y1: Array<Float64 like Long> = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0]
+let a = release_candidate(x0, y0)
+let b = release_candidate(x1, y1)
+// All demand sites below follow the second call, including the first result.
+let sx0 = reduce(x0, (+))
+let sy0 = reduce(y0, (+))
+let sx1 = reduce(x1, (+))
+let sy1 = reduce(y1, (+))
+let sa = reduce(a, (+))
+let sb = reduce(b, (+))
+// EXPECT: x0 = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: y0 = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+// EXPECT: x1 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+// EXPECT: y1 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0]
+// EXPECT: a = [56.0, 57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0, 65.0, 66.0]
+// EXPECT: b = [137.0, 138.0, 139.0, 140.0, 141.0, 142.0, 143.0, 144.0, 145.0, 146.0, 147.0]
+// EXPECT: sx0 = 21.0
+// EXPECT: sy0 = 110.0
+// EXPECT: sx1 = 56.0
+// EXPECT: sy1 = 132.0
+// EXPECT: sa = 671.0
+// EXPECT: sb = 1562.0

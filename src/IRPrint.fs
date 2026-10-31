@@ -363,6 +363,9 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         $"{pp e}.{i}"
     | IRIf (c, t, e) ->
         $"if {pp c} then {pp t} else {pp e}"
+    | IRBeginPoolScope call -> $"begin_pool_scope({call})"
+    | IRReleasePools (scope, pools, call) ->
+        $"""release_pools({pp scope}, [{pools |> List.map pp |> String.concat "; "}], {call})"""
     | IRLet (id, v, b) ->
         // Add the let-bound name to mapping for body
         let names' = Map.add id $"v{id}" names
@@ -422,7 +425,6 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRZero _ -> "zero"
     | IRUnseededSeed (b, _, r) -> (if r then $"unseeded_seed[repro]({pp b})" else $"unseeded_seed({pp b})")
     | IRUninit ty -> $"uninit<{ppIRType ty}>"
-    | IRReleasePools (call, start, pools) -> $"""release_pools[{call}; from __v{start}]({(pools |> List.map (fun (id, _) -> $"__v{id}") |> String.concat ", ")})"""
     | IRRank arr -> $"rank({pp arr})"
     | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"
     | IRPolyTail (pack, drop) -> $"{pp pack}[{drop}..]"

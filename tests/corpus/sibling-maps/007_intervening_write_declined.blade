@@ -1,0 +1,16 @@
+// TEST: Sibling Maps Stop At A Write Between The Siblings
+// ============================================================================
+// `x(0) = 100.0` writes the shared input between the two maps: y1 must read
+// the cell before the write and y2 after it, so the group closes at the
+// write and each map keeps its own loop (the value shows both reads).
+type I = Idx<4>
+function two(x: mut Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a * 2.0 |> compute
+    x(0) = 100.0
+    let y2 = method_for(x) <@> lambda(a) -> a + 1.0 |> compute
+    y1(0) * 1000.0 + y2(0)
+}
+let mut v: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let r = two(v)
+// EXPECT: r = 2101.0
+// EXPECT: v = [100.0, 2.0, 3.0, 4.0]

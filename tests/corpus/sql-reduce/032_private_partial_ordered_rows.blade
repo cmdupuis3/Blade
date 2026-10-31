@@ -1,0 +1,11 @@
+// TEST: Private Partial Map Folds Each Row In The Original Ascending Graph
+// This noncommutative fold retains order in the default licensed build too.
+type R = Idx<2>
+type C = Idx<3>
+function square_plus(v: Float64) -> Float64 = {
+    let w = v * v
+    w + 1.0
+}
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let rows = reduce(method_for(M) <@> lambda(v: Float64) -> square_plus(v), lambda(a, b) -> a * 2.0 + b, 7.0)
+// EXPECT: rows = [84.0, 213.0]

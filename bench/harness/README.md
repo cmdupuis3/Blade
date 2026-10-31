@@ -1,6 +1,6 @@
 # bench/harness -- the Blade-vs-Fortran driver
 
-`run.py` is a single-file, standard-library-only Python 3.14 driver (harness version 2). It
+`run.py` is a standard-library-only Python 3.14 driver (harness version 2.2). It
 discovers kernels, builds every arm of a kernel/regime up front, validates BOTH checksums of
 EVERY run against independent pins, runs the interleaved timing protocol, and writes an
 immutable session bundle. The protocol's entry point is `bench/README.md` (fairness,
@@ -29,6 +29,7 @@ C:\Python314\python.exe bench\harness\run.py bench --kernels gram,dot --regimes 
 | `check <kernel>` | build every arm at `--size` (default smoke), run each ONCE, validate against the pin | `bench/.build/sessions/<date>-<host>/session-<HHMMSS>-check/` |
 | `smoke` | `check` for every kernel (or `--kernels`) | `.../session-<HHMMSS>-smoke/` |
 | `bench` | the measured protocol | `bench/results/<date>-<host>/session-<HHMMSS>/` + `summary.md` beside it |
+| `diagnose-memory` | PM54 Windows reserve/touch/release diagnostic, three distinct fresh-child workloads; no benchmark ratios | `--out-dir` (default `bench/.build/pm54`), new session with `session.json`, `memory.md`, `diagnostic.md`, per-child JSON |
 
 `smoke`/`check` record per (kernel, regime, arm) the status and the hashes of THAT arm's
 committed source, of `bench_support.f90` (Fortran arms), of Blade.dll (Blade arms) and of the
@@ -268,6 +269,9 @@ expected_llvm "fallback" + expected_llvm_reason       -- a fallback is then not 
 no_parallel_form true | false | ["<mt8 regime>"]      -- Blade has no licensed parallel spelling (false / [] = it has one)
 parallel_notes {"<arm>": "parallel preparation, serial kernel ..."}   -- shown in mt8 rows
 size_exempt {"<file>": [params]}
+memory_contract {id, source, required_values, observation_boundary, cleanup_endpoint,
+                 audit_status, linear_payload_model {parameter, bytes_per_element {...}}}
+                                                     -- OPTIONAL, source contract/model only
 ```
 
 SIZE markers: each param is declared on exactly ONE line per source, ending with `// SIZE p`
@@ -292,7 +296,7 @@ with `_` are comments.
 
 - `session.json` (checkpointed after every run; `os.replace` retried 10x with backoff on a
   sharing violation, a failed checkpoint is logged in `checkpoint_failures` and the session
-  continues), `summary.md`, `manifest.json` (argv + every planned cell with its final status:
+  continues), `summary.md`, `memory.md`, `manifest.json` (argv + every planned cell with its final status:
   measured, validated, unsupported, unrun, fallback, serial-only, no-blas, no-parallel-form,
   gated, failed, invalid, dq, unbuilt);
 - `sources-sha256.json`: the SHA-256 of every input (kernels, fortran, harness, validation,
@@ -308,7 +312,7 @@ Not written: the SIZE-substituted `src/` copies (the sizes are in the manifest a
 record's `source.size_lines`; `source.compiled_sha256` keeps the identity of the rewritten
 file), `*.copy` files, and the runtime header / LLVM shim copies (identified by the Blade.dll
 hash; their per-file hashes stay in `evidence.runtime_headers_sha256`). Smoke and check
-sessions write only `session.json`, `summary.md` and `manifest.json` (their builds live in
+sessions write only `session.json`, `summary.md`, `memory.md` and `manifest.json` (their builds live in
 the git-ignored `bench/.build/`, unpruned).
 
 session.json top level: `schema`, `harness_version`, `mode`, `argv`, `size`, `started`,
@@ -319,11 +323,112 @@ hypothesis, gate_only, power, checksum_reference, ratio_reference, rounds {n, ru
 order_seed, bootstrap {rounds, resamples, seed}, controls, flags, suppressed, and `arms`:
 per arm `status`, `reason`, `note`, `build` (the build record), `samples[]` (kind, ok,
 reason, time_s, both checksums + texts, validation, round, position, wall_s, peak_working_set,
-page_faults, affinity_mask, started), `stats` (n, min, median, q1, q3, iqr, max, mean over
+peak_commit_bytes, page_faults, affinity_mask, started), `stats` (n, min, median, q1, q3, iqr, max, mean over
 the timed rounds), `peak_working_set_max`, `trend`, `ratio`, `ratio_vs_blade_cpp`,
 `incremental`, `incremental_ratio`.
 
+### Process memory report (B01, additive memory schema 1)
+
+Session **schema 2 is retained**; harness version 2.1 adds fields and `memory.md`. Existing
+`peak_working_set`, `page_faults`, timing statistics and `peak_working_set_max` keep their
+meaning. The last is the maximum across **all** samples, including warm-ups, failed runs
+and timing exclusions; the timing summary labels that population and uses the correct
+binary unit, MiB. It is a legacy diagnostic, not the primary memory statistic. The latest
+bench summary and memory report are also written beside the immutable session bundle.
+
+Each raw `Sample` now retains `peak_commit_bytes` from Win32 `PeakPagefileUsage`, which the
+driver already collected but previously dropped. The accurately named process counters
+are `process_peak_resident_bytes` (`PeakWorkingSetSize`), `process_peak_commit_bytes`
+(`PeakPagefileUsage`) and `process_page_fault_count` (`PageFaultCount`, soft AND hard
+faults, not hard faults or DRAM traffic). The source and units are recorded at top-level
+`memory_report.counters`. Counter semantics follow
+[Microsoft's PROCESS_MEMORY_COUNTERS definitions](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters).
+
+Resident/commit counters describe the **fresh child process's lifetime high water**;
+page faults are a cumulative per-run count. Counters are read from the child's handle
+after exit when available. That scope includes startup, runtimes, libraries,
+allocation, execution and teardown. It is neither a resettable kernel-local peak nor live
+allocation capacity. Commit is not bytes transferred to the page file. No input-only peak
+is subtracted from a total peak. Input-only arms remain separate observations.
+
+Each arm and drift control has an additive `memory_report {schema: 1, populations: {...}}`.
+Populations are `successful_rounds` (the PRIMARY bench population), `successful_contracts`
+(check/smoke), `successful_warmups`, `successful_controls`, `failed_runs`, and
+`successful_timing_excluded`. The last is an explicitly overlapping subset of successful
+runs, retained to expose samples excluded from timing inference. **Timing excursions stay
+in the successful memory distributions.** If a later failure invalidates an arm, earlier
+successful observations remain descriptive; arm status and partial/aborted state remain
+visible and do not license comparisons.
+
+Every population records `sample_count` and `counters.<metric> {status, unit,
+available_runs, missing_runs, distribution}`. Status is `unmeasured` (no observations),
+`partial` (some unavailable), or `measured` (all observed). Missing/null counter values stay
+unmeasured, never zero-filled; an observed zero is valid. Each `distribution` contains n,
+min, median, q1, q3, IQR, max and mean over the available per-run counter values; empty
+distributions contain only `n: 0`. Bytes stay bytes in JSON; `memory.md` displays MiB. No
+timing bootstrap interval is presented as memory uncertainty. Reports update at each JSON
+checkpoint, including an aborted block that never reaches timing statistics.
+
+Top-level `memory_report.unmeasured` explicitly records missing coverage: compiler demand
+and backing-root liveness, live allocation/capacity, allocator-retained bytes, allocation
+count/cumulative bytes, external/worker workspace, modeled cache traffic, measured DRAM
+traffic, provider fetched/decoded bytes, and the separate required-store audit. Process
+peaks cannot reveal which root was live at a peak, distinguish live from retained memory,
+or prove stores survived. Native byte/event instrumentation is a later card; no compiler
+or runtime policy changes are made by this report.
+
+Optional `kernel.json.memory_contract` metadata is copied into the block/control record;
+the PM49 saxpy control supplies its required values, observation lifetime, cleanup
+endpoints, current route/audit limitations and a linear analytical payload/operation model
+in bytes per element of one size parameter. This is a source model, not measured capacity
+or physical traffic, and applies to the total arm, not its input-only twin. It never
+changes compilation or arithmetic. Undeclared kernel contracts/cleanup models are
+explicitly unmeasured. Executable, compiler, substituted source, lane, flags and runtime
+knob identity remain in the existing session build records; `memory.md` points to them.
+
+Runner-only focused fixtures (no real child execution or compilation):
+
+```
+C:\Python314\python.exe -m unittest discover -s bench/harness -p test_memory.py -v
+```
+
+The fixtures cover population boundaries, timing-excluded memory observations,
+missing/null/zero counters, empty/failed-only records, independent commit/resident values,
+commit propagation on timeout, legacy fields/JSON, byte units, and partial-block/control
+checkpoints. Synthetic process counters deliberately cannot establish a live-payload or
+retention change; those native allocation fixtures are deferred with instrumentation.
+
 ## Test kernels
+
+### PM54 diagnostic control (B02)
+
+`diagnose-memory` runs reserve-only, sparse-touch and dense workloads independently; it
+does not discover/build kernels, require a Blade binary, modify smoke evidence, or enter
+the timing/ratio pipeline. Contract and coverage: [PM54 spec](../diagnostics/pm54/spec.md).
+Options are `--bytes N` (default non-power-of-two 16,000,003; ceiling 256,000,003),
+`--out-dir DIR`, and `--run-timeout S` (default 30, maximum 60). Runner only:
+
+```
+C:\Python314\python.exe -m unittest discover -s bench/harness -p test_pm54.py -v
+C:\Python314\python.exe bench/harness/run.py diagnose-memory --bytes 65539 --out-dir bench/.build/B02-smoke
+```
+
+The portable `pm54.py` contract/orchestrator uses existing `run_proc`, Sample and memory
+reporting; `pm54_win32.py` contains the native child. Pure tests use a fake backend and
+run no native API/child/compiler/benchmark. Each child records actual page size and
+allocation-address granularity, checked reservation/commit geometry, byte stores vs
+distinct touched pages, checksum coverage, work/dense-completion status, explicit release
+attempt/success and five named current/peak/fault snapshots. Reserve-only's commit/touch
+stages are explicitly skipped; it never reads its reservation or claims dense output.
+
+`diagnostic.md` presents current working-set/commit alongside their lifetime high waters;
+`memory.md` uses the independent parent process observations. Missing counters remain
+null/unmeasured. Release success does not imply an immediate current-resident drop, and
+high waters never become resettable allocation peaks. Python/metadata/checksum overhead
+is included; whole-allocator live/retained capacity and DRAM bytes remain unmeasured. A
+failure, timeout, bad checksum, missing stage or failed release returns 1; invalid parent
+arguments return 2. No quiet-machine or headline performance evidence follows from this
+diagnostic correctness check.
 
 `bench/.build/stub-kernels/` (selfcheck, dqprobe, fbprobe) with pins in
 `bench/.build/stub-validation/` and `bench/.build/stub-config.json`:

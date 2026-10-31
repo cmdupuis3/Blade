@@ -1,0 +1,23 @@
+// TEST: Fold Ring Long Trajectory Called Twice
+// ============================================================================
+// PM35: a long rank-1 trajectory (200003 steps, 1.6 MB as a full buffer) folded
+// twice per call; with the ring each call holds 2 rows. Called twice with
+// different seeds (each call its own ring and states).
+// ============================================================================
+type T = Idx<200003>
+
+function summary(a: Float64) -> (Float64, Float64) = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.99999 + 0.00001
+    (reduce(s, (+)), reduce(s, lambda(p, q) -> if p > q then p else q))
+}
+
+let (sum_a, max_a) = summary(0.25)
+let (sum_b, max_b) = summary(4.0)
+// EXPECT: sum_a = 135152.740243131
+// EXPECT: max_a = 0.898501582590666
+// EXPECT: sum_b = 459404.039030057
+// EXPECT: max_b = 4.0

@@ -1555,7 +1555,11 @@ let guardProviderWrite (ind: string) (lines: string list) : string list =
 /// `ix[k] - ix[k-1] - 1` (canon_left_justify, cpp:863). The diagonal-anchored
 /// form shifts the whole pool by one cell in both directions and runs one
 /// cell past the end of the last row.
-let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string) (varName: string) (toFlat: bool) : string list =
+/// The cell count of a packed (SymIdx/AntisymIdx leading group + dense
+/// trailing) pool -- canonical cells x the trailing block -- with exactly the
+/// refusals the linear pool copy below raises (shared by it and by the
+/// provider write's destination-passing arm, provider-sink v1).
+let packedPoolTotal (arrTy: IRArrayType) (varName: string) : int64 =
     let (lead, trailing) =
         match arrTy.IndexTypes with
         | l :: rest when l.Symmetry <> SymNone && l.Rank >= 2 -> (l, rest)
@@ -1579,7 +1583,10 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
     // Linear pool copy (canonical cells x trailing block, contiguous) -- one
     // shape for sym and antisym alike; see the header comment for why the
     // strict pool is compact.
-    let total = card * trail
+    card * trail
+
+let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string) (varName: string) (toFlat: bool) : string list =
+    let total = packedPoolTotal arrTy varName
     if toFlat then
         [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
           $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { {{flatBase}}_flat[__pc_i] = __pc_pool[__pc_i]; } }""" ]

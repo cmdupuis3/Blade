@@ -34,5 +34,22 @@
     "ifx-natural",
     "ifx-expert"
   ],
-  "source_of_truth": "bench/kernels/saxpy/spec.md + bench/notes/kernel-list.md (2026-10-17)"
+  "source_of_truth": "bench/kernels/saxpy/spec.md + bench/notes/kernel-list.md (2026-10-17)",
+  "memory_contract": {
+    "id": "PM49-triad-materialized-v1",
+    "source": "bench/kernels/saxpy/spec.md",
+    "required_values": "distinct immutable Float64 x and y, named stored Float64 y2=1.5*x+y, checksum=sum(y2*y2), input_checksum=sum(x)+sum(y)",
+    "observation_boundary": "every y2 cell is stored and available through its checksum consumption; diagnostic smoke dump observes every cell after construction; input sums consume original x/y after kernel return",
+    "cleanup_endpoint": "source intent: Blade function-local y2 released at kernel return and x/y at outer block exit, before stop; Fortran x/y/y2 deallocated after stop (and after BENCH_DUMP if enabled); counters cover whole process lifetime",
+    "audit_status": "unverified on base master 361504b6: known inline cleanup defects are A01 scope; LLVM saxpy lifetime-matched attribution remains withdrawn pending A01 and fresh route, lifetime and full-size machine-code store audits; no memory optimization or bandwidth win claimed",
+    "linear_payload_model": {
+      "parameter": "n",
+      "bytes_per_element": {
+        "required_input_payload": 16,
+        "required_output_payload": 8,
+        "triad_logical_reads": 16,
+        "triad_logical_writes": 8
+      }
+    }
+  }
 }

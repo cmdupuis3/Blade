@@ -1,0 +1,12 @@
+// TEST: Sibling Maps Need A Shared Input
+// ============================================================================
+// y1 reads x and y2 reads w: one sweep would save no input traffic, so the
+// two maps are not siblings and keep their own loops.
+type I = Idx<5>
+function two(x: Array<Float64 like I>, w: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a * 2.0 |> compute
+    let y2 = method_for(w) <@> lambda(a) -> a * 3.0 |> compute
+    reduce(y1, (+)) + reduce(y2, (+))
+}
+let r = two([1.0, 2.0, 3.0, 4.0, 5.0], [10.0, 20.0, 30.0, 40.0, 50.0])
+// EXPECT: r = 480.0

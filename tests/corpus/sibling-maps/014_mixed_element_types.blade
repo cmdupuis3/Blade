@@ -1,0 +1,10 @@
+// TEST: Sibling Maps Write Outputs Of Different Element Types
+// ============================================================================
+// One sweep over x writes a Float64 output and a Bool output, each in its
+// own pool with its own element type.
+type I = Idx<6>
+let x: Array<Float64 like I> = [1.0, -2.0, 3.0, -4.0, 5.0, -6.0]
+let y1 = method_for(x) <@> lambda(a) -> a * a |> compute
+let y2 = method_for(x) <@> lambda(a) -> a > 0.0 |> compute
+// EXPECT: y1 = [1.0, 4.0, 9.0, 16.0, 25.0, 36.0]
+// EXPECT: y2 = [true, false, true, false, true, false]

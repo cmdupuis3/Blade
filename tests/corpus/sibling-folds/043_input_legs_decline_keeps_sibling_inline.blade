@@ -5,7 +5,8 @@
 // is not an owned allocation form; the call is not retained for A7c) -- and
 // the sibling pass's own join-driven inlining still keeps the call inlined
 // for its Jx join (W2-4 fifth review NEW 3: the decline record no longer
-// promises the call survives). No return-boundary event is installed.
+// promises the call survives). Since the round-4 merge that join-driven
+// inline carries its own A01 lifetime region (one release, no BL7005).
 // ============================================================================
 type Ix = Idx<1003>
 type Jx = Idx<1009>

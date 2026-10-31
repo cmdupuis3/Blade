@@ -1,0 +1,22 @@
+// TEST: LLVM same-cell return keeps old scalar snapshots and two live call results
+// The completed sum is an old-value barrier. The return may replace p's
+// cells only when p is fresh and solely owned by this ordinary function.
+type Ix = Idx<7>
+function same_cell(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let old_sum = reduce(p, (+))
+    let bias = old_sum - 1.0
+    p * 0.5 + bias
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let y: Array<Float64 like Ix> = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+let a = same_cell(x)
+let b = same_cell(y)
+let sa = reduce(a, (+))
+let sb = reduce(b, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: y = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+// EXPECT: a = [48.5, 49.5, 50.5, 51.5, 52.5, 53.5, 54.5]
+// EXPECT: b = [120.5, 122.5, 124.5, 126.5, 128.5, 130.5, 132.5]
+// EXPECT: sa = 360.5
+// EXPECT: sb = 885.5

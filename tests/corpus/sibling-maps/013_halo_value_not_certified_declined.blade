@@ -1,0 +1,19 @@
+// TEST: Sibling Maps Certify Window Reads As Safe, Not As Values (aborts)
+// ============================================================================
+// y1 raises a window cell to the power of its neighbour: an integer `^` whose
+// exponent may be negative may fail. The window certificate proves each read
+// in bounds and nothing about its value, so y1 is not closed-total and keeps
+// its own loop: the first failure is y1's negative exponent, ahead of the
+// intervening `1 / q` (Codex review of PM04: substituting a literal for the
+// certified reads had proved the exponent nonnegative).
+type I = Idx<5>
+function probe(x: Array<Int64 like I>, q: Int64) -> Int64 = {
+    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) ->
+        x(w(0)) ^ x(w(1)) |> compute
+    let stop = 1 / q
+    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) ->
+        x(w(0)) + x(w(1)) |> compute
+    reduce(y1, (+)) + reduce(y2, (+)) + stop
+}
+let r = probe([2, -1, 2, 2, 2], 0)
+// ABORT: negative exponent

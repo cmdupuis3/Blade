@@ -1,0 +1,17 @@
+// TEST: Sibling Halo Walks That All Request Threads Share One Team
+// ============================================================================
+// Both window kernels carry `where omp`: the walk's shared segment carries
+// the one thread team (the fringes are a few cells and stay serial); every
+// output cell is independent, so the team changes no value.
+type I = Idx<41>
+function gen(k: Int64) -> Float64 = Float64((k * 53 + 7) % 32) / 32.0
+function fir2(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) where omp ->
+        0.25 * x(w(-1)) + 0.5 * x(w(0)) + 0.25 * x(w(1)) |> compute
+    let y2 = method_for(halo<I, [-2, 2]>) <@> lambda(w) where omp ->
+        x(w(2)) - x(w(-2)) |> compute
+    reduce(y1, (+)) + reduce(y2, (+)) * 2.0 + y1(0) + y2(36)
+}
+let x = method_for(range<I>) <@> lambda(i) -> gen(Int64(i)) |> compute
+let c = fir2(x)
+// EXPECT: c = 19.65625

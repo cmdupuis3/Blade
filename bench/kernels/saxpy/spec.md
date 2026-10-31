@@ -84,3 +84,65 @@ investigated.
 - A compiler eliding the `y2` stores (in any arm) is the one way to "win" here; the store
   audit of the optimized machine code (README §1.5, M10) is the gate, and an arm that fails
   it is reported as "checksum-only computation".
+
+## Round-4 PM49 measurement contract (B01, 2026-10-22)
+
+`PM49-triad-materialized-v1` reuses this existing kernel as the round's **one** bandwidth
+control. Swapping the sketch's operand names gives `y + alpha*x`, the identical triad.
+No new control family, algorithm, source tuning or checksum-only replacement is added.
+The committed Blade, natural/expert Fortran and input-only sources and independent pins
+remain unchanged by B01. `kernel.json.memory_contract` carries the reporting metadata.
+
+Required values are distinct, immutable `x` and `y` with the existing `Ix` provenance,
+the named stored `y2`, and BOTH existing checksum scalars. Every `y2` cell must be assigned
+and available through its checksum consumption. Original `x/y` are then consumed by the
+input checksum. The natural tier uses an array assignment plus read-back; the expert
+may fuse checksum arithmetic with the mandatory output stores. The output store audit is
+required in **both** tiers, both Blade lanes and every measured regime; source assignments
+or passing checksums alone cannot establish it.
+
+For Float64 and extent `n`, analytical input payload is `16n` bytes, mandatory output
+payload `8n` bytes. The triad operation's logical traffic is `16n` bytes read and `8n`
+bytes written. These are operation/payload models, **not** live capacity or DRAM traffic.
+The complete timed task also includes allocation/first touch, input generation, both
+input sums, the output checksum, and implementation-dependent passes. A separate checksum
+read-back reads `8n` output bytes; a fused checksum can avoid that read while keeping the
+stores. No `24n / complete_time` DRAM-bandwidth claim is permitted. The input-only twin
+requires the inputs and `checksum=0`; its process peaks are reported beside the total,
+never subtracted to invent workspace.
+
+| size | n | input payload bytes | output payload bytes | triad logical read/write bytes |
+|---|---:|---:|---:|---:|
+| smoke | 20,011 | 320,176 | 160,088 | 320,176 / 160,088 |
+| control | 700,001 | 11,200,016 | 5,600,008 | 11,200,016 / 5,600,008 |
+| full | 2,000,003 | 32,000,048 | 16,000,024 | 32,000,048 / 16,000,024 |
+
+All extents are non-powers of two. These existing points characterize this control;
+no asymptotic, cache-to-DRAM sweep or bandwidth saturation claim follows from them.
+
+The timer starts before allocations and stops after both scalar checksums. Source intent:
+Blade's function-local output is released at kernel return; outer input arrays at block
+exit, before the stop line. Fortran program arrays remain through the stop line and are
+explicitly deallocated after reporting (and after `BENCH_DUMP` when enabled). Retained
+allocator capacity may persist after logical release. The process counters cover startup
+through exit, including cleanup; they cannot locate a release or prove memory retention.
+
+**Current route/lifetime status: unverified on base master `361504b6`.** The four known
+inline cleanup defects are owned by A01
+([existing brief](../../notes/round3/briefs/wave2-builder-briefs.md#w2-4-round4-lifetime)).
+In particular LLVM saxpy's lifetime-matched attribution remains withdrawn. B01 makes no
+memory optimization, lifetime-parity, store-audit or speedup claim. A01 plus fresh plan,
+emission, optimized machine-code store and cleanup evidence must establish those facts
+on the tested source identity before interpreting a comparison.
+
+The existing independent reference is `bench/validation/ref_saxpy.py`, with smoke, control
+and full pins in `pins-B.json`; its smoke result includes every `y2` cell. B01 adds
+`bench/validation/dump/saxpy_dump.blade` for full smoke output validation. Existing natural
+and expert `BENCH_DUMP` variants write every cell to `saxpy_dump.txt`. The diagnostic Blade
+fixture deliberately retains its output for printing; its lifetime differs from the timed
+program, so its time and process peaks must never stand in for benchmark measurements.
+
+The runner must validate the smoke dump cell by cell against the independent reference,
+validate both scalar pins in total and twin runs, and record actual selected/refused
+routes and skips. B01's harness report records process resident and commit distributions;
+live allocation/capacity, retention, DRAM traffic and allocation churn stay **unmeasured**.

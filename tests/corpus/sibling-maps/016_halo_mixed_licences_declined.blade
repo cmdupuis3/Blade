@@ -1,0 +1,13 @@
+// TEST: Sibling Halo Walks With Different Thread Licences Keep Their Loops
+// ============================================================================
+// y1 carries `where omp`, y2 `where omp(w: 0)` (a depth that licenses no
+// level): one shared team would thread y2 beyond its licence, so the two
+// walks keep their own loops (Codex review of PM04).
+type I = Idx<23>
+function two(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp -> x(w(0)) + x(w(1)) |> compute
+    let y2 = method_for(halo<I, [0, 1]>) <@> lambda(w) where omp(w: 0) -> x(w(0)) - x(w(1)) |> compute
+    reduce(y1, (+)) + reduce(y2, (+)) * 3.0
+}
+let r = two(0.25 * Float64(range<Idx<23>>) |> compute)
+// EXPECT: r = 104.5

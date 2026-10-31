@@ -660,6 +660,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRUnaryOp (op, e) ->
         N.evalUnaryOp op (evalExpr st env e)
 
+    | IRBeginPoolScope _ | IRReleasePools _ -> VUnit
     | IRLet (id, value, body) ->
         // SSA ids are globally unique, so binding into the current frame (rather
         // than a child scope) is safe and matches the flat env model.
@@ -1159,11 +1160,6 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             |> Array.ofList
         VArray (ArrayOps.allocDense at.ElemType at.IndexTypes extents)
 
-    // An inlined call's return boundary (IR.IRReleasePools, A7c): the compiled
-    // lanes free the callee's pools here; the interpreter's arrays are
-    // garbage-collected, so the event is a no-op that changes no value.
-    | IRReleasePools _ -> VUnit
-
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.
@@ -1430,6 +1426,33 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
          | VArray ba ->
              let coords = indices |> List.map (fun e -> toI64 (evalExpr st env e))
              ArrayOps.writeIndexed ba coords v
+         | VSparse sv ->
+             // Sparse::operator() writes an EXISTING key's compact cell. Keep
+             // the same backing store (formal/ordinary aliases share it), not
+             // sparseToDense's copy; partial reads remain independent gathers.
+             let packed =
+                 match sv.LeadRank, indices with
+                 | 1, first :: rest when (match first with IRTuple _ -> false | _ -> true) -> IRTuple [first] :: rest
+                 | _ -> indices
+             match packed with
+             | IRTuple coords :: trailing when coords.Length = sv.LeadRank ->
+                 match classifyCompoundIndexTuple sv.LeadRank coords with
+                 | CompoundFull ->
+                     if sv.IndexTypes.Length <> 1 || sv.TrailingStride <> 1L || not trailing.IsEmpty then
+                         raise (InterpUnsupported "sparse assignment with trailing axes/indices is not supported")
+                     // evalExpr already evaluated the RHS, then the target
+                     // above; evaluate packed key coordinates once in order,
+                     // before key lookup. No trailing offset is admitted.
+                     let key = coords |> List.map (fun e -> toI64 (evalExpr st env e)) |> Array.ofList
+                     let r = ArrayOps.sparseLinearize sv key
+                     let compact =
+                         { ElemType = sv.ElemType
+                           IndexTypes = []
+                           Extents = [| sv.Cardinality * sv.TrailingStride |]
+                           Data = sv.Data }
+                     ArrayOps.writeCell compact [int64 r] v
+                 | CompoundPartial _ -> raise (InterpUnsupported "partial/wildcard sparse assignment is not supported")
+             | _ -> raise (InterpUnsupported "sparse assignment requires a full packed key")
          | _ -> raise (InterpUnsupported "IRAssign to non-array index target"))
     | LVOther _ -> raise (InterpUnsupported "IRAssign to non-lvalue target")
 

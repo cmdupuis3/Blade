@@ -1,0 +1,16 @@
+// TEST: Same-cell return declines when an alias of the donor is folded
+// PM03 (A06): `held` names p's storage; the certificate admits only scalar
+// observations of the donor itself after it, so the fresh result pool stays.
+type Ix = Idx<7>
+function retained(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let held = p
+    let old_sum = reduce(held, (+))
+    p * 0.5 + old_sum
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let a = retained(x)
+let sa = reduce(a, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: a = [49.5, 50.5, 51.5, 52.5, 53.5, 54.5, 55.5]
+// EXPECT: sa = 367.5

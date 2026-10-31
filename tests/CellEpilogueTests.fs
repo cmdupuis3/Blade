@@ -505,6 +505,25 @@ let runCellEpilogueTests () : BlockResult =
             match r with
             | "rep_ser" -> Some "__epl_acc_"
             | _ -> Some "for (size_t __ek = __cep_b;" }
+    let corpusFile (rel: string) =
+        [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
+          Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
+    // (since the round-4 merge the kept inline's fail-closed ownership scope --
+    // round-3 W2-4 rounds 5-7 -- declines 032_lifetime (a tuple-typed callee let)
+    // and 034_lifetime (a user call in the callee): their legs do not ride, so
+    // they have no gate-on / gate-off raw-bit arm here; `blade test optimize`
+    // pins their declines and releases)
+    let lifetimePrograms =
+        [ "033_lifetime_cse_equal_caller_map.blade", ["r"]
+          "035_lifetime_function_scalar_return.blade", ["r"]
+          "037_lifetime_scratch_reuse_region.blade", ["r"] ]
+        |> List.choose (fun (file, scalars) ->
+            match corpusFile ("sibling-folds/" + file) with
+            | None -> fail ("inline lifetime witness " + file) "corpus file not found"; None
+            | Some path ->
+                Some { legsCall with Name = "lifetime_" + Path.GetFileNameWithoutExtension file
+                                     Source = File.ReadAllText path; Scalars = scalars
+                                     Needle = fun _ -> Some "__epl_acc_" })
     let legRegimes =
         [ (legsCall, "rep_ser", "off", true, true)
           (legsCall, "lic_ser", "off", false, false)
@@ -512,6 +531,7 @@ let runCellEpilogueTests () : BlockResult =
           (legsStrict, "rep_ser", "off", true, true)
           (legsStrict, "lic_ser", "off", false, true)
           (legsStrict, "lic_ser", "fast", false, true) ]
+        @ (lifetimePrograms |> List.map (fun p -> p, "rep_ser", "off", true, true))
     for (p, regime, contract, repro, bitwise) in legRegimes do
         let name = $"{p.Name} epilogue legs {regime} contract={contract} T=1 (NEW vs BLADE_EPILOGUE_LEGS=0)"
         use _c = pinEnv "BLADE_FP_CONTRACT" contract
@@ -556,7 +576,7 @@ let runCellEpilogueTests () : BlockResult =
     (match Build.resolveClang () with
      | None -> skip "llvm epilogue legs" "no clang (BLADE_LLVM_CLANG)"
      | Some _ ->
-     for p in [ legsCall; legsStrict ] do
+     for p in [ legsCall; legsStrict ] @ lifetimePrograms do
         let name = $"{p.Name} llvm epilogue legs (REPRO, contract=off, T=1): gate on == gate off"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
@@ -593,7 +613,10 @@ let runCellEpilogueTests () : BlockResult =
             let bitsShown = a |> List.forall (fun l -> l.Contains " #")
             // the joined pass's loop is gone (the call form's inlined callee
             // is not emitted when nothing calls it any more)
-            let armOk = loops llOn = loops llOff - 1
+            let armOk =
+                if p.Name.StartsWith "lifetime_" then
+                    match Blade.Tests.LlvmTests.inlineLifetimeCleanupProof llOn with Ok n -> n > 0 | Error _ -> false
+                else loops llOn = loops llOff - 1
             if a.IsEmpty || not bitsShown then fail name ($"""no raw bits printed (BLADE_PRINT_BITS): [{String.concat " | " a}]""")
             elif a <> b then fail name ($"""raw bits differ: on [{String.concat " | " a}] off [{String.concat " | " b}]""")
             elif not armOk then fail name ($"arm needle: {loops llOn} loops on vs {loops llOff} off")
@@ -604,15 +627,13 @@ let runCellEpilogueTests () : BlockResult =
     //     intervening BL8013 still fires at its own line, after the producer.
     //   sibling-folds/029: a B1-shaped THROWING callee is never inlined for the
     //     legs; BL8013 fires inside `kernel`'s own frame (`at kernel`).
-    let corpusFile (rel: string) =
-        [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
-          Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
     for (rel, frame) in [ ("sibling-folds/026_input_legs_failure_between_aborts.blade", None)
                           ("sibling-folds/029_input_legs_throwing_callee_keeps_frame.blade", Some "at kernel")
                           ("sibling-folds/034_input_legs_function_caller_failure_after_return.blade", Some "at driver")
                           ("sibling-folds/037_input_legs_decline_alias_function_caller_aborts.blade", Some "at driver")
                           ("sibling-folds/041_input_legs_decline_nested_alias_function_caller_aborts.blade", Some "at driver")
-                          ("sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade", Some "at driver") ] do
+                          ("sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade", Some "at driver")
+                          ("sibling-folds/036_lifetime_caller_panic.blade", Some "at driver") ] do
       for lane in [ "cpp"; "llvm" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
         match corpusFile rel with
@@ -672,7 +693,12 @@ let runCellEpilogueTests () : BlockResult =
                  "sibling-folds/031_input_legs_two_plans_one_inlined_call.blade"
                  "sibling-folds/032_input_legs_unused_final_join_atom_return.blade"
                  "sibling-folds/033_input_legs_cse_barrier_function_caller.blade"
-                 "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade" ] do
+                 "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade"
+                 "sibling-folds/032_lifetime_deleted_final_join.blade"
+                 "sibling-folds/033_lifetime_cse_equal_caller_map.blade"
+                 "sibling-folds/034_lifetime_duplicate_scalar_return.blade"
+                 "sibling-folds/035_lifetime_function_scalar_return.blade"
+                 "sibling-folds/037_lifetime_scratch_reuse_region.blade" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel}: return-boundary releases under ASan and with the pool cache"
         match corpusFile rel with
         | None -> fail name "corpus file not found"
@@ -682,8 +708,13 @@ let runCellEpilogueTests () : BlockResult =
         use _o = pinEnv "BLADE_OMP_THREADS" "1"
         use _r = pinEnv "BLADE_FP_REPRO" "1"
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
-        // 035 is the scratch-reuse witness: reuse ON there (the default), off elsewhere.
-        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035" then null else "off")
+        // master's 035_input_legs is the scratch-reuse witness: reuse ON there (the
+        // default), off for master's other fixtures. Round 4's `_lifetime_` fixtures
+        // keep the default they were written under (037_lifetime is a reuse witness).
+        // Names are matched WHOLE: a bare "035" also matched 035_lifetime after the
+        // round-4 merge.
+        let lifetimeFixture = rel.Contains "_lifetime_"
+        use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035_input_legs" || lifetimeFixture then null else "off")
         let runWith (gate: string) (memcheck: bool) : Result<int * string, string> =
             use _g = pinEnv "BLADE_EPILOGUE_LEGS" (if isNull gate then "1" else gate)
             use _m = pinEnv "BLADE_MEMCHECK" (if memcheck then "1" else null)
@@ -722,8 +753,13 @@ let runCellEpilogueTests () : BlockResult =
                     // release, nothing left outstanding that gate-off frees.
                     // 030 / 032: gate-off keeps W1-D's own join-driven inline, whose
                     // pools then live to exit (pre-existing): gate-on frees more.
-                    if rel.Contains "031" || rel.Contains "033" then a1 = a2 && f1 = f2 && o1 = o2
-                    elif rel.Contains "035" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    // Round 4's `_lifetime_` fixtures keep round 4's rule (the inline
+                    // allocates nothing gate-off does not, and frees no less).
+                    // 037_lifetime is round 4's scratch-reuse witness and behaves like
+                    // 035_input_legs: the event-bearing function forgoes its reuse.
+                    if rel.Contains "035_input_legs" || rel.Contains "037_lifetime" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    elif lifetimeFixture then a1 = a2 && f1 >= f2 && o1 <= o2
+                    elif rel.Contains "031_input_legs" || rel.Contains "033_input_legs" then a1 = a2 && f1 = f2 && o1 = o2
                     else a1 = a2 && f1 >= f2 && o1 <= o2
                 | _ -> false
             if aOn <> 0 || aOff <> 0 || nOn <> 0 || nOff <> 0 then fail name ($"exit codes asan {aOn}/{aOff} plain {nOn}/{nOff}: {tOn}")

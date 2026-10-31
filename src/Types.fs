@@ -544,18 +544,39 @@ let haloContributors (h: HaloAccess) (outExtent: int64) (j: int64) : (int * int6
     |> List.map (fun o -> (o, j - h.Start - int64 o))
     |> List.filter (fun (_, i) -> 0L <= i && i < outExtent)
 
-/// The run boundaries of every `Chunked` alias registered in the current
+/// The run geometry of every `Chunked` alias registered in the current
 /// compilation, by alias (docs/plans/structural/07): what the stencil
 /// emitter reads to drive a halo map over a streamed segmented source one
 /// run at a time (§2.3). The checker records it beside its own
 /// Segmentations table; AsyncLocal, like the provider registries, so
-/// parallel test compilations do not see each other.
+/// parallel test compilations do not see each other. Uniform aliases retain
+/// only extent/edge; explicit consumers request expansion when needed.
 module SegmentTable =
     open System.Threading
-    let private table = new AsyncLocal<Map<string, int64 list>>()
+    type Runs =
+        | UniformRuns of extent: int64 * edge: int64
+        | ExplicitRuns of offsets: int64 list
+    let private table = new AsyncLocal<Map<string, Runs>>()
     let private entries () = match box table.Value with null -> Map.empty | _ -> table.Value
-    let record (alias: string) (offsets: int64 list) = table.Value <- Map.add alias offsets (entries ())
-    let tryFind (alias: string) : int64 list option = Map.tryFind alias (entries ())
+    let record (alias: string) (offsets: int64 list) = table.Value <- Map.add alias (ExplicitRuns offsets) (entries ())
+    let recordUniform (alias: string) (extent: int64) (edge: int64) =
+        table.Value <- Map.add alias (UniformRuns (extent, edge)) (entries ())
+    let tryFindRuns (alias: string) : Runs option = Map.tryFind alias (entries ())
+    /// Compatibility expansion for consumers that require an explicit table.
+    /// The certified uniform halo path never calls this O(number of runs) API.
+    let toExplicitOffsets (runs: Runs) : int64 list =
+        match runs with
+        | ExplicitRuns offsets -> offsets
+        | UniformRuns (n, k) ->
+            if n < 0L || k <= 0L || (n > 0L && k > n) then
+                invalidArg "runs" "invalid uniform segmentation extent/edge"
+            if n = 0L then [0L; 0L]
+            else
+                let rec loop at acc =
+                    if at = n then List.rev (n :: acc)
+                    else loop (at + min k (n - at)) (at :: acc)
+                loop 0L []
+    let tryFind (alias: string) : int64 list option = tryFindRuns alias |> Option.map toExplicitOffsets
     let reset () = table.Value <- Map.empty
 
 /// WHERE A DECLARED TYPE CAME FROM (D11: module-qualified type identity).
@@ -605,6 +626,17 @@ module TypeOrigins =
     let cppName (identity: string) : string =
         if table.ContainsKey identity then identity.Replace(".", "__") else identity
 
+/// Optional private intermediate capability. These are tracked workspace and
+/// serialized disk allowances, NOT a whole-program memory or physical disk cap.
+/// A caller deliberately binding this policy to an artifact authorizes its
+/// persistent scratch behavior. None at existing entry points stays resident.
+type PrivateSpoolPolicy = {
+    Root: string
+    TrackedWorkspaceBytes: uint64
+    LogicalDiskBytes: uint64
+    BlockCells: uint64
+}
+
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2):
 /// the plan `Blade.Optimize.planPoolReuse` computes per function body and
 /// codegen consumes. A let whose fresh dense pool has the same element type
@@ -633,6 +665,7 @@ module PoolReuseTable =
     let donors () : Map<IRId, IRId> = (get ()).Donors
     let recordReturn (func: IRId) (donor: IRId) = cell.Value <- { get () with ReturnDonors = Map.add func donor (get ()).ReturnDonors }
     let tryReturnDonor (func: IRId) : IRId option = Map.tryFind func (get ()).ReturnDonors
+    let returnDonors () : Map<IRId, IRId> = (get ()).ReturnDonors
     let setCurrentReturnDonor (d: IRId option) = cell.Value <- { get () with CurrentReturnDonor = d }
     let currentReturnDonor () : IRId option = (get ()).CurrentReturnDonor
 

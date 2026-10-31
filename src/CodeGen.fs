@@ -136,8 +136,80 @@ let private groupKeysTypeInScope (id: IRId) (scope: IRExpr list) : IRType option
 /// deterministic-deallocation frame can be pushed and popped around it inside a
 /// `try ... finally` WITHOUT adding a closure layer over the mutable `currentNames`
 /// the fold threads (see setAllocOwner's note on that hazard).
+/// PM03 same-cell RETURN, the C++ realization (round 4 A06). The semantic
+/// proof is Blade.SameCellReturn's certificate over the ORIGINAL callable
+/// (shared with the LLVM lane's A04); `Decided` says the return arm recorded
+/// this function's `same-cell-return-cpp` outcome.
+type internal SameCellCandidate =
+    { Proof: Blade.SameCellReturn.Certificate
+      Subject: string
+      Decided: bool ref }
+
+let internal recordSameCellCpp (subject: string) (fid: IRId) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "same-cell-return-cpp"; Version = 1; Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = ($"function v{fid}; the shared same-cell certificate (Blade.SameCellReturn, A04's admission), no generic return donor" :: evidence) }
+
+/// The ACTUAL allocation-frame check, immediately before the tail is emitted:
+/// the body the frame renders is exactly the certified original spine, the
+/// live frame is the function's own depth-one SFunc holding exactly ONE
+/// registration -- the donor's dense pool, owned by the donor let, its free
+/// the dense `deallocate` mirror, no owned dynamic extents, not escaping, not
+/// suppressed -- whose declaration is the one plain dense allocation over a
+/// static constexpr extents table of the certified extent, and every scalar
+/// snapshot the kernel reads is an emitted name. Read-only: nothing is
+/// emitted, forced or freed here. Ok = the donor's C++ name, the loop's four
+/// temporaries (pool pointer, cell count, index, old cell) -- each chosen so
+/// it is no emitted binding name and no identifier already in the body (a
+/// Blade name may itself be `__sc_old`; review A06-1) -- and the rendered
+/// cell expression over the old-cell temporary.
+let private sameCellRealization (proof: Blade.SameCellReturn.Certificate) (lets: (IRId * IRExpr) list)
+                                (info: ApplyInfo) (names: Map<IRId, string>) (stmts: string list)
+                                : Result<string * (string * string * string * string) * string, string> =
+    let rec spineIds e = match e with IRLet (id, _, b) -> id :: spineIds b | _ -> []
+    if lets |> List.map fst <> spineIds proof.Body then Error "the emitted body's let spine is not the certified original spine"
+    elif info <> proof.Tail then Error "the emitted return is not the certified tail"
+    else
+    match Map.tryFind proof.Donor names with
+    | None -> Error "the donor has no emitted name"
+    | Some dn ->
+    let frameOk =
+        allocScopeDepth () = 1 &&
+        (match currentAllocScope () with
+         | Some frame when frame.Kind = SFunc ->
+             (match frame.Allocs with
+              | [ PoolAlloc (n, "deallocate", "typename promote<double, 1>::type, nullptr", None, Some owner) ] ->
+                  n = dn && owner = proof.Donor && not (frame.Escapes.Contains proof.Donor) && not (frame.SuppressNames.Contains dn)
+              | _ -> false)
+         | _ -> false)
+    if not frameOk then Error "the donor is not the frame's sole tracked dense allocation (owner, routine, extents, escape or suppression differ)"
+    else
+    let decl = $"Array<double, 1> {dn} = {{ allocate<typename promote<double, 1>::type, nullptr>({dn}_extents), {dn}_extents }};"
+    let ext = $"static constexpr const size_t {dn}_extents[1] = {{ {proof.Extent} }};"
+    let count (needle: string) = stmts |> List.filter (fun l -> l.Trim() = needle) |> List.length
+    if count decl <> 1 || count ext <> 1 then Error "the donor's declaration is not the one plain dense allocation over its static extents table"
+    elif proof.Snapshots |> Set.exists (fun id -> not (Map.containsKey id names)) then Error "a scalar snapshot is not an emitted binding"
+    else
+    match resolveCallable info.Kernel with
+    | Some k when k.Params.Length = 1 ->
+        let leaf = k.Params.Head.VarId
+        let taken = names |> Map.toSeq |> Seq.map snd |> Set.ofSeq
+        let body = String.concat "\n" stmts
+        let used = System.Collections.Generic.HashSet<string>()
+        let free (stem: string) =
+            let rec pick i =
+                let cand = if i = 0 then stem else $"{stem}{i}"
+                if taken.Contains cand || used.Contains cand || containsIdentToken body cand then pick (i + 1)
+                else (used.Add cand |> ignore; cand)
+            pick 0
+        let temps = (free "__sc_pool", free "__sc_cells", free "__sc_k", free "__sc_old")
+        let (_, _, _, oldName) = temps
+        Ok (dn, temps, exprToCpp (Map.add leaf oldName names) k.Body)
+    | _ -> Error "the return kernel does not resolve to its certified one-parameter callable"
+
 let rec private genFuncBodyScoped
         (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+        (sameCell: SameCellCandidate option)
         (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : string list =
     let mutable currentNames = names
     // Grouped-array registrations made by THIS body's lets (group_by ->
@@ -211,7 +283,7 @@ let rec private genFuncBodyScoped
             | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
                 Set.add rid read
             | _ -> read
-    let stmts = lets |> List.collect (fun (id, value) ->
+    let emitBodyLet (id: IRId, value: IRExpr) : string list =
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
@@ -230,6 +302,13 @@ let rec private genFuncBodyScoped
                 | e -> e
             collapse value
         match value with
+        | IRBeginPoolScope call ->
+            currentNames <- Map.add id varName currentNames
+            [ $"{indent}// A01: begin inline pool scope: {call}" ]
+        | IRReleasePools (_, pools, call) ->
+            let lines = releaseInlinePools indent currentNames pools call
+            currentNames <- Map.add id varName currentNames
+            lines
         | IRForRange (vid, lo, hi, forBody) ->
             // Route through genForRangeBinding -- the recursive binding-level
             // renderer -- so nested for-in loops (and any statement form its
@@ -838,7 +917,14 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
-            [$"{indent}auto {varName} = {valStr};"])
+            [$"{indent}auto {varName} = {valStr};"]
+    // Sibling maps (Optimize.planSiblingMaps): each let renders inside the
+    // group protocol -- the first member preflights the group, the last
+    // flushes any stash its apply never reached (CodeGenLoopNest).
+    let stmts = lets |> List.collect (fun (id, value) ->
+        siblingArmBegin id $"__v{id}" siblingPreflight
+        let lines = emitBodyLet (id, value)
+        lines @ siblingArmEnd id $"__v{id}")
     // Scratch reuse: a let the plan gave a donor takes the donor's pool -- its
     // `allocate<>` declaration is rewritten into an alias of the donor's data
     // (its own extents table stays), and its scope free is spared; the donor's
@@ -853,8 +939,30 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                  | Some dn ->
                      let name = $"__v{id}"
                      let (acc', matched) = rewritePoolAlias acc name dn
-                     if matched then suppressAllocName name
-                     acc'
+                     // the backing goes with the donor; an owned run-time extents
+                     // table (PM60) is still the reuser's to free
+                     if matched then spareReusedBacking name
+                     // PM60: a RUN-TIME-shaped pair (the reuser's extents are not
+                     // a static table) is proved equal by the planner; the
+                     // emitted belt checks it before the first store and fails
+                     // loudly (an internal error) rather than overrun the pool
+                     let staticExt = acc' |> List.exists (fun l -> l.TrimStart().StartsWith $"static constexpr const size_t {name}_extents[")
+                     if matched && not staticExt then
+                         let tag = $"/* pool reuse: {name} takes {dn}'s dead pool */"
+                         let rank =
+                             acc' |> List.tryPick (fun l ->
+                                 let m = System.Text.RegularExpressions.Regex.Match(l, @"Array<.+?, (\d+)> " + System.Text.RegularExpressions.Regex.Escape name + " = ")
+                                 if m.Success && l.Contains tag then Some (int m.Groups.[1].Value) else None)
+                         match rank with
+                         | Some r ->
+                             let cond = [ 0 .. r - 1 ] |> List.map (fun d -> $"{name}_extents[{d}] == {dn}.extents[{d}]") |> String.concat " && "
+                             acc' |> List.collect (fun l ->
+                                 if l.Contains tag then
+                                     let ind = l.Substring(0, l.Length - l.TrimStart().Length)
+                                     [ l; $"{ind}if (!({cond})) {{ blade_rt::panic(\"BL9002\", \"internal: run-time scratch reuse over unequal extents ({name} <- {dn})\", nullptr, 0); }}" ]
+                                 else [ l ])
+                         | None -> acc'
+                     else acc'
                  | None -> acc)
             | None -> acc) stmts
     // Return-arm emissions carry NO owner: a __retN temporary must not be matched
@@ -882,6 +990,44 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // the inline-expression sentinel (UNEVALUATED_COMPUTATION_USED_AS_
         // VALUE) even though the statement-form emitter handles it exactly
         // as it handles the computed spelling.
+        // PM03 same-cell return (A06): the certified tail fills the donor's
+        // own pool -- old cell to a scalar, then the same-index store -- and
+        // returns it; any realization failure takes the fresh return below,
+        // once, nothing emitted or evaluated before it.
+        let sameCellArm =
+            match retExpr, sameCell with
+            | IRCompute (IRApplyCombinator info), Some cand when not cand.Decided.Value ->
+                cand.Decided.Value <- true
+                match sameCellRealization cand.Proof lets info currentNames stmts with
+                | Error why ->
+                    recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined why) []
+                    None
+                | Ok (dn, (pool, cells, k, old), cell) ->
+                    let i2 = indent + "    "
+                    let i3 = i2 + "    "
+                    let code =
+                        [ $"{indent}// same-cell return (A06, PM03): function v{cand.Proof.Function} donor v{cand.Proof.Donor} -- filled in {dn}'s own pool, each old cell loaded before its same-index store; no result pool"
+                          $"{indent}{{"
+                          $"{i2}double* {pool} = nested_array_utilities::pool_base({dn}.data);"
+                          $"{i2}const size_t {cells} = {cand.Proof.Extent}UL;"
+                          $"{i2}BLADE_IVDEP"
+                          $"{i2}for (size_t {k} = 0; {k} < {cells}; {k}++) {{"
+                          $"{i3}const double {old} = {pool}[{k}];"
+                          $"{i3}{pool}[{k}] = {cell};"
+                          $"{i2}}}"
+                          $"{indent}}}" ]
+                    // The donor's pool leaves with the value (its static
+                    // constexpr extents survive the frame); nothing else owns it.
+                    suppressAllocName dn
+                    recordSameCellCpp cand.Subject cand.Proof.Function Blade.Effects.Applied
+                        [ $"donor v{cand.Proof.Donor} (`{dn}`), the frame's sole tracked dense pool, returned; one pool, no result allocation, no in-callee free"
+                          "old cell loaded into a scalar before the same-index store; the kernel, its operand order and every scalar snapshot unchanged"
+                          "serial; no restricted second access path" ]
+                    Some (stmts @ code @ popAllocScopeFrees indent @ [$"{indent}return {dn};"])
+            | _ -> None
+        match sameCellArm with
+        | Some lines -> lines
+        | None ->
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = $"__ret{builder.FreshId()}"
@@ -1188,6 +1334,12 @@ or return a scalar and materialize at the call site"
 /// registers into that frame and is freed immediately before the single exit,
 /// unless the escape analysis (or a return-name suppression) spares it.
 and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+    genFuncBodyWith ctx builder names indent None body
+
+/// genFuncBody with the ordinary function return's same-cell candidate (A06):
+/// only genFuncDefCore passes one; every other body renderer passes None.
+and internal genFuncBodyWith (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+                             (sameCell: SameCellCandidate option) (body: IRExpr) : string list =
     // Deep unroll: flatten all nested IRLet chains into a flat list
     let rec deepUnroll (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match expr with
@@ -1290,7 +1442,7 @@ and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
     pushAllocScope SFunc escapes
-    try genFuncBodyScoped ctx builder names indent lets retExpr
+    try genFuncBodyScoped ctx builder names indent sameCell lets retExpr
     finally truncateAllocScopeStack allocDepth
 
 // Shadow-stack frames: emission markers and panic-reachability resolution
@@ -1660,6 +1812,24 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
     // Scratch reuse: the plan's donor for THIS body's return position, read
     // by genFuncBody's return arm; cleared after so no other body sees it.
     Blade.Types.PoolReuseTable.setCurrentReturnDonor (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id)
+    // PM03 same-cell return (A06): the shared certificate over THIS original
+    // callable, read only by this ordinary function return (every other body
+    // renderer passes None). An array return with a generic return donor is
+    // the generic path's; any other array return records why it declines.
+    let sameCell =
+        match funcDef.RetType with
+        | ArrayElem _ when (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id).IsNone && unforwardableCaptureRefusal.IsNone ->
+            let callables = (IR.currentAnalysisCtx ()).Callables
+            match Blade.SameCellReturn.certify callables (Blade.SameCellReturn.reachesSelf callables) funcDef with
+            | Error why ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined why) []
+                None
+            | Ok proof when proof.Function = funcDef.Id && proof.Body = funcDef.Body ->
+                Some { Proof = proof; Subject = funcDef.SourceName; Decided = ref false }
+            | Ok _ ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined "the certificate belongs to a different function/body") []
+                None
+        | _ -> None
     let bodyStmts =
         try
             match unforwardableCaptureRefusal with
@@ -1668,12 +1838,18 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
             if funcDef.IsRepro then
                 (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value + 1
-                try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+                try genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
                 finally
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                         (Blade.LinAlgPatterns.reproScopeDepth ()).Value - 1
-            else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+            else genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
         finally Blade.Types.PoolReuseTable.setCurrentReturnDonor None
+    // a certified body whose return arm was never reached (an emitted spine
+    // the frame did not render as certified) records its decline here
+    (match sameCell with
+     | Some cand when not cand.Decided.Value ->
+         recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined "the certified return arm was not reached by the emitted body") []
+     | _ -> ())
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
@@ -2061,7 +2237,30 @@ let private computeModuleCaptureHoistIds
 let private genModuleBinding
         (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
         (hoistIds: Set<IRId>) : string list * CodeGenContext =
-    let (code, ctx') = genBinding ctx binding builder
+    let atBinding =
+        { ctx with TopLevelProviderRead = if ctx.ProviderReads.ContainsKey binding.Id then Some binding.Id else None }
+    // Sibling maps (Optimize.planSiblingMaps): the group protocol around
+    // every module binding (CodeGenLoopNest.siblingArmBegin / siblingArmEnd)
+    siblingArmBegin binding.Id (bindingCppName binding) siblingPreflight
+    let (code, emittedCtx) =
+        match ctx.PrivateSpoolRegion with
+        | Some region when obj.ReferenceEquals(binding, region.Plan.Producer) && not region.Committed ->
+            match Blade.CodeGenPrivateSpool.tryGenerate atBinding region.Plan with
+            | Ok lines ->
+                Blade.CodeGenPrivateSpool.record binding.Name Blade.Effects.Applied
+                    [ "private-statistic-spool-v1: exact stored F64 bits, serial/repro and contraction off"
+                      "retained normal-window decode/input capacity; append faults drain original source windows"
+                      "tracked workspace and serialized disk only; terminal publication follows replay/EOF/cleanup" ]
+                lines, { atBinding with PrivateSpoolRegion = Some { region with Committed = true } }
+            | Error why ->
+                Blade.CodeGenPrivateSpool.record binding.Name (Blade.Effects.Declined why) []
+                genBinding { atBinding with PrivateSpoolRegion = None } binding builder
+        | Some region when region.Committed
+                           && ([region.Plan.Statistic;region.Plan.Barrier;region.Plan.Terminal]
+                               |> List.exists (fun b -> obj.ReferenceEquals(b,binding))) -> [], atBinding
+        | _ -> genBinding atBinding binding builder
+    let code = code @ siblingArmEnd binding.Id (bindingCppName binding)
+    let ctx' = { emittedCtx with TopLevelProviderRead = ctx.TopLevelProviderRead }
     if not (Set.contains binding.Id hoistIds) then (code, ctx')
     else
         let name = bindingCppName binding
@@ -2246,7 +2445,7 @@ let private emissionOrderedItems (modul: IRModule) (mainLocalFuncIds: Set<IRId>)
         | _ -> (k, 1, 0)
     bindingItems @ funcItems |> List.sortBy sortKey
 
-let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
+let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
     setCodegenStructFieldsCache modul.Types
@@ -2281,7 +2480,8 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
 
     // First pass: register ALL names (both bindings and functions) in context
     let ctx0 =
@@ -2303,6 +2503,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Main-locality first: the emission order reads it (emissionOrderedItems).
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
 
     // Generate in ID order (approximates source order).
     // First, collect file-scope functions to generate forward declarations.
@@ -2391,6 +2594,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     | [fc; bc] -> (fc, bc)
     | _ -> (funcCode, bindCode)
 
+/// Low-level callers supply one module without whole-program demand evidence.
+let genModule modul builder = genModuleCore false None modul builder
+
 /// Split-timing variant of genModule: identical context-threaded emission, but
 /// binding output is routed into TWO buckets -- `setupCode` (data-setup
 /// bindings) and `computeCode` (forced computations) -- so the caller can place
@@ -2398,7 +2604,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
 /// still threaded through ALL items in ID order (later bindings reference
 /// earlier ones), so only the OUTPUT is partitioned, never the evaluation
 /// order. Returns (funcCode, setupCode, computeCode).
-let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
+let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
     setCodegenStructFieldsCache modul.Types
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
@@ -2421,7 +2627,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
     let ctx0 =
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
@@ -2431,6 +2638,9 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     // Same emission order as genModule, from the same definition.
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
     let fileScopeFuncs =
         allItems |> List.choose (fun (_, item) ->
             match item with
@@ -2517,6 +2727,8 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     match resolveShadowFrames [funcCode; setupCode; computeCode] with
     | [fc; sc; cc] -> (fc, sc, cc)
     | _ -> (funcCode, setupCode, computeCode)
+
+let genModuleSplit modul builder = genModuleSplitCore false None modul builder
 
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) : string list =
@@ -3900,7 +4112,7 @@ let providerIncludes (modul: IRModule) : string list =
 /// ids read by genPrintStatements, the include flags read below) start empty,
 /// and the deterministic-deallocation facts are reinstalled by genModule /
 /// genModuleSplit (they need the callables table first).
-let private genSelfContainedProgram (modul: IRModule) (testName: string) : string =
+let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
     // must not collide with typecheck/lowering ids arriving in the module --
@@ -3917,6 +4129,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
         // the module actually has provider I/O, so non-provider programs gain
         // no extra dependency (registry-dispatched per provider).
         genIncludesExternal () @ providerIncludes modul
+        @ (if spool.IsSome then ["#include \"blade_private_spool.hpp\"";"#include <memory>"] else [])
     // MPI scaffolding: only when the emit gate is on AND the module has an
     // mpi kernel (a PURE predicate -- includes are computed before genModule
     // runs, so an emission-time cell would not work here). Adds
@@ -3941,13 +4154,13 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     // the forced-deferred collector genModule* populates.
     let mainFunc =
         if splitTimingModeEnabled () then
-            let (funcDefs, setupCode, computeCode) = genModuleSplit modul builder
+            let (funcDefs, setupCode, computeCode) = genModuleSplitCore true spool modul builder
             let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName setupIndented computeIndented printCode)
         else
-            let (funcDefs, bindCode) = genModule modul builder
+            let (funcDefs, bindCode) = genModuleCore true spool modul builder
             let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode)
@@ -4037,13 +4250,30 @@ let beginProgramAssembly () : unit =
 
 /// Generate a self-contained C++ program from an IR program: THE program
 /// assembler (CLI, REPL, notebook and every test lane go through here).
-let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (program: IRProgram) (testName: string) : string * string list =
     beginProgramAssembly ()
+    let spool =
+        match options.PrivateSpool with
+        | None -> None
+        | Some policy ->
+            Blade.CodeGenPrivateSpool.validatePolicy policy
+            if splitTimingModeEnabled () then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "split timing placement is not admitted") []
+                None
+            elif not (Blade.CodeGenPrivateSpool.fpSupported ()) then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "requires reproducible serial folds and explicit BLADE_FP_CONTRACT=off") []
+                None
+            else
+                match Blade.OptimizePrivateSpool.tryPlan policy (printSelection ()) program with
+                | Ok plan -> Some plan
+                | Error why ->
+                    Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined why) []
+                    None
     let cell = exprWarningsCell ()
     let code =
         match program.Modules with
         | [] -> "// Empty program\nint main() { return 0; }\n"
-        | [modul] -> genSelfContainedProgram modul testName
+        | [modul] -> genSelfContainedProgram spool modul testName
         | modules ->
             // Multi-module: merge all modules into one for code generation
             // Functions and bindings from earlier modules come first
@@ -4066,7 +4296,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
                 FunctionAliasNames = modules |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty
             }
-            genSelfContainedProgram merged testName
+            genSelfContainedProgram None merged testName
     // Expression-position refusals become real `#error` directives. They are
     // appended to the END of the translation unit rather than spliced at the
     // refusal site because the refusal site is an EXPRESSION and a preprocessor
@@ -4101,3 +4331,9 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                     "// " + Blade.CodeGenState.ompSuppressedPhrase why)
             code + "\n" + (lines |> String.concat "\n") + "\n"
     (code, cell.Value)
+
+/// Existing callers never acquire disk authority. The explicit options entry
+/// deliberately binds its validated policy to the generated artifact; optional
+/// resident fallback does not implement an enforced global workspace limit.
+let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+    genSelfContainedProgramFromIRWithOptions defaultProgramEmissionOptions program testName

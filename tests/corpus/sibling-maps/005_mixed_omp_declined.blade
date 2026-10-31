@@ -1,0 +1,13 @@
+// TEST: Sibling Maps Decline Siblings With Different Thread Requests
+// ============================================================================
+// y1 requests threads and y2 does not: v1 shares a team only when every
+// sibling requests it the same way, so each keeps its own loop.
+type I = Idx<11>
+function two(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) where omp -> a * 2.0 |> compute
+    let y2 = method_for(x) <@> lambda(a) -> a + 7.0 |> compute
+    reduce(y1, (+)) + reduce(y2, (+)) * 0.5
+}
+let x = 0.5 * Float64(range<I>) |> compute
+let r = two(x)
+// EXPECT: r = 107.25

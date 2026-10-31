@@ -1,0 +1,6 @@
+// TEST: C05 census no matching sparse entries keeps exact negative zero seed
+let static K = [(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]
+let vals: Array<Float64 like Idx<5>> = [4.0, 9.0, 2.0, 8.0, 3.0]
+let S = sparse(vals, K)
+let total = reduce(S((_, 99)), lambda(a: Float64, b: Float64) -> a * 10.0 + b, -0.0)
+// EXPECT: total = -0.0

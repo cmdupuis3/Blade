@@ -1,0 +1,34 @@
+// B04 PM52 diagnostic ONLY: both p and q must be printed in full after stop.
+// Same executable is audited and observed; no scalar-only timing twin is admitted.
+type Ix = Idx<2053>
+
+/// Fixed R5 generator, independent of any ambient BENCH_GENERATOR selection.
+function gen(k: Int64, seed: Int64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    Float64(h5) / 2147483648.0
+}
+
+function inputs(seed: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) where omp -> gen(Int64(i), seed) |> compute
+}
+
+function producer(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    (1.5 * x + y) |> compute
+}
+
+function consumer(p: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    (p * p) |> compute
+}
+
+// Module roots deliberately survive to the post-stop full-array print observer.
+// Process-exit reclamation is not an explicit scalar-pool cleanup endpoint.
+let x = inputs(10000019)
+let y = inputs(20000038)
+let p = producer(x, y)
+let q = consumer(p)
+let checksum = reduce(q, (+), 0.0)
+let input_checksum = reduce(x, (+), 0.0) + reduce(y, (+), 0.0)

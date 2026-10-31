@@ -1,0 +1,14 @@
+// TEST: Fold State In Place Nested Kernel Constants
+// ============================================================================
+// PM14: the pointwise kernel may be a chain of elementwise maps with literal
+// constants (`a * 0.5 + b * 2.0`): the cell expander inlines every stage, so
+// each cell's chain keeps the kernel's own operations in their own order.
+// Top-level fold (main's statement spine) and a non-associative update that
+// would expose any change of the per-cell order.
+// ============================================================================
+let g = (method_for(range<Idx<9>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) + Float64(c) * 10.0)) |> compute
+let ewma = reduce(g, lambda(a: T^1, b: T^1) -> a * 0.5 + b * 2.0)
+let ewma_seeded = reduce(g, lambda(a: T^1, b: T^1) -> a * 0.5 + b * 2.0, g(8))
+// EXPECT: ewma = [28.015625, 67.8984375, 107.78125]
+// EXPECT: ewma_seeded = [28.03125, 67.97265625, 107.9140625]

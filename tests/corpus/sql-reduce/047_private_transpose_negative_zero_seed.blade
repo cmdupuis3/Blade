@@ -1,0 +1,6 @@
+// TEST: Private transpose preserves negative zero seed bits on empty columns
+type R = Idx<0>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = []
+let rows: Array<Float64 like C> = reduce(transpose(M, [0, 1]), lambda(a: Float64, b: Float64) -> a * 10.0 + b, -0.0)
+// EXPECT: rows = [-0.0, -0.0, -0.0]

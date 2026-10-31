@@ -26,6 +26,459 @@ open Blade.ZarrProvider
 open Blade.Build
 open Blade.Tests.TestHarness
 
+/// D09-I1/I2 focused gate, callable without running the whole Zarr category.
+/// Keep all evidence in a new private directory and stop on the first failure.
+let runRank2StreamedValueBoundaryTests (workDirectory: string) : int =
+    printHeader "Rank-two streamed value boundary and certified rows (D09-I1/I2)"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let check (label: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            printfn "  PASS: %s" label
+        else
+            failed <- failed + 1
+            printfn "  FAIL: %s -- %s" label detail
+            failwith ("D09-I1 stopped: " + label)
+    let directory = Path.GetFullPath workDirectory
+    if Directory.Exists directory || File.Exists directory then
+        invalidArg "workDirectory" "D09-I1 requires a new private directory; preserve earlier evidence"
+    if directory.Length > 160 || (directory |> Seq.exists (fun c -> c < ' ' || c > '~')) then
+        invalidArg "workDirectory" "Use a short private ASCII path (at most 160 characters)"
+    Directory.CreateDirectory directory |> ignore
+    let keys =
+        ([ "BLADE_FP_REPRO"; "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT";
+           "BLADE_PRINT"; "BLADE_TILE_CACHE"; "BLADE_LLVM"; "BLADE_BLAS"; "BLADE_OMP_THREADS" ]
+         @ Blade.Optimize.optimizerGates) |> List.distinct
+    let saved = keys |> List.map (fun k -> k, Environment.GetEnvironmentVariable k)
+    let savedTiming = Blade.CodeGenState.splitTimingModeEnabled ()
+    let savedTarget = Blade.CodeGenState.splitTimingOnlyBinding ()
+    let aData = [| for i in 0..4 do for j in 0..2 -> float (10*i+j) |]
+    let bData = aData |> Array.map (fun x -> x+100.0)
+    let fixtureShape (label: string) (n: int64) (k: int64) (a: float array) (b: float array)
+                (fillA: ZarrFill) (omitA: int64 list list)
+                (fillB: ZarrFill) (omitB: int64 list list) =
+        let store = Path.Combine(directory, "s_" + label)
+        let variable (name: string) (data: float array) (fill: ZarrFill) (omit: int64 list list) : ZarrWrite.WriteVar =
+            { Name = name
+              DimNames = Some ["row"; "col"]
+              Shape = [n; 3L]
+              Chunks = [k; 2L]
+              FillValue = fill
+              Data = ZarrWrite.WF64 data
+              OmitChunks = omit
+              Blade = None }
+        ZarrWrite.writeStoreV2 store [variable "A" a fillA omitA; variable "B" b fillB omitB]
+        store.Replace('\\','/')
+    let fixture label a b fillA omitA fillB omitB =
+        fixtureShape label 5L 2L a b fillA omitA fillB omitB
+    let source (store: string) (bVerb: string) (tail: string) =
+        String.concat "\n"
+            [ "import zarr as z";
+              sprintf "let s = z.load(\"%s\")" store;
+              "let A = s.vars.A |> z.stream";
+              "let B = s.vars.B |> z." + bVerb;
+              tail; "" ]
+    let map (body: string) =
+        "let out = (method_for(zip(A, B)) <@> lambda(a: Float64, b: Float64) -> " + body + ") |> compute"
+    let lowerCase (label: string) (demand: string) (text: string) =
+        Environment.SetEnvironmentVariable("BLADE_PRINT",demand)
+        File.WriteAllText(Path.Combine(directory,label + ".demand.txt"),demand)
+        File.WriteAllText(Path.Combine(directory,label + ".blade"),text)
+        match Blade.Lowering.lower text with
+        | Ok ir -> ir
+        | Error e -> failwith (label + " lower: " + e)
+    let emit (label: string) (demand: string) (ir: IRProgram) =
+        Environment.SetEnvironmentVariable("BLADE_PRINT",demand)
+        File.WriteAllText(Path.Combine(directory,label + ".demand.txt"),demand)
+        match validateIR ir with
+        | Error errors -> failwith (label + " validation: " + String.concat "\n" errors)
+        | Ok validated ->
+            let cpp, warnings = CodeGen.genSelfContainedProgramFromIR validated ("D09_I1_" + label)
+            File.WriteAllText(Path.Combine(directory,label + ".cpp"),cpp)
+            let refusals = Blade.CodeGenState.takeCodegenRefusalDiagnostics cpp
+            let reasons =
+                [ yield! warnings
+                  for d in refusals do
+                      yield sprintf "%s %d:%d-%d:%d %s" d.Code d.Span.StartLine d.Span.StartCol d.Span.EndLine d.Span.EndCol d.Message ]
+            File.WriteAllText(Path.Combine(directory,label + ".diagnostics.txt"),String.concat "\n" reasons)
+            cpp, refusals
+    let accepted (label: string) (demand: string) (ir: IRProgram) =
+        let cpp, refusals = emit label demand ir
+        check (label + ": no refusal")
+            (refusals.IsEmpty && not (cpp.Contains "#error") && not (cpp.Contains "BLADE_CODEGEN_ERROR"))
+            (String.concat "\n" (refusals |> List.map (_.Message)))
+        cpp
+    let refused (label: string) (text: string) =
+        let cpp, refusals = emit label "out" (lowerCase label "out" text)
+        check (label + ": settled BL7004, never a runnable borrowed-array fallback")
+            (cpp.Contains "#error" && cpp.Contains "BLADE_CODEGEN_ERROR_STREAMED_VALUE_B"
+             && (refusals |> List.exists (fun d -> d.Code="BL7004" && d.Span.StartLine>0
+                                                    && d.Message.Contains "'B'" && d.Message.Contains ".stream")))
+            (String.concat "\n" (refusals |> List.map (_.Message)))
+    let native (label: string) (cpp: string) (judge: int -> string -> bool) =
+        if not Blade.Build.capabilities.Value.HasGpp then
+            skipped <- skipped + 1
+            printfn "  SKIP: %s -- g++ not found" label
+        else
+            // Refused C++ is evidence only, never a native fixture.
+            check (label + ": runnable source admitted") (not (cpp.Contains "#error")) "refusal directive"
+            CodeGen.deployRuntimeHeaders directory
+            let file = Path.Combine(directory,label + ".cpp")
+            match compileCpp file directory with
+            | Error e ->
+                File.WriteAllText(Path.Combine(directory,label + ".compile-error.txt"),e)
+                if isSkipError e then
+                    skipped <- skipped + 1
+                    printfn "  SKIP: %s -- %s" label e
+                else check (label + ": compile") false e
+            | Ok exe ->
+                File.WriteAllText(Path.Combine(directory,label + ".executable.txt"),exe)
+                match runExecutable exe with
+                | Error e -> check (label + ": run") false e
+                | Ok (code, output) ->
+                    File.WriteAllText(Path.Combine(directory,label + ".output.txt"),output)
+                    File.WriteAllText(Path.Combine(directory,label + ".exit.txt"),string code)
+                    check (label + ": independent values/failure") (judge code output) output
+    let values (expected: float array) (code: int) (output: string) =
+        code=0 && tryParsePrintedFloats "out" output = Some expected
+    let directRows (label: string) (cpp: string) =
+        check (label + ": both actual row loads are window-relative, no input tables/aliases")
+            (cpp.Contains "__win0 + static_cast<size_t>(static_cast<int64_t>(__i0) - static_cast<int64_t>(__w_lo)) * 3UL"
+             && cpp.Contains "__win1 + static_cast<size_t>(static_cast<int64_t>(__i0) - static_cast<int64_t>(__w_lo)) * 3UL"
+             && not (cpp.Contains "__rows0") && not (cpp.Contains "__rows1")
+             && not (cpp.Contains "__srcext0") && not (cpp.Contains "__srcext1")
+             && not (cpp.Contains "A.data[__i0]") && not (cpp.Contains "B.data[__i0]")) ""
+    let fallbackTable (label: string) (cpp: string) =
+        check (label + ": independent I1 table allocation/install/alias/deletion witness")
+            (cpp.Contains "out__rows0 = new double*[5]()"
+             && cpp.Contains "out__rows0[__r] = out__win0 + (__r - __w_lo) * 3UL"
+             && cpp.Contains "Array<double, 2> A = { out__rows0, out__srcext0 }"
+             && cpp.Contains "A.data[__i0]" && cpp.Contains "delete[] out__rows0;") ""
+    try
+        try
+            for key in Blade.Optimize.optimizerGates do Environment.SetEnvironmentVariable(key,null)
+            Environment.SetEnvironmentVariable("BLADE_FP_REPRO","1")
+            Environment.SetEnvironmentVariable("BLADE_FP_REASSOC",null)
+            Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT","off")
+            Environment.SetEnvironmentVariable("BLADE_PRINT","out")
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE",null)
+            Environment.SetEnvironmentVariable("BLADE_LLVM","off")
+            Environment.SetEnvironmentVariable("BLADE_BLAS","off")
+            Environment.SetEnvironmentVariable("BLADE_OMP_THREADS","1")
+            Blade.CodeGenState.setSplitTimingMode false
+            Blade.CodeGenState.setSplitTimingOnlyBinding None
+            File.WriteAllLines(Path.Combine(directory,"environment.txt"),
+                keys |> List.map (fun k -> sprintf "%s=%A" k (Environment.GetEnvironmentVariable k)))
+            let good = fixture "good" aData bData (FillFloat 0.0) [] (FillFloat 0.0) []
+            let positive = source good "stream" (map "a + 2.0 * b")
+            let gather = source good "stream" (map "a + B(0, 0)")
+            let escape = source good "stream" (map "B")
+            let positiveIr = lowerCase "positive" "out" positive
+            let cpp = accepted "positive" "out" positiveIr
+            check "positive: two borrowed windows, required output and run table retained"
+                (cpp.Contains "out__win0 = new double[6]" && cpp.Contains "out__win1 = new double[6]"
+                 && cpp.Contains "out__runs[4]" && cpp.Contains "0UL, 2UL, 4UL, 5UL"
+                 && cpp.Contains "Array<double, 2> out = { allocate<"
+                 && cpp.Contains "delete[] out__win0;" && cpp.Contains "delete[] out__win1;") ""
+            check "positive: A then B normal window scans and scalar peels"
+                (cpp.IndexOf("refuse_missing(out__win0",StringComparison.Ordinal) >= 0
+                 && cpp.IndexOf("refuse_missing(out__win0",StringComparison.Ordinal) < cpp.IndexOf("refuse_missing(out__win1",StringComparison.Ordinal)
+                 && cpp.Contains "A____i0____i1" && cpp.Contains "B____i0____i1") ""
+            // Exercise the opaque proof through its public-in-assembly APIs.
+            // These tests never allocate/execute a large resident output.
+            let modul = positiveIr.Modules.Head
+            let oldAnalysis = setCallablesContext (buildCallablesTableForModule modul)
+            try
+                let applies = ResizeArray<ApplyInfo>()
+                for b in modul.Bindings do
+                    iterIRExpr (function IRApplyCombinator a -> applies.Add a | _ -> ()) b.Value
+                let info = applies |> Seq.find (fun a -> a.Arrays.Length = 2 && a.IsCoIteration)
+                let bindingsById = modul.Bindings |> List.map (fun b -> b.Id, b) |> Map.ofList
+                let operands =
+                    info.Arrays |> List.map (function
+                        | IRVar (id, _) -> id, bindingsById.[id].Name, modul.ProviderReads.[id]
+                        | _ -> failwith "direct source fixture changed")
+                let names = operands |> List.map (fun (id, vn, _) -> id, vn) |> Map.ofList
+                let evidence = operands |> List.mapi (fun k (id, vn, spec) -> id, vn, spec, $"__cert__win{k}")
+                let builder = IRBuilder()
+                builder.EnsureAtLeast(0x40000000)
+                let initial = buildLoopNestCodeGen info (operands |> List.map (fun (_, vn, _) -> vn)) "__cert" builder
+                let cg = { initial with MpiSlab = true }
+                let runs = [0L; 2L; 4L; 5L]
+                let certify a c s r = Blade.CodeGenLoopNest.tryCertifyRank2BandPeels a c s r names
+                let certification = certify info cg evidence runs
+                File.WriteAllText(Path.Combine(directory,"i2-certificate.txt"),
+                    match certification with Ok _ -> "admitted exact final test projection" | Error why -> "declined: " + why)
+                match certification with
+                | Error why -> check "I2 final proof fixture admits" false why
+                | Ok cert ->
+                    let stale label changed changedNames streamed =
+                        let result = Blade.CodeGenLoopNest.tryGenLoopNestRank2Band cert streamed changed changedNames 0
+                        check ("I2 stale " + label + " rejects before renderer mutation")
+                            (match result with Error _ -> true | Ok _ -> false) ""
+                    stale "kernel" { cg with KernelExpr = IRUnaryOp(IRNeg,cg.KernelExpr) } names Map.empty
+                    stale "bindings" { cg with Bindings = cg.Bindings |> List.map (fun b -> { b with StrictOffset = 1 }) } names Map.empty
+                    let changedInner =
+                        { cg.Bindings.[1] with
+                            Elements = cg.Bindings.[1].Elements |> List.map (fun e -> { e with ParamVarId = e.ParamVarId + 1000 }) }
+                    stale "inner peel" { cg with Bindings = [cg.Bindings.Head; changedInner] } names Map.empty
+                    stale "name context" cg (names |> Map.map (fun _ vn -> vn + "_changed")) Map.empty
+                    let _, vn, spec, _ = evidence.Head
+                    stale "fiber path" cg names (Map.ofList [vn, spec])
+                    check "I2 owner contract rejects changed capacity and source order"
+                        (Blade.CodeGenLoopNest.rank2BandOwnsWindows cert "__cert" (operands |> List.map (fun (_, vn, s) -> vn, s)) 2L
+                         && not (Blade.CodeGenLoopNest.rank2BandOwnsWindows cert "__cert" (operands |> List.map (fun (_, vn, s) -> vn, s)) 1L)
+                         && not (Blade.CodeGenLoopNest.rank2BandOwnsWindows cert "__cert" (operands |> List.rev |> List.map (fun (_, vn, s) -> vn, s)) 2L)
+                         && not (Blade.CodeGenLoopNest.rank2BandOwnsWindows cert "__other" (operands |> List.map (fun (_, vn, s) -> vn, s)) 2L)) ""
+                    let rk = (resolveKernel info.Kernel).Value.Callable
+                    let prior = setCallablesContext (Map.add rk.Id { rk with Body = IRUnaryOp(IRNeg,rk.Body) } (buildCallablesTableForModule modul))
+                    try stale "callee identity" cg names Map.empty
+                    finally restoreAnalysisContext prior
+                let declines label a c s r =
+                    check ("I2 nonadmission: " + label)
+                        (match certify a c s r with Error _ -> true | Ok _ -> false) ""
+                declines "duplicate run" info cg evidence [0L; 2L; 2L; 5L]
+                declines "different grid" info cg evidence [0L; 3L; 5L]
+                declines "bad final endpoint" info cg evidence [0L; 2L; 4L; 6L]
+                let originalLoop =
+                    match info.Loop with IRMethodFor loop -> loop | _ -> failwith "zip loop fixture changed"
+                let hiddenLoop = { originalLoop with Arrays = [IRLit(IRLitFloat 1.0)] }
+                declines "hidden method_for operand" { info with Loop = IRMethodFor hiddenLoop } cg evidence runs
+                declines "altered scalar variable type" info
+                    { cg with KernelExpr = IRVar(cg.KernelParams.Head.VarId,IRTScalar ETFloat32) } evidence runs
+                let float32Arithmetic =
+                    IRBinOp(IRElementwise,IRAdd,IRLit(IRLitFloat32 1.0f),IRLit(IRLitFloat32 2.0f),SrcLoc.Nowhere)
+                declines "non-Float64 arithmetic result" info { cg with KernelExpr = float32Arithmetic } evidence runs
+                declines "array-valued side use" info { cg with KernelExpr = info.Arrays.Head } evidence runs
+                declines "unsupported epilogue metadata" info { cg with OutputSymmVec = [1; 1] } evidence runs
+                let changedSources =
+                    evidence |> List.map (fun (id, vn, s, win) ->
+                        let axes = s.VarType.IndexTypes |> List.map (fun ix -> { ix with Id = ix.Id + 1000 })
+                        id, vn, { s with VarType = { s.VarType with IndexTypes = axes } }, win)
+                declines "same extents, foreign axis identities" info cg changedSources runs
+                let oversized, largeAxes =
+                    match cg.OutputType with
+                    | ArrayElem at ->
+                        let axes = at.IndexTypes |> List.mapi (fun i ix -> if i=0 then { ix with Extent = IRLit(IRLitInt 2147483647L) } else ix)
+                        mkArrayLike { at with IndexTypes = axes }, axes
+                    | _ -> failwith "rank-two output fixture changed"
+                let largeInfo =
+                    { info with
+                        OutputType = oversized
+                        SharedIndexTypes = largeAxes
+                        Loop = IRMethodFor { originalLoop with SharedIndexTypes = largeAxes } }
+                check "I2 metadata-only oversized allocation reaches checked wide bound"
+                    (match certify largeInfo { cg with OutputType = oversized } evidence runs with
+                     | Error why -> why.Contains "conservative checked arithmetic"
+                     | Ok _ -> false) ""
+                let metadataPath = Path.Combine(good,"A",".zarray")
+                let savedMetadata = File.ReadAllText metadataPath
+                let malformed = System.Text.Json.Nodes.JsonNode.Parse savedMetadata
+                malformed.["chunks"] <- System.Text.Json.Nodes.JsonNode.Parse "[2147483647,2]"
+                try
+                    File.WriteAllText(metadataPath,malformed.ToJsonString())
+                    check "I2 padded chunk bytes/strides reject before provider int narrowing"
+                        (match certify info cg evidence runs with
+                         | Error why -> why.Contains "representable local v2"
+                         | Ok _ -> false) ""
+                finally
+                    File.WriteAllText(metadataPath,savedMetadata)
+            finally
+                restoreAnalysisContext oldAnalysis
+            directRows "positive" cpp
+            native "positive" cpp (values [| for i in 0..4 do for j in 0..2 -> float (200+30*i+3*j) |])
+            refused "gather" gather
+            refused "escape" escape
+            // Same already-lowered object after a refusal: no stale mask or
+            // settled-refusal state may leak into the next direct emitter.
+            accepted "after_refusal" "out" positiveIr |> ignore
+            let termSource = source good "stream"
+                                "let term = reduce(method_for(zip(A, B)) <@> lambda(a, b) -> a + 2.0 * b, (+), axes = 2)"
+            let termCpp = accepted "terminal" "term" (lowerCase "terminal" "term" termSource)
+            directRows "terminal" termCpp
+            check "terminal: streamed owned producer and separate scalar fold retained"
+                (termCpp.Contains "elementwise over segments"
+                 && termCpp.Contains "double term =" && termCpp.Contains "< 5LL;" && termCpp.Contains "< 3LL;") ""
+            native "terminal" termCpp (fun code output ->
+                let printed = output.Split('\n') |> Array.tryFind (fun l -> l.Trim().StartsWith "term = ")
+                let correct =
+                    printed |> Option.exists (fun l ->
+                        match Double.TryParse(l.Trim().Substring(7),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture) with
+                        | true, v -> v=3945.0
+                        | _ -> false)
+                code=0 && correct)
+            let residentCases : (string * string * float array) list =
+                [ ("read_gather", "a + B(0, 0)", aData |> Array.map (fun x -> x+100.0));
+                  ("read_escape", "B", Array.init 225 (fun i -> bData.[i%15])) ]
+            for label, body, expected in residentCases do
+                let text = source good "read" (map body)
+                let result = accepted label "out" (lowerCase label "out" text)
+                fallbackTable label result
+                native label result (values expected)
+            let fiberSource = source good "stream"
+                                  "let out = (method_for(A) <@> lambda(row: Float64^1) -> row(0)) |> compute"
+            let fiber = accepted "fiber" "out" (lowerCase "fiber" "out" fiberSource)
+            check "fiber: legitimate trailing-axis reader remains selected" (fiber.Contains "A_fb_p0" && not (fiber.Contains "out__rows0")) ""
+            native "fiber" fiber (values [|0.0;10.0;20.0;30.0;40.0|])
+            let literalText = source good "stream" (map "[a, b]")
+            let literal = accepted "literal" "out" (lowerCase "literal" "out" literalText)
+            fallbackTable "literal" literal
+            let literalExpected =
+                [| for i in 0..14 do
+                       yield aData.[i]
+                       yield bData.[i] |]
+            native "literal" literal (values literalExpected)
+            let pureHelper = source good "stream"
+                                 ("function combine(a: Float64, b: Float64) -> Float64 = { a + 2.0 * b }\n"
+                                  + "let out = (method_for(zip(A, B)) <@> combine) |> compute")
+            let helper = accepted "helper" "out" (lowerCase "helper" "out" pureHelper)
+            directRows "helper" helper
+            native "helper" helper (values [| for i in 0..4 do for j in 0..2 -> float (200+30*i+3*j) |])
+            let repeatedText = positive.Replace("zip(A, B)","zip(A, A)")
+            let repeated = accepted "repeated" "out" (lowerCase "repeated" "out" repeatedText)
+            check "repeated A,A: one exact window/row/scalar declaration, two scalar parameter uses"
+                (repeated.Contains "out__win0 + static_cast<size_t>" && not (repeated.Contains "out__win1")
+                 && not (repeated.Contains "out__rows")
+                 && repeated.Split("double* BLADE_RESTRICT A____i0 =",StringSplitOptions.None).Length = 2
+                 && repeated.Split("double A____i0____i1 =",StringSplitOptions.None).Length = 2
+                 && repeated.Split("refuse_missing(out__win0",StringSplitOptions.None).Length = 2) ""
+            native "repeated" repeated (values (aData |> Array.map (fun a -> 3.0*a)))
+            let distinctText =
+                positive.Replace("let B = s.vars.B |> z.stream","let B = s.vars.A |> z.stream")
+            let distinct = accepted "distinct_same_variable" "out" (lowerCase "distinct_same_variable" "out" distinctText)
+            directRows "distinct_same_variable" distinct
+            check "distinct source IDs retain both read/scan sites"
+                (distinct.Contains "refuse_missing(out__win0" && distinct.Contains "refuse_missing(out__win1"
+                 && distinct.Contains "delete[] out__win0;" && distinct.Contains "delete[] out__win1;") ""
+            native "distinct_same_variable" distinct (values (aData |> Array.map (fun a -> 3.0*a)))
+            let scalarCapture = source good "stream"
+                                    ("let bias_data = s.vars.A |> z.read\n"
+                                     + "let bias = bias_data(0, 0) + 3.0\n" + map "a + b + bias")
+            let captured = accepted "scalar_capture" "out" (lowerCase "scalar_capture" "out" scalarCapture)
+            fallbackTable "scalar_capture" captured
+            native "scalar_capture" captured (values (Array.map2 (fun a b -> a+b+3.0) aData bData))
+            let unaryText = source good "stream"
+                                "let out = (method_for(A) <@> lambda(a: Float64) -> a + 1.0) |> compute"
+            let unary = accepted "unary" "out" (lowerCase "unary" "out" unaryText)
+            fallbackTable "unary" unary
+            native "unary" unary (values (aData |> Array.map (fun a -> a+1.0)))
+            let smallStore = fixtureShape "n1" 1L 2L aData.[0..2] bData.[0..2] (FillFloat 0.0) [] (FillFloat 0.0) []
+            let smallText = source smallStore "stream" (map "a + 2.0 * b")
+            let small = accepted "n1" "out" (lowerCase "n1" "out" smallText)
+            directRows "n1" small
+            check "N1/K2: exact one-row capacity and one run, required output"
+                (small.Contains "out__win0 = new double[3]" && small.Contains "out__runs[2]"
+                 && small.Contains "0UL, 1UL" && small.Contains "Array<double, 2> out = { allocate<") ""
+            native "n1" small (values [|200.0;203.0;206.0|])
+            let sevenA = [| for i in 0..6 do for j in 0..2 -> float (10*i+j) |]
+            let sevenB = sevenA |> Array.map (fun x -> x+100.0)
+            let sevenStore = fixtureShape "n7k3" 7L 3L sevenA sevenB (FillFloat 0.0) [] (FillFloat 0.0) []
+            let sevenText = source sevenStore "stream" (map "a + 2.0 * b")
+            let seven = accepted "n7k3" "out" (lowerCase "n7k3" "out" sevenText)
+            directRows "n7k3" seven
+            check "N7/K3: independent bands [0,3),[3,6),[6,7) and nine-cell capacity"
+                (seven.Contains "out__win0 = new double[9]" && seven.Contains "0UL, 3UL, 6UL, 7UL") ""
+            native "n7k3" seven (values [| for i in 0..6 do for j in 0..2 -> float (200+30*i+3*j) |])
+            let hugeStore = fixtureShape "derived_nonfinite" 1L 2L [|1e200;2.0;3.0|] bData.[0..2] (FillFloat 0.0) [] (FillFloat 0.0) []
+            let hugeText = source hugeStore "stream" (map "a * a + 2.0 * b")
+            let huge = accepted "derived_nonfinite" "out" (lowerCase "derived_nonfinite" "out" hugeText)
+            directRows "derived_nonfinite" huge
+            native "derived_nonfinite" huge (fun code output ->
+                // Check the IEEE category, not equality with infinity/NaN.
+                let printed = output.Split('\n') |> Array.tryFind (fun l -> l.Trim().StartsWith "out = [")
+                let correct =
+                    printed |> Option.exists (fun line ->
+                        let cells = line.Substring(line.IndexOf('[')).Replace("[","").Replace("]","").Split(',')
+                        cells.Length = 3 && cells.[0].Trim().ToLowerInvariant() = "inf"
+                        && Double.Parse(cells.[1],System.Globalization.CultureInfo.InvariantCulture) = 206.0
+                        && Double.Parse(cells.[2],System.Globalization.CultureInfo.InvariantCulture) = 213.0)
+                code=0 && correct && not (output.Contains "BL8015"))
+            let captureTail =
+                "function from_b(x: Float64) -> Float64 = { x + B(0, 0) }\n"
+                + "function through(x: Float64) -> Float64 = { from_b(x) }\n"
+                + map "through(a)"
+            refused "captured_helper" (source good "stream" captureTail)
+            let residentHelperText = source good "read" captureTail
+            let residentHelper = accepted "resident_helper" "out" (lowerCase "resident_helper" "out" residentHelperText)
+            fallbackTable "resident_helper" residentHelper
+            native "resident_helper" residentHelper (values (aData |> Array.map (fun x -> x+100.0)))
+            refused "callable_alias" (source good "stream"
+                ("function from_b(x: Float64) -> Float64 = { x + B(0, 0) }\nlet h = from_b\n" + map "h(a)"))
+            refused "local_alias" (source good "stream" (map "{ let full = B; a + full(0, 0) }"))
+            // Preserve the exact validated source type and capture metadata;
+            // only replace the gather value with a static shape query. The
+            // descriptor alone must not reject this inline literal query.
+            let gatherIr = lowerCase "metadata_base" "out" gather
+            let b = gatherIr.Modules |> List.collect (_.Bindings) |> List.find (fun b -> b.Name="B")
+            let rewrite = function
+                | IRIndex (IRVar (id, ty), [IRLit(IRLitInt 0L); IRLit(IRLitInt 0L)], _) when id=b.Id ->
+                    IRUnaryOp(IRCast(ETFloat64,SrcLoc.Nowhere),IRExtent(IRVar(id,ty),0))
+                | e -> e
+            let metadataIr : IRProgram =
+                { Modules = gatherIr.Modules |> List.map (fun m ->
+                    { m with
+                        Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr rewrite f.Body })
+                        Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) })
+                  DeclSpans = gatherIr.DeclSpans }
+            File.WriteAllText(Path.Combine(directory,"metadata.rewrite.txt"),"IRIndex(B,[0,0]) -> Float64(IRExtent(B,0)); original source/capture types unchanged")
+            let metadata = accepted "metadata" "out" metadataIr
+            fallbackTable "metadata" metadata
+            native "metadata" metadata (values (aData |> Array.map (fun x -> x+5.0)))
+            let finiteStore = fixture "finite_fill" aData bData (FillFloat 0.0) [] (FillFloat -1.0) [[0L;1L]]
+            let finiteText = source finiteStore "stream" (map "a + 2.0 * b")
+            let finite = accepted "finite_fill" "out" (lowerCase "finite_fill" "out" finiteText)
+            directRows "finite_fill" finite
+            let finiteExpected =
+                [| for i in 0..4 do
+                       for j in 0..2 ->
+                           if i<2 && j=2 then float (10*i+j-2)
+                           else float (200+30*i+3*j) |]
+            native "finite_fill" finite (values finiteExpected)
+            // The same finite fixture is recreated per failure pair; only
+            // twelve padded 32-byte chunks are ever needed by one case.
+            let failures : (string * string * string * int * bool * bool) list =
+                [ ("same_short", "A", "0.1", 0, false, false);
+                  ("same_null", "A", "0.1", 0, true, false);
+                  ("cross_source", "B", "0.1", 0, false, false);
+                  ("future_short", "A", "1.1", 0, false, false);
+                  ("reversed", "B", "0.1", 0, false, true);
+                  ("global_location", "", "", 13, false, false) ]
+            for label, badSource, badChunk, missingAt, nullFill, reversed in failures do
+                let missing = Array.copy aData
+                missing.[missingAt] <- nan
+                let omitted = if nullFill then [[0L;1L]] else []
+                let store = fixture label missing bData (if nullFill then FillNone else FillFloat 0.0) omitted (FillFloat 0.0) []
+                let text = source store "stream" ((map "a + 2.0 * b").Replace("zip(A, B)", if reversed then "zip(B, A)" else "zip(A, B)"))
+                let result = accepted label "out" (lowerCase label "out" text)
+                directRows label result
+                if badSource<>"" && not nullFill then File.WriteAllBytes(Path.Combine(store,badSource,badChunk),[|0uy|])
+                native label result (fun code output ->
+                    let firstAssemblyFailure = label="same_short" || label="same_null" || reversed
+                    let correct =
+                        if firstAssemblyFailure then
+                            output.Contains (if nullFill then "is missing and fill_value is null" else "is short (expected 32 bytes)")
+                            && not (output.Contains "error[BL8015]")
+                        else
+                            output.Contains "error[BL8015]" && output.Contains (if label="global_location" then "first at [4, 1]" else "first at [0, 0]")
+                            && not (output.Contains "is short") && not (output.Contains "fill_value is null")
+                    code<>0 && correct && not (output.Contains "out = "))
+            // Fresh lower + emitter after both indirect refusals and provider
+            // failures must still admit the original ordinary map.
+            accepted "final_state" "out" (lowerCase "final_state" "out" positive) |> ignore
+        with ex ->
+            if failed=0 then
+                failed <- failed+1
+                printfn "  FAIL: D09-I1 completes -- %s" (ex.ToString())
+            else printfn "  D09-I1 stopped: %s" (ex.ToString())
+    finally
+        Blade.CodeGenState.setSplitTimingMode savedTiming
+        Blade.CodeGenState.setSplitTimingOnlyBinding savedTarget
+        for key,value in saved do Environment.SetEnvironmentVariable(key,value)
+    printFooter "Rank-two streamed value boundary" [$"{passed} passed"; $"{failed} failed"; $"{skipped} skipped"]
+    if failed=0 then 0 else 1
+
 let runZarrTests () =
     printHeader "Zarr Provider Tests"
     let mutable passed = 0
@@ -1139,6 +1592,339 @@ let sizes = extents(seg)
         with ex -> check "streamed fold" false ex.Message
     streamedFoldE2E ()
 
+    // S2 / D01: one rank-1 reader -> a NAMED shared affine producer ->
+    // independently seeded sum and sumsq. Route assertions are required:
+    // a successful materialized map is not evidence for this bridge.
+    let streamedJoinedScalarsE2E () =
+        printfn "\n--- rank1 Zarr block consumer: shared producer and seeded scalar join ---"
+        let knobs = [ "BLADE_FP_REPRO"; "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_PRINT"; "BLADE_TILE_CACHE" ]
+        let saved = knobs |> List.map (fun k -> k, Environment.GetEnvironmentVariable k)
+        let marker = "rank1-zarr-joined-scalars: bounded input"
+        let program store mode map extra =
+            String.concat "\n"
+                [ "import zarr as z"
+                  sprintf "let sample = z.load(\"%s\")" store
+                  sprintf "let A = sample.vars.A |> z.%s" mode
+                  sprintf "let y = method_for(A) <@> lambda(x) -> %s" map
+                  extra
+                  "let total, squares = object_for(<&!>) <@> (reduce(y, (+), 7.0), reduce(method_for(y) <@> lambda(v) -> v * v, (+), 3.0))"
+                  "" ]
+        let normal (s: string) =
+            s.Replace("\r\n", "\n").Split('\n')
+            |> Array.filter (fun l -> l.StartsWith "total = " || l.StartsWith "squares = ")
+            |> String.concat "\n"
+        let emit label src =
+            match lower src with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                try
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                    Some (ir, cpp)
+                with ex -> check ($"{label}: emits") false ex.Message; None
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with
+            | Error e -> Error e
+            | Ok exe -> runExecutable exe
+        let fixture label version n bad =
+            let store = Path.GetFullPath(Path.Combine(scratch, "stream_terminal_" + label)).Replace('\\', '/')
+            let data = Array.init n (fun i -> if bad && (i = 0 || i = n - 1) then nan else float (i + 1))
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some [ "x" ]; Shape = [ int64 n ]; Chunks = [ 4L ]
+                    FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 data; OmitChunks = []; Blade = None } ]
+            (if version = 2 then ZarrWrite.writeStoreV2 else ZarrWrite.writeStoreV3) store vars
+            store
+        try
+            Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+            Environment.SetEnvironmentVariable("BLADE_FP_REASSOC", null)
+            Environment.SetEnvironmentVariable("BLADE_FP_CONTRACT", "off")
+            Environment.SetEnvironmentVariable("BLADE_PRINT", "total,squares")
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+            for version, n in [ 2, 0; 2, 11; 3, 11; 2, 257 ] do
+                let label = $"zarr_join_v{version}_n{n}"
+                let store = fixture label version n false
+                let mk mode = program store mode "x * 2.0 + 1.0" ""
+                match emit (label + "_stream") (mk "stream"), emit (label + "_read") (mk "read") with
+                | Some (ir, streamCpp), Some (_, readCpp) ->
+                    check ($"{label}: bounded scalar route actually emits")
+                        (streamCpp.Contains marker && streamCpp.Contains "std::vector<double>"
+                         && not (streamCpp.Contains "elementwise over segments")
+                         && not (streamCpp.Contains "A_flat = new")
+                         && not (streamCpp.Contains "allocate<typename promote<double, 1>::type")
+                         && not (streamCpp.Contains "_run_offsets")
+                         && not (readCpp.Contains marker) && readCpp.Contains "Read A from zarr store") ""
+                    check ($"{label}: missing validation precedes joined scalar publication")
+                        (streamCpp.IndexOf("_miss.count)", StringComparison.Ordinal) >= 0
+                         && streamCpp.IndexOf("_miss.count)", StringComparison.Ordinal)
+                            < streamCpp.LastIndexOf("std::make_tuple(", StringComparison.Ordinal)) ""
+                    // The provider stream is explicitly unsupported in this lane.
+                    if version = 2 && n = 11 then
+                        // Provenance belongs to the private whole-program cores,
+                        // never to state left behind by a previous assembly.
+                        let savedTiming = Blade.CodeGenState.splitTimingModeEnabled ()
+                        try
+                            CodeGen.setSplitTimingMode false
+                            let normalCpp, _ = CodeGen.genSelfContainedProgramFromIR ir (label + "_normal_census")
+                            check "rank1 scalar stream: normal whole-program assembly admits the route"
+                                (normalCpp.Contains marker) ""
+                            match ir.Modules |> List.tryFind (fun m -> m.ProviderReads |> Map.exists (fun _ r -> r.Streamed)) with
+                            | None -> check "rank1 scalar stream: low-level provenance fixture has a streamed module" false "no source module"
+                            | Some modul ->
+                                let probe api generate =
+                                    let builder = IRBuilder()
+                                    builder.EnsureAtLeast(0x40000000)
+                                    let cpp = generate modul builder |> String.concat "\n"
+                                    let refusals = CodeGen.takeCodegenRefusalDiagnostics cpp |> List.map string |> String.concat " | "
+                                    check ($"rank1 scalar stream: direct {api} refuses without whole-program evidence after normal assembly")
+                                        (not (cpp.Contains marker)
+                                         && refusals.Contains "whole-module demand facts are unavailable") refusals
+                                probe "genModule" (fun m b ->
+                                    let funcs, bindings = CodeGen.genModule m b
+                                    funcs @ bindings)
+                                probe "genModuleSplit" (fun m b ->
+                                    let funcs, setup, compute = CodeGen.genModuleSplit m b
+                                    funcs @ setup @ compute)
+                            CodeGen.setSplitTimingMode true
+                            let splitCpp, _ = CodeGen.genSelfContainedProgramFromIR ir (label + "_split_census")
+                            check "rank1 scalar stream: split-timing whole-program assembly admits the route"
+                                (splitCpp.Contains marker && splitCpp.Contains "input allocation took") ""
+                        finally
+                            CodeGen.setSplitTimingMode savedTiming
+                        let interp = Blade.Interp.Run.runProgram ir label Blade.Interp.Value.defaultLimits
+                        check "rank1 scalar stream: interpreter refuses explicitly"
+                            (interp.ExitCode <> 0 && interp.Stderr.Contains "streamed provider read") interp.Stderr
+                        match Blade.EmitLlvm.tryEmitProgramNamed label ir with
+                        | Error why -> check "rank1 scalar stream: LLVM refuses provider I/O explicitly" (why.Contains "provider read") why
+                        | Ok _ -> check "rank1 scalar stream: LLVM refuses provider I/O explicitly" false "unexpected success"
+                    if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                    else
+                        match run (label + "_read") readCpp, run (label + "_stream") streamCpp with
+                        | Ok (0, expected), Ok (0, actual) ->
+                            let nf = float n
+                            let sum = nf * (nf + 2.0) + 7.0
+                            let squares = nf * (4.0 * nf * nf + 12.0 * nf + 11.0) / 3.0 + 3.0
+                            let known = sprintf "total = %.1f\nsquares = %.1f" sum squares
+                            check ($"{label}: exact .read reference with identical print selection")
+                                (normal expected = normal actual && normal actual <> "") ($"read: {expected}; stream: {actual}")
+                            check ($"{label}: independent sum/sumsq including both seeds")
+                                (normal actual = known) ($"expected {known}; actual {actual}")
+                        | Error e, _ -> baselineFailed label e
+                        | _, Error e -> check ($"{label}: streamed build/run") false e
+                        | a, b -> check ($"{label}: both runs succeed") false (sprintf "%A / %A" a b)
+                | _ -> ()
+            let store = fixture "refusals" 2 11 false
+            let refusal label residentFallback src =
+                match emit ("zarr_join_refuse_" + label) src with
+                | Some (_, cpp) ->
+                    let errors = CodeGen.takeCodegenRefusalDiagnostics cpp |> List.map string |> String.concat " | "
+                    check ($"rank1 scalar join refuses {label} before the block route")
+                        (not (cpp.Contains marker)
+                         && (errors.Contains "rank-1 streamed reduction join"
+                             || (residentFallback && cpp.Contains "elementwise over segments"))) errors
+                | None -> ()
+            refusal "fallible map" false (program store "stream" "Float64(Int64(floor(x)))" "")
+            refusal "indexed source" false (program store "stream" "x * 2.0 + 1.0" "let observed = A((0 : sample.index.x))")
+            refusal "required producer array" true (program store "stream" "x * 2.0 + 1.0" "let observed = y |> compute")
+            refusal "second provider read" false (program store "stream" "x * 2.0 + 1.0" "let B = sample.vars.A |> z.stream")
+            refusal "captured source" false (program store "stream" "x * 2.0 + 1.0" "function leak() -> Float64 = reduce(A, (+))")
+            refusal "mutable array state" false (program store "stream" "x * 2.0 + 1.0" "let mut state = Float64([0.0])")
+            Environment.SetEnvironmentVariable("BLADE_PRINT", "y,total,squares")
+            refusal "explicit producer print" false (program store "stream" "x * 2.0 + 1.0" "")
+            Environment.SetEnvironmentVariable("BLADE_PRINT", "total,squares")
+            Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "0")
+            refusal "licensed fastest fold tree" false (program store "stream" "x * 2.0 + 1.0" "")
+            Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+            // A bad first block plus a bad last block reports ONE whole-read
+            // count, without publishing scalars. Corrupting the last chunk
+            // afterward makes its I/O error take precedence in BOTH routes.
+            for shortTail in [ false; true ] do
+                let label = if shortTail then "zarr_join_missing_then_short" else "zarr_join_missing_tally"
+                let store = fixture label 2 11 true
+                let mk mode = program store mode "x * 2.0 + 1.0" ""
+                match emit (label + "_stream") (mk "stream"), emit (label + "_read") (mk "read") with
+                | Some (_, streamCpp), Some (_, readCpp) ->
+                    check ($"{label}: failure witness uses the block route") (streamCpp.Contains marker) ""
+                    if shortTail then File.WriteAllBytes(Path.Combine(store, "A", "2"), [| 0uy |])
+                    if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                    else
+                        for mode, cpp in [ "stream", streamCpp; "read", readCpp ] do
+                            match run (label + "_" + mode) cpp with
+                            | Ok (code, output) ->
+                                let expected =
+                                    if shortTail then output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                    else output.Contains "2 cell(s) hold a missing value" && output.Contains "first at [0]"
+                                check ($"{label}: {mode} preserves whole-read failure order")
+                                    (code <> 0 && expected && normal output = "") output
+                            | Error e -> check ($"{label}: {mode} builds/runs") false e
+                | _ -> ()
+        with ex -> check "rank1 streamed joined scalars" false ex.Message
+        for key, value in saved do Environment.SetEnvironmentVariable(key, value)
+    streamedJoinedScalarsE2E ()
+
+    // PM43 / D02: the output itself is REQUIRED and printed. Only its duplicate
+    // flat assembly/copy may disappear. The unprivileged provider reader is
+    // the exact old implementation and supplies a materialized reference.
+    let residentDestinationE2E () =
+        printfn "\n--- rank1 Zarr resident destination: one final pool, no flat copy ---"
+        let marker = "zarr-rank1-direct-destination: required resident output"
+        let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+        let savedTile = Environment.GetEnvironmentVariable "BLADE_TILE_CACHE"
+        let source store = String.concat "\n" [ "import zarr as z"; sprintf "let s = z.load(\"%s\")" store; "let A = s.vars.A |> z.read"; "" ]
+        let fixture label version payload shape chunks fill omit =
+            let store = Path.GetFullPath(Path.Combine(scratch, "resident_destination_" + label)).Replace('\\', '/')
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some (if List.length shape = 1 then [ "x" ] else [ "x"; "y" ])
+                    Shape = shape; Chunks = chunks; FillValue = fill; Data = payload; OmitChunks = omit; Blade = None } ]
+            (if version = 2 then ZarrWrite.writeStoreV2 else ZarrWrite.writeStoreV3) store vars
+            store
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with Error e -> Error e | Ok exe -> runExecutable exe
+        let printed (output: string) =
+            output.Replace("\r\n", "\n").Split('\n')
+            |> Array.filter (fun line -> line.StartsWith "A = ") |> String.concat "\n"
+        let emitPair label store =
+            match lower (source store) with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                let specId, spec = ir.Modules |> List.collect (fun m -> Map.toList m.ProviderReads) |> List.exactlyOne
+                let binding = ir.Modules |> List.collect (_.Bindings) |> List.find (fun b -> b.Id = specId)
+                let ctx = { Blade.CodeGenState.emptyContext () with ProviderReads = Map.ofList [ specId, spec ] }
+                let builder = IRBuilder()
+                builder.EnsureAtLeast(0x40000000)
+                let legacyLines, returned = Blade.CodeGenBinding.genBinding ctx binding builder
+                let legacy = String.concat "\n" legacyLines
+                check ($"{label}: default binding context has no top-level destination authority")
+                    (not (legacy.Contains marker) && legacy.Contains "A_flat = new" && returned.TopLevelProviderRead.IsNone) legacy
+                match CppZarr.tryGenReadVarIntoFinal spec "A" with
+                | None -> check ($"{label}: rank1 destination capability") false "declined fixture"; None
+                | Some directLines ->
+                    let indented lines = lines |> List.map (fun line -> "    " + line) |> String.concat "\n"
+                    let directBlock = indented directLines
+                    // Replace exactly the provider reader span with the unchanged
+                    // generic reader. Every printer, demanded output and wrapper
+                    // stays identical, and a missing/duplicated span is a failure.
+                    let copies = cpp.Split([| directBlock |], StringSplitOptions.None).Length - 1
+                    check ($"{label}: direct reader span occurs exactly once") (copies = 1) ($"found {copies}")
+                    let baseline = cpp.Replace(directBlock, indented legacyLines)
+                    let pending = "A__resident_pending = allocate<typename promote<"
+                    let publication = cpp.IndexOf("A = { A__resident_pending, A_extents }", StringComparison.Ordinal)
+                    let metadata = cpp.IndexOf("std::ifstream A_zm", StringComparison.Ordinal)
+                    let allocation = cpp.IndexOf(pending, StringComparison.Ordinal)
+                    check ($"{label}: actual final-allocator route has no full flat allocation/copy")
+                        (cpp.Contains marker && allocation >= 0 && publication > allocation
+                         && metadata >= 0 && metadata < allocation
+                         && not (cpp.Contains "A_flat") && not (cpp.Contains "A_i0")
+                         && cpp.Contains "delete[] A_cbuf;"
+                         && baseline.Contains "A_flat = new" && not (baseline.Contains marker)) ""
+                    if spec.VarType.ElemType = IRTScalar ETFloat32 || spec.VarType.ElemType = IRTScalar ETFloat64 then
+                        check ($"{label}: whole-read validation completes before final Array publication")
+                            (cpp.IndexOf("delete[] A_cbuf;", StringComparison.Ordinal) < cpp.IndexOf("if (A_miss.count)", StringComparison.Ordinal)
+                             && cpp.IndexOf("if (A_miss.count)", StringComparison.Ordinal) < publication) ""
+                    // Even an explicitly different authorized ID cannot leak
+                    // authority into this local binding, regardless of its indent.
+                    let wrongOwner = { ctx with TopLevelProviderRead = Some (specId + 1); Indent = 0 }
+                    let denied, _ = Blade.CodeGenBinding.genBinding wrongOwner binding builder
+                    check ($"{label}: another binding's capability cannot authorize a local read")
+                        ((denied |> List.exists (fun line -> line.Contains "A_flat = new"))
+                         && not (denied |> List.exists (fun line -> line.Contains marker))) ""
+                    let savedMpi = Blade.CodeGenState.mpiProgramOn ()
+                    try
+                        Blade.CodeGenState.setMpiProgramOn true
+                        let denied, _ = Blade.CodeGenBinding.genBinding { ctx with TopLevelProviderRead = Some specId } binding builder
+                        check ($"{label}: MPI retains the generic resident reader")
+                            ((denied |> List.exists (fun line -> line.Contains "A_flat = new"))
+                             && not (denied |> List.exists (fun line -> line.Contains marker))) ""
+                    finally Blade.CodeGenState.setMpiProgramOn savedMpi
+                    for why, unsupported in
+                        [ "stream", { spec with Streamed = true }
+                          "masked raw", { spec with AllowMissing = true }
+                          "window", { spec with Window = Some (0L, 1L) }
+                          "other provider", { spec with Provider = "netcdf" }
+                          "rank two", { spec with VarType = { spec.VarType with IndexTypes = spec.VarType.IndexTypes @ spec.VarType.IndexTypes } }
+                          "mismatched shape", { spec with VarType = { spec.VarType with IndexTypes = spec.VarType.IndexTypes |> List.map (fun ix -> { ix with Extent = IRLit (IRLitInt Int64.MaxValue) }) } } ] do
+                        check ($"{label}: destination capability falls back for {why}")
+                            (CppZarr.tryGenReadVarIntoFinal unsupported "A").IsNone ""
+                    Some (cpp, baseline, spec)
+        try
+            try
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "A")
+                Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+                let values = [| for i in 1 .. 11 -> float i |]
+                let floatExpected = "A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]"
+                let cases =
+                    [ "f64_v2_odd", 2, ZarrWrite.WF64 values, 11L, FillFloat 0.0, [], floatExpected
+                      "f64_v3_padding_nan", 3, ZarrWrite.WF64 values, 11L, FillFloat nan, [], floatExpected
+                      "f32_v2_odd", 2, ZarrWrite.WF32 (values |> Array.map float32), 11L, FillFloat 0.0, [], floatExpected
+                      "i4_v3_widen", 3, ZarrWrite.WI32 [| -5 .. 5 |], 11L, FillInt 0L, [], "A = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]"
+                      "empty", 2, ZarrWrite.WF64 [||], 0L, FillFloat 0.0, [], "A = []"
+                      "finite_fill", 2, ZarrWrite.WF64 values, 11L, FillFloat -2.0, [ [ 1L ] ], "A = [1.0, 2.0, 3.0, 4.0, -2.0, -2.0, -2.0, -2.0, 9.0, 10.0, 11.0]" ]
+                for tag, version, payload, n, fill, omit, expected in cases do
+                    let label = "zarr_resident_" + tag
+                    let store = fixture tag version payload [ n ] [ 4L ] fill omit
+                    match emitPair label store with
+                    | None -> ()
+                    | Some (cpp, baseline, spec) ->
+                        if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                        else
+                            match run (label + "_reference") baseline, run label cpp with
+                            | Ok (0, reference), Ok (0, actual) ->
+                                check ($"{label}: exact unchanged-reader reference and independently known printed A")
+                                    (printed actual = expected && printed reference = expected) ($"reference: {reference}; actual: {actual}")
+                            | Error e, _ -> baselineFailed label e
+                            | _, Error e -> check ($"{label}: direct reader builds/runs") false e
+                            | a, b -> check ($"{label}: both readers succeed") false (sprintf "%A / %A" a b)
+                        if tag = "f64_v2_odd" then
+                            // Metadata-only oversized padded chunk: do not allocate
+                            // its bytes, and do not call the unchecked legacy core.
+                            let hugeStore = Path.Combine(scratch, "resident_destination_oversized")
+                            Directory.CreateDirectory(Path.Combine(hugeStore, "A")) |> ignore
+                            File.WriteAllText(Path.Combine(hugeStore, ".zgroup"), "{\"zarr_format\":2}")
+                            File.WriteAllText(Path.Combine(hugeStore, "A", ".zarray"), "{\"shape\":[11],\"chunks\":[2147483647],\"dtype\":\"<f8\",\"compressor\":null,\"fill_value\":0,\"order\":\"C\",\"filters\":null}")
+                            check "resident destination: oversized padded chunk declines before Int32 multiplication"
+                                (CppZarr.tryGenReadVarIntoFinal { spec with FilePath = hugeStore } "A").IsNone ""
+                // Same source-data failure order as the original owned-flat
+                // assembly, including errors after an earlier nonfinite cell.
+                for failure in [ "missing_tally"; "later_short"; "later_null_chunk" ] do
+                    let data = [| for i in 0 .. 10 -> if i = 0 || i = 10 then nan else float (i + 1) |]
+                    let fill, omit = if failure = "later_null_chunk" then FillNone, [ [ 2L ] ] else FillFloat 0.0, []
+                    let label = "zarr_resident_" + failure
+                    let store = fixture failure 2 (ZarrWrite.WF64 data) [ 11L ] [ 4L ] fill omit
+                    match emitPair label store with
+                    | None -> ()
+                    | Some (cpp, baseline, _) ->
+                        if failure = "later_short" then File.WriteAllBytes(Path.Combine(store, "A", "2"), [| 0uy |])
+                        if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                        else
+                            for lane, text in [ "direct", cpp; "reference", baseline ] do
+                                match run (label + "_" + lane) text with
+                                | Ok (code, output) ->
+                                    let diagnostic =
+                                        match failure with
+                                        | "later_short" -> output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                        | "later_null_chunk" -> output.Contains "is missing and fill_value is null" && not (output.Contains "error[BL8015]")
+                                        | _ -> output.Contains "2 cell(s) hold a missing value" && output.Contains "first at [0]"
+                                    check ($"{label}: {lane} preserves diagnostic priority and publishes no Array")
+                                        (code <> 0 && diagnostic && printed output = "") output
+                                | Error e -> check ($"{label}: {lane} builds/runs") false e
+                let rank2 = fixture "rank2_control" 2 (ZarrWrite.WF64 [| for i in 1 .. 15 -> float i |]) [ 3L; 5L ] [ 2L; 3L ] (FillFloat 0.0) []
+                match lower (source rank2) with
+                | Error e -> check "resident destination: rank2 fallback lowers" false e
+                | Ok ir ->
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir "zarr_resident_rank2_control"
+                    check "resident destination: rank2 keeps original owned-flat assembly and copy"
+                        (not (cpp.Contains marker) && cpp.Contains "A_flat = new" && cpp.Contains "delete[] A_flat;") ""
+            with ex -> check "rank1 Zarr resident destination" false ex.Message
+        finally
+            Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", savedTile)
+    residentDestinationE2E ()
+
     // ---------------------------------------------------------------
     // 10f'. Sibling folds over a STREAMED variable are not joined
     // (Optimize.shareSiblingFoldsModule): a `.stream` read has an ordinary
@@ -1232,6 +2018,11 @@ let d2 = method_for(halo<CX, [-2, 0, 2]>) <@> lambda(w) -> A(w(2)) * A(w(-2)) - 
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_segments_stencil"
                 check "stencil over segments: per-run emission, no whole-array buffer"
                     (cppCode.Contains "stencil over segments" && not (cppCode.Contains "A_flat = new")) ""
+                check "stencil over segments: actual local loads replace every rank1 alias"
+                    (cppCode.Contains "d__win0[static_cast<size_t>"
+                     && cppCode.Contains "d2__win0[static_cast<size_t>"
+                     && not (cppCode.Contains " - __w_lo,")
+                     && not (cppCode.Contains "Array<double, 1> A =")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, "zarr_segments_stencil.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -1289,6 +2080,12 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_segments_elementwise"
                 check "elementwise stream: per-block emission, no whole-array buffer"
                     (cppCode.Contains "elementwise over segments" && not (cppCode.Contains "A_flat = new")) ""
+                check "elementwise stream: scalar peels use local windows, resident zip stays resident"
+                    (cppCode.Contains "doubled__win0[static_cast<size_t>"
+                     && cppCode.Contains "shifted__win0[static_cast<size_t>"
+                     && cppCode.Contains "scaled__win0[static_cast<size_t>"
+                     && not (cppCode.Contains " - __w_lo,")
+                     && not (cppCode.Contains "Array<double, 1> A =")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, "zarr_segments_elementwise.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -1310,6 +2107,459 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                 check "elementwise stream: lowers" false e
         with ex -> check "elementwise stream" false ex.Message
     elementwiseStreamE2E ()
+
+    // D04: local addressing is a safety prerequisite, independent of caching.
+    // These fixtures pin values without compiling the former invalid alias.
+    let rank1WindowAddressingE2E () =
+        printfn "\n--- rank1 streamed windows: local addresses, global coordinates ---"
+        let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+        let savedTile = Environment.GetEnvironmentVariable "BLADE_TILE_CACHE"
+        let fixture label version payload n fill omit =
+            let store = Path.GetFullPath(Path.Combine(scratch, "window_address_" + label)).Replace('\\', '/')
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some ["x"]; Shape = [n]; Chunks = [4L]
+                    FillValue = fill; Data = payload; OmitChunks = omit; Blade = None } ]
+            (if version = 2 then ZarrWrite.writeStoreV2 else ZarrWrite.writeStoreV3) store vars
+            store
+        let source (store: string) (annotation: string) (extra: string) : string =
+            let lines : string list =
+                [ "import zarr as z";
+                  sprintf "let s = z.load(\"%s\")" store;
+                  "type CX = Chunked<s.index.x, store>";
+                  $"let A: Array<{annotation} like CX> = s.vars.A |> z.stream";
+                  "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> { let hi = A(w(1)); hi - A(w(-1)) } |> compute";
+                  extra; "" ]
+            String.concat "\n" lines
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with Error e -> Error e | Ok exe -> runExecutable exe
+        let emit (label: string) (src: string) =
+            match lower src with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                Some (ir, cpp)
+        let noUnsafeAlias (cpp: string) =
+            not (cpp.Contains " - __w_lo,") && not (cpp.Contains "Array<double, 1> A =")
+            && not (cpp.Contains "Array<float, 1> A =") && not (cpp.Contains "Array<int64_t, 1> A =")
+        try
+            try
+                Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+                let dtypeCases : (string * string * ZarrWrite.WritePayload) list =
+                    [ ("f64", "Float64", ZarrWrite.WF64 [| for j in 1 .. 11 -> float (j * j) |]);
+                      ("f32", "Float32", ZarrWrite.WF32 [| for j in 1 .. 11 -> float32 (j * j) |]);
+                      ("i4", "Int64", ZarrWrite.WI32 [| for j in 1 .. 11 -> j * j |]) ]
+                for dtype, annotation, payload in dtypeCases do
+                    for version in [2; 3] do
+                        let label = $"zarr_window_{dtype}_v{version}"
+                        let store = fixture label version payload 11L (if dtype = "i4" then FillInt 0L else FillFloat nan) []
+                        let extra =
+                            if dtype = "f64" then
+                                "let coords = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> Float64(w(0)) + A(w(0)) |> compute"
+                            else ""
+                        Environment.SetEnvironmentVariable("BLADE_PRINT", if extra = "" then "d" else "d,coords")
+                        match emit label (source store annotation extra) with
+                        | None -> ()
+                        | Some (_, cpp) ->
+                            check ($"{label}: actual local load, final output and unchanged read owner")
+                                (noUnsafeAlias cpp && cpp.Contains "d__win0[static_cast<size_t>"
+                                 && cpp.Contains "static_cast<int64_t>(__w_lo)"
+                                 && cpp.Contains "uniform-zarr-halo-cursor" && not (cpp.Contains "d__runs[")
+                                 && cpp.Contains "delete[] d__win0;"
+                                 && cpp.Contains "d = { allocate<typename promote<"
+                                 && not (cpp.Contains "#error") && not (cpp.Contains "BLADE_CODEGEN_ERROR")
+                                 && not (cpp.Contains "A_flat = new")) ""
+                            if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found" label
+                            else
+                                match run label cpp with
+                                | Ok (0, output) ->
+                                    let expected =
+                                        if dtype = "i4" then "d = [8, 12, 16, 20, 24, 28, 32, 36, 40]"
+                                        else "d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0]"
+                                    check ($"{label}: independent odd-tail values, padded NaNs unobserved") (output.Contains expected) output
+                                    if extra <> "" then
+                                        check ($"{label}: kernel coordinates remain global across windows")
+                                            (output.Contains "coords = [5.0, 11.0, 19.0, 29.0, 41.0, 55.0, 71.0, 89.0, 109.0]") output
+                                | Ok (code, output) -> check ($"{label}: runs") false ($"exit {code}: {output}")
+                                | Error e -> baselineFailed label e
+                // Finite omitted chunk fills are real neighbor values, not
+                // invented boundary ghosts. Expected values computed by hand.
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "d")
+                for n, expected in [0, "d = []"; 1, "d = [2.0]"] do
+                    let label = $"zarr_window_empty_or_single_{n}"
+                    let store = fixture label 2 (ZarrWrite.WF64 [| for j in 1 .. n -> float j |]) (int64 n) (FillFloat 0.0) []
+                    let lines : string list =
+                        [ "import zarr as z";
+                          sprintf "let s = z.load(\"%s\")" store;
+                          "let A = s.vars.A |> z.stream";
+                          "let d = A + 1.0"; "" ]
+                    let src = String.concat "\n" lines
+                    match emit label src with
+                    | Some (_, cpp) ->
+                        check ($"{label}: elementwise path retains safe local peel")
+                            (noUnsafeAlias cpp && cpp.Contains "d__win0[static_cast<size_t>") ""
+                        if zCaps.HasGpp then
+                            match run label cpp with
+                            | Ok (0, output) -> check ($"{label}: independent values and empty interior") (output.Contains expected) output
+                            | other -> check ($"{label}: runs") false (sprintf "%A" other)
+                    | None -> ()
+                let finite = fixture "finite_fill" 2 (ZarrWrite.WF64 [| 1.0 .. 10.0 |]) 10L (FillFloat -1.0) [[1L]]
+                match emit "zarr_window_finite" (source finite "Float64" "") with
+                | Some (_, cpp) when zCaps.HasGpp ->
+                    match run "zarr_window_finite" cpp with
+                    | Ok (0, output) -> check "rank1 local windows: finite missing-chunk fill" (output.Contains "d = [2.0, 2.0, -4.0, -5.0, 0.0, 0.0, 10.0, 11.0]") output
+                    | other -> check "rank1 local windows: finite fill runs" false (sprintf "%A" other)
+                | _ -> ()
+                // Same-window source-data failure wins over an earlier NaN;
+                // future-window failure must not be touched before its turn.
+                let failureCases : (string * int * int * bool) list =
+                    [ ("future_short", 2, 0, false); ("same_short", 1, 0, false);
+                      ("future_null", 2, 0, true); ("same_null", 1, 0, true);
+                      ("global_missing", -1, 6, false) ]
+                for label, badChunk, missingAt, nullFill in failureCases do
+                    let data = [| for j in 0 .. 10 -> if j = missingAt then nan else float (j + 1) |]
+                    let store = fixture label 2 (ZarrWrite.WF64 data) 11L (if nullFill then FillNone else FillFloat 0.0) (if nullFill then [[int64 badChunk]] else [])
+                    match emit ("zarr_window_" + label) (source store "Float64" "") with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        if badChunk >= 0 && not nullFill then File.WriteAllBytes(Path.Combine(store, "A", string badChunk), [|0uy|])
+                        if zCaps.HasGpp then
+                            match run ("zarr_window_" + label) cpp with
+                            | Ok (code, output) ->
+                                let expected =
+                                    if label = "same_short" then output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                    elif label = "same_null" then output.Contains "is missing and fill_value is null" && not (output.Contains "error[BL8015]")
+                                    else output.Contains "error[BL8015]" && output.Contains ($"first at [{missingAt}]")
+                                         && not (output.Contains "is short") && not (output.Contains "fill_value is null")
+                                check ($"rank1 local windows: {label} preserves per-window failure order/global location")
+                                    (code <> 0 && expected && not (output.Contains "d = ")) output
+                            | Error e -> baselineFailed label e
+                // Mutate otherwise-positive lowered IR to isolate backend
+                // refusal boundaries even when the front end rules them out.
+                let store = fixture "refusal" 2 (ZarrWrite.WF64 [| 1.0 .. 11.0 |]) 11L (FillFloat 0.0) []
+                let helperSource =
+                    let withHelper = (source store "Float64" "").Replace(
+                        "let d = method_for", "function gap(a: Float64, b: Float64) -> Float64 = { a - b }\nlet d = method_for")
+                    withHelper.Replace("let hi = A(w(1)); hi - A(w(-1))", "gap(A(w(1)), A(w(-1)))")
+                match emit "zarr_window_scalar_helper" helperSource with
+                | Some (_, cpp) ->
+                    let helperCall = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"gap[^\s(]*\(d__win0\[static_cast<size_t>")
+                    check "rank1 local windows: capture-free named scalar call renders certified loads"
+                        (helperCall && noUnsafeAlias cpp && not (cpp.Contains "BLADE_CODEGEN_ERROR")) ""
+                    if zCaps.HasGpp then
+                        match run "zarr_window_scalar_helper" cpp with
+                        | Ok (0, output) ->
+                            check "rank1 local windows: named scalar helper independent values"
+                                (output.Contains "d = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]") output
+                        | other -> check "rank1 local windows: named scalar helper runs" false (sprintf "%A" other)
+                | None -> ()
+                match lower (source store "Float64" "") with
+                | Error e -> check "rank1 local windows: refusal fixture lowers" false e
+                | Ok ir ->
+                    let transformExpr rewrite (program: IRProgram) =
+                        { Modules = program.Modules |> List.map (fun m ->
+                            { m with Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr rewrite f.Body })
+                                     Bindings = m.Bindings |> List.map (fun b -> { b with Value = mapIRExpr rewrite b.Value }) })
+                          DeclSpans = program.DeclSpans }
+                    let rewriteRead change = function
+                        | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, loc)], ident) as e
+                            when (Blade.IRAccess.denseHaloTagOf w).IsSome -> change e aid ty w off loc ident
+                        | e -> e
+                    let refuse label program =
+                        try
+                            let cpp, _ = CodeGen.genSelfContainedProgramFromIR program ("zarr_window_refuse_" + label)
+                            check ($"rank1 local windows: {label} refuses without runnable alias fallback") false cpp
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d ->
+                            check ($"rank1 local windows: {label} refuses without runnable alias fallback")
+                                (d.Code = "BL7001" && d.Message.Contains "rank-one streamed window addressing" && d.Span.StartLine > 0) (string d)
+                    let changed label change = refuse label (transformExpr (rewriteRead change) ir)
+                    changed "computed_offset" (fun _ aid ty w _ loc ident -> IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,w,w,loc)], ident))
+                    changed "huge_offset" (fun _ aid ty w _ loc ident -> IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,w,IRLit(IRLitInt System.Int64.MaxValue),loc)], ident))
+                    changed "foreign_window" (fun _ aid ty w off loc ident ->
+                        let foreign = match w with IRVar (_, t) -> IRVar (0x3ffffffe, t) | _ -> w
+                        IRIndex (IRVar(aid,ty), [IRBinOp(IRElementwise,IRAdd,foreign,off,loc)], ident))
+                    changed "mixed_global_read" (fun e aid ty _ _ loc _ -> IRBinOp(IRElementwise,IRAdd,e,IRIndex(IRVar(aid,ty),[IRLit(IRLitInt 0L)],None),loc))
+                    changed "source_escape" (fun e aid ty _ _ _ _ -> IRLet (0x3ffffffd, IRVar(aid,ty), e))
+                    changed "hidden_type_extent" (fun _ aid ty w off loc ident ->
+                        let badTy = IRTIdxTagged(ty, IRefAnon(0x3ffffffc, IRVar(aid,ty)))
+                        IRIndex(IRVar(aid,badTy),[IRBinOp(IRElementwise,IRAdd,w,off,loc)],ident))
+                    refuse "reynolds" (transformExpr (function IRApplyCombinator a -> IRApplyCombinator {a with HasReynolds = true} | e -> e) ir)
+                    let haloCallable =
+                        ir.Modules |> List.collect (_.Functions) |> List.tryFind (fun f ->
+                            not (Blade.IRAccess.windowReadsOf (fun w -> (Blade.IRAccess.denseHaloTagOf w).IsSome) f.Body).IsEmpty)
+                    match haloCallable with
+                    | None -> check "rank1 local windows: captured-callee refusal has a real lifted kernel" false "no callable"
+                    | Some f ->
+                        let callee = { f with Id = 0x3ffffffb; Name = "__window_captured_callee" }
+                        let call = IRApp(IRVar(callee.Id, IRTUnit), f.Params |> List.map (fun p -> IRVar(p.VarId,p.Type)), f.RetType)
+                        let opaque =
+                            { Modules = ir.Modules |> List.map (fun m ->
+                                if m.Functions |> List.exists (fun c -> c.Id = f.Id) then
+                                    { m with Functions = (m.Functions |> List.map (fun c -> if c.Id = f.Id then {c with Body = call} else c)) @ [callee] }
+                                else m)
+                              DeclSpans = ir.DeclSpans }
+                        refuse "captured_callee" opaque
+                    let arraySource = (source store "Float64" "").Replace("let hi = A(w(1)); hi - A(w(-1))", "[A(w(1)), A(w(-1))]")
+                    match lower arraySource with
+                    | Ok arrayIr -> refuse "array_result" arrayIr
+                    | Error e -> check "rank1 local windows: array-result refusal fixture lowers" false e
+                    let changedProvider (_: IRId) (s: ProviderReadSpec) : ProviderReadSpec =
+                        let changedIndices : IRIndexType list =
+                            s.VarType.IndexTypes |> List.map (fun ix -> {ix with Extent = IRLit(IRLitInt 12L)})
+                        let changedType : IRArrayType = {s.VarType with IndexTypes = changedIndices}
+                        {s with VarType = changedType}
+                    let changedModule (m: IRModule) : IRModule =
+                        let changedReads : Map<IRId, ProviderReadSpec> = Map.map changedProvider m.ProviderReads
+                        {m with ProviderReads = changedReads}
+                    let disagree : IRProgram = {ir with Modules = List.map changedModule ir.Modules}
+                    refuse "source_extent_disagreement" disagree
+                    // The immutable certificate is scoped to the final IR and
+                    // exact binding records; it cannot be reused after a rewrite.
+                    let priorAnalysis =
+                        setCallablesContext (ir.Modules |> List.collect (_.Functions) |> List.map (fun f -> f.Id, f) |> Map.ofList)
+                    try
+                        let applies = ResizeArray<ApplyInfo>()
+                        for m in ir.Modules do
+                            for b in m.Bindings do
+                                iterIRExpr (function IRApplyCombinator a -> applies.Add a | _ -> ()) b.Value
+                        let a = applies |> Seq.find (fun a -> match a.Arrays with [IRRange _] -> true | _ -> false)
+                        let sourceId, spec = ir.Modules |> List.collect (fun m -> Map.toList m.ProviderReads) |> List.find (fun (_, s) -> s.Streamed)
+                        let builder = IRBuilder()
+                        builder.EnsureAtLeast(0x40000000)
+                        let initial = buildLoopNestCodeGen a ["__halo_range"] "__certificate_test" builder
+                        let cg = {initial with MpiSlab = true}
+                        match Blade.CodeGenLoopNest.certifyRank1WindowReads cg "stencil" [(sourceId,"A",spec,"__cert_win")] (-1L) 1L 1L [] with
+                        | Error why -> check "rank1 local windows: stale-proof fixture obtains a certificate" false why
+                        | Ok cert ->
+                            let stale label changed =
+                                try
+                                    Blade.CodeGenLoopNest.genLoopNestWindowed cert Map.empty changed Map.empty 0 |> ignore
+                                    check ($"rank1 local windows: changed {label} rejects stale certificate before rendering") false "unexpected render"
+                                with
+                                | :? InvalidOperationException as ex ->
+                                    check ($"rank1 local windows: changed {label} rejects stale certificate before rendering")
+                                        (ex.Message.Contains "certificate belongs to a different kernel") ex.Message
+                            stale "kernel" {cg with KernelExpr = IRUnaryOp(IRNeg,cg.KernelExpr)}
+                            stale "bindings" {cg with Bindings = cg.Bindings |> List.map (fun b -> {b with Extent = IRLit(IRLitInt 1L)})}
+                    finally
+                        restoreAnalysisContext priorAnalysis
+                    // A normal emission after refusals cannot inherit state or
+                    // lose its own certificate. No ambient authorization exists.
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir "zarr_window_after_refusal"
+                    check "rank1 local windows: repeated emission retains safe local addressing"
+                        (cpp.Contains "d__win0[static_cast<size_t>" && noUnsafeAlias cpp
+                         && not (cpp.Contains "#error") && not (cpp.Contains "BLADE_CODEGEN_ERROR")) ""
+            with ex -> check "rank1 local window addressing" false ex.Message
+        finally
+            Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", savedTile)
+    rank1WindowAddressingE2E ()
+
+    // D05: bound traversal metadata through declaration and emission. Explicit
+    // structural groupings and store fingerprint enumeration remain separate.
+    let uniformHaloCursorE2E () =
+        printfn "\n--- uniform Zarr halo cursor: compact metadata and identical windows ---"
+        let marker = "uniform-zarr-halo-cursor"
+        let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+        let savedTile = Environment.GetEnvironmentVariable "BLADE_TILE_CACHE"
+        let source (store: string) (edge: string) (radius: int) : string =
+            let lines : string list =
+                [ "import zarr as z";
+                  sprintf "let s = z.load(\"%s\")" store;
+                  sprintf "type CX = Chunked<s.index.x, %s>" edge;
+                  "let A: Array<Float64 like CX> = s.vars.A |> z.stream";
+                  sprintf "let d = method_for(halo<CX, [-%d, 0, %d]>) <@> lambda(w) -> A(w(%d)) - A(w(-%d)) |> compute" radius radius radius radius;
+                  "" ]
+            String.concat "\n" lines
+        let fixture (label: string) (n: int) (missing: bool) (nullChunk: bool) : string =
+            let store = Path.GetFullPath(Path.Combine(scratch, "uniform_cursor_" + label)).Replace('\\', '/')
+            let values = [| for j in 0 .. n - 1 -> if missing && j = 0 then nan else float ((j + 1) * (j + 1)) |]
+            let vars : ZarrWrite.WriteVar list =
+                [ { Name = "A"; DimNames = Some ["x"]; Shape = [int64 n]; Chunks = [4L]
+                    FillValue = (if nullChunk then FillNone else FillFloat 0.0); Data = ZarrWrite.WF64 values
+                    OmitChunks = (if nullChunk then [[1L]] else []); Blade = None } ]
+            ZarrWrite.writeStoreV2 store vars
+            store
+        let metadataOnly (label: string) (n: int64) (edge: int64) : string =
+            let store = Path.GetFullPath(Path.Combine(scratch, "uniform_cursor_metadata_" + label)).Replace('\\', '/')
+            let arrayDir = Path.Combine(store, "A")
+            Directory.CreateDirectory arrayDir |> ignore
+            let metadata : string = sprintf """{"zarr_format":2,"shape":[%d],"chunks":[%d],"dtype":"<f8","compressor":null,"fill_value":0.0,"order":"C","filters":null}""" n edge
+            File.WriteAllText(Path.Combine(store, ".zgroup"), """{"zarr_format":2}""")
+            File.WriteAllText(Path.Combine(arrayDir, ".zarray"), metadata)
+            File.WriteAllText(Path.Combine(arrayDir, ".zattrs"), """{"_ARRAY_DIMENSIONS":["x"]}""")
+            store
+        let run (label: string) (cpp: string) =
+            CodeGen.deployRuntimeHeaders e2eDir
+            let file = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(file, cpp)
+            match compileCpp file e2eDir with Error e -> Error e | Ok exe -> runExecutable exe
+        let emit (label: string) (src: string) : (IRProgram * string) option =
+            match lower src with
+            | Error e -> check ($"{label}: lowers") false e; None
+            | Ok ir ->
+                let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir label
+                Some (ir, cpp)
+        try
+            try
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "d")
+                Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", null)
+                SegmentTable.recordUniform "D05.left.CX" 10L 3L
+                SegmentTable.recordUniform "D05.right.CX" 11L 4L
+                check "uniform cursor: qualified alias identities stay distinct"
+                    (SegmentTable.tryFindRuns "D05.left.CX" = Some (SegmentTable.UniformRuns(10L,3L))
+                     && SegmentTable.tryFindRuns "D05.right.CX" = Some (SegmentTable.UniformRuns(11L,4L))) ""
+                SegmentTable.record "D05.explicit" [0L; 3L; 8L; 10L]
+                check "uniform cursor: explicit registry and compatibility APIs retain boundaries"
+                    (SegmentTable.tryFindRuns "D05.explicit" = Some (SegmentTable.ExplicitRuns [0L;3L;8L;10L])
+                     && SegmentTable.tryFind "D05.explicit" = Some [0L;3L;8L;10L]
+                     && SegmentTable.tryFind "D05.left.CX" = Some [0L;3L;6L;9L;10L]) ""
+                SegmentTable.reset ()
+                check "uniform cursor: reset clears compact and explicit entries"
+                    (SegmentTable.tryFindRuns "D05.left.CX" = None && SegmentTable.tryFindRuns "D05.explicit" = None) ""
+                let geometryCases : (int64 * int64 * int64 * int64 * int64 * int64 list) list =
+                    [ (10L,4L,-1L,1L,6L,[0L;4L;8L;10L]);
+                      (11L,4L,-1L,1L,6L,[0L;4L;8L;11L]);
+                      (10L,3L,-1L,1L,5L,[0L;3L;6L;9L;10L]);
+                      (11L,2L,-3L,3L,8L,[0L;2L;4L;6L;8L;10L;11L]);
+                      (2L,1L,-1L,1L,1L,[0L;1L;2L]);
+                      (10L,4L,-3L,0L,7L,[0L;4L;8L;10L]) ]
+                for n,k,lo,hi,capacity,offsets in geometryCases do
+                    let actual = Blade.CodeGenCuda.uniformHaloWindowCapacity n k (-lo) (n-hi) lo hi
+                    check ($"uniform cursor: independent exact capacity N{n} K{k} reach{lo},{hi}") (actual = Ok capacity) (sprintf "%A" actual)
+                    check ($"uniform cursor: compatibility boundary reference N{n} K{k}")
+                        (SegmentTable.toExplicitOffsets (SegmentTable.UniformRuns(n,k)) = offsets) ""
+                check "uniform cursor: signed-limit capacity checked without enumeration"
+                    (Blade.CodeGenCuda.uniformHaloWindowCapacity Int64.MaxValue Int64.MaxValue 0L Int64.MaxValue 0L 0L = Ok Int64.MaxValue) ""
+                let badGeometry : (int64 * int64 * int64 * int64 * int64 * int64) list =
+                    [ (10L,0L,1L,9L,-1L,1L); (10L,11L,1L,9L,-1L,1L);
+                      (10L,4L,2L,9L,-1L,1L); (10L,4L,1L,10L,-1L,1L);
+                      (0L,1L,0L,0L,0L,0L); (10L,4L,0L,9L,Int64.MinValue,1L) ]
+                for n,k,a,b,lo,hi in badGeometry do
+                    check "uniform cursor: malformed/overflowing geometry refuses without enumeration"
+                        ((Blade.CodeGenCuda.uniformHaloWindowCapacity n k a b lo hi).IsError) ""
+                let valueCases : (string * int * string * int * int64 * string) list =
+                    [ ("store",11,"store",1,6L,"d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0]");
+                      ("literal3",10,"3",1,5L,"d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0]");
+                      ("wide_radius",11,"2",3,8L,"d = [48.0, 60.0, 72.0, 84.0, 96.0]");
+                      ("empty_interior",2,"1",1,1L,"d = []") ]
+                for label,n,edge,radius,capacity,expected in valueCases do
+                    let store = fixture label n false false
+                    match emit ("zarr_cursor_" + label) (source store edge radius) with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        let k = if edge = "store" then 4L else Int64.Parse edge
+                        check ($"uniform cursor: {label} keeps compact declaration facts through emission")
+                            (SegmentTable.tryFindRuns "CX" = Some (SegmentTable.UniformRuns(int64 n,k))) ""
+                        let advance = cpp.IndexOf("__run_next = __run_hi;", StringComparison.Ordinal)
+                        let emptyContinue = cpp.IndexOf("if (__c_lo >= __c_hi) continue;", StringComparison.Ordinal)
+                        check ($"uniform cursor: {label} actual capped step, local load and progress before continue")
+                            (cpp.Contains marker && not (cpp.Contains "d__runs[")
+                             && cpp.Contains "__run_step" && cpp.Contains "d__win0[static_cast<size_t>"
+                             && advance >= 0 && emptyContinue > advance
+                             && cpp.Contains ($"d__win0 = new double[{capacity}];")
+                             && cpp.Contains "__c_lo = __run_lo <" && cpp.Contains "__c_hi = __run_hi >"
+                             && cpp.Contains "delete[] d__win0;" && not (cpp.Contains " - __w_lo,")) ""
+                        if zCaps.HasGpp then
+                            match run ("zarr_cursor_" + label) cpp with
+                            | Ok (0, output) -> check ($"uniform cursor: {label} independent values/clipped empty runs") (output.Contains expected) output
+                            | other -> check ($"uniform cursor: {label} runs") false (sprintf "%A" other)
+                        else printfn "  SKIP uniform cursor %s: g++ not found" label
+                // Metadata-only fixtures contain no payload. Large N cannot
+                // build a compiler boundary list or emitted boundary initializer.
+                let mutable smallCppBytes = 0
+                for label,n in [("small",1009L); ("large",1000000007L)] do
+                    let store = metadataOnly label n 127L
+                    match emit ("zarr_cursor_metadata_" + label) (source store "store" 1) with
+                    | None -> ()
+                    | Some (_, cpp) ->
+                        check ($"uniform cursor: metadata-only {label} has one compact descriptor and no payload")
+                            (SegmentTable.tryFindRuns "CX" = Some (SegmentTable.UniformRuns(n,127L))
+                             && Directory.GetFiles(store,"*",SearchOption.AllDirectories).Length = 3
+                             && cpp.Contains marker && not (cpp.Contains "d__runs[")) ""
+                        if label = "small" then smallCppBytes <- cpp.Length
+                        else
+                            check "uniform cursor: emitted metadata does not grow with N/K"
+                                (smallCppBytes > 0 && cpp.Length < smallCppBytes + 8192) ($"small={smallCppBytes}, large={cpp.Length}")
+                let store = fixture "explicit_control" 11 false false
+                match emit "zarr_cursor_control" (source store "store" 1) with
+                | None -> ()
+                | Some (ir, _) ->
+                    SegmentTable.record "CX" [0L;3L;7L;11L]
+                    let cpp, _ = CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_explicit"
+                    check "uniform cursor: irregular explicit plan keeps D04 table and safe local addressing"
+                        (not (cpp.Contains marker) && cpp.Contains "d__runs[4] = { 0UL, 3UL, 7UL, 11UL }"
+                         && cpp.Contains "d__win0[static_cast<size_t>" && not (cpp.Contains " - __w_lo,")) ""
+                    let invalidDescriptors : (int64 * int64) list = [(12L,4L); (11L,0L); (11L,-1L); (11L,12L)]
+                    for n,k in invalidDescriptors do
+                        SegmentTable.recordUniform "CX" n k
+                        try
+                            CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_bad_descriptor" |> ignore
+                            check "uniform cursor: malformed descriptor refuses before emission" false "unexpected success"
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d ->
+                            check "uniform cursor: malformed descriptor refuses before emission"
+                                (d.Code = "BL7001" && d.Message.Contains "rank-one streamed window addressing") d.Message
+                    SegmentTable.recordUniform "CX" 11L 4L
+                // Separate user-visible structural grouping keeps its own
+                // explicit IR/offsets representation; no whole-program bound.
+                let groupedSource = (source store "store" 1) + "\nlet seg = segments(CX)\n"
+                match emit "zarr_cursor_grouping_control" groupedSource with
+                | Some (_, cpp) ->
+                    check "uniform cursor: explicit segments consumer retains its table"
+                        (cpp.Contains marker && cpp.Contains "seg__offsets[4]") ""
+                | None -> ()
+                let huge = metadataOnly "overflow" Int64.MaxValue 127L
+                match lower (source huge "store" 1) with
+                | Error e -> check "uniform cursor: overflow fixture lowers without eager offsets" false e
+                | Ok ir ->
+                    try
+                        CodeGen.genSelfContainedProgramFromIR ir "zarr_cursor_capacity_overflow" |> ignore
+                        check "uniform cursor: required output capacity refuses before allocation" false "unexpected success"
+                    with
+                    | Blade.Diagnostics.BladeDiagnosticException d ->
+                        check "uniform cursor: required output capacity refuses before allocation"
+                            (d.Code = "BL7001" && d.Message.Contains "allocation capacity overflows") d.Message
+                let zero = metadataOnly "zero" 0L 1L
+                check "uniform cursor: frontend zero-extent Chunked admission remains unchanged"
+                    (isError (lower (source zero "1" 1)) "chunk edge must be between 1") ""
+                // K is the authored segmentation, independently of physical C=4.
+                let failures : (string * bool) list = [("short",false); ("null",true)]
+                for label,isNull in failures do
+                    for k in [3;4] do
+                        let label = $"zarr_cursor_{label}_K{k}"
+                        let store = fixture label 10 true isNull
+                        match emit label (source store (string k) 1) with
+                        | None -> ()
+                        | Some (_, cpp) ->
+                            if not isNull then File.WriteAllBytes(Path.Combine(store,"A","1"),[|0uy|])
+                            if zCaps.HasGpp then
+                                match run label cpp with
+                                | Ok (code, output) ->
+                                    let correct =
+                                        if k = 3 then output.Contains "error[BL8015]" && output.Contains "first at [0]"
+                                        elif isNull then output.Contains "fill_value is null" && not (output.Contains "error[BL8015]")
+                                        else output.Contains "is short (expected 32 bytes)" && not (output.Contains "error[BL8015]")
+                                    check ($"uniform cursor: {label} preserves authored-grid failure order")
+                                        (code <> 0 && correct && not (output.Contains "d = ")) output
+                                | Error e -> baselineFailed label e
+            with ex -> check "uniform Zarr halo cursor" false ex.Message
+        finally
+            Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+            Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", savedTile)
+            SegmentTable.reset ()
+    uniformHaloCursorE2E ()
+
+    check "private statistical-barrier spool focused gate"
+        (Blade.Tests.PrivateSpoolTests.runPrivateSpoolTests
+            (Path.Combine(e2eDir, "D08_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
+
+    check "rank-two streamed value boundary focused gate"
+        (runRank2StreamedValueBoundaryTests
+            (Path.Combine(e2eDir, "D09_I1_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
 
     // ---------------------------------------------------------------
     // 10i. RANK-2 streaming: one store standing in for four files decomposed
@@ -1850,7 +3100,7 @@ let w = z.write("%s", C)
             sprintf """
 import zarr as z
 
-let A = [%s]
+let A = Float64([%s])
 let g = lambda(%s) where comm(%s) -> %s
 let C = method_for(%s) <@> reynolds(g, %s) |> compute
 let w = z.write("%s", C)
@@ -1865,6 +3115,11 @@ let w = z.write("%s", C)
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_kw_{label}_e2e")
                 check ($"kernel-write {label}: pool flatten is a linear pool_base copy")
                     (cppCode.Contains "pool_base" && not (cppCode.Contains "antisymmetric::unlinearize")) ""
+                // provider-sink v1 (BLADE_SINK_ALIAS, default on): the writer
+                // reads C's pool in place -- no flatten buffer, no delete.
+                check ($"kernel-write {label}: the writer reads the pool in place (provider-sink v1)")
+                    (cppCode.Contains "_flat = nested_array_utilities::pool_base(C.data);"
+                     && not (cppCode.Contains "__pc_pool") && not (cppCode.Contains "delete[] C_wr")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, $"zarr_kw_{label}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -2172,7 +3427,7 @@ let w = z.write("%s", D)
             sprintf """
 import zarr as z
 
-let A = [%s]
+let A = Float64([%s])
 let g = lambda(x, y) where comm(x, y) -> %s
 let S = method_for(A, A) <@> %s |> compute
 let h = lambda(p, q) where comm(p, q) -> %s
@@ -2198,10 +3453,22 @@ let w = z.write("%s", W)
                 // the Iliffe skeleton. That is an unrelated array and says nothing
                 // about how W is written -- but it turned this into a false red.
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"{label}_write")
-                check ($"{label}: write emits a flat pool copy + the orb_cell_count pin (no skeleton route for W)")
-                    (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat[__ow_i]"
+                // provider-sink v1 (BLADE_SINK_ALIAS, default on): the writer
+                // reads W's flat pool in place through a const pointer -- no
+                // flatten buffer, no copy, no delete; the pin stays first.
+                check ($"{label}: write reads the flat pool in place + the orb_cell_count pin (no skeleton route for W)")
+                    (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat = &(W[0]);"
+                     && not (cppCode.Contains "_flat[__ow_i]") && not (cppCode.Contains "delete[] W_wr")
                      && not (cppCode.Contains "pool_base(W.data)")
                      && not (cppCode.Contains "__pc_pool")) ""
+                // ... and with the gate off, the flat pool copy of old.
+                let offCode =
+                    let prev = Environment.GetEnvironmentVariable "BLADE_SINK_ALIAS"
+                    Environment.SetEnvironmentVariable("BLADE_SINK_ALIAS", "0")
+                    try fst (CodeGen.genSelfContainedProgramFromIR ir ($"{label}_write_off"))
+                    finally Environment.SetEnvironmentVariable("BLADE_SINK_ALIAS", prev)
+                check ($"{label}: BLADE_SINK_ALIAS=0 restores the flat pool copy")
+                    (offCode.Contains "orb_cell_count" && offCode.Contains "_flat[__ow_i]" && offCode.Contains "delete[] W_wr") ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, $"{label}_write.cpp")
                 File.WriteAllText(cppFile, cppCode)
@@ -2324,7 +3591,7 @@ let W = s.vars.W |> z.read
             sprintf """
 import zarr as z
 
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let C: Array<Float64 like OrbIdx<[(2,%s)], 3>> = method_for(A, A) <@> reynolds(g, %s) |> compute
 let w = z.write("%s", C)
@@ -3205,6 +4472,32 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float
                       (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "2 cell(s) are NaN or infinite") out
               | Some (Error e) -> check "zarr: write refusal runs" false e)
          | Error e -> check "zarr boundary write: lowers" false e)
+        // provider-sink v1: a PACKED write reads the pool in place (no flatten
+        // buffer); the BL8015 scan of that pool still runs BEFORE any file
+        // effect, so nothing of the store is published.
+        (let outStore = store + "_packed_out"
+         (try Directory.Delete(outStore, true) with _ -> ())
+         // A PRE-EXISTING destination: the refusal must leave it untouched.
+         Directory.CreateDirectory outStore |> ignore
+         let sentinel = Path.Combine(outStore, "sentinel.txt")
+         File.WriteAllText(sentinel, "untouched")
+         // Pool order (0,0) (0,1) (0,2) (1,1) (1,2) (2,2) over a = [1, 2, 3]:
+         // a cell is infinite exactly when one of its coordinates holds 2.0,
+         // so 3 cells, the first at flat cell 1 (a finite prefix before it).
+         match run "zarr_boundary_write_packed" ("let a = Float64([1.0, 2.0, 3.0])\nlet g = lambda(p, q) where comm(p, q) -> p / (q - 2.0)\nlet bad = method_for(a, a) <@> reynolds(g, Symmetric) |> compute\nlet _ = z.write(\"" + outStore + "\", bad)") with
+         | Ok r ->
+             check "zarr: a packed write reads the pool in place (provider-sink v1)"
+                 (r.Cpp.Contains "_flat = nested_array_utilities::pool_base(bad.data);" && not (r.Cpp.Contains "delete[] bad_wr")) ""
+             (match r.Compiled with
+              | None -> printfn "  SKIP zarr packed write refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "zarr: a packed write of infinite cells is refused (BL8015: count and first flat cell) and leaves an existing destination untouched"
+                      (code <> 0 && out.Contains "error[BL8015]: provider write of 'bad'" && out.Contains "3 cell(s) are NaN or infinite (first at flat cell 1)"
+                       && File.ReadAllText sentinel = "untouched"
+                       && not (File.Exists (Path.Combine(outStore, ".zgroup")))
+                       && not (Directory.Exists (Path.Combine(outStore, "bad")))) out
+              | Some (Error e) -> check "zarr: packed write refusal runs" false e)
+         | Error e -> check "zarr boundary packed write: lowers" false e)
         (match lower (prog "let static V = zb.vars.Q |> z.read") with
          | Ok _ -> check "zarr: static fold of a NaN cell refused" false "lowered without error"
          | Error e ->

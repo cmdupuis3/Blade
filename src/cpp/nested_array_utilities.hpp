@@ -16,6 +16,9 @@
 #include "blade_portability.hpp"
 #include <cstdio>
 #include <new>
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+#include "blade_pool_capacity.hpp"
+#endif
 
 // ---------------------------------------------------------------------------
 // blade_pool -- the retained-block cache behind every scalar pool allocate<>
@@ -146,6 +149,13 @@ namespace blade_pool {
 #endif
     static_assert(kMaxBlock <= kBudget, "blade_pool: the largest retained block must fit the budget");
     constexpr size_t kSlots    = 16;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+    constexpr bool kCapacityPolicySupported = true;
+#else
+    constexpr bool kCapacityPolicySupported = kBudget <= (std::numeric_limits<size_t>::max)() - kMaxBlock;
+#endif
+#endif
 
     // Is a pool of `cells` T's in the retained size band? (Overflow-safe: a
     // product that would overflow is far above kMaxBlock.)
@@ -156,11 +166,32 @@ namespace blade_pool {
 
 #if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
     template<class T> inline T* alloc(size_t cells) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
+#endif
         if constexpr (cacheable<T>::value) { if (eligible<T>(cells)) BLADE_POOL_COUNT(fresh); }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        T* result = capacity_detail::native_new<T>(cells);
+        operation.success();
+        return result;
+#else
         return new T[cells];
+#endif
     }
-    template<class T> inline void release(T* p, size_t /*cells*/) { delete[] p; }
-    inline void flush() {}
+    template<class T> inline void release(T* p, size_t cells) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::release);
+        capacity_detail::native_delete(p, cells);
+#else
+        (void)cells;
+        delete[] p;
+#endif
+    }
+    inline void flush() {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::flush);
+#endif
+    }
 #else
     // One type tag per element type: the address of a per-type variable.
     template<class T> struct TypeTag { static inline const char id = 0; };
@@ -174,14 +205,28 @@ namespace blade_pool {
     inline thread_local Cache tl_cache{};
 
     inline void evict_oldest(Cache& c) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        const size_t bytes = c.s[0].bytes;
+        capacity_detail::begin_delete();
+        try { c.s[0].del(c.s[0].p); }
+        catch (...) { capacity_detail::invalidate(capacity_detail::Invalid::native_delete_exception); throw; }
+        capacity_detail::Guard guard;
+#else
         c.s[0].del(c.s[0].p);
+#endif
         c.bytes -= c.s[0].bytes;
         for (size_t m = 1; m < c.n; m++) c.s[m - 1] = c.s[m];
         c.n--;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::evict_locked(bytes);
+#endif
         BLADE_POOL_COUNT(evicted);
     }
     // Free every block this thread retains (out-of-memory retry; thread exit).
     inline void flush() {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::flush);
+#endif
         Cache& c = tl_cache;
         while (c.n > 0) evict_oldest(c);
     }
@@ -190,6 +235,9 @@ namespace blade_pool {
     struct Reaper { ~Reaper() { flush(); tl_cache.dead = true; } };
 
     template<class T> inline T* alloc(size_t cells) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
+#endif
         if constexpr (cacheable<T>::value) {
             if (eligible<T>(cells)) {
                 Cache& c = tl_cache;
@@ -199,10 +247,22 @@ namespace blade_pool {
                         T* r = static_cast<T*>(c.s[k].p);
                         // a fresh new std::complex<F>[] is all zeros; so is a reused one
                         if constexpr (!std::is_arithmetic<T>::value) std::fill(r, r + cells, T());
+                        {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        const size_t bytes = c.s[k].bytes;
+                        capacity_detail::Guard guard;
+#endif
                         c.bytes -= c.s[k].bytes;
                         for (size_t m = k + 1; m < c.n; m++) c.s[m - 1] = c.s[m];
                         c.n--;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        capacity_detail::reuse_locked(bytes);
+#endif
+                        }
                         BLADE_POOL_COUNT(reused);
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        operation.success();
+#endif
                         return r;
                     }
                 }
@@ -210,15 +270,37 @@ namespace blade_pool {
                 if (c.n > 0) {
                     // Out of memory with blocks still retained: give them back
                     // and try once more before letting bad_alloc propagate.
-                    try { return new T[cells]; }
-                    catch (const std::bad_alloc&) { flush(); }
+                    try {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        T* result = capacity_detail::native_new<T>(cells);
+                        operation.success();
+                        return result;
+#else
+                        return new T[cells];
+#endif
+                    }
+                    catch (const std::bad_alloc&) {
+                        flush();
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        capacity_detail::retry();
+#endif
+                    }
                 }
             }
         }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        T* result = capacity_detail::native_new<T>(cells);
+        operation.success();
+        return result;
+#else
         return new T[cells];
+#endif
     }
 
     template<class T> inline void release(T* p, size_t cells) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::release);
+#endif
         if constexpr (cacheable<T>::value) {
             if (p && eligible<T>(cells)) {
                 Cache& c = tl_cache;
@@ -227,14 +309,24 @@ namespace blade_pool {
                     (void)reaper;
                     const size_t b = cells * sizeof(T);
                     while (c.n > 0 && (c.n == kSlots || c.bytes + b > kBudget)) evict_oldest(c);
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                    capacity_detail::Guard guard;
+#endif
                     c.s[c.n++] = Slot{ p, cells, b, &TypeTag<T>::id, &delete_block<T> };
                     c.bytes += b;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                    capacity_detail::retain_locked(b);
+#endif
                     BLADE_POOL_COUNT(retained);
                     return;
                 }
             }
         }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::native_delete(p, cells);
+#else
         delete[] p;
+#endif
     }
 #endif
 } // namespace blade_pool
@@ -626,7 +718,12 @@ namespace nested_array_utilities {
             // Rank 1: there is no skeleton -- build_skeleton returned `pool + 0`, so `data` IS the pool base. One release
             // and we are done (also covers the degenerate extent-0 case); the count is allocate's `total > 0 ? total : 1`.
             if (extents) blade_pool::release(data, extents[0] > 0 ? extents[0] : size_t(1));
-            else delete[] data;
+            else {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                if (data) blade_pool::capacity_detail::unknown_release();
+#endif
+                delete[] data;
+            }
         } else {
             size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
             // Recover the pool BEFORE the skeleton is torn down: pool_base walks the [0] spine, which requires the rows
@@ -682,7 +779,12 @@ namespace nested_array_utilities {
         if constexpr (!std::is_pointer<DTYPE>::value) {
             // rank 1: data IS the pool
             if (extents) blade_pool::release(data, extents[0] > 0 ? extents[0] : size_t(1));
-            else delete[] data;
+            else {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                if (data) blade_pool::capacity_detail::unknown_release();
+#endif
+                delete[] data;
+            }
         } else {
             size_t total = count_leaves_strict<TYPE, SYMM, STRICT, 0>(extents, 0);
             SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;

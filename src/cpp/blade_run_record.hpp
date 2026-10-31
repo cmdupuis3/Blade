@@ -45,7 +45,13 @@
 // cold C stdio code -- a std::string-building writer cost g++ ~0.4 s of -O3
 // per program (measured on a two-line program: 1.15 s vs 0.76 s). File
 // observation is POSIX/MinGW stat(); the executable's own path is one
-// declared Win32 entry point or /proc/self/exe.
+// declared Win32 entry point or /proc/self/exe. The declaration is written by
+// hand, NOT taken from an SDK header: <libloaderapi.h> drags minwindef.h /
+// winnt.h into every program, whose macros (IN, OUT, DELETE, TRUE, far, ...)
+// and typedefs (INT, BOOL, DWORD, ...) collide with Blade names. Its parameter
+// type is the SDK's own HMODULE (struct HINSTANCE__* under STRICT, the SDK
+// default; void* under NO_STRICT), so it redeclares the same function as the
+// private spool's <windows.h> in either include order.
 #pragma once
 #if !defined(__CUDA_ARCH__)
 #include <atomic>
@@ -58,7 +64,12 @@
 #include <sys/stat.h>
 #include "blade_runtime.hpp"
 #if defined(_WIN32)
+#if defined(NO_STRICT)
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void* module, char* out, unsigned long size);
+#else
+struct HINSTANCE__;
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(HINSTANCE__* module, char* out, unsigned long size);
+#endif
 #else
 #include <unistd.h>
 #endif

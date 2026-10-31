@@ -938,6 +938,7 @@ and private KArg =
 and private PoolScope =
     { At: int
       Pools: ResizeArray<string * string>
+      mutable InlineId: IRId option
       KnownIds: HashSet<IRId> }
 
 /// One emitted group_keys binding: the llvm-lane port of the C++ lane's
@@ -1020,6 +1021,9 @@ and private Ctx =
       /// bindings ITS value names too (the C++ lane's `forceDeferredArrayInput`
       /// recursion), and each of those then prints.
       mutable BindingValues: Map<IRId, IRExpr>
+      /// A LOCAL array let bound to a still-deferred producer -> that producer's IR,
+      /// so applyToArr can audit it before keeping its rows streaming.
+      DeferredLetValues: Dictionary<IRId, IRExpr>
       /// Each virtual domain map's kernel body, keyed by its AVirt producer
       /// closure (by reference): what a fold over it hands domainFoldOrder, the
       /// order decision the C++ lane and `blade plan` share.
@@ -1213,6 +1217,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       TupleSlots = Dictionary()
       Forced = HashSet()
       BindingValues = Map.empty
+      DeferredLetValues = Dictionary()
       DomainMapBodies = Dictionary(HashIdentity.Reference)
       Inlining = HashSet()
       ModuleReads = Dictionary()
@@ -1445,6 +1450,7 @@ let private allocaOf (c: Ctx) (llType: string) : string =
 let private pushPoolScope (c: Ctx) : unit =
     c.PoolScopes.Add { At = c.Body.Count
                        Pools = ResizeArray()
+                       InlineId = None
                        KnownIds = HashSet(c.ArrSlots.Keys) }
 
 /// The pool now held by binding `id` OUTLIVES every open scope the binding
@@ -2382,6 +2388,18 @@ let private storeCell (c: Ctx) (elem: Sc) (ptr: string) (v: Val) : unit =
         ln c ($"store i8 {w}, ptr {ptr}")
     | _ -> ln c ($"store {(poolTy elem)} {v.Reg}, ptr {ptr}")
 
+/// Sibling maps (Optimize.planSiblingMaps): per group, (committed, the stashed
+/// members' (first centre, producer, pool), completed) for this emission.
+let private siblingLlvmStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool>>()
+let private siblingLlvmCell () : System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool> =
+    let v = siblingLlvmStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<int, bool * (int64 * ArrVal * string) list * bool>()
+        siblingLlvmStorage.Value <- fresh
+        fresh
+    else v
+
 /// An UNINITIALIZED pool of `n` cells -- `n` an OPERAND, so a runtime-sized
 /// ragged pool and a literal-sized dense one are the same call.
 ///
@@ -3076,6 +3094,28 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
 
     | IRMatch (scrutinee, cases) -> emitMatch c e scrutinee cases
 
+    | IRBeginPoolScope _ -> refuse "an inline pool scope must be let-bound"
+    | IRReleasePools (IRVar (sid, _), pools, call) ->
+        if c.PoolScopes.Count = 0 || c.PoolScopes.[c.PoolScopes.Count - 1].InlineId <> Some sid then
+            refuse "an unmatched inline pool release"
+        let scope = c.PoolScopes.[c.PoolScopes.Count - 1]
+        for pool in pools do
+            match pool with
+            | IRVar (pid, _) ->
+                match c.ArrSlots.TryGetValue pid with
+                | true, { Src = APool p } when scope.Pools |> Seq.exists (fun (q, _) -> p = q) -> ()
+                | _ -> refuse "an inline release does not own its named pool"
+            | _ -> refuse "an inline release pool is not a binding reference"
+        // BL7005 (the user's decision): this lane RETAINED an opt-in A7c kept
+        // inline; once per region. A program the lane later refuses has its
+        // warnings discarded by the channel reset of the C++ lane it falls back to.
+        Blade.Optimize.noteReleaseRetained "llvm" pools call
+        ln c ($"; A01: inline return cleanup: {call}")
+        // These allocations were registered in this nested scope, never in
+        // its parent. Removing the scope prevents a second free at exit.
+        popPoolScope c None true
+        { Reg = ""; Ty = ScVoid }
+    | IRReleasePools _ -> refuse "an inline release has no scope reference"
     | IRLet (id, value, body) ->
         bindLetIn c id value body
         emitExpr c body
@@ -3131,6 +3171,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
                           refuse "a function rebinding a whole module-level array"
                       let a = if published then materialize c (emitArr c value) else emitArr c value
                       bindArray c id "" a
+                      c.DeferredLetValues.Remove id |> ignore
                       (match a.Src with
                        | APool p when c.PoolScopes |> Seq.exists (fun s -> s.KnownIds.Contains id) ->
                            keepPool c id p
@@ -5034,39 +5075,15 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
     let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
     match value with
-    // A7c round 4: an inlined call's RETURN-BOUNDARY EVENT (IR.IRReleasePools).
-    // As written, a SCALAR-LET call (`let k = kernel(x, y)`) or an arithmetic
-    // operand ran as an OUTLINED function whose pool scope freed these pools
-    // at its scalar return, while a direct TUPLE-COMPONENT call expanded in
-    // place in main with no pool scope (main frees nothing there in either
-    // gate state); either way the kept inline must not retain them. Each
-    // pool is released here, once, in binding order: a pool an enclosing scope
-    // tracks is freed through its tracking slot and the slot nulled, so that
-    // scope's own pop frees nothing twice; an untracked pool (main, which opens
-    // no scope) is freed directly. The binding is then forgotten, so a later
-    // reference -- which IRValidate already rejects -- would refuse loudly.
-    | IRReleasePools (call, start, pools) ->
-        // BL7005: this lane RETAINED the opt-in kept inline (G69). Once per event;
-        // a program the lane later refuses has its warnings discarded by the
-        // channel reset of the C++ lane it falls back to.
-        Blade.Optimize.noteKeptInlineRetained "llvm" call start
-        for (pid, _) in pools do
-            match c.ArrSlots.TryGetValue pid with
-            | true, { Src = APool p } ->
-                needShim c "blade_free"
-                c.AnyFrees <- true
-                let tracked =
-                    c.PoolScopes |> Seq.collect (fun s -> s.Pools) |> Seq.tryFind (fun (q, _) -> q = p)
-                (match tracked with
-                 | Some (_, slot) ->
-                    let r = freshReg c
-                    ln c ($"{r} = load ptr, ptr {slot}")
-                    ln c ($"call void @blade_free(ptr {r})   ; A7c: `{call}` returns here (tracked pool, slot nulled)")
-                    ln c ($"store ptr null, ptr {slot}")
-                 | None ->
-                    ln c ($"call void @blade_free(ptr {p})   ; A7c: `{call}` returns here"))
-                c.ArrSlots.Remove pid |> ignore
-            | _ -> ()
+    // Sibling maps (Optimize.planSiblingMaps, round 4 wave 2, PM04): a planned
+    // member allocates and binds its pool; the last member fills every pool
+    // in one sweep (tryBindSiblingMember).
+    | IRCompute (IRApplyCombinator ainfo) when (Blade.Optimize.SiblingMapTable.tryMember id).IsSome && tryBindSiblingMember c id name ainfo -> ()
+    | IRBeginPoolScope call ->
+        ln c ($"; A01: begin inline pool scope: {call}")
+        pushPoolScope c
+        c.PoolScopes.[c.PoolScopes.Count - 1].InlineId <- Some id
+    | IRReleasePools _ -> emitExpr c value |> ignore
     | IRGroupKeys keys ->
         // A module-scope grouping carries its regime on the binding record;
         // the sentinel itself has no runtime value and prints nothing.
@@ -5157,7 +5174,7 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
             Blade.Effects.Decisions.record
                 { Rule = "epilogue-legs"; Version = 1; Span = c.DeclSpan; Subject = lp.Subject
                   Outcome = Blade.Effects.Declined "llvm lane: the producer's fused loop did not carry the legs (its cell epilogue was not taken in this lane)"
-                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs under the OPT-IN BLADE_EPILOGUE_LEGS=1 arm, whose lifetime audit is incomplete, G69); its owned pools (the forced rank-1 dense maps the event lists) are released at the call's return-boundary event (IRReleasePools) in this lane too" ] | None -> []) }
+                  Evidence = [ "the legs keep their joined pass" ] @ (match lp.InlinedCall with Some call -> [ $"{call} stays inlined (planned for these legs under the OPT-IN BLADE_EPILOGUE_LEGS=1 arm, whose lifetime audit is incomplete, G69); its IR lifetime region still closes the inline allocation scope at its IRReleasePools event when the fused form declines" ] | None -> []) }
         bindNamed c id name declTy value
     // B2r for a recursion: the step's cell loop carried this prodsum's chain.
     | IRProdSum _ when (match Blade.Optimize.CellFoldTable.tryFoldLet id with
@@ -5244,12 +5261,97 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
                  | _ -> refuse "a block-local alias of a deferred array whose source could not be stored")
             | _ -> a
         bindArray c id name stored
+        (match stored.Src with
+         | AVirt _ | AVirtFlat _ -> c.DeferredLetValues.[id] <- value
+         | _ -> c.DeferredLetValues.Remove id |> ignore)
     | VTuple vs -> c.TupleSlots.[id] <- vs
     | VScalar v ->
         if v.Ty <> ScVoid then
             let target = match scalarTyOf declTy with Some t when t <> ScVoid -> t | _ -> v.Ty
             bindScalar c id name (coerce c target v)
     | VOpaque -> c.LoopObjs.Add id |> ignore
+
+/// SIBLING MAPS (round 4 wave 2, PM04; Blade.Optimize.planSiblingMaps), the
+/// LLVM realization: an earlier member's binding allocates its pool and binds
+/// it with NO fill (its producer stashed); the LAST member runs ONE serial
+/// sweep filling every member's pool, each cell its own producer. Preflighted
+/// at the first member (a member the cell epilogue takes in this lane keeps
+/// its own pass); a member whose producer is not the planned dense shape
+/// fills the stashed pools first, in member order, then takes its own path.
+and private siblingLlvmPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
+    match g.Members |> List.tryFindIndex (fun m -> (Blade.Optimize.HotRowTable.tryProducer m).IsSome) with
+    | Some j -> Error $"the cell epilogue takes {List.item j g.Names} in this lane (one pass that stores it and folds its consumer)"
+    | None -> Ok ()
+
+and private siblingFillInto (c: Ctx) (a: ArrVal) (ptr: string) : unit =
+    emitNest c a.Extents (fun idxs ->
+        let v = coerce c a.Elem (readCell c a idxs)
+        storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+
+and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: ApplyInfo) : bool =
+    match Blade.Optimize.SiblingMapTable.tryMember id with
+    | None -> false
+    | Some (g, j) ->
+    let cell = siblingLlvmCell ()
+    let subject = $"""{g.Region}: {String.concat ", " g.Names}"""
+    let record outcome ev =
+        if Blade.Effects.Decisions.active () then Blade.Optimize.recordSiblingMaps subject outcome ev
+    if j = 0 then
+        match siblingLlvmPreflight g with
+        | Ok () -> cell.[g.GroupId] <- (true, [], false)
+        | Error why ->
+            record (Blade.Effects.Declined $"llvm lane: {why}; every member keeps its own pass") []
+            cell.[g.GroupId] <- (false, [], true)
+    match cell.TryGetValue g.GroupId with
+    | true, (true, stash, false) ->
+        let start = List.item j g.Starts
+        let ext = List.item j g.Extents
+        let a = applyToArr c ainfo
+        let shapeOk =
+            match a.Src with
+            | AVirt _ | AVirtFlat _ ->
+                isDenseShape a.Groups
+                && (match g.Kind with
+                    | Blade.Optimize.SibFlat cells -> shapeCells a.Groups = cells
+                    | Blade.Optimize.SibHalo _ -> a.Extents = [ ext ])
+            | APool _ -> false
+        if not shapeOk then
+            // fallback: the stashed pools are filled here, in member order
+            for (_, sa, sp) in stash do siblingFillInto c sa sp
+            cell.[g.GroupId] <- (true, [], true)
+            record (Blade.Effects.Declined $"llvm lane: member {j + 1} ({name}) is not the planned dense producer; the earlier members' pools are filled here, individually, before its own") []
+            false
+        else
+        let ptr = allocPool c a.Elem (string (shapeCells a.Groups))
+        bindArray c id name { a with Src = APool ptr }
+        let stash' = stash @ [ (start, a, ptr) ]
+        if j < g.Members.Length - 1 then
+            cell.[g.GroupId] <- (true, stash', false)
+        else
+            cell.[g.GroupId] <- (true, [], true)
+            match g.Kind with
+            | Blade.Optimize.SibFlat _ ->
+                let (_, a0, _) = List.head stash'
+                emitNest c a0.Extents (fun idxs ->
+                    for (_, sa, sp) in stash' do
+                        let v = coerce c sa.Elem (readCell c sa idxs)
+                        storeCell c sa.Elem (gepCell c sa.Elem sp (storageOffset c sa.Groups idxs)) v)
+                record Blade.Effects.Applied [ $"llvm lane: one serial flat sweep writes {stash'.Length} outputs (this lane has no thread form)" ]
+            | Blade.Optimize.SibHalo _ ->
+                let spans = stash' |> List.mapi (fun m (s, sa, sp) -> (s, s + List.item m g.Extents, sa, sp))
+                let points = spans |> List.collect (fun (s, z, _, _) -> [ s; z ]) |> List.distinct |> List.sort
+                for (lo, hi) in List.pairwise points do
+                    if hi > lo then
+                        let active = spans |> List.filter (fun (s, z, _, _) -> s <= lo && hi <= z)
+                        if not active.IsEmpty then
+                            emitCountedLoopTo c (string (hi - lo)) (fun k ->
+                                for (s, _, sa, sp) in active do
+                                    let idx = i64Add c k (string (lo - s))
+                                    let v = coerce c sa.Elem (readCell c sa [ { Reg = idx; Ty = ScI64 } ])
+                                    storeCell c sa.Elem (gepCell c sa.Elem sp idx) v)
+                record Blade.Effects.Applied [ $"llvm lane: one serial halo walk writes {stash'.Length} outputs, peeled by member domain (this lane has no thread form)" ]
+        true
+    | _ -> false
 
 /// Publish a top-level binding that some out-of-line function reads (see
 /// computeModuleReads). A SCALAR moves into its global outright: main's slot
@@ -6522,6 +6624,14 @@ and private emitArrayLit (c: Ctx) (elems: IRExpr list) (arrType: IRArrayType) : 
         storeCell c elem (gepCell c elem ptr (string i)) v)
     { Elem = elem; Groups = groups; Src = APool ptr; RowOpBytes = 0L }
 
+/// The unchanged dense fill, shared by fresh materialization and an A03
+/// return whose existing owned backing has passed the realization checks.
+and private fillDensePool (c: Ctx) (ptr: string) (a: ArrVal) : ArrVal =
+    emitNest c a.Extents (fun idxs ->
+        let v = coerce c a.Elem (readCell c a idxs)
+        storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
+    { a with Src = APool ptr }
+
 /// Run a producer into a fresh pool. The ONLY place an array acquires
 /// storage in this lane, and therefore the one place the iteration strategy
 /// for a shape is chosen. Four shapes, four strategies:
@@ -6581,10 +6691,7 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
     | AVirt _ when isDenseShape a.Groups ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem (string total)
-        emitNest c a.Extents (fun idxs ->
-            let v = coerce c a.Elem (readCell c a idxs)
-            storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
-        { a with Src = APool ptr }
+        fillDensePool c ptr a
     | AVirt _ ->
         match trySyrkTileCore c a with
         | Some pooled -> pooled
@@ -7304,6 +7411,27 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
      | ArrayElem arr when arr.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath) ->
          refuse "an OrbIdx (iterated-wreath) output pool"
      | _ -> ())
+    // A virtual multi-slot source consumes one scalar parameter PER axis;
+    // real operands consume one parameter each (IRStorage's paramSpan rule).
+    let paramSpans =
+        info.Arrays |> List.mapi (fun pos a ->
+            match a with
+            | IRRange _ | IRVirtualReverse _ when pos < info.ArrayTypes.Length ->
+                max 1 (info.ArrayTypes.[pos].IndexTypes |> List.sumBy _.Rank)
+            | IRRange _ | IRVirtualReverse _ -> refuse "a virtual apply operand without slot metadata"
+            | _ -> 1)
+    let paramStart pos = paramSpans |> List.take pos |> List.sum
+    let inputRank pos = info.KernelInputRanks.[paramStart pos]
+    if info.KernelInputRanks.Length <> List.sum paramSpans then
+        refuse "an apply whose input-rank metadata does not match its operands"
+    if info.KernelInputRanks |> List.exists (fun rank -> rank < 0) then
+        refuse "an apply with negative input rank metadata"
+    info.Arrays |> List.iteri (fun pos a ->
+        match a with
+        | IRRange _ | IRVirtualReverse _ ->
+            if info.KernelInputRanks |> List.skip (paramStart pos) |> List.take paramSpans.[pos] |> List.exists ((<>) 0) then
+                refuse "a virtual range/reverse passed as an array-valued kernel argument"
+        | _ -> ())
     let cg =
         buildLoopNestCodeGen info
             (info.Arrays |> List.mapi (fun i _ -> $"__a{i}"))
@@ -7402,14 +7530,6 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
             match Blade.IR.stripUnits info.OutputType with
             | ArrayElem arr -> requireScalar "a combinator's element" arr.ElemType
             | t -> requireScalar "a combinator's result" t
-    // Operand arrays are emitted ONCE, here -- not per cell. Virtual sources
-    // (`range`, `reverse`) never become arrays at all: their levels peel as
-    // induction values below.
-    let operands =
-        info.Arrays |> List.map (fun a ->
-            match a with
-            | IRRange _ | IRVirtualReverse _ -> None
-            | _ -> Some (emitArr c a))
     // Level -> which array positions peel there, and with which element
     // descriptor. Outer product gives one position per level; co-iteration
     // gives every position at every level.
@@ -7418,6 +7538,83 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
         |> List.mapi (fun li b -> (li, b))
         |> List.collect (fun (li, b) ->
             b.Elements |> List.filter (fun el -> el.ArrayPosition = pos) |> List.map (fun el -> (li, el)))
+    // method_for consumes an ArrayExpr BEFORE handing its rows to a kernel.
+    // Letting a producer survive as an AVirt row view interleaves its cells
+    // with row-kernel failures/writes (PM10/L1). Scalar-peel maps and virtual
+    // scalar ranges retain their streaming path. Decide before emitting an
+    // operand, so a call/extent computation is never evaluated twice.
+    let rowOperands =
+        info.Arrays |> List.mapi (fun pos a ->
+            let kernelRank = inputRank pos
+            match a with
+            | IRRange _ | IRVirtualReverse _ -> false
+            | _ ->
+                let rank =
+                    match Blade.IR.stripUnits (typeOf a) with
+                    | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
+                    | _ -> refuse "a real apply operand without concrete array-rank metadata"
+                let remaining = rank - (levelsOf pos).Length
+                if remaining < 0 || (remaining > 0) <> (kernelRank > 0) then
+                    refuse "an apply whose input rank disagrees with its actual operand peel"
+                if paramStart pos >= rk.Callable.Params.Length then
+                    refuse "a real apply operand without a kernel parameter"
+                match Blade.IR.stripUnits rk.Callable.Params.[paramStart pos].Type with
+                | ArrayElem at when at.IndexTypes.Length <> kernelRank ->
+                    refuse "an apply whose input rank disagrees with its concrete kernel parameter"
+                | ty when (scalarTyOf ty).IsSome && kernelRank <> 0 ->
+                    refuse "an apply whose array input rank names a scalar kernel parameter"
+                | _ -> ()
+                remaining > 0)
+    // Forcing a row operand matters only where the interleaving it prevents
+    // could be OBSERVED: a producer that may panic or write, or a consuming
+    // apply that writes. A closed-total, write-free scalar-cell producer over
+    // stored operands, consumed by a write-free apply, keeps its AVirt row
+    // views (one pass, no pool -- the pre-round-4 route): each cell is
+    // evaluated once, in row order, and no program can tell when. Anything
+    // unproved -- a producer this lane cannot see (a function-local deferred
+    // let), a Reynolds kernel, a deferred operand of the producer -- is forced.
+    let isDeferredId (id: IRId) =
+        match c.ArrSlots.TryGetValue id with
+        | true, v -> (match v.Src with AVirt _ | AVirtFlat _ -> true | _ -> false)
+        | _ -> false
+    let consumerWrites = lazy (Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues (IRApplyCombinator info))
+    let deferredValue (id: IRId) =
+        if not (isDeferredId id) then None
+        else
+            match Map.tryFind id c.BindingValues with
+            | Some v -> Some v
+            | None -> (match c.DeferredLetValues.TryGetValue id with | true, v -> Some v | _ -> None)
+    let streamRow (a: IRExpr) =
+        let producer =
+            match a with
+            | IRVar (id, _) -> deferredValue id
+            | e -> Some e
+        match producer with
+        | Some (IRApplyCombinator p) when not p.HasReynolds && p.KernelOutputRank = 0 ->
+            let storedOperand = function
+                | IRRange _ | IRVirtualReverse _ -> true
+                | IRVar (id, ty) -> not (isDeferredId id) && (match Blade.IR.stripUnits ty with ArrayElem at -> not at.IsVirtual | _ -> false)
+                | _ -> false
+            let res (k: IRExpr) = Blade.IR.resolveKernel k |> Option.map (fun r -> r.Callable)
+            let dOf (id: IRId) = deferredValue id
+            List.forall storedOperand p.Arrays
+            && (match Blade.IRTotality.auditApply res dOf isDeferredId p with Ok () -> true | Error _ -> false)
+            && not (Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues (IRApplyCombinator p))
+            && not consumerWrites.Value
+        | _ -> false
+    let operands =
+        info.Arrays |> List.mapi (fun pos a ->
+            match a with
+            | IRRange _ | IRVirtualReverse _ -> None
+            | _ ->
+                let value = if rowOperands.[pos] && not (streamRow a) then materializeExpr c a else emitArr c a
+                let sourceRank =
+                    match Blade.IR.stripUnits (typeOf a) with
+                    | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
+                    | _ -> refuse "a real apply operand without concrete array-rank metadata"
+                if value.Rank <> sourceRank || (value.Rank > (levelsOf pos).Length) <> rowOperands.[pos] then
+                    refuse "an emitted apply operand whose rank disagrees with its kernel argument"
+                Some value)
     let positions = cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (_.ArrayPosition)) |> List.distinct
     let paramOf (varId: IRId) =
         cg.KernelParams |> List.tryFind (fun p -> p.VarId = varId)
@@ -7638,6 +7835,8 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                             if d < rawAxis.Length && rawAxis.[d] then idxs.[li]
                             else absoluteAt c2 li idxs)
                     let arg =
+                        if (List.length myIdxs < a.Rank) <> rowOperands.[pos] then
+                            refuse "an apply whose scalar/array kernel argument disagrees with its input-rank metadata"
                         if List.length myIdxs = List.length a.Extents then KScalar (readCell c2 a myIdxs)
                         elif List.length myIdxs < List.length a.Extents then KArray (rowView c2 a myIdxs)
                         else refuse "a loop nest that peels more levels than the array has"
@@ -9178,8 +9377,11 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     // callee is in emitCall: its parameters bind to the arguments, and its
     // body is walked here as a pack, so the components land as the caller's
     // own values. A recursive tuple-returning call cannot be inlined and
-    // refuses (the C++ lane takes it).
-    | IRApp (IRVar (fid, _), args, _) when c.Callables.ContainsKey fid ->
+    // refuses (the C++ lane takes it). Scalar and array tuple members must
+    // fall through to classifyValue: their ordinary call ABI owns scoped
+    // cleanup and escaping array results, even when the call is a tuple leaf.
+    | IRApp (IRVar (fid, _), args, retType)
+        when c.Callables.ContainsKey fid && (match stripUnits retType with IRTTuple _ -> true | _ -> false) ->
         let cl = c.Callables.[fid]
         if cl.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{cl.SourceName}'")
         if cl.IsCudaKernel || cl.IsMpiParallel then
@@ -9241,6 +9443,137 @@ type private ParamKind =
     /// separate pointer" ABI, spelled with offsets rather than lens because
     /// offsets are what addressing consumes and offsets[rows] is the total.
     | PRagged of Sc * int64
+
+/// A03 consumes only an existing return-donor plan in an ordinary outlined
+/// function. This is a realization check over actual slots/owned allocations,
+/// not a new liveness or alias analysis. In particular AVirt operands are not
+/// forced speculatively: their late evaluation could still read the old donor.
+let private returnPoolDestination (c: Ctx) (cl: IRCallable) (lets: Map<IRId, IRExpr>)
+                                  (tail: IRExpr) (donor: IRId) : Result<ApplyInfo * string * string, string> =
+    let rec computedMap e =
+        match e with
+        | IRCompute (IRApplyCombinator info) -> Some info
+        | IRCompute (IRCompute _ as inner) -> computedMap inner
+        | _ -> None
+    let plainShape ty =
+        // No outer/element unit erasure or virtual/layout conversion. Axis
+        // Id/Tag identify logical types; only their already-planned physical
+        // extent is reused. The producer/result keep their original metadata.
+        match ty with
+        | ArrayElem at when not at.IsVirtual && at.ElemType = IRTScalar ETFloat64 ->
+            match at.IndexTypes with
+            | [ix] when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 &&
+                        ix.Kind = SDimension && ix.Dependencies.IsEmpty ->
+                match ix.Extent with IRLit (IRLitInt n) when n > 0L -> Some n | _ -> None
+            | _ -> None
+        | _ -> None
+    let mutable blocked : string option = None
+    let require ok why = if not ok && blocked.IsNone then blocked <- Some why
+    require (not (containsPoolLifetimeEvent cl.Body)) "inline lifetime region remains excluded"
+    require (cl.Captures.IsEmpty && not (c.Facts.SelfRecursive.Contains cl.Id) &&
+             not cl.IsOmpParallel && not cl.IsCudaKernel && not cl.IsMpiParallel)
+            "the callable is not an ordinary capture-free nonrecursive serial function"
+    let mutable letPlan = false
+    iterIRExpr (function
+        | IRLet (id, _, _) when (Blade.Types.PoolReuseTable.tryDonor id).IsSome -> letPlan <- true
+        | _ -> ()) cl.Body
+    require (not letPlan) "let-donor plans are outside the return-only LLVM consumer"
+    let info = computedMap tail
+    require info.IsSome "the return is not a computed scalar map"
+    let donorValue = Map.tryFind donor lets
+    require (donorValue |> Option.bind computedMap |> Option.isSome) "the donor is not a direct fresh computed body let"
+    let n = plainShape cl.RetType
+    require n.IsSome "the return is not static plain rank-one Float64 storage"
+    require ((donorValue |> Option.bind (typeOf >> plainShape)) = n && n.IsSome) "the donor type/extent does not match the return"
+    let scope = if c.PoolScopes.Count = 1 then Some c.PoolScopes.[0] else None
+    require (scope |> Option.exists (fun s -> s.InlineId.IsNone && not (s.KnownIds.Contains donor)))
+            "the donor has no exact current ordinary function scope"
+    let donorArray = match c.ArrSlots.TryGetValue donor with true, a -> Some a | _ -> None
+    let donorPtr = donorArray |> Option.bind (fun a -> match a.Src with APool p -> Some p | _ -> None)
+    require donorPtr.IsSome "the donor is not a completed stored backing"
+    let ownedSlot =
+        match scope, donorPtr with
+        | Some sc, Some ptr ->
+            let entries = sc.Pools |> Seq.filter (fun (p, _) -> p = ptr) |> List.ofSeq
+            match entries with [(_, slot)] -> Some slot | _ -> None
+        | _ -> None
+    require ownedSlot.IsSome "the donor has no unique owned allocation/tracking slot"
+    let matchesShape (a: ArrVal) = a.Elem = ScF64 && (match a.Groups, n with [GDense m], Some n -> m = n | _ -> false)
+    require (donorArray |> Option.exists matchesShape) "the donor backing layout does not match the return"
+    match info with
+    | Some info ->
+        require (plainShape info.OutputType = n && n.IsSome && info.KernelInputRanks = [0] &&
+                 info.KernelOutputRank = 0 && info.SDimsPerArray = [1] && info.KernelTDims.IsEmpty &&
+                 not info.HasReynolds && (info.TriangularLevels |> List.forall not))
+                "the return map has unsupported shape/peel/strategy metadata"
+        match info.Arrays with
+        | [IRVar (input, inputType)] ->
+            require (plainShape inputType = n && n.IsSome) "the input type/extent does not match the return"
+            match c.ArrSlots.TryGetValue input with
+            | true, a ->
+                require (matchesShape a) "the input backing layout does not match the return"
+                match a.Src with
+                | APool ptr ->
+                    require (donorPtr <> Some ptr) "the input reads the donor backing"
+                    let owned = scope |> Option.exists (fun sc -> sc.Pools |> Seq.filter (fun (p, _) -> p = ptr) |> Seq.length = 1)
+                    let param = cl.Params |> List.mapi (fun i p -> p.VarId = input && ptr = sprintf "%%a%d" i) |> List.exists id
+                    require (owned || param) "the input is not an independent owned root or original formal array"
+                | _ -> require false "the input is deferred: no speculative forcing for return reuse"
+            | _ -> require false "the input has no completed array slot"
+        | _ -> require false "the return map does not have one named stored operand"
+        match info.Kernel with
+        | IRVar (kid, _) when c.Callables.ContainsKey kid ->
+            let k = c.Callables.[kid]
+            let snapshot (cap: CaptureInfo) =
+                cap.Type = IRTScalar ETFloat64 &&
+                (match c.Slots.TryGetValue cap.Id with true, (_, ScF64) -> true | _ -> false) &&
+                ((Map.tryFind cap.Id lets |> Option.exists (fun v -> typeOf v = IRTScalar ETFloat64)) ||
+                 (cl.Params |> List.exists (fun p -> p.VarId = cap.Id && p.Type = IRTScalar ETFloat64)))
+            let vars = (k.Params |> List.map (_.VarId)) @ (k.Captures |> List.map (_.Id)) |> Set.ofList
+            let rec closed e =
+                match e with
+                | IRLit (IRLitFloat _) -> true
+                | IRVar (id, ty) -> ty = IRTScalar ETFloat64 && Set.contains id vars
+                | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv), l, r, _) -> closed l && closed r
+                | _ -> false
+            require (k.Params.Length = 1 && (k.Params |> List.forall (fun p -> p.Type = IRTScalar ETFloat64)) &&
+                     k.RetType = IRTScalar ETFloat64 && (k.Captures |> List.forall snapshot) && closed k.Body &&
+                     not k.IsOmpParallel && not k.IsCudaKernel && not k.IsMpiParallel && not k.IsArityPoly)
+                    "the return kernel is not closed scalar arithmetic over completed snapshots"
+        | _ -> require false "the return kernel is not a direct resolved scalar callable"
+    | None -> ()
+    match blocked, info, donorPtr, ownedSlot with
+    | None, Some info, Some ptr, Some slot -> Ok (info, ptr, slot)
+    | Some why, _, _, _ -> Error why
+    | _ -> Error "the return donor lacks a complete backing proof"
+
+/// A04's certificate is the ONE shared semantic proof (Blade.SameCellReturn,
+/// extracted unchanged so the C++ lane's A06 realization reads the same
+/// admission); this lane passes its own callables table and recursion fact.
+type private SameCellReturn = Blade.SameCellReturn.Certificate
+
+let private sameCellReturnCertificate (c: Ctx) (cl: IRCallable) : Result<SameCellReturn, string> =
+    Blade.SameCellReturn.certify c.Callables (fun id -> c.Facts.SelfRecursive.Contains id) cl
+
+/// Read-only realization check. No forcing, allocation, slot mutation or early
+/// free happens speculatively; fallback evaluates the original tail once.
+let private sameCellReturnBacking (c: Ctx) (proof: SameCellReturn) : Result<string * string, string> =
+    if c.PoolScopes.Count <> 1 then Error "no exact ordinary function scope"
+    else
+        let scope = c.PoolScopes.[0]
+        match c.ArrSlots.TryGetValue proof.Donor, List.ofSeq scope.Pools with
+        | (true, a), [(ptr, slot)] when scope.InlineId.IsNone && not (scope.KnownIds.Contains proof.Donor) &&
+                                       a.Elem = ScF64 && a.Groups = [GDense proof.Extent] && a.RowOpBytes = 0L &&
+                                       (match a.Src with APool p -> p = ptr | _ -> false) ->
+            let tracking =
+                c.Body |> Seq.map (fun line -> line.Trim())
+                |> Seq.filter (fun line -> line.StartsWith "store ptr " && line.EndsWith (", ptr " + slot)) |> List.ofSeq
+            let alias = c.ArrSlots |> Seq.exists (fun kv -> kv.Key <> proof.Donor && (match kv.Value.Src with APool p -> p = ptr | _ -> false))
+            let complete = proof.Snapshots |> Set.forall (fun id -> match c.Slots.TryGetValue id with true, (_, ScF64) -> true | _ -> false)
+            if alias || tracking <> [$"store ptr {ptr}, ptr {slot}"] then Error "donor ownership/slot was aliased, escaped or released"
+            elif not complete then Error "scalar snapshot is not completed in this frame"
+            else Ok (ptr, slot)
+        | _ -> Error "donor is not the sole completed owned backing/tracking entry"
 
 /// `internal` linkage everywhere but `main`: the module is the whole program
 /// (Blade has no separate compilation), so nothing needs to be externally
@@ -9388,7 +9721,67 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         // An array-returning function hands back the pool pointer. The result
         // must be MATERIALIZED before it leaves: a producer's closure captures
         // this frame's slots, which do not survive the return.
-        let result = materialize c (emitArr c cl.Body)
+        let result =
+            match Blade.Types.PoolReuseTable.tryReturnDonor cl.Id with
+            | None ->
+                let record outcome evidence =
+                    Blade.Effects.Decisions.record
+                        { Rule = "same-cell-return-llvm"; Version = 1; Span = c.DeclSpan; Subject = cl.SourceName
+                          Outcome = outcome; Evidence = ($"function v{cl.Id}; LLVM-only certificate (no generic return donor)" :: evidence) }
+                match sameCellReturnCertificate c cl with
+                | Error why ->
+                    record (Blade.Effects.Declined why) []
+                    materialize c (emitArr c cl.Body)
+                | Ok proof ->
+                    if proof.Function <> cl.Id || proof.Body <> cl.Body then
+                        refuse "same-cell return: certificate belongs to a different function/body"
+                    let rec bindOriginal e =
+                        match e with
+                        | IRLet (id, value, body) ->
+                            bindLetIn c id value body
+                            bindOriginal body
+                        | _ -> ()
+                    bindOriginal proof.Body
+                    match sameCellReturnBacking c proof with
+                    | Error why ->
+                        record (Blade.Effects.Declined why) []
+                        materialize c (emitArr c (IRCompute (IRApplyCombinator proof.Tail)))
+                    | Ok (ptr, slot) ->
+                        let producer = applyToArr c proof.Tail
+                        match producer.Src with
+                        | AVirt _ when producer.Elem = ScF64 && producer.Groups = groups ->
+                            ln c ($"; A04: same-cell return: function v{proof.Function} donor v{proof.Donor} backing {ptr} slot {slot}")
+                            let result = fillDensePool c ptr producer
+                            record Blade.Effects.Applied [$"donor v{proof.Donor}, owned backing {ptr}, tracking slot {slot}; old cell loaded before same-index store"]
+                            result
+                        | _ -> refuse "same-cell return: prepared producer contradicts its closed dense certificate"
+            | Some donor ->
+                let record outcome evidence =
+                    Blade.Effects.Decisions.record
+                        { Rule = "pool-reuse-llvm"; Version = 1; Span = c.DeclSpan; Subject = cl.SourceName
+                          Outcome = outcome; Evidence = ($"function v{cl.Id}, return donor v{donor}" :: evidence) }
+                let rec emitReturn lets tail =
+                    match tail with
+                    | IRLet (id, value, body) ->
+                        bindLetIn c id value body
+                        emitReturn (Map.add id value lets) body
+                    | tail ->
+                        match returnPoolDestination c cl lets tail donor with
+                        | Error why ->
+                            record (Blade.Effects.Declined why) []
+                            materialize c (emitArr c tail)
+                        | Ok (info, ptr, slot) ->
+                            // Preflight emitted nothing and proved every input
+                            // already stored; prepare the original producer ONCE.
+                            let producer = applyToArr c info
+                            match producer.Src with
+                            | AVirt _ when producer.Elem = ScF64 && producer.Groups = groups ->
+                                ln c ($"; A03: return pool reuse: function v{cl.Id} donor v{donor} backing {ptr} slot {slot}")
+                                let result = fillDensePool c ptr producer
+                                record Blade.Effects.Applied [ $"owned backing {ptr}, tracking slot {slot}; completed independent input; original dense fill" ]
+                                result
+                            | _ -> refuse "return pool reuse: prepared producer contradicts its dense scalar preflight"
+                emitReturn Map.empty cl.Body
         if result.Elem <> elem || result.Groups <> groups then
             refuse ($"the body of '{cl.Name}' produces a shape its return type does not declare")
         (match result.Src with

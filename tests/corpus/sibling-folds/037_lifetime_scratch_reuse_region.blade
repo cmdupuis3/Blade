@@ -1,0 +1,20 @@
+// TEST: Scratch reuse excludes retained inline lifetime regions
+type Ix = Idx<1003>
+function inputs(a: Float64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> a + 0.0 * Float64(i) |> compute
+}
+function cell(a: Float64, b: Float64) -> Float64 = a + b
+function cube(a: Float64) -> Float64 = a * a * a
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> cell |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let z = method_for(zip(x, y)) <@> lambda(a, b) -> a - b |> compute
+    let q = reduce(method_for(z) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s + q
+}
+function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let k = kernel(x, y)
+    k + reduce(x, (+)) + reduce(y, (+))
+}
+let r = driver(inputs(1.0), inputs(2.0))
+// EXPECT: r = 13039.0

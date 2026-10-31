@@ -1,5 +1,15 @@
 # Plan: windowed (partially-materialized) recursive arrays
 
+> **Status (2026-10-26): P2 v2a (fold fusion) BUILT at IR level, round 4 wave 2 (PM35), OPT-IN** (`BLADE_REC_FOLD=1`;
+> default-on waits for one more converged use-census audit, gap G94: five review rounds each found
+> a member of the trajectory use census). Not the
+> surface splice section 9 sketches: `Optimize.windowRecFoldsModule` (rule `rec-fold-ring`, knob
+> `BLADE_REC_FOLD`) runs after row-fold fusion, so slice-write fusion, the threaded step
+> (rec-step-parallel) and the cell epilogues still see logical indices; it rings a trajectory whose
+> later uses are all folds and moves each fold's state into the sweep. See CLAUDE.md's
+> environment table for the admission. v2b (elementwise `|> compute` fusion), mixed fixed-row
+> reads + folds, and P3/P4 remain open.
+>
 > **Status (2026-10-25): P1 PORTED, branch `claude/recarray-ring` (off master 4919eefe).**
 > Block- and function-body `let rec`s window as specified in sections 3-4: classifier
 > (`TypeCheckSupport.recArrayMaxLag` / `recArrayTailReads` / `recArrayWindowVerdict`), the

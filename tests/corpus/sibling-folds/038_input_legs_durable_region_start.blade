@@ -5,7 +5,8 @@
 // kernel with its unused Jx join moved to the START (the sibling pass drops
 // it into the caller's Jx join); the Ix plan still admits, validates and
 // releases y2 once. Region 2 (driver): the callee's FIRST let is a scalar
-// builtin expression equal to one driver already computed, so CSE removes it
+// builtin expression equal to one driver already computed (CSE would remove
+// it; since the round-4 merge CSE leaves an event-bearing function alone)
 // (a builtin: a user call in the callee would decline the inline, round 7); the
 // plan admits and validates. Values are the as-written ones.
 // ============================================================================

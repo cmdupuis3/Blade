@@ -1,0 +1,14 @@
+// TEST: Sibling Maps Stop At A Statement That Reads An Earlier Sibling
+// ============================================================================
+// `let t = y1(2)` reads y1 between the two maps: moving y1's loop below it
+// would read an unwritten cell, so the group closes before t and y2 keeps
+// its own loop.
+type I = Idx<6>
+function two(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a * 3.0 |> compute
+    let t = y1(2)
+    let y2 = method_for(x) <@> lambda(a) -> a + t |> compute
+    reduce(y1, (+)) + reduce(y2, (+))
+}
+let r = two([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+// EXPECT: r = 138.0

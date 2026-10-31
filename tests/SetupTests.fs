@@ -31,6 +31,37 @@ let runSetupTests () : BlockResult =
             failedNames <- failedNames @ [name]
             resultLine Fail name detail
 
+    // Generated filenames cross the .NET/native-toolchain boundary. These
+    // actual corpus names previously compiled to a different Unicode path.
+    let unicodeNames =
+        [ "comoment_prod \u2014 recursive centered product over a pack of arrays"
+          "Covariance matrix \u2014 object_for(comoment) over 2D data"
+          "Deferred former \u2014 bare object_for(named poly kernel), let-bound then applied"
+          "One recursive poly kernel specialized at multiple arities \u2014 no C++ redefinition"
+          "Symmetric arity-poly storage \u2014 comm pack over identical arrays -> SymIdx" ]
+    for name in unicodeNames do
+        let stem = Build.sanitizeFileName name
+        let projected = Build.sanitizeFileName (name.Replace("\u2014", "_"))
+        check ("native filename ASCII: " + name)
+            (stem |> Seq.forall (fun c -> int c <= 127)) "no Unicode in generated source/executable basename"
+        check ("native filename stable/bounded: " + name)
+            (stem = Build.sanitizeFileName name && stem.Length = projected.Length + 18
+             && stem.StartsWith(projected + "_u", StringComparison.Ordinal)
+             && stem <> projected)
+            "readable ASCII prefix and fixed-size collision-aware Unicode suffix"
+    for input, expected in
+        [ "Simple_Name-123", "Simple_Name-123"
+          "a b:c/d\\e(f)", "a_bc_d_ef"
+          "a&&b||c", "a_and_b_or_c"
+          "a|b&c+d,e<f>g\"h*i?", "a_b_c_d_e_f_gh_i_"
+          "", "" ] do
+        check ("native filename ASCII compatibility: " + input)
+            (Build.sanitizeFileName input = expected) expected
+    let unicodeVariants = [ "a\u2014b"; "a\u2013b"; "a\uFFFDb"; "a_b" ]
+    check "native filename Unicode projection collisions distinguished"
+        (unicodeVariants |> List.map Build.sanitizeFileName |> Set.ofList |> Set.count = unicodeVariants.Length)
+        "em dash, en dash, replacement character and existing ASCII remain distinct"
+
     // ---- parseArgs ----
     check "no args -> BlasUnspecified"
         (match Setup.parseArgs [] with

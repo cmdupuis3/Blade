@@ -1,0 +1,14 @@
+// TEST: Fold State In Place Inside A Kernel
+// ============================================================================
+// PM14: a leading-axis fold inside a map kernel's body (examples/lswosa's
+// per-frequency shape) -- one fold per output cell, each updating its own
+// private state in place instead of leaking a slice per step per cell.
+// ============================================================================
+type K = Idx<4>
+let per = method_for(range<K>) <@> lambda(k) -> {
+    let gg = (method_for(range<Idx<6>>) <@> lambda(r) ->
+               (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(k) * 0.5 + Float64(r) + Float64(c) * 0.125)) |> compute
+    let acc = reduce(gg, lambda(a: T^1, b: T^1) -> a + b)
+    acc(0) + acc(2)
+} |> compute
+// EXPECT: per = [31.5, 37.5, 43.5, 49.5]

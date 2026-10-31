@@ -315,6 +315,14 @@ let describePoolRetention (lane: PoolLane) (p: PoolRetention) : string =
             + "so the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; "
             + "this lane writes NO run record: this line and the shim object's identity, captured beside a measurement, are build evidence, not an observed runtime record)"
 
+/// Coverage mode is shared by admission and rendering. A retained inline
+/// must not be admitted when the instrumentation renderer owns its nest.
+let private ompCoverageMode = System.Threading.AsyncLocal<bool ref>()
+let ompCoverageModeCell () =
+    if isNull (box ompCoverageMode.Value) then ompCoverageMode.Value <- ref false
+    ompCoverageMode.Value
+let setOmpCoverageMode on = ompCoverageMode.Value <- ref on
+
 let private poolRetentionWarned = System.Collections.Concurrent.ConcurrentDictionary<string, bool>()
 
 /// The warning line for a malformed value, once per value per process.
