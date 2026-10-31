@@ -25,20 +25,22 @@
     "_why": "relative checksum tolerance vs the pin; kernel.json `tolerance` may override per kernel"
   },
   "verdict_delta": 0.1,
+  "threads": [8],
+  "_threads_why": "the thread counts N of the mt<N> regimes (plan-cloud-bench-campaign.md 4.1): positive integers and/or \"all\" (the physical core count). [8] = the box's matrix. Every kernel.json declares its threaded regimes by family (mt-<fp>-<blas>; the legacy mt8-... spelling reads as the family), so --regimes all and bench expand each family over this list. The campaign sets [1, 2, 4, 8, 16, 32, \"all\"] on the instance.",
   "serial_affinity_cpu": 2,
-  "_serial_affinity_why": "review M20: serial arms pinned to logical CPU 2 (first SMT thread of physical core 1). mt8 arms are unbound (no OMP_PLACES/OMP_PROC_BIND, KMP_AFFINITY=disabled).",
+  "_serial_affinity_why": "review M20: serial arms pinned to logical CPU 2 (first SMT thread of physical core 1). mt<N> arms are unbound (no OMP_PLACES/OMP_PROC_BIND, KMP_AFFINITY=disabled).",
   "run_env": {
     "serial": {
       "OMP_NUM_THREADS": "1",
       "OPENBLAS_NUM_THREADS": "1",
       "OMP_DYNAMIC": "FALSE"
     },
-    "mt8": {
-      "OMP_NUM_THREADS": "8",
+    "mt": {
+      "OMP_NUM_THREADS": "{n}",
       "OMP_DYNAMIC": "FALSE",
-      "OPENBLAS_NUM_THREADS": "8",
+      "OPENBLAS_NUM_THREADS": "{n}",
       "KMP_AFFINITY": "disabled",
-      "_why": "fortran-notes.md jitter investigation (coordinator 2026-10-17): all mt8 arms run UNBOUND -- libgomp cannot bind on Windows, libiomp5 binding under OMP_PLACES=cores/OMP_PROC_BIND=close caused 17-48 ms jitter; KMP_AFFINITY=disabled is harmless for libgomp"
+      "_why": "{n} = the regime's thread count (mt8 -> 8); a fixed number that disagrees with the regime is refused. fortran-notes.md jitter investigation (coordinator 2026-10-17): all mt<N> arms run UNBOUND -- libgomp cannot bind on Windows, libiomp5 binding under OMP_PLACES=cores/OMP_PROC_BIND=close caused 17-48 ms jitter; KMP_AFFINITY=disabled is harmless for libgomp"
     }
   },
   "blade_knobs": {
@@ -53,7 +55,7 @@
     "repro": {
       "BLADE_FP_REPRO": "1",
       "BLADE_FP_REASSOC": "0",
-      "_why": "repro: no reordered fold anywhere; BLADE_FP_REASSOC=0 is the compatibility spelling; mt8 fold teams are serialized too"
+      "_why": "repro: no reordered fold anywhere; BLADE_FP_REASSOC=0 is the compatibility spelling; mt<N> fold teams are serialized too"
     },
     "fastmath": {
       "_why": "same Blade knobs as licensed; fastmath differs on the Fortran side only"
@@ -89,7 +91,7 @@
       "serial_extra": [
         "-fopenmp-simd"
       ],
-      "mt8_extra": [
+      "mt_extra": [
         "-fopenmp"
       ]
     },
@@ -120,7 +122,7 @@
       "serial_extra": [
         "/Qopenmp-simd"
       ],
-      "mt8_extra": [
+      "mt_extra": [
         "/Qopenmp"
       ],
       "_strict_why": "fortran-notes.md 3: ifx 2026.1 /fp:precise does not contract FMAs; -mllvm -fp-contract=fast enables contraction only"

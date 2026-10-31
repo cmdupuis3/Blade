@@ -67,20 +67,22 @@ Base arms `blade-llvm`, `blade-cpp`, `gfortran-natural`, `gfortran-expert`, `ifx
 source with `fortran_twin_flags` (`-cpp -DBENCH_INPUTONLY` / `/fpp /DBENCH_INPUTONLY`). A
 twin must print `checksum = 0.0` and the pinned `input_checksum`.
 
-Regimes are `<serial|mt8>-<licensed|repro|fastmath>-<native|blas>`. Per regime the knobs come
+Regimes are `<serial|mt<N>>-<licensed|repro|fastmath>-<native|blas>` (`mt8` = the box's matrix; a session's thread
+counts come from `config.json` `threads`, default `[8]`; `--regimes all` and `bench` expand every threaded
+FAMILY a kernel declares over that list). Per regime the knobs come
 from `config.json`:
 
-| | Blade compile knobs | Fortran flags (`fortran_flags.<compiler>.<fp>` + serial/mt8 extra) |
+| | Blade compile knobs | Fortran flags (`fortran_flags.<compiler>.<fp>` + `serial_extra` / `mt_extra`) |
 |---|---|---|
 | licensed (headline) | (none: the default since 5f4b33ea honours every licence) | `-O3 -march=native -ffp-contract=fast -fno-external-blas -fno-external-blas64 -cpp -DBENCH_LICENSED` / `/O3 /QxHost /fp:precise -mllvm -fp-contract=fast /fpp /DBENCH_LICENSED` |
-| repro | `BLADE_FP_REPRO=1 BLADE_FP_REASSOC=0` (mt8: threaded maps, serial folds) | the same without `BENCH_LICENSED` |
+| repro | `BLADE_FP_REPRO=1 BLADE_FP_REASSOC=0` (mt<N>: threaded maps, serial folds) | the same without `BENCH_LICENSED` |
 | fastmath | (as licensed) | `-ffast-math` / `/fp:fast` |
-| every Blade arm | `BLADE_BLAS=0|1`, `BLADE_EXE_CACHE=0`, `BLADE_LLVM_CLANG`; LLVM: `BLADE_LLVM=1 BLADE_FP_CONTRACT=fast`; serial: `BLADE_OMP_THREADS=1` | serial `-fopenmp-simd` / `/Qopenmp-simd`; mt8 `-fopenmp` / `/Qopenmp` |
+| every Blade arm | `BLADE_BLAS=0|1`, `BLADE_EXE_CACHE=0`, `BLADE_LLVM_CLANG`; LLVM: `BLADE_LLVM=1 BLADE_FP_CONTRACT=fast`; serial: `BLADE_OMP_THREADS=1` | serial `-fopenmp-simd` / `/Qopenmp-simd`; mt<N> `-fopenmp` / `/Qopenmp` |
 
 Run environment (`run_env`): serial `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_DYNAMIC=FALSE`,
 pinned to ONE logical CPU (`serial_affinity_cpu`, default 2) from the child's first
 instruction (the harness sets its own affinity mask before spawning; children inherit it);
-mt8 `OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE KMP_AFFINITY=disabled`, UNBOUND (no OMP_PLACES / OMP_PROC_BIND: libgomp cannot bind on Windows and libiomp5 binding caused 17-48 ms jitter; fortran-notes.md). Recorded in `machine.run_env`.
+mt<N> `OMP_NUM_THREADS=N OPENBLAS_NUM_THREADS=N OMP_DYNAMIC=FALSE KMP_AFFINITY=disabled` (`run_env.mt`, `{n}` = N), UNBOUND (no OMP_PLACES / OMP_PROC_BIND: libgomp cannot bind on Windows and libiomp5 binding caused 17-48 ms jitter; fortran-notes.md). Recorded in `machine.run_env`.
 Every process: inherited env minus all `BLADE_*`, `OMP_*`, `GOMP_*`, `KMP_*`,
 `OPENBLAS_NUM_THREADS`; `C:\msys64\ucrt64\bin` FIRST on PATH, then the Intel runtime (ifx),
 then `OPENBLAS_DIR\bin` (blas). Executables are run directly, never via `blade run`.
@@ -88,7 +90,7 @@ then `OPENBLAS_DIR\bin` (blas). Executables are run directly, never via `blade r
 ## Build acceptance (recorded under `build.evidence`)
 
 Build statuses: `ok`, `failed`, `fallback`, `serial-only`, `no-blas`, `no-parallel-form`,
-`unbuilt` (source missing), `gated` (mt8 arm whose own serial arm did not validate).
+`unbuilt` (source missing), `gated` (mt<N> arm whose own serial arm did not validate).
 
 - Blade `compile -o <exe> --verbose --print checksum,input_checksum`; the kept build dir's
   `.ll`/`.cpp`/headers are copied to `<armdir>/generated/`. LLVM arms need positive evidence
@@ -101,7 +103,7 @@ Build statuses: `ok`, `failed`, `fallback`, `serial-only`, `no-blas`, `no-parall
   `BLADE_OMP_[PARALLEL_FOR_]SIMD_REDUCTION(` invocations, `blade_fold::{sum,dot,sq,dot3}<` calls and scalar K-lane trees (one per typed `__rlane0` / `__pl0` seed declaration, `CodeGenExprSupport.fpReassocLaneStmts`) in the .cpp, of `reassoc`/`fast`
   fast-math flags on fadd/fmul/... instructions in the .ll (comments stripped). A
   **repro serial** build with either FAILS (review M3).
-- blas regime (gram: arms blade-cpp, blade-llvm, gfortran-expert, ifx-expert via `regime_arms`): the exe must import libopenblas.dll, EXCEPT a Blade C++ build whose plan.txt records a native kernel preempting the library for the same contraction -- a `[blas-routing vN] S: declined ...` line (not "BLAS gate off") plus `[microkernel vN] S: applied [packed syrk tile ...` or `[fold-form vN] S: applied [fold form: syrk tile ...` for the same subject S (design-decisions D47). Such a build is `ok` with `evidence.blas_route = "native-preempt"`, `evidence.blas_preempt` (the matched lines) and the note "native tile preempted the library"; library-routed builds carry `blas_route = "library"`. Without those plan lines a build that imports no BLAS DLL is a failure. The LLVM lane is `no-blas` as before; a Fortran arm that imports no libopenblas.dll is a failure. `OPENBLAS_NUM_THREADS` is 1 (serial) / 8 (mt8) for every arm; an mt8 BLAS arm with no OpenMP construct is timed, its parallelism being the library's threads.
+- blas regime (gram: arms blade-cpp, blade-llvm, gfortran-expert, ifx-expert via `regime_arms`): the exe must import libopenblas.dll, EXCEPT a Blade C++ build whose plan.txt records a native kernel preempting the library for the same contraction -- a `[blas-routing vN] S: declined ...` line (not "BLAS gate off") plus `[microkernel vN] S: applied [packed syrk tile ...` or `[fold-form vN] S: applied [fold form: syrk tile ...` for the same subject S (design-decisions D47). Such a build is `ok` with `evidence.blas_route = "native-preempt"`, `evidence.blas_preempt` (the matched lines) and the note "native tile preempted the library"; library-routed builds carry `blas_route = "library"`. Without those plan lines a build that imports no BLAS DLL is a failure. The LLVM lane is `no-blas` as before; a Fortran arm that imports no libopenblas.dll is a failure. `OPENBLAS_NUM_THREADS` is 1 (serial) / N (mt<N>) for every arm; an mt<N> BLAS arm with no OpenMP construct is timed, its parallelism being the library's threads.
 - **parallelism** (table column): `serial`, `openmp (N construct(s))`, `library threads (OPENBLAS_NUM_THREADS=n)` [+ openmp runtime], or for Fortran mt8 `openmp runtime linked`.
 - `blade plan` under the arm's knobs -> `<armdir>/plan.txt`, `plan_decisions`, `plan_omp`, `plan_fold_form` (the plan's per-site `fold form:` lines; C++ lane only, so recorded beside the artifact counts).
 - PE imports, stack/heap reserve+commit, and every imported DLL resolved along the run PATH
@@ -258,16 +260,16 @@ disagreed the later, driver rule is kept and marked "driver:"; the bullets witho
 ```
 name (= directory), group, title, notes, hypothesis {natural, expert},
 sizes {smoke {param: int}, full {...}, [scale ...]}   -- full = the committed literals
-regimes [..]                                          -- REQUIRED, e.g. "serial-licensed-native"
+regimes [..]                                          -- REQUIRED FAMILIES, e.g. "serial-licensed-native", "mt-licensed-native" (legacy "mt8-..." = "mt-...")
 arms [base arms]                                      -- default: all six
 inputonly true                                        -- every arm gets its own twin
 inputonly_blade "inputonly.blade", sources {blade, natural, expert}, blas_sources {expert: ...}
 regime_arms {"<regime>": [base arms]}                 -- narrow one regime
-rounds {serial: n, mt8: n}                            -- raise the minimum
+rounds {serial: n, mt: n}                             -- raise the minimum (legacy key mt8 = mt)
 tolerance {licensed|repro|fastmath: rel}, input_tolerance (default 1e-14 relative; a kernel may only widen it)
 expected_llvm "fallback" + expected_llvm_reason       -- a fallback is then not a failure
-no_parallel_form true | false | ["<mt8 regime>"]      -- Blade has no licensed parallel spelling (false / [] = it has one)
-parallel_notes {"<arm>": "parallel preparation, serial kernel ..."}   -- shown in mt8 rows
+no_parallel_form true | false | ["<mt family>"]       -- Blade has no licensed parallel spelling (false / [] = it has one)
+parallel_notes {"<arm>": "parallel preparation, serial kernel ..."}   -- shown in mt<N> rows
 size_exempt {"<file>": [params]}
 memory_contract {id, source, required_values, observation_boundary, cleanup_endpoint,
                  audit_status, linear_payload_model {parameter, bytes_per_element {...}}}
@@ -285,9 +287,9 @@ entry must agree): `{"<kernel>": {"<size>": {"checksum": x, "input_checksum": y,
 it must equal kernel.json's, which catches a stale pin.
 
 **config.json** (required, every key; M3): `controls[]` {name, kernel, arm, regime, size},
-`tolerance`, `verdict_delta`, `serial_affinity_cpu`, `run_env {serial, mt8}`,
+`tolerance`, `verdict_delta`, `serial_affinity_cpu`, `run_env {serial, mt}` (`{n}` = the thread count), `threads` (optional, default `[8]`),
 `blade_knobs {all, llvm, licensed, repro, fastmath}`, `fortran_flags {gfortran, ifx} x
-{licensed, repro, fastmath, serial_extra, mt8_extra}`, `fortran_twin_flags`. Keys starting
+{licensed, repro, fastmath, serial_extra, mt_extra}`, `fortran_twin_flags`. Keys starting
 with `_` are comments.
 
 ## Session bundle (M27, lean form since 2026-10-18)

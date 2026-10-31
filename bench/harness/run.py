@@ -76,8 +76,30 @@ BASE_ARMS = ["blade-llvm", "blade-cpp", "gfortran-natural", "gfortran-expert", "
 TWIN_ARMS = [a + "-inputonly" for a in BASE_ARMS]
 ALL_ARMS = BASE_ARMS + TWIN_ARMS
 FP_REGIMES = ("licensed", "repro", "fastmath")      # licensed = HEADLINE (README 3)
-# Order of work: licensed serial, licensed mt8, repro serial, repro mt8, fastmath, blas.
-REGIME_ORDER = [f"{t}-{fp}-{bl}" for bl in ("native", "blas") for fp in FP_REGIMES for t in ("serial", "mt8")]
+BLAS_REGIMES = ("native", "blas")
+# Thread regimes are `serial` and `mt<N>` (N a positive integer; `mt8` is the box's
+# historical threaded regime and the default). The campaign's thread counts come from
+# config.json `threads` (plan-cloud-bench-campaign.md 4.1); every kernel.json declares its
+# threaded regimes by FAMILY (`mt-<fp>-<blas>`, with the legacy spelling `mt8-...` read as
+# the family), so one kernel.json serves every N.
+DEFAULT_THREAD_COUNTS = [8]
+THREADS_RE = re.compile(r"^mt([1-9][0-9]*)$")
+
+
+def regime_order(thread_counts: list[int]) -> list[str]:
+    """Order of work: licensed serial, licensed mt<N> ascending, repro serial, repro mt<N>,
+    fastmath, then the same for blas (README 3)."""
+    threads = ["serial"] + [f"mt{n}" for n in thread_counts]
+    return [f"{t}-{fp}-{bl}" for bl in BLAS_REGIMES for fp in FP_REGIMES for t in threads]
+
+
+def regime_sort_key(name: str) -> tuple[int, int, int]:
+    """(blas, fp, thread count): the order of work for ANY N, known to the config or not."""
+    r = Regime.parse(name)
+    return (BLAS_REGIMES.index(r.blas), FP_REGIMES.index(r.fp), r.n_threads if r.threaded else 0)
+
+
+REGIME_ORDER = regime_order(DEFAULT_THREAD_COUNTS)       # the box's matrix, for callers without a config
 DEFAULT_SMOKE_REGIME = "serial-licensed-native"
 # Blade prints Float64 with setprecision(15) in both lanes (Fortran prints 17 digits):
 # "exact" input agreement = equal after rounding both to 15 significant digits.
@@ -98,7 +120,7 @@ LAST_SESSION_END = BUILD_ROOT / "last-bench-session-end.txt"
 DQ_RUN_S = 2.5                     # README 6: a run longer than 2.5 s disqualifies the arm
 RUN_TIMEOUT_CAP_S = 3 * DQ_RUN_S   # M19: child watchdog = 3x the run cap
 MEMORY_BOUND_S = 0.05              # README 6: < 50 ms full-size -> memory-bound rounds
-MIN_ROUNDS = {"serial": 11, "mt8": 7, "memory_bound": 21}   # M15
+MIN_ROUNDS = {"serial": 11, "mt": 7, "memory_bound": 21}   # M15 (keyed by thread CLASS)
 THERMAL_FACTOR = 3.0               # M19: any run > 3x its running median aborts the session
 THERMAL_MIN_MEDIAN_S = 0.005       # ... once that median is above the timer-noise floor
 TREND_LIMIT = 0.05                 # M18: first-half vs second-half median within a block
@@ -356,10 +378,11 @@ def load_config(path: Path = CONFIG_FILE) -> dict[str, Any]:
     missing = [k for k in REQUIRED_CONFIG if k not in cfg]
     if missing:
         raise HarnessError(f"{path}: missing required key(s) {missing}")
+    _normalize_thread_keys(cfg)
     for comp in ("gfortran", "ifx"):
         t = cfg["fortran_flags"].get(comp)
-        if not isinstance(t, dict) or any(not isinstance(t.get(k), list) for k in (*FP_REGIMES, "serial_extra", "mt8_extra")):
-            raise HarnessError(f"{path}: fortran_flags.{comp} needs list keys {FP_REGIMES}, serial_extra, mt8_extra")
+        if not isinstance(t, dict) or any(not isinstance(t.get(k), list) for k in (*FP_REGIMES, "serial_extra", "mt_extra")):
+            raise HarnessError(f"{path}: fortran_flags.{comp} needs list keys {FP_REGIMES}, serial_extra, mt_extra")
         if not isinstance(cfg["fortran_twin_flags"].get(comp), list):
             raise HarnessError(f"{path}: fortran_twin_flags.{comp} must be a list")
     for c in cfg["controls"]:
@@ -372,10 +395,54 @@ def load_config(path: Path = CONFIG_FILE) -> dict[str, Any]:
     for k in ("all", "llvm", *FP_REGIMES):
         if not isinstance(cfg["blade_knobs"].get(k), dict):
             raise HarnessError(f"{path}: blade_knobs.{k} must be an object")
-    for k in ("serial", "mt8"):
+    for k in ("serial", "mt"):
         if not isinstance(cfg["run_env"].get(k), dict):
             raise HarnessError(f"{path}: run_env.{k} must be an object")
+    cfg["threads"] = _resolve_thread_counts(cfg.get("threads", list(DEFAULT_THREAD_COUNTS)), path)
     return cfg
+
+
+def _normalize_thread_keys(cfg: dict[str, Any]) -> None:
+    """The legacy `mt8` spelling of the threaded CLASS (`run_env.mt8`, `*.mt8_extra`) reads as
+    `mt`; a config naming both is ambiguous and refused."""
+    def move(d: dict[str, Any], old: str, new: str, where: str) -> None:
+        if old in d:
+            if new in d:
+                raise HarnessError(f"config: {where} names both {old!r} and {new!r}")
+            d[new] = d.pop(old)
+    if isinstance(cfg.get("run_env"), dict):
+        move(cfg["run_env"], "mt8", "mt", "run_env")
+    if isinstance(cfg.get("fortran_flags"), dict):
+        for comp, t in cfg["fortran_flags"].items():
+            if isinstance(t, dict):
+                move(t, "mt8_extra", "mt_extra", f"fortran_flags.{comp}")
+
+
+def physical_core_count() -> int | None:
+    """Physical cores (Win32_Processor NumberOfCores summed); None when the query fails."""
+    r = run_proc(["powershell", "-NoProfile", "-Command",
+                  "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum"],
+                 env=make_env({}), cwd=BENCH_DIR, timeout=60)
+    return int(r.stdout.strip()) if r.stdout.strip().isdigit() else None
+
+
+def _resolve_thread_counts(spec: Any, path: Path) -> list[int]:
+    """config.json `threads`: a list of positive integers and/or the word "all" (= the
+    physical core count, resolved once here), deduplicated and ascending; default [8]."""
+    if not isinstance(spec, list) or not spec:
+        raise HarnessError(f"{path}: threads must be a non-empty list of positive integers and/or \"all\"")
+    out: set[int] = set()
+    for x in spec:
+        if x == "all":
+            n = physical_core_count()
+            if n is None:
+                raise HarnessError(f"{path}: threads names \"all\" but the physical core count could not be read")
+            out.add(n)
+        elif isinstance(x, int) and not isinstance(x, bool) and x >= 1:
+            out.add(x)
+        else:
+            raise HarnessError(f"{path}: threads entry {x!r} is neither a positive integer nor \"all\"")
+    return sorted(out)
 
 
 def config_hash(cfg: dict[str, Any]) -> str:
@@ -402,7 +469,8 @@ def build_config_hash(cfg: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class Regime:
-    """One cell of the regime matrix, named ``<threads>-<fp>-<blas>``."""
+    """One cell of the regime matrix, named ``<threads>-<fp>-<blas>`` with threads
+    ``serial`` or ``mt<N>``."""
     threads: str
     fp: str
     blas: str
@@ -411,17 +479,70 @@ class Regime:
     def name(self) -> str:
         return f"{self.threads}-{self.fp}-{self.blas}"
 
+    @property
+    def threaded(self) -> bool:
+        return self.threads != "serial"
+
+    @property
+    def n_threads(self) -> int:
+        """The OpenMP team size the regime runs with (1 for serial)."""
+        m = THREADS_RE.match(self.threads)
+        return int(m.group(1)) if m else 1
+
+    @property
+    def thread_class(self) -> str:
+        """`serial` or `mt`: the key config.json, kernel.json `rounds` and MIN_ROUNDS use."""
+        return "mt" if self.threaded else "serial"
+
+    @property
+    def family(self) -> str:
+        """The name kernel.json declares: `<serial|mt>-<fp>-<blas>` (every N is one family)."""
+        return f"{self.thread_class}-{self.fp}-{self.blas}"
+
     def serial_twin(self) -> "Regime":
-        """The serial regime an mt8 regime is gated on (charter 2.3, review M12)."""
+        """The serial regime a threaded regime is gated on (charter 2.3, review M12)."""
         return Regime("serial", self.fp, self.blas)
+
+    def with_threads(self, n: int) -> "Regime":
+        return Regime(f"mt{n}", self.fp, self.blas)
+
+    @staticmethod
+    def _split(name: str, what: str) -> tuple[str, str, str]:
+        parts = name.strip().split("-")
+        if len(parts) != 3 or parts[1] not in FP_REGIMES or parts[2] not in BLAS_REGIMES:
+            raise HarnessError(f"bad {what} {name!r} (want <serial|mt<N>>-<licensed|repro|fastmath>-<native|blas>)")
+        return parts[0], parts[1], parts[2]
 
     @staticmethod
     def parse(name: str) -> "Regime":
-        parts = name.strip().split("-")
-        if (len(parts) != 3 or parts[0] not in ("serial", "mt8")
-                or parts[1] not in FP_REGIMES or parts[2] not in ("native", "blas")):
-            raise HarnessError(f"bad regime name {name!r} (want <serial|mt8>-<licensed|repro|fastmath>-<native|blas>)")
-        return Regime(*parts)
+        t, fp, bl = Regime._split(name, "regime name")
+        if t != "serial" and not THREADS_RE.match(t):
+            raise HarnessError(f"bad regime name {name!r} (want <serial|mt<N>>-<licensed|repro|fastmath>-<native|blas>)")
+        return Regime(t, fp, bl)
+
+    @staticmethod
+    def family_of(name: str) -> str:
+        """Normalize a kernel.json regime entry to its family: `serial-...` and `mt-...` as
+        written, the legacy `mt8-...` (any `mt<N>-...`) to `mt-...`."""
+        t, fp, bl = Regime._split(name, "regime family")
+        if t == "serial" or t == "mt":
+            return f"{t}-{fp}-{bl}"
+        if THREADS_RE.match(t):
+            return f"mt-{fp}-{bl}"
+        raise HarnessError(f"bad regime family {name!r} (want <serial|mt>-<licensed|repro|fastmath>-<native|blas>)")
+
+    @staticmethod
+    def expand(families: Iterable[str], thread_counts: list[int]) -> list["Regime"]:
+        """The concrete regimes of a kernel's declared families: a serial family is itself,
+        a threaded family is one regime per configured thread count."""
+        out: list[Regime] = []
+        for fam in families:
+            t, fp, bl = Regime._split(Regime.family_of(fam), "regime family")
+            if t == "serial":
+                out.append(Regime("serial", fp, bl))
+            else:
+                out += [Regime(f"mt{n}", fp, bl) for n in thread_counts]
+        return out
 
 
 @dataclass(frozen=True)
@@ -492,11 +613,15 @@ class Kernel:
     def arms_in(self, regime: Regime) -> list[str]:
         """The arms a regime runs (kernel.json `regime_arms` narrows a regime's base arms;
         twins follow their base arm)."""
-        sel = self.regime_arms.get(regime.name)
+        sel = self.regime_arms.get(regime.family)
         return list(self.arms) if sel is None else [a for a in self.arms if ArmSpec.parse(a).base in sel]
 
+    def declares(self, regime: Regime) -> bool:
+        """Whether kernel.json's `regimes` names this regime's family."""
+        return regime.family in self.regimes
+
     def blade_has_parallel_form(self, regime: Regime) -> bool:
-        return not (regime.threads == "mt8" and ("all" in self.no_parallel_form or regime.name in self.no_parallel_form))
+        return not (regime.threaded and ("all" in self.no_parallel_form or regime.family in self.no_parallel_form))
 
 
 def load_kernel(kdir: Path) -> Kernel:
@@ -537,18 +662,17 @@ def load_kernel(kdir: Path) -> Kernel:
     inputonly = bool(raw.get("inputonly", False))
     if inputonly:
         arms += [twin_of(a) for a in arms]
-    regimes = need("regimes", list)
-    for r in regimes:
-        Regime.parse(r)
-    regime_arms = raw.get("regime_arms", {})
-    for rn, al in regime_arms.items():
-        Regime.parse(rn)
+    # `regimes`, `regime_arms` keys and `no_parallel_form` entries are FAMILIES (the legacy
+    # `mt8-...` spelling, which every committed kernel.json uses, reads as `mt-...`).
+    regimes = [Regime.family_of(r) for r in need("regimes", list)]
+    regime_arms = {Regime.family_of(rn): al for rn, al in raw.get("regime_arms", {}).items()}
+    for al in regime_arms.values():
         for x in al:
             ArmSpec.parse(x)
-    rounds = raw.get("rounds", {})
+    rounds = {("mt" if key == "mt8" else key): v for key, v in raw.get("rounds", {}).items()}
     for key, v in rounds.items():
-        if key not in ("serial", "mt8") or not isinstance(v, int) or v < 1:
-            raise HarnessError(f"{path}: rounds.{key} must be serial|mt8 -> positive int")
+        if key not in ("serial", "mt") or not isinstance(v, int) or v < 1:
+            raise HarnessError(f"{path}: rounds.{key} must be serial|mt -> positive int")
     tol = {fp: float(v) for fp, v in raw.get("tolerance", {}).items()}   # overrides of config.json
     sources = {"blade": f"{name}.blade", "natural": "natural.f90", "expert": "expert.f90"}
     sources.update(raw.get("sources", {}))
@@ -561,6 +685,8 @@ def load_kernel(kdir: Path) -> Kernel:
         npf = []
     elif not isinstance(npf, list):
         raise HarnessError(f"{path}: no_parallel_form must be true, false or a list of regime names")
+    else:
+        npf = [x if x == "all" else Regime.family_of(x) for x in npf]
     contract = raw.get("memory_contract")
     if contract is not None:
         if not isinstance(contract, dict):
@@ -820,10 +946,7 @@ def fingerprint() -> dict[str, Any]:
             fp["cpu_mhz_nominal"] = winreg.QueryValueEx(k, "~MHz")[0]
     except OSError:
         fp["cpu"] = platform.processor()
-    r = run_proc(["powershell", "-NoProfile", "-Command",
-                  "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum"],
-                 env=make_env({}), cwd=BENCH_DIR, timeout=60)
-    fp["physical_cores"] = int(r.stdout.strip()) if r.stdout.strip().isdigit() else None
+    fp["physical_cores"] = physical_core_count()
     ms = _MemoryStatusEx()
     ms.dwLength = ctypes.sizeof(_MemoryStatusEx)
     if _k32.GlobalMemoryStatusEx(ctypes.byref(ms)):
@@ -840,9 +963,10 @@ def fingerprint() -> dict[str, Any]:
 
 def record_run_env(fp: dict[str, Any], config: dict[str, Any]) -> None:
     """The run environment per thread regime and the serial pin, in the fingerprint (M20)."""
-    fp["run_env"] = {t: {k: v for k, v in config["run_env"][t].items() if not k.startswith("_")} for t in ("serial", "mt8")}
+    fp["run_env"] = {t: {k: v for k, v in config["run_env"][t].items() if not k.startswith("_")} for t in ("serial", "mt")}
     fp["serial_affinity_cpu"] = config["serial_affinity_cpu"]
-    fp["mt8_binding"] = "unbound" if not any(k in fp["run_env"]["mt8"] for k in ("OMP_PLACES", "OMP_PROC_BIND")) else "bound"
+    fp["thread_counts"] = list(config["threads"])
+    fp["mt_binding"] = "unbound" if not any(k in fp["run_env"]["mt"] for k in ("OMP_PLACES", "OMP_PROC_BIND")) else "bound"
 
 
 # ---------------------------------------------------------------------------
@@ -864,14 +988,24 @@ def blade_knobs(regime: Regime, lane: str, config: dict[str, Any]) -> dict[str, 
 
 
 def run_knobs(regime: Regime, config: dict[str, Any]) -> dict[str, str]:
-    """Run-time knobs (config.json `run_env`): thread counts, OMP_DYNAMIC, placement."""
-    return {k: str(v) for k, v in config["run_env"][regime.threads].items() if not k.startswith("_")}
+    """Run-time knobs (config.json `run_env.<serial|mt>`): thread counts, OMP_DYNAMIC,
+    placement. In the `mt` entry the placeholder ``{n}`` is the regime's thread count; a
+    thread-count variable spelled as a fixed number that disagrees with the regime is a
+    config error, never a silently mis-sized team."""
+    out = {k: str(v).replace("{n}", str(regime.n_threads))
+           for k, v in config["run_env"][regime.thread_class].items() if not k.startswith("_")}
+    if regime.threaded:
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            if var in out and out[var] != str(regime.n_threads):
+                raise HarnessError(f"config run_env.mt.{var}={out[var]!r} disagrees with regime {regime.name}; "
+                                   "spell it \"{n}\"")
+    return out
 
 
 def fortran_flags(family: str, regime: Regime, config: dict[str, Any], twin: bool) -> list[str]:
     """The regime's flags for gfortran or ifx (never per kernel), plus the twin defines."""
     t = config["fortran_flags"][family]
-    flags = list(t[regime.fp]) + list(t["serial_extra" if regime.threads == "serial" else "mt8_extra"])
+    flags = list(t[regime.fp]) + list(t[f"{regime.thread_class}_extra"])
     if twin:
         flags += list(config["fortran_twin_flags"][family])
     return flags
@@ -1178,7 +1312,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
         ev["blas_preempt"] = pre
     elif regime.blas == "blas":
         ev["blas_route"] = "library"
-    if regime.threads == "mt8":
+    if regime.threaded:
         if arm.lane == "llvm":
             # The LLVM lane has no OpenMP: a licence compiles serial with no refusal line.
             b.status, b.reason = "serial-only", "LLVM lane has no OpenMP"
@@ -1192,11 +1326,11 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
                 ev["parallelism"] = f"library threads (OPENBLAS_NUM_THREADS={b.run_knobs.get('OPENBLAS_NUM_THREADS')})"
                 b.status = "ok"
                 return
-            b.status, b.reason = "no-parallel-form", "the mt8 build contains no thread-parallel construct"
+            b.status, b.reason = "no-parallel-form", f"the {regime.threads} build contains no thread-parallel construct"
             return
         ev["parallelism"] = f"openmp ({ev['thread_constructs']} construct(s))"
         if regime.fp == "repro":
-            # BLADE_FP_REPRO=1 serializes the mt8 fold teams as well
+            # BLADE_FP_REPRO=1 serializes the threaded fold teams as well
             ev["parallelism"] += "; threaded maps, serial folds (BLADE_FP_REPRO)"
     elif regime.blas == "blas" and ev["blas_routed"]:
         ev["parallelism"] = f"library threads (OPENBLAS_NUM_THREADS={b.run_knobs.get('OPENBLAS_NUM_THREADS')})"
@@ -1286,14 +1420,14 @@ def _build_fortran(b: Build, arm: ArmSpec, regime: Regime, src: Path, armdir: Pa
         omp_rt = any(d.startswith(("libgomp", "libiomp")) for d in imports)
         if regime.blas == "blas" and b.evidence["blas_routed"]:
             par = f"library threads (OPENBLAS_NUM_THREADS={b.run_knobs.get('OPENBLAS_NUM_THREADS')})"
-            b.evidence["parallelism"] = par + (" + openmp runtime" if (omp_rt and regime.threads == "mt8") else "")
-        elif regime.threads == "mt8":
+            b.evidence["parallelism"] = par + (" + openmp runtime" if (omp_rt and regime.threaded) else "")
+        elif regime.threaded:
             b.evidence["parallelism"] = "openmp runtime linked" if omp_rt else "serial (no OpenMP runtime imported)"
         else:
             b.evidence["parallelism"] = "serial"
         b.status = "ok"
-        if arm.family == "ifx" and regime.threads == "mt8" and not (Path(b.cwd) / "libiomp5md.dll").is_file():
-            b.warnings.append("mt8 ifx build has no libiomp5md.dll beside the exe")
+        if arm.family == "ifx" and regime.threaded and not (Path(b.cwd) / "libiomp5md.dll").is_file():
+            b.warnings.append(f"{regime.threads} ifx build has no libiomp5md.dll beside the exe")
 
 
 # ---------------------------------------------------------------------------
@@ -1715,12 +1849,12 @@ class Session:
 
     def regimes_for(self, k: Kernel) -> list[Regime]:
         if self.opt.regimes is not None:
-            wanted = [r for r in self.opt.regimes if r.name in k.regimes]
+            wanted = [r for r in self.opt.regimes if k.declares(r)]
         elif self.opt.mode == "bench":
-            wanted = [Regime.parse(r) for r in k.regimes]
+            wanted = Regime.expand(k.regimes, self.opt.config["threads"])
         else:
             wanted = [Regime.parse(DEFAULT_SMOKE_REGIME)]
-        return sorted(wanted, key=lambda r: REGIME_ORDER.index(r.name))
+        return sorted(wanted, key=lambda r: regime_sort_key(r.name))
 
     def arms_for(self, k: Kernel, regime: Regime) -> list[ArmSpec]:
         names = k.arms_in(regime)
@@ -1896,7 +2030,7 @@ class Session:
         so an abort keeps its partial evidence (M27)."""
         opt = self.opt
         bench = opt.mode == "bench" and not gate_only
-        mt8 = regime.threads == "mt8"
+        threaded = regime.threaded
         key = f"{k.name}/{regime.name}"
         blk: dict[str, Any] = {"kernel": k.name, "group": k.group, "regime": regime.name, "size": size,
                                "sizes": k.sizes[size], "tolerance": self.tol(k, regime),
@@ -1916,12 +2050,12 @@ class Session:
         arms = self.arms_for(k, regime)
         builds: dict[str, Build] = {}
         state: dict[str, dict[str, Any]] = {}
-        # 1. build every arm up front (mt8 arms only when their own serial arm validated)
+        # 1. build every arm up front (threaded arms only when their own serial arm validated)
         for a in arms:
             entry: dict[str, Any] = {"status": "unbuilt", "reason": "", "samples": []}
             blk["arms"][a.name] = entry
             state[a.name] = entry
-            if mt8 and not self._serial_gate_ok(k, regime, a):
+            if threaded and not self._serial_gate_ok(k, regime, a):
                 b = Build(arm=a.name, regime=regime.name, size=size, status="gated",
                           reason=f"its own serial arm ({regime.serial_twin().name}) did not validate",
                           twin=a.twin, lane=a.lane)
@@ -1934,7 +2068,7 @@ class Session:
             entry["status"], entry["reason"] = b.status, b.reason
             if regime.threads == "serial" and b.status != "ok":
                 self.serial_valid[(k.name, regime.name, a.name)] = b.status
-            if mt8 and a.name in k.parallel_notes:
+            if threaded and a.name in k.parallel_notes:
                 entry["note"] = k.parallel_notes[a.name]
             if b.evidence.get("blas_route") == "native-preempt":
                 entry["note"] = (entry.get("note", "") + "; " if entry.get("note") else "") + \
@@ -2024,17 +2158,17 @@ class Session:
         return blk
 
     def _serial_gate_ok(self, k: Kernel, regime: Regime, a: ArmSpec) -> bool:
-        """M12: each mt8 arm is gated on ITS OWN validated serial arm.  When the serial
+        """M12: each threaded arm is gated on ITS OWN validated serial arm.  When the serial
         counterpart was not part of this session it is validated at smoke size first."""
         key = (k.name, regime.serial_twin().name, a.name)
         if key not in self.serial_valid:
-            if regime.serial_twin().name not in k.regimes:
+            if not k.declares(regime.serial_twin()):
                 self.warnings.append(f"{k.name}/{regime.name}: no serial counterpart declared; {a.name} ungated")
                 return True
             log(f"{k.name} {regime.name}: serial counterpart not run in this session; validating it at smoke size")
             self.run_block(k, regime.serial_twin(), "smoke", gate_only=True)
         # a serial arm that is not measured BY DESIGN (expected LLVM fallback, no BLAS route)
-        # does not block its mt8 build; one that failed, was disqualified or is missing does.
+        # does not block its threaded build; one that failed, was disqualified or is missing does.
         return self.serial_valid.get(key, "unrun") in GATE_PASS
 
     def _run_validated(self, k: Kernel, regime: Regime, a: ArmSpec, b: Build, ref: dict[str, Any] | None,
@@ -2117,10 +2251,11 @@ class Session:
         warm = [x["time_s"] for name, e in state.items() if not ArmSpec.parse(name).twin
                 for x in e["samples"][:1] if x["ok"]]
         memory_bound = size == "full" and bool(warm) and statistics.median(warm) < MEMORY_BOUND_S
-        minimum = MIN_ROUNDS["memory_bound"] if memory_bound else MIN_ROUNDS[regime.threads]
-        minimum = max(minimum, k.rounds.get(regime.threads, 0))
-        rule = f"minimum {minimum} ({'memory-bound: median warm-up < 50 ms' if memory_bound else regime.threads}"
-        rule += (f", kernel.json rounds.{regime.threads}" if regime.threads in k.rounds else "") + ")"
+        cls = regime.thread_class
+        minimum = MIN_ROUNDS["memory_bound"] if memory_bound else MIN_ROUNDS[cls]
+        minimum = max(minimum, k.rounds.get(cls, 0))
+        rule = f"minimum {minimum} ({'memory-bound: median warm-up < 50 ms' if memory_bound else cls}"
+        rule += (f", kernel.json rounds.{cls}" if cls in k.rounds else "") + ")"
         if self.opt.rounds is not None:
             taint = f"--rounds {self.opt.rounds} below the minimum {minimum}" if self.opt.rounds < minimum else None
             return self.opt.rounds, f"--rounds {self.opt.rounds}; {rule}", taint
@@ -2206,11 +2341,11 @@ class Session:
             if self.opt.regimes is not None:
                 regs = self.opt.regimes
             elif self.opt.mode == "bench":
-                regs = [Regime.parse(x) for x in k.regimes]
+                regs = Regime.expand(k.regimes, self.opt.config["threads"])
             else:
                 regs = [Regime.parse(DEFAULT_SMOKE_REGIME)]
             for r in regs:
-                if r.name not in k.regimes:
+                if not k.declares(r):
                     self.manifest.append({"kernel": k.name, "regime": r.name, "arm": "*",
                                           "status": "unsupported (regime not declared by the kernel)"})
                     continue
@@ -2362,14 +2497,14 @@ def render_summary(data: dict[str, Any]) -> str:
                      f"Verdicts (delta {pr.get('verdict_delta')}): win / detectable-win / equivalent / detectable-loss / "
                      "loss / inconclusive; `suppressed` = the block failed a drift, trend or control check. "
                      "Intervals are pointwise; no suite-wide claim. incremental = median(arm) - median(its own "
-                     "input-only twin), NOT kernel time. Reference: blade-llvm (serial), blade-cpp (mt8, or when "
+                     "input-only twin), NOT kernel time. Reference: blade-llvm (serial), blade-cpp (mt<N>, or when "
                      "the LLVM lane refused). Fresh-process, allocation-inclusive measurements.")
     if data.get("aborted"):
         lines.append(f"- **ABORTED**: {data['aborted']}")
     for f in data.get("flags", []):
         lines.append(f"- **FLAG**: {f}")
     blocks = [b for b in data.get("blocks", []) if not b.get("gate_only")]
-    regimes = sorted({b["regime"] for b in blocks}, key=lambda r: REGIME_ORDER.index(r) if r in REGIME_ORDER else 99)
+    regimes = sorted({b["regime"] for b in blocks}, key=regime_sort_key)
     for rg in regimes:
         rows = [b for b in blocks if b["regime"] == rg]
         has_inc = any("incremental" in e for b in rows for e in b["arms"].values())
@@ -2560,7 +2695,7 @@ def cmd_list(kernels: list[Kernel]) -> int:
         if not k.llvm_expected:
             print(f"    expected_llvm = fallback ({k.raw.get('expected_llvm_reason', '')})")
         if k.no_parallel_form:
-            print(f"    no_parallel_form (Blade, mt8): {k.no_parallel_form}")
+            print(f"    no_parallel_form (Blade, mt<N>): {k.no_parallel_form}")
     return 0
 
 
@@ -2583,7 +2718,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--kernels-dir", type=Path, default=KERNELS_DIR, help="where <name>/kernel.json live")
-        p.add_argument("--regimes", help="comma list, e.g. serial-licensed-native,mt8-licensed-native, or 'all'")
+        p.add_argument("--regimes", help="comma list, e.g. serial-licensed-native,mt8-licensed-native (any mt<N>), "
+                                         "or 'all' (= every regime over config.json `threads`)")
         p.add_argument("--arms", help="comma list of arms (a base arm also selects its twin)")
         p.add_argument("--build-dir", type=Path, default=BUILD_ROOT, help="private build root (gitignored)")
         p.add_argument("--out-dir", type=Path, help="where the session bundle goes")
@@ -2646,7 +2782,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise HarnessError(f"kernel {k.name} has no size {size!r} (has {sorted(k.sizes)})")
         regimes = None
         if a.regimes:
-            names = REGIME_ORDER if a.regimes == "all" else _csv(a.regimes) or []
+            names = regime_order(config["threads"]) if a.regimes == "all" else _csv(a.regimes) or []
             regimes = [Regime.parse(r) for r in names]
         arms = _csv(a.arms)
         for x in arms or []:
