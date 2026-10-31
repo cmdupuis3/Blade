@@ -8,5 +8,5 @@
 // explicitly rather than defaulted to 1 behind the author's back.
 // ============================================================================
 let grid: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
-let k = 2
+let k: Int64 = 2
 let bad = reduce(grid, (+), axes = k)

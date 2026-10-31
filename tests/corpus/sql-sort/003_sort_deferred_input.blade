@@ -7,8 +7,8 @@
 // in place (shared forceDeferredArrayInput helper, same machinery as
 // |> compute) before sorting. The second sort over the same binding confirms
 // the forced materialization happens exactly once (no C++ redefinition of w).
-let vals = [3, 1, 2]
-let w = method_for(vals) <@> lambda(q) -> if q > 1 then 1.0 else 0.0
+let vals = Int64([3, 1, 2])
+let w = method_for(vals) <@> lambda(q) -> if q > 1 then Float64(1.0) else Float64(0.0)
 let s = sort(w, lambda(x) -> x)
 let result = method_for(s) <@> lambda(x) -> x |> compute
 let s2 = sort(w, lambda(x) -> x)

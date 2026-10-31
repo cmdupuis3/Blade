@@ -19,13 +19,13 @@ let v = method_for(range<J>) <@> lambda(j) -> 1.0 + 0.1 * Float64(j) |> compute
 
 let y1 = (method_for(range<I>) <@> lambda(i) -> {
     let qi = q(i)
-    let s = reduce(method_for(zip(k, v)) <@> lambda(b, x) -> (score(qi, b), 1.0, x),
+    let s = reduce(method_for(zip(k, v)) <@> lambda(b, x) -> (score(qi, b), Float64(1.0), x),
                    lambda(a, b) -> {
                        let m = if a[0] > b[0] then a[0] else b[0]
                        let ca = exp(a[0] - m)
                        let cb = exp(b[0] - m)
                        (m, a[1] * ca + b[1] * cb, a[2] * ca + b[2] * cb)
-                   }, (-1.0e300, 0.0, 0.0))
+                   }, (-1.0e300, Float64(0.0), Float64(0.0)))
     s[2] / s[1]
 }) |> compute
 

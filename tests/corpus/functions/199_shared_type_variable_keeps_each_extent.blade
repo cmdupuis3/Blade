@@ -13,8 +13,8 @@
 // extent baked in.
 // The count is taken in the row's own class (`row ^ 0`, functions/160).
 function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
-let x = [1.0, 2.0, 3.0]
-let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+let x = Float64([1.0, 2.0, 3.0])
+let y = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 
 // mean(y) = 30
 function shift(v: T^1, w: T^1) -> T^1 = v - lmean(w)
@@ -42,7 +42,7 @@ let ds = doubled_second(x, y)
 
 // Rank 2, disagreeing on the inner axis only.
 function total2(A: T^2, B: T^2) -> T^0 = reduce(reduce(A, (+)), (+)) + reduce(reduce(B, (+)), (+))
-let P = [[1.0, 2.0], [3.0, 4.0]]
-let Q = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+let P = Float64([[1.0, 2.0], [3.0, 4.0]])
+let Q = Float64([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
 let t2 = total2(P, Q)
 // EXPECT: t2 = 19.0

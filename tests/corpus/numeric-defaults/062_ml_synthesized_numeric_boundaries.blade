@@ -1,0 +1,26 @@
+// TEST: ML synthesized buffers coefficients and offsets retain fixed widths
+import ml as ml
+import ad as ad
+let static scalar = [(0, 0, 1)]
+let static cfg = (scalar, scalar, scalar)
+// Runtime loop coordinates are Int64, as are the generated offset tables.
+let product = ml.tensor_product(cfg, Float64([2.0]), Float64([3.0]), Float64([0.5]))
+// The mutable output and non-binary basis coefficients both stay Float64.
+let source = Float64([1.0, 0.5, -0.3, 2.0, 0.7, -1.0])
+let basis = ml.sym_to_irreps(source)
+let back = ml.irreps_to_sym(basis)
+// EXPECT: product = [3.0]
+// EXPECT: basis = [1.154700538379252, 0.7071067811865476, 0.9899494936611666, -2.041241452319315, -0.4242640687119285, -0.7071067811865475]
+// EXPECT: back = [1.0000000000000004, 0.5, -0.3, 2.0000000000000004, 0.7, -1.0]
+
+// AD must still recognize the generated typed tables and output initializer.
+function weight_loss(w: Array<Float64 like Idx<1>>) -> Float64 = {
+    let x = [Float64(2.0)]
+    let y = [Float64(3.0)]
+    let p = ml.tensor_product(cfg, x, y, w)
+    p(0)
+}
+let mut dw: Array<Float64 like Idx<1>> = [0.0]
+let loss = ad.grad(weight_loss)(Float64([0.5]), dw)
+// EXPECT: loss = 3.0
+// EXPECT: dw = [6.0]

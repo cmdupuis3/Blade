@@ -1,0 +1,17 @@
+// TEST: partial applications receive expected residual parameter widths
+function add3(a, b, c) = a + b + c
+let wide: Float64 -> Float64 = add3(1.0, 2.0)
+let narrow: Float32 -> Float32 = add3(1.0, 2.0)
+function apply64(f: Float64 -> Float64, x: Float64) = f(x)
+function apply32(f: Float32 -> Float32, x: Float32) = f(x)
+let a = wide(4.0)
+let b = narrow(4.0)
+let c = apply64(add3(1.0, 2.0), 4.0)
+let d = apply32(add3(1.0, 2.0), 4.0)
+let written: Float64 -> Float64 = lambda(x) -> x + 1.0
+let e = written(4.0)
+// EXPECT: a = 7.0
+// EXPECT: b = 7.0
+// EXPECT: c = 7.0
+// EXPECT: d = 7.0
+// EXPECT: e = 5.0

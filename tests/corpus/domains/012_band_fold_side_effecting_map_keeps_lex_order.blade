@@ -8,15 +8,15 @@
 // output ...)` and an `[omp] requested but emitted serial` line): every lane
 // evaluates the cells in lex order, which is what pins `s`. Integer-valued
 // terms, so the licensed combine's own order cannot move it.
-let static n = 13
-let static w = 3
+let static n: Int64 = 13
+let static w: Int64 = 3
 
 static struct Band {
     i: Int64<min=0, max=n-1>,
     j: Int64<min=0, max=n-1>
 } where abs(i - j) <= w
 
-let mut hits = 0
+let mut hits: Int64 = 0
 let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> {
     hits = hits + 1
     Float64(hits * (i + 1))

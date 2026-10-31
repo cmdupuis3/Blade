@@ -12,7 +12,7 @@ import ad as ad
 
 type R = Idx<6>
 
-function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float64 = {
     let gk = group_keys(k)
     let g = group_by(v, gk)
     let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute

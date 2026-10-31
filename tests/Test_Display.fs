@@ -209,7 +209,7 @@ add "REPL channel: ids count emissions and repeat across runs" (fun () ->
     | Error e, _ | _, Error e -> false, e)
 
 add "REPL channel: a program that never emits produces no sentinel" (fun () ->
-    match interpStdout "let x = 1\n" with
+    match interpStdout "let x: Int64 = 1\n" with
     | Error e -> false, e
     | Ok out -> (not (out.Contains F.Sentinel)), out)
 
@@ -243,7 +243,7 @@ add "serve channel: the submission is still kept and typed as usual" (fun () ->
     | None -> false, sprintf "no anonymous echo in %A" r.Bindings)
 
 add "serve channel: a non-emitting submission has an empty Display" (fun () ->
-    let r = evalOnce "let x = 1"
+    let r = evalOnce "let x: Int64 = 1"
     r.Display.IsEmpty, sprintf "%A" r.Display)
 
 add "serve wire: display[] splices raw frame objects, not strings" (fun () ->
@@ -270,7 +270,7 @@ add "serve wire: display[] is omitted entirely when nothing was emitted" (fun ()
     // Backward compatibility in the honest sense: a non-plotting submission's
     // response is byte-identical to what this compiler produced before display
     // frames existed.
-    let wire = Blade.IdeServe.evalResponse 7 (evalOnce "let x = 1")
+    let wire = Blade.IdeServe.evalResponse 7 (evalOnce "let x: Int64 = 1")
     (not (wire.Contains "display")), wire)
 
 add "serve wire: a json-encoded payload lands as an OBJECT, not a string" (fun () ->
@@ -303,7 +303,7 @@ let private plotFrame (source: string) : Result<System.Text.Json.JsonDocument, s
 
 let private contourSource =
     "import plot\n\
-     let ok = plot.contourf([0.0, 1.0, 2.0], [0.0, 1.0], [[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]], 20: levels, \"waves\": title)\n"
+     let ok = plot.contourf(Float64([0.0, 1.0, 2.0]), Float64([0.0, 1.0]), Float64([[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]]), Int64(20): levels, \"waves\": title)\n"
 
 add "plot.contourf: one frame, plotly mime, inline-json encoding" (fun () ->
     match plotFrame contourSource with
@@ -343,8 +343,8 @@ add "plot.line + units.SI: unit_label auto-fills the axis titles" (fun () ->
         "import units.SI\n\
          import display as d\n\
          import plot\n\
-         let ts: Array<Float<second> like Idx<3>> = [0.0, 1.0, 2.0]\n\
-         let vs: Array<Float<meter/second^2> like Idx<3>> = [0.0, 9.81, 19.62]\n\
+         let ts: Array<Float64<second> like Idx<3>> = [0.0, 1.0, 2.0]\n\
+         let vs: Array<Float64<meter/second^2> like Idx<3>> = [0.0, 9.81, 19.62]\n\
          let ok = plot.line(ts, vs, d.unit_label(ts): xlabel, d.unit_label(vs): ylabel)\n"
     match plotFrame src with
     | Error e -> false, e
@@ -360,7 +360,7 @@ add "plot: a title with quotes, a backslash and a tab still parses" (fun () ->
     // present: one apostrophe-shaped character and the panel got nothing.
     let src =
         "import plot\n\
-         let ok = plot.line([0.0, 1.0], [0.0, 1.0], \"he said \\\"hi\\\"\\tand\\\\left\": title)\n"
+         let ok = plot.line(Float64([0.0, 1.0]), Float64([0.0, 1.0]), \"he said \\\"hi\\\"\\tand\\\\left\": title)\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -373,7 +373,7 @@ add "plot: a title with quotes, a backslash and a tab still parses" (fun () ->
 add "plot: an axis label with a quote does not leak out of its string" (fun () ->
     let src =
         "import plot\n\
-         let ok = plot.line([0.0, 1.0], [0.0, 1.0], \"x\\\" ,\\\"evil\\\":1\": xlabel)\n"
+         let ok = plot.line(Float64([0.0, 1.0]), Float64([0.0, 1.0]), \"x\\\" ,\\\"evil\\\":1\": xlabel)\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -388,7 +388,7 @@ add "plot: an axis label with a quote does not leak out of its string" (fun () -
 add "plot: NaN and both infinities serialize as JSON null" (fun () ->
     let src =
         "import plot\n\
-         let ok = plot.line([0.0, 1.0, 2.0, 3.0, 4.0], [2.5, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 0.5])\n"
+         let ok = plot.line(Float64([0.0, 1.0, 2.0, 3.0, 4.0]), Float64([2.5, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 0.5]))\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -412,7 +412,7 @@ add "plot: json_num of a non-finite scalar slot is null too" (fun () ->
     // v1. The z array covers json_array's rank-2 arm at the same time.
     let src =
         "import plot\n\
-         let ok = plot.contourf([0.0, 1.0], [0.0, 1.0], [[0.0, 0.0 / 0.0], [1.0 / 0.0, 1.5]], 5: levels)\n"
+         let ok = plot.contourf(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[0.0, 0.0 / 0.0], [1.0 / 0.0, 1.5]]), Int64(5): levels)\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -673,7 +673,7 @@ add "plot: all five factories carry the backend slot, flat and chained" (fun () 
 
 let private streamSource =
     "import plot\n\
-     let ok = plot.stream(\"train_loss\", [0.0, 1.0, 2.0], [0.9, 0.5, 0.3], \"mse\": ylabel, 3: epoch, \"batch\": xlabel, \"loss\": title)\n"
+     let ok = plot.stream(\"train_loss\", Float64([0.0, 1.0, 2.0]), Float64([0.9, 0.5, 0.3]), \"mse\": ylabel, Int64(3): epoch, \"batch\": xlabel, \"loss\": title)\n"
 
 add "plot.stream: the stream mime, inline-json encoding, and one frame" (fun () ->
     match plotFrame streamSource with
@@ -706,7 +706,7 @@ add "plot.stream: meta.id IS the channel name, and it carries the stream flag" (
 add "plot.stream: a bare call marks the epoch -1 and OMITS every label" (fun () ->
     // "not given" and "given as blank" are the same request, and the shorter
     // payload is the one a training loop repeats thousands of times.
-    let src = "import plot\nlet ok = plot.stream(\"c\", [0.0, 1.0], [2.0, 3.0])\n"
+    let src = "import plot\nlet ok = plot.stream(\"c\", Float64([0.0, 1.0]), Float64([2.0, 3.0]))\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -726,9 +726,9 @@ add "plot.stream: frames of one channel share an id, and spend NO ordinal" (fun 
     // ordinary plot in a notebook the moment a training cell ran.
     let src =
         "import plot\n\
-         let a = plot.stream(\"loss\", [0.0], [1.0])\n\
-         let b = plot.stream(\"loss\", [1.0], [0.5])\n\
-         let c = plot.line([0.0, 1.0], [0.0, 1.0])\n"
+         let a = plot.stream(\"loss\", Float64([0.0]), Float64([1.0]))\n\
+         let b = plot.stream(\"loss\", Float64([1.0]), Float64([0.5]))\n\
+         let c = plot.line(Float64([0.0, 1.0]), Float64([0.0, 1.0]))\n"
     match interpStdout src with
     | Error e -> false, e
     | Ok out ->
@@ -745,7 +745,7 @@ add "plot.stream: a channel name with a quote cannot escape meta.id" (fun () ->
     // The id travels through Frame.escape; the SAME name also travels through
     // d.json_string into the payload's `channel`. Both have to survive, and
     // the frame has to still PARSE -- which plotFrame checks by construction.
-    let src = "import plot\nlet ok = plot.stream(\"a\\\" ,\\\"evil\\\":1\", [0.0], [1.0])\n"
+    let src = "import plot\nlet ok = plot.stream(\"a\\\" ,\\\"evil\\\":1\", Float64([0.0]), Float64([1.0]))\n"
     match plotFrame src with
     | Error e -> false, e
     | Ok doc ->
@@ -762,7 +762,7 @@ add "plot.stream: no sink installed means an ordinary buffered frame" (fun () ->
     // `blade repl`, the corpus, the interp/g++ differential gate -- leaves the
     // sink unset, and a stream frame is then just another sentinel line at
     // column 0 of stdout, ahead of the binding prints like any other frame.
-    let src = "import plot\nlet ok = plot.stream(\"loss\", [0.0], [1.0])\n"
+    let src = "import plot\nlet ok = plot.stream(\"loss\", Float64([0.0]), Float64([1.0]))\n"
     match interpStdout src with
     | Error e -> false, e
     | Ok out ->
@@ -782,8 +782,8 @@ add "the sink takes stream frames only, and leaves the buffer alone" (fun () ->
     let seen = ResizeArray<string>()
     let src =
         "import plot\n\
-         let s = plot.stream(\"loss\", [0.0], [1.0])\n\
-         let p = plot.line([0.0, 1.0], [0.0, 1.0])\n"
+         let s = plot.stream(\"loss\", Float64([0.0]), Float64([1.0]))\n\
+         let p = plot.line(Float64([0.0, 1.0]), Float64([0.0, 1.0]))\n"
     let out =
         F.setSink (fun l -> seen.Add l)
         try interpStdout src finally F.clearSink ()

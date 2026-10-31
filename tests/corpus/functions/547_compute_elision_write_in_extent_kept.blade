@@ -11,7 +11,7 @@ function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {
     3
 }
 function f() -> Int64 = {
-    let mut a = [1, 2, 3]
+    let mut a = Int64([1, 2, 3])
     let x = method_for(a) <@> lambda(v) -> v + 1 |> compute
     let y = method_for(0..bump(a)) <@> lambda(v) -> v + 1 |> compute
     let s = reduce(x, (+), 0)

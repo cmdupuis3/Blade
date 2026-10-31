@@ -24,7 +24,7 @@
 // The class here is all-'+', so every character is +1: a mirrored tuple reads
 // the SAME value as its canonical representative and there is no zero set.
 // 213 is the mixed-character twin, where both of those change.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

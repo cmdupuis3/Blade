@@ -232,6 +232,23 @@ let currentPos (tokens: Token list) =
     | t :: _ -> t.Line, t.Col
     | [] -> PS.Cur.LastEnd
 
+/// ROUND 6 (rules 2-3): the removed spellings, refused with a steer. Only
+/// bit-sized numeric type names remain, and booleans are `true` / `false`.
+let widthlessTypeMessage (name: string) : string =
+    match name with
+    | "Int" -> "`Int` has no width: write `Int32` or `Int64`"
+    | "Double" -> "`Double` is not a Blade type: write `Float64`"
+    | _ -> "`Float` has no width: write `Float32` or `Float64`"
+
+let isWidthlessTypeName (name: string) : bool =
+    match name with
+    | "Int" | "Float" | "Double" -> true
+    | _ -> false
+
+let capitalBoolMessage (name: string) : string =
+    let lower = name.ToLowerInvariant()
+    $"`{name}` is spelled `{lower}` in Blade: the booleans are `true` and `false`"
+
 /// End position (line, col) of the last meaningful (non-terminator) token
 /// consumed advancing from `before` to `after` (`after` must be a suffix of
 /// `before`). Newline/semi terminators are excluded so the span stops at the

@@ -6,9 +6,9 @@
 // the join's internal schedule: the compiled lanes interleaved the legs per
 // cell (r = 612.0), the interpreter ran them one after another (r = 615.0).
 // Refused like a writing map leg.
-let mut G = [0.0]
-let x = [1.0, 2.0, 3.0]
+let mut G = Float64([0.0])
+let x = Float64([1.0, 2.0, 3.0])
 let r = {
-    let (s, t) = object_for(<&!>) <@> (reduce(x, lambda(a, b) -> { G(0) = G(0) + 1.0; a + b }, 0.0), reduce(method_for(x) <@> lambda(v) -> v + G(0), (+)))
+    let (s, t) = object_for(<&!>) <@> (reduce(x, lambda(a, b) -> { G(0) = G(0) + 1.0; a + b }, Float64(0.0)), reduce(method_for(x) <@> lambda(v) -> v + G(0), (+)))
     s * 100.0 + t
 }

@@ -10,8 +10,8 @@
 let static spec2 = [(0, 0, 1), (1, 1, 1)]
 type Feat = IrrepsIdx<spec2>
 type Hidden = IrrepsIdx<spec2>
-function h(v: Array<Float like Hidden>) -> Float = {
+function h(v: Array<Float64 like Hidden>) -> Float64 = {
     v(0)
 }
-let a: Array<Float like Feat> = [1.0, 2.0, 3.0, 4.0]
+let a: Array<Float64 like Feat> = [1.0, 2.0, 3.0, 4.0]
 let bad = h(a)

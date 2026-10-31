@@ -32,7 +32,7 @@ module Main
 import Stats
 from Stats import mean, centered
 
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 
 let m = Stats.mean(x)
 // EXPECT: m = 2.0
@@ -51,6 +51,6 @@ let wrapped = spread(x)
 // section, named function, reynolds(...), or zero"). That is a pre-existing
 // limitation of qualified names in kernel position, unrelated to anything this
 // test is about -- the selective import is the spelling that works today.
-let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let B = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let rowmeans = method_for(B) <@> mean |> compute
 // EXPECT: rowmeans = [2.0, 4.0]

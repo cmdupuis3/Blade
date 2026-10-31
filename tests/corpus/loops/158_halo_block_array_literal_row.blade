@@ -36,7 +36,7 @@ function work(frs: T^1, B: T^1) = {
     } |> compute
 }
 let B: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
-let frs = [0.1, 0.2, 0.3]
+let frs = Float64([0.1, 0.2, 0.3])
 let out = work(frs, B)
 // out(f) = (1 + 3f) + (2 + f) * 4f = 1 + 3f + 8f + 4f^2
 // EXPECT: out = [2.14, 3.36, 4.66]

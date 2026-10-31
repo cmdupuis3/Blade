@@ -17,32 +17,32 @@ let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
 let static WD = ml.hom_dim(SIN, SOUT)
 
-let xg = [0.5, -1.2, 0.8, 0.3, -0.6]
-let xg_rot = [0.5, -1.2, 0.6087844265611232, 0.6708032524645346, -0.5190419236050658]
-let tgt = [1.0, 0.5, 0.25]
-let wv = [0.4, -0.3, 0.2, 0.1]
+let xg = Float64([0.5, -1.2, 0.8, 0.3, -0.6])
+let xg_rot = Float64([0.5, -1.2, 0.6087844265611232, 0.6708032524645346, -0.5190419236050658])
+let tgt = Float64([1.0, 0.5, 0.25])
+let wv = Float64([0.4, -0.3, 0.2, 0.1])
 
-function model(w: Array<Float like Idx<WD>>, x: Array<Float like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+function model(w: Array<Float64 like Idx<WD>>, x: Array<Float64 like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float64 like Idx<3>> = {
     let h = ml.derive_linear(SIN, SOUT, w, x)
     ml.norms(SOUT, h)
 }
 
-function loss(w: Array<Float like Idx<WD>>) -> Float = {
+function loss(w: Array<Float64 like Idx<WD>>) -> Float64 = {
     let o = model(w, xg)
     reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2))], (+))
 }
 
-function loss_rot(w: Array<Float like Idx<WD>>) -> Float = {
+function loss_rot(w: Array<Float64 like Idx<WD>>) -> Float64 = {
     let o = model(w, xg_rot)
     reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2))], (+))
 }
 
-let mut dw = [0.0, 0.0, 0.0, 0.0]
+let mut dw = Float64([0.0, 0.0, 0.0, 0.0])
 let lv = ad.grad(loss)(wv, dw)
 // EXPECT: lv = 0.29959233727723616
 // EXPECT: dw = [-0.43999999999999995, 1.0559999999999998, -0.6080306508910549, -0.30401532544552745]
 
-let mut dw_rot = [0.0, 0.0, 0.0, 0.0]
+let mut dw_rot = Float64([0.0, 0.0, 0.0, 0.0])
 let lv_rot = ad.grad(loss_rot)(wv, dw_rot)
 // EXPECT: lv_rot = 0.29959233727723616
 // EXPECT: dw_rot = [-0.43999999999999995, 1.0559999999999998, -0.6080306508910551, -0.30401532544552756]

@@ -9,8 +9,8 @@
 // identity, so all -0.0 terms fold to -0.0 and the three writes happen.
 module Lib
 
-let mut hits = 0
-function mapk(x: Float64) -> Float64 = match 0 with
+let mut hits: Int64 = 0
+function mapk(x: Float64) -> Float64 = match Int64(0) with
     | 0 -> x
     | _ -> {
         hits = hits + 1

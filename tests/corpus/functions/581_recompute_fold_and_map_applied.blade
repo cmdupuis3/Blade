@@ -12,7 +12,7 @@ function scaled(a: T^1, b: T^1) -> T^0 = {
     let r = method_for(zip(x, b)) <@> lambda(p, q) -> p * q + 1.0 |> compute
     s + reduce(r, (+), 0.0)
 }
-let a = [1.0, 2.0, 3.0]
-let b = [10.0, 20.0, 30.0]
+let a = Float64([1.0, 2.0, 3.0])
+let b = Float64([10.0, 20.0, 30.0])
 let t = scaled(a, b)
 // EXPECT: t = 295.0

@@ -15,7 +15,7 @@
 // other stays green. The child here is a deferred combinator, not a literal, so
 // this test stays on the IRSequence path.
 // ----------------------------------------------------------------------------
-let A = [1.0, 2.0]
+let A = Float64([1.0, 2.0])
 let L = method_for(A)
 let c = L <@> lambda(v) -> v + 10.0
 

@@ -7,11 +7,11 @@
 // * 2.0` returned as Float64 would make `x` itself a Float64.)
 // ============================================================================
 function r(x: T^0) -> Float64 = Float64(sqrt(x)) * 2.0
-let a = r(4)
+let a = r(Int64(4))
 // EXPECT: a = 4.0
 function q(x: T^0) = Float64(sqrt(x))
-let b = q(9)
+let b = q(Int64(9))
 // EXPECT: b = 3.0
 function e(x: T^0) = exp(x) > 0.5
-let c = e(1)
+let c = e(Int64(1))
 // EXPECT: c = true

@@ -5,7 +5,7 @@
 // df/dx = y*x^(y-1) = 12, df/dy = 8*log 2 (pinned via residual).
 import ad as ad
 
-function f(x: Float, y: Float) -> Float = x ^ y
+function f(x: Float64, y: Float64) -> Float64 = x ^ y
 
 let (gv, gdx, gdy) = ad.grad(f)(2.0, 3.0)
 let (jvx, jtx) = ad.jvp(f)(2.0, 3.0, 1.0, 0.0)

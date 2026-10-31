@@ -56,8 +56,8 @@ let private Prec = 15
 // digit) and the decimal exponent `x` of that leading digit (the value is
 // d0.d1...d14 * 10^x, exactly what C's "%e" reports after rounding to 15
 // digits), produce the "%.15g" text.
-let private assemble (sign: string) (digits: string) (x: int) : string =
-    if x < -4 || x >= Prec then
+let private assembleP (prec: int) (sign: string) (digits: string) (x: int) : string =
+    if x < -4 || x >= prec then
         // scientific: d[.ddd]e{+|-}dd
         let lead = digits.Substring(0, 1)
         let frac = digits.Substring(1).TrimEnd('0')
@@ -93,6 +93,18 @@ let markFloat (s: string) : string =
         if not (Char.IsAsciiDigit s.[i]) then bare <- false
     if bare then s + ".0" else s
 
+/// BLADE_PRINT_BITS, the exact-bits channel (round 6: the interpreter reads it
+/// too, so `test interp` can compare a Float32's last bit, which "%.6g" text
+/// hides): `1`/`on` appends each printed float's raw IEEE-754 bits, ` #<16 hex
+/// digits>` for a Float64 and ` #<8 hex digits>` for a Float32 -- the C++
+/// lane's blade_rt::float_put / fmt_f32 and the LLVM shim's blade_fmt_f64 /
+/// blade_fmt_f32 append the same text. Read per call (an env gate is a
+/// function, never a cached value); unset / `0` / `off` / `false` = plain text.
+let printBitsRequested () : bool =
+    match Environment.GetEnvironmentVariable "BLADE_PRINT_BITS" with
+    | null | "" -> false
+    | e -> not (e = "0" || e = "off" || e = "OFF" || e = "false")
+
 /// printf "%.15g" as rendered by ucrt64 iostreams, before the float marker.
 let private render15 (x: float) : string =
     if Double.IsNaN x then "nan"
@@ -113,13 +125,15 @@ let private render15 (x: float) : string =
         let mantStr = s.Substring(0, eidx)      // "d.dddddddddddddd"
         let x10 = Int32.Parse(s.Substring(eidx + 1), NumberStyles.Integer, inv)
         let digits = mantStr.Replace(".", "")   // exactly 15 significant digits
-        assemble sign digits x10
+        assembleP Prec sign digits x10
 
 /// Byte-exact mirror of `cout << setprecision(15) << x` (defaultfloat) for a
 /// double: printf "%.15g" as rendered by ucrt64 iostreams, plus the float
 /// marker (`2.0`, never `2`).
 let formatFloat15 (x: float) : string =
-    markFloat (render15 x)
+    let s = markFloat (render15 x)
+    if printBitsRequested () then s + " #" + (uint64 (BitConverter.DoubleToInt64Bits x)).ToString("x16", inv)
+    else s
 
 /// Layout of the shortest-digit rendering: "%.17g" conventions (fixed notation
 /// for decimal exponents in [-4, 17), scientific otherwise) applied to a digit
@@ -175,11 +189,98 @@ let formatFloatShortest (x: float) : string =
         let x10 = intLen - 1 - (raw.Length - trimmed.Length) + e10
         assembleShortest sign digits x10
 
-/// Byte-exact mirror of `cout << setprecision(15) << f` for a 32-bit float.
-/// iostreams promotes the float to double before formatting, so this is simply
-/// the 15-significant-digit rendering of the float's exact double value.
+/// The `prec` significant decimal digits of a finite nonzero |x| and the
+/// decimal exponent of the first, rounded from the EXACT binary value with
+/// ties to even (IEEE 754 / ucrt's "%.Ng" since Windows 10 2004, glibc's in
+/// the default rounding mode). Exact BigInteger arithmetic: a Float32 has
+/// many exact decimal ties at 6 digits (123456.5f), so no shortcut through
+/// .NET's own digit generation is taken here.
+let private exactDigits (prec: int) (ax: float) : string * int =
+    let bits = BitConverter.DoubleToInt64Bits ax
+    let bexp = int ((bits >>> 52) &&& 0x7FFL)
+    let frac = bits &&& 0xFFFFFFFFFFFFFL
+    let (m, e2) =
+        if bexp = 0 then (frac, -1074) else (frac ||| 0x10000000000000L, bexp - 1075)
+    let num0 = Numerics.BigInteger(m)
+    let (num, den) =
+        if e2 >= 0 then (num0 * Numerics.BigInteger.Pow(Numerics.BigInteger(2), e2), Numerics.BigInteger.One)
+        else (num0, Numerics.BigInteger.Pow(Numerics.BigInteger(2), -e2))
+    // k = floor(log10(ax)), corrected exactly against 10^k <= num/den < 10^(k+1).
+    let ten = Numerics.BigInteger(10)
+    let pow10 (k: int) = Numerics.BigInteger.Pow(ten, k)
+    let geq (k: int) = // num/den >= 10^k
+        if k >= 0 then num >= pow10 k * den else num * pow10 (-k) >= den
+    let mutable k = int (Math.Floor(Math.Log10 ax))
+    while not (geq k) do k <- k - 1
+    while geq (k + 1) do k <- k + 1
+    // q = round(num/den * 10^(prec-1-k)), ties to even.
+    let s = prec - 1 - k
+    let (n2, d2) = if s >= 0 then (num * pow10 s, den) else (num, den * pow10 (-s))
+    let mutable q = Numerics.BigInteger.Divide(n2, d2)
+    let r = n2 - q * d2
+    let c = Numerics.BigInteger.Compare(r * Numerics.BigInteger(2), d2)
+    if c > 0 || (c = 0 && not q.IsEven) then q <- q + Numerics.BigInteger.One
+    if q >= pow10 prec then
+        q <- q / ten
+        k <- k + 1
+    (q.ToString(inv), k)
+
+/// printf "%.Ng" (N = `prec`) of a double, before the float marker.
+let private renderG (prec: int) (x: float) : string =
+    if Double.IsNaN x then "nan"
+    elif Double.IsPositiveInfinity x then "inf"
+    elif Double.IsNegativeInfinity x then "-inf"
+    elif x = 0.0 then (if Double.IsNegative x then "-0" else "0")
+    else
+        let sign = if x < 0.0 then "-" else ""
+        let (digits, k) = exactDigits prec (abs x)
+        assembleP prec sign digits k
+
+/// Float32 print precision: 6 significant digits (FLT_DIG; round 6 rule 8).
+[<Literal>]
+let private Prec32 = 6
+
+/// Byte-exact mirror of the compiled lanes' Float32 spelling: "%.6g" of the
+/// float's value plus the float marker -- blade_rt::fmt_f32 (C++, streamed
+/// through blade_rt::pv) and blade_fmt_f32 (LLVM shim). `0.1f` is "0.1",
+/// `1234567.0f` is "1.23457e+06", `2.0f` is "2.0".
 let formatFloat32 (x: float32) : string =
-    formatFloat15 (float x)
+    let s = markFloat (renderG Prec32 (float x))
+    if printBitsRequested () then s + " #" + (BitConverter.SingleToUInt32Bits x).ToString("x8", inv)
+    else s
+
+/// A Float32 cell the interpreter holds double-backed: rounded to float first
+/// (the compiled lanes store a `float`), then spelled as a Float32.
+let formatFloat32Of (x: float) : string = formatFloat32 (float32 x)
+
+/// Shortest round-trip rendering of a FLOAT (the display-frame JSON rule for a
+/// Float32: blade_display::jsonfloat<float>, std::to_chars on the float):
+/// the fewest digits that parse back to the same float32, laid out like
+/// formatFloatShortest.
+let formatFloat32Shortest (x: float32) : string =
+    if Single.IsNaN x then "nan"
+    elif Single.IsPositiveInfinity x then "inf"
+    elif Single.IsNegativeInfinity x then "-inf"
+    elif x = 0.0f then (if Single.IsNegative x then "-0" else "0")
+    else
+        let sign = if x < 0.0f then "-" else ""
+        let s = (abs x).ToString("R", inv)
+        let eidx = s.IndexOf('E')
+        let mant = if eidx < 0 then s else s.Substring(0, eidx)
+        let e10 =
+            if eidx < 0 then 0
+            else Int32.Parse(s.Substring(eidx + 1), NumberStyles.AllowLeadingSign, inv)
+        let pidx = mant.IndexOf('.')
+        let intLen = if pidx < 0 then mant.Length else pidx
+        let raw = mant.Replace(".", "")
+        let trimmed = raw.TrimStart('0')
+        let digits = trimmed.TrimEnd('0')
+        let x10 = intLen - 1 - (raw.Length - trimmed.Length) + e10
+        assembleShortest sign digits x10
+
+/// `blade_rt::pv(std::complex<float>)`: "(re,im)", each part a Float32.
+let formatComplex64 (re: float) (im: float) : string =
+    "(" + formatFloat32Of re + "," + formatFloat32Of im + ")"
 
 /// Byte-exact mirror of `cout << std::complex<double>(re, im)`:
 /// "(re,im)" with no spaces, each component via formatFloat15 -- so a

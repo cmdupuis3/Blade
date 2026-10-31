@@ -85,7 +85,7 @@ let cov11 = p11 / 6.0 - (p1 / 6.0) * (p1 / 6.0)
 // 3-day window instead of 9); decompact rebuilds the dense matrix when
 // needed. reynolds(g) sums g over both argument orders, hence 2 * r_i r_j.
 // ============================================================================
-let w3 = [1.0, -2.0, 3.0]
+let w3 = Float64([1.0, -2.0, 3.0])
 let Lp = method_for(w3, w3)
 let co_gain = Lp <@> reynolds(lambda(x, y) where comm(x, y) -> x * y) |> compute
 let co_gain_dense = decompact(co_gain, 0)

@@ -13,21 +13,21 @@ import ad as ad
 type H = Idx<7>
 type Step = Idx<5>
 type K = Idx<9>
-function f(a: Array<Float like H>) -> Float = {
+function f(a: Array<Float64 like H>) -> Float64 = {
     let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) * a(w(-1)) |> compute
     reduce(d, (+))
 }
-function g(a: Array<Float like H>, s: Float64) -> Float64 = {
+function g(a: Array<Float64 like H>, s: Float64) -> Float64 = {
     let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) * s |> compute
-    let rec acc: Array<Float like Step> =
+    let rec acc: Array<Float64 like Step> =
         match acc with
         | zero -> zero
         | zero :: t -> zero :: d(0)
         | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + d(1)
     reduce(acc, (+))
 }
-let a0: Array<Float like H> = 1.0 + 0.25 * Float64(0..7)
-let mut da: Array<Float like H> = 0.0 * Float64(0..7)
+let a0: Array<Float64 like H> = 1.0 + 0.25 * Float64(0..7)
+let mut da: Array<Float64 like H> = 0.0 * Float64(0..7)
 let fv = ad.grad(f)(a0, da)
 let outs = method_for(range<K>) <@> lambda(k) -> g(a0, Float64(k)) |> compute
 let total = reduce(outs, (+))

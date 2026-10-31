@@ -6,10 +6,10 @@
 // the program TYPECHECKS, and lowering used to refuse it with a bare, spanless
 // message -- after `blade check` had printed OK. The refusal is BL6002 at the
 // expression, and `check` (which lowers) reports it too.
-function f(x: Array<Float like Idx<5>>) -> Float = {
+function f(x: Array<Float64 like Idx<5>>) -> Float64 = {
     let m = mask(x, lambda(q) -> q > 2.0)
     let c = compound(x, m)
     reduce(c, (+))
 }
-let a = [1.0, 2.0, 3.0, 4.0, 5.0]
+let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let s = f(a)

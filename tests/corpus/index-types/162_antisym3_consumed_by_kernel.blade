@@ -8,7 +8,7 @@
 // g = x*x*y is not itself antisymmetric, so the signed sum over the six
 // permutations survives: reynolds(g, Anti)(x,y,w) = the Vandermonde-shaped
 // alternating sum, nonzero on every strict triple.
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let g = lambda(x, y, w) where comm(x, y, w) -> x * x * y
 let C = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute

@@ -25,7 +25,7 @@ type I = Idx<3>
 let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
 let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
 let g = method_for(g0) <@> lambda(v: Float64) -> v * 2.0
-let held = (g |> compute, 2.0)
+let held = (g |> compute, Float64(2.0))
 let g_out = held[0]
 let g12 = g_out(1, 2)
 let g21 = g_out(2, 1)
@@ -43,7 +43,7 @@ let y_out = pair[0]
 // EXPECT: h = [[0.0, 1.0, 2.0], [4.0, 7.0], [12.0]]
 // EXPECT: y_out = [1.0, 6.0, 11.0]
 
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let gw = method_for(g0) <@> lambda(v: Float64) -> {
     G(0) = G(0) + 1.0
     v + G(0)

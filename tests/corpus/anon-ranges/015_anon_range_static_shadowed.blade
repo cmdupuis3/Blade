@@ -3,7 +3,7 @@
 // parameter of the same spelling shadows it and is a runtime bound. The
 // static evaluator reads statics by name, so without that check `g(3)` would
 // build a range typed by the static's 7.
-let static n = 7
+let static n: Int64 = 7
 function g(n: Int64) -> Int64 = {
     let xs = Float64(0..n)
     extents(xs)

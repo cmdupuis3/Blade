@@ -14,8 +14,8 @@
 // ============================================================================
 Unit second
 Unit day = 86400 * second
-let ts: Array<Float<day> like Idx<3>> = [1.0, 2.0, 3.0]
-let ws: Array<Float<1/day> like Idx<2>> = [1.0, 2.0]
+let ts: Array<Float64<day> like Idx<3>> = [1.0, 2.0, 3.0]
+let ws: Array<Float64<1/day> like Idx<2>> = [1.0, 2.0]
 let out = ws <@> lambda(w) -> {
     let wt = w * ts * ts
     let sn = sin <@> wt

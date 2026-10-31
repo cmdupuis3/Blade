@@ -1,7 +1,7 @@
 // TEST: Foreign Key Outer Product
 // Foreign keys participate in outer products with data arrays
-let temps = [20.0, 25.0, 30.0]
-let region = [0, 1, 2]
+let temps = Float64([20.0, 25.0, 30.0])
+let region = Int64([0, 1, 2])
 
 // Outer product: each (temp, region) pair
 let L = method_for(temps, region)

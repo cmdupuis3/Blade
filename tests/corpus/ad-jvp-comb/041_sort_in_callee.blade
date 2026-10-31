@@ -11,18 +11,18 @@ import ad as ad
 
 type I = Idx<5>
 
-function weighted_sorted(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x)
+function weighted_sorted(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 
-function outer(a: Array<Float like I>) -> Float = {
+function outer(a: Array<Float64 like I>) -> Float64 = {
     let t = weighted_sorted(a)
     t * 2.0
 }
 
-let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
-let gv = ad.grad(outer)([3.0, 1.0, 4.0, 1.5, 2.0], da)
+let mut da = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let gv = ad.grad(outer)(Float64([3.0, 1.0, 4.0, 1.5, 2.0]), da)
 // EXPECT: gv = 84.0
 // EXPECT: da = [8.0, 2.0, 10.0, 4.0, 6.0]
 let (jv, jt) = ad.jvp(outer)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])

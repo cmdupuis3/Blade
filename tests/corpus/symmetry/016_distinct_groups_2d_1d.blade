@@ -5,7 +5,7 @@
 // distinct identity groups, never from the data dimensions of one group.
 // a = [1,2,3,4] flat; b = [10,20]; pair products bq = [100, 200, 400].
 let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
-let B = [10.0, 20.0]
+let B = Float64([10.0, 20.0])
 let L = method_for(A, A, B, B)
 let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
 let result = L <@> f |> compute

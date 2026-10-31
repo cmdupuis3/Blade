@@ -5,6 +5,6 @@
 // (ml-equiv/083 asserts the behavior but that category carries no ERROR
 // pins). The BVar half keeps its original sentence, pinned by 020.
 import ml as ml
-function widen(k: Int) -> Float = 1.0
-function bad(u: Array<Float like Idx<4>>) where ml.galilean(u) -> Float =
+function widen(k: Int32) -> Float64 = 1.0
+function bad(u: Array<Float64 like Idx<4>>) where ml.galilean(u) -> Float64 =
   widen(rank(u))

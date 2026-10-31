@@ -1,0 +1,28 @@
+// TEST: Explicit scalar cast identities keep recursive pack result ranks
+// A numeric cast is an identity at arity zero, not a rank-one result.
+// Each larger instance adds the head's axis to the smaller instance.
+function outer(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> Float64(1.0)
+    | _ -> {
+        let head :: tail = a
+        head [*] outer(tail)
+    }
+}
+let x = Float64([1.0, 2.0])
+let y = Float64([3.0, 4.0, 5.0])
+let pair: Array<Float64 like Idx<2>, Idx<3>> = outer(x, y)
+let rows = reduce(pair, (+))
+// EXPECT: pair = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]
+// EXPECT: rows = [12.0, 24.0]
+
+function outer_int(a: Poly<T^1>) = {
+    match arity(a) with
+    | 0 -> Int64(1)
+    | _ -> {
+        let head :: tail = a
+        head [*] outer_int(tail)
+    }
+}
+let ipair: Array<Int64 like Idx<2>, Idx<2>> = outer_int(Int64([2, 3]), Int64([4, 5]))
+// EXPECT: ipair = [[8, 10], [12, 15]]

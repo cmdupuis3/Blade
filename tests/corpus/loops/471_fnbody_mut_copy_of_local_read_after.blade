@@ -7,39 +7,39 @@
 // lane aliased and returned 100.0; the interpreter copied). `write_only`
 // never reads `q` again, so the alias is legal there and the write shows.
 type I = Idx<2>
-function read_src(x: Array<Float like I>) -> Float = {
+function read_src(x: Array<Float64 like I>) -> Float64 = {
     let q = x * 2.0
     let mut q2 = q
     q2((0 : I)) = 100.0
     q((0 : I))
 }
-function return_src(x: Array<Float like I>) -> Array<Float like I> = {
+function return_src(x: Array<Float64 like I>) -> Array<Float64 like I> = {
     let q = x * 2.0
     let mut q2 = q
     q2((0 : I)) = 100.0
     q
 }
-function read_derived(x: Array<Float like I>) -> Float = {
+function read_derived(x: Array<Float64 like I>) -> Float64 = {
     let q = x * 2.0
     let s = q + 1.0
     let mut q2 = q
     q2((1 : I)) = 50.0
     s((1 : I)) + q2((1 : I))
 }
-function write_only(x: Array<Float like I>) -> Array<Float like I> = {
+function write_only(x: Array<Float64 like I>) -> Array<Float64 like I> = {
     let q = x * 2.0
     let mut q2 = q
     q2((0 : I)) = 100.0
     q2
 }
-function deferred_before(x: Array<Float like I>) -> Float = {
+function deferred_before(x: Array<Float64 like I>) -> Float64 = {
     let q = x * 2.0
     let L = method_for(q) <@> lambda(v) -> v + 1.0
     let mut q2 = q
     q2((0 : I)) = 100.0
     reduce(L |> compute, (+))
 }
-let a = [1.0, 2.0]
+let a = Float64([1.0, 2.0])
 let m = read_src(a)
 let v = return_src(a)
 let d = read_derived(a)

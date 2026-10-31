@@ -8,7 +8,7 @@
 // inverse round trip, and a 3 x 5 fft2 (Bluestein on BOTH axes: the batched
 // row pass and the strided column pass) against the exact 2-D DFT.
 import spectra as sp
-let tau = 6.283185307179586
+let tau: Float64 = 6.283185307179586
 type N = Idx<12>
 let x: Array<Float64 like N> = [0.3, -1.2, 2.5, 0.0, 1.1, -0.7, 3.3, 0.9, -2.2, 1.6, 0.4, -0.1]
 let X = sp.fft(x)

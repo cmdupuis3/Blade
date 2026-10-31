@@ -24,6 +24,6 @@ function centered_prod(xs: Poly<T^1>) -> T^1 = {
 }
 function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
 let G3 = object_for(comoment) <@> (G, G, G) |> compute
-let ys = [1, 2]
+let ys = Int64([1, 2])
 let y = ys(1)
 let bad = G3(0, y, 0, 0, 0, 0)

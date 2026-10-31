@@ -1,0 +1,5 @@
+// TEST: callable literal arguments must fit the selected width (rejects)
+function apply(c) = c(2147483648)
+function narrow(i: Int32) = i + 1
+let result = apply(narrow)
+// ERROR: BL3001

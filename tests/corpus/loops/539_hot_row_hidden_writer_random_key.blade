@@ -13,7 +13,7 @@ function bump(a: mut Array<Float64 like I, J>) -> Int64 = {
     a(0, 0) = 9.0
     7
 }
-let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute
+let mut p = method_for(range<I, J>) <@> lambda(i, j) -> Float64(1.0) |> compute
 let noise = r.uniform(bump(p), 1)
 let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)
 // EXPECT: s = 84.0

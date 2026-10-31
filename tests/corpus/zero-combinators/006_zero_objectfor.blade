@@ -5,6 +5,6 @@
 // loops/062's `object_for(k2) <@> (A, A)` pins with 9 values), every element
 // the Float64 zero literal.
 // EXPECT is FLAT: a rank-2 result prints flattened row-major.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let result = object_for(zero) <@> (A, A) |> compute
 // EXPECT: result = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

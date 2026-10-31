@@ -11,10 +11,10 @@
 // antisymmetric, reynolds(g, Antisymmetric) = 2*(a - b).
 // ============================================================================
 let static spec = [(0, 0, 2), (1, 1, 1)]
-let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x: Array<Float64 like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let L = method_for(x, x)
 let g = lambda(a, b) where comm(a, b) -> a - b
-let q: Array<Float like AntisymIdx<2, IrrepsIdx<spec>>> = L <@> reynolds(g, Antisymmetric) |> compute
+let q: Array<Float64 like AntisymIdx<2, IrrepsIdx<spec>>> = L <@> reynolds(g, Antisymmetric) |> compute
 // 10 stored cells in lex order over i < j, value 2*(x[i] - x[j]):
 // EXPECT: q = [-2.0, -4.0, -6.0, -8.0, -2.0, -4.0, -6.0, -2.0, -4.0, -2.0]
 let stored = q(0, 1)

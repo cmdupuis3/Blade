@@ -11,7 +11,7 @@ type A = Idx<10>
 type B = Idx<8>
 
 let mid = {
-    let rec legA: Array<Float like A> =
+    let rec legA: Array<Float64 like A> =
         match legA with
         | zero -> zero
         | zero :: s -> zero :: 1.0
@@ -20,7 +20,7 @@ let mid = {
 }
 
 let final = {
-    let rec legB: Array<Float like B> =
+    let rec legB: Array<Float64 like B> =
         match legB with
         | zero -> zero
         | zero :: s -> zero :: mid * 0.5

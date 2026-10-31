@@ -5,7 +5,7 @@
 // product of two antisymmetric operands is EVEN under the mirror
 // ((-a)(-b) = ab): the sign-character rule (formalism 8.6) types it SymIdx and
 // gathers it over range<SymIdx<2, 3>>, diagonal included (0 * 0 = 0).
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
 let S = R * R
 let s01 = S(0, 1)

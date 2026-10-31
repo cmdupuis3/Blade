@@ -45,27 +45,27 @@ let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2
 
 // SUGGEST: function 'spin_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>]
-function spin_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                    -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function spin_loose(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                    -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     ml.derive_pg_linear(C4, EC, EC, x, w)
 
 // SUGGEST: function 'spin_twice_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>] (also requires pinning: spin_loose)
-function spin_twice_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                          -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function spin_twice_loose(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                          -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     spin_loose(spin_loose(x, w), w)
 
 // The pinned twins.
-function spin_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                    where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function spin_tight(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                    where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     ml.derive_pg_linear(C4, EC, EC, x, w)
 
-function spin_twice_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                          where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function spin_twice_tight(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                          where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     spin_tight(spin_tight(x, w), w)
 
 // (0, 1) is pure J: (a, b) -> (-b, a), and J^2 = -Id. Integer generators, so
 // every pin below is exact.
-let wv = [0.0, 1.0]
+let wv = Float64([0.0, 1.0])
 
 let s1 = spin_loose([3.0, 4.0], wv)
 // EXPECT: s1 = [-4.0, 3.0]

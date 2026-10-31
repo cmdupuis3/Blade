@@ -1,0 +1,26 @@
+// TEST: Int64 Literal Folding
+// ============================================================================
+// An Int64 product of two literals is computed in 64 bits in every lane. The
+// C++ lane used to spell Int64 literals with an `L` suffix -- a 32-bit `long`
+// on Windows (LLP64) -- so `1000000L * 3000L` folded in 32 bits and printed
+// -1294967296. Every Int64 literal is now `LL` (INT64_MIN spelled
+// `(-9223372036854775807LL - 1)`).
+// ============================================================================
+let m: Int64 = 1000000 * 3000
+let n: Int64 = -2000000 * 1500000
+let e: Int64 = 65536 * 65536 - 1
+let q: Int64 = 4000000000 / 3 + 70000 * 70000
+let mn: Int64 = -9223372036854775807 - 1
+let static min_constant: Int64 = -9223372036854775807 - 1
+let min_literal: Int64 = min_constant
+let x: Int64 = 46341
+let sq = x * 46341
+// EXPECT: m = 3000000000
+// EXPECT: n = -3000000000000
+// EXPECT: e = 4294967295
+// EXPECT: q = 6233333333
+// EXPECT: mn = -9223372036854775808
+// EXPECT: min_constant = -9223372036854775808
+// EXPECT: min_literal = -9223372036854775808
+// EXPECT: x = 46341
+// EXPECT: sq = 2147488281

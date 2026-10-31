@@ -8,7 +8,7 @@ type Row = Idx<3>
 let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
 let g = method_for(x) <@> lambda(v) -> v * 2.0
 let c = reduce(x, (+)) > 5.0
-let t = if c then (method_for(x) <@> lambda(v) -> v * g(0) |> compute, 1.0) else (x, 2.0)
+let t = if c then (method_for(x) <@> lambda(v) -> v * g(0) |> compute, Float64(1.0)) else (x, Float64(2.0))
 // ERROR: BL6002 @ 10:1
 // ERROR-CONTAINS: whose arm reads the deferred computation `g`
 // REJECT-AT: lower

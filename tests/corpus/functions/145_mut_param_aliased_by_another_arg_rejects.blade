@@ -7,10 +7,10 @@
 // the result depends on the order the body happens to read and write in. Write
 // permission (formalism 2.7) was checked per argument; the aliasing between
 // arguments was not.
-function f(a: mut Array<Float like Idx<2>>, b: mut Array<Float like Idx<2>>) -> Float = {
+function f(a: mut Array<Float64 like Idx<2>>, b: mut Array<Float64 like Idx<2>>) -> Float64 = {
     a(0) = 5.0
     b(0) = a(0) + 1.0
     a(0)
 }
-let mut x = [1.0, 2.0]
+let mut x = Float64([1.0, 2.0])
 let v = f(x, x)

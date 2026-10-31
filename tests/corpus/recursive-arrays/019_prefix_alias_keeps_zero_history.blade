@@ -6,7 +6,7 @@
 // read cell -1 (an uninitialized double where the zero-history rule says
 // 0). Aliases of the prefix are inlined before the rewrite.
 type Step = Idx<3>
-let rec x: Array<Float like Step> =
+let rec x: Array<Float64 like Step> =
     match x with
     | zero -> zero
     | zero :: s -> zero :: 7.0

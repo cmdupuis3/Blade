@@ -10,8 +10,8 @@
 // and Parser.parseLetPattern are each shared by all three let sites, so the
 // top-level form here and the block form below cannot drift.
 
-let b = 1.0
-let c = 2.0
+let b: Float64 = 1.0
+let c: Float64 = 2.0
 
 // Width 2, top-level. `t` itself is Unit-invisible to the auto-printer (a
 // tuple binding prints nothing), so the pin is on the projections -- which
@@ -24,7 +24,7 @@ let t1 = t[1]
 // EXPECT: t1 = 2.0
 
 // Width 3. Nothing about the rule is 2-specific.
-let a3 = 10.0, 20.0, 30.0
+let a3 = Float64(10.0), Float64(20.0), Float64(30.0)
 let s3 = a3[0] + a3[1] + a3[2]
 // EXPECT: s3 = 60.0
 
@@ -55,6 +55,6 @@ let blockSum = inBlock(3.0)
 
 // The parenthesized literal is unchanged and produces the SAME node
 // (ExprTuple), so the two spellings are one program from the checker down.
-let paren = (4.0, 5.0)
+let paren = (Float64(4.0), Float64(5.0))
 let parenv = paren[0] + paren[1]
 // EXPECT: parenv = 9.0

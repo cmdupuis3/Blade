@@ -15,8 +15,8 @@ import ad as ad
 
 type S = Idx<4>
 
-function f(c: Float) -> Float = {
-    let rec s: Array<Float like S> =
+function f(c: Float64) -> Float64 = {
+    let rec s: Array<Float64 like S> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: c
@@ -24,7 +24,7 @@ function f(c: Float) -> Float = {
     reduce(s, (+))
 }
 
-let (fv, ft) = ad.jvp(f)(2.0, 1.0)
+let (fv, ft) = ad.jvp(f)(Float64(2.0), Float64(1.0))
 // EXPECT: fv = 7.0
 // EXPECT: ft = 3.5
 
@@ -32,8 +32,8 @@ let (fv, ft) = ad.jvp(f)(2.0, 1.0)
 // also an array PARAMETER. `w` inside the slice is the recursion's prefix --
 // the pattern binds it -- so the answer must be f's, not a read of the
 // parameter. Misclassified, this printed 21 (0.5 * w(2) = 15 in the last slot).
-function g(w: Array<Float like S>, c: Float) -> Float = {
-    let rec s: Array<Float like S> =
+function g(w: Array<Float64 like S>, c: Float64) -> Float64 = {
+    let rec s: Array<Float64 like S> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: c
@@ -42,7 +42,7 @@ function g(w: Array<Float like S>, c: Float) -> Float = {
 }
 
 let direct = g([10.0, 20.0, 30.0, 40.0], 2.0)
-let (gv, gt) = ad.jvp(g)([10.0, 20.0, 30.0, 40.0], 2.0, [0.0, 0.0, 0.0, 0.0], 1.0)
+let (gv, gt) = ad.jvp(g)(Float64([10.0, 20.0, 30.0, 40.0]), Float64(2.0), Float64([0.0, 0.0, 0.0, 0.0]), Float64(1.0))
 // EXPECT: direct = 7.0
 // EXPECT: gv = 7.0
 // EXPECT: gt = 3.5
@@ -52,8 +52,8 @@ let (gv, gt) = ad.jvp(g)([10.0, 20.0, 30.0, 40.0], 2.0, [0.0, 0.0, 0.0, 0.0], 1.
 // is shown not to have changed it.
 // h: s(0) = c; s(n) = s(n-1)*0.5 + (if n > 2 then c else 0).
 // At c = 2: s = [2, 1, 0.5, 2.25], sum = 5.75; ds sums to 2.875.
-function h(c: Float) -> Float = {
-    let rec s: Array<Float like S> =
+function h(c: Float64) -> Float64 = {
+    let rec s: Array<Float64 like S> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: c
@@ -61,6 +61,6 @@ function h(c: Float) -> Float = {
     reduce(s, (+))
 }
 
-let (hv, ht) = ad.jvp(h)(2.0, 1.0)
+let (hv, ht) = ad.jvp(h)(Float64(2.0), Float64(1.0))
 // EXPECT: hv = 5.75
 // EXPECT: ht = 2.875

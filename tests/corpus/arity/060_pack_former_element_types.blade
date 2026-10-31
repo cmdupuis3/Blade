@@ -17,9 +17,9 @@ function polySum(args: Poly<T^0>) -> T^0 = {
     reduce(terms, (+))
 }
 
-let ints = polySum(10, 20, 30)
-let floats = polySum(1.5, 2.5)
-let pair = polySum(10, 20)
+let ints = polySum(Int64(10), Int64(20), Int64(30))
+let floats = polySum(Float64(1.5), Float64(2.5))
+let pair = polySum(Int64(10), Int64(20))
 // EXPECT: ints = 60
 // EXPECT: floats = 4.0
 // EXPECT: pair = 30

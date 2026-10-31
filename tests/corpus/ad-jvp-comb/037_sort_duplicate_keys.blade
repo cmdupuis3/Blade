@@ -19,14 +19,14 @@ import ad as ad
 
 type I = Idx<6>
 
-function f(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x)
+function f(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0
       + s(3) * 4.0 + s(4) * 5.0 + s(5) * 6.0
 }
 
-let mut da = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let gv = ad.grad(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], da)
+let mut da = Float64([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+let gv = ad.grad(f)(Float64([3.0, 1.0, 3.0, 1.0, 2.0, 3.0]), da)
 // EXPECT: gv = 54.0
 // EXPECT: da = [4.0, 1.0, 5.0, 2.0, 3.0, 6.0]
 

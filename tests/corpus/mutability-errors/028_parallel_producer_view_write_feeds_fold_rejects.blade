@@ -5,8 +5,8 @@
 // aliasing `where omp` producer with a fold consuming its cells -- refused
 // before any fused lane / chunk form could be chosen.
 type K = Idx<2>
-let mut G = method_for(range<K>, range<K>) <@> lambda(i, j) -> 0.0 |> compute
-let x = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut G = method_for(range<K>, range<K>) <@> lambda(i, j) -> Float64(0.0) |> compute
+let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let p = method_for(x) <@> lambda(v) where omp -> {
     let t = G((0 : K))
     t((0 : K)) = t((0 : K)) + v

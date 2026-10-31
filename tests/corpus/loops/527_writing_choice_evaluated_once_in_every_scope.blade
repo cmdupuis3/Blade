@@ -13,8 +13,8 @@
 //   seen : 3 + 3 + 3 + 6 = 15 writes; the interpreter's former per-read
 //          evaluation gave 3 + 6 + 6 + 12 = 27
 type R = Idx<2>
-let x = [1.0, 2.0, 3.0]
-let mut counter = 0
+let x = Float64([1.0, 2.0, 3.0])
+let mut counter: Int64 = 0
 let qm = (method_for(x) <@> lambda(v) -> {
     counter = counter + 1
     v * 2.0
@@ -34,7 +34,7 @@ function f(s: Float64) -> Float64 = {
     }) <|> (method_for(x) <@> lambda(v) -> v)
     reduce(qf, (+)) + reduce(qf, (+), 1.0)
 }
-let rf = f(2.0)
+let rf = f(Float64(2.0))
 let rk = method_for(range<R>) <@> lambda(r) -> {
     let qk = (method_for(x) <@> lambda(v) -> {
         counter = counter + 1

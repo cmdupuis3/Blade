@@ -10,4 +10,4 @@
 function toint(x: T^0) -> Int64 = Int64(x)
 function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)
 function outer(x: T^0) -> Int64 = applyG(toint, x)
-let r = outer(2.5)
+let r = outer(Float64(2.5))

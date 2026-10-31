@@ -14,11 +14,11 @@
 // INTEGER-VALUED data on purpose — see 110 for why the interpreter differential
 // requires it.
 function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
 let named = reduce(A, myAdd)
 let seeded = reduce(A, myAdd, 45.0)
 let inline_lam = reduce(A, lambda(a, b) where comm(a, b), omp -> (a + b) * 1.0)
-let B = [2.0, 3.0, 4.0, 5.0]
+let B = Float64([2.0, 3.0, 4.0, 5.0])
 let fused = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)
 // EXPECT: named = 55.0
 // EXPECT: seeded = 100.0

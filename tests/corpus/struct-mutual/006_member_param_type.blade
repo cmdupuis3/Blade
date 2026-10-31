@@ -2,11 +2,11 @@
 // ERROR: BL4006
 // Member types cannot appear in function parameter positions.
 struct Particle {
-    pos: Float,
-    vel: Float,
-    mass: Float
+    pos: Float64,
+    vel: Float64,
+    mass: Float64
 }
 type P1 = Particle
 and P2 = Particle
 where P1.vel + P2.vel == 0.0
-function speed(p: P1) -> Float = p.vel
+function speed(p: P1) -> Float64 = p.vel

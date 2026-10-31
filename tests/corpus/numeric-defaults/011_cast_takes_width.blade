@@ -1,0 +1,18 @@
+// TEST: a literal under a width cast takes the width of the cast
+// ============================================================================
+// Rule 7: `Float64(0.1)` is the double nearest 0.1, never the Float32 0.1
+// widened; the same for every element of `Float64([0.1, 0.2])` and for an
+// expression made only of literals. `Int64(2147483647) + 1` adds in Int64.
+// ============================================================================
+let v = Float64(0.1)
+let a = v - 0.1
+let arr = Float64([0.1, 0.2])
+let b = arr(1) - 0.2
+let c = Float64(1.0 / 3.0)
+let third: Float64 = 1.0
+let d = c - third / 3.0
+let i = Int64(2147483647) + 1
+// EXPECT: a = 0.0
+// EXPECT: b = 0.0
+// EXPECT: d = 0.0
+// EXPECT: i = 2147483648

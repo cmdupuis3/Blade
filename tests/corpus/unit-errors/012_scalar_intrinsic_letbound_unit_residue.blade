@@ -15,14 +15,14 @@ Unit second
 Unit day = 86400 * second
 Unit time: day
 Unit frequency: 1 / day
-let two_pi = 6.283185307179586
+let two_pi: Float64 = 6.283185307179586
 function viaLet(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
     freqs <@> lambda(fq) -> {
         let w = two_pi * fq
         cos(w * t_zero * t_zero)
     }
 }
-let fs: Array<Float<frequency> like Idx<2>> = [0.0, 0.25]
-let tz: Float<time> = 1.0
+let fs: Array<Float64<frequency> like Idx<2>> = [0.0, 0.25]
+let tz: Float64<time> = 1.0
 let a = viaLet(fs, tz) |> compute
 // ERROR-CONTAINS: dimensionless vs 86400 * second

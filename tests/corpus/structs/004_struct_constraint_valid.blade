@@ -1,9 +1,9 @@
 // TEST: Struct Constraint Valid
 // Struct with where constraint - valid construction
 struct Balanced {
-    a: Int,
-    b: Int,
-    total: Int
+    a: Int32,
+    b: Int32,
+    total: Int32
 } where a + b == total
 let x = Balanced { a = 3, b = 7, total = 10 }
 let result = x.total

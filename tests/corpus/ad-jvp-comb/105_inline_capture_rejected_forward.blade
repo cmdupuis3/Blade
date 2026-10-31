@@ -21,12 +21,12 @@ import ad as ad
 
 type I = Idx<3>
 
-function helper(p: Float, arr: Array<Float like I>) -> Float = {
-    let scaled = method_for(arr) <@> lambda(y: Float) -> y * p |> compute
+function helper(p: Float64, arr: Array<Float64 like I>) -> Float64 = {
+    let scaled = method_for(arr) <@> lambda(y: Float64) -> y * p |> compute
     reduce(scaled, (+))
 }
 
-function loss(y: Float, arr: Array<Float like I>) -> Float = helper(y, arr)
+function loss(y: Float64, arr: Array<Float64 like I>) -> Float64 = helper(y, arr)
 
 let (lv, dly) = ad.jvp(loss)(2.0, [1.0, 2.0, 3.0], 1.0, [0.0, 0.0, 0.0])
 lv

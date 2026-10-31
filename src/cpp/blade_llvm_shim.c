@@ -160,6 +160,40 @@ long long blade_f2i64(double x, const char *file, long long line) {
     return (long long)x;
 }
 
+/* The Int32 twins (blade_rt::idiv32 / imod32 / ipow32 / f2i32): the same
+ * contract at 32 bits -- MIN / -1 wraps to MIN, a power is exact modulo 2^32,
+ * a float -> Int32 conversion outside [-2^31, 2^31) panics BL8014. A Float32
+ * operand reaches blade_f2i32 widened (fpext is exact), as in the C++ lane. */
+int blade_idiv32(int a, int b, const char *file, long long line) {
+    if (b == 0) blade_panic_at("error[BL8013]: integer division by zero", file, line);
+    if (b == -1) return (int)(0U - (unsigned)a);
+    return a / b;
+}
+
+int blade_imod32(int a, int b, const char *file, long long line) {
+    if (b == 0) blade_panic_at("error[BL8013]: integer modulo by zero", file, line);
+    if (b == -1) return 0;
+    return a % b;
+}
+
+int blade_ipow32(int b, int e, const char *file, long long line) {
+    unsigned r = 1U, x = (unsigned)b, n;
+    if (e < 0) blade_panic_at("error[BL8013]: integer power with a negative exponent", file, line);
+    n = (unsigned)e;
+    while (n != 0U) {
+        if (n & 1U) r *= x;
+        x *= x;
+        n >>= 1;
+    }
+    return (int)r;
+}
+
+int blade_f2i32(double x, const char *file, long long line) {
+    if (!(x >= -2147483648.0 && x < 2147483648.0))
+        blade_panic_at("error[BL8014]: float-to-integer conversion of NaN or an out-of-range value", file, line);
+    return (int)x;
+}
+
 /* ---- allocation ------------------------------------------------------- */
 
 /* EVERY pool is 64-byte aligned, and that is a CONTRACT the emitted IR relies
@@ -495,6 +529,50 @@ static void blade_fmt_f64(char *buf, size_t cap, double v) {
         size_t used = strlen(buf);
         if (used + 20 < cap) snprintf(buf + used, cap - used, " #%016llx", u);
     }
+}
+
+/* A Float32 (round 6 rule 8): "%.6g" of the float's value -- 6 significant
+ * digits (FLT_DIG) where a double keeps 15 -- with the same nan/inf and
+ * typed-float rules, and under BLADE_PRINT_BITS the FLOAT's own raw bits as
+ * " #<8 hex digits>". Twin of blade_rt::fmt_f32 (C++ lane, streamed through
+ * blade_rt::pv) and CppFormat.formatFloat32 (interpreter). */
+static void blade_fmt_f32(char *buf, size_t cap, float v) {
+    if (isnan(v)) snprintf(buf, cap, "nan");
+    else if (isinf(v)) snprintf(buf, cap, v < 0.0f ? "-inf" : "inf");
+    else {
+        int n = snprintf(buf, cap, "%.6g", (double)v);
+        if (n > 0 && (size_t)n + 3 <= cap) {
+            int i = (buf[0] == '-') ? 1 : 0;
+            int bare = n > i;
+            for (int k = i; k < n; ++k)
+                if (buf[k] < '0' || buf[k] > '9') { bare = 0; break; }
+            if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+        }
+    }
+    static int bits_mode = -1;
+    if (bits_mode < 0) {
+        const char *e = getenv("BLADE_PRINT_BITS");
+        bits_mode = (e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0 && strcmp(e, "OFF") != 0
+                     && strcmp(e, "false") != 0) ? 1 : 0;
+    }
+    if (bits_mode) {
+        unsigned int u;
+        memcpy(&u, &v, sizeof u);
+        size_t used = strlen(buf);
+        if (used + 12 < cap) snprintf(buf + used, cap - used, " #%08x", u);
+    }
+}
+
+void blade_print_f32(const char *name, float v) {
+    char buf[64];
+    blade_fmt_f32(buf, sizeof buf, v);
+    printf("%s = %s\n", name, buf);
+}
+
+void blade_out_f32(float v) {
+    char buf[64];
+    blade_fmt_f32(buf, sizeof buf, v);
+    fputs(buf, stdout);
 }
 
 void blade_print_i64(const char *name, long long v) {

@@ -159,7 +159,7 @@ let private diffCaseAntisymReynolds (outputDir: string) : bool =
         let arrArgs = List.replicate r "A" |> String.concat ", "
         let expectedLit = expected |> List.map floatPin |> String.concat ", "
         let src =
-            $"let A = [{aLit}]\n" +
+            $"let A = Float64([{aLit}])\n" +
             $"let L = method_for({arrArgs})\n" +
             $"let g = lambda({paramList}) where comm({paramList}) -> {kEdgi}\n" +
             "let result = L <@> reynolds(g, Antisymmetric) |> compute\n" +
@@ -221,7 +221,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     yield symSrc.[(min i j, max i j)] ]
         let symExpect = symDense |> List.map floatPin |> String.concat ", "
         let symSrcEdgi =
-            $"let A = [{aLit}]\n" +
+            $"let A = Float64([{aLit}])\n" +
             "let L = method_for(A, A)\n" +
             "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
             "let sym = L <@> reynolds(g) |> compute\n" +
@@ -238,7 +238,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     else yield 0.0 ]
         let antiExpect = antiDense |> List.map floatPin |> String.concat ", "
         let antiSrcEdgi =
-            $"let A = [{aLit}]\n" +
+            $"let A = Float64([{aLit}])\n" +
             "let L = method_for(A, A)\n" +
             "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
             "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n" +

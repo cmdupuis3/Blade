@@ -11,13 +11,13 @@
 // u(i, j) = i^2 + 2 j^2: integer-valued, every sum exact.
 type Y = Idx<7>
 type X = Idx<9>
-let scale = 100.0
+let scale: Float64 = 100.0
 
 function f() -> Float64 = {
     let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(i) + 2 * Int64(j) * Int64(j)) |> compute
     let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
         u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute
-    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))
+    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> Float64(0.5), (+))
     let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * w2, (+))
     s
 }
@@ -26,7 +26,7 @@ let (a, b) = {
     let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(i) + 2 * Int64(j) * Int64(j)) |> compute
     let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
         u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute
-    let scale = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))
+    let scale = reduce(method_for(range<X>) <@> lambda(j) -> Float64(0.5), (+))
     let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * scale, (+))
     (s, scale)
 }

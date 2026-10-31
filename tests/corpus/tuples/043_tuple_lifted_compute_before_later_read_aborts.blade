@@ -13,6 +13,6 @@
 type Row = Idx<1>
 let a: Array<Int64 like Row> = [1]
 let later = method_for(a) <@> lambda(v) -> a((v : Row))
-let t = (method_for([0]) <@> lambda(v) -> 1 / v |> compute, later(0))
+let t = (method_for(Int64([0])) <@> lambda(v) -> 1 / v |> compute, later(0))
 // ABORT: BL8013
 // ABORT: integer division by zero

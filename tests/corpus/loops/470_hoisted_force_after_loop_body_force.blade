@@ -10,7 +10,7 @@ type S = Idx<3>
 let b = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0
 let d = method_for(range<I>) <@> lambda(i) -> b((1 : I)) + Float64(i)
 let y = {
-    let rec x: Array<Float like S> =
+    let rec x: Array<Float64 like S> =
         match x with
         | zero -> zero
         | zero :: s -> zero :: 1.0

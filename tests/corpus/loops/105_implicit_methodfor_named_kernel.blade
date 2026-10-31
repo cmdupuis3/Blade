@@ -4,6 +4,6 @@
 // so the plain array variable on the left gets its method_for synthesized.
 // Twin of loops/098 with the former erased.
 function square(x) = x * x
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let result = A <@> square |> compute
 // EXPECT: result = [1.0, 4.0, 9.0]

@@ -5,7 +5,7 @@
 // calls swapped -- the indirect writer comes first, the direct pure call
 // second. The fixpoint does not depend on the order the sites are met.
 type I = Idx<2>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + 1.0

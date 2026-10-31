@@ -3,7 +3,7 @@
 // mutability-errors/011 with one more hop (N16): `bump` never names `x`
 // itself, but it calls the module-level lambda `peek`, which reads `x`; the
 // write through `a` would show through that read.
-let mut x = [1.0, 2.0]
+let mut x = Float64([1.0, 2.0])
 let peek = lambda(i: Int64) -> x(i)
 function bump(a: mut Array<Float64 like Idx<2>>) -> Float64 = {
     a(0) = 5.0

@@ -73,8 +73,8 @@ more of the same; the region as a whole allocates and writes the 48 MB trajector
 ```blade sketch
 type T = Idx<301>        // SIZE nt
 type X = Idx<20011>      // SIZE nx
-function rhs(u: Array<Float like X>) -> Array<Float like X> = u - u * u * u
-function step(u: Array<Float like X>) -> Array<Float like X> = {
+function rhs(u: Array<Float64 like X>) -> Array<Float64 like X> = u - u * u * u
+function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
     let k1 = rhs(u)
     let k2 = rhs(u + 0.005 * k1)
     let k3 = rhs(u + 0.005 * k2)
@@ -82,7 +82,7 @@ function step(u: Array<Float like X>) -> Array<Float like X> = {
     method_for(zip(u, k1, k2, k3, k4)) <@> lambda(v, a1, a2, a3, a4) where omp(v: 1) ->
         v + (0.01 / 6.0) * (a1 + 2.0 * a2 + 2.0 * a3 + a4) |> compute
 }
-let rec traj: Array<Float like T, X> =
+let rec traj: Array<Float64 like T, X> =
     match traj with
     | zero -> zero
     | zero :: s -> zero :: u0

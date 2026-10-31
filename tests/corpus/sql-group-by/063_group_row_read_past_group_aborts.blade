@@ -5,8 +5,8 @@
 // `grouped(0, 5)` read row 5 of group 0 (another group's cell, or past the
 // pool). It is checked against the group's own length, read off the
 // grouping's offsets (the grouped value's extents table), in both lanes.
-let region = [0, 1, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0]
+let region = Int64([0, 1, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let ok = grouped(1, 1)

@@ -16,13 +16,13 @@ let r = outer(2.5, 3)
 // EXPECT: r = 5.5
 let blk = {
     function twice(x) = x + x
-    let p = twice(2.0)
-    let q = twice(4)
+    let p = twice(Float64(2.0))
+    let q = twice(Int64(4))
     p + Float64(q)
 }
 // EXPECT: blk = 12.0
 let arr = {
     function twice(x) = x + x
-    twice([1, 2, 3])
+    twice(Int64([1, 2, 3]))
 }
 // EXPECT: arr = [2, 4, 6]

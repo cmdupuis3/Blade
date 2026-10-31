@@ -7,13 +7,13 @@ import ad as ad
 
 type I = Idx<3>
 
-function viaMap(a: Array<Float like I>) -> Float = {
+function viaMap(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a) <@> lambda(x) -> x * x * 3.0 |> compute
     reduce(m, (+))
 }
 
-function viaLoop(a: Array<Float like I>) -> Float = {
-    let rec s: Array<Float like I> =
+function viaLoop(a: Array<Float64 like I>) -> Float64 = {
+    let rec s: Array<Float64 like I> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: a(0) * a(0) * 3.0
@@ -22,7 +22,7 @@ function viaLoop(a: Array<Float like I>) -> Float = {
 }
 
 let (vm, tm) = ad.jvp(viaMap)([1.0, 2.0, 3.0], [1.0, 0.5, 0.25])
-let (vl, tl) = ad.jvp(viaLoop)([1.0, 2.0, 3.0], [1.0, 0.5, 0.25])
+let (vl, tl) = ad.jvp(viaLoop)(Float64([1.0, 2.0, 3.0]), Float64([1.0, 0.5, 0.25]))
 let vresid = vm - vl
 let tresid = tm - tl
 // WARN: BL4003

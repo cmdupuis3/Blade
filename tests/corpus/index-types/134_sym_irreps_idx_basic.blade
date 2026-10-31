@@ -14,10 +14,10 @@
 // storage; it never compresses).
 // ============================================================================
 let static spec = [(0, 0, 2), (1, 1, 1)]
-let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x: Array<Float64 like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let L = method_for(x, x)
 let f = lambda(a, b) where comm(a, b) -> a * b
-let r: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
+let r: Array<Float64 like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
 // 15 stored cells in lex order over i <= j, value x[i]*x[j]:
 // EXPECT: r = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 6.0, 8.0, 10.0, 9.0, 12.0, 15.0, 16.0, 20.0, 25.0]
 
@@ -33,6 +33,6 @@ let mirror = r(4, 1)
 // A whole-type alias folds the alias name INTO the irreps identity tag (the
 // same nominative rule IrrepsIdx aliases use), so it still denotes this space.
 type SymSpec = SymIdx<2, IrrepsIdx<spec>>
-let s: Array<Float like SymSpec> = L <@> f |> compute
+let s: Array<Float64 like SymSpec> = L <@> f |> compute
 let sCell = s(0, 3)
 // EXPECT: sCell = 4.0

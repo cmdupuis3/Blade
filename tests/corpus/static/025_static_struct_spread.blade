@@ -2,7 +2,7 @@
 // `..base` functional update where the base is a folded static struct:
 // the spread inherits the missing fields by NAME from the SVStruct, and
 // the updated value keeps nominal identity for runtime field access.
-struct P { x: Int, y: Int }
+struct P { x: Int32, y: Int32 }
 let static base_p = P { x = 1, y = 2 }
 let static upd = P { y = 5, ..base_p }
 let a = upd.x

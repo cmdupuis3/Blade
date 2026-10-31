@@ -1,0 +1,10 @@
+// TEST: a Float32 static beside a Float64 value is a width mismatch (rejects)
+// ============================================================================
+// Lead ruling A4: only INTEGER statics adapt their width; `let static K = 0.5`
+// is a Float32 constant and `d * K` over a Float64 `d` is refused (annotate
+// `let static K: Float64 = 0.5`).
+// ============================================================================
+let static K = 0.5
+let d: Float64 = 2.0
+let r = d * K
+// ERROR: BL3020

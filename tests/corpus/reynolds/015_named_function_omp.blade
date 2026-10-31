@@ -11,8 +11,8 @@
 // This file pins the VALUES; the pragma itself is pinned by the pure-codegen
 // block (`blade test omp-pragma`), since a corpus EXPECT cannot see emitted C++.
 // Both matter: parallelizing is only a fix if the results stay right.
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 function cov(a: Float64, b: Float64) where omp(a: 1) = a * b
 let m = object_for(cov) <@> (A, B) |> compute
 // Outer product, printed flat (tests/Expect.fs DOES check 2-D EXPECT pins,

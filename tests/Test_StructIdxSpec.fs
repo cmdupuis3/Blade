@@ -113,13 +113,13 @@ let private bin op a b = e (ExprBinOp (Elementwise, op, a, b))
 /// `hi - 1`. Exercising the half-open spelling here is deliberate: it is the
 /// normalization step where an off-by-one would hide.
 let private fieldHalfOpen (name: string) (lo: Expr) (hi: Expr) : FieldDecl =
-    { Name = name; Type = TyNamed ("Int", []); Default = None
+    { Name = name; Type = TyNamed ("Int32", []); Default = None
       Bound = Some { Lo = Some lo; Hi = Some hi; HiInclusive = false } }
 
 /// `f: Int<min=lo, max=hi>` — the INCLUSIVE spelling, normalized by the parser
 /// into the same Bound channel with HiInclusive = true.
 let private fieldInclusive (name: string) (lo: Expr) (hi: Expr) : FieldDecl =
-    { Name = name; Type = TyNamed ("Int", []); Default = None
+    { Name = name; Type = TyNamed ("Int32", []); Default = None
       Bound = Some { Lo = Some lo; Hi = Some hi; HiInclusive = true } }
 
 let private structDecl (name: string) (isStatic: bool) (fields: FieldDecl list) (conjuncts: Expr list) =
@@ -303,7 +303,7 @@ let runStructIdxSpecTests () : BlockResult =
                 fieldInclusive "m2"    (lit -1L) (lit 1L)
                 fieldInclusive "m_out" (lit -1L) (lit 1L) ]
               [ bin OpEq (bin OpAdd (v "m1") (v "m2")) (v "m_out") ] ]
-    check "the INCLUSIVE spelling `Int<min=-1, max=1>` lands on the same box and the same 7 solutions"
+    check "the INCLUSIVE spelling `Int32<min=-1, max=1>` lands on the same box and the same 7 solutions"
           ((okOr Unchecked.defaultof<_> (structEntries (envOf inclDecls) "CGi")).Entries = want7) ""
 
     // A static FUNCTION in a conjunct (§3's "static-function calls").
@@ -395,7 +395,7 @@ let runStructIdxSpecTests () : BlockResult =
     // (c) an UNBOUNDED field.
     let unboundedDecls =
         [ structDecl "Unb" true
-              [ { Name = "y"; Type = TyNamed ("Int", []); Default = None; Bound = None } ] [] ]
+              [ { Name = "y"; Type = TyNamed ("Int32", []); Default = None; Bound = None } ] [] ]
     let unb = foldIdxCard (envOf unboundedDecls) (v "Unb")
     check "NEGATIVE: an unbounded field is REFUSED, naming the struct, the field and the requirement"
           (isErr unb && (msgOf unb).Contains "struct Unb, field 'y'" && (msgOf unb).Contains "unbounded field"
@@ -406,7 +406,7 @@ let runStructIdxSpecTests () : BlockResult =
     // silently defaulted to anything.
     let halfDecls =
         [ structDecl "Half" true
-              [ { Name = "z"; Type = TyNamed ("Int", []); Default = None
+              [ { Name = "z"; Type = TyNamed ("Int32", []); Default = None
                   Bound = Some { Lo = Some (lit 0L); Hi = None; HiInclusive = false } } ] [] ]
     check "NEGATIVE: a HALF-bounded field is unbounded too (no end is ever defaulted)"
           (isErr (foldIdxCard (envOf halfDecls) (v "Half"))) ""
@@ -421,7 +421,7 @@ let runStructIdxSpecTests () : BlockResult =
     // (e) a NON-STATIC BOUND expression.
     let dynBoundDecls =
         [ structDecl "Dyn" true
-              [ { Name = "a"; Type = TyNamed ("Int", []); Default = None
+              [ { Name = "a"; Type = TyNamed ("Int32", []); Default = None
                   Bound = Some { Lo = Some (lit 0L); Hi = Some (v "nope"); HiInclusive = false } } ] [] ]
     let dynBound = foldIdxCard (envOf dynBoundDecls) (v "Dyn")
     check "NEGATIVE: a non-static bound expression is REFUSED, naming which bound of which field"

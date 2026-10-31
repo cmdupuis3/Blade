@@ -48,13 +48,13 @@
 // ============================================================================
 
 // shared constants
-let h = 0.707106781186548
-let s = 0.25
-let r = sqrt(0.9375)
+let h: Float64 = 0.707106781186548
+let s: Float64 = 0.25
+let r: Float64 = sqrt(0.9375)
 
 // ---- the classical wall: all 64 deterministic strategies ----
 // strategy g's six binary digits are the outcomes (a1, a2, a3, b1, b2, b3)
-let SGN = [-1.0, 1.0]
+let SGN = Float64([-1.0, 1.0])
 let I_DET = method_for(range<Idx<64>>) <@> lambda(g: Int64) -> {
     let a1 = SGN(g % 2)
     let a2 = SGN((g / 2) % 2)
@@ -119,12 +119,12 @@ let tval = 0.0 - 1.0 + (TA1(0) + TA2(0)) / 4.0 - (TB1(0) + TB2(0)) / 4.0 + (tc11
 // ---- the imported anchor and the strata verdicts ----
 // quantum supremum for I3322: 0.2508754 (Pal-Vertesi 2010; the one
 // number this file does not derive)
-let q_sup = 0.2508754
+let q_sup: Float64 = 0.2508754
 let strata_V = if qval > 0.0 && q_sup > qval && tval > q_sup then "STRICT_SANDWICH_EXHIBITED" else "NO"
 let gap = tval - q_sup
 
 // ---- the tilt dial: how far off the quantum slice is the wall? ----
-let SGRID = [0.0, 0.0482, 0.1, 0.18, 0.25]
+let SGRID = Float64([0.0, 0.0482, 0.1, 0.18, 0.25])
 let IS = 0.0 - 1.0 + SGRID - SGRID * SGRID + (1.0 - SGRID * SGRID) / 2.0 + 0.707106781186548 * sqrt(1.0 - SGRID * SGRID)
 let exit_V = if IS(0) < q_sup && IS(1) > q_sup then "QUANTUM_CEILING_EXITS_AT_5PC_TILT" else "NO"
 let dial_match0 = abs(IS(0) - qval)

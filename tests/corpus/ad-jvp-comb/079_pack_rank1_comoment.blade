@@ -37,7 +37,7 @@ function comoment(a: Poly<T^1>) where comm(a) -> T^0 = {
     reduce(cprod(a), (+)) / Float64(extents(h))
 }
 
-function f(a: Array<Float like R, C>) -> Float = {
+function f(a: Array<Float64 like R, C>) -> Float64 = {
     let cov = object_for(comoment) <@> (a, a) |> compute
     cov(0, 0) + 3.0 * cov(0, 1)
 }
@@ -45,7 +45,7 @@ function f(a: Array<Float like R, C>) -> Float = {
 let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 let presid = v - f([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
-let h = 0.000001
+let h: Float64 = 0.000001
 let fplus = f([[1.0 + h, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let fminus = f([[1.0 - h, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let fd = (fplus - fminus) / (2.0 * h)

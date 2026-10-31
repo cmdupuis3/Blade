@@ -9,7 +9,7 @@
 // function's scope, every statement of the body before the fold is
 // intervening); the audit admits it and a threaded strict build pulls. The
 // pins hold with BLADE_ORBIT_PULL on and off, under REPRO at every team size.
-let static p = 97
+let static p: Int64 = 97
 type Var = Idx<p>
 type Obs = Idx<2>
 function radd(a: Float64, b: Float64) where repro -> Float64 = a + b

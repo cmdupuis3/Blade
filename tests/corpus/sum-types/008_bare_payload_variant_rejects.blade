@@ -5,7 +5,7 @@
 // constructor -- matching everything and silently killing every later arm.
 // Now it demands the payload be spelled.
 
-type Option = Some : Int | None
+type Option = Some : Int32 | None
 let x = Some(42)
 let r = match x with
     | Some -> 1

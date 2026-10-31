@@ -7,7 +7,7 @@
 // p = 8, t = 3x^2 = 12, tp = 12, tt = 6x = 12 (the second derivative).
 import ad as ad
 
-function f(x: Float) -> Float = x * x * x
+function f(x: Float64) -> Float64 = x * x * x
 
 let (p, t, tp, tt) = ad.jvp(ad.jvp(f))(2.0, 1.0, 1.0, 0.0)
 // EXPECT: p = 8.0

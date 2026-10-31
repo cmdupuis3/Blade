@@ -6,8 +6,8 @@
 // the same body called from a closed-form domain kernel: cell code, the
 // vectorizable split. They must agree bit for bit at every cell (`miss`),
 // and `g` pins the values a C-semantics reference gives.
-let static n = 37
-let static w = 3
+let static n: Int64 = 37
+let static w: Int64 = 3
 type Nx = Idx<n>
 
 static struct Band {
@@ -26,11 +26,11 @@ function gen_cell(k: Int64, seed: Int64) -> Float64 = {
 }
 
 let g = method_for(range<Nx>) <@> lambda(k) -> gen_scalar(Int64(k), -1000003) |> compute
-let negatives = reduce(method_for(range<Nx>) <@> lambda(k) -> if g(k) < 0.0 then 1 else 0, (+))
+let negatives = reduce(method_for(range<Nx>) <@> lambda(k) -> if g(k) < 0.0 then Int64(1) else Int64(0), (+))
 // EXPECT: negatives = 37
 let g_sum = reduce(g, (+))
 // EXPECT: g_sum = -18.9984497670084
-let miss = reduce(method_for(range<Band>) <@> lambda(i, j) -> if gen_cell(i, -1000003) == g((i : Nx)) then 0 else 1, (+))
+let miss = reduce(method_for(range<Band>) <@> lambda(i, j) -> if gen_cell(i, -1000003) == g((i : Nx)) then Int64(0) else Int64(1), (+))
 // EXPECT: miss = 0
 let quad = reduce(method_for(range<Band>) <@> lambda(i, j) -> g((i : Nx)) * g((j : Nx)), (+))
 // EXPECT: quad = 65.9761971186334

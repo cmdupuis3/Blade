@@ -7,7 +7,7 @@
 // the wrong cells ran silently (488). Both spellings, `>` and `>=`, and a
 // negated form go through the same arm.
 static struct Low {
-    i: Int<min=0, max=10>
+    i: Int32<min=0, max=10>
 } where i > 5
 
 let static CARD = idx_card(Low)
@@ -21,7 +21,7 @@ let first = R(6)
 // EXPECT: first = 6
 
 static struct AtLeast {
-    k: Int<min=0, max=6>
+    k: Int32<min=0, max=6>
 } where k >= 3
 
 let static CARD2 = idx_card(AtLeast)
@@ -31,7 +31,7 @@ let squares = reduce(S, (+))
 // EXPECT: squares = 86
 
 static struct Negated {
-    m: Int<min=0, max=9>
+    m: Int32<min=0, max=9>
 } where -m <= -7
 
 let static CARD3 = idx_card(Negated)

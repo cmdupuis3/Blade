@@ -11,16 +11,16 @@
 // ============================================================================
 type R = Idx<5>
 type C = Idx<5>
-function next_row(prev: Array<Float like C>) -> Array<Float like C> =
+function next_row(prev: Array<Float64 like C>) -> Array<Float64 like C> =
     (for (prev) in range<C> <@> lambda(p, j) -> {
         let above_left = if j > 0 then prev(j - 1) else 0.0
         above_left + p
     }) |> compute
 
-let rec pascal: Array<Float like R, C> =
+let rec pascal: Array<Float64 like R, C> =
     match pascal with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 0.0, 0.0, 0.0, 0.0]
+    | zero :: s -> zero :: Float64([1.0, 0.0, 0.0, 0.0, 0.0])
     | prefix :: n -> prefix :: next_row(prefix(n - 1))
 // EXPECT: pascal = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 1.0, 3.0, 3.0, 1.0, 0.0, 1.0, 4.0, 6.0, 4.0, 1.0]
 let last_row = pascal((4 : R))

@@ -23,7 +23,7 @@ function user(y: Float64) -> Float64 = {
     let nt = ((y, 2.0 * y), 3.0 * y)
     nt[1] * 100.0 + nt[0][1] * 10.0 + nt[0][0]
 }
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let a = four(x)
 let b = aliased(x)
 let ((s0, s1), s2) = sub(x)

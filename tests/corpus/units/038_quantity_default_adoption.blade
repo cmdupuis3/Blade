@@ -8,9 +8,9 @@ Unit meters
 Unit seconds
 Unit mps = meters / seconds
 Unit speed: mps
-function boost(v: Float<speed>, dv: Float<speed> = 1.0) -> Float<speed> = v + dv
-let v0 = 4.0: speed
+function boost(v: Float64<speed>, dv: Float64<speed> = 1.0) -> Float64<speed> = v + dv
+let v0 = Float64(4.0): speed
 let b1 = boost(v0)
-let b2 = boost(v0, (2.5 : speed))
+let b2 = boost(v0, (Float64(2.5) : speed))
 // EXPECT: b1 = 5.0
 // EXPECT: b2 = 6.5

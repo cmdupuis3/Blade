@@ -5,5 +5,5 @@
 // not transform as the declared invariant output.
 import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
-function bad(a: Array<Float like IrrepsIdx<S>>, b: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like Idx<8>> =
+function bad(a: Array<Float64 like IrrepsIdx<S>>, b: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float64 like Idx<8>> =
     join(a, b, 0)

@@ -4,11 +4,11 @@
 // temporary of its OWN frame, hands it to `scaler`, and returns the closure:
 // both frames are gone before `g` is called.
 function scaler(v: Array<Float64 like Idx<3>>) = lambda(k: Float64) -> reduce(v, (+)) * k
-function build(n: Float64) = scaler([1.0, 2.0, 3.0] * n)
+function build(n: Float64) = scaler(Float64([1.0, 2.0, 3.0]) * n)
 let f = scaler([1.0, 2.0, 3.5])
-let g = build(2.0)
+let g = build(Float64(2.0))
 let r1 = f(2.0)
-let r2 = g(0.5)
+let r2 = g(Float64(0.5))
 let r3 = build(3.0)(1.0) + g(1.0)
 // EXPECT: r1 = 13.0
 // EXPECT: r2 = 6.0

@@ -8,10 +8,10 @@
 // bare literal so the API author's own default needs no annotation.
 Unit second
 function scaled(x: T<second>^1, k: T<second>^0) = reduce(x, (+)) * k
-function shifted(x: T<second>^1, t_zero: T<second>^0 = 0.0) = reduce(x, (+)) + t_zero
-let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
-let k: Float<second> = 2.0
-let area: Float<second^2> = scaled(ts, k)
+function shifted(x: T<second>^1, t_zero: T<second>^0 = Float64(0.0)) = reduce(x, (+)) + t_zero
+let ts: Array<Float64<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let k: Float64<second> = 2.0
+let area: Float64<second^2> = scaled(ts, k)
 let base = shifted(ts)
 let offset = shifted(ts, k)
 // EXPECT: area = 12.0

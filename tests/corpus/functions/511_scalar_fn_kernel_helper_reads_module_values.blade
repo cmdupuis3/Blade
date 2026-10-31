@@ -1,10 +1,10 @@
 // TEST: Helper In A Scalar Function's Kernel Reads Module Values
 // A function with only a scalar parameter: its kernel captures `m`, and the
 // helper it calls reads a module scalar and a module array.
-let scale = 2.5
-let tab: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-function term(i: Int64) -> Float = scale * tab(i)
-function total(m: Int64) -> Float = {
+let scale: Float64 = 2.5
+let tab: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+function term(i: Int64) -> Float64 = scale * tab(i)
+function total(m: Int64) -> Float64 = {
     let e = method_for(range<Idx<4>>) <@> lambda(i) -> term(i) * Float64(m) |> compute
     reduce(e, (+))
 }

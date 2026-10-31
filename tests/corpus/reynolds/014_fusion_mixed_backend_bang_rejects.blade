@@ -10,7 +10,7 @@
 // caught in codegen: lowering succeeds and the emitted C++ carries an #error
 // naming the mixed serial/omp leaves, so the C++ compile is what fails.
 // REJECT-AT: codegen
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let mean = lambda(x) -> x
 let cov = lambda(x, y) where omp(x: 1) -> x * y
 let (m1, m2) = (object_for(mean) <@> (A)) <&!> (object_for(cov) <@> (A, A)) |> compute

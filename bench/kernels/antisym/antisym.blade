@@ -6,8 +6,8 @@
 // Threading (mt8): the input map (`omp(i: 1)`), the kernel's level 0 (`omp(a: 1)`) and the checksum
 // and input-sum folds (`lambda(u, v) where omp -> u + v`) all carry licences; a serial build
 // (BLADE_OMP_THREADS=1) emits none of the thread pragmas.
-let static p = 1201    // SIZE p
-let static n = 401     // SIZE n
+let static p: Int64 = 1201    // SIZE p
+let static n: Int64 = 401     // SIZE n
 type Part = Idx<p>
 type Comp = Idx<2>
 type Obs = Idx<n>

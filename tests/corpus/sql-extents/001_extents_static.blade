@@ -3,6 +3,6 @@
 /// Phase 7: extents
 // extents() on a literal-typed array should resolve to a compile-time literal.
 // The codegen emits 5L (not a runtime read), parallel to rank()'s behavior.
-let A = [10.0, 20.0, 30.0, 40.0, 50.0]
+let A = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let n = extents(A)
 // EXPECT: n = 5

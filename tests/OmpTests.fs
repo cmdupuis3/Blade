@@ -83,7 +83,7 @@ let private cppOf (testName: string) (src: string) : Result<string, string> =
 /// below varies ONLY how the kernel is written and where the clause sits.
 let private ompPragmaCases : (string * string * bool) list =
     // (name, source, expectPragma)
-    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    let arrays = "let A = Float64([1.0, 2.0, 3.0])\nlet B = Float64([4.0, 5.0, 6.0])\n"
     [ // The regression case: clause on a named function, function used as the
       // object_for kernel. Eta-expanded — the clause must survive the wrapper.
       ("named_function_object_for",
@@ -125,7 +125,7 @@ let private ompPragmaCases : (string * string * bool) list =
 /// `collapse(2)`, threading a dimension of `b`, which granted nothing.
 let private ompDepthCases : (string * string * string) list =
     // (name, source, exact expected pragma line)
-    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    let arrays = "let A = Float64([1.0, 2.0, 3.0])\nlet B = Float64([4.0, 5.0, 6.0])\n"
     let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
     let kern clause = $"function k(a: Float64, b: Float64) where {clause} = a * b\n"
     [ // One dimension licensed of a 2-level collapsible nest: collapse would
@@ -151,7 +151,7 @@ let private ompDepthCases : (string * string * string) list =
       // it emitted collapse(2) for both.
       ("one_arg_two_levels_depth_1",
        "function k(a: Float64) where omp(a: 1) = a * 2.0\n" +
-       "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
        "#pragma omp parallel for")
       // Depth 2 on the same nest threads BOTH levels. Since Phase 3
@@ -165,7 +165,7 @@ let private ompDepthCases : (string * string * string) list =
       // separate is unaffected: depth 1 above still threads one level only.
       ("one_arg_two_levels_depth_2",
        "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
-       "let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
        "#pragma omp parallel for simd")
       // TUPLE PARAMETER (docs/plan-tuples-vs-arg-packs.md 6c). A `Tuple<k>`
@@ -235,7 +235,7 @@ let private g41WriterBans =
       "BLADE_OMP_PARALLEL_FOR_COLLAPSE"; "BLADE_OMP_PARALLEL_FOR_DYNAMIC" ]
 let private ompReduceCases : (string * string * string list * string list) list =
     // (name, source, mustContain, mustNotContain)
-    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
+    let arr = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])\n"
     [ // Path A: builtin body, no comm needed — `+` carries commutativity and
       // associativity outright.
       ("reduce_builtin_lambda_omp",
@@ -288,7 +288,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // here is what made this case (and the two knob arms below) vacuous.
       ("reduce_over_computation_chunked",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
-       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
+       "let B = Float64([2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n" +
        "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
        ["comm-licensed parallel fold, outer level chunked"
         "#pragma omp parallel num_threads("
@@ -297,7 +297,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // desugar, and no parallel region anywhere.
       ("reduce_over_computation_no_clause",
        "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" + arr +
-       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n" +
+       "let B = Float64([2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n" +
        "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
        [], ["#pragma omp"])
       // ---- the EXPRESSION-form reduce: declined, but no longer silent -------
@@ -313,7 +313,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // load-bearing rather than cosmetic.
       ("reduce_in_kernel_body_marks_dropped_omp",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
-       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]])\n" +
        "let r = method_for(M) <@> lambda(row) -> reduce(row, myAdd, 0.0) |> compute\n",
        ["/* [omp] requested but emitted serial: reduce in expression position"],
        ["#pragma omp"; "omp_get_"])
@@ -325,7 +325,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // spelling that gets the parallel fold (reduce_over_computation_chunked).
       ("reduce_partial_default_marks_dropped_omp",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
-       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]])\n" +
        "let r = reduce(M, myAdd, 0.0)\n",
        ["/* [omp] requested but emitted serial: reduce in expression position"],
        ["#pragma omp"; "omp_get_"])
@@ -334,7 +334,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // Without this the emitter could pass both cases by marking every reduce.
       ("reduce_in_kernel_body_no_clause_no_marker",
        "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n" +
-       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]])\n" +
        "let r = reduce(M, myAdd, 0.0)\n",
        [], ["[omp]"; "#pragma omp"])
       // ---- the licence on the MAP feeding a fold (bench gap G27) ------------
@@ -344,7 +344,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // accepted and DROPPED with no trace (the one-level simd arm never reached
       // the nest emitter whose marker would have reported it).
       ("map_licence_feeding_fold_threads_path_b",
-       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])\n" +
        "let s = reduce(method_for(A) <@> lambda(a) where omp(a: 1) -> a * a, (+))\n",
        ["comm-licensed parallel fold, outer level chunked"
         "#pragma omp parallel num_threads("
@@ -352,7 +352,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
        ["[omp] requested but emitted serial"])
       // Negative control: the same fold, no clause on the map -- no team.
       ("map_without_licence_feeding_fold_no_team",
-       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])\n" +
        "let s = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n",
        [], ["[omp]"; "#pragma omp parallel"; "omp_get_"])
       // ---- gap G41: a licence never makes a WRITING kernel race-safe --------
@@ -391,23 +391,23 @@ let private ompReduceCases : (string * string * string list * string list) list 
        g41Pre1 + g41Fold1 "{ let mut q = a; q = q + b; q }",
        [g41Team], [g41WriteCensus])
       ("map_licence_fold_kernel_fresh_scratch_threads",
-       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute; s((0 : K)) = a; s((1 : K)) = b; s((0 : K)) + s((1 : K)) }",
+       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute; s((0 : K)) = a; s((1 : K)) = b; s((0 : K)) + s((1 : K)) }",
        [g41Team], [g41WriteCensus])
       ("map_licence_fold_kernel_local_alias_threads",
-       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute; let u = s; u((0 : K)) = a + b; s((0 : K)) }",
+       g41Pre1 + g41Fold1 "{ let mut s = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute; let u = s; u((0 : K)) = a + b; s((0 : K)) }",
        [g41Team], [g41WriteCensus])
       ("map_licence_fold_kernel_callee_fills_fresh_scratch_threads",
        g41Pre1 + "function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {\n    buf((0 : K)) = v\n    v\n}\n"
-       + g41Fold1 "{\n    let mut scratch = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    fill(scratch, a + b)\n}",
+       + g41Fold1 "{\n    let mut scratch = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    fill(scratch, a + b)\n}",
        [g41Team], [g41WriteCensus])
       // REBINDING (Codex re-review, finding 9): `t` starts as fresh scratch,
       // then is rebound to a row VIEW of G -- every later store through `t`
       // writes G. A fresh-to-fresh rebind stays local.
       ("map_licence_fold_kernel_rebound_to_view_stays_serial",
-       g41Pre2 + g41Fold "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}",
+       g41Pre2 + g41Fold "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}",
        [g41WriteCensus], g41NoTeam)
       ("map_licence_fold_kernel_rebound_fresh_to_fresh_threads",
-       g41Pre1 + g41Fold1 "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = method_for(range<K>) <@> lambda(k) -> 1.0 |> compute\n    t((0 : K)) = a + b\n    t((0 : K))\n}",
+       g41Pre1 + g41Fold1 "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = method_for(range<K>) <@> lambda(k) -> Float64(1.0) |> compute\n    t((0 : K)) = a + b\n    t((0 : K))\n}",
        [g41Team], [g41WriteCensus])
       ("map_licence_fold_kernel_callee_local_let_rec_threads",
        g41Pre1 + "function tri(v: Float64) -> Float64 = {\n    let rec r: Array<Float64 like K> =\n        match r with\n        | zero -> zero\n        | zero :: s -> zero :: v\n        | prefix :: n -> prefix :: prefix(n - 1) + v\n    reduce(r, (+))\n}\n"
@@ -457,7 +457,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // pass and threaded as ONE join (G7) -- pinned in omp-reduce's g7_*
       // cases -- which is not this case's subject.)
       ("tuple_component_licensed_fold_opens_team",
-       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n" +
+       "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])\n" +
        "let (a, b) = (A(0), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
        ["#pragma omp parallel for simd reduction(+:"],
        // (A fold in a KERNEL BODY keeps the structural decline, pinned above
@@ -471,7 +471,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
 /// statement that there is no third, silent one.
 let private ompReduceDiagCases : (string * string) list =
     // (name, source) — each must fail to lower, with BL4016 in the message.
-    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
+    let arr = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])\n"
     [ ("omp_without_comm_antisym_body",
        arr + "let s = reduce(A, lambda(a, b) where omp -> a - b)\n")
       ("omp_without_comm_nonbuiltin_body",
@@ -516,7 +516,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
     // is invisible to it -- which is exactly how `ivdep` came to sit on a header
     // whose body is a loop.
     let fiber = "Array<Float64 like Idx<5>>"
-    let rowsDecl = "let R = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n"
+    let rowsDecl = "let R = Float64([[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]])\n"
     let prodsumSrc =
         rowsDecl +
         $"let Cv = method_for(R, R) <@> lambda(a: {fiber}, b: {fiber}) -> prodsum(a, b) |> compute\n"
@@ -527,7 +527,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
     // outer level. Extent 13 -- prime, and not 3, so a bound that lost a
     // dependency subtraction is visible.
     let triSrc =
-        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0])\n" +
         "let L = method_for(A, A, A)\n" +
         "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y * z + x + y + z\n" +
         "let R = L <@> k |> compute\n"
@@ -594,17 +594,17 @@ let private emissionShapeCases : (string * string * string list * string list) l
       // storage (a running counter) never gets it -- the plain flat loop, the
       // cell-epilogue producer, and the general nest. Pure twins keep it.
       ("ivdep_declined_on_writing_flat_producer",
-       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet mut G = [0.0]\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\n",
+       "let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\nlet mut G = Float64([0.0])\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\n",
        [ "for (size_t __fk = 0; __fk < __fp_cells; __fk++)" ], g41WriterBans)
       ("ivdep_kept_on_pure_flat_producer",
-       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet p = method_for(x) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n",
+       "let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\nlet p = method_for(x) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n",
        [ "BLADE_IVDEP" ], [])
       ("ivdep_declined_on_writing_epilogue_producer",
-       "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\nlet mut G = [0.0]\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\nlet total = reduce(method_for(p) <@> lambda(v) -> v, (+), 0.0)\n",
+       "let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\nlet mut G = Float64([0.0])\nlet p = method_for(x) <@> lambda(v) -> {\n    G(0) = G(0) + v\n    G(0)\n} |> compute\nlet total = reduce(method_for(p) <@> lambda(v) -> v, (+), 0.0)\n",
        // the path taken: the plain flat producer (the epilogue declined it)
        [ "// flat elementwise: 5 cells"; "for (size_t __fk = 0; __fk < __fp_cells; __fk++)" ], g41WriterBans @ [ "blade_fold::lane_state" ])
       ("ivdep_declined_on_writing_nest_producer",
-       "type I = Idx<3>\ntype J = Idx<4>\nlet mut G = [0.0]\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    G(0)\n} |> compute\n",
+       "type I = Idx<3>\ntype J = Idx<4>\nlet mut G = Float64([0.0])\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    G(0)\n} |> compute\n",
        // the path taken: the general two-level nest
        [ "for (size_t __i0 = 0; __i0 < 3; __i0++) {"; "for (size_t __i1 = 0; __i1 < 4; __i1++) {" ], g41WriterBans)
       // ---- G41 (Codex review W2F-5, finding 20): a parallel kernel that
@@ -651,7 +651,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
        "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {\n    let k = h\n    k(f)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("omp_pure_callback_via_tuple_held_alias_keeps_team",
-       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {\n    let k = h\n    let t = (k, 0)\n    t[0](f)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
+       "type I = Idx<2>\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {\n    let k = h\n    let t = (k, Int64(0))\n    t[0](f)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("omp_pure_callback_third_order_keeps_team",
        "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\ntype Q = (H, F) -> R\ntype D = (Q, F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction via(h: H, f: F) -> R = h(f)\nfunction bridge(q: Q, f: F) -> R = q(launch, f)\nfunction relay(h: D, f: F) -> R = h(via, f)\nlet a = launch(ident)\nlet b = relay(bridge, ident)\n",
@@ -669,7 +669,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
       // callback checks), so the veto stays a backstop. corpus loops/517
       // pins the values in every lane.
       ("omp_nest_kernel_let_mut_copy_keeps_team",
-       "type K = Idx<2>\ntype I = Idx<3>\nlet G = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\nlet r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {\n    let mut c = G\n    c((0 : K)) = Float64(i)\n    c((0 : K)) + G((0 : K))\n} |> compute\n",
+       "type K = Idx<2>\ntype I = Idx<3>\nlet G = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\nlet r = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {\n    let mut c = G\n    c((0 : K)) = Float64(i)\n    c((0 : K)) + G((0 : K))\n} |> compute\n",
        [ "BLADE_OMP_PARALLEL_FOR"; "std::copy_n(pool_base(G.data)" ],
        [ "[omp] requested but emitted serial" ])
       // Gap G47 (Codex review W2F-9 finding 29): RETURN FLOW in the callback
@@ -681,10 +681,10 @@ let private emissionShapeCases : (string * string * string list * string list) l
        "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction passthrough(h: H) -> H = {\n    let k = h\n    k\n}\nlet a = launch(ident)\nlet b = passthrough(launch)(ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("omp_pure_callback_tuple_parameter_reads_scalar_keeps_team",
-       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction tag(p: (H, Int64)) -> Int64 = p[1]\nfunction via(h: H, f: F) -> R = {\n    let k = h\n    let t = (k, 0)\n    let n = tag(t)\n    h(f) + Float64(n)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction tag(p: (H, Int64)) -> Int64 = p[1]\nfunction via(h: H, f: F) -> R = {\n    let k = h\n    let t = (k, Int64(0))\n    let n = tag(t)\n    h(f) + Float64(n)\n}\nlet a = launch(ident)\nlet b = via(launch, ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("omp_pure_callback_return_flow_shapes_keep_team",
-       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction first(p: (H, Int64)) -> H = p[0]\nfunction rec_ret(n: Int64, h: H) -> H = if n <= 0 then h else rec_ret(n - 1, h)\nfunction pair(h: H) -> (H, Int64) = (h, 1)\nfunction mk() -> H = launch\nfunction pick(c: Bool, h: H) -> H = if c then h else launch\nlet a = launch(ident)\nlet b = first((launch, 0))(ident)\nlet c = rec_ret(3, launch)(ident)\nlet d = pair(launch)[0](ident)\nlet e = pick(true, mk())(ident)\n",
+       "type I = Idx<2>\ntype F = (Float64) -> Float64\ntype R = Array<Float64 like I>\ntype H = (F) -> R\nfunction ident(v: Float64) -> Float64 = v\nfunction launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute\nfunction first(p: (H, Int64)) -> H = p[0]\nfunction rec_ret(n: Int64, h: H) -> H = if n <= 0 then h else rec_ret(n - 1, h)\nfunction pair(h: H) -> (H, Int64) = (h, 1)\nfunction mk() -> H = launch\nfunction pick(c: Bool, h: H) -> H = if c then h else launch\nlet a = launch(ident)\nlet b = first((launch, Int64(0)))(ident)\nlet c = rec_ret(3, launch)(ident)\nlet d = pair(launch)[0](ident)\nlet e = pick(true, mk())(ident)\n",
        [ "BLADE_OMP_PARALLEL_FOR" ], [ "requested but emitted serial" ])
       ("ivdep_kept_on_pure_nest_producer",
        "type I = Idx<3>\ntype J = Idx<4>\nlet p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i * 4 + j) * 0.5 |> compute\n",
@@ -715,7 +715,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
 /// "parallelized the unlicensed outer level".
 let private ompPlacementCases : (string * string * string) list =
     // (name, source, index variable the pragma must immediately precede)
-    let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    let arrays = "let A = Float64([1.0, 2.0, 3.0])\nlet B = Float64([4.0, 5.0, 6.0])\n"
     let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
     let kern clause = $"function k(a: Float64, b: Float64) where {clause} = a * b\n"
     [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
@@ -749,21 +749,21 @@ let private peelPragmaCases : (string * string * string option) list =
     let dynamicPragma = Some "#pragma omp parallel for schedule(dynamic)"
     // Grouped: uneven group sizes, the shape `schedule(dynamic)` exists for.
     let grouped body =
-        "let region = [0, 1, 0, 1, 1]\n" +
-        "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+        "let region = Int64([0, 1, 0, 1, 1])\n" +
+        "let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0])\n" +
         "let gk = group_keys(region)\n" +
         "let grouped = group_by(temps, gk)\n" + body
     let groupedZip body =
-        "let region = [0, 1, 0, 1, 1]\n" +
-        "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
-        "let b = [10.0, 20.0, 30.0, 40.0, 50.0]\n" +
+        "let region = Int64([0, 1, 0, 1, 1])\n" +
+        "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n" +
+        "let b = Float64([10.0, 20.0, 30.0, 40.0, 50.0])\n" +
         "let gk = group_keys(region)\n" +
         "let ga = group_by(a, gk)\nlet gb = group_by(b, gk)\n" + body
     let raggedLit body =
         "let lens: Array<Int64 like Idx<3>> = [3, 2, 1]\n" +
         "let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]\n" + body
     let raggedInline body =
-        "let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]\n" + body
+        "let r = Float64([[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]])\n" + body
     let row = "Array<Float64 like RaggedIdx<_>>"
     [ // ---- grouped, single operand: the reported case ---------------------
       ("peel_grouped_reduce_licensed",
@@ -809,8 +809,8 @@ let private peelPragmaCases : (string * string * string option) list =
 /// The two expectations are opposites, which is why this is its own case.
 let private peelDeclineMarkerCase : string * string =
     ("peel_depth_zero_reports_serial",
-     "let region = [0, 1, 0, 1, 1]\n" +
-     "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+     "let region = Int64([0, 1, 0, 1, 1])\n" +
+     "let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0])\n" +
      "let gk = group_keys(region)\n" +
      "let grouped = group_by(temps, gk)\n" +
      "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 0) -> reduce(g, (+)) |> compute\n")
@@ -838,8 +838,8 @@ let private peelDeclineMarkerCase : string * string =
 let private ompThreadsKnobCases : (string * string * string list * string list) list =
     // (name, source, mustContain, mustNotContain)
     // Non-power-of-two extents throughout, per the repo's stride discipline.
-    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
-    let arr = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    let arrays = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\nlet B = Float64([4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])\n"
+    let arr = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     let marker = "// [omp] requested but emitted serial: BLADE_OMP_THREADS=1"
     [ // ---- loop nests: genNestPragma's three forms all go away --------------
       ("knob_licensed_map_emits_no_team",
@@ -849,13 +849,13 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
        [ "#pragma omp parallel"; "omp_get_" ])
       ("knob_collapse_form_suppressed",
        "function k(a: Float64, b: Float64) where omp(a: 1, b: 1) = a * b + 1.0\n" +
-       "let P = [1.5, 2.5, 3.5, 4.5, 5.5]\nlet Q = [0.25, 0.5, 0.75, 1.25]\n" +
+       "let P = Float64([1.5, 2.5, 3.5, 4.5, 5.5])\nlet Q = Float64([0.25, 0.5, 0.75, 1.25])\n" +
        "let M = object_for(k) <@> (P, Q) |> compute\n",
        [ marker ], [ "#pragma omp parallel"; "collapse("; "omp_get_" ])
       // The triangular arm: `schedule(dynamic)` is a `parallel for` clause, so
       // it goes with the construct rather than surviving on a serial loop.
       ("knob_triangular_dynamic_suppressed",
-       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
+       "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0])\n" +
        "let L = method_for(A, A, A)\n" +
        "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y * z + x + y + z\n" +
        "let R = L <@> k |> compute\n",
@@ -867,7 +867,7 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       // knob was never about, so this case is the one that pins the split.
       ("knob_flat_elementwise_keeps_omp_simd",
        "function k(a: Float64) where omp(a: 2) = a * 2.0\n" +
-       "let M = [[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]]\n" +
+       "let M = Float64([[1.0, 2.0, 3.0, 4.0, 5.0], [4.0, 5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0, 13.0]])\n" +
        "let m = object_for(k) <@> (M) |> compute\n",
        [ marker; "#pragma omp simd" ],
        [ "#pragma omp parallel"; "omp_get_" ])
@@ -904,7 +904,7 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       // so the knob arm and its `_control_knob_off` twin both go vacuous.
       ("knob_reduce_over_computation_serial",
        "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" + arr +
-       "let B = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n" +
+       "let B = Float64([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])\n" +
        "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n",
        [ marker ],
        [ "#pragma omp"; "omp_get_"; "outer level chunked" ])
@@ -919,8 +919,8 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       // knob-OFF control twin requiring `#pragma omp parallel` to be present,
       // which is what keeps this arm from passing vacuously.
       ("knob_ragged_peel_row_loop_suppressed",
-       "let region = [0, 1, 0, 1, 1]\n" +
-       "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+       "let region = Int64([0, 1, 0, 1, 1])\n" +
+       "let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0])\n" +
        "let gk = group_keys(region)\n" +
        "let grouped = group_by(temps, gk)\n" +
        "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute\n",
@@ -956,13 +956,13 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
 /// nothing to report.
 let private ompThreadsEquivalenceCases : (string * string * string) list =
     // (name, licensed source, the same program with the clause deleted)
-    let arrays = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\nlet B = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]\n"
-    let tri = "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\nlet L = method_for(A, A, A)\n"
+    let arrays = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\nlet B = Float64([4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])\n"
+    let tri = "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0])\nlet L = method_for(A, A, A)\n"
     // `clause` is the ONLY textual difference between the two programs, so the
     // comparison cannot accidentally be measuring some other edit.
     let grouped (clause: string) =
         "let region = [0, 1, 0, 1, 1]\n" +
-        "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
+        "let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0])\n" +
         "let gk = group_keys(region)\n" +
         "let grouped = group_by(temps, gk)\n" +
         $"let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) {clause}-> reduce(g, (+)) |> compute\n"
@@ -2005,20 +2005,20 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         //   not expressed by a simple clause (it requires AntisymIdx typing), so
         //   it is intentionally omitted here rather than guessed at.
         let rectSrc =
-            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
-            "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let A = Float64([1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])\n" +
+            "let B = Float64([1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])\n" +
             "let L = method_for(A, B)\n" +
             "let f = lambda(x, y) where omp(x: 1) -> x * y\n" +
             "let result = L <@> f |> compute\n"
         let symSrc =
-            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let A = Float64([1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])\n" +
             "let L = method_for(A, A)\n" +
             "let k = lambda(x, y) where comm(x, y), omp(x: 1) -> x * y\n" +
             "let result = L <@> k |> compute\n"
         // Partial comm: 3-arg kernel with comm on a subset (proven form, see
         // Test_Symmetry). Exercises a mixed symmetry nest through genNestPragma.
         let mixedSrc =
-            "let A = [1.0,2.0,3.0,4.0]\n" +
+            "let A = Float64([1.0,2.0,3.0,4.0])\n" +
             "let L = method_for(A, A, A)\n" +
             "let k = lambda(x, y, z) where comm(x, y), omp(x: 1) -> x * y * z\n" +
             "let result = L <@> k |> compute\n"
@@ -2031,8 +2031,8 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         // with no team to observe, and the coverage check goes vacuous.
         let foldSrc =
             "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n" +
-            "let A = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
-            "let B = [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]\n" +
+            "let A = Float64([1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])\n" +
+            "let B = Float64([1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])\n" +
             "let s = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, myAdd, 0.0, axes = 2)\n"
         // G55: a SCALAR omp fold let in a FUNCTION body -- its own let, so it
         // takes the statement fold path and forms a real team (it used to be
@@ -2809,7 +2809,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         let aLit = aVals |> List.map (sprintf "%g") |> String.concat ","
         let expectedLit = expectedSym |> List.map (sprintf "%g") |> String.concat ", "
         let valSrc =
-            $"let A = [{aLit}]\n" +
+            $"let A = Int64([{aLit}])\n" +
             "let L = method_for(A, A)\n" +
             // omp clause so this genuinely runs parallel under OMP_NUM_THREADS=4
             // — otherwise (post-flip) it would be serial and the env var inert,
@@ -3138,7 +3138,7 @@ let private g7ZeroSrc =
     + "let x = method_for(range<Z>) <@> lambda(i) -> Float64(Int64(i)) + 1.0 |> compute\n"
     + "let l = method_for(x)\n"
     + "let (z1, z2) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v), lambda(u, v) where omp -> u + v, 10.0)\n"
-    + "let (y1, y2) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 20.0), reduce(x, (+), 30.0))\n"
+    + "let (y1, y2) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, Float64(20.0)), reduce(x, (+), Float64(30.0)))\n"
 
 let private g7Count (needle: string) (s: string) =
     let mutable n = 0
@@ -3163,15 +3163,15 @@ let private g7RefusedCases : (string * string) list =
        + "let (s1, s2) = reduce((l <@> lambda(v) -> {\n    counter = counter + 1\n    v\n}) <&!> (l <@> lambda(v) -> v * v), " + omp + ", 0.0)\n")
       // a WRITING SHARED PRODUCER through a transitive helper (per-leg pack)
       ("g7_pack_join_writing_shared_producer_refused",
-       "let mut counter = 0\nfunction bump(v: Float64) -> Float64 = {\n    counter = counter + 1\n    v\n}\n"
+       "let mut counter: Int64 = 0\nfunction bump(v: Float64) -> Float64 = {\n    counter = counter + 1\n    v\n}\n"
        + "type Ix = Idx<1009>\n"
        + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
        + "let e = method_for(x) <@> lambda(v) -> bump(v)\n"
-       + "let (a, b, c) = object_for(<&!>) <@> (reduce(e, lambda(p, q) where omp -> p + q, 10.0), prodsum(e, x), reduce(x, (+), 30.0))\n")
+       + "let (a, b, c) = object_for(<&!>) <@> (reduce(e, lambda(p, q) where omp -> p + q, Float64(10.0)), prodsum(e, x), reduce(x, (+), Float64(30.0)))\n")
       // a comm-declared WRITING custom fold beside a requesting leg
       ("g7_pack_join_comm_writing_custom_fold_refused",
-       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\n"
-       + "let (a, b) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 0.0), reduce(x, lambda(p, q) where comm(p, q) -> {\n    counter = counter + 1\n    p + q\n}, 0.0))\n") ]
+       "let mut counter: Int64 = 0\nlet x = Float64([1.0, 2.0, 3.0])\n"
+       + "let (a, b) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, Float64(0.0)), reduce(x, lambda(p, q) where comm(p, q) -> {\n    counter = counter + 1\n    p + q\n}, Float64(0.0)))\n") ]
 /// The emission + record cases. (name, pins, source, check over (decisions, C++)).
 let private g7EmitCases : (string * (string * string) list * string * (Blade.Effects.Decision list -> string -> Result<string, string>)) list =
     let team = "BLADE_OMP_PARALLEL_NUM_THREADS("
@@ -3306,7 +3306,7 @@ let private g7EmitCases : (string * (string * string) list * string * (Blade.Eff
       // them requesting omp: the sibling-fold pass joins them (every leg is
       // licensed) and the join threads under the requesting leg's own clause.
       ("g7_sibling_tuple_components_join_and_thread", [],
-       "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]\n"
+       "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])\n"
        + "let (a, b) = (reduce(A, (+)), reduce(A, lambda(p, q) where omp -> p + q, 0.0))\n",
        (fun ds cpp ->
             if g7Count team cpp <> 1 then Error "expected one team for the joined pair"
@@ -3358,12 +3358,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let n = 240
         let vals = [ for i in 1 .. n -> 1.0 / float i + float (i % 7) * 0.3 ]
         let aLit = vals |> List.map (_.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
-        let arrDecl = $"let A = [{aLit}]\n"
+        let arrDecl = $"let A = Float64([{aLit}])\n"
         // A second array for the deferred-computation (2-level nest) case; kept
         // short so the fused nest stays a quick compile.
         let bVals = [ for i in 1 .. 9 -> 0.5 + 1.0 / float (i + 2) ]
         let bLit = bVals |> List.map (_.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
-        let bDecl = $"let B = [{bLit}]\n"
+        let bDecl = $"let B = Float64([{bLit}])\n"
         let commFn = "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
         let serialFn = "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n"
         // Compound (masked) operand: reduce walks the flat `.data` buffer of
@@ -3372,7 +3372,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // A fold over a closed-form domain of n x n with conjunct `conj`, its
         // kernel the bench band's coefficient on non-integer data.
         let domainSrc (n: int) (w: int) (conj: string) (foldKernel: string) =
-            $"let static n = {n}\nlet static w = {w}\ntype Pts = Idx<n>\n"
+            $"let static n: Int64 = {n}\nlet static w: Int64 = {w}\ntype Pts = Idx<n>\n"
             + "static struct D {\n    i: Int64<min=0, max=n-1>,\n    j: Int64<min=0, max=n-1>\n} where " + conj + "\n"
             + "let x = 1.0 / (1.0 + Float64(0..n))\n"
             + "function phi(i: Int64, j: Int64) -> Float64 = {\n    let d = Float64(i - j)\n    (2.0 + d / Float64(w + 1)) / (1.0 + d * d)\n}\n"
@@ -3543,7 +3543,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         for (label, n, integerData) in laneCases do
             let name = "lane_boundary_" + label
             let lit = laneLit n (fun i -> if integerData then float (i % 9 + 1) else awkward i)
-            let decl = $"let A = [{lit}]\n"
+            let decl = $"let A = Float64([{lit}])\n"
             let body = "let s = reduce(A, laneAdd)\n"
             match compileProgram outputDir (name + "_omp") (laneKernelOmp + decl + body),
                   compileProgram outputDir (name + "_serial") (laneKernelSer + decl + body) with
@@ -3676,19 +3676,19 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
 
         // (label, n, integerData, sourceOf n)
         let fprSrcReduce (lit: string) =
-            $"let A = [{lit}]\nlet s = reduce(A, lambda(a, b) -> a + b)\n"
+            $"let A = Float64([{lit}])\nlet s = reduce(A, lambda(a, b) -> a + b)\n"
         let fprSrcProdsum (lit: string) (lit2: string) =
-            $"let A = [{lit}]\nlet B = [{lit2}]\nlet s = prodsum(A, B)\n"
+            $"let A = Float64([{lit}])\nlet B = Float64([{lit2}])\nlet s = prodsum(A, B)\n"
         // THREE operand streams: the comoment3 fiber kernel's shape, and the
         // one the arity-aware lane count (`laneCountForStreams`) puts at K = 5.
         let fprSrcProdsum3 (l1: string) (l2: string) (l3: string) =
-            $"let A = [{l1}]\nlet B = [{l2}]\nlet C = [{l3}]\nlet s = prodsum(A, B, C)\n"
+            $"let A = Float64([{l1}])\nlet B = Float64([{l2}])\nlet C = Float64([{l3}])\nlet s = prodsum(A, B, C)\n"
         // reduce over an UNFORCED zip -- the dot shape. This lowers through
         // `genReduceComputeBinding` (reduce over a deferred computation), a
         // different emitter from the two above: its element is not a subscript
         // but the nest's whole per-iteration body evaluated at the lane index.
         let fprSrcDot (lit: string) (lit2: string) =
-            $"let x = [{lit}]\nlet y = [{lit2}]\n"
+            $"let x = Float64([{lit}])\nlet y = Float64([{lit2}])\n"
               + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
               + "let s = reduce(P, (+))\n"
         // A `comm`-DECLARED kernel whose body is NOT a bare builtin op. This is
@@ -3700,16 +3700,16 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let fprCommKernel =
             "function myK(a: Float64, b: Float64) where comm(a, b) = a + b + 0.0\n"
         let fprSrcCommReduce (lit: string) =
-            fprCommKernel + $"let A = [{lit}]\nlet s = reduce(A, myK)\n"
+            fprCommKernel + $"let A = Float64([{lit}])\nlet s = reduce(A, myK)\n"
         // comm kernel over a deferred computation: the reduce-over-computation
         // site's lane fallback. The 3-arg form is required there (a fused fold
         // cannot seed from its first element).
         let fprSrcCommDot (lit: string) (lit2: string) =
-            fprCommKernel + $"let x = [{lit}]\nlet y = [{lit2}]\n"
+            fprCommKernel + $"let x = Float64([{lit}])\nlet y = Float64([{lit2}])\n"
               + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
               + "let s = reduce(P, myK, 0.0)\n"
         let fprSrcCommDot3 (l1: string) (l2: string) (l3: string) =
-            fprCommKernel + $"let x = [{l1}]\nlet y = [{l2}]\nlet z = [{l3}]\n"
+            fprCommKernel + $"let x = Float64([{l1}])\nlet y = Float64([{l2}])\nlet z = Float64([{l3}])\n"
               + "let P = method_for(zip(x, y, z)) <@> lambda(a: Float64, b: Float64, c: Float64) -> a * b * c\n"
               + "let s = reduce(P, myK, 0.0)\n"
         let fprNs = [1; 3; 7; 8; 9; 15; 17]
@@ -3838,21 +3838,21 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               // so this is the serial arm either way.
               ("unlicensed_kernel_stays_serial",
                "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
-                 + $"let A = [{(laneLit 17 awkward)}]\n"
+                 + $"let A = Float64([{(laneLit 17 awkward)}])\n"
                  + "let s = reduce(A, myK)\n", "unchanged")
               // A FUSED FOLD over a `<&!>` tree (one shared builtin kernel,
               // one accumulator per leaf) -> ONE `omp simd reduction` clause
               // naming every accumulator (2026-10-17; the onepass shape, bench
               // gap G20/F11). Before, the tree stayed serial in every build.
               ("fused_join_simd",
-               $"let x = [{(laneLit 17 awkward)}]\n"
+               $"let x = Float64([{(laneLit 17 awkward)}])\n"
                  + "let l = method_for(x)\n"
                  + "let (s1, s2) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v), (+))\n"
                  + "let s = s1 + s2\n", "simd")
               // A REDUCTION JOIN with per-leg builtin `+` folds: same clause.
               ("pack_join_simd",
-               $"let x = [{(laneLit 17 awkward)}]\n"
-                 + $"let y = [{(laneLit 17 (fun i -> awkward (i + 3)))}]\n"
+               $"let x = Float64([{(laneLit 17 awkward)}])\n"
+                 + $"let y = Float64([{(laneLit 17 (fun i -> awkward (i + 3)))}])\n"
                  + "let (a, b) = object_for(<&!>) <@> (reduce(x, (+), 0.0), prodsum(x, y))\n"
                  + "let s = a + b\n", "simd") ]
         for (label, src, expectForm) in fprEmitCases do
@@ -3912,8 +3912,8 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // the knob (bench register G7 / G27: a dropped omp is never silent).
         (let name = "fp_reassoc_emission_omp_deferred_fold_serial_build_simd"
          let src =
-             $"let x = [{(laneLit 17 awkward)}]\n"
-               + $"let y = [{(laneLit 17 (fun i -> awkward (i + 3)))}]\n"
+             $"let x = Float64([{(laneLit 17 awkward)}])\n"
+               + $"let y = Float64([{(laneLit 17 (fun i -> awkward (i + 3)))}])\n"
                + "let s = reduce(method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b, lambda(p, q) where omp -> p + q, 0.0)\n"
          let withThreads (v: string) (f: unit -> 'a) : 'a =
              let prior = System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS")
@@ -3986,8 +3986,8 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // Text-only assertions cannot see this; only g++ can.
         let collapseSrc =
             "function k(a: Float64, b: Float64) where omp(a: 1, b: 1) = a * b + 1.0\n" +
-            "let P = [1.5, 2.5, 3.5, 4.5, 5.5]\n" +
-            "let Q = [0.25, 0.5, 0.75, 1.25]\n" +
+            "let P = Float64([1.5, 2.5, 3.5, 4.5, 5.5])\n" +
+            "let Q = Float64([0.25, 0.5, 0.75, 1.25])\n" +
             "let M = object_for(k) <@> (P, Q) |> compute\n"
         let collapseName = "collapse2_dense_map_compiles"
         match compileProgram outputDir collapseName collapseSrc with
@@ -4053,7 +4053,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
         let knobN = 33
         let knobLit = laneLit knobN awkward
-        let knobDecl = $"let A = [{knobLit}]\n"
+        let knobDecl = $"let A = Float64([{knobLit}])\n"
         let knobCases : (string * string) list =
             // (label, source) -- one per suppression shape the knob has.
             [ ("path_a_builtin_sum",

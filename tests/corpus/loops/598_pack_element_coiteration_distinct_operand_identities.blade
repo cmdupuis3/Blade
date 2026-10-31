@@ -9,8 +9,8 @@
 // operands; `blade test optimize` pins the identities themselves.
 function d2(A: Poly<T^1>) -> T^1 = A[0] - A[1]
 function sq2(A: Poly<T^1>) -> T^1 = (A[0] + A[1]) * (A[0] - A[1])
-let x = [5.0, 7.0]
-let y = [2.0, 3.0]
+let x = Float64([5.0, 7.0])
+let y = Float64([2.0, 3.0])
 let r = d2(x, y)
 let s = d2(x, x)
 let t = sq2(x, y)

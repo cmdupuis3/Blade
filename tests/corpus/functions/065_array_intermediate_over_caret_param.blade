@@ -45,11 +45,11 @@
 Unit second
 Unit time = second
 
-let two_pi = 6.283185307179586
+let two_pi: Float64 = 6.283185307179586
 
 function taper(ts_sub: Tuple<T<time>^1, U^1>, lower: T<time>, upper: T<time>) = {
     let t_sub, s_sub = ts_sub
-    let alpha = 0.53836
+    let alpha: Float64 = 0.53836
     let beta = 1.0 - alpha
     let span = upper - lower
     let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
@@ -57,10 +57,10 @@ function taper(ts_sub: Tuple<T<time>^1, U^1>, lower: T<time>, upper: T<time>) = 
     (s_sub * w / sqrt(scale)) |> compute
 }
 
-let ts: Array<Float<time> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-let ss: Array<Float like Idx<4>> = [1.0, 0.5, 0.25, 0.125]
+let ts: Array<Float64<time> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let ss: Array<Float64 like Idx<4>> = [1.0, 0.5, 0.25, 0.125]
 
-let sw = taper((ts, ss), 0.0, 8.0)
+let sw = taper((ts, ss), Float64(0.0), Float64(8.0))
 // EXPECT: sw = [0.293711798006901, 0.373051878450875, 0.29962392894915, 0.173235325084922]
 
 // The consumer that used to refuse: an array intrinsic over the array-valued
@@ -75,7 +75,7 @@ let tot = reduce(sw, (+))
 // two of them are only reachable THROUGH the tuple literal.
 function taperAbs(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
     let t_sub, s_sub = ts_sub
-    let alpha = 0.53836
+    let alpha: Float64 = 0.53836
     let beta = 1.0 - alpha
     let span = upper - lower
     let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
@@ -83,8 +83,8 @@ function taperAbs(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
     (s_sub * w / sqrt(scale)) |> compute
 }
 
-let tsp: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-let swAbs = taperAbs((tsp, ss), 0.0, 8.0)
+let tsp: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let swAbs = taperAbs((tsp, ss), Float64(0.0), Float64(8.0))
 // EXPECT: swAbs = [0.293711798006901, 0.373051878450875, 0.29962392894915, 0.173235325084922]
 
 let totAbs = reduce(swAbs, (+))

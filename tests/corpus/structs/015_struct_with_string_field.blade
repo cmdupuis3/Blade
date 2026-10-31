@@ -13,8 +13,8 @@ struct Person {
 }
 let alice = Person { name = "Alice", age = 30 }
 let bob = Person { name = "Bob", age = 25 }
-let aliceMatch = if alice.name == "Alice" then 1 else 0
-let bobMatch = if bob.name == "Alice" then 1 else 0
+let aliceMatch: Int64 = if alice.name == "Alice" then 1 else 0
+let bobMatch: Int64 = if bob.name == "Alice" then 1 else 0
 let ageSum = alice.age + bob.age
 // EXPECT: aliceMatch = 1
 // EXPECT: bobMatch = 0

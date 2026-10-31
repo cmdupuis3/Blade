@@ -12,7 +12,7 @@ let h = method_for(x) <@> lambda(v) -> v + 5.0
 let p = (m, m)
 let q = p
 let c = reduce(x, (+)) > 5.0
-let t = if c then (q, 1.0) else (q, h(0))
+let t = if c then (q, Float64(1.0)) else (q, h(0))
 // ERROR: BL6002 @ 14:1
 // ERROR-CONTAINS: whose arm reads the deferred computation `h`
 // REJECT-AT: lower

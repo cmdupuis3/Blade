@@ -12,18 +12,18 @@
 // legacy `SymIdx<2, n>` record (same extent, Tag = None, plain kind).
 // ============================================================================
 let static spec = [(0, 0, 2), (1, 1, 1)]
-let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let x: Array<Float64 like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let L = method_for(x, x)
 let f = lambda(a, b) where comm(a, b) -> a * b
-let r: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
+let r: Array<Float64 like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute
 
-function corners(m: Array<Float like SymIdx<2, 5>>) -> Float = {
+function corners(m: Array<Float64 like SymIdx<2, 5>>) -> Float64 = {
     m(0, 0) + m(1, 4) + m(4, 4)
 }
 let viaPlain = corners(r)
 // EXPECT: viaPlain = 36.0
 
-function cornersIdx(m: Array<Float like SymIdx<2, Idx<5>>>) -> Float = {
+function cornersIdx(m: Array<Float64 like SymIdx<2, Idx<5>>>) -> Float64 = {
     m(2, 3)
 }
 let viaIdxBase = cornersIdx(r)

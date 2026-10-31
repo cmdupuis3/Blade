@@ -9,8 +9,8 @@
 // orders, one unlicensed level, a second read at a fixed cell -- each keeps
 // the logical walk, and each value
 // is pinned against its hand-derived relation to the plain sum.
-let static p = 23
-let static n = 5
+let static p: Int64 = 23
+let static n: Int64 = 5
 type Var = Idx<p>
 type Obs = Idx<n>
 let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 37 + s * 11) % 101) / 7.0 + 0.1 |> compute

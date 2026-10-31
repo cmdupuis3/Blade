@@ -11,7 +11,7 @@
 // kernel is refused (017), and would regroup on every iteration.
 type X = Chunked<Idx<10>, 4>
 type K = Idx<3>
-let A: Array<Float like X> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 let seg = segments(X)
 let g = group_by(A, seg)
 let totals = method_for(range<K>) <@> lambda(k) -> {
@@ -20,8 +20,8 @@ let totals = method_for(range<K>) <@> lambda(k) -> {
 } |> compute
 // EXPECT: totals = [55.0, 56.0, 57.0]
 
-let B = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-let keys = [0, 0, 1, 1, 2, 2, 0, 1, 2, 0]
+let B = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+let keys = Int64([0, 0, 1, 1, 2, 2, 0, 1, 2, 0])
 let gk = group_keys(keys)
 let h = group_by(B, gk)
 let counted = method_for(range<K>) <@> lambda(k) -> {

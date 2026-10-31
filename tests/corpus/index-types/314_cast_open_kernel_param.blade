@@ -9,11 +9,11 @@
 // integers into I): an open operand gets the checked conversion, and its
 // final type is judged after inference. This is examples/07's state-vector
 // unpacking, which spelled 91 literal subscripts by hand for want of it.
-let static W1 = 4
-let static W2 = 2
+let static W1: Int64 = 4
+let static W2: Int64 = 2
 type State = Idx<7>
 type Part = Idx<3>
-let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+let s: Array<Float64 like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
 // unpack: a cast of the parameter and of a position computed from it
 let w1 = method_for(range<Idx<W1>>) <@> lambda(k) -> s((k : State)) |> compute
 let w2 = method_for(range<Idx<W2>>) <@> lambda(k) -> s((W1 + k : State)) |> compute

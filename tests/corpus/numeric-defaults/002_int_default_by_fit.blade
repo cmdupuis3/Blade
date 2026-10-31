@@ -1,0 +1,12 @@
+// TEST: an integer literal past Int32 defaults to Int64
+// ============================================================================
+// Rule 4: `3000000000` does not fit Int32, so it is an Int64 by default, and
+// the Int64 annotation of the variable holds it. `-2147483648` is the Int32
+// minimum: the fit test reads the NEGATED value.
+// ============================================================================
+let big = 3000000000
+let k: Int64 = big
+let lo = -2147483648
+let m: Int32 = lo
+// EXPECT: k = 3000000000
+// EXPECT: m = -2147483648

@@ -12,7 +12,7 @@ let z: Array<Int64 like Row> = [0]
 let boom = method_for(z) <@> lambda(v) -> 2 / v
 let fine = method_for(a) <@> lambda(v) -> v * 7
 let c = a(0) > 5
-let t = if c then (boom |> compute, 1) else (fine |> compute, 2)
+let t = if c then (boom |> compute, Int64(1)) else (fine |> compute, Int64(2))
 let bad = a((a(0) : Row))
 // ABORT: BL8006
 // ABORT: outside Row

@@ -7,6 +7,6 @@
 // band, distinct from the BL3006 dimension mismatch in unit-errors/006.
 Unit second
 Unit day = 86400 * second
-let t1: Float<day> = 1.0
-let t2: Float<second> = 86400.0
+let t1: Float64<day> = 1.0
+let t2: Float64<second> = 86400.0
 let bad = atan2(t1, t2)

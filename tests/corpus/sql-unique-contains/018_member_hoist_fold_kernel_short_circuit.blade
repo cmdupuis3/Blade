@@ -8,8 +8,8 @@
 // ============================================================================
 type Row = Idx<9>
 let xs: Array<Int64 like Row> = [0, 1, 2, 3, 4, 0, 6, 7, 8]
-let B = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34]
-let guarded = reduce(method_for(xs) <@> lambda(x) -> if contains(B, x) && 100 / x > 20 then 1 else 0, (+), 0)
+let B = Int64([2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34])
+let guarded = reduce(method_for(xs) <@> lambda(x) -> if contains(B, x) && 100 / x > 20 then Int64(1) else Int64(0), (+), 0)
 let weighted = reduce(method_for(xs) <@> lambda(x) -> if contains(B, x) then x * 10 else 1, (+), 1000)
 // EXPECT: guarded = 2
 // EXPECT: weighted = 1205

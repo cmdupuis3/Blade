@@ -8,6 +8,6 @@ function sum_and_product(a: T^1) -> T^0 = {
     let x = method_for(a) <@> lambda(v) -> v + 1.0 |> compute
     reduce(x, (+)) * reduce(x, (*))
 }
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let p = sum_and_product(a)
 // EXPECT: p = 216.0

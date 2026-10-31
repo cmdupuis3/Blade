@@ -1,0 +1,20 @@
+// TEST: Float32 Arrays
+// ============================================================================
+// Float32 array cells are float32: maps, co-iteration, outer products and
+// rank-2 prints carry float cells in every lane.
+// ============================================================================
+type I = Idx<5>
+let v: Array<Float32 like I> = [0.1, 0.2, 0.3, 0.7, 1.1]
+let u: Array<Float32 like I> = [1.5, -2.25, 3.0, 0.125, 9.75]
+let w = v * 3.0 + 0.1 |> compute
+let p = method_for(zip(v, u)) <@> lambda(a, b) -> a * b + a |> compute
+let o = method_for(v, u) <@> lambda(a, b) -> a - b * a |> compute
+let r = v / u |> compute
+let e = v(2) * u(3)
+// EXPECT: v = [0.1, 0.2, 0.3, 0.7, 1.1]
+// EXPECT: u = [1.5, -2.25, 3.0, 0.125, 9.75]
+// EXPECT: w = [0.4, 0.7, 1.0, 2.2, 3.4]
+// EXPECT: p = [0.25, -0.25, 1.2, 0.7875, 11.825]
+// EXPECT: o = [[-0.05, 0.325, -0.2, 0.0875, -0.875], [-0.1, 0.65, -0.4, 0.175, -1.75], [-0.15, 0.975, -0.6, 0.2625, -2.625], [-0.35, 2.275, -1.4, 0.6125, -6.125], [-0.55, 3.575, -2.2, 0.9625, -9.625]]
+// EXPECT: r = [0.0666667, -0.0888889, 0.1, 5.6, 0.112821]
+// EXPECT: e = 0.0375

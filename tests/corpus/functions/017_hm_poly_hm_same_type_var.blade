@@ -41,5 +41,5 @@
 // and adds the scalar (also T). The pack is passed as a tuple literal;
 // the scalar follows as a separate argument.
 function f(pack: Poly<T^0>, scalar: T) -> T = pack[0] + scalar
-let r = f((10, 20, 30), 5)
+let r = f((Int64(10), Int64(20), Int64(30)), Int64(5))
 // EXPECT: r = 15

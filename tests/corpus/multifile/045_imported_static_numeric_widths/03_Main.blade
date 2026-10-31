@@ -1,0 +1,18 @@
+// TEST: imported statics retain explicit wide and intentional narrow widths
+// MODULE: Main
+module Main
+from Relay import real_wide, real_small, int_wide, int_small
+let static rw = real_wide
+let static rs = real_small
+let static iw = int_wide
+let static ismall = int_small
+let checked_wide: Float64 = rw
+let checked_small: Float32 = rs
+let checked_int_wide: Int64 = iw
+let checked_int_small: Int32 = ismall
+let exact = checked_wide == Float64(0.1)
+let rounded = Float64(checked_small) != Float64(0.1)
+// EXPECT: exact = true
+// EXPECT: rounded = true
+// EXPECT: checked_int_wide = 2147483648
+// EXPECT: checked_int_small = 22

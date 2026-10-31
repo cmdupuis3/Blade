@@ -1,0 +1,34 @@
+// TEST: Float32 Folds
+// ============================================================================
+// Folds over Float32 keep a float accumulator: the unseeded identity is
+// -0.0f, a seeded chain starts from its seed, a non-commutative kernel is the
+// left fold, and partial reductions peel the innermost axis.
+// ============================================================================
+type I = Idx<11>
+type J = Idx<3>
+let v: Array<Float32 like I> = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
+let total = reduce(v, (+))
+let seeded = reduce(v, (+), Float32(0.25))
+let prod = reduce(v, (*))
+let left = reduce(v, lambda(a, b) -> a - b)
+let dot = prodsum(v, v)
+let m: Array<Float32 like J, I> = method_for(range<J>, v) <@> lambda(j, x) -> x * Float32(j + 1) |> compute
+let rows = reduce(m, (+))
+let all = reduce(rows, (+))
+let mean = total / Float32(extents(v))
+let negz: Array<Float32 like J> = [-0.0, -0.0, -0.0]
+let zsum = reduce(negz, (+))
+let lic = reduce(v, lambda(a, b) where omp -> a + b, Float32(0.0))
+// EXPECT: v = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
+// EXPECT: total = 6.6
+// EXPECT: seeded = 6.85
+// EXPECT: prod = 0.000399168
+// EXPECT: left = -6.4
+// EXPECT: dot = 5.06
+// EXPECT: m = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1], [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2], [0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.0, 3.3]]
+// EXPECT: rows = [6.6, 13.2, 19.8]
+// EXPECT: all = 39.6
+// EXPECT: mean = 0.6
+// EXPECT: negz = [-0.0, -0.0, -0.0]
+// EXPECT: zsum = -0.0
+// EXPECT: lic = 6.6

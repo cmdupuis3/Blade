@@ -20,7 +20,7 @@ function packprod(a: Poly<T^0>) -> T^0 = {
              head * packprod(tail) }
 }
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let m = object_for(lambda(x, y) -> packprod(x, y)) <@> (a, a) |> compute
     m(0, 2) + m(2, 0) + m(1, 1)
 }

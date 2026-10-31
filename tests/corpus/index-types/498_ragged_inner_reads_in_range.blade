@@ -2,9 +2,9 @@
 // ============================================================================
 // The run-time row-length check passes every in-range read, literal or
 // computed, flat or curried.
-let u = [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]]
-let i = 0 + 2
-let j = 0 + 1
+let u = Float64([[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]])
+let i: Int64 = 0 + 2
+let j: Int64 = 0 + 1
 let a = u(i, j)
 // EXPECT: a = 5.0
 let b = u(i)(j)

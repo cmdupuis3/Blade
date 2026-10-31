@@ -9,7 +9,7 @@ import ad as ad
 
 type R = Idx<4>
 
-function loss(v: Array<Float64 like R>) -> Float = {
+function loss(v: Array<Float64 like R>) -> Float64 = {
     let kloc = [0, 1, 0, 1]
     let gk = group_keys(kloc)
     let g = group_by(v, gk)

@@ -4,8 +4,8 @@
 // `mut` is array-only: a scalar passes by value in the C++ ABI, so callee
 // writes would silently vanish. Reject with steering.
 // ============================================================================
-function bump(x: mut Float) -> Float = {
+function bump(x: mut Float64) -> Float64 = {
     x += 1.0
     x
 }
-let r = bump(1.0)
+let r = bump(Float64(1.0))

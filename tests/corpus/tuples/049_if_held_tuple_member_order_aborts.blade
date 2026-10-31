@@ -12,7 +12,7 @@ let z: Array<Int64 like Row> = [0]
 let boom = method_for(z) <@> lambda(v) -> 2 / v
 let late = method_for(z) <@> lambda(v) -> 3 / v
 let c = a(0) > 0
-let t = if c then (a((a(0) : Row)), late |> compute) else (0, boom |> compute)
+let t = if c then (a((a(0) : Row)), late |> compute) else (Int64(0), boom |> compute)
 // ABORT: BL8006
 // ABORT: outside Row
 // ABORT: .blade:14

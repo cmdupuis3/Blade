@@ -5,10 +5,10 @@
 // a zip use keep working.
 // ============================================================================
 function gt(a: T, b: U) = a > b
-let A = [1.0, 5.0, 3.0]
-let B = [2.0, 4.0]
+let A = Float64([1.0, 5.0, 3.0])
+let B = Float64([2.0, 4.0])
 let o = method_for(A, B) <@> gt |> compute
 // EXPECT: o = [[false, false], [true, true], [true, false]]
-let C = [2.0, 4.0, 3.0]
+let C = Float64([2.0, 4.0, 3.0])
 let z = method_for(zip(A, C)) <@> gt |> compute
 // EXPECT: z = [false, true, false]

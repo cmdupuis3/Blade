@@ -17,12 +17,12 @@ let pair = [reduce(a * b, (+)), reduce(b * b, (+))]
 
 // Element position inside a NESTED literal -- the walker must still measure
 // rank 2, so only the scalar leaf is hoisted.
-let grid = [[reduce(a * b, (+)), 1.0], [2.0, 3.0]]
+let grid = [[reduce(a * b, (+)), 1.0], Float64([2.0, 3.0])]
 // EXPECT: grid = [[70.0, 1.0], [2.0, 3.0]]
 
 // `if` CONDITION. Evaluated exactly once whatever the select does, so the
 // hoist is unconditional and changes no work.
-let picked = if reduce(a * b, (+)) > 80.0 then 1.0 else 2.0
+let picked: Float64 = if reduce(a * b, (+)) > 80.0 then 1.0 else 2.0
 // EXPECT: picked = 2.0
 
 // The positions that always worked, kept here so a regression shows up beside

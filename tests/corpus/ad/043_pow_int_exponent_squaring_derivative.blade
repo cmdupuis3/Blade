@@ -13,7 +13,7 @@ import ad as ad
 // in reverse mode (ad.grad), forward mode (ad.jvp), and at a negative k
 // (reciprocal of the squared power). A Float exponent keeps the pow rule.
 // ============================================================================
-function q(x: Float, k: Int) -> Float = x ^ k
+function q(x: Float64, k: Int32) -> Float64 = x ^ k
 let (qv, dqdx) = ad.grad(q)(1.05, 7)
 let by_hand = Float64(7) * 1.05 ^ 6
 let same_grad = dqdx == by_hand
@@ -22,7 +22,7 @@ let same_jvp = jt == by_hand
 let (nv, dndx) = ad.grad(q)(1.05, 0 - 3)
 let same_neg = dndx == Float64(0 - 3) * 1.05 ^ (0 - 4)
 let (zv, dzdx) = ad.grad(q)(1.05, 0)
-function p(x: Float, y: Float) -> Float = x ^ y
+function p(x: Float64, y: Float64) -> Float64 = x ^ y
 let (pv, dpdx, dpdy) = ad.grad(p)(2.0, 3.0)
 let same_float = dpdx == 3.0 * 2.0 ^ 2.0
 // EXPECT: same_grad = true

@@ -5,7 +5,7 @@
 // ERROR-CONTAINS: the left side has coefficient -1, the right side 1
 import ml as ml
 let static EC = [("E", 1)]
-function b_covariant(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                     where ml.equiv(C4) -> Float =
+function b_covariant(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                     where ml.equiv(C4) -> Float64 =
     x(0) * x(0) - x(1) * x(1)
 let r = b_covariant([3.0, 4.0])

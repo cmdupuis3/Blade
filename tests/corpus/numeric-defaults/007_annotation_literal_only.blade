@@ -1,0 +1,13 @@
+// TEST: an expression made only of literals takes the annotation width
+// ============================================================================
+// Rule 5: `1.0 / 3.0` under a Float64 annotation is computed in Float64 (the
+// whole literal-only expression adapts, not each literal after the fact), so
+// it equals the double third; the same shape unannotated is a Float32.
+// ============================================================================
+let c: Float64 = 1.0 / 3.0
+let third: Float64 = 1.0
+let d = c - third / 3.0
+let e = 2.0 * 3.0
+let f: Float32 = e
+// EXPECT: d = 0.0
+// EXPECT: f = 6.0

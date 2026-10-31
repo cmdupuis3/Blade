@@ -17,6 +17,6 @@ let y = compound(amt, keep)
 let checksum = reduce(y, (+)) + Float64(extents(y))
 let elig2 = method_for(range<Ev2>) <@> lambda(e) -> (Int64(e) * 97) % 4093 |> compute
 let keep2 = mask(cust, lambda(c) -> contains(elig2, c % 4093))
-let hits2 = reduce(method_for(keep2) <@> lambda(b) -> if b then 1 else 0, (+), 0)
+let hits2 = reduce(method_for(keep2) <@> lambda(b) -> if b then Int64(1) else Int64(0), (+), 0)
 // EXPECT: checksum = 8184.0
 // EXPECT: hits2 = 175

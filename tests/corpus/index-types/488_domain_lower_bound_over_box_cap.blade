@@ -5,10 +5,10 @@
 // 200001 cells of the box (n = 200001, and the first cell was i = 0). The
 // solution set is exactly i = 199999 and i = 200000.
 static struct Big {
-    i: Int<min=0, max=200000>
+    i: Int32<min=0, max=200000>
 } where i > 199998
 
-let R = method_for(range<Big>) <@> lambda(i) -> 1 |> compute
+let R = method_for(range<Big>) <@> lambda(i) -> Int64(1) |> compute
 let n = extents(R)
 // EXPECT: n = 2
 let s = reduce(R, (+))

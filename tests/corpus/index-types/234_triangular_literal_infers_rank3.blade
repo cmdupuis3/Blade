@@ -8,7 +8,7 @@
 //
 // The echo stays FLAT here: nesting the print is a rank-2 form, so a rank-3
 // array prints its pool.
-let T = [[[1, 2, 3], [4, 5], [6]], [[7, 8], [9]], [[10]]]
+let T = Int64([[[1, 2, 3], [4, 5], [6]], [[7, 8], [9]], [[10]]])
 let t012 = T(0, 1, 2)
 let t210 = T(2, 1, 0)
 let t120 = T(1, 2, 0)

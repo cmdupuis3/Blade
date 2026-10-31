@@ -1,0 +1,31 @@
+// TEST: Int32 Arith
+// ============================================================================
+// Int32 arithmetic wraps modulo 2^32 in every lane, also beside an integer
+// literal (`i + 1` is Int32: the literal adapts to the width of its partner).
+// ============================================================================
+let mx: Int32 = 2147483647
+let wrap = mx + 1
+let cmp = mx + 1 > mx
+let half = (mx + 1) / 2
+let rem = (mx + 3) % 7
+let mul = mx * 3
+let sub = Int32(-2147483647) - 2
+let sq = mx ^ 2
+let xs: Array<Int32 like Idx<4>> = [2147483647, 1, -5, 7]
+let total = reduce(xs, (+))
+let bumped = xs + 1 |> compute
+let scaled = xs * 2 |> compute
+let q = xs / 2 |> compute
+// EXPECT: mx = 2147483647
+// EXPECT: wrap = -2147483648
+// EXPECT: cmp = false
+// EXPECT: half = -1073741824
+// EXPECT: rem = 0
+// EXPECT: mul = 2147483645
+// EXPECT: sub = 2147483647
+// EXPECT: sq = 1
+// EXPECT: xs = [2147483647, 1, -5, 7]
+// EXPECT: total = -2147483646
+// EXPECT: bumped = [-2147483648, 2, -4, 8]
+// EXPECT: scaled = [-2, 2, -10, 14]
+// EXPECT: q = [1073741823, 0, -2, 3]

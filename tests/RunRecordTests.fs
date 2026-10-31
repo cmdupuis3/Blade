@@ -125,7 +125,7 @@ let runRunRecordTests () : BlockResult =
          check "emission: the folded input is baked with its content hash"
              (cpp.Contains "\"folded\", \"\", \"content\", \"") cpp)
     // A program with no provider read has an empty manifest -- and still a record.
-    (match Blade.Lowering.lower "let x = 1.0 + 2.0\n" with
+    (match Blade.Lowering.lower "let x: Float64 = 1.0 + 2.0\n" with
      | Error e -> check "manifest: plain program lowers" false e
      | Ok ir ->
          let entries = RunRecord.manifestOf ir.Modules (Blade.ProviderStatics.drainFoldLog ())
@@ -213,7 +213,7 @@ let runRunRecordTests () : BlockResult =
     // failure there is the host's BL8005 too. Both wrapper families: the
     // rectangular map and the triangular (simplicial) comm kernel.
     let plainCudaSource =
-        "let A = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+        "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
         + "let B = method_for(A) <@> lambda(x) where cuda(block: 32) -> x * 2.0 + 1.0 |> compute\n"
         + "let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y |> compute\n"
     (try
@@ -367,7 +367,7 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
     let memberPart =
         "type Row = Idx<9>\n"
         + "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5]\n"
-        + "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]\n"
+        + "let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])\n"
         + "let keep = mask(customer, lambda(c) -> contains(evens, c))\n"
     // the rank-3 ordered orbit scatter's row-owned pull (BLADE_FP_REPRO=1,
     // threads on, BLADE_TILE_TUNE pull_min=0): its leaf stage notes its form
@@ -386,7 +386,7 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
     // as its own build, on a team of 1 (the serial slice form, no team opened)
     let withForms = [ "blade_run_record"; "program"; "status"; "executable"; "policy"; "routes"; "rng"; "forms"; "inputs" ]
     let fixtures =
-        [ ("rr_opt_none", "let xs = [1, 2, 3]\nlet s = reduce(xs, (+))\n", baseMembers, false, None, "3")
+        [ ("rr_opt_none", "let xs = Int64([1, 2, 3])\nlet s = reduce(xs, (+))\n", baseMembers, false, None, "3")
           ("rr_opt_member", memberPart, baseMembers @ [ "member_hoist"; "member_hoist_dropped" ], true, None, "3")
           ("rr_opt_forms", formsPart, withForms, false, Some ("row-pull", 3, 3), "3")
           ("rr_opt_forms_serial", formsPart, withForms, false, Some ("serial-leaf3", 1, 1), "1")

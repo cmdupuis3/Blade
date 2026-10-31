@@ -14,7 +14,7 @@
 // strict forms (the ordered scatter, the pull, the row action) under
 // BLADE_FP_REPRO=1 by raw bits. QUOTED pins: a numeric `-0.0` pin accepts
 // either zero; the reciprocal pins the sign.
-let static p = 7
+let static p: Int64 = 7
 type Var = Idx<p>
 type Obs = Idx<3>
 let w = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.5 |> compute

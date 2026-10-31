@@ -12,9 +12,9 @@
 // known -- which is why the two results below must agree cell for cell.
 Unit day
 
-let region = [0, 1, 0, 1]
+let region = Int64([0, 1, 0, 1])
 let t: Array<Float64<day> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-let s = [10.0, 20.0, 30.0, 40.0]
+let s = Float64([10.0, 20.0, 30.0, 40.0])
 let gk = group_keys(region)
 let gt = group_by(t, gk)
 let gs = group_by(s, gk)

@@ -30,7 +30,7 @@ let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [
 let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]
 let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute
 
-let a3 = [1.0, 2.0, 3.0]
+let a3 = Float64([1.0, 2.0, 3.0])
 let outerProd = lambda(u, v) where comm(u, v) -> u * v
 let S = method_for(a3, a3) <@> outerProd |> compute
 let D = decompact(S, 0)

@@ -8,7 +8,7 @@
 // checker's, before any build knob is read).
 type T = Idx<4>
 type X = Idx<3>
-let mut hits = 0.0
+let mut hits: Float64 = 0.0
 
 function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
     method_for(u) <@> lambda(v) where omp(v: 1) -> {

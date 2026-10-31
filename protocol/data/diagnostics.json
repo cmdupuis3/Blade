@@ -17,8 +17,8 @@
     },
     "BL0003": {
       "title": "invalid numeric literal",
-      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
-      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
+      "explanation": "A numeric token could not be parsed as a signed 64-bit integer or a floating-point value: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
+      "fix": "Rewrite the literal in a form the target type accepts. An integer literal defaults to Int32 when it fits and Int64 otherwise; a value outside Int64 must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
       "examples": [
         "tests/corpus/diagnostics/081_number_glued_to_name_rejects.blade",
         "tests/corpus/diagnostics/086_numeric_literal_malformed_rejects.blade"
@@ -54,13 +54,14 @@
     },
     "BL1003": {
       "title": "removed loop or malformed recursive array",
-      "explanation": "Blade has no imperative loop, and this code is the steer away from one. It fires for the removed `for x in a..b { ... }` statement (at top level and inside a block alike) and for `while` / `do` written as a statement. It also guards the construct a sequential loop becomes: a `let rec` recursive array has a rigid form -- an explicit type annotation, `match <the array itself> with`, a base arm `| zero -> zero`, an optional seed arm `| zero :: n -> zero :: <slice>`, and an inductive arm `| prefix :: n -> prefix :: <slice>` -- and any departure from it is reported here. The two guards are not interchangeable: a recursive-array arm takes `while` (defined until the condition goes false, frozen after), only on the inductive arm; an ordinary match arm takes `if` (a failing guard falls through to the next arm). Each spelled on the other is this code.",
+      "explanation": "Blade has no imperative loop, and this code is the steer away from one. It fires for the removed `for x in a..b { ... }` statement (at top level and inside a block alike) and for `while` / `do` written as a statement. It also guards the construct a sequential loop becomes: a `let rec` recursive array has a rigid form -- an explicit type annotation, `match <the array itself> with`, a base arm `| zero -> zero`, an optional seed arm `| zero :: n -> zero :: <slice>`, and an inductive arm `| prefix :: n -> prefix :: <slice>` -- and any departure from it is reported here. The two guards are not interchangeable: a recursive-array arm takes `while` (defined until the condition goes false, frozen after), only on the inductive arm; an ordinary match arm takes `if` (a failing guard falls through to the next arm). Each spelled on the other is this code. It is also the steer for the removed capitalized booleans: `True` / `False` are spelled `true` / `false`.",
       "fix": "Pick the declarative construct the loop was standing in for. A recurrence, time-stepping or running state is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`); iterate-until-converged is that array's inductive arm with a `while` guard over a budget extent. A fold is `reduce(...)`, and a parallel map is array arithmetic or `method_for(range<...>) <@> lambda(...)`. If the `let rec` itself was refused, the message names the part of the form that is wrong.",
       "examples": [
         "tests/corpus/diagnostics/045_for_in_removed.blade",
         "tests/corpus/diagnostics/078_while_loop_steer.blade",
         "tests/corpus/diagnostics/079_while_on_ordinary_match_arm_rejects.blade",
-        "tests/corpus/recursive-arrays/014_while_guard_on_seed_rejects.blade"
+        "tests/corpus/recursive-arrays/014_while_guard_on_seed_rejects.blade",
+        "tests/corpus/numeric-defaults/021_capital_true_rejects.blade"
       ],
       "docs": [
         "docs/formalism.md",
@@ -69,13 +70,14 @@
     },
     "BL1004": {
       "title": "ill-formed type spelling",
-      "explanation": "The text sits where a type belongs and uses a type former, but spells no type. Two formers raise it. `Tuple<...>` is either one integer WIDTH of at least 2 (`Tuple<2>`, element types inferred) or a list of at least two component TYPES (`Tuple<Float64, Float64>`): a width of 0 or 1, a negative width, an empty `Tuple<>`, a single component type, or a width mixed with component types are all refused -- there is no 1-tuple, because `(e)` is grouping. The caret `H^r` builds a rank-r array of H elements: a concrete element type needs an integer literal rank (`Float64^1`; a variable rank belongs to a type variable, `T^r`), a builtin that is not an array element type cannot take a caret, and neither can an alias that is already an array type (that would be an array of arrays, which the caret does not build).",
+      "explanation": "The text sits where a type belongs and uses a type former, but spells no type. Two formers raise it. `Tuple<...>` is either one integer WIDTH of at least 2 (`Tuple<2>`, element types inferred) or a list of at least two component TYPES (`Tuple<Float64, Float64>`): a width of 0 or 1, a negative width, an empty `Tuple<>`, a single component type, or a width mixed with component types are all refused -- there is no 1-tuple, because `(e)` is grouping. The caret `H^r` builds a rank-r array of H elements: a concrete element type needs an integer literal rank (`Float64^1`; a variable rank belongs to a type variable, `T^r`), a builtin that is not an array element type cannot take a caret, and neither can an alias that is already an array type (that would be an array of arrays, which the caret does not build). The width-less numeric names are refused here too: only bit-sized names exist (`Int32`, `Int64`, `Float32`, `Float64`, `Complex64`, `Complex128`), so `Float`, `Int` and `Double` -- in type and in cast position -- are steered to the bit-sized spelling.",
       "fix": "For a tuple, write a literal width of 2 or more, or at least two component types, never a mixture. For a caret, give a concrete element a literal rank (`Float64^1`, `Int64^2`), use a type variable when the element or the rank is generic (`T^1`, `T^r`), and name an existing array type directly instead of raising it with `^`.",
       "examples": [
         "tests/corpus/tuples/005_tuple_width_one_rejects.blade",
         "tests/corpus/tuples/019_tuple_width_type_mixture_rejects.blade",
         "tests/corpus/functions/173_concrete_element_caret_variable_rank_rejects.blade",
-        "tests/corpus/functions/182_caret_on_array_alias_rejects.blade"
+        "tests/corpus/functions/182_caret_on_array_alias_rejects.blade",
+        "tests/corpus/numeric-defaults/023_float_type_rejects.blade"
       ],
       "docs": [
         "docs/formalism.md"
@@ -402,7 +404,7 @@
     },
     "BL3020": {
       "title": "implicit numeric conversion",
-      "explanation": "An ERROR: Blade converts nothing implicitly (formalism 2.4). `1` is an Int64 and `1.0` a Float64 -- the decimal point is the type, as in F#. An arithmetic operator (`+ - * / %`) or a comparison whose operands' elements -- scalars, or array elements, elementwise -- are an integer and a float or complex is refused at the integer operand, whether it is a literal (`x * 2` over a Float64 `x`) or a variable (`n * 0.5` over an Int64 `n`). Two widths of one class (Float32 and Float64, Int32 and Int64, Complex64 and Complex128) are refused unless one side is a literal, which adapts to its partner's width (`a32 * 1.0` is Float32). A real beside a complex is the exact embedding at the complex's component width (`w * z` over Float64 and Complex128) or as a float literal. The same rule refuses an integer -- literal or variable -- passed to a Float64 parameter or bound to a Float64-annotated name. The exponent of `^` is the one polymorphic position.",
+      "explanation": "An ERROR: Blade converts nothing implicitly (formalism 2.4). `1` defaults to Int32 and `1.0` to Float32; the decimal point selects the numeric class, and context can fix the width within that class. An arithmetic operator (`+ - * / %`) or a comparison whose operands' elements -- scalars, or array elements, elementwise -- are an integer and a float or complex is refused at the integer operand, whether it is a literal (`x * 2` over a Float64 `x`) or a variable (`n * 0.5` over an Int64 `n`). Two widths of one class (Float32 and Float64, Int32 and Int64, Complex64 and Complex128) are refused unless one side is a literal, which adapts to its partner's width (`a32 * 1.0` is Float32). A real beside a complex is the exact embedding at the complex's component width (`w * z` over Float64 and Complex128) or as a float literal. The same rule refuses an integer -- literal or variable -- passed to a Float64 parameter or bound to a Float64-annotated name. The exponent of `^` is the one polymorphic position.",
       "fix": "Write the literal in its type (`2.0`, not `2`), or convert with the type in call position -- `Float64(n)` for a scalar, `Float64(xs)` for an array (a cast converts the element only and keeps the shape) -- or convert the other operand if integer arithmetic was meant (`Int64(floor(x))`).",
       "examples": [
         "tests/corpus/casts/520_int_float_mix_rejects.blade"
@@ -523,7 +525,7 @@
     },
     "BL3030": {
       "title": "invalid recursive array definition",
-      "explanation": "A `let rec` recursive array is ill-formed: it is used outside `let rec NAME: Array<..> = match NAME with ...`, its leading (recursion) axis has no static extent of at least 1, its element type is not Float / Int / Complex, its slice axes are not static, or its `while` guard is not a Bool predicate.",
+      "explanation": "A `let rec` recursive array is ill-formed: it is used outside `let rec NAME: Array<..> = match NAME with ...`, its leading (recursion) axis has no static extent of at least 1, its element type is not a supported floating-point, integer, or complex type, its slice axes are not static, or its `while` guard is not a Bool predicate.",
       "fix": "Annotate the binding with an Array type over a static recursion axis (`let rec x: Array<Float64 like Step> = match x with ...`) and make the `while` guard a comparison or boolean expression.",
       "examples": [
         "tests/corpus/recursive-arrays/015_while_guard_not_bool_rejects.blade"
@@ -1090,7 +1092,7 @@
     "BL8011": {
       "title": "co-iteration extent mismatch",
       "explanation": "Two operands walked together in one loop nest -- `a + b`, `zip(a, b)`, `method_for(zip(...))`, or gram's contracted axis -- disagree on the runtime extent of a shared axis. The nest is bounded by its first operand, so the shorter one would be read past its end. The compile-time twin is BL3016, which compares literal extents at the call site; inside a function over `T^k` parameters the extents belong to the caller, and a curried or let-bound partial application never reaches the call-site check, so this guard runs once before the nest on both the compiled and interpreted lanes.",
-      "fix": "Pass operands of equal extent on every shared axis, or declare the parameters with named index types (`Array<Float like I>`) so the disagreement is refused at the call site instead of at runtime.",
+      "fix": "Pass operands of equal extent on every shared axis, or declare the parameters with named index types (`Array<Float64 like I>`) so the disagreement is refused at the call site instead of at runtime.",
       "examples": [
         "tests/corpus/functions/128_curried_extent_mismatch_aborts.blade"
       ],

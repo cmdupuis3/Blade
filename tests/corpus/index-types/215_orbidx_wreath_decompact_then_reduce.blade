@@ -15,7 +15,7 @@
 //
 // n = 2 keeps the dense image at 2^4 = 16 cells so the pinned fibre can be read
 // straight off D's printed rows.
-let A = [1.0, 2.0]
+let A = Float64([1.0, 2.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

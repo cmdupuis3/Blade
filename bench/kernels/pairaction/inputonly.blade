@@ -1,6 +1,6 @@
 // pairaction inputonly twin -- the input generation and input_checksum of pairaction.blade, the
 // kernel (W, z, u_r, y_r) omitted (README section 5: net = median(total) - median(inputonly)).
-let static n = 2503    // SIZE n
+let static n: Int64 = 2503    // SIZE n
 type Pts = Idx<n>
 type Dim = Idx<3>
 
@@ -19,6 +19,6 @@ let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) where omp(i: 1) ->
 let v0 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 4) |> compute
 let v1 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 5) |> compute
 let v2 = method_for(range<Pts>) <@> lambda(i) where omp(i: 1) -> lcg(i, 10000019 * 6) |> compute
-let checksum = 0.0
+let checksum: Float64 = 0.0
 let input_checksum = reduce(reduce(pts, (+)), lambda(p, q) where omp -> p + q, 0.0)
     + reduce(v0, lambda(p, q) where omp -> p + q, 0.0) + reduce(v1, lambda(p, q) where omp -> p + q, 0.0) + reduce(v2, lambda(p, q) where omp -> p + q, 0.0)

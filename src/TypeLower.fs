@@ -89,7 +89,7 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
       Functions = projected
       CalledFunctions = ref Set.empty
       ProviderRoots = Map.empty
-      Segments = Map.empty
+      Segments = Map.empty; Widths = Map.empty
       Structs = env.StructStatics }
 
 let evalStaticIntExpr (env: TypeEnv) (expr: Expr) : int option =
@@ -237,8 +237,8 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
 /// this list used to be a `match` local to `prescanTypeVarNames`, which is
 /// still the only consumer of the predicate below.
 let builtinScalarNames : string list =
-    [ "Int"; "Int32"; "Int64"
-      "Float"; "Float32"; "Float64"; "Double"
+    [ "Int32"; "Int64"
+      "Float32"; "Float64"
       "Complex64"; "Complex128"
       "Bool"; "Void"; "Nat"; "String"; "Char"
       "Poly"; "Array" ]
@@ -258,8 +258,8 @@ let isBuiltinScalar (name: string) : bool = Set.contains name builtinScalarSet
 /// question (which bases OWN a unit slot) and is not interchangeable.
 let isConcreteTypeBaseName (name: string) : bool =
     match name with
-    | "Int" | "Int32" | "Int64"
-    | "Float" | "Float32" | "Float64" | "Double"
+    | "Int32" | "Int64"
+    | "Float32" | "Float64"
     | "Complex64" | "Complex128"
     | "Bool" | "Void" | "Nat" | "String" | "Char"
     | "Poly" | "Array" | "Dist" -> true
@@ -449,9 +449,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | _ -> baseType
         let tryResolveUnitArg baseType args = tryResolveTagArg baseType baseType args
         match name with
-        | "Int" | "Int32" -> tryResolveUnitArg (IRTScalar ETInt32) args
+        | "Int32" -> tryResolveUnitArg (IRTScalar ETInt32) args
         | "Int64" -> tryResolveUnitArg (IRTScalar ETInt64) args
-        | "Float" | "Float64" | "Double" -> tryResolveUnitArg (IRTScalar ETFloat64) args
+        | "Float64" -> tryResolveUnitArg (IRTScalar ETFloat64) args
         | "Float32" -> tryResolveUnitArg (IRTScalar ETFloat32) args
         | "Complex64" -> tryResolveUnitArg (IRTScalar ETComplex64) args
         | "Complex128" -> tryResolveUnitArg (IRTScalar ETComplex128) args
@@ -1917,8 +1917,11 @@ let resolveRaggedLensSource (env: TypeEnv) (lengths: IRExpr) : RaggedLensSource 
     // than falling through to RlRuntime: a negative row length is nonsense,
     // and reporting it as "the lens disagrees with the literal" beats "the
     // lens is not compile-time", which sends the reader after the wrong fix.
-    let ofTypedValue (te: TypedExpr) =
+    let rec ofTypedValue (te: TypedExpr) =
         match te.Kind with
+        // Explicit array casts retain a checked value boundary. A materialized
+        // integer literal underneath is still a compile-time lens.
+        | TExprCompute inner -> ofTypedValue inner
         | TExprArrayLit (rows, _) ->
             rows
             |> List.map (fun e ->

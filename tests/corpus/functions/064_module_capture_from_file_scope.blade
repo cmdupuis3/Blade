@@ -17,34 +17,34 @@
 // ============================================================================
 
 // (1) forwarded as a capture argument by a wrapper closure inside a function.
-let two = 2.0
+let two: Float64 = 2.0
 function scaled(x: Float64) = {
     let g = lambda(t: Float64) -> t * two
     g(x)
 }
-let s = scaled(5.0)
+let s = scaled(Float64(5.0))
 // EXPECT: s = 10.0
 
 // (2) read directly by a kernel body inlined into a function's loop nest.
-let k = 3.0
-function triple(x: Array<Float like Idx<4>>) = (x <@> lambda(t) -> t * k) |> compute
-let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let k: Float64 = 3.0
+function triple(x: Array<Float64 like Idx<4>>) = (x <@> lambda(t) -> t * k) |> compute
+let a: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 let t3 = triple(a)
 // EXPECT: t3 = [3.0, 6.0, 9.0, 12.0]
 
 // (3) an ARRAY module binding captured by a kernel inside a function: the
 // promoted declaration is the `Array<T,N>` wrapper, and main() still runs the
 // pool allocation and the element stores in place.
-let ts: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-function weighted(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * prodsum(ts, ts)) |> compute
-let b: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let ts: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+function weighted(ws: Array<Float64 like Idx<3>>) = (ws <@> lambda(w) -> w * prodsum(ts, ts)) |> compute
+let b: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let wsum = weighted(b)
 // EXPECT: wsum = [30.0, 60.0, 90.0]
 
 // (4) the promoted binding's RHS need not be a literal: a reduce emits an
 // accumulator loop, and only its leading definition line moves.
 let tot = reduce(ts, (+))
-function byTotal(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * tot) |> compute
+function byTotal(ws: Array<Float64 like Idx<3>>) = (ws <@> lambda(w) -> w * tot) |> compute
 let scaledTot = byTotal(b)
 // EXPECT: tot = 10.0
 // EXPECT: scaledTot = [10.0, 20.0, 30.0]

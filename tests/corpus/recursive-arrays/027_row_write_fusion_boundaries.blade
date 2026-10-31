@@ -20,19 +20,19 @@ function centered(u: Array<Float64 like X>) -> Array<Float64 like X> = u - reduc
 let rec a: Array<Float64 like T, X> =
     match a with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0, 6.0])
     | prefix :: n -> prefix :: centered(prefix(n - 1)) * 0.5 + prefix(0)
 
 let rec b: Array<Float64 like T, X> =
     match b with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0, 6.0])
     | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + prefix(n - 2) * 0.25
 
 let rec r: Array<Float64 like T, X> =
     match r with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0, 6.0])
     | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + prefix(0) * 0.25
 
 let a5 = a((5 : T))

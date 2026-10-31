@@ -8,6 +8,6 @@
 // visible: rows sum to 3 and 7, plus 1.0 each.
 function total(row) = reduce(row, (+))
 let f = lambda(x) -> total(x) + 1.0
-let data = [[1.0, 2.0], [3.0, 4.0]]
+let data = Float64([[1.0, 2.0], [3.0, 4.0]])
 let result = method_for(data) <@> f |> compute
 // EXPECT: result = [4.0, 8.0]

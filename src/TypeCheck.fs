@@ -484,11 +484,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // into a copy of this module's OWN static decls so resolveStatics's
     // fold assertion can see through a `let static x = M.k + 1` reference.
     let crossModuleStaticSeed = importedStaticSeed env modul.Decls
-    let env = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues crossModuleStaticSeed }
+    let env = { env with StaticValues = Map.fold (fun acc k v -> Map.add k (StaticEval.normalizeStatic v) acc) env.StaticValues crossModuleStaticSeed }
     let declsForStaticResolution = seedImportedStaticsIntoDecls crossModuleStaticSeed modul.Decls
     let env, staticAssertErrors =
         match StaticEval.resolveStatics declsForStaticResolution with
         | Ok (se, failures) ->
+            staticWidths.Clear()
+            for kv in se.Widths do staticWidths.[kv.Key] <- kv.Value
             let env' = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues se.Values }
             let errs =
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->

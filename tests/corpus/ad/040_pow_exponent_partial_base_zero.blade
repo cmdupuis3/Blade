@@ -5,7 +5,7 @@ import ad as ad
 // 0^e = 0 -- is 0. Both sweeps now read log(x + guard(x == 0, 1)): exactly
 // log(x) for x <> 0, log(1) = 0 at the base-zero point. The base partial
 // e * x^(e-1) was already finite there.
-function p(x: Float, e: Float) -> Float = x ^ e
+function p(x: Float64, e: Float64) -> Float64 = x ^ e
 let (pv, px, pe) = ad.grad(p)(0.0, 2.5)
 let (pjv, pjt) = ad.jvp(p)(0.0, 2.5, 0.0, 1.0)
 let (pjv2, pjt2) = ad.jvp(p)(0.0, 2.5, 1.0, 0.0)

@@ -5,7 +5,7 @@
 // `ad.grad`'s (seed 1.0), and the message says so.
 import ad as ad
 type J = Idx<4>
-function loss(x: Array<Float like J>) -> Float = {
+function loss(x: Array<Float64 like J>) -> Float64 = {
     x(0) * 2.0 + x(3)
 }
 let x0 = [1.0, 2.0, 3.0, 4.0]

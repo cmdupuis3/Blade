@@ -11,7 +11,7 @@
 // which is what the diagonal bounds max(0, 2 + k) .. min(10, 15 + k) must get
 // right: 78 cells. A kernel that reads a MATRIX at (i, j) keeps the row walk
 // (a diagonal strides it by a row); its value is the same either way.
-let static n = 9
+let static n: Int64 = 9
 type Nx = Idx<n>
 
 static struct Skew {
@@ -24,7 +24,7 @@ static struct Band {
     j: Int64<min=0, max=n-1>
 } where abs(i - j) <= 2
 
-let cells = reduce(method_for(range<Skew>) <@> lambda(i, j) -> 1.0, lambda(p, q) where omp -> p + q, 0.0)
+let cells = reduce(method_for(range<Skew>) <@> lambda(i, j) -> Float64(1.0), lambda(p, q) where omp -> p + q, 0.0)
 // EXPECT: cells = 78.0
 let lex = reduce(method_for(range<Skew>) <@> lambda(i, j) -> Float64(i * 100 + j), lambda(p, q) where omp -> p + q, 0.0)
 // EXPECT: lex = 43572.0

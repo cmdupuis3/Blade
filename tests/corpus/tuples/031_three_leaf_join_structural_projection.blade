@@ -27,7 +27,7 @@ function pair(x: Float64^1) -> (Float64, Float64) = {
     let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
     t[0]
 }
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let a = f(x)
 let b = g(x)
 let c = h(x)

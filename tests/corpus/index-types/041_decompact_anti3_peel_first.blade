@@ -1,5 +1,5 @@
 // TEST: Decompact Anti3 Peel First
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let L = method_for(A, A, A)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
 let anti = L <@> reynolds(f, Antisymmetric) |> compute

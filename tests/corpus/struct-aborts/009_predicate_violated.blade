@@ -2,10 +2,10 @@
 // The guard calls the named predicate at runtime; a violating construction
 // panics like any inlined conjunct.
 // ABORT: Constraint violation in CGPath
-static function tri_hi(a: Int, b: Int, c: Int) -> Bool = c <= a + b
+static function tri_hi(a: Int32, b: Int32, c: Int32) -> Bool = c <= a + b
 struct CGPath {
-    l1: Int,
-    l2: Int,
-    l_out: Int
+    l1: Int32,
+    l2: Int32,
+    l_out: Int32
 } where tri_hi(l1, l2, l_out)
 let p = CGPath { l1 = 1, l2 = 2, l_out = 5 }

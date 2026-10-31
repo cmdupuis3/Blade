@@ -3,7 +3,7 @@
 // path (extractLiteralValues silently returns [] for strings, so the
 // fast scalar path falls through). Each element renders via litToCpp.
 let words = ["forest", "urban", "farmland"]
-let count = if words(0) == "forest" then 1 else 0
-let count2 = count + (if words(1) == "urban" then 1 else 0)
-let count3 = count2 + (if words(2) == "farmland" then 1 else 0)
+let count: Int64 = if words(0) == "forest" then 1 else 0
+let count2 = count + (if words(1) == "urban" then Int64(1) else Int64(0))
+let count3 = count2 + (if words(2) == "farmland" then Int64(1) else Int64(0))
 // EXPECT: count3 = 3

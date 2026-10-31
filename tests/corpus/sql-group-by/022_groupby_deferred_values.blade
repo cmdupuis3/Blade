@@ -8,9 +8,9 @@
 // (same machinery as |> compute) before grouping. The second group_by over
 // the same binding confirms the forced materialization happens exactly once
 // (no C++ redefinition of w).
-let region = [0, 1, 2, 0, 1, 2]
-let vals = [1, 0, 2, 0, 0, 3]
-let w = method_for(vals) <@> lambda(q) -> if q > 0 then 1.0 else 0.0
+let region = Int64([0, 1, 2, 0, 1, 2])
+let vals = Int64([1, 0, 2, 0, 0, 3])
+let w = method_for(vals) <@> lambda(q) -> if q > 0 then Float64(1.0) else Float64(0.0)
 let gk = group_keys(region)
 let grouped = group_by(w, gk)
 let counts = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute

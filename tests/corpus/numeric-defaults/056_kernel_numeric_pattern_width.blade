@@ -1,0 +1,7 @@
+// TEST: numeric pattern literals wait for the kernel operand width
+let ints = Int64([0, 1, 2])
+let im = method_for(ints) <@> lambda(k) -> match k with | 0 -> 1 | _ -> 2 |> compute
+let small = [0, 1]
+let sm = method_for(small) <@> lambda(k) -> match k with | 0 -> 1 | _ -> 2 |> compute
+// EXPECT: im = [1, 2, 2]
+// EXPECT: sm = [1, 2]

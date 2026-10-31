@@ -5,7 +5,7 @@
 // first row 1, 2, 3; the join folds it twice and writes nothing.
 type I = Idx<2>
 type J = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
 let row = m((0 : I))
 let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))

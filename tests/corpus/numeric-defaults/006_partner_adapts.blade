@@ -1,0 +1,14 @@
+// TEST: a literal takes the width of its operator partner, widening exactly
+// ============================================================================
+// Rule 5: beside a Float64 operand, `0.1` IS the double 0.1 (not the Float32
+// 0.1 widened), so subtracting the literal again cancels exactly. Beside an
+// Int64 operand an integer literal is an Int64.
+// ============================================================================
+let one: Float64 = 1.0
+let t = one * 0.1
+let u = t - 0.1
+let n: Int64 = 3000000000
+let s = n + 1
+let r: Int64 = s
+// EXPECT: u = 0.0
+// EXPECT: r = 3000000001

@@ -4,6 +4,6 @@
 // The body calls `c(0)` with ONE argument and applies what it returns: a
 // function of two parameters is not that (the generic body is one call per
 // application). Write `c(0, 1)` to take it.
-function cc(c) = c(0)(1)
+function cc(c) = c(Int64(0))(Int64(1))
 function f2(i: Int64, j: Int64) = Float64(i + j)
 let r = cc(f2)

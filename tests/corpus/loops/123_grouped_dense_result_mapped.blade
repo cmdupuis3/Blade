@@ -36,9 +36,9 @@
 // grid row k = (fs * prodsum_k, fs); mag2(z) = re^2 + im^2; reduce folds the
 // innermost axis, so `s` is one cell per FREQUENCY after the transpose.
 // ============================================================================
-let region = [0, 1, 0, 1]
-let a = [1.0, 2.0, 3.0, 4.0]
-let b = [10.0, 20.0, 30.0, 40.0]
+let region = Int64([0, 1, 0, 1])
+let a = Float64([1.0, 2.0, 3.0, 4.0])
+let b = Float64([10.0, 20.0, 30.0, 40.0])
 let fs: Array<Float64 like Idx<2>> = [1.0, 2.0]
 
 function mag2(z: Complex128) = real(z)^2 + imag(z)^2

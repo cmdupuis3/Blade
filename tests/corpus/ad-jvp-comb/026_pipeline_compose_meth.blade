@@ -7,10 +7,10 @@ import ad as ad
 
 type I = Idx<3>
 
-function s1(x: Float) -> Float = x + 1.0
-function s2(y: Float) -> Float = y * y
+function s1(x: Float64) -> Float64 = x + 1.0
+function s2(y: Float64) -> Float64 = y * y
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let L = method_for(a)
     let m = (L <@> s1) @>> (L <@> s2) |> compute
     reduce(m, (+))

@@ -4,7 +4,7 @@
 // land. At module level the scope is the whole program, so a block may hand
 // such a closure to a module binding.
 function tally(v: Array<Float64 like Idx<4>>) = {
-    let mut seen = 0.0
+    let mut seen: Float64 = 0.0
     let bump = lambda(x: Float64) -> {
         seen = seen + x
         seen
@@ -14,23 +14,23 @@ function tally(v: Array<Float64 like Idx<4>>) = {
     seen + a + b
 }
 function ksum(v: Array<Float64 like Idx<4>>) = {
-    let mut acc = 0.0
+    let mut acc: Float64 = 0.0
     let w = method_for(v) <@> lambda(x) -> {
         acc = acc + x
         x * 2.0
     } |> compute
     acc + reduce(w, (+))
 }
-let r1 = tally([1.0, 2.0, 3.0, 4.0])
-let r2 = ksum([1.0, 2.0, 3.0, 4.0])
+let r1 = tally(Float64([1.0, 2.0, 3.0, 4.0]))
+let r2 = ksum(Float64([1.0, 2.0, 3.0, 4.0]))
 let c = {
-    let mut n = 10
+    let mut n: Int64 = 10
     lambda(k: Int64) -> {
         n = n + k
         n
     }
 }
-let r3 = c(1)
+let r3 = c(Int64(1))
 let r4 = c(5)
 // EXPECT: r1 = 7.0
 // EXPECT: r2 = 30.0

@@ -7,7 +7,7 @@
 // j = [2,3,4,5]: j0*j3 + sum = 10 + 14 = 24. Seed a=[1,0]: 5 + 1 = 6.
 import ad as ad
 
-function f(a: Array<Float like Idx<2>>, b: Array<Float like Idx<2>>) -> Float = {
+function f(a: Array<Float64 like Idx<2>>, b: Array<Float64 like Idx<2>>) -> Float64 = {
     let j = join(a, b, 0)
     j(0) * j(3) + reduce(j, (+))
 }

@@ -11,7 +11,7 @@
 // ============================================================================
 type Row = Idx<5>
 let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]
-let stored = [4, 9, 7]
+let stored = Int64([4, 9, 7])
 let S1 = stored
 let S2 = S1
 let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute

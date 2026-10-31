@@ -114,8 +114,8 @@ let isUnitExprArg (tokens: Token list) : bool =
 /// `Poly` and `Void` are lexer keywords and never reach the name arm.
 let isCaretElementBaseName (name: string) : bool =
     match name with
-    | "Int" | "Int32" | "Int64"
-    | "Float" | "Float32" | "Float64" | "Double"
+    | "Int32" | "Int64"
+    | "Float32" | "Float64"
     | "Complex64" | "Complex128"
     | "Bool" | "String" | "Char" -> true
     | _ -> false
@@ -361,6 +361,9 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
              expectGt afterElem >>= fun _ remaining ->
              success (TyDist (orderExpr, elemType, [])) remaining)
 
+    | Some (TokIdent name0) when isWidthlessTypeName name0 ->
+        let line, col = currentPos tokens
+        errorC "BL1004" (widthlessTypeMessage name0) line col
     | Some (TokIdent name0) ->
         // A dotted run is a qualified type path (`store.index.y`); a bare
         // name is unaffected.

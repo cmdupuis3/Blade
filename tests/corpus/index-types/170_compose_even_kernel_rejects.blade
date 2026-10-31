@@ -8,7 +8,7 @@
 // per-stage typing now runs the same gate per stage: stage 1 (odd, v*2.0)
 // inherits the antisymmetric class legitimately; stage 2 (even, v*v) must
 // refuse it exactly as the direct spelling does.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let o1 = object_for(lambda(v) -> v * 2.0)

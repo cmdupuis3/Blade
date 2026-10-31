@@ -232,6 +232,8 @@ type GenericObligation =
     /// literal); an integer instance would hand a T-typed result a Float64
     /// value (a silent truncation), so it is refused at the call.
     | GOPromotion of var: int * op: string * partner: ElemType * literal: bool
+    /// A literal-only partner must fit the width selected by each instance.
+    | GOLiteralFit of var: int * op: string * literal: TypedExpr
     /// `a * k` (any arithmetic op) between a generic ARRAY parameter whose
     /// element is a signature variable (`a: T^1`) and a concrete scalar
     /// `partner`: the broadcast's kernel is typed while the element is open,
@@ -319,6 +321,9 @@ type ArrowVariant = {
 type ArrowObligation = {
     Head: int
     Args: IRType list
+    /// Literal-only arguments retain their value trees so a concrete function
+    /// slot may fix their width; a variable argument must never adapt this way.
+    LiteralArgs: TypedExpr option list
     Result: IRType
 }
 
@@ -1538,7 +1543,7 @@ the array's flat storage holds them in." shape detail
     | DistNotIndependent (op, source1, source2, steering) -> $"dist {op}: cumulants combine only for independent distributions -- sources '{source1}' and '{source2}' are not declared independent; {steering}"
     | PplConstraintNeedsImport (func, bare) -> $"function '{func}': constraint '{bare}' belongs to the ppl module -- add `import ppl as <alias>` and write `where <alias>.{bare}(...)`"
     | StructBoundScope (structName, field, bad) -> $"struct {structName}, field '{field}': bound references '{bad}' -- bounds may reference only earlier fields and statics"
-    | StaticStructField (structName, field, why) -> $"static struct {structName}, field '{field}': {why} -- every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)"
+    | StaticStructField (structName, field, why) -> $"static struct {structName}, field '{field}': {why} -- every field of a `static struct` must have a statically evaluable type (Int32/Int64, Float32/Float64, Bool, String, Char, a tuple of those, or another static struct)"
     | BoundsInverted (where_, lo, hi) -> $"{where_}: bounds cross -- min={lo} is greater than max={hi} (bounds are inclusive on both ends, so this type has no values)"
     | BoundsOnAggregate (where_, noun, subject) -> $"{where_}: bounds apply to primitive types, not aggregates -- the bound is applied to {noun}. A bound is a runtime comparison against {subject} itself (formalism 2.4: bounded PRIMITIVES carry runtime-checked bounds), and an aggregate has no such comparison. Write the bound on the ELEMENT type instead -- `Array<Float64<min=.., max=..> like I, J>` is checked cell by cell."
     // Wording must match Unify.fs's rank-bound block: `got` carries the
@@ -2188,7 +2193,9 @@ let freeInferVarsInEnv (subst: Subst) (vars: Map<string, VarInfo>) : Set<int> =
 let generalize (subst: Subst) (envVars: Map<string, VarInfo>) (ty: IRType) : TypeScheme =
     let envFree = freeInferVarsInEnv subst envVars
     let tyFree = freeInferVars subst (subst.Resolve ty)
-    let quantified = Set.difference tyFree envFree |> Set.toList
+    // A synthesized width-flexible literal variable (round 6,
+    // Subst.MarkWideDefault) is ONE binding's width, never a scheme variable.
+    let quantified = Set.difference tyFree envFree |> Set.toList |> List.filter (fun v -> not (subst.IsWideDefault v))
     { QuantifiedVars = quantified; Body = subst.Resolve ty }
 
 // 3. Constant Expression Evaluation (for index extents)

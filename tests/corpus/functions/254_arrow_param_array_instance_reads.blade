@@ -9,7 +9,7 @@
 // still a call of it.
 type L = Idx<3>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
-let v = [10.0, 20.0, 30.0, 40.0]
+let v = Float64([10.0, 20.0, 30.0, 40.0])
 
 function pick(c, i) = c(i)
 let l: Nat<L> = 2
@@ -19,7 +19,7 @@ let tot = reduce(method_for(range<L>) <@> lambda(j) -> pick(A, j), (+))
 // EXPECT: tot = 6.0
 let p = pick(v, 3)
 // EXPECT: p = 40.0
-let f = pick(lambda(k) -> Float64(k) * 3.0, 2)
+let f = pick(lambda(k) -> Float64(k) * 3.0, Int64(2))
 // EXPECT: f = 6.0
 
 function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)

@@ -30,22 +30,22 @@ let static SC = [("A", 1), ("E", 2)]
 let static WC = ml.pg_hom_dim("C4", SC, SC)
 // EXPECT: WC = 9
 
-function drift(x: Array<Float like PgIrrepsIdx<C4, SC>>, pw: Array<Float like Idx<WC>>,
-               v: Array<Float like Idx<2>>, u: Array<Float like Idx<2>>)
-               where ml.equiv(C4), ml.galilean(v, u) -> Float = {
+function drift(x: Array<Float64 like PgIrrepsIdx<C4, SC>>, pw: Array<Float64 like Idx<WC>>,
+               v: Array<Float64 like Idx<2>>, u: Array<Float64 like Idx<2>>)
+               where ml.equiv(C4), ml.galilean(v, u) -> Float64 = {
     let d = v - u
     let y = ml.derive_pg_linear(C4, SC, SC, x, pw)
-    y(0) * (d(0) * d(0) + d(1) * d(1))
+    y(Int64(0)) * (d(0) * d(0) + d(1) * d(1))
 }
 
 // The A cell of the layer is pw(0) * x(0) = 2 * 1 = 2; d = (3, 4), so the
 // squared speed is 25 and the readout is 50.
-let pw = [2.0,
+let pw = Float64([2.0,
           3.0, 0.0 - 1.0,
           0.5, 4.0,
           0.0 - 2.0, 1.5,
-          0.25, 0.0 - 3.0]
-let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+          0.25, 0.0 - 3.0])
+let xs = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let r = drift(xs, pw, [4.0, 5.0], [1.0, 1.0])
 // EXPECT: r = 50.0
 

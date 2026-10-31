@@ -383,8 +383,12 @@ type private UValue =
 // in unfoldModule). Opaque leaves keep their own original spans.
 let rec private staticValueToExpr (sv: StaticValue) : Expr =
     match sv with
-    | SVInt n -> syn (ExprLit (LitInt n))
-    | SVFloat f -> syn (ExprLit (LitFloat f))
+    // A folded value already has a width. Re-emitting a bare literal would
+    // default it again (Float64(2.0) became Float32 after static unfolding).
+    | SVInt n -> syn (ExprApp (syn (ExprVar "Int64"), [syn (ExprLit (LitInt n))]))
+    | SVInt32 n -> syn (ExprApp (syn (ExprVar "Int32"), [syn (ExprLit (LitInt (int64 n)))]))
+    | SVFloat f -> syn (ExprApp (syn (ExprVar "Float64"), [syn (ExprLit (LitFloat f))]))
+    | SVFloat32 f -> syn (ExprApp (syn (ExprVar "Float32"), [syn (ExprLit (LitFloat (float f)))]))
     | SVBool b -> syn (ExprLit (LitBool b))
     | SVString s -> syn (ExprLit (LitString s))
     | SVUnit -> syn (ExprLit LitUnit)
@@ -446,7 +450,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
                       (inInline: bool) (fuel: int) (expr: Expr) : UValue =
     if fuel <= 0 then
         raise (UnfoldError "static unfolding: step limit exceeded (possible unbounded staged recursion)")
-    match evalExpr ctx.Env maxSteps expr with
+    match evalExprNarrow ctx.Env maxSteps expr with
     | Ok sv -> UGround sv
     | Error _ ->
         let recur = ueval ctx staged inInline (fuel - 1)

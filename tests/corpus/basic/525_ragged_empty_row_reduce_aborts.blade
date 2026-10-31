@@ -6,6 +6,6 @@
 // empty row); it now guards the peeled row's carried length and prints the
 // same `error[BL8003]` and `  --> file:line` lines as the C++ lane.
 // ============================================================================
-let rows = [[1.0, 2.0], [3.0], []]
+let rows = [Float64([1.0, 2.0]), Float64([3.0]), []]
 let sums = method_for(rows) <@> lambda(row) -> reduce(row, (+)) |> compute
 // ABORT: error[BL8003]: reduce: empty array, no reduction possible

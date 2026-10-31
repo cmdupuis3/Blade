@@ -1,0 +1,11 @@
+// TEST: dependent defaults read supplied literals at their required slot width
+Unit gain: 1
+function amp(x: Float64, g: Float64<gain> = x * 2.0) -> Float64 = x + g
+function narrow(x: Float32, g: Float32<gain> = x * 2.0) -> Float32 = x + g
+let a: Float64 = amp(3.0)
+let b: Float32 = narrow(3.0)
+function half(n: Int64, h: Int64 = n / 2) = h
+let c: Int64 = half(2147483647 + 1)
+// EXPECT: a = 9.0
+// EXPECT: b = 9.0
+// EXPECT: c = 1073741824

@@ -8,14 +8,14 @@ import ad as ad
 
 type I = Idx<3>
 
-function sq(u: Float) -> Float = u * u
+function sq(u: Float64) -> Float64 = u * u
 
-function fnamed(a: Array<Float like I>) -> Float = {
+function fnamed(a: Array<Float64 like I>) -> Float64 = {
     let m = object_for(sq) <@> a |> compute
     reduce(m, (+))
 }
 
-function fintr(a: Array<Float like I>) -> Float = {
+function fintr(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a) <@> sqrt |> compute
     reduce(m, (+))
 }

@@ -6,7 +6,7 @@
 // uses a level coordinate beyond the read, an inner seed that mentions the
 // outer coordinate, a fold kernel that may panic (integer `/`), and a rank-4
 // pool.
-let static p = 5
+let static p: Int64 = 5
 type Var = Idx<p>
 type Obs = Idx<3>
 function radd(a: Float64, b: Float64) where repro -> Float64 = a + b

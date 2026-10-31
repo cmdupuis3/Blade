@@ -39,6 +39,6 @@ let antiLiteral = method_for(range<AntisymIdx<2, 3>>) <@> lambda(i, j) -> B(i) -
 // its iteration values reach A's N3 slots untagged. The alias lines above
 // inherit N3's tag instead and are silent -- which is why the pin is one
 // warning and not three.
-let static n = 3
+let static n: Int64 = 3
 let byExtent = method_for(range<SymIdx<2, n>>) <@> lambda(i, j) -> A(i) + A(j) |> compute
 // EXPECT: byExtent = [[2.0, 3.0, 4.0], [3.0, 4.0], [4.0]]

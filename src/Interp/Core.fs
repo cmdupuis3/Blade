@@ -245,6 +245,7 @@ let private valueNonZero (v: Value) : bool =
     | VFloat f -> f <> 0.0
     | VFloat32 f -> f <> 0.0f
     | VComplex (r, i) -> r <> 0.0 || i <> 0.0
+    | VComplex64 (r, i) -> r <> 0.0f || i <> 0.0f
     | _ -> false
 
 /// Integer projection for loop bounds / counters -- C++ `(int64_t)x` truncates
@@ -270,6 +271,7 @@ let private toF64 (v: Value) : float =
     | VChar c -> float (int c)
     | VBool b -> if b then 1.0 else 0.0
     | VComplex (r, _) -> r
+    | VComplex64 (r, _) -> float r
     | _ -> nan
 
 /// The IRExpr union case name (e.g. "IRZip"), for InterpUnsupported messages.
@@ -502,6 +504,33 @@ let private asDeclaredWidth (e: IRExpr) (v: Value) : Value =
          | IRTScalar ETFloat32 -> VFloat32 (float32 f)
          | IRTUnitAnnotated (IRTScalar ETFloat32, _) -> VFloat32 (float32 f)
          | _ -> v)
+    // A Complex64 node computed through the Complex128 path (a complex
+    // intrinsic: the double function, each part rounded once).
+    | VComplex (r, i) ->
+        (match stripUnits (typeOf e) with
+         | IRTScalar ETComplex64 -> VComplex64 (float32 r, float32 i)
+         | _ -> v)
+    | _ -> v
+
+/// A scalar value converted to the WIDTH a declared type names, as C++
+/// converts at a typed declaration, a parameter or a return (`int32_t mx =
+/// 2147483647L`, a Float64 passed to a `float`): Int64 -> Int32 wraps, a
+/// double -> float rounds once, a Complex128 -> Complex64 rounds each part;
+/// the widenings are exact. Anything that is not a numeric scalar of another
+/// width passes through.
+let coerceScalarTo (ty: IRType) (v: Value) : Value =
+    let rec elemOf (t: IRType) =
+        match t with
+        | IRTScalar et -> Some et
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> elemOf inner
+        | _ -> None
+    match elemOf ty, v with
+    | Some ETInt32, VInt n -> VInt32 (int32 n)
+    | Some ETInt64, VInt32 n -> VInt (int64 n)
+    | Some ETFloat32, VFloat f -> VFloat32 (float32 f)
+    | Some ETFloat64, VFloat32 f -> VFloat (float f)
+    | Some ETComplex64, VComplex (r, i) -> VComplex64 (float32 r, float32 i)
+    | Some ETComplex128, VComplex64 (r, i) -> VComplex (float r, float i)
     | _ -> v
 
 // The evaluator.
@@ -543,9 +572,14 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | _ -> raise (InterpUnsupported $"IRParam '{name}' (qualified or partially-applied reference)")
 
     | IRComplex (re, im) ->
-        let r = toF64 (evalExpr st env re)
-        let i = toF64 (evalExpr st env im)
-        VComplex (r, i)
+        let rv = asDeclaredWidth re (evalExpr st env re)
+        let iv = asDeclaredWidth im (evalExpr st env im)
+        // Float32 parts build a Complex64 (std::complex<float>), as typeOf says.
+        (match typeOf expr with
+         | IRTScalar ETComplex64 ->
+             let f (v: Value) = match v with VFloat32 x -> x | v -> float32 (toF64 v)
+             VComplex64 (f rv, f iv)
+         | _ -> VComplex (toF64 rv, toF64 iv))
 
     // fma(a, b, c): ONE rounding. Math.FusedMultiplyAdd is the hardware fma
     // where the CPU has it and a correctly-rounded software fma otherwise,
@@ -553,10 +587,18 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // -- so this node is bit-identical across lanes under ANY BLADE_FP_CONTRACT
     // (the one arithmetic node for which that is true by construction).
     | IRFma (a, b, c) ->
-        let x = toF64 (evalExpr st env a)
-        let y = toF64 (evalExpr st env b)
-        let z = toF64 (evalExpr st env c)
-        VFloat (System.Math.FusedMultiplyAdd (x, y, z))
+        let av = evalExpr st env a
+        let bv = evalExpr st env b
+        let cv = evalExpr st env c
+        (match typeOf expr with
+        // Three Float32 operands: fmaf, ONE rounding of the exact a*b+c to
+        // float (std::fma(float, float, float), llvm.fma.f32). Never the
+        // double fma rounded again -- the exact product-sum needs more than
+        // 53 bits, so that would double-round.
+        | IRTScalar ETFloat32 ->
+            let f (v: Value) = match v with VFloat32 x -> x | v -> float32 (toF64 v)
+            VFloat32 (System.MathF.FusedMultiplyAdd (f av, f bv, f cv))
+        | _ -> VFloat (System.Math.FusedMultiplyAdd (toF64 av, toF64 bv, toF64 cv)))
 
     // ONE ADDRESSED SAMPLE (D13): the fill's own transform at one address --
     // RandMirror's `_at` draw of a single sample at index `i`, which is the
@@ -595,14 +637,26 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // operands never reach here: Lowering's lowerArrayBinOpsModule rewrites
         // every array-typed binop into a method_for co-iteration combinator,
         // so this arm only ever sees scalars.
-        let lv = evalExpr st env l
-        let rv = evalExpr st env r
+        // Operands are taken at the width the IR declares (a Float32 read
+        // that reached here double-backed is narrowed), and a bare integer
+        // LITERAL beside an Int32 operand adapts to Int32 (formalism 2.4:
+        // "`i32 + 1` is Int32" -- IR.typeOf's literal rule; the C++ lane
+        // renders it as an int, the LLVM lane as an i32), so the operation
+        // wraps at 32 bits and compares at 32 bits.
+        let lv = asDeclaredWidth l (evalExpr st env l)
+        let rv = asDeclaredWidth r (evalExpr st env r)
+        let lv, rv =
+            match l, lv, r, rv with
+            | IRLit (IRLitInt n), VInt _, _, VInt32 _ when Blade.IR.fitsInt32 n -> VInt32 (int32 n), rv
+            | _, VInt32 _, IRLit (IRLitInt n), VInt _ when Blade.IR.fitsInt32 n -> lv, VInt32 (int32 n)
+            | _ -> lv, rv
+        let res = N.evalBinOpAt loc op lv rv
         (match op with
-         | IRCaret | IRMath2 _ -> N.evalBinOpAt loc op (asDeclaredWidth l lv) (asDeclaredWidth r rv)
-         | _ -> N.evalBinOpAt loc op lv rv)
+         | IRMath2 _ -> asDeclaredWidth expr res
+         | _ -> res)
 
     | IRUnaryOp ((IRMath _) as op, e) ->
-        N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e))
+        asDeclaredWidth expr (N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e)))
     | IRUnaryOp (op, e) ->
         N.evalUnaryOp op (evalExpr st env e)
 
@@ -733,6 +787,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRAssign (target, value) ->
         let v = evalExpr st env value
+        // A scalar variable keeps its declared width (C++'s assignment
+        // conversion into `int32_t` / `float`).
+        let v = match target with IRVar (_, ty) -> coerceScalarTo ty v | _ -> v
         evalAssign st env target v
         VUnit
 
@@ -882,12 +939,15 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
              // Its C++ mirror is blade_display::jsonval.
              let jsonF (x: float) =
                  Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest x) x
+             // A Float32 renders the FLOAT's shortest digits (jsonfloat<float>).
              let jsonF32 (x: float32) =
-                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest (float x)) (float x)
+                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32Shortest x) (float x)
              let elemStr (store: Store) (i: int) : string =
                  match store with
                  | SFloat a -> jsonF a.[i]
+                 | SFloat32 a -> jsonF32 a.[i]
                  | SInt a -> string a.[i]
+                 | SInt32 a -> string a.[i]
                  | SObj vs ->
                      (match vs.[i] with
                       | VFloat f -> jsonF f
@@ -935,9 +995,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
          | _ -> raise (InterpUnsupported "display.json_array: operand did not evaluate to an array"))
 
     | IRDisplayNum dataExpr ->
-        (match forceValue st env (evalExpr st env dataExpr) with
+        (match asDeclaredWidth dataExpr (forceValue st env (evalExpr st env dataExpr)) with
          | VFloat f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest f) f)
-         | VFloat32 f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest (float f)) (float f))
+         | VFloat32 f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32Shortest f) (float f))
          | VInt n -> VString (string n)
          | VInt32 n -> VString (string n)
          | _ -> raise (InterpUnsupported "display.json_num: operand did not evaluate to a numeric scalar"))
@@ -1230,7 +1290,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
         raise (InterpPanic ("BL8002",
                             $"arity mismatch calling '{callable.Name}' (expected {(List.length ps)}, got {(List.length args)})",
                             None, 0))
-    List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId a |> ignore) ps args
+    List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId (coerceScalarTo p.Type a) |> ignore) ps args
     // A capture-free callable is a function body (see FunctionCallDepth). Not
     // restored on a panic path: an escaping InterpPanic ends the run.
     let isFunctionBody = List.isEmpty callable.Captures
@@ -1262,7 +1322,11 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
     popFrame st
     st.Depth <- st.Depth - 1
-    result
+    // A NAMED function converts at `return` to its declared type's width, as
+    // its C++ declaration does; a lifted lambda (`__lambda_<id>`, a C++
+    // `auto` return) returns its body's own width -- no conversion.
+    if callable.Name.StartsWith "__lambda" then result
+    else coerceScalarTo callable.RetType result
 
 /// First-match with guard fall-through. Each candidate case gets a fresh child
 /// scope so that a pattern which partially binds and then fails (or whose guard
@@ -1542,7 +1606,9 @@ let rec evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         | IRVar _, VArray ba when (b.IsMutable || Set.contains b.Id st.MutableArrayLets)
                                   && isDenseCopyableArray ba ->
             VArray (copyBladeArray ba)
-        | _ -> value
+        // A scalar binding holds its DECLARED width (`int32_t mx =
+        // 2147483647L`, `float a = ...`).
+        | _ -> coerceScalarTo b.Type value
 
 // Public call entry.
 

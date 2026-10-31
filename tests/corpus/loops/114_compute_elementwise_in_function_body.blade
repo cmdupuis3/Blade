@@ -23,7 +23,7 @@ function varU(x: T^1) = {
     prodsum(dx, dx) / n
 }
 
-let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let a: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 let computed = varC(a)
 let uncomputed = varU(a)
 // EXPECT: computed = 1.25

@@ -4,7 +4,7 @@
 // alias. The named writing map is evaluated once at its definition (cells
 // 1..4, G = 4), so the join folds stored cells and writes nothing.
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
 let alias = m
 function twice() -> Int64 = {

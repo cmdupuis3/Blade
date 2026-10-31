@@ -12,7 +12,7 @@ import ml as ml
 // ============================================================================
 let static S = ml.sh_spec(1)
 
-function scaled(px: Float, py: Float, pz: Float, c: Float, w: Array<Float like Idx<2>>) where ml.equiv(O3) -> Array<Float like Idx<2>> = {
+function scaled(px: Float64, py: Float64, pz: Float64, c: Float64, w: Array<Float64 like Idx<2>>) where ml.equiv(O3) -> Array<Float64 like Idx<2>> = {
     let byParam = c * ml.y_to(1, px, py, pz)
     let byElement = byParam * w(0)
     ml.norms(S, byElement)

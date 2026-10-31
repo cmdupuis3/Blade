@@ -16,12 +16,12 @@ import Util2
 let c = Util.scale + Util2.scale
 // EXPECT: c = 9.0
 
-let scale = 5.0
+let scale: Float64 = 5.0
 let d = Util.scale + scale
 // EXPECT: d = 7.0
 
 function f(scale: Float64) -> Float64 = scale + Util.scale
-let e = f(1.0)
+let e = f(Float64(1.0))
 // EXPECT: e = 3.0
 
 // The imported bindings print qualified, so they never collide with main's.

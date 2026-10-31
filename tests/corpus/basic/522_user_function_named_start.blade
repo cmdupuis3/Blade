@@ -4,8 +4,8 @@
 // `auto start = TIME;` shadowed the function and every call inside main named
 // a time_point (BL9002 "no match for call"). The timing locals are now
 // reserved `__blade_` names.
-function start(a: Int64, b: Int64) -> Float = Float64(a * 10 + b)
-function elapsed(x: Float) -> Float = x * 2.0
+function start(a: Int64, b: Int64) -> Float64 = Float64(a * 10 + b)
+function elapsed(x: Float64) -> Float64 = x * 2.0
 let s = method_for(range<Idx<2>>, range<Idx<3>>) <@> lambda(a, b) -> start(a, b) |> compute
 let e = elapsed(s(1, 2))
 // EXPECT: s = [[0.0, 1.0, 2.0], [10.0, 11.0, 12.0]]

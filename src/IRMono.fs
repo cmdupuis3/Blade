@@ -1339,6 +1339,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         modul.Functions
         |> List.filter (fun f -> not (Set.contains f.Id hmFuncIdSet))
         |> List.map rewriteFunc
+    let boundTypes = System.Collections.Generic.Dictionary<IRId, IRType>()
     let newBindings =
         modul.Bindings
         |> List.map (fun b ->
@@ -1347,7 +1348,24 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let newType = substTypeInIRType bindings b.Type
             let valueWithRewrittenCalls = mapIRExpr rewriteCallSite b.Value
             let valueWithSubstitutedTypes = substTypeInIRExpr bindings valueWithRewrittenCalls
-            { b with Type = newType; Value = valueWithSubstitutedTypes })
+            // A declaration variable shared by two different instances is
+            // deliberately absent from globalBindings. Dependents still read
+            // the concrete type of THEIR stored value, not that shared var.
+            let value =
+                valueWithSubstitutedTypes |> mapIRExpr (fun e ->
+                    match e with
+                    | IRVar (id, ty) when not (Set.isEmpty (collectInferIds ty)) ->
+                        match boundTypes.TryGetValue id with
+                        | true, concrete -> IRVar (id, concrete)
+                        | _ -> e
+                    | _ -> e)
+            let resultBindings =
+                match exprTypeIfKnown value with
+                | Some ty when Set.isEmpty (collectInferIds ty) -> unifyParamWithArg newType ty Map.empty
+                | _ -> Map.empty
+            let finalType = substTypeInIRType resultBindings newType
+            if Set.isEmpty (collectInferIds finalType) then boundTypes.[b.Id] <- finalType
+            { b with Type = finalType; Value = substTypeInIRExpr resultBindings value })
     // A BINDING OF AN ARITY-DECIDED RESULT APPLIED AT TYPE CHECKING (D4):
     // `let o = outer(x, y)` then `o(1)`. Its rank was unknown when `o(1)` was
     // typed, so the application was recorded as a call of an open value
@@ -1802,18 +1820,74 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
         | Some (ArrayElem a) -> narrowElem a.ElemType
         | Some t -> narrowElem t
         | None -> false
-    let narrowLit (e: IRExpr) : IRExpr option =
+    // A LITERAL-ONLY float subtree (round 6, review core-1 S1: the checker
+    // keeps `x * (0.1 + 0.2)` beside an open `x` at the wide width) is
+    // rebuilt WHOLE at Float32 from its doubles -- not just a bare leaf -- so
+    // a Float32 instance computes the constant in Float32, as the explicit
+    // Float32 spelling does.
+    let rec intLiteralTree (e: IRExpr) =
+        match e with
+        | IRLit (IRLitInt _) -> true
+        | IRUnaryOp (IRNeg, x) -> intLiteralTree x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, _) ->
+            intLiteralTree l && intLiteralTree r
+        | _ -> false
+    let rec narrowLit (e: IRExpr) : IRExpr option =
         match e with
         | IRLit (IRLitFloat v) -> Some (IRLit (IRLitFloat32 (float32 v)))
-        | IRUnaryOp (IRNeg, IRLit (IRLitFloat v)) -> Some (IRUnaryOp (IRNeg, IRLit (IRLitFloat32 (float32 v))))
+        | IRUnaryOp ((IRNeg | IRMath _) as u, x) -> narrowLit x |> Option.map (fun x' -> IRUnaryOp (u, x'))
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ as op), l, r, loc) ->
+            (match narrowLit l, narrowLit r with
+             | Some l', Some r' -> Some (IRBinOp (IRElementwise, op, l', r', loc))
+             | _ -> None)
+        | IRBinOp (IRElementwise, IRCaret, l, r, loc) ->
+            match narrowLit l, narrowLit r with
+            | Some l', Some r' -> Some (IRBinOp (IRElementwise, IRCaret, l', r', loc))
+            | Some l', None when intLiteralTree r -> Some (IRBinOp (IRElementwise, IRCaret, l', r, loc))
+            | _ -> None
         | _ -> None
+    // Integer trees need the same per-instance treatment. Cast EACH leaf,
+    // so Int32 overflow happens before a later division, not at the result.
+    // Existing casts are barriers: this only retypes width-flexible literals.
+    let rec narrowInt (e: IRExpr) : IRExpr option =
+        let at32 x = IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), x)
+        match e with
+        | IRLit (IRLitInt n) when n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue -> Some (at32 e)
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt 2147483648L)) -> Some (at32 (IRLit (IRLitInt -2147483648L)))
+        | IRUnaryOp (IRNeg, x) -> narrowInt x |> Option.map (fun x' -> IRUnaryOp (IRNeg, x'))
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret as op), l, r, loc) ->
+            match narrowInt l, narrowInt r with
+            | Some l', Some r' -> Some (IRBinOp (IRElementwise, op, l', r', loc))
+            | _ -> None
+        | _ -> None
+    let isInt32 ty =
+        match ty with
+        | Some (ArrayElem a) -> IR.stripUnits a.ElemType = IRTScalar ETInt32
+        | Some t -> IR.stripUnits t = IRTScalar ETInt32
+        | None -> false
     let adapt (e: IRExpr) : IRExpr option =
         match e with
         | IRBinOp (IRElementwise, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
             (match narrowLit r, narrowLit l with
              | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
              | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (IRElementwise, op, l', r, loc))
-             | _ -> None)
+             | _ ->
+                 match narrowInt r, narrowInt l with
+                 | Some r', _ when op <> IRCaret && isInt32 (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
+                 | _, Some l' when isInt32 (exprTypeIfKnown r) && op <> IRCaret -> Some (IRBinOp (IRElementwise, op, l', r, loc))
+                 | _ -> None)
+        | IRApp (f, args, retTy) ->
+            match exprTypeIfKnown f |> Option.map IR.stripUnits with
+            | Some (FuncElem (slots, _)) when slots.Length = args.Length ->
+                let replacements =
+                    List.map2 (fun slot arg ->
+                        if isInt32 (Some slot) then narrowInt arg
+                        elif isNarrow (Some slot) then narrowLit arg
+                        else None) slots args
+                if replacements |> List.exists Option.isSome then
+                    Some (IRApp (f, List.map2 Option.defaultValue args replacements, retTy))
+                else None
+            | _ -> None
         | _ -> None
     let hit =
         let mutable hit = false
@@ -1986,6 +2060,9 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
         // The lowering-time broadcast's `let s = <scalar> in <map>` (see the
         // `rewrite` arm that rebuilds it).
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> true
+        // A binary array op lowered before arity specialization may now
+        // have a scalar base-case operand. Its original loop shape is stale.
+        | IRApp (IRObjectFor _, [IRTuple [_; _]], _) -> true
         // A scalar unary op over an operand the clone made an array (see the
         // `rewrite` arm `liftUnary`).
         | IRUnaryOp (uop, x) when isLiftableUnary uop ->
@@ -2203,8 +2280,31 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                 | IRTArrow (slots, _, id2) -> IRTArrow (slots, kernelRet, id2)
                 | _ -> xt
             mapOneArray x la (IRVar (lam.Id, kernelFuncType)) outputType
-    let rewrite (e: IRExpr) : IRExpr =
+    let rec rewrite (e: IRExpr) : IRExpr =
         match e with
+        | IRApp (IRObjectFor o, [IRTuple [l; r]], _)
+            when o.InputRanks = [0; 0] && o.OutputRank = 0 && o.CommGroups = [[0; 1]] ->
+            // Recover only the exact cell operator synthesized by lowering.
+            // Recursive Poly calls can lose axes at arity zero; choose
+            // co-iteration or scalar broadcast from their specialized types.
+            // The ordinary binop paths below also name computed array
+            // operands before a loop reads them.
+            match o.Kernel with
+            | IRVar (kid, _) ->
+                match callableOf.TryGetValue kid with
+                | true, k when k.Captures.IsEmpty ->
+                    match k.Params, k.Body with
+                    | [a; b], IRBinOp (IRElementwise, op, IRVar (ai, _), IRVar (bi, _), loc)
+                        when ai = a.VarId && bi = b.VarId ->
+                        match operandType l, operandType r with
+                        | Some (ArrayElem _), Some (ArrayElem _)
+                        | Some (ArrayElem _), Some (AnyPrimElem _)
+                        | Some (AnyPrimElem _), Some (ArrayElem _) ->
+                            rewrite (IRBinOp (IRElementwise, op, l, r, loc))
+                        | _ -> e
+                    | _ -> e
+                | _ -> e
+            | _ -> e
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> rebuildLoweredBroadcast e
         | IRUnaryOp (uop, x) when isLiftableUnary uop ->
             (match operandType x with
@@ -3467,6 +3567,13 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             match e with
             | IRLet (_, _, body) -> finalScalarType body
             | CarriedType (IRTScalar _ as ty) -> Some ty
+            // An explicit identity cast carries no type on its IR node.
+            // Recognize it only when its operand proves the cast scalar;
+            // an element cast of an array must keep the array's shape.
+            | IRUnaryOp (IRCast _, _) ->
+                match exprTypeIfKnown e with
+                | Some (IRTScalar _ as ty) -> Some ty
+                | _ -> None
             | _ -> None
         let newRetType =
             match finalScalarType newBody with
@@ -3653,6 +3760,17 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    (specSide) once the instance's result is learned. Inside a
     //    specialization the call names the CALLEE instance's variable, which
     //    is what that learning reads.
+    // A generic pack's literal-only scalar base has no parameters left
+    // at arity zero, so HM cannot specialize its width from arguments.
+    // Keep that expression inside the recursive caller until its element
+    // width is known. Fixed values, casts, calls and captures are barriers.
+    let rec literalOnlyBase e =
+        match e with
+        | IRLit (IRLitInt _ | IRLitFloat _) -> true
+        | IRUnaryOp ((IRNeg | IRMath _), x) -> literalOnlyBase x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret | IRMath2 _), l, r, _) ->
+            literalOnlyBase l && literalOnlyBase r
+        | _ -> false
     let rewriteCallSiteWith (keepOpenCallerType: bool) e =
         match e with
         | IRApp (IRVar (funcId, fty), args, origRetTy) when polyFuncIds.Contains funcId ->
@@ -3665,7 +3783,14 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                     let retTy =
                         if keepOpenCallerType && not (Set.isEmpty (collectInferIds spec.RetType)) then origRetTy
                         else spec.RetType
-                    IRApp (IRVar (spec.Id, fty), flatArgs, retTy)
+                    let genericElement =
+                        match func.RetType with
+                        | ArrayElem a -> not (Set.isEmpty (collectInferIds a.ElemType))
+                        | _ -> false
+                    if not keepOpenCallerType && genericElement && flatArgs.IsEmpty
+                       && spec.Params.IsEmpty && spec.Captures.IsEmpty && literalOnlyBase spec.Body then
+                        spec.Body
+                    else IRApp (IRVar (spec.Id, fty), flatArgs, retTy)
                 | None -> e
             | None -> e
         | _ -> e

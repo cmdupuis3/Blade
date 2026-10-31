@@ -20,35 +20,35 @@ import ad as ad
 
 type I = Idx<2>
 
-function fseq(x: Array<Float like I>, y: Array<Float like I>) -> Float = {
+function fseq(x: Array<Float64 like I>, y: Array<Float64 like I>) -> Float64 = {
     let s = sequence(x, y) |> compute
     s(0, 0) * 3.0 + s(1, 1) * 5.0
 }
 
-function frep(x: Array<Float like I>) -> Float = {
+function frep(x: Array<Float64 like I>) -> Float64 = {
     let r = replicate(2, x) |> compute
     r(0, 0) * 3.0 + r(1, 1) * 5.0
 }
 
-function facc(x: Array<Float like I>) -> Float = {
+function facc(x: Array<Float64 like I>) -> Float64 = {
     let r = replicate(2, x) |> compute
     r(0, 0) * 3.0 + r(1, 0) * 7.0
 }
 
-let mut dx = [0.0, 0.0]
-let mut dy = [0.0, 0.0]
-let sv = ad.grad(fseq)([1.0, 2.0], [3.0, 4.0], dx, dy)
+let mut dx = Float64([0.0, 0.0])
+let mut dy = Float64([0.0, 0.0])
+let sv = ad.grad(fseq)(Float64([1.0, 2.0]), Float64([3.0, 4.0]), dx, dy)
 // EXPECT: sv = 23.0
 // EXPECT: dx = [3.0, 0.0]
 // EXPECT: dy = [0.0, 5.0]
 
-let mut rx = [0.0, 0.0]
-let rv = ad.grad(frep)([1.0, 2.0], rx)
+let mut rx = Float64([0.0, 0.0])
+let rv = ad.grad(frep)(Float64([1.0, 2.0]), rx)
 // EXPECT: rv = 13.0
 // EXPECT: rx = [3.0, 5.0]
 
-let mut ax = [0.0, 0.0]
-let av = ad.grad(facc)([1.0, 2.0], ax)
+let mut ax = Float64([0.0, 0.0])
+let av = ad.grad(facc)(Float64([1.0, 2.0]), ax)
 // EXPECT: av = 10.0
 // EXPECT: ax = [10.0, 0.0]
 

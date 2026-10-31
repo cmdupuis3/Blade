@@ -2,10 +2,10 @@
 // ERROR: BL4005
 // A `mut` parameter writes through to the caller's array, so every cell of the
 // parallel body would write the same captured `acc` at once (#17).
-let mut acc = [0.0, 0.0]
+let mut acc = Float64([0.0, 0.0])
 function add_into(t: mut Array<Float64 like Idx<2>>, x: Float64) -> Float64 = {
     t(0) = t(0) + x
     x
 }
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let r = a <@> lambda(x) where omp(x: 1) -> add_into(acc, x) |> compute

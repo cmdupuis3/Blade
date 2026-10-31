@@ -11,7 +11,7 @@
 // extremes, through all three routes: inline in a domain kernel, in a
 // function the domain kernel calls, and in a plain (non-domain) range map.
 // Every lane (and the interpreter) must count zero mismatches.
-let static m = 14
+let static m: Int64 = 14
 type Case = Idx<m>
 
 static struct K {
@@ -55,11 +55,11 @@ function want(k: Int64) -> Float64 =
 
 function conv(k: Int64) -> Float64 = Float64(val(k))
 
-let cells = reduce(method_for(range<K>) <@> lambda(k, z) -> 1, (+))
+let cells = reduce(method_for(range<K>) <@> lambda(k, z) -> Int64(1), (+))
 // EXPECT: cells = 14
-let miss_inline = reduce(method_for(range<K>) <@> lambda(k, z) -> if Float64(val(k)) == want(k) then 0 else 1, (+))
+let miss_inline = reduce(method_for(range<K>) <@> lambda(k, z) -> if Float64(val(k)) == want(k) then Int64(0) else Int64(1), (+))
 // EXPECT: miss_inline = 0
-let miss_callee = reduce(method_for(range<K>) <@> lambda(k, z) -> if conv(k) == want(k) then 0 else 1, (+))
+let miss_callee = reduce(method_for(range<K>) <@> lambda(k, z) -> if conv(k) == want(k) then Int64(0) else Int64(1), (+))
 // EXPECT: miss_callee = 0
-let miss_scalar = reduce(method_for(range<Case>) <@> lambda(c) -> if Float64(val(Int64(c))) == want(Int64(c)) then 0 else 1, (+))
+let miss_scalar = reduce(method_for(range<Case>) <@> lambda(c) -> if Float64(val(Int64(c))) == want(Int64(c)) then Int64(0) else Int64(1), (+))
 // EXPECT: miss_scalar = 0

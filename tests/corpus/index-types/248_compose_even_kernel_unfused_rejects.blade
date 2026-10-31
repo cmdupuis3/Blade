@@ -10,10 +10,10 @@
 // to inline, so the pipeline survives to the compose/functor arms intact.
 // Same setup as 170: stage 1 (odd, v*2.0) inherits the antisymmetric class
 // legitimately; stage 2 (even, v*v) must refuse it.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
-function even_blocky(v: Float) -> Float = { v * v }
+function even_blocky(v: Float64) -> Float64 = { v * v }
 let o1 = object_for(lambda(v) -> v * 2.0)
 let o2 = object_for(even_blocky)
 let out = (o1 >>@ o2) <@> C |> compute

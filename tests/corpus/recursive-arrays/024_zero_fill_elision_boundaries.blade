@@ -14,7 +14,7 @@ type S4 = Idx<4>
 
 // ELIDED: lags 1, 2 and 3; at n < 3 the deeper lags read the implicit zero.
 // x0 = 1; x(n) = x(n-1) + x(n-2) + x(n-3) + 1, the missing lags zero.
-let rec trib: Array<Float like S6> =
+let rec trib: Array<Float64 like S6> =
     match trib with
     | zero -> zero
     | zero :: s -> zero :: 1.0
@@ -23,7 +23,7 @@ let rec trib: Array<Float like S6> =
 
 // KEPT: a WHOLE-prefix read sees the unbuilt rows, which must be zero.
 // w(n) = (sum of the whole buffer, rows >= n still zero) + 1: 1, 2, 4, 8, 16.
-let rec w: Array<Float like S5> =
+let rec w: Array<Float64 like S5> =
     match w with
     | zero -> zero
     | zero :: s -> zero :: 1.0
@@ -32,7 +32,7 @@ let rec w: Array<Float like S5> =
 
 // ELIDED, no seed: the inductive arm writes row 0 itself (its lag reads the
 // implicit zero there), then every later row.
-let rec noseed: Array<Float like S4> =
+let rec noseed: Array<Float64 like S4> =
     match noseed with
     | zero -> zero
     | prefix :: n -> prefix :: prefix(n - 1) * 2.0 + 1.0

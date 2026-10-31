@@ -15,7 +15,7 @@ function add(a: Float64, b: Float64) where comm(a, b), omp -> Float64 = a + b
 function stored() where repro -> Float64 = reduce(v, add, 0.0)
 function deferred() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, add, 0.0)
 function joined() where repro -> Float64 = {
-    let a, b = object_for(<&!>) <@> (reduce(v, add, 0.0), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))
+    let a, b = object_for(<&!>) <@> (reduce(v, add, Float64(0.0)), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))
     a + b
 }
 let s = stored()

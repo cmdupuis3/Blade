@@ -1,0 +1,9 @@
+// TEST: a literal kernel return takes the annotated element width
+// ============================================================================
+// Rule 5: a map whose kernel returns a literal, checked against an array of
+// Float64 elements, returns the double 0.1 (not the Float32 0.1 widened).
+// ============================================================================
+type I = Idx<3>
+let a: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.1 |> compute
+let d = a(2) - 0.1
+// EXPECT: d = 0.0

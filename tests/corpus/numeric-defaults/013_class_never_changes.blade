@@ -1,0 +1,8 @@
+// TEST: an integer literal beside a float is still refused (rejects)
+// ============================================================================
+// Rule 5: adaptation is within a class; `x * 2` over a Float64 `x` is the
+// mixing refusal (write `2.0`).
+// ============================================================================
+let x: Float64 = 1.5
+let y = x * 2
+// ERROR: BL3020

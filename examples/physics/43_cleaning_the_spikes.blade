@@ -116,7 +116,7 @@ let DRIE = method_for(LAM) <@> lambda(x) -> {
     if x > 2.250001 then 1.0 + (lh - 1.0) * oh else 1.0
 } |> compute
 // naive: the TRUE strengths on the top three, 1 on the rest
-let TOP3 = [10.0, 5.0, 2.5]
+let TOP3 = Float64([10.0, 5.0, 2.5])
 let DNAI = method_for(range<Idx<40>>) <@> lambda(k: Int64) -> if k < 3 then TOP3(k) else 1.0 |> compute
 
 // ---- the ladder: Frobenius error to truth. Each cleaned matrix is the

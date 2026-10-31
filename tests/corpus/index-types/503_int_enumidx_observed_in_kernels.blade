@@ -8,7 +8,7 @@
 type R = EnumIdx<[100, 200, 300]>
 let codes: Array<R like Idx<3>> = [300, 100, 200]
 // EXPECT: codes = [300, 100, 200]
-let w = [1.0, 2.0, 3.0]
+let w = Float64([1.0, 2.0, 3.0])
 let a = codes <@> lambda(c) -> c + 1 |> compute
 // EXPECT: a = [301, 101, 201]
 let b = method_for(zip(codes, w)) <@> lambda(c, x) -> Float64(c) * x |> compute

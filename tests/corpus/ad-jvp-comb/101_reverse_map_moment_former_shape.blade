@@ -46,13 +46,13 @@ import ad as ad
 type S = Idx<4>
 
 // Phase B: a learnable scalar scaling the former's input upstream.
-function loss(r0: Array<Float like S>, r1: Array<Float like S>, beta: Float) -> Float = {
-    let s0 = method_for(r0) <@> lambda(t: Float) -> beta * t |> compute
-    let s1 = method_for(r1) <@> lambda(t: Float) -> beta * t |> compute
+function loss(r0: Array<Float64 like S>, r1: Array<Float64 like S>, beta: Float64) -> Float64 = {
+    let s0 = method_for(r0) <@> lambda(t: Float64) -> beta * t |> compute
+    let s1 = method_for(r1) <@> lambda(t: Float64) -> beta * t |> compute
     let L = method_for(zip(s0, s1))
-    let p00: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x0 * x0 |> compute
-    let p01: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x0 * x1 |> compute
-    let p11: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x1 * x1 |> compute
+    let p00: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x0 * x0 |> compute
+    let p01: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x0 * x1 |> compute
+    let p11: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x1 * x1 |> compute
     let m00 = reduce(p00, (+)) / 4.0
     let m01 = reduce(p01, (+)) / 4.0
     let m11 = reduce(p11, (+)) / 4.0
@@ -61,11 +61,11 @@ function loss(r0: Array<Float like S>, r1: Array<Float like S>, beta: Float) -> 
 
 // Phase A: the same former over a FIXED featurization -- no learnable
 // pre-transform at all. Byte-identical kernels; the scaling maps are gone.
-function loss_fixed(r0: Array<Float like S>, r1: Array<Float like S>) -> Float = {
+function loss_fixed(r0: Array<Float64 like S>, r1: Array<Float64 like S>) -> Float64 = {
     let L = method_for(zip(r0, r1))
-    let p00: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x0 * x0 |> compute
-    let p01: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x0 * x1 |> compute
-    let p11: Array<Float like S> = L <@> lambda(x0: Float, x1: Float) -> x1 * x1 |> compute
+    let p00: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x0 * x0 |> compute
+    let p01: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x0 * x1 |> compute
+    let p11: Array<Float64 like S> = L <@> lambda(x0: Float64, x1: Float64) -> x1 * x1 |> compute
     let m00 = reduce(p00, (+)) / 4.0
     let m01 = reduce(p01, (+)) / 4.0
     let m11 = reduce(p11, (+)) / 4.0
@@ -74,16 +74,16 @@ function loss_fixed(r0: Array<Float like S>, r1: Array<Float like S>) -> Float =
 
 // The lane twin of Phase B: the scaling folded into each moment's slice, so
 // the arithmetic is identical and the LOWERING is not.
-function loss_rec(r0: Array<Float like S>, r1: Array<Float like S>, beta: Float) -> Float = {
-    let rec q00: Array<Float like Idx<4>> =
+function loss_rec(r0: Array<Float64 like S>, r1: Array<Float64 like S>, beta: Float64) -> Float64 = {
+    let rec q00: Array<Float64 like Idx<4>> =
         match q00 with
         | zero -> zero
         | prefix :: n -> prefix :: (beta * r0(n)) * (beta * r0(n))
-    let rec q01: Array<Float like Idx<4>> =
+    let rec q01: Array<Float64 like Idx<4>> =
         match q01 with
         | zero -> zero
         | prefix :: n -> prefix :: (beta * r0(n)) * (beta * r1(n))
-    let rec q11: Array<Float like Idx<4>> =
+    let rec q11: Array<Float64 like Idx<4>> =
         match q11 with
         | zero -> zero
         | prefix :: n -> prefix :: (beta * r1(n)) * (beta * r1(n))
@@ -91,12 +91,12 @@ function loss_rec(r0: Array<Float like S>, r1: Array<Float like S>, beta: Float)
 }
 
 // WARN: BL4003
-let r0 = [1.0, 2.0, 3.0, 4.0]
-let r1 = [2.0, 1.0, 4.0, 0.5]
+let r0 = Float64([1.0, 2.0, 3.0, 4.0])
+let r1 = Float64([2.0, 1.0, 4.0, 0.5])
 
-let mut d0 = [0.0, 0.0, 0.0, 0.0]
-let mut d1 = [0.0, 0.0, 0.0, 0.0]
-let (lv, dbeta) = ad.grad(loss)(r0, r1, 1.5, d0, d1)
+let mut d0 = Float64([0.0, 0.0, 0.0, 0.0])
+let mut d1 = Float64([0.0, 0.0, 0.0, 0.0])
+let (lv, dbeta) = ad.grad(loss)(r0, r1, Float64(1.5), d0, d1)
 // EXPECT: lv = 72.984375
 // EXPECT: dbeta = 97.3125
 // EXPECT: d0 = [3.375, 3.375, 7.875, 5.0625]
@@ -106,9 +106,9 @@ let (lv, dbeta) = ad.grad(loss)(r0, r1, 1.5, d0, d1)
 // `expandRecArray`'s prefix-free arm instead of the map lowering. Different
 // pre-pass, different emitted statements, same numbers -- value AND all
 // three gradients.
-let mut g0 = [0.0, 0.0, 0.0, 0.0]
-let mut g1 = [0.0, 0.0, 0.0, 0.0]
-let (rv, rdbeta) = ad.grad(loss_rec)(r0, r1, 1.5, g0, g1)
+let mut g0 = Float64([0.0, 0.0, 0.0, 0.0])
+let mut g1 = Float64([0.0, 0.0, 0.0, 0.0])
+let (rv, rdbeta) = ad.grad(loss_rec)(r0, r1, Float64(1.5), g0, g1)
 let lane_vresid = rv - lv
 let lane_bresid = rdbeta - dbeta
 let lane_gresid = reduce(abs(g0 - d0), (+)) + reduce(abs(g1 - d1), (+))
@@ -120,11 +120,11 @@ let lane_gresid = reduce(abs(g0 - d0), (+)) + reduce(abs(g1 - d1), (+))
 // gradient through the former must equal the Phase-A fixed-featurization
 // gradient. Not approximately -- the scaling maps collapse to copies, so
 // every partial is the same number.
-let mut e0 = [0.0, 0.0, 0.0, 0.0]
-let mut e1 = [0.0, 0.0, 0.0, 0.0]
+let mut e0 = Float64([0.0, 0.0, 0.0, 0.0])
+let mut e1 = Float64([0.0, 0.0, 0.0, 0.0])
 let (ident_v, ident_db) = ad.grad(loss)(r0, r1, 1.0, e0, e1)
-let mut f0 = [0.0, 0.0, 0.0, 0.0]
-let mut f1 = [0.0, 0.0, 0.0, 0.0]
+let mut f0 = Float64([0.0, 0.0, 0.0, 0.0])
+let mut f1 = Float64([0.0, 0.0, 0.0, 0.0])
 let fixed_v = ad.grad(loss_fixed)(r0, r1, f0, f1)
 let ident_vresid = ident_v - fixed_v
 let ident_gresid = reduce(abs(e0 - f0), (+)) + reduce(abs(e1 - f1), (+))
@@ -134,7 +134,7 @@ let ident_gresid = reduce(abs(e0 - f0), (+)) + reduce(abs(e1 - f1), (+))
 // EXPECT: ident_db = 64.875
 
 // Central differences on the primal: the independent route.
-let h = 0.000001
+let h: Float64 = 0.000001
 let fdb = (loss(r0, r1, 1.5 + h) - loss(r0, r1, 1.5 - h)) / (2.0 * h)
 let fd0 = (loss([1.0, 2.0, 3.0 + h, 4.0], r1, 1.5) - loss([1.0, 2.0, 3.0 - h, 4.0], r1, 1.5)) / (2.0 * h)
 let fd1 = (loss(r0, [2.0, 1.0, 4.0, 0.5 + h], 1.5) - loss(r0, [2.0, 1.0, 4.0, 0.5 - h], 1.5)) / (2.0 * h)

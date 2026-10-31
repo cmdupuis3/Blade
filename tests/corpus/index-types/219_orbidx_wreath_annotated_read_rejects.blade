@@ -18,5 +18,5 @@
 // then subscripts the binding, so the refusal has to come from the annotation
 // rather than from the read (which would now succeed).
 let R: Array<Float64 like OrbIdx<[(2,+), (2,+)], 3>> = zero |> compute
-let cell = R(0, 1, 0, 1)
+let cell = R(Int64(0), Int64(1), Int64(0), Int64(1))
 // EXPECT: typecheck failure — a written (annotated) OrbIdx class has no producer.

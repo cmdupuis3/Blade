@@ -373,6 +373,15 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
         // double and rounds each component once).
         | IRMath name, Some et when isComplexElem et && complexLibmRuntimeNames.Contains name ->
             $"blade_libm::{name}({inner})"
+        // A Complex64's magnitude and phase follow the same rule: evaluated
+        // over the Complex128 widening (the interpreter's complexAbs / atan2
+        // in double), the magnitude rounded once to its Float32 node type --
+        // never libstdc++'s float cabsf/cargf, which the interpreter has no
+        // twin of.
+        | IRMath "abs", Some ETComplex64 ->
+            $"static_cast<float>(std::abs(std::complex<double>({inner})))"
+        | IRArg, Some ETComplex64 ->
+            $"std::arg(std::complex<double>({inner}))"
         | _ -> $"{(unaryOpToCpp op)}({inner})"
 
 /// Coerce a rendered scalar operand to match std::complex's SAME-TYPE-ONLY
@@ -407,7 +416,18 @@ let emitBinOpWithComplexCoercion
         | Some ((ETComplex64 | ETComplex128) as resElem) ->
             let lC = coerceComplexOperand resElem le lStr
             let rC = coerceComplexOperand resElem re rStr
-            $"({lC} {(binToCpp op)} {rC})"
+            // Complex64 x Complex64 `*` / `/`: Blade's own float algorithms
+            // (blade_arith::c64_mul / c64_div), the interpreter's twins --
+            // not libgcc's __mulsc3 / __divsc3 (round 6, Complex64 fidelity).
+            // A real divided by a Complex64 is the full complex division
+            // too (libstdc++'s operator/(T, complex) divides complex(s) by z).
+            match resElem, op with
+            | ETComplex64, (IRMul | IRDiv) when isComplexElem le && isComplexElem re && not (inCudaDeviceDialect ()) ->
+                let fn = if op = IRMul then "c64_mul" else "c64_div"
+                $"blade_arith::{fn}({lC}, {rC})"
+            | ETComplex64, IRDiv when isComplexElem re && not (inCudaDeviceDialect ()) ->
+                $"blade_arith::c64_div(std::complex<float>({lC}), {rC})"
+            | _ -> $"({lC} {(binToCpp op)} {rC})"
         | _ -> $"({lStr} {(binToCpp op)} {rStr})"
     | _ -> $"({lStr} {(binToCpp op)} {rStr})"
 
@@ -444,10 +464,40 @@ let private intLiteralOf (e: IRExpr) : int64 option =
 /// None = the caller's ordinary rendering. The CUDA device dialect keeps the
 /// old `pow(l, r)` / infix spelling: device bodies cannot reach blade_rt or
 /// blade_libm (host-only).
+/// Which operand of a binop is a bare integer literal that ADAPTS to an Int32
+/// partner (IR.typeOf's literal rule, formalism 2.4: "`i32 + 1` is Int32"):
+/// (left adapts, right adapts). Such a literal renders as a plain `int`
+/// (int32LiteralToCpp) and the operation takes the 32-bit helpers, so the
+/// C++ lane wraps and compares at 32 bits on every data model (an `L`
+/// literal is 64-bit on LP64 and would widen `x + 1L > x`).
+let int32AdaptedLiterals (inferTy: IRExpr -> IRType) (l: IRExpr) (r: IRExpr) : bool * bool =
+    let isI32 (e: IRExpr) = scalarElemOf (inferTy e) = Some ETInt32
+    match l, r with
+    | IRLit (IRLitInt n), _ when fitsInt32 n && isI32 r -> (true, false)
+    | _, IRLit (IRLitInt n) when fitsInt32 n && isI32 l -> (false, true)
+    | _ -> (false, false)
+
+/// An Int32-adapted integer literal as a C++ `int` token (INT32_MIN has no
+/// literal spelling of its own).
+let int32LiteralToCpp (n: int64) : string =
+    if n = int64 System.Int32.MinValue then "(-2147483647 - 1)" else string n
+
+/// An Int64 literal as a C++ token: `LL` (long long, 64 bits on EVERY data
+/// model). `L` is a `long`, 32 bits on Windows (LLP64), so two `L` literals
+/// folded in 32 bits -- `1000000L * 3000L` was -1294967296 where Blade's
+/// Int64 product is 3000000000. INT64_MIN has no literal spelling of its own.
+/// The one Int64-literal renderer every emission site uses.
+let int64LiteralToCpp (n: int64) : string =
+    if n = System.Int64.MinValue then "(-9223372036854775807LL - 1)" else $"{n}LL"
+
 let renderContractBinOp
         (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
         (inferTy: IRExpr -> IRType) (loc: SrcLoc) : string option =
     let isInt et = match et with ETInt32 | ETInt64 -> true | _ -> false
+    // An Int32-adapted literal counts as Int32 for the helper's width.
+    let (lAdapt, rAdapt) = int32AdaptedLiterals inferTy l r
+    let wOf (le: ElemType) (re: ElemType) =
+        if (le = ETInt64 && not lAdapt) || (re = ETInt64 && not rAdapt) then "64" else "32"
     // The fault's source position, for the panic's `--> file:line`: constants
     // the guard reads only on its cold path (blade_runtime.hpp idiv/imod/ipow).
     let at = panicSpanArgs loc.Span
@@ -461,13 +511,13 @@ let renderContractBinOp
     | IRCaret when inCudaDeviceDialect () ->
         match scalarElemOf (inferTy l), scalarElemOf (inferTy r), intLiteralOf r with
         | Some le, Some re, Some n when isInt le && isInt re && n >= 0L ->
-            let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
+            let w = wOf le re
             Some $"blade_dev_ipow{w}({lStr}, {rStr})"
         | _ -> None
     | IRDiv | IRMod | IRCaret when not (inCudaDeviceDialect ()) ->
         match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
         | Some le, Some re when isInt le && isInt re ->
-            let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
+            let w = wOf le re
             match op, intLiteralOf r with
             | (IRDiv | IRMod), Some n when n <> 0L && n <> -1L -> None
             | IRDiv, _ -> Some $"blade_rt::idiv{w}({lStr}, {rStr}, {at})"
@@ -555,7 +605,7 @@ let escapeStringLit (s: string) : string =
 /// Used for kernel bodies in inline generation
 let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
-    | IRLit (IRLitInt n) -> $"{n}L"
+    | IRLit (IRLitInt n) -> int64LiteralToCpp n
     | IRLit (IRLitFloat f) -> floatToCppLiteral f
     | IRLit (IRLitFloat32 f) -> float32ToCppLiteral f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
@@ -564,8 +614,9 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
     | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRBinOp (_, op, l, r, loc) ->
-        let lStr = exprToCppSimple names l
-        let rStr = exprToCppSimple names r
+        let (la, ra) = int32AdaptedLiterals inferExprType l r
+        let lStr = match l with IRLit (IRLitInt n) when la -> int32LiteralToCpp n | _ -> exprToCppSimple names l
+        let rStr = match r with IRLit (IRLitInt n) when ra -> int32LiteralToCpp n | _ -> exprToCppSimple names r
         match renderContractBinOp op l r lStr rStr inferExprType loc, op with
         | Some s, _ -> s
         | None, IRCaret -> $"pow({lStr}, {rStr})"
@@ -582,13 +633,14 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         else inner
     | IRUnaryOp (op, e) -> renderUnaryOpTyped op (inferExprType e) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
-        $"({(exprToCppSimple names cond)} ? {(exprToCppSimple names body)} : 0.0)"
+        let zero = if scalarElemOf (inferExprType body) = Some ETFloat32 then "0.0f" else "0.0"
+        $"({(exprToCppSimple names cond)} ? {(exprToCppSimple names body)} : {zero})"
     | other -> $"BLADE_UNSUPPORTED_EXPR_{(other.GetType().Name.ToUpper())}"
 
 /// Convert IRLit to C++ literal string
 let litToCpp (lit: IRLit) : string =
     match lit with
-    | IRLitInt n -> $"{n}L"
+    | IRLitInt n -> int64LiteralToCpp n
     | IRLitFloat f -> floatToCppLiteral f
     | IRLitFloat32 f -> float32ToCppLiteral f
     | IRLitBool b -> if b then "true" else "false"

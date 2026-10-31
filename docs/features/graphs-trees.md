@@ -166,7 +166,7 @@ The precedent is settled and it is `IrrepsIdx<spec>`
 
 ```blade sketch
 let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
-let x: Array<Float like IrrepsIdx<spec_h>> = [...]
+let x: Array<Float64 like IrrepsIdx<spec_h>> = [...]
 ```
 
 A `let static` value, referenced from a type-level `< >` slot, its payload

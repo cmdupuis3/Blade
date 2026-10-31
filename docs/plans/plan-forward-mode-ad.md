@@ -46,7 +46,7 @@ What forward mode buys that reverse mode cannot:
 
 ```blade
 import ad as ad
-function f(x: Float, w: Array<Float like Idx<3>>) -> Float = ...
+function f(x: Float64, w: Array<Float64 like Idx<3>>) -> Float64 = ...
 
 let (fv, df) = ad.jvp(f)(x0, w0, 1.0, [0.0, 0.0, 0.0])   // seed dx=1, dw=0
 let j = ad.jvp(f)                                          // binding form, free

@@ -69,10 +69,21 @@ let private sLetMut n value = StmtLet { Pattern = synPat (PatVar n); Type = None
 let private sAccum lhs e = StmtExpr (syn (ExprAssign (lhs, add lhs e)))
 let private sAssign lhs e = StmtExpr (syn (ExprAssign (lhs, e)))
 let private sFor var lo hi body = StmtForIn (var, syn (ExprDotDot (iLit lo, iLit hi)), body)
-let private zerosLit (n: int) = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
-let private intArrLit (xs: int list) = syn (ExprArrayLit (xs |> List.map iLit))
-let private floatArrLit (xs: float list) = syn (ExprArrayLit (xs |> List.map fLit))
-let private tyFloatArr (n: int) = TyArray (TyNamed ("Float", []), [ TyIdx (iLit n) ])
+// Generated buffers and coefficient tables implement Float64 kernels; offset
+// tables meet Int64 iteration coordinates. Name those array boundaries before
+// literal defaulting, retaining bare scalar literals for symbolic extraction.
+let private typedArrayLit (element: string) (xs: Expr list) =
+    let elemTy = TyNamed (element, [])
+    match xs with
+    // An empty table has no cell from which to infer its element type.
+    | [] -> syn (ExprTyped (syn (ExprArrayLit []), TyArray (elemTy, [ TyIdx (iLit 0) ])))
+    // AD recognizes a literal initializer by its outer ExprArrayLit shape.
+    // Keep that shape and carry width on each literal cell instead.
+    | _ -> syn (ExprArrayLit (xs |> List.map (fun x -> syn (ExprTyped (x, elemTy)))))
+let private zerosLit (n: int) = typedArrayLit "Float64" (List.replicate n (fLit 0.0))
+let private intArrLit (xs: int list) = typedArrayLit "Int64" (xs |> List.map iLit)
+let private floatArrLit (xs: float list) = typedArrayLit "Float64" (xs |> List.map fLit)
+let private tyFloatArr (n: int) = TyArray (TyNamed ("Float64", []), [ TyIdx (iLit n) ])
 
 /// Array<Float like IrrepsIdx<[(l, p, m), ...]>> -- irreps-typed signature
 /// slot, the inline spec literal rebuilt from the RESOLVED Spec. Used for the
@@ -85,7 +96,7 @@ let private tyIrrepsArr (s: Spec) : TypeExpr =
     let specLit =
         syn (ExprArrayLit (s |> List.map (fun e ->
             syn (ExprTuple [ iLit e.L; iLit e.Parity; iLit e.Mult ]))))
-    TyArray (TyNamed ("Float", []), [ TyIrrepsIdx specLit ])
+    TyArray (TyNamed ("Float64", []), [ TyIrrepsIdx specLit ])
 
 /// Array<Float like PgIrrepsIdx<GROUP, [(LABEL, mult), ...]>> -- the pg twin
 /// of `tyIrrepsArr`, the inline spec literal rebuilt from the RESOLVED
@@ -96,7 +107,7 @@ let private tyPgIrrepsArr (group: string) (s: Blade.ML.PointSpec.PgSpec) : TypeE
     let specLit =
         syn (ExprArrayLit (s |> List.map (fun (label, m) ->
             syn (ExprTuple [ syn (ExprLit (LitString label)); iLit m ]))))
-    TyArray (TyNamed ("Float", []), [ TyPgIrrepsIdx (group, specLit) ])
+    TyArray (TyNamed ("Float64", []), [ TyPgIrrepsIdx (group, specLit) ])
 
 let private mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =
     { Name = name
@@ -211,7 +222,7 @@ let private sigmoidDecl (name: string) : FunctionDecl =
     let nonNeg = syn (ExprBinOp (Elementwise, OpGe, z, fLit 0.0))
     let neg = syn (ExprUnaryOp (OpNot, nonNeg))
     let e () = syn (ExprApp (v "exp", [ add (guardE nonNeg (sub (fLit 0.0) z)) (guardE neg z) ]))
-    mkFunc name [ ("z", TyNamed ("Float", [])) ] (TyNamed ("Float", []))
+    mkFunc name [ ("z", TyNamed ("Float64", [])) ] (TyNamed ("Float64", []))
         (add (guardE nonNeg (divE (fLit 1.0) (add (fLit 1.0) (e ()))))
              (guardE neg (divE (e ()) (add (fLit 1.0) (e ())))))
 
@@ -228,7 +239,7 @@ let private yToDecl (name: string) (lmax: int) : Result<FunctionDecl, ElabError>
         Error (err5000 "y_to: lmax must be 0..2 (closed forms only)")
     else
     let dimTot = (lmax + 1) * (lmax + 1)
-    let f = TyNamed ("Float", [])
+    let f = TyNamed ("Float64", [])
     let stmts =
         [ yield sLetMut "sh" (zerosLit dimTot)
           yield sAssign (idx "sh" (iLit 0)) (fLit 0.28209479177387814)
@@ -1695,7 +1706,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             // rather than in the kept-path one.
             | "derive_poly", [ specE; kE; sOutE; xE; wE ] ->
                 elabDerivePoly st statics e specE kE sOutE xE wE
-            | "derive_poly", _ -> Error (err5000 "derive_poly: expected derive_poly(SPEC, K, SOUT, x, w) with x of type Array<Float like IrrepsIdx<SPEC>> and w of extent ml.poly_weight_dim(SPEC, K, SOUT)")
+            | "derive_poly", _ -> Error (err5000 "derive_poly: expected derive_poly(SPEC, K, SOUT, x, w) with x of type Array<Float64 like IrrepsIdx<SPEC>> and w of extent ml.poly_weight_dim(SPEC, K, SOUT)")
             // The Sn index-action layer: the complete Hom_{Sn}(R^{N^K}, R^{N^L})
             // basis over FLAT ROW-MAJOR node-power buffers, one loop nest per
             // partition of the K+L axis positions.
@@ -1716,7 +1727,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
             // complex type) that the O(3) member never needed.
             | "derive_pg_linear", [ gE; sInE; sOutE; xE; wE ] ->
                 elabDerivePgLinear st statics e gE sInE sOutE xE wE
-            | "derive_pg_linear", _ -> Error (err5000 "derive_pg_linear: expected derive_pg_linear(GROUP, SIN, SOUT, x, w) with GROUP a registered point group (C4, D4), SIN/SOUT static arrays of (LABEL_NAME, mult) tuples, x of type Array<Float like PgIrrepsIdx<GROUP, SIN>> and w of extent ml.pg_hom_dim(GROUP, SIN, SOUT)")
+            | "derive_pg_linear", _ -> Error (err5000 "derive_pg_linear: expected derive_pg_linear(GROUP, SIN, SOUT, x, w) with GROUP a registered point group (C4, D4), SIN/SOUT static arrays of (LABEL_NAME, mult) tuples, x of type Array<Float64 like PgIrrepsIdx<GROUP, SIN>> and w of extent ml.pg_hom_dim(GROUP, SIN, SOUT)")
             // The monomial lift: the value-side half of the symmetric-power
             // bridge. Its type-side twin is ml.sym_spec(SPEC, K), and
             // ml.derive_linear(ml.sym_spec(SPEC, K), SPEC_OUT) composed with
@@ -1732,7 +1743,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                     | SVInt k ->
                         Error (err5000 $"sym_lift: K must be a static int in 1..4 (got {k}) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)")
                     | _ -> Error (err5000 "sym_lift: K must be a static int"))))
-            | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
+            | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float64 like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
             | "tensor_to_irreps", [ gE ] ->
                 ensure st (fingerprint "tensor_to_irreps" (box ())) (fun n ->
                     Ok (bridgeDecl n Blade.ML.CartesianBridge.bridge9Flat 9 "g"
@@ -1944,7 +1955,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         let emptyStatics : StaticEnv =
             { Values = Map.empty; Globals = Map.empty; Functions = Map.empty
               CalledFunctions = ref Set.empty; ProviderRoots = Map.empty
-              Structs = Map.empty; Segments = Map.empty }
+              Structs = Map.empty; Segments = Map.empty; Widths = Map.empty }
         // Run rewriteExpr over every expression-bearing decl.
         let mapDecls (statics: StaticEnv) (opsEnabled: bool) (ds: Located<Decl> list) =
             ds |> List.fold (fun acc d ->

@@ -5,7 +5,7 @@
 // the interpreter reported BL8003, the empty-reduction code; both lanes
 // now abort with BL8006 and the same message.
 static struct Low {
-    i: Int<min=0, max=10>
+    i: Int32<min=0, max=10>
 } where i > 5
 
 let R = method_for(range<Low>) <@> lambda(i) -> i |> compute

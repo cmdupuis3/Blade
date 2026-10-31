@@ -10,7 +10,7 @@
 // reference from the inlined copy is not audited in v1).
 module Helpers
 
-let scale = 3.0
+let scale: Float64 = 3.0
 function sq(v: Float64) -> Float64 = { v * v }
 function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
 function scaled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * scale |> compute }

@@ -5,5 +5,5 @@
 // A lambda passed straight to `reduce` has no binding of its own. It prints
 // as `lambda in <the nearest enclosing binding or function>` -- here `r` --
 // never as its emitted `__lambda_<id>`, in both lanes.
-let xs = [4, 2, 0]
+let xs = Int64([4, 2, 0])
 let r = reduce(xs, lambda(a, b) -> a / b)

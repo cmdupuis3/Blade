@@ -13,7 +13,7 @@
 //     row i=2:  3*4, 3*5, 3*6  = 12, 15, 18
 let kernel = lambda(x: Float64, y: Float64) -> x * y
 let O = object_for(kernel)
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let R = O <@> (A, B) |> compute
 // EXPECT: R = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]

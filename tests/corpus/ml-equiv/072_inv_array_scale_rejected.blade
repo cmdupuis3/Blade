@@ -26,12 +26,12 @@ import ml as ml
 // ============================================================================
 let static S = [(0, 0, 1), (1, 1, 1)]
 
-function bad_o3(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<4>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bad_o3(x: Array<Float64 like IrrepsIdx<S>>, w: Array<Float64 like Idx<4>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
   x * w
 
 // The C4 E plane is 2-dimensional and rho(r) is R90, which commutes with no
 // diag(a, b) unless a = b — the same failure, one lattice member over.
 let static EC = [("E", 1)]
 
-function bad_c4(p: Array<Float like PgIrrepsIdx<C4, EC>>, v: Array<Float like Idx<2>>) where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function bad_c4(p: Array<Float64 like PgIrrepsIdx<C4, EC>>, v: Array<Float64 like Idx<2>>) where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
   p * v

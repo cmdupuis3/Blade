@@ -850,6 +850,11 @@ let placementOf (ix: IRIndexType) : PlacementClass =
     | _ when ix.IxKind = IxKTree -> PlaceDense
     | _ -> placementClassOf ix.Symmetry
 
+/// True when an integer literal's value fits Int32 -- the range in which a
+/// bare literal adapts to an Int32 partner (typeOf's literal rule below).
+let fitsInt32 (n: int64) : bool =
+    n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue
+
 /// Compute the promoted element type for two numeric types per section 3.4.2.
 /// Returns None if the types are incompatible for promotion. Index nominal
 /// tags are not represented at the ElemType level; their strict unification
@@ -3139,9 +3144,31 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          // C++ overload set promotes integer operands to double), so they do
          // NOT follow the promote-the-operands rule below -- `atan2(1, 1)` over
          // two Int64s is a double, not an int.
-         | IRMath2 _ -> IRTScalar ETFloat64
+         // ... except over two Float32 operands (or a Float32 beside a float
+         // literal, which Lowering already narrowed to IRLitFloat32): the
+         // double function rounded once to float is a Float32 (formalism 2.4).
+         | IRMath2 _ ->
+             (match stripUnits (typeOf left), stripUnits (typeOf right) with
+              | IRTScalar ETFloat32, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+              | _ -> IRTScalar ETFloat64)
          | _ ->
              match typeOf left, typeOf right with
+             // An INTEGER exponent keeps the base's type (formalism 2.4: the
+             // exponent of `^` is polymorphic) -- `x32 ^ 2` is a Float32,
+             // `i32 ^ 2` an Int32, never promoted by the exponent's width.
+             | IRTScalar e1, IRTScalar (ETInt32 | ETInt64) when op = IRCaret
+                                                              && (match e1 with
+                                                                  | ETInt32 | ETInt64 | ETFloat32 | ETFloat64
+                                                                  | ETComplex64 | ETComplex128 -> true
+                                                                  | _ -> false) -> IRTScalar e1
+             // A bare integer LITERAL that fits Int32 adapts to an Int32
+             // partner (formalism 2.4: "`i32 + 1` is Int32"; the checker's
+             // literal rule, stated once more here because IRLitInt carries
+             // no width of its own). Every lane computes such a node in 32 bits.
+             | IRTScalar ETInt32, IRTScalar ETInt64 when (match right with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                 IRTScalar ETInt32
+             | IRTScalar ETInt64, IRTScalar ETInt32 when (match left with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                 IRTScalar ETInt32
              | IRTScalar e1, IRTScalar e2 ->
                  IRTScalar (promoteElemType e1 e2 |> Option.defaultValue e1)
              | lt, _ -> lt)
@@ -3162,21 +3189,32 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          // abs always yields the real magnitude (Float64); other intrinsics on
          // a complex operand preserve the complex type (std::exp(complex)->
          // complex), and stay Float64 on a real operand.
-         | IRMath "abs" -> IRTScalar ETFloat64
+         // A Float32 operand keeps Float32 (formalism 2.4: a transcendental
+         // of a Float32 is the double function rounded once to float, and
+         // sqrt / floor / ceil / abs are the float operations); the magnitude
+         // of a Complex64 is its component width.
+         | IRMath "abs" ->
+             (match stripUnits (typeOf operand) with
+              | IRTScalar (ETFloat32 | ETComplex64) -> IRTScalar ETFloat32
+              | _ -> IRTScalar ETFloat64)
          | IRMath _ ->
              (match typeOf operand with
               | IRTScalar (ETComplex64 | ETComplex128) as ct -> ct
+              | t when stripUnits t = IRTScalar ETFloat32 -> IRTScalar ETFloat32
               | _ -> IRTScalar ETFloat64)
          // A cast's type is its target, whatever the operand resolved to.
          | IRCast (et, _) -> IRTScalar et)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
-    | IRFma _ -> IRTScalar ETFloat64
+    | IRFma (a, b, c) ->
+        (match stripUnits (typeOf a), stripUnits (typeOf b), stripUnits (typeOf c) with
+         | IRTScalar ETFloat32, IRTScalar ETFloat32, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+         | _ -> IRTScalar ETFloat64)
     | IRRandAt (kind, _, _) -> if kind = "categorical_at" then IRTScalar ETInt64 else IRTScalar ETFloat64
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 -> Complex64,
         // Float64 -> Complex128. Reports as a scalar (NOT a tuple) -- that's
         // the whole point of having a separate IRComplex node.
-        (match typeOf re with
+        (match stripUnits (typeOf re) with
          | IRTScalar ETFloat32 -> IRTScalar ETComplex64
          | _ -> IRTScalar ETComplex128)
     | IRTupleProj (e, i, isFlat) ->
@@ -3770,6 +3808,15 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         (match exprTypeIfKnown arr with
          | Some (ArrayElem _) -> Some (typeOf expr)
          | _ -> None)
+    // A rank-one fold over a known array answers its element type. This
+    // knowledge must survive specialization: a Float32/Complex64 fold beside
+    // a literal keeps that component width, and an Int32 fold keeps wrapping
+    // arithmetic at Int32. Use the canonical fold rule only after proving the
+    // operand shape; unknown operands still answer None.
+    | IRReduce (arr, _, _) ->
+        (match exprTypeIfKnown arr with
+         | Some (ArrayElem a) when a.IndexTypes.Length = 1 -> Some (typeOf expr)
+         | _ -> None)
     // ---- Scalar-valued constructions over KNOWN operands ----------------
     // An argument WRITTEN INLINE -- `idg(complex(1.0, 2.0))`, `idg(Float32(x))`,
     // `idg(1.0 + 2.0)`, `idg(-2.5)`, `idg(sqrt(2.0))`, `idg(a < b)`,
@@ -3798,11 +3845,13 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
          | IRArg, Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
-         | IRMath "abs", Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
+         | IRMath "abs", Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
+         | IRMath "abs", Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
          | IRMath "abs", Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 as et)) ->
              Some (IRTScalar et)
          | IRMath _, Some (AnyPrimElem (ETComplex64 | ETComplex128 as et)) -> Some (IRTScalar et)
-         | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64)) ->
+         | IRMath _, Some (AnyPrimElem ETFloat32) -> Some (IRTScalar ETFloat32)
+         | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat64)) ->
              Some (IRTScalar ETFloat64)
          | _ -> None)
     | IRBinOp (_, op, l, r, _) ->
@@ -3810,6 +3859,7 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | Some (AnyPrimElem e1), Some (AnyPrimElem e2) ->
              (match op with
               | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> Some (IRTScalar ETBool)
+              | IRMath2 _ when e1 = ETFloat32 && e2 = ETFloat32 -> Some (IRTScalar ETFloat32)
               | IRMath2 _ -> Some (IRTScalar ETFloat64)
               // `^` is left alone off the all-Float64 case: an integer power's
               // result class is not the plain promotion rule's to state.
@@ -3822,6 +3872,14 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
                                  | ETComplex64 | ETComplex128 -> true
                                  | _ -> false) -> Some (IRTScalar e1)
               | IRCaret -> None
+              // typeOf's literal rule: a bare fitting integer literal adapts
+              // to an Int32 partner.
+              | IRAdd | IRSub | IRMul | IRDiv | IRMod when e1 = ETInt32 && e2 = ETInt64
+                                                       && (match r with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                  Some (IRTScalar ETInt32)
+              | IRAdd | IRSub | IRMul | IRDiv | IRMod when e1 = ETInt64 && e2 = ETInt32
+                                                       && (match l with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                  Some (IRTScalar ETInt32)
               | IRAdd | IRSub | IRMul | IRDiv | IRMod ->
                   promoteElemType e1 e2 |> Option.map IRTScalar)
          | _ -> None)
@@ -3834,6 +3892,8 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         (match exprTypeIfKnown a, exprTypeIfKnown b, exprTypeIfKnown c with
          | Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64) ->
              Some (IRTScalar ETFloat64)
+         | Some (AnyPrimElem ETFloat32), Some (AnyPrimElem ETFloat32), Some (AnyPrimElem ETFloat32) ->
+             Some (IRTScalar ETFloat32)
          | _ -> None)
     | IRRandAt _ -> Some (typeOf expr)
     // ---- Value-preserving wrappers --------------------------------------

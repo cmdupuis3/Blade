@@ -20,15 +20,15 @@ function dotpack(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
         ha * hb + dotpack(ta, tb)
       }
 }
-let x = [1.0, 2.0, 3.0]
-let t = (x, [4.0, 5.0, 6.0])
-let r = first_at(t, 1)
-let r_written = first_at((x, [4.0, 5.0, 6.0]), 1)
-let p = (10.0, 20.0)
-let q = (1.0, 3.0)
-let b = blend(p, 2.0, q)
-let u = (1.0, 2.0, 3.0)
-let v = (4.0, 5.0, 6.0)
+let x = Float64([1.0, 2.0, 3.0])
+let t = (x, Float64([4.0, 5.0, 6.0]))
+let r = first_at(t, Int64(1))
+let r_written = first_at((x, Float64([4.0, 5.0, 6.0])), Int64(1))
+let p = (Float64(10.0), Float64(20.0))
+let q = (Float64(1.0), Float64(3.0))
+let b = blend(p, Float64(2.0), q)
+let u = (Float64(1.0), Float64(2.0), Float64(3.0))
+let v = (Float64(4.0), Float64(5.0), Float64(6.0))
 let d = dotpack(u, v)
 // EXPECT: r = 2.0
 // EXPECT: r_written = 2.0

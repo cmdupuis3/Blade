@@ -39,7 +39,7 @@ let e_named = exp <@> a
 let at_module_named = prodsum(a, e_named)
 
 // Function body: the second forcing seam.
-function g(v: Array<Float like X>) -> Float = prodsum(v, exp <@> v)
+function g(v: Array<Float64 like X>) -> Float64 = prodsum(v, exp <@> v)
 let in_function = g(a)
 
 // A composed pipeline applied inline -- IRComposeApply, not IRApplyCombinator.

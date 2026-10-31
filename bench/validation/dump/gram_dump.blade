@@ -5,8 +5,8 @@
 // permutation, mirror or sign error in the packed storage shows up cell by cell.
 // Run (C++ lane): BLADE_BLAS=0 blade run gram_dump.blade --print G,checksum,input_checksum
 // Compared against ref_gram.py by validate_A.py.
-let static p = 61
-let static n = 31
+let static p: Int64 = 61
+let static n: Int64 = 31
 type Var = Idx<p>
 type Obs = Idx<n>
 

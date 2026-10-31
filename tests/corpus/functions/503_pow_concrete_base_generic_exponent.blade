@@ -5,12 +5,12 @@
 // to be typed as the EXPONENT's variable (the arithmetic rule for `2.0 + n`),
 // so an Int64 call was refused. `2 ^ n` at an Int64 exponent is exact.
 // ============================================================================
-function tw(n) = 2.0 ^ n
-function itw(n) = 2 ^ n
-let a = tw(3)
-let b = tw(0.5)
-let c = tw(-1)
-let d = itw(10)
+function tw(n) = Float64(2.0) ^ n
+function itw(n) = Int64(2) ^ n
+let a = tw(Int64(3))
+let b = tw(Float64(0.5))
+let c = tw(-Int64(1))
+let d = itw(Int64(10))
 // EXPECT: a = "8.0"
 // EXPECT: b = 1.4142135623731
 // EXPECT: c = 0.5

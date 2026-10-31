@@ -8,5 +8,5 @@
 // used to evaluate integer kernels in FLOAT, which refuted the TRUE sign law
 // (printing -9.22337E+18); it now runs exact wrapping Int64, accepts the sign
 // law, and refuses the diagonal, printing the exact integer.
-let A = [1, 2, 3]
+let A = Int64([1, 2, 3])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) + (-9223372036854775807 - 1) |> compute

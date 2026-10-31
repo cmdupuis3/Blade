@@ -31,7 +31,7 @@ Unit frequency: 1 / day
 
 // The segment count is compile-time: the cell axis carries an index type and
 // `halo` needs its extent. `n_segments` is the single source of truth.
-let static n_segments = 10
+let static n_segments: Int64 = 10
 type CellIdx = Idx<n_segments + 1>
 
 /// The sums accumulated per (cell, frequency), named rather than positional:
@@ -43,8 +43,8 @@ type Sum = EnumIdx<["u_c", "u_s", "c", "s", "c_c", "c_s"]>
 /// What each segment contributes to its frequency's average.
 type Est = EnumIdx<["power", "cos_arg", "sin_arg"]>
 
-let i = complex(0.0, 1.0)
-let two_pi = 6.283185307179586
+let i: Complex128 = complex(0.0, 1.0)
+let two_pi: Float64 = 6.283185307179586
 
 // `mean` is stdlib (`from stats import mean`, above); an array's min and max
 // are lambda folds.
@@ -62,7 +62,7 @@ function variance(x: T^1) = {
 /// One kernel, not the lifted `alpha - beta * cos(two_pi * ts / seg_span)`:
 /// that spelling is five broadcast passes over the series where this is one.
 function segment_taper(ts: T<time>^1, seg_span: T<time>) = {
-    let alpha = 0.53836
+    let alpha: Float64 = 0.53836
     let beta = 1.0 - alpha
     (ts <@> lambda(t) -> alpha - beta * cos(two_pi * t / seg_span)) |> compute
 }

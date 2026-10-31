@@ -31,6 +31,10 @@
 //
 // Surface math syntax feels like numpy/R/MATLAB; the rest of the grammar is
 // ML-style (Rust, OCaml, F#).
+// Integer literals default to Int32 when they fit, otherwise Int64; float
+// literals default to Float32. Context can set a literal's width within its
+// numeric class. Use bit-sized names such as Float64 when wider precision
+// is required; width-less Float, Int and Double are not type names.
 // %%
 let a = 2
 let b = 3
@@ -41,14 +45,14 @@ mySum
 // Conditionals: `if`/`then`/`else` and `match` are expressions; results can be
 // let-bound.
 // %%
-function test1(a: Nat) = if a == 2 then True else False
+function test1(a: Nat) = if a == 2 then true else false
 
 function test2(a: Nat) = {
     match a with
-    | 1 -> True
-    | 2 -> False
-    | 3 -> False
-    | _ -> True
+    | 1 -> true
+    | 2 -> false
+    | 3 -> false
+    | _ -> true
 }
 // %%
 test2(2)
@@ -66,7 +70,7 @@ type myIdx = Idx<N>
 type LatIdx = Idx<180>
 type LonIdx = Idx<360>
 
-type EarthArray = Array<Float like LatIdx, LonIdx>
+type EarthArray = Array<Float64 like LatIdx, LonIdx>
 // %% [markdown]
 // Index types don't evaluate to values, so you cannot see the numbers inside,
 // but they guarantee that the `Array` types they define iterate in the fastest
@@ -123,10 +127,10 @@ myFunc(5)(3)      // U^0 -> U^0 -> T^0
 // ## 4. Function Basics
 //
 // Blade has two parallel type systems: *concrete types* and *abstract types*.
-// `EarthArray` is concrete — a 180 × 360 `Array` of `Float`. Functions are on a
+// `EarthArray` is concrete — a 180 × 360 `Array` of `Float64`. Functions are on a
 // need-to-know basis; they only need abstract types:
 // %%
-type EarthArray = Array<Float like LatIdx, LonIdx>   // concrete
+type EarthArray = Array<Float64 like LatIdx, LonIdx>   // concrete
 // %% [markdown]
 // Abstract types have the form `T^rank(symm)`: a value type, a rank, and a
 // symmetry vector of length `rank` (ignore symmetry for now).
@@ -140,7 +144,7 @@ function add1(array: T^2) -> T^2 = {
 // and mutate through element writes (a scalar result is simply returned):
 // %%
 let mut a = [1.0, 2.0, 3.0]
-function tryToChange(xs: mut Array<Float64 like Idx<3>>) -> Float64 = {
+function tryToChange(xs: mut Array<Float32 like Idx<3>>) -> Float32 = {
     xs(0) = xs(0) + 10.0
     xs(0)
 }
@@ -154,14 +158,14 @@ a
 //
 // Anonymous functions use `lambda`:
 // %%
-let myFunc = lambda(x: Float) -> x + 10
+let myFunc = lambda(x: Float32) -> x + 10.0
 // %% [markdown]
 // ## 5. Structure-First Math
 //
 // Say we want an average global temperature:
 // %%
 let temps = getTemperatures("temperatures.nc")
-// temps : Array<Float like Idx<100>, Idx<120>>
+// temps : Array<Float64 like Idx<100>, Idx<120>>
 // %% [markdown]
 // The primitive `+` has type `T^0 -> T^0 -> T^0`. Blade functions look at *all*
 // the dimensions in a call before iterating. Adding a scalar to a 2D array
@@ -264,7 +268,7 @@ method_for(A, B) <@> add2       // A [+] B (outer-product style)
 // behavior and the symmetry above. But how can triangular iteration live in a
 // type like this?
 // %%
-let array = Array<Float like Idx<100>, Idx<100>>
+let array = Array<Float64 like Idx<100>, Idx<100>>
 // %% [markdown]
 // It can't! The bounds of a triangular loop depend on each other. We need an
 // index type that describes multiple symmetric positions simultaneously:
@@ -277,11 +281,11 @@ let array = Array<Float like Idx<100>, Idx<100>>
 // memory of a dense 100×100 array — and encodes the triangular iteration
 // pattern:
 // %%
-type SymArray = Array<Float like SymIdx<2, 100>>
+type SymArray = Array<Float64 like SymIdx<2, 100>>
 // %% [markdown]
 // Now the covariance of a 2D+time array, concretely:
 // %%
-type Btype = Array<Float like Idx<100>, Idx<200>, Idx<T>>
+type Btype = Array<Float64 like Idx<100>, Idx<200>, Idx<T>>
 let B: Btype = ...
 let calc = cov(B, B)
 // %% [markdown]
@@ -289,7 +293,7 @@ let calc = cov(B, B)
 // two spatial dimensions; commutativity symmetrizes the two *compound* spatial positions jointly:
 //
 // ```
-// calc : Array<Float like SymIdx<2, <Idx<100>, Idx<200>>>>
+// calc : Array<Float64 like SymIdx<2, <Idx<100>, Idx<200>>>>
 // ```
 // %%
 calc
@@ -392,7 +396,7 @@ where comm(A) -> T^0 = {
 // %% [markdown]
 // One generator, every comoment:
 // %%
-type Array2D = Array<Float like Idx<X>, Idx<T>>
+type Array2D = Array<Float64 like Idx<X>, Idx<T>>
 let A: Array2D = ...
 
 let comomentLoop = object_for(comoment_generator)
@@ -400,11 +404,11 @@ let covariance = comomentLoop <@> (A, A)
 let coskewness = comomentLoop <@> (A, A, A)
 let cokurtosis = comomentLoop <@> (A, A, A, A)
 // %%
-covariance // : Array<Float like SymIdx<2, X>>    // 2!  = 2x  speedup
+covariance // : Array<Float64 like SymIdx<2, X>>    // 2!  = 2x  speedup
 // %%
-coskewness // Array<Float like SymIdx<3, X>>    // 3!  = 6x
+coskewness // Array<Float64 like SymIdx<3, X>>    // 3!  = 6x
 // %%
-cokurtosis // Array<Float like SymIdx<4, X>>    // 4!  = 24x
+cokurtosis // Array<Float64 like SymIdx<4, X>>    // 4!  = 24x
 // %% [markdown]
 // Arity determines loop depth, output rank, and symmetry — deduced, typed, and optimized automatically.
 // %% [markdown]
@@ -415,9 +419,9 @@ cokurtosis // Array<Float like SymIdx<4, X>>    // 4!  = 24x
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-type Distance = Float<meters>
-type Time = Float<seconds>
-type Speed = Float<mps>
+type Distance = Float64<meters>
+type Time = Float64<seconds>
+type Speed = Float64<mps>
 // %%
 let speed1 = 4.0: Speed
 let speed2 = 3.0: Speed
@@ -425,11 +429,11 @@ let dist = 4.0: Distance
 let time = 2.0: Time
 let speed3 = dist / time         // meters/seconds = mps: OK
 // %%
-(speed1 + speed2 + speed3) / 3   // 3.0
+(speed1 + speed2 + speed3) / 3.0   // 3.0
 // %%
 speed1 + dist                    // Error! mps + meters
 // %% [markdown]
-// Units can carry valid ranges (`Float<meters, min=0.0>`), encoding physical
+// Units can carry valid ranges (`Float64<meters, min=0.0>`), encoding physical
 // constraints checked at runtime — salinity that can never go negative, and so
 // on.
 // %% [markdown]

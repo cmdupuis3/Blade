@@ -15,7 +15,7 @@ impl VecOps for Vec2 {
 let v1 = Vec2 { x = 3.0, y = 4.0 }
 let v2 = Vec2 { x = 1.0, y = 2.0 }
 let d = v1.dot(v2)
-let v3 = v1.scale(2.0)
+let v3 = v1.scale(Float64(2.0))
 let sx = v3.x
 let sy = v3.y
 // EXPECT: d = 11.0

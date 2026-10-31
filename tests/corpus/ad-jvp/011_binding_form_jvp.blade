@@ -3,7 +3,7 @@
 // rewrite produces a bare function reference, so both are the same case.
 import ad as ad
 
-function f(x: Float) -> Float = x * x * x
+function f(x: Float64) -> Float64 = x * x * x
 
 let j = ad.jvp(f)
 let (v1, t1) = j(2.0, 1.0)

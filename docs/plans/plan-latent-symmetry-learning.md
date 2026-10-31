@@ -532,14 +532,14 @@ derivative is needed; the realism term uses the U-statistic at moderate `t`, the
 let Z0   = encode(w_phi, X)                             // (Lat, Samp), whitened in-lane
 let gens = lie.discover(Z0, Fz, K, tol)                 // EXACT: Hessian + dynamics rows, eigh, ladder printed
 let G    = sample_group(gens, w_table, round)           // expm of algebra draws, CONSTANT this round
-function loss(w_phi: ..., w_psi: ..., x: ..., g: ...) -> Float = {
+function loss(w_phi: ..., w_psi: ..., x: ..., g: ...) -> Float64 = {
     let Z   = encode(w_phi, x)
     let Xr  = decode(w_psi, Z)
     let Zg  = act(g, Z)                                 // gram against a constant
     let Xg  = decode(w_psi, Zg)
     recon(Xr, x) + l1 * mmd2_gauss_u(Xg, x, sigma) + l2 * hess_ratio(Z, gens) + l3 * dyn_equiv(Z, gens)
 }
-let rec wtraj: Array<Float like Epochs, State> = ... | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
+let rec wtraj: Array<Float64 like Epochs, State> = ... | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
 ```
 
 **Mode C — unsupervised joint (research, P5).** The LaLiGAN objective without a

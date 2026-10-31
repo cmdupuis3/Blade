@@ -5,7 +5,7 @@
 // no pool copy. Every reader sees the same canonical cells: the print, a
 // full orbit-weighted fold, a mirrored subscript, and a map.
 // S = reynolds(2x + y) over [1, 2, 3]: canonicals 6 9 12 / 12 15 / 18.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let S = L <@> reynolds(g) |> compute

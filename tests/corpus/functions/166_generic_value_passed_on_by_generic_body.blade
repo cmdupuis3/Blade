@@ -8,7 +8,7 @@
 function idg(x: T) -> T = x
 function applyG(g: (T) -> T, x: T) -> T = g(x)
 function outer(x: T^0) -> T^0 = applyG(idg, x)
-let r = outer(2.5)
+let r = outer(Float64(2.5))
 // EXPECT: r = 2.5
-let s = outer(3)
+let s = outer(Int64(3))
 // EXPECT: s = 3

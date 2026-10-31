@@ -8,8 +8,8 @@
 // in every build; `lic` and `thr` agree with it to 1e-12 relative. Under
 // BLADE_FP_REPRO=1 (what `blade test interp` pins) every fold keeps the lex
 // order, so there all three are bit-identical to the interpreter's walk.
-let static n = 301
-let static w = 7
+let static n: Int64 = 301
+let static w: Int64 = 7
 type Pts = Idx<n>
 
 static struct Band {

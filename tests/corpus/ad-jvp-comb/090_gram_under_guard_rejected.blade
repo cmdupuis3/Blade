@@ -13,7 +13,7 @@ import ad as ad
 type I = Idx<2>
 type K = Idx<3>
 
-function floss(p: Float, a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {
+function floss(p: Float64, a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Float64 = {
     let g = guard(p > 0.0, gram(a, b))
     g(0, 1) * 2.0 + g(1, 0)
 }

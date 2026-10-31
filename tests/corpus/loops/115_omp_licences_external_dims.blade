@@ -21,7 +21,7 @@
 //
 // Values are identical either way -- parallelism never changes them.
 // ============================================================================
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 
 function inner(xs: Float64^1) where omp(xs: 1) = {
     xs <@> lambda(x) -> x * 2.0 |> compute

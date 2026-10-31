@@ -2,5 +2,5 @@
 // ERROR: BL4009 @ 5:8
 // ERROR-CONTAINS: boost-variant value escapes to 'sqrt'
 import ml as ml
-function bad(uc: Float) where ml.galilean(uc) -> Float =
+function bad(uc: Float64) where ml.galilean(uc) -> Float64 =
   sqrt(uc)

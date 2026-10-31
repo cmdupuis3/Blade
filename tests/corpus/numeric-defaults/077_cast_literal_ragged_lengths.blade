@@ -1,0 +1,6 @@
+// TEST: Explicit-width literal arrays remain compile-time ragged lengths
+let lengths = Int64([2, 1])
+let rows: Array<Float64 like Idx<2>, RaggedIdx<lengths>> = [[1.0, 2.0], [3.0]]
+function sum_row(row: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(row, (+))
+let sums = method_for(rows) <@> sum_row |> compute
+// EXPECT: sums = [3.0, 3.0]

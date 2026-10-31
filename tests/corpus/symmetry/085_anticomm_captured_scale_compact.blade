@@ -3,10 +3,10 @@
 // capture nothing: `(x - y) * k` is antisymmetric with a zero diagonal for
 // any k, so sampling k refutes nothing, in Int64 and in Float64 alike (the
 // float kernel is one the parity tables cannot prove, so the witness runs).
-let k = 5
-let s = 0.25
-let A = [1, 2, 4]
-let B = [1.0, 2.0, 4.0]
+let k: Int64 = 5
+let s: Float64 = 0.25
+let A = Int64([1, 2, 4])
+let B = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) * k |> compute
 let F = method_for(B, B) <@> lambda(x, y) where anticomm(x, y) -> if x > y then (x - y) * s else 0.0 - (y - x) * s |> compute
 let r12 = R(1, 2)

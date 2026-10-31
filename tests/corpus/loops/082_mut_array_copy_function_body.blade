@@ -7,7 +7,7 @@
 // data pointer. The top-level rename `let U = Z` is likewise a snapshot
 // (assignable binding), so it stays all-2s no matter what later code does
 // with Z or the copies.
-let Z = method_for(range<Idx<4>>) <@> lambda(i) -> 2.0 |> compute
+let Z = method_for(range<Idx<4>>) <@> lambda(i) -> Float64(2.0) |> compute
 let U = Z
 
 function stamp(x: Float64) -> Float64 = {
@@ -19,7 +19,7 @@ function stamp(x: Float64) -> Float64 = {
     a(3)
 }
 
-let r1 = stamp(10.0)
+let r1 = stamp(Float64(10.0))
 let r2 = stamp(20.0)
 let z0 = Z(0)
 let z3 = Z(3)

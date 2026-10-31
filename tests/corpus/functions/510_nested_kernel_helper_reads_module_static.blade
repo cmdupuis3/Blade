@@ -2,10 +2,10 @@
 // The same gap reached through a NESTED kernel inside a top-level one: `pos`
 // reads the module `let static NTR` and two module arrays, and the inner
 // kernel calls it with the outer kernel's index in scope.
-let static NTR = 3
-let pos_tr: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
-let pos_te: Array<Float like Idx<2>> = [10.0, 20.0]
-function pos(n: Int64) -> Float = if n < NTR then pos_tr(n) else pos_te(n - NTR)
+let static NTR: Int64 = 3
+let pos_tr: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let pos_te: Array<Float64 like Idx<2>> = [10.0, 20.0]
+function pos(n: Int64) -> Float64 = if n < NTR then pos_tr(n) else pos_te(n - NTR)
 let t = method_for(range<Idx<2>>) <@> lambda(k) -> {
     let inner = method_for(range<Idx<5>>) <@> lambda(n) -> pos(n) * Float64(k + 1) |> compute
     reduce(inner, (+))

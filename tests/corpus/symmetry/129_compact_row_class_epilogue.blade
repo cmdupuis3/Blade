@@ -29,7 +29,7 @@ let (ss2, n2) = {
             + b((0 : Dim))
     } |> compute
     let s = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k2(i, j), (+)), (+), 1.0)
-    (s, 37)
+    (s, Int64(37))
 }
 // EXPECT: ss2 = 26337.0
 // EXPECT: n2 = 37

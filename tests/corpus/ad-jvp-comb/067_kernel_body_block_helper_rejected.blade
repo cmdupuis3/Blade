@@ -7,12 +7,12 @@ import ad as ad
 
 type I = Idx<3>
 
-function center(x: Float) -> Float = {
+function center(x: Float64) -> Float64 = {
     let c = x - 1.0
     c
 }
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let sq = method_for(a) <@> lambda(x) -> center(x) * center(x) |> compute
     reduce(sq, (+))
 }

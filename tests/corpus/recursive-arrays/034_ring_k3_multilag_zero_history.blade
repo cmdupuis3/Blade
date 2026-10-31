@@ -10,14 +10,14 @@
 // ============================================================================
 type C = Idx<3>
 type Steps = Idx<8>
-function combine3(p: Array<Float like C>, q: Array<Float like C>, r: Array<Float like C>) -> Array<Float like C> =
+function combine3(p: Array<Float64 like C>, q: Array<Float64 like C>, r: Array<Float64 like C>) -> Array<Float64 like C> =
     (method_for(zip(p, q, r)) <@> lambda(x, y, z) -> x + 10.0 * y + 100.0 * z) |> compute
 
 let out = {
-    let rec vec: Array<Float like Steps, C> =
+    let rec vec: Array<Float64 like Steps, C> =
         match vec with
         | zero -> zero
-        | zero :: s -> zero :: [1.0, 2.0, 3.0]
+        | zero :: s -> zero :: Float64([1.0, 2.0, 3.0])
         | prefix :: n -> prefix :: combine3(prefix(n - 1), prefix(n - 2), prefix(n - 3))
     vec((7 : Steps))
 }

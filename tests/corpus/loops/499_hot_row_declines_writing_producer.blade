@@ -7,10 +7,10 @@
 // never scheduled behind its own rows now.
 type I = Idx<2>
 type J = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {
     G(0) = G(0) + 1.0
-    0.0
+    Float64(0.0)
 } |> compute
 let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), (+), 0.0)
 // EXPECT: total = 12.0

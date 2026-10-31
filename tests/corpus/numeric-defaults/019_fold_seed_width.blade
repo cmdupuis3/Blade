@@ -1,0 +1,20 @@
+// TEST: a fold seed takes the width of the operand
+// ============================================================================
+// The literal seed of `reduce(xs, (+), 0.5)` is the element width (Float32
+// over a Float32 array, Float64 over a Float64 one); a full fold of a Float32
+// matrix (`axes = 2`) accumulates in Float32.
+// ============================================================================
+let xs = [1.0, 2.0, 3.0]
+let s = reduce(xs, (+), 0.5)
+let s32: Float32 = s
+let ys = Float64([1.0, 2.0, 3.0])
+let t = reduce(ys, (+), 0.5)
+let t64: Float64 = t
+type J = Idx<2>
+type I = Idx<3>
+let m: Array<Float32 like J, I> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let total = reduce(m, (+), axes = 2)
+let total32: Float32 = total
+// EXPECT: s32 = 6.5
+// EXPECT: t64 = 6.5
+// EXPECT: total32 = 21.0

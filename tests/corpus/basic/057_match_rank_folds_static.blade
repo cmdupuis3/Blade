@@ -6,15 +6,15 @@
 // survives to the emitted code. Values prove the right arm was taken.
 
 type I = Idx<3>
-let a: Array<Float like I> = [1.0, 2.0, 3.0]
-let x = 4.0
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let x: Float64 = 4.0
 
-let y = match rank(a) with
+let y: Int64 = match rank(a) with
     | 0 -> 100
     | _ -> 200
 // EXPECT: y = 200
 
-let z = match rank(x) with
+let z: Int64 = match rank(x) with
     | 0 -> 100
     | _ -> 200
 // EXPECT: z = 100

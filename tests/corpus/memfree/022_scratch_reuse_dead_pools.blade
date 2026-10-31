@@ -22,20 +22,20 @@ type I = Idx<7>
 type J = Idx<3>
 type K = Idx<5>
 
-function demean(x: Array<Float like I>) -> Array<Float like I> = {
+function demean(x: Array<Float64 like I>) -> Array<Float64 like I> = {
     let y = x * 2.0 + 1.0
     let m = reduce(y, (+)) / Float64(extents(y))
     let z = y - m
     z * 0.5
 }
-let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
-let b = [7.0, 5.0, 3.0, 1.0, -1.0, -3.0, -5.0]
+let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+let b = Float64([7.0, 5.0, 3.0, 1.0, -1.0, -3.0, -5.0])
 let da = demean(a)
 let db = demean(b)
 // EXPECT: da = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
 // EXPECT: db = [6.0, 4.0, 2.0, 0.0, -2.0, -4.0, -6.0]
 
-function chain(x: Array<Float like I>) -> Float = {
+function chain(x: Array<Float64 like I>) -> Float64 = {
     let p = x * 2.0
     let m = reduce(p, (+)) + 0.0
     let q = x - m
@@ -49,13 +49,13 @@ let cb = chain(b)
 // EXPECT: ca = -7616.0
 // EXPECT: cb = -1904.0
 
-function viewed(x: Array<Float like J, K>) -> Float = {
+function viewed(x: Array<Float64 like J, K>) -> Float64 = {
     let y = x * 2.0
     let row = y((1 : J))
     let w = x + 1.0
     let t = reduce(reduce(w, (+)), (+))
     reduce(row, (+)) + t
 }
-let g: Array<Float like J, K> = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]
+let g: Array<Float64 like J, K> = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]
 let vg = viewed(g)
 // EXPECT: vg = 215.0

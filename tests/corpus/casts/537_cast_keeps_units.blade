@@ -6,9 +6,9 @@
 // a generic body whose rank is open.
 // ============================================================================
 Unit meters
-let d: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let d: Array<Float64<meters> like Idx<3>> = [1.0, 2.0, 3.0]
 let e = Float32(d)
-let off: Float<meters> = 0.5
+let off: Float64<meters> = 0.5
 let moved = e + Float32(off)
 // EXPECT: moved = [1.5, 2.5, 3.5]
 function narrow(x: T) = Float32(x)

@@ -5,10 +5,10 @@
 // DECLINED ("used whole"). x_n = 1 + 2n over 15 rows; the sum is 225.
 // ============================================================================
 type T = Idx<15>
-function total_sum(a: Array<Float like T>) -> Float = reduce(a, (+))
+function total_sum(a: Array<Float64 like T>) -> Float64 = reduce(a, (+))
 
 let out = {
-    let rec traj: Array<Float like T> =
+    let rec traj: Array<Float64 like T> =
         match traj with
         | zero -> zero
         | zero :: s -> zero :: 1.0

@@ -9,6 +9,6 @@
 type Row = Idx<1>
 let z: Array<Int64 like Row> = [0]
 let g = method_for(z) <@> lambda(v) -> 1 / v
-let r = (g(0) <|> 0) + (if z(0) > 0 then g(0) else 0)
+let r = (g(0) <|> Int64(0)) + (if z(0) > 0 then g(0) else 0)
 // ABORT: BL8013
 // ABORT: .blade:10

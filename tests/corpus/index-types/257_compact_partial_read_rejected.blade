@@ -8,6 +8,6 @@
 // pointer. Coordinates are walked through the records in flat order; a
 // count that lands inside a compact group has no residual class, the same
 // refusal the wildcard form gives.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let S = method_for(A, A) <@> (+) |> compute
-let x = S(1)
+let x = S(Int64(1))

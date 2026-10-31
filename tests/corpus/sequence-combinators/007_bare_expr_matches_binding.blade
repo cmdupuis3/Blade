@@ -22,8 +22,8 @@
 // nondeterministic rather than merely wrong, so it can only show up as a hard
 // mismatch here -- never as a plausible number.
 // ----------------------------------------------------------------------------
-let x = [1.0, 2.0]
-let y = [3.0, 4.0]
+let x = Float64([1.0, 2.0])
+let y = Float64([3.0, 4.0])
 
 let s = sequence(x, y) |> compute
 let t = stack(x, y)

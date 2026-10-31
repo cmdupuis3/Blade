@@ -5,14 +5,14 @@
 // Lowering now binds the literal first and folds over the binding. All
 // three reduce forms, plus block-local use.
 // ============================================================================
-let a = reduce([1.0, 2.5, 3.5], (+))
+let a = reduce(Float64([1.0, 2.5, 3.5]), (+))
 // EXPECT: a = 7.0
-let b = reduce([2.0, 3.0, 4.0], (*), 10.0)
+let b = reduce(Float64([2.0, 3.0, 4.0]), (*), 10.0)
 // EXPECT: b = 240.0
 let c = {
-    let inner = reduce([5.0, 5.0], (+))
+    let inner = reduce(Float64([5.0, 5.0]), (+))
     inner * 2.0
 }
 // EXPECT: c = 20.0
-let d = reduce([4], (+))
+let d = reduce(Int64([4]), (+))
 // EXPECT: d = 4

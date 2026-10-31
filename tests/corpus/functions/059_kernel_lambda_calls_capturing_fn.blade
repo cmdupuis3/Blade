@@ -11,7 +11,7 @@
 //
 // This is the shape examples/lswosa.blade hits: a kernel calling `hanning`
 // and `wosa_lsdft`, both of which 058's rule makes main-local.
-let K = 4.0
+let K: Float64 = 4.0
 function g(x: Float64) -> Float64 = x + K
 function f(a: Array<Float64 like Idx<n>>) -> Array<Float64 like Idx<n>>
 = method_for(a) <@> lambda(x) -> g(x) |> compute

@@ -2,7 +2,7 @@
 // Complex128 literal construction via the complex(re, im) constructor
 // call — both components are float-typed; the resulting value is a
 // scalar Complex128, NOT a 2-tuple of doubles.
-let x = complex(1.0, 2.0)
-let y = complex(3.0, 4.0)
+let x: Complex128 = complex(1.0, 2.0)
+let y: Complex128 = complex(3.0, 4.0)
 // EXPECT: x = (1.0,2.0)
 // EXPECT: y = (3.0,4.0)

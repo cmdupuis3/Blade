@@ -387,7 +387,7 @@ point, the output never materializes. A recursive array is the missing
 producer for that terminal:
 
 ```blade
-let rec traj: Array<Float like T, Y, X> = …    // classified: windowed
+let rec traj: Array<Float64 like T, Y, X> = …    // classified: windowed
 z.write("traj", traj)                          // sole whole-array consumer
 ```
 

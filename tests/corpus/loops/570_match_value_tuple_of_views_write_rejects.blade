@@ -9,7 +9,7 @@
 type Y = Idx<2>
 type X = Idx<3>
 let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
-let pair = match 0 with
+let pair = match Int64(0) with
     | 0 -> (m(0), m(1))
     | _ -> (m(1), m(0))
 let row = pair[0]

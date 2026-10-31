@@ -1,0 +1,6 @@
+// TEST: callable slots do not adapt variable arguments (rejects)
+let index: Int64 = 0
+function apply(c) = c(index)
+function narrow(i: Int32) = i + 1
+let result = apply(narrow)
+// ERROR: BL3001

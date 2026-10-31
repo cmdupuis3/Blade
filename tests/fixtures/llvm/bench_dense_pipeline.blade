@@ -32,7 +32,7 @@ function multi_accumulator() -> Float64 = {
     let base = method_for(range<Ix>) <@> lambda(i) -> 0.5 + 0.25 * Float64(i) |> compute
     let l = method_for(base)
     let (s, ss, n) =
-        reduce((l <@> lambda(x) -> x) <&!> (l <@> square) <&!> (l <@> lambda(x) -> 1.0), (+))
+        reduce((l <@> lambda(x) -> x) <&!> (l <@> square) <&!> (l <@> lambda(x) -> Float64(1.0)), (+))
     let mean = s / n
     ss / n - mean * mean
 }

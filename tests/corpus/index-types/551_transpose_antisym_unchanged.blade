@@ -3,7 +3,7 @@
 // negate twice: transpose-normal-form v1 leaves both (recorded as declines);
 // the values are the per-class actions' (strict canonicals, no diagonal).
 // anti = reynolds(2x + y, Antisymmetric) over [1, 2, 3]: -1 -2 / -1.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let anti = L <@> reynolds(g, Antisymmetric) |> compute

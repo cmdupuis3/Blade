@@ -63,7 +63,7 @@ let picked = ws <@> lambda(w) -> w * c((1 : X)) |> compute
 // (3) Lambda bound to a name, called directly -- the alias wrapper forwards
 //     the same capture, so it needs the same forcing.
 let f = lambda(w) -> w * reduce(c, (+))
-let z = f(2.0)
+let z = f(Float64(2.0))
 
 // (4) Control: module-level fold, no capture, still fuses. d = [2, 3, 4, 5].
 let d = method_for(A) <@> lambda(x) -> x + 1.0

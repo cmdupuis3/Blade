@@ -377,6 +377,7 @@ let scalarElem (v: Value) : ElemType option =
     | VFloat _ -> Some ETFloat64
     | VFloat32 _ -> Some ETFloat32
     | VComplex _ -> Some ETComplex128
+    | VComplex64 _ -> Some ETComplex64
     | VBool _ -> Some ETBool
     | VString _ -> Some ETString
     | VChar _ -> Some ETInt32   // char literals lower to ETInt32 in this compiler
@@ -392,6 +393,7 @@ let private asF64 (v: Value) : float =
     | VInt n -> float n
     | VInt32 n -> float n
     | VComplex (r, _) -> r
+    | VComplex64 (r, _) -> float r
     | VBool b -> if b then 1.0 else 0.0
     | VChar c -> float (int c)
     | _ -> nan
@@ -432,7 +434,37 @@ let private asI32 (v: Value) : int32 =
 let private asComplex (v: Value) : float * float =
     match v with
     | VComplex (r, i) -> (r, i)
+    | VComplex64 (r, i) -> (float r, float i)
     | other -> (asF64 other, 0.0)
+
+/// Complex64 `*` / `/`: Blade's OWN float algorithms, twins of
+/// blade_arith::c64_mul / c64_div (blade_runtime.hpp) -- every product,
+/// sum and quotient one float32 operation (.NET float32 operators are
+/// single-rounded on x64 RyuJIT). Not libgcc's __mulsc3 / __divsc3.
+let c64Mul (a: float32) (b: float32) (c: float32) (d: float32) : float32 * float32 =
+    let ac = a * c
+    let bd = b * d
+    let ad = a * d
+    let bc = b * c
+    (ac - bd, ad + bc)
+
+let c64Div (a: float32) (b: float32) (c: float32) (d: float32) : float32 * float32 =
+    if abs c >= abs d then
+        let r = d / c
+        let den = c + d * r
+        ((a + b * r) / den, (b - a * r) / den)
+    else
+        let r = c / d
+        let den = c * r + d
+        ((a * r + b) / den, (b * r - a) / den)
+
+/// A value's Complex64 parts (a real widens with a zero imaginary part).
+let private asComplex64 (v: Value) : float32 * float32 =
+    match v with
+    | VComplex64 (r, i) -> (r, i)
+    | VComplex (r, i) -> (float32 r, float32 i)
+    | VFloat32 f -> (f, 0.0f)
+    | other -> (float32 (asF64 other), 0.0f)
 
 // C++ usual-arithmetic-conversion type: the type C++ evaluates a real binop
 // in (distinct from the Blade node type, IR.promoteElemType). Ranks: Float64
@@ -527,7 +559,8 @@ let private convertTo (target: ElemType) (v: Value) : Value =
     | ETInt64 -> VInt (asI64 v)
     | ETFloat32 -> VFloat32 (asF32 v)
     | ETFloat64 -> VFloat (asF64 v)
-    | ETComplex128 | ETComplex64 -> let (r, i) = asComplex v in VComplex (r, i)
+    | ETComplex128 -> let (r, i) = asComplex v in VComplex (r, i)
+    | ETComplex64 -> let (r, i) = asComplex64 v in VComplex64 (r, i)
     | _ -> v
 
 /// Compute a real (non-complex, non-pow) binop in the C++ evaluation type,
@@ -1035,9 +1068,16 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
 ///   real ^ complex    = x > 0 ? polar(pow(x, w.re), w.im * log(x))
 ///                       : cpow((x, 0), w)
 /// Elsewhere the old best-effort exp(w * log z) (NOT bit-verified).
-let private complexCaret (l: Value) (r: Value) : Value =
-    let isC (v: Value) = match v with VComplex _ -> true | _ -> false
+let rec private complexCaret (l: Value) (r: Value) : Value =
+    let isC (v: Value) = match v with VComplex _ | VComplex64 _ -> true | _ -> false
+    let wide (v: Value) = match v with VComplex64 (a, b) -> VComplex (float a, float b) | VFloat32 f -> VFloat (float f) | _ -> v
     match l, r with
+    // A Complex64 operand: the Complex128 evaluation rounded ONCE per part
+    // (blade_arith::cpowi / blade_libm::pow over complex<float>).
+    | VComplex64 _, _ | _, VComplex64 _ ->
+        (match complexCaret (wide l) (wide r) with
+         | VComplex (a, b) -> VComplex64 (float32 a, float32 b)
+         | v -> v)
     // Complex ^ an INTEGER exponent: repeated squaring over the complex
     // multiply (blade_arith::cpowi -- libstdc++'s pow(complex, int) over a
     // 64-bit exponent), every platform: complexMul is libgcc's __muldc3 and
@@ -1093,7 +1133,42 @@ let private evalArith (loc: SrcLoc) (op: IRBinOp) (l: Value) (r: Value) : Value 
     match scalarElem l, scalarElem r with
     | Some le, Some re ->
         let resElem = promoteElemType le re |> Option.defaultValue le
-        if isComplexElem resElem then
+        if resElem = ETComplex64 && op <> IRCaret then
+            // A Complex64 node: float32 arithmetic throughout. Complex x
+            // complex `*` / `/` are Blade's own algorithms (c64Mul / c64Div,
+            // blade_arith::c64_mul / c64_div); `+` `-` and the mixed real
+            // overloads are componentwise float operations, as
+            // std::complex<float>'s are.
+            let lc = isComplexElem le
+            let rc = isComplexElem re
+            let (ar, ai) = asComplex64 l
+            let (br, bi) = asComplex64 r
+            let (xr, xi) =
+                if lc && rc then
+                    match op with
+                    | IRAdd -> (ar + br, ai + bi)
+                    | IRSub -> (ar - br, ai - bi)
+                    | IRMul -> c64Mul ar ai br bi
+                    | IRDiv -> c64Div ar ai br bi
+                    | _ -> (nanf, nanf)
+                elif lc then
+                    match op with
+                    | IRAdd -> (ar + br, ai)
+                    | IRSub -> (ar - br, ai)
+                    | IRMul -> (ar * br, ai * br)
+                    | IRDiv -> (ar / br, ai / br)
+                    | _ -> (nanf, nanf)
+                else
+                    match op with
+                    | IRAdd -> (ar + br, bi)
+                    | IRSub -> (ar - br, 0.0f - bi)
+                    | IRMul -> (ar * br, ar * bi)
+                    // s / (c + di): std::complex<float>'s operator/(T, complex)
+                    // is complex(s) / z -- the full complex division.
+                    | IRDiv -> c64Div ar 0.0f br bi
+                    | _ -> (nanf, nanf)
+            VComplex64 (xr, xi)
+        elif isComplexElem resElem then
             // Complex node. Which operands render as complex in the emitted C++
             // decides full-complex vs. mixed-scalar overload.
             let lc = isComplexElem le
@@ -1210,7 +1285,7 @@ let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
                     elif compEq ls.[i] rs.[i] then lex (i + 1)
                     else evalCompare op ls.[i] rs.[i]
                 lex 0
-    | VComplex _, _ | _, VComplex _ ->
+    | VComplex _, _ | _, VComplex _ | VComplex64 _, _ | _, VComplex64 _ ->
         // std::complex has only == / != ; ordered comparisons never type-check.
         let (ar, ai) = asComplex l
         let (br, bi) = asComplex r
@@ -1305,6 +1380,9 @@ let private evalAbs (v: Value) : Value =
     | VFloat f -> VFloat (math1 "fabs" f)
     | VFloat32 f -> VFloat32 (float32 (math1 "fabs" (float f)))
     | VComplex (r, i) -> VFloat (complexAbs r i)
+    // |Complex64|: the Complex128 magnitude rounded once to float (codegen's
+    // static_cast<float>(std::abs(std::complex<double>(z)))).
+    | VComplex64 (r, i) -> VFloat32 (float32 (complexAbs (float r) (float i)))
     | _ -> v
 
 /// Apply an IRMath intrinsic (real result Float64, except abs which follows the
@@ -1314,6 +1392,9 @@ let evalMath (name: string) (v: Value) : Value =
     else
         match v with
         | VComplex (r, i) -> let (xr, xi) = complexMath name r i in VComplex (xr, xi)
+        // A Complex64: the Complex128 function, each part rounded once
+        // (blade_libm's complex<float> overloads).
+        | VComplex64 (r, i) -> let (xr, xi) = complexMath name (float r) (float i) in VComplex64 (float32 xr, float32 xi)
         // A Float32 operand: the double function at the widened operand,
         // rounded ONCE to float -- blade_libm's float overload for the
         // transcendentals, and exactly std::sqrt/floor/ceil(float) for the
@@ -1369,11 +1450,17 @@ let private evalCast (loc: SrcLoc) (target: ElemType) (v: Value) : Value =
     | ETComplex128 ->
         (match v with
          | VComplex _ -> v
+         | VComplex64 (r, i) -> VComplex (float r, float i)
          | _ -> VComplex (asRealF64 (), 0.0))
     | ETComplex64 ->
         (match v with
-         | VComplex (r, i) -> VComplex (float (float32 r), float (float32 i))
-         | _ -> VComplex (float (float32 (asRealF64 ())), 0.0))
+         | VComplex (r, i) -> VComplex64 (float32 r, float32 i)
+         | VComplex64 _ -> v
+         // An Int64 converts straight to float (static_cast<float>), never
+         // through a double.
+         | VInt n -> VComplex64 (float32 n, 0.0f)
+         | VFloat32 f -> VComplex64 (f, 0.0f)
+         | _ -> VComplex64 (float32 (asRealF64 ()), 0.0f))
     | ETBool | ETUnit | ETString -> bad ()
 
 /// Evaluate a scalar unary operator, matching CodeGen's IRUnaryOp emission.
@@ -1386,17 +1473,18 @@ let evalUnaryOp (op: IRUnaryOp) (v: Value) : Value =
         | VFloat f -> VFloat (-f)
         | VFloat32 f -> VFloat32 (-f)
         | VComplex (r, i) -> VComplex (-r, -i)
+        | VComplex64 (r, i) -> VComplex64 (-r, -i)
         | _ -> v
     | IRNot ->
         match v with VBool b -> VBool (not b) | _ -> v
     | IRConj ->
         // std::conj on complex; the identity on reals (CodeGen emits the operand
         // bare for real operands, IR.fs unaryOpToCpp note).
-        match v with VComplex (r, i) -> VComplex (r, -i) | _ -> v
+        match v with VComplex (r, i) -> VComplex (r, -i) | VComplex64 (r, i) -> VComplex64 (r, -i) | _ -> v
     | IRReal ->
-        match v with VComplex (r, _) -> VFloat r | _ -> v
+        match v with VComplex (r, _) -> VFloat r | VComplex64 (r, _) -> VFloat32 r | _ -> v
     | IRImag ->
-        match v with VComplex (_, i) -> VFloat i | _ -> VFloat 0.0
+        match v with VComplex (_, i) -> VFloat i | VComplex64 (_, i) -> VFloat32 i | VFloat32 _ -> VFloat32 0.0f | _ -> VFloat 0.0
     | IRArg ->
         let (r, i) = asComplex v in VFloat (complexArg r i)
     | IRMath name -> evalMath name v

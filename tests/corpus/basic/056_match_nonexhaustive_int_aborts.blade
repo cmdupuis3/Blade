@@ -5,8 +5,8 @@
 // Int64-valued ternary chain to double and turned this program into a g++
 // float-conversion error instead of a reachable runtime abort.
 
-let x = 7
-let r = match x with
+let x: Int64 = 7
+let r: Int64 = match x with
     | 1 -> 10
     | 2 -> 20
 r

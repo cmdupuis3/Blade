@@ -50,10 +50,12 @@ function comoment_prod(a: Poly<T^1>) where comm(a) -> T^1 = {
 function comoment(a: Poly<T^1>) where comm(a) -> T^0 = mean(comoment_prod(a))
 
 let data = [[1.0, 2.0, 4.0, 7.0], [2.0, 1.0, 0.0, 1.0], [3.0, 3.0, 5.0, 5.0]]
+// stats.mean computes in Float64; convert at this kernel boundary.
+let data64 = Float64(data)
 let m = object_for(comoment)
-let cov    = m <@> (data, data)             |> compute   // SymIdx<2, 3>,  2x
-let coskew = m <@> (data, data, data)       |> compute   // SymIdx<3, 3>,  6x
-let cokurt = m <@> (data, data, data, data) |> compute   // SymIdx<4, 3>, 24x
+let cov    = m <@> (data64, data64)             |> compute   // SymIdx<2, 3>,  2x
+let coskew = m <@> (data64, data64, data64)       |> compute   // SymIdx<3, 3>,  6x
+let cokurt = m <@> (data64, data64, data64, data64) |> compute   // SymIdx<4, 3>, 24x
 let var0 = cov(0, 0)
 let skew0 = coskew(0, 0, 0)
 // EXPECT: var0 = 5.25
@@ -235,7 +237,7 @@ let L = method_for(data)
 let (means, vars) = (L <@> mean) <&!> (L <@> variance) |> compute
 
 // Staged: demean, then the sum of squares of the result, same loop structure:
-function demean(row: T^1) -> T^1 = row - mean(row)
+function demean(row: T^1) = Float64(row) - mean(row)
 function sumsq(row: T^1) -> T^0 = reduce(row * row, (+))
 let ss = (L <@> demean) @>> (L <@> sumsq) |> compute
 
@@ -277,10 +279,10 @@ axes yields fully dense output.
 ```blade prelude
 Unit meters
 Unit seconds
-type Speed = Float<meters / seconds>
+type Speed = Float64<meters / seconds>
 
-let dist = 100.0: Float<meters>
-let t    = 9.58: Float<seconds>
+let dist = 100.0: Float64<meters>
+let t    = 9.58: Float64<seconds>
 ```
 
 ```blade

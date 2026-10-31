@@ -7,7 +7,7 @@
 // declaration must reach the wrapper and pin the same strict simplex the
 // inline lambda gets in symmetry/020.
 function diff(a, b) where anticomm(a, b) = a - b
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let result = object_for(diff) <@> (A, A) |> compute
 // Same six strict-triangle cells as symmetry/020 (A[i] - A[j], i < j).
 // EXPECT: result = [-1.0, -2.0, -3.0, -1.0, -2.0, -1.0]

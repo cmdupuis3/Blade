@@ -24,7 +24,7 @@ let a = {
     let gx = method_for(range<Idx<40>>) <@> lambda(i) -> Float64(i) |> compute
     let gy = method_for(range<Idx<24>>) <@> lambda(i) -> Float64(i) |> compute
     let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> Float64(i * 40 + j) |> compute
-    plot.contourf(gx, gy, gz, 16: maxdim)
+    plot.contourf(gx, gy, gz, Int64(16): maxdim)
 }
 let b = {
     let gx = method_for(range<Idx<40>>) <@> lambda(i) -> Float64(i) |> compute

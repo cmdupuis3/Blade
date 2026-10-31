@@ -3,15 +3,15 @@
 // array. The jvp tangent under seed v must equal <grad buffer, v>.
 import ad as ad
 
-function h(w: Array<Float like Idx<3>>, s: Float) -> Float = {
+function h(w: Array<Float64 like Idx<3>>, s: Float64) -> Float64 = {
     let t = reduce(w, (+))
     t * s
 }
 
-let mut dw = [0.0, 0.0, 0.0]
+let mut dw = Float64([0.0, 0.0, 0.0])
 let (gv, gds) = ad.grad(h)([1.0, 2.0, 3.0], 0.5, dw)
 let (jv, jt) = ad.jvp(h)([1.0, 2.0, 3.0], 0.5, [1.0, -2.0, 0.5], 0.0)
-let dot = reduce(dw * [1.0, -2.0, 0.5], (+))
+let dot = reduce(dw * Float64([1.0, -2.0, 0.5]), (+))
 let tresid = jt - dot
 let (jv2, jt2) = ad.jvp(h)([1.0, 2.0, 3.0], 0.5, [0.0, 0.0, 0.0], 1.0)
 let sresid = jt2 - gds

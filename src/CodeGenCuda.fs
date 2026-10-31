@@ -861,7 +861,7 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     // balance, so it should be chosen by BENCHMARK, not assumed.
     let unrank =
         [ "    size_t __blade_t = __blade_i;"
-          $"    long __blade_neff = {neff}L;"
+          $"    long __blade_neff = {neff}LL;"
           "    long __blade_x = 0;"
           "    long long __blade_rem = (long long)__blade_t;" ]
         @ [ for pos in 0 .. r - 1 do
@@ -4166,7 +4166,7 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                 $"{ind}    size_t __c_lo = {runs}[__seg] < {cMin}UL ? {cMin}UL : {runs}[__seg];"
                                 $"{ind}    size_t __c_hi = {runs}[__seg + 1] > {cMax}UL ? {cMax}UL : {runs}[__seg + 1];"
                                 $"{ind}    if (__c_lo >= __c_hi) continue;"
-                                $"{ind}    size_t __w_lo = __c_lo + ({rLo}L); size_t __w_hi = __c_hi + ({rHi}L);"
+                                $"{ind}    size_t __w_lo = __c_lo + ({rLo}LL); size_t __w_hi = __c_hi + ({rHi}LL);"
                                 $"{ind}    if (__w_hi > {lastN}UL) __w_hi = {lastN}UL;" ]
                             @ (windows |> List.collect (fun (_, r, _) -> r))
                             @ [ $"{ind}    size_t __blade_mpi_lo_{name} = __c_lo - {start}UL;"

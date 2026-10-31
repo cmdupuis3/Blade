@@ -12,7 +12,7 @@
 // (`blade test optimize` asserts both edges' wiring; the cli block runs them).
 // The LLVM lane refuses run-time ranges. Values are the as-written
 // program's; integer-valued data, every sum exact.
-let k = reduce([3, 4, 5], (+))
+let k = reduce(Int64([3, 4, 5]), (+))
 // EXPECT: k = 12
 let ks = 0..k |> compute
 let xs = method_for(ks) <@> lambda(i) -> i * 1 |> compute

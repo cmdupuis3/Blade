@@ -28,9 +28,9 @@ let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2
 
-function c4_chain(x: Array<Float like PgIrrepsIdx<C4, EC>>,
-                  w1: Array<Float like Idx<WE>>, w2: Array<Float like Idx<WE>>, s: Float)
-                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function c4_chain(x: Array<Float64 like PgIrrepsIdx<C4, EC>>,
+                  w1: Array<Float64 like Idx<WE>>, w2: Array<Float64 like Idx<WE>>, s: Float64)
+                  where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     let h = ml.derive_pg_linear(C4, EC, EC, x, w1)
     let g = ml.derive_pg_linear(C4, EC, EC, h, w2)
     (h + g) * s
@@ -56,9 +56,9 @@ let static ED = [("E", 1)]
 let static WED = ml.pg_hom_dim("D4", ED, ED)
 // EXPECT: WED = 1
 
-function d4_chain(x: Array<Float like PgIrrepsIdx<D4, ED>>,
-                  w1: Array<Float like Idx<WED>>, w2: Array<Float like Idx<WED>>, s: Float)
-                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, ED>> = {
+function d4_chain(x: Array<Float64 like PgIrrepsIdx<D4, ED>>,
+                  w1: Array<Float64 like Idx<WED>>, w2: Array<Float64 like Idx<WED>>, s: Float64)
+                  where ml.equiv(D4) -> Array<Float64 like PgIrrepsIdx<D4, ED>> = {
     let h = ml.derive_pg_linear(D4, ED, ED, x, w1)
     let g = ml.derive_pg_linear(D4, ED, ED, h, w2)
     (h + g) * s
@@ -85,15 +85,15 @@ let static SD = [("A1", 1), ("E", 2)]
 let static WD = ml.pg_hom_dim("D4", SD, SD)
 // EXPECT: WD = 5
 
-function d4_readout(x: Array<Float like PgIrrepsIdx<D4, SD>>, w: Array<Float like Idx<WD>>)
-                    where ml.equiv(D4) -> Float = {
+function d4_readout(x: Array<Float64 like PgIrrepsIdx<D4, SD>>, w: Array<Float64 like Idx<WD>>)
+                    where ml.equiv(D4) -> Float64 = {
     let y = ml.derive_pg_linear(D4, SD, SD, x, w)
-    let a = y(0)
+    let a = y(Int64(0))
     sqrt(a * a) + a
 }
 
 // The A1 cell of the layer output is w(0)*x(0) = 2*1 = 2, so the readout is 4.
-let wd = [2.0, 3.0, 0.0 - 1.0, 0.5, 4.0]
+let wd = Float64([2.0, 3.0, 0.0 - 1.0, 0.5, 4.0])
 let inv0 = d4_readout([1.0, 2.0, 3.0, 4.0, 5.0], wd)
 // EXPECT: inv0 = 4.0
 
@@ -119,13 +119,13 @@ let d_s = inv0 - inv_s
 // O(3)-equivariant one, and the O(3) theorem is untouched by it.
 let static SH1 = ml.sh_spec(1)
 
-function o3_with_pg(vx: Float, vy: Float, vz: Float,
-                    p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>)
-                    where ml.equiv(O3) -> Float = {
+function o3_with_pg(vx: Float64, vy: Float64, vz: Float64,
+                    p: Array<Float64 like PgIrrepsIdx<C4, EC>>, pw: Array<Float64 like Idx<WE>>)
+                    where ml.equiv(O3) -> Float64 = {
     let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
     let sh = ml.y_to(1, vx, vy, vz)
     let n = ml.norms(SH1, sh)
-    n(1) * q(0)
+    n(Int64(1)) * q(Int64(0))
 }
 
 // The O(3) premise is y_to's: (vx, vy, vz) are the components of the standard

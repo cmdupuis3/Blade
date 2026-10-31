@@ -23,7 +23,7 @@ let blk = {
 }
 function body() = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
 let fn = body()
-let mut G = [0]
+let mut G = Int64([0])
 let w = method_for(x) <@> lambda(v) -> { G(0) = G(0) + 1; v * 2.0 }
 let w2 = w
 let Pw = method_for(w, w2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute

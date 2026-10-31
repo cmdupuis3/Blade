@@ -5,5 +5,5 @@
 // `Int64(x)` over a generic `x` is legal at an integer instance and refused
 // at a float one, where the truncation must be spelled (`floor`/`ceil`).
 function toint(x: T^0) = Int64(x)
-let c = toint(3)
+let c = toint(Int64(3))
 let d = toint(2.5)

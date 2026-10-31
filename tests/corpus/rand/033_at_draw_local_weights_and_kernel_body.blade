@@ -9,12 +9,12 @@
 import rand as r
 
 function cat_local(k: Int64, o: Int64) = {
-    let wl = [0.1, 0.0, 0.4, 0.5]
+    let wl = Float64([0.1, 0.0, 0.4, 0.5])
     r.categorical_at(k, 3, o, wl, 3)
 }
-let wt = [0.1, 0.0, 0.4, 0.5]
+let wt = Float64([0.1, 0.0, 0.4, 0.5])
 let c_fill = r.categorical_at(99, 3, 5, wt, 3)
-let c_local = cat_local(99, 5)
+let c_local = cat_local(Int64(99), Int64(5))
 let dc = reduce((c_local - c_fill) * (c_local - c_fill), (+))
 // EXPECT: dc = 0
 

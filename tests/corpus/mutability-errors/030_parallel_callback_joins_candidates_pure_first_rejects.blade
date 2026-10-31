@@ -6,7 +6,7 @@
 // (writes the module-level G). The old resolver chose ONE candidate -- forward,
 // which a first probe thought writing -- found it pure, and admitted the kernel
 // (old binary: compiled). Every candidate's effects are joined now.
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function twice(v: Float64) -> Float64 = v * 2.0
 function invoke(cb: (Float64) -> Float64, v: Float64) -> Float64 = cb(v)
 function forward(v: Float64) -> Float64 = invoke(twice, v)

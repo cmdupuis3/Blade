@@ -5,9 +5,9 @@
 // projected row reads stored cells and the join writes nothing.
 type I = Idx<2>
 type J = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let m = method_for(range<I>, range<J>) <@> lambda(i, j) -> { G(0) = G(0) + 1.0; G(0) }
-let pair = (m((0 : I)), 0.0)
+let pair = (m((0 : I)), Float64(0.0))
 let row = pair[0]
 let r = object_for(<&!>) <@> (reduce(row, (+)), reduce(row, (+)))
 // EXPECT: r = (6.0, 6.0)

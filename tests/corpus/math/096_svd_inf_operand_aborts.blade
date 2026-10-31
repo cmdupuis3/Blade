@@ -4,7 +4,7 @@
 // check therefore also requires the operand's norm to be finite, so an Inf
 // operand is refused with the same BL8008 instead of a "result" built from it.
 import math as m
-let big = 1.0 / 0.0
+let big: Float64 = 1.0 / 0.0
 let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, big, 1.0], [0.0, 1.0, 2.0]]
 let (U, SV, V) = m.svd(S)
 // ABORT: error[BL8008]

@@ -20,5 +20,5 @@ import ml as ml
 // diagnostics/015.
 // ============================================================================
 let static S = [(0, 0, 2), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
   x(2)

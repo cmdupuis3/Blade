@@ -22,8 +22,8 @@ import ad as ad
 type V = Idx<2>
 type S = Idx<4>
 
-function loss(a: Array<Float like V, S>) -> Float = {
-    let c = method_for(a, a) <@> lambda(x1: Array<Float like S>, x2: Array<Float like S>) -> reduce(x1 * x2, (+)) / 4.0 |> compute
+function loss(a: Array<Float64 like V, S>) -> Float64 = {
+    let c = method_for(a, a) <@> lambda(x1: Array<Float64 like S>, x2: Array<Float64 like S>) -> reduce(x1 * x2, (+)) / 4.0 |> compute
     c(0, 1)
 }
 

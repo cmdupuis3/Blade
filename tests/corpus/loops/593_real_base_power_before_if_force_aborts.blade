@@ -9,9 +9,9 @@
 type Row = Idx<1>
 let z: Array<Int64 like Row> = [0]
 let g = method_for(z) <@> lambda(v) -> 1 / v
-let n = 1
+let n: Int64 = 1
 let r = {
-    let t = 2.0 ^ n
+    let t = Float64(2.0) ^ n
     if g(0) > 0 then Float64(g(0)) + t else t
 }
 // ABORT: BL8013

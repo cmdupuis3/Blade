@@ -37,22 +37,22 @@ import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
 
 // TYPED-SUGGEST: bump|O3
-function bump(v) -> Array<Float like IrrepsIdx<S>> = v + v
+function bump(v) -> Array<Float64 like IrrepsIdx<S>> = v + v
 
 // TYPED-SUGGEST: jitter_loose|O3
-function jitter_loose(x: Array<Float like IrrepsIdx<S>>) -> Array<Float like IrrepsIdx<S>> =
+function jitter_loose(x: Array<Float64 like IrrepsIdx<S>>) -> Array<Float64 like IrrepsIdx<S>> =
     bump(bump(x))
 
 // The pinned twins.
-function bump_tight(v: Array<Float like IrrepsIdx<S>>)
-                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bump_tight(v: Array<Float64 like IrrepsIdx<S>>)
+                    where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     v + v
 
-function jitter_tight(x: Array<Float like IrrepsIdx<S>>)
-                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function jitter_tight(x: Array<Float64 like IrrepsIdx<S>>)
+                      where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     bump_tight(bump_tight(x))
 
-let xv = [2.0, 1.0, 0.0 - 3.0, 5.0]
+let xv = Float64([2.0, 1.0, 0.0 - 3.0, 5.0])
 
 let jl = jitter_loose(xv)
 // EXPECT: jl = [8.0, 4.0, -12.0, 20.0]

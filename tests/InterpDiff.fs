@@ -220,6 +220,17 @@ let private pinFpContractOff () =
         member _.Dispose() =
             for (k, v) in prior do System.Environment.SetEnvironmentVariable(k, v) }
 
+/// Categories whose differential runs with `BLADE_PRINT_BITS=1` in BOTH lanes
+/// (the compiled binary reads it at run time, the interpreter's CppFormat per
+/// call): every printed float carries its raw IEEE bits, so the comparison is
+/// bit-exact. Needed where the TEXT hides bits: a Float32 prints 6
+/// significant digits (round 6 rule 8), so `0.1f + 0.2f` computed in float
+/// and in double-then-rounded print the same `0.3`. The EXPECT check strips
+/// the ` #<hex>` suffixes first (the pins spell the decimal text).
+let printBitsCategories : string list = [ "numeric-widths" ]
+
+let private bitsSuffix = System.Text.RegularExpressions.Regex(" #[0-9a-f]{8}(?:[0-9a-f]{8})?\\b")
+
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"
     let blockName = "Interp Diff"
@@ -323,8 +334,12 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                     printfn "    compiled: %s"
                         (theirs.Split('\n') |> Array.truncate 3 |> String.concat " | ")
                 else
-                    // Second gate: EXPECT values vs interp output.
-                    match checkExpectedValues expected interp.Stdout with
+                    // Second gate: EXPECT values vs interp output (the bits
+                    // channel's suffixes stripped: the pins spell the text).
+                    let shown =
+                        if Blade.Interp.CppFormat.printBitsRequested () then bitsSuffix.Replace(interp.Stdout, "")
+                        else interp.Stdout
+                    match checkExpectedValues expected shown with
                     | Ok () -> pass name "values identical"
                     | Error msgs -> fail name ($"""interp value-check: {(String.concat "; " msgs)}""")
 
@@ -372,8 +387,10 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                         judgeRun name expected compiledExit compiledOut interp
 
         let multiCats = Set.ofList (multiFileCategories ())
+        let bitsPrior = System.Environment.GetEnvironmentVariable "BLADE_PRINT_BITS"
         for cat in categories do
             printSubHeader ($"category: {cat}")
+            System.Environment.SetEnvironmentVariable("BLADE_PRINT_BITS", (if List.contains cat printBitsCategories then "1" else bitsPrior))
             if multiCats.Contains cat then
                 for (name, files) in multiFileCategory cat do
                     runMultiFile name files
@@ -472,6 +489,7 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                             match runInterpTimedRec program name with
                             | Error e -> fail name e
                             | Ok interp -> judgeRun name (parseExpectedValues source) compiledExit compiledOut interp
+        System.Environment.SetEnvironmentVariable("BLADE_PRINT_BITS", bitsPrior)
 
         // ------------------------------------------------------------------
         // Provider-read wiring verification (M6). There are NO netcdf/zarr CORPUS

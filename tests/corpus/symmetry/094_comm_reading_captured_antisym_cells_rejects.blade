@@ -3,5 +3,5 @@
 // The twin of symmetry/093: an AntisymIdx read negates under a swap by its
 // type, so a comm claim on `A(i, j)` is refuted at sampled cells (D12).
 let A: Array<Float64 like AntisymIdx<2, 3>> = [[1.0, 2.0], [3.0], []]
-let idx = [0, 1, 2]
+let idx = Int64([0, 1, 2])
 let r = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> A(i, j) |> compute

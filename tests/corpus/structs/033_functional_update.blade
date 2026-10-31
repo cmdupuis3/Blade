@@ -1,9 +1,9 @@
 // TEST: Struct Functional Update
 // `S { f = v, ..base }` copies the unlisted fields from base.
 struct Point {
-    x: Float,
-    y: Float,
-    z: Float
+    x: Float64,
+    y: Float64,
+    z: Float64
 }
 let p = Point { x = 1.0, y = 2.0, z = 3.0 }
 let q = Point { x = 10.0, ..p }

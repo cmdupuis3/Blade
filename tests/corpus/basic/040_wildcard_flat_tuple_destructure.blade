@@ -10,7 +10,7 @@
 // projected structurally -- handing b the whole (1,2) sub-tuple. The checker
 // now states the width and the per-leaf slot explicitly, so the wildcard
 // covers flat leaf 0 and b/c take leaves 1 and 2.
-let y = ((1, 2), 3)
+let y = ((Int64(1), Int64(2)), Int64(3))
 
 let (_, b, c) = y
 // EXPECT: b = 2

@@ -4,5 +4,5 @@
 // `pick(c, i) = c(i)`: at this call `c` is an array, and the body would
 // subscript it with the Float64 passed as `i`. A subscript is an integer.
 function pick(c, i) = c(i)
-let v = [1.0, 2.0, 3.0]
+let v = Float64([1.0, 2.0, 3.0])
 let p = pick(v, 2.5)

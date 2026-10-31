@@ -6,12 +6,12 @@
 // The staged former's x*y is commutative with A in both slots, so the storage
 // suggestion fires; it is incidental to the DCE claim, and the dense s2 is what
 // the EXPECT reads, so it is pinned rather than acted on.
-static function cap(k: Int) -> Int = k + 1
+static function cap(k: Int32) -> Int32 = k + 1
 static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
 struct Bounded {
-    n: Int
+    n: Int32
 } where n < cap(10)
-let A = [1.0, 2.0]
+let A = Float64([1.0, 2.0])
 let s2 = static method_for(rep(A, 2)) <@> lambda(x, y) -> x * y |> compute
 let b = Bounded { n = 5 }
 let m = b.n

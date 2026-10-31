@@ -5,9 +5,9 @@
 // operand grouped by the SAME group_keys binding. This is the ACCEPTED half:
 // one gk, aliased zip, the peel runs exactly as it does inline. The refused
 // half (two independent group_keys) is 053.
-let region = [0, 1, 0, 1, 1]
-let a = [1.0, 2.0, 3.0, 4.0, 5.0]
-let b = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 1, 1])
+let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
+let b = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)

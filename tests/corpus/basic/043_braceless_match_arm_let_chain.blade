@@ -26,12 +26,12 @@ function classify(n: Int64) -> Int64 =
         let bumped = doubled + 1
         bumped * 10
     | _ ->
-        let inner = match n with
+        let inner: Int64 = match n with
                     | 2 -> 20
                     | _ -> 30
         inner + 1
 
-let r0 = classify(0)
+let r0 = classify(Int64(0))
 let r1 = classify(1)
 let r2 = classify(2)
 let r3 = classify(7)

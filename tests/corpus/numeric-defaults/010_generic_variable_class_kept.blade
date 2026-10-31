@@ -1,0 +1,9 @@
+// TEST: a literal never changes class to meet a generic variable (rejects)
+// ============================================================================
+// Rules 5-6: an integer literal is never a float, even where a Float64
+// argument fixed the shared variable.
+// ============================================================================
+function scale(a: T, s: T) -> T = a * s
+let d: Float64 = 1.0
+let r = scale(d, 2)
+// ERROR: BL3024

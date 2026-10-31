@@ -11,4 +11,4 @@ function total(args: Poly<T^0>) -> T^0 = {
     | _ -> let head :: tail = args
            head + total(tail)
 }
-let d = total(1.0, 2.0, 3.0)
+let d = total(Float64(1.0), Float64(2.0), Float64(3.0))

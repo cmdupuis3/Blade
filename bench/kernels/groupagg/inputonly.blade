@@ -28,5 +28,5 @@ function keysum(key: Array<G like Ix>) -> Float64 = reduce(method_for(key) <@> l
 let (checksum, input_checksum) = {
     let key = keys()
     let x = values()
-    (0.0, reduce(x, (+)) + keysum(key))
+    (Float64(0.0), reduce(x, (+)) + keysum(key))
 }

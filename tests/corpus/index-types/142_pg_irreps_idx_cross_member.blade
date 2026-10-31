@@ -25,9 +25,9 @@
 let static ospec = [(0, 0, 2), (1, 1, 1)]
 let static pspec = [("A", 1), ("E", 2)]
 
-function o3_only(v: Array<Float like IrrepsIdx<ospec>>) -> Float = {
+function o3_only(v: Array<Float64 like IrrepsIdx<ospec>>) -> Float64 = {
     v(0)
 }
 
-let p: Array<Float like PgIrrepsIdx<C4, pspec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let p: Array<Float64 like PgIrrepsIdx<C4, pspec>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let bad = o3_only(p)

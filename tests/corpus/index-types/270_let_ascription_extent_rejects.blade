@@ -6,6 +6,6 @@
 // = a` with a 3-element `a` copied 5 doubles out of a 3-double buffer. The
 // shared static-extent refinement -- the one the call seam applies to
 // arguments -- now runs at every ascription.
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let x: Array<Float64 like Idx<5>> = a
-let v = x(4)
+let v = x(Int64(4))

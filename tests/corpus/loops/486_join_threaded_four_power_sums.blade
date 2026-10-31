@@ -8,7 +8,7 @@
 // interpreter keep the one serial sweep. Integer-valued data: every value is
 // exact under any association, so the pins are the same in every build.
 // Powers keep their source parenthesization ((v * v) * v, never (v*v)*(v*v)).
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v)
     <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v),

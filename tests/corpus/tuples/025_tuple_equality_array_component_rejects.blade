@@ -15,9 +15,9 @@
 // rather than given a third meaning. Compare the array components directly and
 // combine the results.
 // ============================================================================
-let x = [1.0, 2.0]
-let y = [1.0, 2.0]
-let t1 = x, 1
-let t2 = y, 1
+let x = Float64([1.0, 2.0])
+let y = Float64([1.0, 2.0])
+let t1 = x, Int64(1)
+let t2 = y, Int64(1)
 let same = t1 == t2
 // EXPECT: typecheck failure -- an Array component has no scalar equality

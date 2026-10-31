@@ -102,8 +102,9 @@ tdim_extent ::= literal | input.extent(dim) | tdim_extent op tdim_extent
 Base types: `Int32/Int64/Float32/Float64/Complex64/Complex128`. Conversions
 are EXPLICIT: a scalar type name in call position is a numeric cast —
 `Float32(x)`, `Float64(extents(a))`, `Complex128(r)` — a plain-call
-intrinsic, shadowable like `abs`/`complex`, with the type-position aliases
-included (`Int` casts to Int32, `Float`/`Double` to Float64). Legal
+intrinsic, shadowable like `abs`/`complex`. Only bit-sized names exist in
+type and cast position: the width-less `Int`, `Float` and `Double` are
+refused with a steer (BL1004), as `True` / `False` are (BL1003). Legal
 conversions: int↔int, int→float, int→complex, float↔float, float→complex,
 complex↔complex, and the identity; units ride through unchanged. Refused
 (BL3019): a complex source into a real/int target — which real is meant is
@@ -156,12 +157,14 @@ may differ from the other lanes where the C++ compiler fuses `a * b + c`
 | Int `/` `%` | truncate toward zero. A zero divisor PANICS **BL8013** (`integer division by zero` / `integer modulo by zero`). `MIN / -1` wraps to `MIN` and `MIN % -1` is `0` (C++ UB, an x86 trap, a .NET exception — defined here) |
 | Int `^` Int | EXACT, wrapping like `*` (square-and-multiply modulo 2ʷ); `0 ^ 0 = 1`; a negative exponent PANICS **BL8013** (`integer power with a negative exponent`) — convert to Float64 first for a real power |
 | Real or complex `^` Int | the exponent is NOT converted: the power is the BASE's type, computed by repeated squaring over a 64-bit exponent in one fixed order (libgcc's `__powidf2`, libstdc++'s `pow(complex, int)`: start at `x` for an odd exponent, else 1; each later set bit multiplies in the running square). A negative exponent is the reciprocal of the positive power, `1 / x^|n|` -- no panic (`2.0 ^ -2` is `0.25`; `2.0 ^ -1074` is `1 / ∞ = 0.0`). Float32 / Complex64 evaluate in double / Complex128 and round once. Never libm `pow`, so the value is exact-order IEEE arithmetic every lane (and a compile-time fold) reproduces bit for bit |
-| Real `^` Real | `x * x` when the exponent is exactly 2.0, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double. An Int base beside a floating exponent promotes like any mix (BL3020 for a non-literal base) |
+| Real `^` Real | `x * x` when the exponent is exactly 2.0, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double. An integer base beside a floating exponent is refused (BL3020), whether literal or variable; write a float base or convert it explicitly |
 | float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
 | Int64 → Int32 cast | wraps (two's complement) |
 | transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
 | complex transcendental intrinsics (`exp log sqrt sin cos tan sinh cosh tanh asin acos atan` on a complex operand) and complex `^` | the PLATFORM C library's complex functions (`cexp clog csqrt csin ccos ctan csinh ccosh ctanh casin cacos catan cpow` — libmingwex's on Windows), computed AT RUN TIME under the same barrier, so a constant operand and a run-time one agree bit for bit. Complex `^` a floating or complex exponent (an integer one squares, above) is libstdc++'s algorithm over those functions: complex ^ complex is `cpow`; complex ^ real is `pow(re, y)` for a positive real base, else `polar(exp(y · log(z).re), y · log(z).im)`; real ^ complex is `polar(pow(x, w.re), w.im · log(x))` for `x > 0`, else `cpow`. A Complex64 operand is evaluated by the Complex128 function and each component rounded once to Float32 |
 | `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
+| Float32 `+` `-` `*` `/` (and every Float32 operation above) | ONE float32 rounding per operation in every lane -- the C++ lane's `float`, the LLVM lane's `f32`, the interpreter's float32, a `let static` fold -- never a double intermediate (`fma` of three Float32s is `fmaf`, one rounding of the exact `a * b + c`) |
+| Complex `*` `/` | Complex128: libgcc's `__muldc3` / `__divdc3` (the naive product with Annex-G NaN recovery, Smith's scaled division). Complex64: Blade's OWN float algorithms, each operation one float32 rounding -- `(ac - bd) + (ad + bc)i`, and Smith's division (no NaN recovery); a real divided by a Complex64 is the division of `(s, 0)`, while `+` `-` and a real times a complex are componentwise. (A builtin `(*)` fold over Complex64 cells is emitted as C++'s own `complex<float>` product, the same four products and two sums, which keeps libstdc++'s Annex-G recovery when both parts come out NaN -- the one recorded difference; every `/` goes through Blade's division.) `abs` / `arg` of a Complex64 evaluate over the Complex128 widening (the magnitude rounded once to Float32) |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
 
 NaN payloads and signalling state are outside the contract. Every lane prints
@@ -287,8 +290,41 @@ interpreter's operation sequence, bit for bit -- is asked for, never assumed:
 The interpreter and compile-time evaluation never contract and never
 reassociate.
 
-**The mixing rule: nothing converts implicitly.** `1` is an Int64 and `1.0`
-a Float64 -- the decimal point is the type, as in F#. An arithmetic operator
+**Numeric literals: the spelling is the class, the context the width.** `1`
+is an integer and `1.0` a float -- the decimal point is the class, as in F#.
+Where nothing fixes its width, a literal takes the SMALLER default: an integer
+literal is an Int32 when its value fits Int32 (the test reads a negated
+literal's value, so `-2147483648` is an Int32) and an Int64 otherwise; a float
+literal is a Float32 unless its value lies outside Float32's finite range at
+either end -- a magnitude above FLT_MAX, or a nonzero value whose Float32
+rounding is zero or subnormal -- and then a Float64; `complex(re, im)` of two
+defaulted float literals is a Complex64. A Float32 literal's value is the
+float32 nearest the double nearest the source text (the lexer reads a double,
+and every lane and the compile-time evaluator derive from it). A literal
+ADAPTS within its class to whatever fixes its width, widening or narrowing: an
+operator partner (`x64 * 0.1` multiplies by the double 0.1, `a32 * 1.0` stays
+Float32, `i32 + 1` is Int32), a declared type (a `let`, a struct field, a
+return, a parameter), a cast target, a generic type variable that a
+NON-literal argument fixed (below), the other branch of an `if` / the other
+arms of a `match`, the other elements of an array literal, an index position.
+An expression made ONLY of literals (literals, unary minus, `+ - * / % ^`, the
+math intrinsics, `complex`) adapts as a whole: `let c: Float64 = 1.0 / 3.0`
+divides in Float64, and the same expression unannotated is a Float32. A
+literal, or such an expression, under a width cast takes the CAST's width --
+`Float64(0.1)` is the double nearest 0.1, never the Float32 0.1 widened
+(0.100000001490116), and `Float64([0.1, 0.2])` the same for every element; a
+same-class cast of a literal is no conversion at all. A literal never changes
+CLASS: an integer literal is never a float. Index-like integers -- extents,
+counts, subscripts, range elements and loop coordinates -- are Int64, and a
+literal in those positions is an Int64. A `let static` value follows the same
+rules (a Float32 static folds in Float32, rounding after every operation, so it
+agrees bit for bit with the same expression at run time); an INTEGER static
+name adapts its width like a literal (an Int32 value widens exactly), a FLOAT
+static name does not -- it is a constant of its own width. (One place an
+integer literal still meets a float: an array literal that mixes them, `[1,
+2.5]`, is a float array -- a known inconsistency, kept for now.)
+
+**The mixing rule: nothing converts implicitly.** An arithmetic operator
 (`+ - * / %`) or a comparison (`== != < <= > >=`) whose operands' elements
 (scalars, or array elements: the rule is elementwise) are an integer and a
 float or complex is a type error (BL3020), whether either operand is a
@@ -297,7 +333,7 @@ an Int64 `n` and `A * 2` over a Float64 array are all refused at the integer
 operand -- write `2.0`, or convert with the type in call position,
 `Float64(n)` / `Float64(xs)`. Within one class, two widths (Float32 and
 Float64, Int32 and Int64, Complex64 and Complex128) are refused too unless
-one side is a LITERAL, which adapts to its partner's width (`a32 * 1.0` is
+one side is a LITERAL (or made only of literals), which adapts to its partner's width (`a32 * 1.0` is
 Float32, `i32 + 1` is Int32: the literal says the class, its partner the
 width). A real beside a complex is the exact embedding when the real is the
 complex's component width (`w * z` over Float64 and Complex128, Float32 with
@@ -308,9 +344,10 @@ uses the integer-exponent algorithm). The same rule holds where a value meets
 a declared type: an integer -- literal or variable -- is no argument for a
 `Float64` parameter and no value for a `Float64`-annotated binding (`let x:
 Float64 = 1` is refused; `1.0` is the float spelling), as a float is none for
-an integer one (BL3019's cast-site rounding is the only way down). A call
-still widens WITHIN a class (a Float32 argument into a Float64 parameter, an
-Int64 into an Int32 one), and a real into a complex parameter.
+an integer one (BL3019's cast-site rounding is the only way down). A fixed
+non-literal argument must match the parameter without conversion: Float32
+into Float64, Int64 into Int32, and real into complex parameters all require
+an explicit cast. A literal adapts only within its own class.
 
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type. There is no promotion TYPE
@@ -318,9 +355,12 @@ in signatures: where two type variables would mix, the caller converts one
 with the target type in call position, so the signature names one variable
 (arithmetic between two bare variables -- `x + y` over `x: T, y: U` -- makes
 them that one variable, §5.1, rather than typing the result as the left one).
-Arguments sharing a variable agree EXACTLY: neither order converts and no
-literal adapts across them (`add(2.5, 1)` is refused like `add(1, 2.5)`; a
-literal's type is its spelling), and the same holds for two caret
+Arguments sharing a variable agree EXACTLY: neither order converts a
+VARIABLE. A LITERAL argument adapts in WIDTH to the variable a non-literal
+argument fixed -- `scale(data, 2.0)` over a Float64 `data` is a Float64
+instance whose literal is the double 2.0; literal arguments alone take the
+widest of their defaults -- but never in class (`add(2.5, 1)` is refused like
+`add(1, 2.5)`), and the same holds for two caret
 variables whose ELEMENTS meet through arithmetic (`a + b` over `a: T^1, b:
 U^1` refuses an Int64 and a Float64 array at the call). `^` is the exception:
 its EXPONENT is polymorphic and never shares the base's variable. `x ^ n` over
@@ -343,7 +383,7 @@ Complex values support literals and `conj(x)`; `conj` is the identity on real
 types and distributes elementwise over arrays.
 
 **Units of measure** are annotations on primitives, not types: `Unit meters`,
-`Unit velocity = meters / seconds`, `Float<velocity>`. Unit arithmetic checks
+`Unit velocity = meters / seconds`, `Float64<velocity>`. Unit arithmetic checks
 addition (same unit) and composes under `*`/`/` -- elementwise, outer
 (`a [*] b` is meters·seconds), in `prodsum`, and across the elements of an
 array literal (one element type, one unit). Through a GENERIC function the
@@ -351,7 +391,7 @@ body's demands are recorded once per declaration and judged at every call:
 `function add(x: T^0, y: T^0) = x + y` requires its two arguments to share a
 unit (as do comparisons, branch results, and a transcendental's argument
 being dimensionless), so `add(meters, seconds)` is BL3006 at the call.
-**Bounded primitives** (`Float<min=0, max=1>`) carry runtime-checked bounds
+**Bounded primitives** (`Float64<min=0, max=1>`) carry runtime-checked bounds
 and compose with units; the bound is checked wherever the annotation stands
 -- a `let`, an expression ascription `e : T`, a function parameter (on entry),
 a function return -- including through a type alias
@@ -700,8 +740,8 @@ buffer is laid out in that order. Duplicate keys are a construction error.
 
 **A `static struct` name as an index type** (enumerable constrained domains,
 docs/plans/structural/06) — `range<R>` and `Array<T like R>` accept the name of
-a `static struct R { f₁: Int<min=a, max=b>, ... } where p₁, p₂, ...` whose
-fields are `Int` or `Nat` with static bounds: the iteration space is the
+a `static struct R { f₁: Int32<min=a, max=b>, ... } where p₁, p₂, ...` whose
+fields are `Int32` or `Nat` with static bounds: the iteration space is the
 struct's SOLUTION SET, in lex order of the fields (first field outermost), and
 the kernel takes one positional parameter per field. When every conjunct is a
 linear inequality on the fields (`i - j <= w`, `abs(i - j) <= w`,
@@ -736,7 +776,7 @@ its map is refused at codegen (BL7004, naming the linear spellings that
 stream), the LLVM lane refuses its range by name, and `|> compute` then
 `reduce` is the working spelling. `blade plan` reports each consumer as a
 `[domain-enum v1]` line (the bounds in the struct's field names, the cell
-count, and whether the consumer streams or fills). Fields may be `Int`
+count, and whether the consumer streams or fills). Fields may be `Int32`
 (Int32) with `let static` bounds and half-widths: a static integer in a
 conjunct is typed as the literal it folds to, a CHECKED conversion — a value
 outside Int32 refuses the declaration (BL4001) with the fix, `Int64<...>`
@@ -848,7 +888,7 @@ every `let static` fold failure) with the same sentence.
 
 ### 3.9 Symmetry lives in the index type
 
-`Array<Float like SymIdx<2, 1000>>` — not a dense array plus an annotation.
+`Array<Float64 like SymIdx<2, 1000>>` — not a dense array plus an annotation.
 The index type fixes storage (triangular), iteration (triangular), and access
 (canonicalizing): `cov(3, 1)` and `cov(1, 3)` are the same location. The
 symmetry system (§11) *infers* symmetric index types for outputs from kernel
@@ -909,11 +949,19 @@ Printing also agrees with the literal's TYPE. As in source, the decimal point
 is what tells a float from an integer: a `Float64`/`Float32` value, and each
 component of a `Complex128`/`Complex64`, prints with one — `2.0`, `-0.0`,
 `[2.0, 3.0]`, `(1.0,-2.0)` — while an `Int64` prints bare, so `[2, 3]` is only
-ever an integer array. Otherwise a float keeps its 15-significant-digit
-rendering (`0.1`, `2.5`); the exponent forms (`1e+20`, `1e-07`) read back as
-float literals already and print unmarked, as do `nan`, `inf` and `-inf`. Every
-lane prints the same bytes (the compiled program, the interpreter, the LLVM
-back end, and the REPL/notebook echo, which shows the program's own output).
+ever an integer array. Otherwise a value prints with the significant digits
+its width carries: a `Float64` (and each `Complex128` component) with 15
+(DBL_DIG, C's `%.15g`), a `Float32` (and each `Complex64` component) with 6
+(FLT_DIG, `%.6g`) -- so `0.1` stored as a Float32 prints `0.1`, not its
+widened double `0.100000001490116`, and a Float32 switches to the exponent
+form at 1e6 (`1.23457e+06`) where a Float64 does at 1e15. Digits are rounded
+from the exact binary value, ties to even (`123456.5` as a Float32 prints
+`123456.0`). The exponent forms (`1e+20`, `1e-07`) read back as float literals
+already and print unmarked, as do `nan`, `inf` and `-inf`. Every lane prints
+the same bytes (the compiled program, the interpreter, the LLVM back end, and
+the REPL/notebook echo, which shows the program's own output); under the
+`BLADE_PRINT_BITS` test instrument each float also carries its raw IEEE bits,
+16 hex digits for a Float64 and 8 for a Float32.
 
 ### 3.10 Index values and nominal typing
 
@@ -929,7 +977,7 @@ Iteration emits values tagged with their source index type as a **unit**:
 **The subscript judgment.** Every subscript `A(e)` into a slot of index type
 `I` is judged by three rules, eagerly and again once inference is complete:
 
-1. *Class.* `e` is an integer or an index value. `Float`, `Bool`, `Complex`
+1. *Class.* `e` is an integer or an index value. `Float32`, `Float64`, `Bool`, `Complex64`, `Complex128`
    and `String` subscripts are refused (BL4003); an otherwise unconstrained
    variable in subscript position defaults to `Int64`, not `Float64`.
    Keyed slots (`SparseIdx`, `EnumIdx`) and halo window offsets stand down.
@@ -1028,17 +1076,17 @@ error class.
 `T^r ≡ T^r(1, 2, ..., r)` (dense).
 
 **What `^` builds is decided by its left-hand side.** A TYPE gives an array
-type; a UNIT gives a unit power (`Unit area = meters^2`, `Float<meters^2>`,
+type; a UNIT gives a unit power (`Unit area = meters^2`, `Float64<meters^2>`,
 `seconds^-1`); a VALUE -- a literal or a static, including inside an extent
 such as `Idx<N^2>` -- gives an arithmetic power. Among types, a single
 capital that names no declared type is a type VARIABLE (`T^1`, any element);
 a type that IS declared or built in fixes the element instead (§13.2's
 Array-Intro with T a base type): `Float64^1` is a dense rank-1 array of
-`Float64`, any extent, `Speed^1` (after `type Speed = Float<mps>`) one of
+`Float64`, any extent, `Speed^1` (after `type Speed = Float64<mps>`) one of
 `Speed`, a declared struct's name the same, and `Float64^0` is `Float64`.
 The rank must be an integer literal, and a head that is itself an array type
 (`type Row = Array<...>`, then `Row^1`) is refused rather than nested (both
-BL1004). The concrete caret is DENSE only, like `Float<day>^2`: there is no
+BL1004). The concrete caret is DENSE only, like `Float64<day>^2`: there is no
 abstract-level symmetry spelling, so a compact argument (`SymIdx`,
 `AntisymIdx`, ...) is refused at the call (BL3001) rather than densified --
 write `T^2` to accept any symmetry class. Transitions: symmetry inference (§11) takes
@@ -1075,7 +1123,7 @@ freely because they are the same thing:
 
 ```blade sketch
 let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
-models(lat, lon)(params)(t) : Float
+models(lat, lon)(params)(t) : Float64
 ```
 
 **Applied unannotated parameters.** Applying a parameter the program never
@@ -1236,19 +1284,24 @@ declared rank, or declare the parameter `T`.
 **Unannotated parameters.** A parameter written without a type is an
 anonymous type variable -- `function inc(x) = x + 1` is `function inc(x: T) =
 x + 1` -- so each call's argument decides its type (one monomorphized body per
-instance), never a default. A literal's type is its spelling (`1` is an Int64,
-`1.0` a Float64), so `inc(6)` is the Int64 7 and `inc(6) / 4` is the integer
-quotient 1, while `inc(2.5)` is refused at the argument (BL3019: the body's
-`1` meets a Float64 instance -- `x + 1.0` is the Float64 increment, and
-`x + x` needs no literal at all). Everything §2.4 says of `x: T` holds:
+instance), never a default. A literal argument nothing else fixes takes its
+default (`6` is an Int32), so `inc(6)` is the Int32 7 and `inc(6) / 4` is the
+integer quotient 1, while `inc(2.5)` is refused at the argument (BL3019: the
+body's `1` meets a float instance -- `x + 1.0` is the float increment, and
+`x + x` needs no literal at all). Inside the body a literal beside `x` takes
+the instance's width (`x * 0.5` computes in Float32 at a Float32 instance and
+in Float64 at a Float64 one); a literal bound to a local with nothing fixing it
+(`let c = 0.1`) is a Float32 VARIABLE, so `x * c` at a Float64 instance is a
+width mismatch. Everything §2.4 says of `x: T` holds:
 beside a float (`x + 1.0`) an Int64 argument is refused at that argument
 (BL3019; the caller writes `3.0` or `Float64(n)`). Two generic variables mixed
 by arithmetic are ONE variable -- there is no promotion type -- so `function
 add(x, y) = x + y` takes one type per call, and its arguments must agree
-EXACTLY: no argument converts implicitly, in either order and literals
-included, so `add(2.5, 1)` and `add(1, 2.5)` are both refused at the second
-(BL3024), as is an Int64 and a Float64 variable -- the caller writes
-`add(2.5, 1.0)` or `add(2.5, Float64(n))`. The one exception is `^`, whose
+EXACTLY: no argument converts implicitly, in either order, so `add(2.5, 1)`
+and `add(1, 2.5)` are both refused at the second (BL3024), as is an Int64 and
+a Float64 variable -- the caller writes `add(2.5, 1.0)` or `add(2.5,
+Float64(n))` (a float LITERAL beside a Float64 variable adapts its width:
+`add(x64, 1.0)` is a Float64 instance). The one exception is `^`, whose
 exponent is polymorphic (§2.4): `function pw(x, n) = x ^ n` keeps two
 variables and is typed as its base, so `pw(2.0, 3)` is the squared-out 8.0,
 `pw(2.0, 0.5)` a floating pow and `pw(2, 3)` the Int64 8, while `pw(2, 0.5)`
@@ -1890,7 +1943,7 @@ extent from a trip count into a **budget**:
 
 ```blade sketch
 type It = Idx<200>                       // a BUDGET, not a trip count
-let rec u: Array<Float like It, Y, X> =
+let rec u: Array<Float64 like It, Y, X> =
     match u with
     | zero -> zero
     | zero :: s -> zero :: u0
@@ -2152,7 +2205,7 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
      S-tuple**: the g whole index *tuples* are interchangeable. When s = 1
      this is the familiar `SymIdx<g, I₁>`. The record carries its factors:
      the type prints and parses as written here, can be ascribed back
-     (`let H: Array<Float like SymIdx<3, <Idx<M>, Idx<N>>>> = ...`), is
+     (`let H: Array<Float64 like SymIdx<3, <Idx<M>, Idx<N>>>> = ...`), is
      nominative in them (an unrelated `SymIdx<3, P>` of the same extent is
      refused), and is read per dimension or by flat compound position (§3.2).
 4. **Concatenate** group contributions in order (concatenation, not
@@ -2183,21 +2236,22 @@ store the joint-symmetric output at all: strict counting inequality
 ∏ⱼ C(nⱼ+r−1, r) < C(∏ⱼ nⱼ + r − 1, r)). See §12.5 and proofs.md
 §Core/§Counting.
 
-Correct examples:
+Correct examples (the input arrays and kernel results in these sketches
+have element type `Float64`; the examples illustrate index structure):
 
 ```blade sketch
 // Self-covariance, 1 S-dim: unchanged
-object_for(cov) <@> (A, A)      // A : Array<Float like Idx<N>, Idx<Time>>
-// Output: Array<Float like SymIdx<2, N>>
+object_for(cov) <@> (A, A)      // A : Array<Float64 like Idx<N>, Idx<Time>>
+// Output: Array<Float64 like SymIdx<2, N>>
 
 // Multi-dim S-space: JOINT symmetry over compound tuples
-object_for(comoment) <@> (A, A, A)   // A : Array<Float like Idx<M>, Idx<N>>
-// Output: Array<Float like SymIdx<3, <Idx<M>, Idx<N>>>>
+object_for(comoment) <@> (A, A, A)   // A : Array<Float64 like Idx<M>, Idx<N>>
+// Output: Array<Float64 like SymIdx<3, <Idx<M>, Idx<N>>>>
 // Speedup: 3! = 6× (joint), NOT (3!)² = 36×
 
 // Distinct groups multiply
 object_for(k) <@> (A, A, B, B)  // A over Idx<M>; B over Idx<K>; comm within groups
-// Output: Array<Float like SymIdx<2, M>, SymIdx<2, K>>
+// Output: Array<Float64 like SymIdx<2, M>, SymIdx<2, K>>
 // Speedup: 2! × 2! = 4× — product across GROUPS, never across one group's dims
 ```
 
@@ -3014,11 +3068,11 @@ a malformed literal (BL0003), not an implicit product.
 type LatIdx = Idx<180>                       // type aliases
 type OceanIdx = CompoundIdx<ocean_mask>
 
-let data: Array<Float like LatIdx, LonIdx, TimeIdx>
-let cov:  Array<Float like SymIdx<2, n>>
+let data: Array<Float64 like LatIdx, LonIdx, TimeIdx>
+let cov:  Array<Float64 like SymIdx<2, n>>
 let v = [1, 2, 3]                            // literals; nested for rank ≥ 2
 let ragged = [[1, 2, 3], [4], [5, 6]]        // ragged literal → RaggedIdx
-let empty : Array<Float like Idx<0>> = []    // empty needs annotation
+let empty : Array<Float64 like Idx<0>> = []    // empty needs annotation
 ```
 
 No separate List type — static-size arrays suffice; dynamic collections are a

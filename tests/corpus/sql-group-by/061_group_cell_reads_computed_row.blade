@@ -3,11 +3,11 @@
 // against its group's length; a read inside a kernel the grouped value is
 // captured into is checked the same way (the offsets ride in the grouped
 // value's extents table).
-let region = [0, 1, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0]
+let region = Int64([0, 1, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
-let k = 3
+let k: Int64 = 3
 let r = grouped(1, k % 2)
 // EXPECT: r = 40.0
 let rc = grouped(0)(k % 2)

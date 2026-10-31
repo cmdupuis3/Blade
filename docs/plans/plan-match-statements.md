@@ -161,7 +161,7 @@ Design refined from plan-fortran-killer.md §2. Surface:
 
 ```blade
 type It = Idx<200>                       // a BUDGET, not a trip count
-let rec u: Array<Float like It, Y, X> =
+let rec u: Array<Float64 like It, Y, X> =
     match u with
     | zero -> zero
     | zero :: s -> zero :: u0

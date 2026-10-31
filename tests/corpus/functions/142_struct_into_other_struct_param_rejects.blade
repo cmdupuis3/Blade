@@ -4,7 +4,7 @@
 // Two structs with the same fields are still different types. `f(Q {...})`
 // against `p: P` used to pass the direct-call seam (both are "named types" to
 // the old class check) and died in g++.
-struct P { x: Float }
-struct Q { x: Float }
-function f(p: P) -> Float = p.x
+struct P { x: Float64 }
+struct Q { x: Float64 }
+function f(p: P) -> Float64 = p.x
 let v = f(Q { x = 1.0 })

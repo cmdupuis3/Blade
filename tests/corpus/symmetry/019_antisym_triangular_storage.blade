@@ -6,7 +6,7 @@
 // flips on the mirror read, diagonal excluded). Complements the 2D joint case
 // (reynolds/023) with the simplest 1D strict-triangle shape, and pairs with
 // symmetry/003 (the inclusive SymIdx twin).
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let result = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 // reynolds(g, Anti)(x, y) = (2x + y) - (2y + x) = x - y. Strict pairs i < j:

@@ -13,7 +13,7 @@
 type R = Idx<6>
 
 let v: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
-let seed = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
+let seed = Float64([1.0, 0.0, -2.0, 3.0, 0.5, 0.25])
 
 // named x anonymous, and the mirror -- neither order refuses.
 let a = v * seed
@@ -32,7 +32,7 @@ let c = v + w
 // Two anonymous operands of equal extent: no names to disagree, and the extent
 // check is what stands between this and the out-of-bounds walk of
 // diagnostics/071.
-let p = [1.0, 2.0, 3.0]
-let q = [10.0, 20.0, 30.0]
+let p = Float64([1.0, 2.0, 3.0])
+let q = Float64([10.0, 20.0, 30.0])
 let d = p + q
 // EXPECT: d = [11.0, 22.0, 33.0]

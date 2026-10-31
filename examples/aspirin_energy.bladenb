@@ -44,32 +44,32 @@ type Xyz = store.index.xyz
 type Species = store.index.species
 type Stat = store.index.stat
 
-let pos_tr: Array<Float like SampTr, Atom, Xyz> = store.vars.pos_train |> z.read
-let pos_te: Array<Float like SampTe, Atom, Xyz> = store.vars.pos_test |> z.read
+let pos_tr: Array<Float64 like SampTr, Atom, Xyz> = store.vars.pos_train |> z.read
+let pos_te: Array<Float64 like SampTe, Atom, Xyz> = store.vars.pos_test |> z.read
 // Read by computed index (a permutation entry, a sample number), these four
 // take plain index types; the positions keep their split's own named type, so a
 // loss that reached into the test split by accident would not typecheck.
-let e_tr: Array<Float like Idx<500>> = store.vars.e_train |> z.read
-let e_te: Array<Float like Idx<100>> = store.vars.e_test |> z.read
+let e_tr: Array<Float64 like Idx<500>> = store.vars.e_train |> z.read
+let e_te: Array<Float64 like Idx<100>> = store.vars.e_test |> z.read
 let perm: Array<Int64 like Idx<8>, Idx<500>> = store.vars.perm |> z.read
-let rots: Array<Float like Idx<8>, Idx<9>> = store.vars.rot3 |> z.read
-let f_te: Array<Float like SampTe, Atom, Xyz> = store.vars.f_test |> z.read
-let spec: Array<Float like Atom, Species> = store.vars.spec_w |> z.read
-let e_stats: Array<Float like Stat> = store.vars.e_stats |> z.read
+let rots: Array<Float64 like Idx<8>, Idx<9>> = store.vars.rot3 |> z.read
+let f_te: Array<Float64 like SampTe, Atom, Xyz> = store.vars.f_test |> z.read
+let spec: Array<Float64 like Atom, Species> = store.vars.spec_w |> z.read
+let e_stats: Array<Float64 like Stat> = store.vars.e_stats |> z.read
 let z_atoms: Array<Int64 like Atom> = store.vars.z_atoms |> z.read
 
 // The molecule (test geometry 0, viewed down z): every pair closer than 1.6
 // Angstrom drawn as a bond, atoms on top by species. Entries 0 .. 1322 are
 // bond segments (pair q = k / 3, NaN-separated); the last 42 are the atoms,
 // each followed by the NaN that keeps it from joining the next.
-function atom_xy(a: Int64, c: Int64) -> Float = pos_te(0, (a : Atom), (c : Xyz))
-function bond_len(a: Int64, b: Int64) -> Float = {
+function atom_xy(a: Int64, c: Int64) -> Float64 = pos_te(0, (a : Atom), (c : Xyz))
+function bond_len(a: Int64, b: Int64) -> Float64 = {
     let dx = atom_xy(a, 0) - atom_xy(b, 0)
     let dy = atom_xy(a, 1) - atom_xy(b, 1)
     let dz = pos_te(0, (a : Atom), 2) - pos_te(0, (b : Atom), 2)
     sqrt(dx * dx + dy * dy + dz * dz)
 }
-function mol_point(k: Int64, c: Int64) -> Float = {
+function mol_point(k: Int64, c: Int64) -> Float64 = {
     let a = (k / 3) / 21
     let b = (k / 3) % 21
     let j = k - 1323
@@ -158,8 +158,8 @@ sizes
 // invariant under a Galilean boost, and offers `where ml.galilean(p)` (BL4014).
 
 // %%
-let static NTR = 500
-let static NTE = 100
+let static NTR: Int64 = 500
+let static NTE: Int64 = 100
 
 // Pair q -> the unordered atom pair (i, j), i < j: a closed form over the strict
 // upper triangle, tabulated once. Per pair and species, the weight with which
@@ -168,7 +168,7 @@ function tri_i(q: Int64) -> Int64 = Int64(floor((41.0 - sqrt(1681.0 - 8.0 * Floa
 function tri_j(q: Int64) -> Int64 = q - (tri_i(q) * 20 - tri_i(q) * (tri_i(q) - 1) / 2) + tri_i(q) + 1
 let pair_i = method_for(range<Idx<210>>) <@> lambda(q) -> tri_i(q) |> compute
 let pair_j = method_for(range<Idx<210>>) <@> lambda(q) -> tri_j(q) |> compute
-let per_atom: Array<Float like Idx<3>> = [0.1111111111111111, 0.25, 0.125]
+let per_atom: Array<Float64 like Idx<3>> = [0.1111111111111111, 0.25, 0.125]
 let pair_w = method_for(range<Idx<210>>, range<Idx<3>>) <@> lambda(q, s) ->
     (spec((pair_i(q) : Atom), (s : Species)) + spec((pair_j(q) : Atom), (s : Species))) * per_atom(s) |> compute
 let atom_w = method_for(range<Idx<21>>, range<Idx<3>>) <@> lambda(a, s) -> spec((a : Atom), (s : Species)) * per_atom(s) |> compute
@@ -177,28 +177,28 @@ let isig = 1.0 / sig
 let shell_w = 1.0 / (0.185 * sig * 0.185 * sig)
 let shell_r = (0.34 + 0.2 * Float64(0..6)) * sig
 
-function pdist(p: Array<Float like Idx<63>>, i: Int64, j: Int64) -> Float = {
+function pdist(p: Array<Float64 like Idx<63>>, i: Int64, j: Int64) -> Float64 = {
     let dx = p(3 * i) - p(3 * j)
     let dy = p(3 * i + 1) - p(3 * j + 1)
     let dz = p(3 * i + 2) - p(3 * j + 2)
     sqrt(dx * dx + dy * dy + dz * dz)
 }
-function shell_sum(g: Array<Float like Idx<1260>>, w: Array<Float like Idx<210>, Idx<3>>, s: Int64, b: Int64) -> Float = {
+function shell_sum(g: Array<Float64 like Idx<1260>>, w: Array<Float64 like Idx<210>, Idx<3>>, s: Int64, b: Int64) -> Float64 = {
     let t = method_for(range<Idx<210>>) <@> lambda(q) -> w(q, s) * g(6 * q + b) |> compute
     reduce(t, (+))
 }
-function harmonic(p: Array<Float like Idx<63>>, i: Int64, c: Int64, k: Float) -> Float = {
+function harmonic(p: Array<Float64 like Idx<63>>, i: Int64, c: Int64, k: Float64) -> Float64 = {
     let y = ml.y_to(2, p(3 * i) * k, p(3 * i + 1) * k, p(3 * i + 2) * k)
     y(c)
 }
-function species_pool(y: Array<Float like Idx<189>>, rad: Array<Float like Idx<21>>, w: Array<Float like Idx<21>, Idx<3>>,
-                      s: Int64, c: Int64) -> Float = {
+function species_pool(y: Array<Float64 like Idx<189>>, rad: Array<Float64 like Idx<21>>, w: Array<Float64 like Idx<21>, Idx<3>>,
+                      s: Int64, c: Int64) -> Float64 = {
     let t = method_for(range<Idx<21>>) <@> lambda(a) -> w(a, s) * rad(a) * y(9 * a + c) |> compute
     reduce(t, (+))
 }
 // Raw features of one flat geometry (63 = 21 atoms x 3): 18 histogram channels
 // (species x shell), then 27 pooled harmonics (species x 9 components).
-function raw_features(p: Array<Float like Idx<63>>) -> Array<Float like Idx<45>> = {
+function raw_features(p: Array<Float64 like Idx<63>>) -> Array<Float64 like Idx<45>> = {
     let d = method_for(range<Idx<210>>) <@> lambda(q) -> pdist(p, pair_i(q), pair_j(q)) |> compute
     let g = method_for(range<Idx<1260>>) <@> lambda(m) -> exp(0.0 - (d(m / 6) - shell_r(m % 6)) * (d(m / 6) - shell_r(m % 6)) * shell_w) |> compute
     let y = method_for(range<Idx<189>>) <@> lambda(m) -> harmonic(p, m / 9, m % 9, isig) |> compute
@@ -207,7 +207,7 @@ function raw_features(p: Array<Float like Idx<63>>) -> Array<Float like Idx<45>>
     let pool = method_for(range<Idx<27>>) <@> lambda(k) -> species_pool(y, rad, atom_w, k / 9, k % 9) |> compute
     join(hist, pool, 0)
 }
-function flat(g: Array<Float like Atom, Xyz>) -> Array<Float like Idx<63>> =
+function flat(g: Array<Float64 like Atom, Xyz>) -> Array<Float64 like Idx<63>> =
     method_for(range<Idx<63>>) <@> lambda(k) -> g((k / 3 : Atom), (k % 3 : Xyz)) |> compute
 let raw_tr = method_for(range<Idx<NTR>>) <@> lambda(n) -> raw_features(flat(pos_tr((n : SampTr)))) |> compute
 let raw_te = method_for(range<Idx<NTE>>) <@> lambda(n) -> raw_features(flat(pos_te((n : SampTe)))) |> compute
@@ -219,7 +219,7 @@ let col_msq = method_for(raw_cols) <@> lambda(c) -> mean(c * c) |> compute
 // Pooled harmonic k of species s sits at 18 + 9 s + k: k = 0 is an invariant,
 // k = 1..3 the species' l = 1 block, k = 4..8 its l = 2 block.
 function invariant_col(i: Int64) -> Bool = i < 18 || (i - 18) % 9 == 0
-function spread2(i: Int64) -> Float = {
+function spread2(i: Int64) -> Float64 = {
     let b = i - (i - 18) % 9
     if invariant_col(i) then col_msq(i) - col_mean(i) * col_mean(i)
     else (if (i - 18) % 9 < 4 then (col_msq(b + 1) + col_msq(b + 2) + col_msq(b + 3)) / 3.0
@@ -233,7 +233,7 @@ let f_sc = method_for(range<Idx<45>>) <@> lambda(i) -> (if spread2(i) < 0.000000
 let to_hspec: Array<Int64 like Idx<45>> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
                                            18, 27, 36, 19, 20, 21, 28, 29, 30, 37, 38, 39,
                                            22, 23, 24, 25, 26, 31, 32, 33, 34, 35, 40, 41, 42, 43, 44]
-function calibrated(r: Array<Float like Idx<45>>) -> Array<Float like Idx<45>> = {
+function calibrated(r: Array<Float64 like Idx<45>>) -> Array<Float64 like Idx<45>> = {
     let c = method_for(range<Idx<45>>) <@> lambda(i) -> (r(to_hspec(i)) - f_mu(to_hspec(i))) * f_sc(to_hspec(i)) |> compute
     c
 }
@@ -243,7 +243,7 @@ let h_te = method_for(range<Idx<NTE>>) <@> lambda(n) -> calibrated(raw_te(n)) |>
 // The differentiable path, positions in, representation out. Re-typing a value
 // that is being differentiated is an array literal: reverse mode differentiates
 // literals, not casts.
-function hfeat(p: Array<Float like Idx<63>>) -> Array<Float like IrrepsIdx<HSPEC>> = {
+function hfeat(p: Array<Float64 like Idx<63>>) -> Array<Float64 like IrrepsIdx<HSPEC>> = {
     let c = calibrated(raw_features(p))
     [c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8), c(9), c(10), c(11), c(12), c(13), c(14),
      c(15), c(16), c(17), c(18), c(19), c(20), c(21), c(22), c(23), c(24), c(25), c(26), c(27), c(28), c(29),
@@ -256,12 +256,12 @@ function hfeat(p: Array<Float like Idx<63>>) -> Array<Float like IrrepsIdx<HSPEC
 // conformational energy moves the long-range peaks; the bonded ones barely move.
 let lo = reduce(0..500, lambda(a, b) -> if e_tr(b) < e_tr(a) then b else a)
 let hi = reduce(0..500, lambda(a, b) -> if e_tr(b) > e_tr(a) then b else a)
-function frame_dists(n: Int64) -> Array<Float like Idx<210>> = {
+function frame_dists(n: Int64) -> Array<Float64 like Idx<210>> = {
     let p = flat(pos_tr((n : SampTr)))
     method_for(range<Idx<210>>) <@> lambda(q) -> pdist(p, pair_i(q), pair_j(q)) |> compute
 }
 let r_grid = 0.6 + 0.04 * Float64(0..140)
-function spectrum(d: Array<Float like Idx<210>>, k: Int64) -> Float = {
+function spectrum(d: Array<Float64 like Idx<210>>, k: Int64) -> Float64 = {
     let t = method_for(d) <@> lambda(v) -> exp(0.0 - (r_grid(k) - v) * (r_grid(k) - v) / 0.0032) |> compute
     reduce(t, (+))
 }
@@ -299,24 +299,24 @@ let fig_spectrum = plot.lines(r_grid, spectra, ["lowest-energy frame", "highest-
 // rather than a silently mis-trained layer.
 
 // %%
-function embed(h: Array<Float like IrrepsIdx<HSPEC>>, we: Array<Float like Idx<WE>>)
-               where ml.equiv(O3) -> Array<Float like IrrepsIdx<ESPEC>> =
+function embed(h: Array<Float64 like IrrepsIdx<HSPEC>>, we: Array<Float64 like Idx<WE>>)
+               where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<ESPEC>> =
     ml.derive_linear(HSPEC, ESPEC, we, h)
 
-function block_e(x: Array<Float like IrrepsIdx<ESPEC>>, wt: Array<Float like Idx<W1>>, wl: Array<Float like Idx<WL>>)
-                 where ml.equiv(O3) -> Array<Float like IrrepsIdx<MSPEC>> = {
+function block_e(x: Array<Float64 like IrrepsIdx<ESPEC>>, wt: Array<Float64 like Idx<W1>>, wl: Array<Float64 like Idx<WL>>)
+                 where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<MSPEC>> = {
     let t = ml.tensor_product(CFG1, x, x, wt)
     let g = ml.gated(MSPEC, t)
     ml.linear(MSPEC, MSPEC, wl, g)
 }
-function block_m(x: Array<Float like IrrepsIdx<MSPEC>>, wt: Array<Float like Idx<W2>>, wl: Array<Float like Idx<WL>>)
-                 where ml.equiv(O3) -> Array<Float like IrrepsIdx<MSPEC>> = {
+function block_m(x: Array<Float64 like IrrepsIdx<MSPEC>>, wt: Array<Float64 like Idx<W2>>, wl: Array<Float64 like Idx<WL>>)
+                 where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<MSPEC>> = {
     let t = ml.tensor_product(CFG2, x, x, wt)
     let g = ml.gated(MSPEC, t)
     ml.linear(MSPEC, MSPEC, wl, g)
 }
-function readout(ev: Array<Float like IrrepsIdx<EVSPEC>>, wr: Array<Float like Idx<WR>>)
-                 where ml.equiv(O3) -> Float = {
+function readout(ev: Array<Float64 like IrrepsIdx<EVSPEC>>, wr: Array<Float64 like Idx<WR>>)
+                 where ml.equiv(O3) -> Float64 = {
     let o = ml.scalars(OUT1, ml.derive_linear(EVSPEC, OUT1, wr, ev))
     o(0)
 }
@@ -325,8 +325,8 @@ function readout(ev: Array<Float like IrrepsIdx<EVSPEC>>, wr: Array<Float like I
 // l > 0 norms, the embedding's 4 norms, the last block's 5 norms and 3 scalars.
 // (No clause on this one, or on the gains or `ev_raw`: see this cell's
 // warnings.)
-function invariants(h: Array<Float like IrrepsIdx<HSPEC>>, e: Array<Float like IrrepsIdx<ESPEC>>,
-                    m3: Array<Float like IrrepsIdx<MSPEC>>) -> Array<Float like Idx<39>> = {
+function invariants(h: Array<Float64 like IrrepsIdx<HSPEC>>, e: Array<Float64 like IrrepsIdx<ESPEC>>,
+                    m3: Array<Float64 like IrrepsIdx<MSPEC>>) -> Array<Float64 like Idx<39>> = {
     let sh = ml.scalars(HSPEC, h)
     let nh = ml.norms(HSPEC, h)
     let ne = ml.norms(ESPEC, e)
@@ -337,11 +337,11 @@ function invariants(h: Array<Float like IrrepsIdx<HSPEC>>, e: Array<Float like I
      nh(21), nh(22), nh(23), nh(24), nh(25), nh(26), ne(0), ne(1), ne(2), ne(3),
      n3(0), n3(1), n3(2), n3(3), n3(4), s3(0), s3(1), s3(2)]
 }
-function gain_e(x: Array<Float like IrrepsIdx<ESPEC>>) -> Float = {
+function gain_e(x: Array<Float64 like IrrepsIdx<ESPEC>>) -> Float64 = {
     let n = ml.norms(ESPEC, x)
     4.0 / (n(0) * n(0) + n(1) * n(1) + n(2) * n(2) + n(3) * n(3) + 1.0)
 }
-function gain_m(x: Array<Float like IrrepsIdx<MSPEC>>) -> Float = {
+function gain_m(x: Array<Float64 like IrrepsIdx<MSPEC>>) -> Float64 = {
     let n = ml.norms(MSPEC, x)
     5.0 / (n(0) * n(0) + n(1) * n(1) + n(2) * n(2) + n(3) * n(3) + n(4) * n(4) + 1.0)
 }
@@ -349,30 +349,30 @@ function gain_m(x: Array<Float like IrrepsIdx<MSPEC>>) -> Float = {
 // The state: [embed 48 | tp1 30 | lin1 11 | tp2 49 | lin2 11 | tp3 49 | lin3 11 |
 // readout 39 | bias 1], then 249 momenta, then the loss. Inside `ad.grad` a
 // `range` spells its extent as a literal, hence one slicer per block width.
-let static NPAR = 249
-let static NP2 = 498
-let static SW = 499
-function w48(s: Array<Float like Idx<SW>>, b: Int64) -> Array<Float like Idx<WE>> = {
+let static NPAR: Int64 = 249
+let static NP2: Int64 = 498
+let static SW: Int64 = 499
+function w48(s: Array<Float64 like Idx<SW>>, b: Int64) -> Array<Float64 like Idx<WE>> = {
     let o = method_for(range<Idx<48>>) <@> lambda(k) -> s(b + k) |> compute
     o
 }
-function w30(s: Array<Float like Idx<SW>>, b: Int64, g: Float) -> Array<Float like Idx<W1>> = {
+function w30(s: Array<Float64 like Idx<SW>>, b: Int64, g: Float64) -> Array<Float64 like Idx<W1>> = {
     let o = method_for(range<Idx<30>>) <@> lambda(k) -> s(b + k) * g |> compute
     o
 }
-function w49(s: Array<Float like Idx<SW>>, b: Int64, g: Float) -> Array<Float like Idx<W2>> = {
+function w49(s: Array<Float64 like Idx<SW>>, b: Int64, g: Float64) -> Array<Float64 like Idx<W2>> = {
     let o = method_for(range<Idx<49>>) <@> lambda(k) -> s(b + k) * g |> compute
     o
 }
-function w11(s: Array<Float like Idx<SW>>, b: Int64) -> Array<Float like Idx<WL>> = {
+function w11(s: Array<Float64 like Idx<SW>>, b: Int64) -> Array<Float64 like Idx<WL>> = {
     let o = method_for(range<Idx<11>>) <@> lambda(k) -> s(b + k) |> compute
     o
 }
-function w39(s: Array<Float like Idx<SW>>, b: Int64) -> Array<Float like Idx<WR>> = {
+function w39(s: Array<Float64 like Idx<SW>>, b: Int64) -> Array<Float64 like Idx<WR>> = {
     let o = method_for(range<Idx<39>>) <@> lambda(k) -> s(b + k) |> compute
     o
 }
-function ev_raw(h: Array<Float like IrrepsIdx<HSPEC>>, s: Array<Float like Idx<SW>>) -> Array<Float like Idx<39>> = {
+function ev_raw(h: Array<Float64 like IrrepsIdx<HSPEC>>, s: Array<Float64 like Idx<SW>>) -> Array<Float64 like Idx<39>> = {
     let e = embed(h, w48(s, 0))
     let m1 = block_e(e, w30(s, 48, gain_e(e)), w11(s, 78))
     let m2 = block_m(m1, w49(s, 89, gain_m(m1)), w11(s, 138))
@@ -381,11 +381,11 @@ function ev_raw(h: Array<Float like IrrepsIdx<HSPEC>>, s: Array<Float like Idx<S
 }
 // The energy: standardized invariants into the certified readout, plus a bias.
 // `mu`/`sc` (the readout calibration below) arrive as arguments.
-function fwd(h: Array<Float like IrrepsIdx<HSPEC>>, s: Array<Float like Idx<SW>>,
-             mu: Array<Float like Idx<39>>, sc: Array<Float like Idx<39>>) -> Float = {
+function fwd(h: Array<Float64 like IrrepsIdx<HSPEC>>, s: Array<Float64 like Idx<SW>>,
+             mu: Array<Float64 like Idx<39>>, sc: Array<Float64 like Idx<39>>) -> Float64 = {
     let v = ev_raw(h, s)
     let c = method_for(range<Idx<39>>) <@> lambda(j) -> (v(j) - mu(j)) * sc(j) |> compute
-    let ev: Array<Float like IrrepsIdx<EVSPEC>> =
+    let ev: Array<Float64 like IrrepsIdx<EVSPEC>> =
         [c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8), c(9), c(10), c(11), c(12), c(13),
          c(14), c(15), c(16), c(17), c(18), c(19), c(20), c(21), c(22), c(23), c(24), c(25), c(26),
          c(27), c(28), c(29), c(30), c(31), c(32), c(33), c(34), c(35), c(36), c(37), c(38)]
@@ -418,8 +418,8 @@ let ev_sc = method_for(ev_cols) <@> lambda(c) -> (if stddev(c) < 0.05 then 20.0 
 // session, so nothing downstream is disturbed.
 
 // %%
-function gate_mix(x: Array<Float like IrrepsIdx<MSPEC>>, g: Array<Float like IrrepsIdx<MSPEC>>)
-                  where ml.equiv(O3) -> Array<Float like IrrepsIdx<MSPEC>> =
+function gate_mix(x: Array<Float64 like IrrepsIdx<MSPEC>>, g: Array<Float64 like IrrepsIdx<MSPEC>>)
+                  where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<MSPEC>> =
     x * g
 
 // %% [markdown]
@@ -435,8 +435,8 @@ function gate_mix(x: Array<Float like IrrepsIdx<MSPEC>>, g: Array<Float like Irr
 // are O(3)-invariant maps.
 
 // %%
-function block_free(x: Array<Float like IrrepsIdx<MSPEC>>, wt: Array<Float like Idx<W2>>, wl: Array<Float like Idx<WL>>)
-                    -> Array<Float like IrrepsIdx<MSPEC>> = {
+function block_free(x: Array<Float64 like IrrepsIdx<MSPEC>>, wt: Array<Float64 like Idx<W2>>, wl: Array<Float64 like Idx<WL>>)
+                    -> Array<Float64 like IrrepsIdx<MSPEC>> = {
     let t = ml.tensor_product(CFG2, x, x, wt)
     let g = ml.gated(MSPEC, t)
     ml.linear(MSPEC, MSPEC, wl, g)
@@ -461,38 +461,38 @@ function block_free(x: Array<Float like IrrepsIdx<MSPEC>>, wt: Array<Float like 
 // **deliberately small budget**, and the next section says what it costs.
 
 // %%
-let static BS = 20
-let static NB = 25
-let static NSTEP = 50
-let static NROW = 51
-let static LR = 0.002
-let static MU = 0.9
+let static BS: Int64 = 20
+let static NB: Int64 = 25
+let static NSTEP: Int64 = 50
+let static NROW: Int64 = 51
+let static LR: Float64 = 0.002
+let static MU: Float64 = 0.9
 
-function sq_err(s: Array<Float like Idx<SW>>, h: Array<Float like IrrepsIdx<HSPEC>>, e: Float,
-                mu: Array<Float like Idx<39>>, sc: Array<Float like Idx<39>>) -> Float = {
+function sq_err(s: Array<Float64 like Idx<SW>>, h: Array<Float64 like IrrepsIdx<HSPEC>>, e: Float64,
+                mu: Array<Float64 like Idx<39>>, sc: Array<Float64 like Idx<39>>) -> Float64 = {
     let d = fwd(h, s, mu, sc) - e
     d * d
 }
-function loss(s: Array<Float like Idx<SW>>, ep: Int64, b: Int64) -> Float = {
+function loss(s: Array<Float64 like Idx<SW>>, ep: Int64, b: Int64) -> Float64 = {
     let errs = method_for(range<Idx<20>>) <@> lambda(j) ->
         sq_err(s, (h_tr(perm(ep, BS * b + j)) : IrrepsIdx<HSPEC>), e_tr(perm(ep, BS * b + j)), ev_mu, ev_sc) |> compute
     reduce(errs, (+)) / 20.0
 }
-function block(s: Array<Float like Idx<SW>>, base: Int64) -> Array<Float like Idx<NPAR>> = {
+function block(s: Array<Float64 like Idx<SW>>, base: Int64) -> Array<Float64 like Idx<NPAR>> = {
     let o = method_for(range<Idx<NPAR>>) <@> lambda(k) -> s(base + k) |> compute
     o
 }
-function sgd_step(s: Array<Float like Idx<SW>>, ep: Int64, b: Int64) -> Array<Float like Idx<SW>> = {
-    let mut ds = replicate(SW, pure(0.0)) |> compute
+function sgd_step(s: Array<Float64 like Idx<SW>>, ep: Int64, b: Int64) -> Array<Float64 like Idx<SW>> = {
+    let mut ds = replicate(SW, pure(Float64(0.0))) |> compute
     let lv = ad.grad(loss)(s, ep, b, ds)
     let v = MU * block(s, NPAR) - LR * block(ds, 0)
     let w = block(s, 0) + v
-    let lrow: Array<Float like Idx<1>> = [lv]
+    let lrow: Array<Float64 like Idx<1>> = [lv]
     join(w, v, lrow, 0)
 }
 // The one recursive array that earns the name: every row reads the row before.
 let traj = {
-    let rec t: Array<Float like Idx<NROW>, Idx<SW>> =
+    let rec t: Array<Float64 like Idx<NROW>, Idx<SW>> =
         match t with
         | zero -> zero
         | zero :: n -> zero :: w0
@@ -565,17 +565,17 @@ scores
 // — zero and zero.
 
 // %%
-function energy(p: Array<Float like Idx<63>>) -> Float = fwd(hfeat(p), final_row, ev_mu, ev_sc)
-function force_of(p: Array<Float like Idx<63>>) -> Array<Float like Idx<63>> = {
-    let mut dp = replicate(63, pure(0.0)) |> compute
+function energy(p: Array<Float64 like Idx<63>>) -> Float64 = fwd(hfeat(p), final_row, ev_mu, ev_sc)
+function force_of(p: Array<Float64 like Idx<63>>) -> Array<Float64 like Idx<63>> = {
+    let mut dp = replicate(63, pure(Float64(0.0))) |> compute
     let e = ad.grad(energy)(p, dp)
     0.0 - dp
 }
 // R applied to every atom of a flat geometry (or force field); m is row-major.
-function rotate(p: Array<Float like Idx<63>>, m: Array<Float like Idx<9>>) -> Array<Float like Idx<63>> =
+function rotate(p: Array<Float64 like Idx<63>>, m: Array<Float64 like Idx<9>>) -> Array<Float64 like Idx<63>> =
     method_for(range<Idx<63>>) <@> lambda(u) ->
         m(3 * (u % 3)) * p(u - u % 3) + m(3 * (u % 3) + 1) * p(u - u % 3 + 1) + m(3 * (u % 3) + 2) * p(u - u % 3 + 2) |> compute
-function above(x: Float, t: Float) -> Float = if x > t then 1.0 else 0.0
+function above(x: Float64, t: Float64) -> Float64 = if x > t then 1.0 else 0.0
 
 let p0 = flat(pos_te((0 : SampTe)))
 let e0 = energy(p0)
@@ -605,7 +605,7 @@ force_ok
 
 // %%
 // Rotation by t about the axis (1, 2, 2) / 3, 25 stops round a turn.
-function rmat9(t: Float) -> Array<Float like Idx<9>> = {
+function rmat9(t: Float64) -> Array<Float64 like Idx<9>> = {
     let c = cos(t)
     let s = sin(t)
     let u = 1.0 - c
@@ -613,7 +613,7 @@ function rmat9(t: Float) -> Array<Float like Idx<9>> = {
      2.0 * u / 9.0 + 2.0 * s / 3.0, c + 4.0 * u / 9.0, 4.0 * u / 9.0 - s / 3.0,
      2.0 * u / 9.0 - 2.0 * s / 3.0, 4.0 * u / 9.0 + s / 3.0, c + 4.0 * u / 9.0]
 }
-let static OX = 7
+let static OX: Int64 = 7
 let turn = 2.0 * 3.141592653589793 / 24.0 * Float64(0..25)
 let f_turn = method_for(turn) <@> lambda(t) -> force_of(rotate(p0, rmat9(t))) |> compute
 let f_hand = method_for(turn) <@> lambda(t) -> rotate(f0, rmat9(t)) |> compute

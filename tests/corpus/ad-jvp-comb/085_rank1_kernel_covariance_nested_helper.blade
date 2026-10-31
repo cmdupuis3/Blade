@@ -29,7 +29,7 @@ function mean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 
 function covariance(x: T^1, y: T^1) -> T^0 = mean((x - mean(x)) * (y - mean(y)))
 
-function f(a: Array<Float like R, C>) -> Float = {
+function f(a: Array<Float64 like R, C>) -> Float64 = {
     let cov = method_for(a, a) <@> lambda(x: T^1, y: T^1) -> covariance(x, y) |> compute
     cov(0, 0) + 3.0 * cov(0, 1)
 }

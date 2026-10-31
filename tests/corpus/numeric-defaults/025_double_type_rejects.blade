@@ -1,0 +1,7 @@
+// TEST: Double is not a Blade type (rejects)
+// ============================================================================
+// Rule 3: `Double` (old meaning Float64) is steered to Float64.
+// ============================================================================
+let xs: Array<Double like Idx<2>> = [1.0, 2.0]
+// ERROR: BL1004
+// ERROR-CONTAINS: `Double` is not a Blade type: write `Float64`

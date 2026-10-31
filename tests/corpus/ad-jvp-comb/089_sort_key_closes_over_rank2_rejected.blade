@@ -9,8 +9,8 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(a: Array<Float like I>, b: Array<Float like I, I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x * b(0)(0))
+function f(a: Array<Float64 like I>, b: Array<Float64 like I, I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x * b(0)(0))
     s(0) * 2.0
 }
 

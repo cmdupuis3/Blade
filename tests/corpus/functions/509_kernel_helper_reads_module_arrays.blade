@@ -6,13 +6,13 @@
 // (g++: 'xs' was not declared, BL9002). A namespace-scope function's own
 // reads of module bindings now promote their declarations, as its callees'
 // captures already did.
-let xs: Array<Float like Idx<5>, Idx<4>> = [[1.0, 0.0, 2.0, 1.0], [0.5, 1.0, 0.0, 2.0], [1.5, 2.0, 1.0, 0.0], [0.0, 0.5, 0.5, 1.0], [2.0, 1.0, 1.0, 1.0]]
-let ys: Array<Float like Idx<5>> = [1.0, 2.0, 3.0, 1.0, 2.0]
-function sq(w: Array<Float like Idx<4>>, n: Int64) -> Float = {
+let xs: Array<Float64 like Idx<5>, Idx<4>> = [[1.0, 0.0, 2.0, 1.0], [0.5, 1.0, 0.0, 2.0], [1.5, 2.0, 1.0, 0.0], [0.0, 0.5, 0.5, 1.0], [2.0, 1.0, 1.0, 1.0]]
+let ys: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 1.0, 2.0]
+function sq(w: Array<Float64 like Idx<4>>, n: Int64) -> Float64 = {
     let d = w(0) * xs(n, 0) - ys(n)
     d * d
 }
-function loss(w: Array<Float like Idx<4>>) -> Float = {
+function loss(w: Array<Float64 like Idx<4>>) -> Float64 = {
     let e = method_for(range<Idx<5>>) <@> lambda(n) -> sq(w, n) |> compute
     reduce(e, (+))
 }

@@ -12,8 +12,8 @@
 //
 // This is the test that would catch a tie rule keyed on the type instead of on
 // the object -- which would silently fold 36 distinct values into 21 cells.
-let A = [1.0, 2.0, 3.0]
-let B = [1.0, 1.0, 2.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([1.0, 1.0, 2.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let SA = method_for(A, A) <@> g |> compute
 let SB = method_for(B, B) <@> g |> compute

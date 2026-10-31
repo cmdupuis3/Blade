@@ -6,10 +6,10 @@
 // float, refused -- it used to be promoted silently by the broadcast kernel.
 function outerm(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1
+    | 0 -> Int64(1)
     | _ -> {
         let head :: tail = a
         head [*] outerm(tail)
     }
 }
-let m2 = outerm([1.0, 2.0], [3.0, 4.0, 5.0])
+let m2 = outerm(Float64([1.0, 2.0]), Float64([3.0, 4.0, 5.0]))

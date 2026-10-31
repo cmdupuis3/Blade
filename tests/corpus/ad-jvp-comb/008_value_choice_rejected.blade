@@ -13,7 +13,7 @@
 // ERROR-CONTAINS: it selects the first NON-ZERO cell
 import ad as ad
 
-function f(a: Array<Float like Idx<2>>, b: Array<Float like Idx<2>>) -> Float = {
+function f(a: Array<Float64 like Idx<2>>, b: Array<Float64 like Idx<2>>) -> Float64 = {
     let ch = a <|> b |> compute
     ch(0) + ch(1)
 }

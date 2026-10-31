@@ -346,7 +346,7 @@ let rec private statusOfType (g: Group) (aliases: Map<string, TypeExpr>) (static
             Error "multi-index arrays mixing IrrepsIdx are not supported in equiv-certified signatures"
     | TyNamed (n, []) ->
         match Map.tryFind n aliases with
-        | Some body -> statusOfType g aliases statics (TyArray (TyNamed ("Float", []), [ body ]))
+        | Some body -> statusOfType g aliases statics (TyArray (TyNamed ("Float64", []), [ body ]))
         // A builtin scalar name is provably 0-dimensional; any other named
         // type is invariant but of unestablished shape (may be an
         // aggregate), so it may not scale a rep.
@@ -1407,7 +1407,7 @@ let rec private sigFamilies (aliases: Map<string, TypeExpr>) (t: TypeExpr) : boo
             | _ -> (ir, pgs)) (false, Set.empty)
     | TyNamed (n, []) ->
         match Map.tryFind n aliases with
-        | Some body -> sigFamilies aliases (TyArray (TyNamed ("Float", []), [ body ]))
+        | Some body -> sigFamilies aliases (TyArray (TyNamed ("Float64", []), [ body ]))
         | None -> (false, Set.empty)
     | TyIrrepsIdx _ -> (true, Set.empty)
     | TyPgIrrepsIdx (gn, _) -> (false, Set.singleton gn)

@@ -1,7 +1,7 @@
 // TEST: Zip Basic
 // zip(A, B) used inside method_for — co-iteration producing elementwise result
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0, 30.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([10.0, 20.0, 30.0])
 let L = method_for(zip(A, B))
 let f = lambda(a, b) -> a + b
 let result = L <@> f |> compute

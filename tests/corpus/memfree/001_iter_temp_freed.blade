@@ -7,15 +7,15 @@
 // ============================================================================
 type C = Idx<4>
 type Steps = Idx<6>
-function bump(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
+function bump(u: Array<Float64 like C>, n: Int64) -> Array<Float64 like C> = {
     let t = method_for(range<C>) <@> lambda(i) -> Float64(i) + Float64(n) |> compute
     let s = reduce(t, (+))
     u + 0.5 * t
 }
-let rec traj: Array<Float like Steps, C> =
+let rec traj: Array<Float64 like Steps, C> =
     match traj with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0])
     | prefix :: n -> prefix :: bump(prefix(n - 1), n)
 let fin = traj((5 : Steps))
 let mass = reduce(fin, (+))

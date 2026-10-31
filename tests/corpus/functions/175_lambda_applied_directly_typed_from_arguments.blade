@@ -14,26 +14,26 @@
 // ============================================================================
 function idg(x: T) -> T = x
 function sq(x: Float64) -> Float64 = x * x
-let xs = [1.5, 2.5, 3.5]
+let xs = Float64([1.5, 2.5, 3.5])
 
 // A generic function argument, specialized at the use the body makes.
-let r1 = (lambda(f, x) -> f(x))(idg, 2.0)
+let r1 = (lambda(f, x) -> f(x))(idg, Float64(2.0))
 // EXPECT: r1 = 2.0
-let r2 = (lambda(f, x) -> f(x))(idg, 7)
+let r2 = (lambda(f, x) -> f(x))(idg, Int64(7))
 // EXPECT: r2 = 7.0
 // A non-generic function argument (worked before; the control).
-let r3 = (lambda(f, x) -> f(x))(sq, 3.0)
+let r3 = (lambda(f, x) -> f(x))(sq, Float64(3.0))
 // EXPECT: r3 = 9.0
 // A block-local alias of the generic function, passed the same way.
 let r4 = {
     let g = idg
-    (lambda(f, x) -> f(x))(g, 2.5)
+    (lambda(f, x) -> f(x))(g, Float64(2.5))
 }
 // EXPECT: r4 = 2.5
 // An ARRAY in the same position is still an array read.
-let r5 = (lambda(f, x) -> f(x))(xs, 1)
+let r5 = (lambda(f, x) -> f(x))(xs, Int64(1))
 // EXPECT: r5 = 2.5
 let r6 = (lambda(a) -> a)(xs)
 // EXPECT: r6 = [1.5, 2.5, 3.5]
-let r7 = (lambda(a, k) -> reduce(a, (+)) * k)(xs, 2.0)
+let r7 = (lambda(a, k) -> reduce(a, (+)) * k)(xs, Float64(2.0))
 // EXPECT: r7 = 15.0

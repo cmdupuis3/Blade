@@ -37,6 +37,15 @@ open Blade.StaticEval
 
 let private v (n: string) = syn (ExprVar n)
 let private fLit (x: float) = syn (ExprLit (LitFloat x))
+/// Round 6 (numeric defaults): a USER scalar this elaborator binds or combines
+/// (a weight, coefficient, family parameter, evaluation point, or chain control) is read
+/// through a cast to the width the PPL computes in -- Float64, Int64 for an RNG key. A literal
+/// argument then takes that width exactly (a literal under a width cast takes the cast's width)
+/// instead of the Float32 / Int32 default a bare synthesized `let` would settle on, and a
+/// Float32 / Int32 variable is CONVERTED rather than refused. PPL is Float64-only this round;
+/// width-generic elaboration is the follow-up.
+let private asF64 (e: Expr) = syn (ExprApp (syn (ExprVar "Float64"), [ e ]))
+let private asI64 (e: Expr) = syn (ExprApp (syn (ExprVar "Int64"), [ e ]))
 let private addE a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
 let private divE a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
 let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
@@ -44,6 +53,8 @@ let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
 let private sMutStmt nm vl = StmtLet { Pattern = synPat (PatVar nm); Type = None; Value = vl; Mutability = BindMut }
+// PPL accumulators have a fixed working width even when initialized by a bare zero.
+let private sMutFloat nm vl = StmtLet { Pattern = synPat (PatVar nm); Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindMut }
 let private assignStmt (lhs: Expr) (rhs: Expr) = StmtExpr (syn (ExprAssign (lhs, rhs)))
 let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
     StmtForIn (var, syn (ExprDotDot (lo, hi)), body)
@@ -609,7 +620,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | [ix], [iy] ->
                     match resolveExtent ctx.Aliases ctx.Statics ix, resolveExtent ctx.Aliases ctx.Statics iy with
                     | Some dx, Some dy ->
-                        let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (fLit 0.0))))
+                        let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (syn (ExprTyped (fLit 0.0, TyFloat64))))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error $"comoments: independent zero block needs static variable-axis extents for '{xName}' and '{yName}'"
                 | _ -> Error "comoments: independent zero blocks support one variable axis per array so far (multi-axis blocks deferred)"
@@ -1150,7 +1161,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     | Some dx, Some dy ->
                         let cellCount =
                             (canonicalTuples dx p |> List.length) * (canonicalTuples dy q |> List.length)
-                        let zeros = arrLitE (List.replicate cellCount (fLit 0.0))
+                        let zeros = arrLitE (List.replicate cellCount (syn (ExprTyped (fLit 0.0, TyFloat64))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error "mixed_cumulants: independent zero block needs static variable-axis extents"
                 | _ -> Error "mixed_cumulants: independent zero blocks support one variable axis per array so far"
@@ -1666,7 +1677,7 @@ let private elabDistExpect (ctx: Ctx) (span: Span) (binding: Binding)
                 let mDecls, mRead = rawMomentDecls span ("ex_" + outName) info q
                 let value =
                     coeffs
-                    |> List.mapi (fun j c -> if j = 0 then c else mulE c (mRead j))
+                    |> List.mapi (fun j c -> if j = 0 then asF64 c else mulE (asF64 c) (mRead j))
                     |> List.reduce addE
                 Ok (mDecls @ [ { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
@@ -1690,7 +1701,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                 let zName = $"__ppl_tb_rw_{dName}_Z"
                 let zVal =
                     coeffs
-                    |> List.mapi (fun c cf -> if c = 0 then cf else mulE cf (mRead c))
+                    |> List.mapi (fun c cf -> if c = 0 then asF64 cf else mulE (asF64 cf) (mRead c))
                     |> List.reduce addE
                 let zDecl = { Value = DeclLet { Pattern = pvar zName; Type = None; Value = zVal; Mutability = BindLet }; Span = span }
                 let wName j = $"__ppl_tb_rw_{dName}_w{j}"
@@ -1698,7 +1709,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                     [ for j in 1 .. rOut ->
                         let num =
                             coeffs
-                            |> List.mapi (fun c cf -> mulE cf (mRead (j + c)))
+                            |> List.mapi (fun c cf -> mulE (asF64 cf) (mRead (j + c)))
                             |> List.reduce addE
                         { Value = DeclLet { Pattern = pvar (wName j); Type = None
                                             Value = divE num (v zName); Mutability = BindLet }
@@ -1743,7 +1754,7 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
                             Sources = Set.union d1.Sources d2.Sources
                             Dim = Some 1
                             Flat = true }
-            Ok ([ bind w1Name w1; bind w2Name w2; bind wsName (addE (v w1Name) (v w2Name)) ]
+            Ok ([ bind w1Name (asF64 w1); bind w2Name (asF64 w2); bind wsName (addE (v w1Name) (v w2Name)) ]
                @ m1Decls @ m2Decls @ mixDecls @ compDecls, outInfo)))
         | _ ->
             Error "dist_mix expects dist_mix(w1, d1, w2, d2) with two previously declared dist bindings"
@@ -1807,7 +1818,7 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                                 Sources = info.Sources
                                 Dim = Some (dim - 1)
                                 Flat = true }
-                Ok ([ bind xN xE
+                Ok ([ bind xN (asF64 xE)
                       bind sN (k2 i i)
                       bind devN (subE (v xN) (k1 i))
                       bind comps.[0] (arrLitE meanCells)
@@ -1851,8 +1862,8 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let bindDecls =
                 [ for i in 0 .. k - 1 do
-                    yield bind (xName i) rest.[2 * i]
-                    yield bind (wName i) rest.[2 * i + 1] ]
+                    yield bind (xName i) (asF64 rest.[2 * i])
+                    yield bind (wName i) (asF64 rest.[2 * i + 1]) ]
             let wsName = $"__ppl_tb_at_{dName}_ws"
             let wsDecl = bind wsName ([ for i in 0 .. k - 1 -> v (wName i) ] |> List.reduce addE)
             let mName j = $"__ppl_tb_at_{dName}_m{j}"
@@ -1888,7 +1899,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
             else
                 let xName i = $"__ppl_tb_ng_{outName}_x{i}"
                 let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) xs.[i] ]
+                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) (asF64 xs.[i]) ]
                 let mDecls, mRead = rawMomentDecls span ("ng_" + outName) info (sPts - 1)
                 let cellName j = $"__ppl_tb_ng_{outName}_c{j}"
                 let cellDecls =
@@ -1988,10 +1999,10 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
             let r = int x
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let pName i = $"__ppl_fam_{dName}_p{i}"
-            let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) e)
+            let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) (asF64 e))
             let p i = v (pName i)
             let direct (kappa: int -> Expr) =
-                [ for k in 1 .. r -> bind (distComponentName dName k) (arrLitE [ kappa k ]) ]
+                [ for k in 1 .. r -> bind (distComponentName dName k) (asF64 (arrLitE [ kappa k ])) ]
             let compDecls =
                 match fam with
                 | "gaussian" ->
@@ -2097,7 +2108,8 @@ let private eqE a b = syn (ExprBinOp (Elementwise, OpEq, a, b))
 let private andE a b = syn (ExprBinOp (Elementwise, OpAnd, a, b))
 let private orE a b = syn (ExprBinOp (Elementwise, OpOr, a, b))
 let private notE a = syn (ExprUnaryOp (OpNot, a))
-let private guardE c e = syn (ExprGuard (c, e))
+// PPL computes in Float64 even when a guarded constant has no numeric partner.
+let private guardE c e = syn (ExprGuard (c, asF64 e))
 
 /// Exactly 0.0 on the support, -inf (log 0) off it. The -inf is a literal's
 /// log, so neither sweep carries anything out of it.
@@ -2172,7 +2184,7 @@ let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Ex
 let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr) : (string * Expr) list * Expr =
     let pName i = $"__ppl_lp_{tok}_p{i}"
     let xName = $"__ppl_lp_{tok}_x"
-    let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
+    let pBinds = ps |> List.mapi (fun i e -> (pName i, asF64 e))
     let p i = v (pName i)
     // The closed forms read `x` = the evaluation point moved onto the
     // support (onSupportE); the support term adds the -inf off it. On the
@@ -2230,7 +2242,7 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
             ([], addE (xlogyE x (p 0))
                       (xlogyE (subE (fLit 1.0) x) (subE (fLit 1.0) (p 0))))
         | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
-    (pBinds @ [ (xName, xExpr) ] @ supportBinds @ extra, withSupport value)
+    (pBinds @ [ (xName, asF64 xExpr) ] @ supportBinds @ extra, withSupport value)
 
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
 /// arithmetic over once-bound parameters, -inf off the family's support
@@ -2261,9 +2273,9 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
     : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
         | None ->
-            Error $"loglik: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
+            Error $"loglik: '{aName}' must be a module-level let with an Array<Float64 like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
         | Some (_, idxs) when idxs.Length <> 1 ->
-            Error $"loglik: '{aName}' carries {idxs.Length} declared axes -- a univariate family sums a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward (dist_map/dist_affine) first"
+            Error $"loglik: '{aName}' carries {idxs.Length} declared axes -- a univariate family sums a rank-1 sample vector (Array<Float64 like SampleIdx>); slice or push forward (dist_map/dist_affine) first"
         | Some (_, idxs) ->
             let fiber = idxs.Head
             match resolveExtent ctx.Aliases ctx.Statics fiber with
@@ -2271,7 +2283,7 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
             | Some n ->
                 let nF = float n
                 let pName i = $"__ppl_ll_{tok}_p{i}"
-                let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
+                let pBinds = ps |> List.mapi (fun i e -> (pName i, asF64 e))
                 let p i = v (pName i)
                 let accN i = $"__ppl_ll_{tok}_acc{i}"
                 let iN = $"__ppl_ll_{tok}_i"
@@ -2432,9 +2444,9 @@ let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr lis
 let private bayesSampleVector (ctx: Ctx) (aName: string) : Result<int, string> =
     match Map.tryFind aName ctx.Arrays with
     | None ->
-        Error $"bayes: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
+        Error $"bayes: '{aName}' must be a module-level let with an Array<Float64 like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
     | Some (_, idxs) when idxs.Length <> 1 ->
-        Error $"bayes: '{aName}' carries {idxs.Length} declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward first"
+        Error $"bayes: '{aName}' carries {idxs.Length} declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float64 like SampleIdx>); slice or push forward first"
     | Some (_, idxs) ->
         match resolveExtent ctx.Aliases ctx.Statics idxs.Head with
         | None -> Error $"bayes: '{aName}' sample axis extent must be statically known (Idx<n> directly or through aliases)"
@@ -2466,8 +2478,8 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
             let prN i = nm $"pr{i}"
             let lkN i = nm $"lk{i}"
             let paramDecls =
-                (priorPs |> List.mapi (fun i e -> bind (prN i) e))
-                @ (likPs |> List.mapi (fun i e -> bind (lkN i) e))
+                (priorPs |> List.mapi (fun i e -> bind (prN i) (asF64 e)))
+                @ (likPs |> List.mapi (fun i e -> bind (lkN i) (asF64 e)))
             let pr i = v (prN i)
             let lk i = v (lkN i)
             // The one sufficient statistic every pair needs beyond the static
@@ -2477,7 +2489,7 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
             let srcN, sumN, iN, accN = nm "src", nm "sum", nm "i", nm "acc"
             let sumVal =
                 syn (ExprBlock (
-                        [ sMutStmt accN (fLit 0.0)
+                        [ sMutFloat accN (fLit 0.0)
                           forIn iN (iLit 0) (iLit n)
                               [ assignStmt (v accN) (addE (v accN) (appE (v srcN) [v iN])) ] ],
                         Some (v accN)))
@@ -2956,7 +2968,7 @@ let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: stri
         elif info.Order > 6 then
             Error $"{former}: the Edgeworth/Cornish-Fisher series are generated up to order 6 and '{dn}' carries {info.Order} -- rebuild or project the tower at order <= 6"
         else
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let r = info.Order
             let muN = $"__ppl_ax_{tag}_mu"
             let sdN = $"__ppl_ax_{tag}_sd"
@@ -2972,7 +2984,7 @@ let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: stri
 /// Horner builder for U(z) over them. Caller guarantees r >= 3.
 let private cfCorrectionDecls (span: Span) (tag: string) (lam: int -> Expr) (r: int)
     : Located<Decl> list * (Expr -> Expr) =
-    let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+    let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
     let grouped = axCornishFisherU r
     let maxDeg = grouped |> Map.toList |> List.map fst |> List.max
     let cName i = $"__ppl_cf_{tag}_c{i}"
@@ -2997,7 +3009,7 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
     | [{ Kind = ExprKind.ExprVar dn }; xExpr] ->
         approxSetupDecls "dist_pdf_approx" ctx span ("ea_" + outName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let maxJ = 3 * (r - 2)
             let cs = axEdgeworthCoeffs r
             let xN = $"__ppl_ea_{outName}_x"
@@ -3021,7 +3033,7 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
             let sqrt2pi = sqrt (2.0 * System.Math.PI)
             let value = divE (mulE (divE (expE (mulE (mulE (fLit -0.5) z) z)) (fLit sqrt2pi)) (v fN)) sd
             setup
-            @ [ bind xN xExpr
+            @ [ bind xN (asF64 xExpr)
                 bind zN (divE (subE (v xN) mu) sd) ]
             @ heDecls
             @ [ bind fN factor
@@ -3038,12 +3050,12 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
     | [{ Kind = ExprKind.ExprVar dn }; pExpr] ->
         approxSetupDecls "dist_quantile_approx" ctx span ("cf_" + outName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let nm suffix = $"__ppl_cf_{outName}_{suffix}"
             let pN, qN, r0N, r1N, ceN, vtN, zN = nm "p", nm "q", nm "r0", nm "r1", nm "ce", nm "vt", nm "z"
             let z = v zN
             let ppndDecls =
-                [ bind pN pExpr
+                [ bind pN (asF64 pExpr)
                   bind qN (subE (v pN) (fLit 0.5))
                   bind r0N (ifE (ltE (v qN) (fLit 0.0)) (v pN) (subE (fLit 1.0) (v pN)))
                   bind r1N (sqrtE (negE (logE (v r0N))))
@@ -3133,15 +3145,15 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
                 let fN = $"__ppl_sm_{sName}_fill"
                 let affine = addE (v muN) (mulE (v sdN) (v "__u"))
                 let body = if fam = "gaussian" then affine else expE affine
-                [ bind muN ps.[0]
-                  bind sdN (sqrtE ps.[1])
+                [ bind muN (asF64 ps.[0])
+                  bind sdN (sqrtE (asF64 ps.[1]))
                   bind fN (appE (v "__rand_normal") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) body }; Span = span } ]
             | "uniform" ->
                 let aN = $"__ppl_sm_{sName}_a"
                 let wN = $"__ppl_sm_{sName}_w"
                 let fN = $"__ppl_sm_{sName}_fill"
-                [ bind aN ps.[0]
+                [ bind aN (asF64 ps.[0])
                   bind wN (subE ps.[1] (v aN))
                   bind fN (appE (v "__rand_uniform") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) (addE (v aN) (mulE (v wN) (v "__u"))) }; Span = span } ]
@@ -3242,7 +3254,7 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
 // =========================================================================
 
 let private tyFloat64 = TyNamed ("Float64", [])
-let private tyIntP = TyNamed ("Int", [])
+let private tyIntP = TyNamed ("Int32", [])
 let private tyFloatArr (n: int) = TyArray (tyFloat64, [TyIdx (iLit n)])
 let private mkParamD (nm: string) (ty: TypeExpr) : ParamDecl =
     { Name = nm; Type = Some ty; Mutability = Immutable; Default = None; NameSpan = noSpan }
@@ -3314,9 +3326,9 @@ let private elabMh (ctx: Ctx) (span: Span) (chainName: string) (binding: Binding
                                     StepVar = tN
                                     SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
                                     Guard = None }) }
-                [ bind x0N x0E
+                [ bind x0N (asF64 x0E)
                   bind scN scaleE
-                  bind keyN keyE
+                  bind keyN (asI64 keyE)
                   bind epsN (appE (v "__rand_normal") [addE (v keyN) (iLit 1000003); iLit n])
                   bind uN (appE (v "__rand_uniform") [addE (v keyN) (iLit 2000003); iLit n])
                   mkFnDecl span stepN [mkParamD prevN tyFloat64; mkParamD tN tyIntP] tyFloat64 stepBody
@@ -3396,10 +3408,10 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
                                 StepVar = tN
                                 SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
                                 Guard = None }) }
-            Ok ([ bind x0N x0E
-                  bind epsN epsE
+            Ok ([ bind x0N (asF64 x0E)
+                  bind epsN (asF64 epsE)
                   bind eps2N (divE (v epsN) (fLit 2.0))
-                  bind keyN keyE
+                  bind keyN (asI64 keyE)
                   bind pFillN (appE (v "__rand_normal") [addE (v keyN) (iLit 3000017); iLit n])
                   bind uN (appE (v "__rand_uniform") [addE (v keyN) (iLit 4000037); iLit n])
                   mkFnDecl span stepN [mkParamD prevN tyFloat64; mkParamD tN tyIntP] tyFloat64 stepBody
@@ -3426,7 +3438,7 @@ let private chainSource (ctx: Ctx) (chains: Map<string, int>) (former: string) (
              | Some (_, idxs) ->
                  Error $"{former}: '{nmv}' carries {idxs.Length} declared axes -- chain diagnostics run on rank-1 chains"
              | None ->
-                 Error $"{former}: '{nmv}' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float like Idx<n>> annotation")
+                 Error $"{former}: '{nmv}' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float64 like Idx<n>> annotation")
     | _ -> Error $"{former}: the chain argument must be a named module-level binding"
 
 let private staticNat (ctx: Ctx) (former: string) (what: string) (e: Expr) : Result<int, string> =
@@ -3457,8 +3469,8 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
                 if isVar then
                     // population variance of the suffix: E[x^2] - mean^2
                     syn (ExprBlock (
-                            [ sMutStmt aN (fLit 0.0)
-                              sMutStmt bN (fLit 0.0)
+                            [ sMutFloat aN (fLit 0.0)
+                              sMutFloat bN (fLit 0.0)
                               forIn iN (iLit burn) (iLit len)
                                   [ assignStmt (v aN) (addE (v aN) read)
                                     assignStmt (v bN) (addE (v bN) (mulE read read)) ] ],
@@ -3466,7 +3478,7 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
                                        (mulE (divE (v aN) (fLit m)) (divE (v aN) (fLit m))))))
                 else
                     syn (ExprBlock (
-                            [ sMutStmt aN (fLit 0.0)
+                            [ sMutFloat aN (fLit 0.0)
                               forIn iN (iLit burn) (iLit len) [ assignStmt (v aN) (addE (v aN) read) ] ],
                             Some (divE (v aN) (fLit m))))
             Ok [ bind srcN (v src)
@@ -3479,10 +3491,10 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
 let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt list * string * string =
     let muN, mN, vN, tN, dN = $"__mu_{tok}", $"__m_{tok}", $"__v_{tok}", $"__t_{tok}", $"__d_{tok}"
     let stmts =
-        [ sMutStmt muN (fLit 0.0)
+        [ sMutFloat muN (fLit 0.0)
           forIn tN (iLit 0) (iLit n) [ assignStmt (v muN) (addE (v muN) (srcRead (v tN))) ]
           sLet mN (divE (v muN) (fLit (float n)))
-          sMutStmt vN (fLit 0.0)
+          sMutFloat vN (fLit 0.0)
           forIn tN (iLit 0) (iLit n)
               [ sLet dN (subE (srcRead (v tN)) (v mN))
                 assignStmt (v vN) (addE (v vN) (mulE (v dN) (v dN))) ] ]
@@ -3508,10 +3520,10 @@ let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Bin
             let body =
                 syn (ExprBlock (
                         pre
-                        @ [ sMutStmt rN (computeE (syn (ExprReplicate (iLit (maxlag + 1), syn (ExprPure (fLit 0.0))))))
+                        @ [ sMutStmt rN (computeE (syn (ExprReplicate (iLit (maxlag + 1), syn (ExprPure (asF64 (fLit 0.0)))))))
                             assignStmt (appE (v rN) [iLit 0]) (fLit 1.0)
                             forIn kN (iLit 1) (iLit (maxlag + 1))
-                                [ sMutStmt aN (fLit 0.0)
+                                [ sMutFloat aN (fLit 0.0)
                                   forIn tN (iLit 0) (subE (iLit len) (v kN))
                                       [ assignStmt (v aN)
                                             (addE (v aN)
@@ -3541,7 +3553,7 @@ let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
             let (pre, mN, vN) = meanVarStmts "0" read len
             let tauN, stopN, kN, aN, bN, tN, gN = "__tau", "__stop", "__k", "__a", "__b", "__t2", "__g"
             let lagSum (accN: string) (lag: Expr) =
-                [ sMutStmt accN (fLit 0.0)
+                [ sMutFloat accN (fLit 0.0)
                   forIn tN (iLit 0) (subE (iLit len) lag)
                       [ assignStmt (v accN)
                             (addE (v accN)
@@ -3552,8 +3564,8 @@ let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
             let body =
                 syn (ExprBlock (
                         pre
-                        @ [ sMutStmt tauN (fLit -1.0)
-                            sMutStmt stopN (fLit 0.0)
+                        @ [ sMutFloat tauN (fLit -1.0)
+                            sMutFloat stopN (fLit 0.0)
                             forIn kN (iLit 0) (iLit pairs)
                                 (lagSum aN evenLag
                                  @ lagSum bN oddLag
@@ -3593,10 +3605,10 @@ let private elabRhat (ctx: Ctx) (span: Span) (outName: string) (binding: Binding
             let segStmts =
                 segs |> List.mapi (fun j (srcP, lo) ->
                     let read = appE (v srcP) [v tN]
-                    [ sMutStmt (muN j) (fLit 0.0)
+                    [ sMutFloat (muN j) (fLit 0.0)
                       forIn tN (iLit lo) (iLit (lo + m)) [ assignStmt (v (muN j)) (addE (v (muN j)) read) ]
                       sLet (mN j) (divE (v (muN j)) (fLit mF))
-                      sMutStmt (vvN j) (fLit 0.0)
+                      sMutFloat (vvN j) (fLit 0.0)
                       forIn tN (iLit lo) (iLit (lo + m))
                           [ sLet dN (subE read (v (mN j)))
                             assignStmt (v (vvN j)) (addE (v (vvN j)) (mulE (v dN) (v dN))) ]

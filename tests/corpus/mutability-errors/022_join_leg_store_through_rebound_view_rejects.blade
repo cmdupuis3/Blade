@@ -6,10 +6,10 @@
 // writes G. Provenance joins every value a local comes to hold.
 type K = Idx<2>
 let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let r = reduce((l <@> lambda(v) -> {
-    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute
     t = G((0 : K))
     t((0 : K)) = t((0 : K)) + v
     v

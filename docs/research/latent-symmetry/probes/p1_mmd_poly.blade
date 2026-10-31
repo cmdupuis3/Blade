@@ -41,7 +41,7 @@ let mut dZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 
 let mut dL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let gv = ad.grad(mmd2)(X, Z, L0, dX, dZ, dL)
 // central finite difference of entry (1, 2)
-let h = 0.000001
+let h: Float64 = 0.000001
 let E12: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
 let fd12 = (mmd2(X, Z, L0 + h * E12) - mmd2(X, Z, L0 - h * E12)) / (2.0 * h)
 let ad12 = dL(1, 2)

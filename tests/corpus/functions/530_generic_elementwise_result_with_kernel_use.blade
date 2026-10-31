@@ -9,18 +9,18 @@
 // D1). Each use is now its own instance.
 // ============================================================================
 function tof(x: T) = Float64(x)
-let ca = tof([1, 2])
+let ca = tof(Int64([1, 2]))
 // EXPECT: ca = [1.0, 2.0]
-let ck = method_for([1, 2, 3]) <@> tof |> compute
+let ck = method_for(Int64([1, 2, 3])) <@> tof |> compute
 // EXPECT: ck = [1.0, 2.0, 3.0]
 function pos(x: T) = x > 0.0
-let pk = method_for([1.0, -2.0, 3.0]) <@> pos |> compute
+let pk = method_for(Float64([1.0, -2.0, 3.0])) <@> pos |> compute
 // EXPECT: pk = [true, false, true]
-let pa = pos([1.0, -2.0])
+let pa = pos(Float64([1.0, -2.0]))
 // EXPECT: pa = [true, false]
 // A chained result: the comparison's source is itself a cast's result.
 function posf(x: T) = Float64(x) > 0.5
-let fk = method_for([1, 0, 2]) <@> posf |> compute
+let fk = method_for(Int64([1, 0, 2])) <@> posf |> compute
 // EXPECT: fk = [true, false, true]
-let fa = posf([0, 3])
+let fa = posf(Int64([0, 3]))
 // EXPECT: fa = [false, true]

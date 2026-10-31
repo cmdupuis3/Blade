@@ -36,10 +36,10 @@
 // there is no number at all.
 // ============================================================================
 static struct Ranged {
-    m: Int<min=0, max=zz_hi>
+    m: Int32<min=0, max=zz_hi>
 }
 
 let static a_card = idx_card(Ranged)
 // EXPECT: a_card = 4
 
-let static zz_hi = 3
+let static zz_hi: Int64 = 3

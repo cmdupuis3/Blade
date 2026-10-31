@@ -21,15 +21,15 @@ let mapped_c = mapped |> compute
 let row_total = reduce(mapped, (+))
 
 function add(a, b) = a + b
-let pr = method_for([1.0, 2.0]) <@> lambda(x) -> x * 3.0
+let pr = method_for(Float64([1.0, 2.0])) <@> lambda(x) -> x * 3.0
 let fused = reduce(pr, add, 0.0)
-let fused_i = reduce(method_for([1, 2]) <@> lambda(x) -> x * 3, add, 0)
+let fused_i = reduce(method_for(Int64([1, 2])) <@> lambda(x) -> x * 3, add, 0)
 
-let forced = method_for([3.0, 1.0, 2.0]) <@> lambda(x) -> x + 0.5
+let forced = method_for(Float64([3.0, 1.0, 2.0])) <@> lambda(x) -> x + 0.5
 let sorted = sort(forced, lambda(x) -> x)
 
 function sq(x: Float64) -> Float64 = x * x
-let L = method_for([1.0, 2.0, 3.0])
+let L = method_for(Float64([1.0, 2.0, 3.0]))
 let (s, ss) = reduce((L <@> sq) <&!> (L <@> lambda(x) -> x), (+))
 // EXPECT: T = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 // EXPECT: mapped_c = [2.0, 4.0, 6.0]

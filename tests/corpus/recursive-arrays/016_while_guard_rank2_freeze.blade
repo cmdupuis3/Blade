@@ -10,10 +10,10 @@
 type Sweep = Idx<6>
 type Row = Idx<2>
 type Col = Idx<2>
-let rec f: Array<Float like Sweep, Row, Col> =
+let rec f: Array<Float64 like Sweep, Row, Col> =
     match f with
     | zero -> zero
-    | zero :: s -> zero :: [[8.0, 4.0], [2.0, 1.0]]
+    | zero :: s -> zero :: Float64([[8.0, 4.0], [2.0, 1.0]])
     | prefix :: n while prefix(n - 1, 0, 0) > 1.0 -> prefix :: [[prefix(n - 1, 0, 0) * 0.5, prefix(n - 1, 0, 1) * 0.5], [prefix(n - 1, 1, 0) * 0.5, prefix(n - 1, 1, 1) * 0.5]]
 // EXPECT: f = [8.0, 4.0, 2.0, 1.0, 4.0, 2.0, 1.0, 0.5, 2.0, 1.0, 0.5, 0.25, 1.0, 0.5, 0.25, 0.125, 1.0, 0.5, 0.25, 0.125, 1.0, 0.5, 0.25, 0.125]
 let probe = f((5 : Sweep), (0 : Row), (0 : Col))

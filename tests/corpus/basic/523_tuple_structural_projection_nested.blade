@@ -4,7 +4,7 @@
 // tuples as flat packs and once indexed the pack with the structural index,
 // answering the second LEAF (2) -- silently, in both a direct projection and
 // one out of a match-bound variable.
-let t = ((1, 2), 3)
+let t = ((Int64(1), Int64(2)), Int64(3))
 let b = t[1]
 let p = t[0]
 let q = p[1]

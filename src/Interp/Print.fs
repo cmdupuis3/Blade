@@ -131,14 +131,17 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
         | VString s -> formatString s
         | _ -> bad ()
     | ETComplex128 | ETComplex64 ->
+        // A Complex64 prints each part like a Float32 (blade_rt::pv's c64_out).
+        let fc = if et = ETComplex64 then formatComplex64 else formatComplex
         match v with
-        | VComplex (re, im) -> formatComplex re im
+        | VComplex (re, im) -> fc re im
+        | VComplex64 (re, im) -> fc (float re) (float im)
         // A real promoted into a complex binding prints with a zero imaginary
         // component, matching std::complex<double>(x, 0).
-        | VFloat f -> formatComplex f 0.0
-        | VFloat32 f -> formatComplex (float f) 0.0
-        | VInt n -> formatComplex (float n) 0.0
-        | VInt32 n -> formatComplex (float n) 0.0
+        | VFloat f -> fc f 0.0
+        | VFloat32 f -> fc (float f) 0.0
+        | VInt n -> fc (float n) 0.0
+        | VInt32 n -> fc (float n) 0.0
         | _ -> bad ()
     // ETUnit is never a printable scalar (skipped before reaching here).
     | ETUnit -> bad ()
@@ -311,6 +314,10 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                     | SInt a ->
                         (match keysOf at.ElemType with
                          | Some keys -> SInt (a |> Array.map (fun p -> if p >= 0L && p < int64 keys.Length then keys.[int p] else p))
+                         | None -> st)
+                    | SInt32 a ->
+                        (match keysOf at.ElemType with
+                         | Some keys -> SInt (a |> Array.map (fun p -> if p >= 0 && p < keys.Length then keys.[int p] else int64 p))
                          | None -> st)
                     | SObj a -> SObj (a |> Array.map (mapValue (fuel - 1) at.ElemType))
                     | SNested a -> SNested (a |> Array.map mapStore)

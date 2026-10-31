@@ -1,0 +1,36 @@
+// TEST: Float32 Scalar Print
+// ============================================================================
+// A Float32 prints with 6 significant digits (FLT_DIG), a Float64 with 15
+// (DBL_DIG), in every lane (round 6 rule 8): the %.6g / %.15g layouts plus
+// the typed-float marker (`2.0`).
+// inf32 / nan32 print `inf` / `nan`; the EXPECT parser reads no such value,
+// so they are compared by the interpreter differential (bits on), not pinned.
+// ============================================================================
+let a: Float32 = 0.1
+let b = a * 3.0
+let third = Float32(1.0) / Float32(3.0)
+let big: Float32 = 1234567.0
+let huge: Float32 = 3.0e38
+let tiny: Float32 = 0.00001
+let small: Float32 = 0.0001
+let whole: Float32 = 2.0
+let negz: Float32 = -0.0
+let mid: Float32 = 123456.0
+let round6: Float32 = 999999.5
+let inf32 = Float32(1.0) / Float32(0.0)
+let nan32 = Float32(0.0) / Float32(0.0)
+let wide: Float64 = 0.1
+let wide3 = wide * 3.0
+// EXPECT: a = 0.1
+// EXPECT: b = 0.3
+// EXPECT: third = 0.333333
+// EXPECT: big = 1.23457e+06
+// EXPECT: huge = 3e+38
+// EXPECT: tiny = 1e-05
+// EXPECT: small = 0.0001
+// EXPECT: whole = 2.0
+// EXPECT: negz = -0.0
+// EXPECT: mid = 123456.0
+// EXPECT: round6 = 1e+06
+// EXPECT: wide = 0.1
+// EXPECT: wide3 = 0.3

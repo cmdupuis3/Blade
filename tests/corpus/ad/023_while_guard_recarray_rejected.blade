@@ -9,8 +9,8 @@ import ad as ad
 // an implicit-function-theorem adjoint.)
 // ============================================================================
 let xs = [4.0, 5.0, 6.0]
-function h(w: Array<Float like Idx<3>>) -> Float = {
-    let rec s: Array<Float like Idx<3>> =
+function h(w: Array<Float64 like Idx<3>>) -> Float64 = {
+    let rec s: Array<Float64 like Idx<3>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: 0.0

@@ -23,16 +23,16 @@ import ad as ad
 // Exact in binary floating point, so the pins are the derivation verbatim --
 // and they are the pre-deletion ad/005 pins.
 // ============================================================================
-let srcs = [0, 1, 1, 2]
-function r(w: Array<Float like Idx<3>>) -> Float = {
-    let rec g: Array<Float like Idx<4>> =
+let srcs = Int64([0, 1, 1, 2])
+function r(w: Array<Float64 like Idx<3>>) -> Float64 = {
+    let rec g: Array<Float64 like Idx<4>> =
         match g with
         | zero -> zero
         | prefix :: e -> prefix :: w(srcs(e)) * 2.0
     reduce(g, (+))
 }
-let wr_ = [10.0, 20.0, 30.0]
-let mut dr = [0.0, 0.0, 0.0]
+let wr_ = Float64([10.0, 20.0, 30.0])
+let mut dr = Float64([0.0, 0.0, 0.0])
 let rv = ad.grad(r)(wr_, dr)
 // EXPECT: rv = 160.0
 // EXPECT: dr = [2.0, 4.0, 2.0]

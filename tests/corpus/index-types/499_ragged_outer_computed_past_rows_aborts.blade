@@ -4,8 +4,8 @@
 // the outer coordinate against the row count first, in the same condition,
 // so a bad `i` stops with BL8006 in both lanes instead of reading a row
 // table past its end.
-let u = [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]]
-let i = 0 + 5
-let j = 0 + 0
+let u = Float64([[1.0], [2.0, 3.0], [4.0, 5.0, 6.0]])
+let i: Int64 = 0 + 5
+let j: Int64 = 0 + 0
 let b = u(i, j)
 // ABORT: BL8006

@@ -6,7 +6,7 @@ module Main
 import Lib
 from Lib import mapk, mapw
 
-let v = [-0.0, -0.0, -0.0]
+let v = Float64([-0.0, -0.0, -0.0])
 let total = reduce(method_for(v) <@> mapk, (+))
 // EXPECT: total = 0.0
 let before = Lib.hits

@@ -32,7 +32,7 @@ let C: Array<Float64 like I> = [1.0, 2.0, 3.0]
 let D = C
 let PCD = method_for(C, D) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
 function first() -> Float64 = {
-    let mut s = 0.0
+    let mut s: Float64 = 0.0
     s = C((0 : I))
     s
 }

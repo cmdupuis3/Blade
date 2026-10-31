@@ -8,17 +8,17 @@
 Unit meters
 Unit seconds
 Unit velocity = meters / seconds
-let v: Float<velocity> = 5.0
-let dt: Float<seconds> = 0.5
+let v: Float64<velocity> = 5.0
+let dt: Float64<seconds> = 0.5
 let dist = {
-    let mut x: Float<meters> = 0.0
+    let mut x: Float64<meters> = 0.0
     x += v * dt
     x += v * dt
     x += v * dt
     x += v * dt
     x
 }
-let m: Float<meters> = 1.0
+let m: Float64<meters> = 1.0
 let probe = dist + m
 // EXPECT: dist = 10.0
 // EXPECT: probe = 11.0

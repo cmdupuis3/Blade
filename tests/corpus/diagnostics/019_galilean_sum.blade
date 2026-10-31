@@ -2,5 +2,5 @@
 // ERROR: BL4009 @ 5:3
 // ERROR-CONTAINS: adding two boost-variant values doubles the U0-coefficient
 import ml as ml
-function bad(ul: Float, ur: Float) where ml.galilean(ul, ur) -> Float =
+function bad(ul: Float64, ur: Float64) where ml.galilean(ul, ur) -> Float64 =
   ul + ur

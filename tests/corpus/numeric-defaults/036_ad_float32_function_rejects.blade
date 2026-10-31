@@ -1,0 +1,10 @@
+// TEST: grad of a Float32 function is refused with its reason (rejects)
+// ============================================================================
+// Float32 AD is not supported yet: ad.grad says so up front instead of a type
+// error from inside the synthesized derivative.
+// ============================================================================
+import ad as ad
+function f(x: Float32) -> Float32 = x * x
+let (fv, dfdx) = ad.grad(f)(2.0)
+// ERROR: BL5500
+// ERROR-CONTAINS: differentiates Float64 functions; this one is Float32

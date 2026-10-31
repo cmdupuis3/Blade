@@ -8,7 +8,7 @@
 // top level when the lanes ran the writer inside the tree (C++ 30 / G 4,
 // LLVM 56 / G 8, interpreter 62 / G 8); there is no write left in the tree.
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 let r = {
     let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
     let (s, t) = reduce((m <@> lambda(v) -> v) <&!> (m <@> lambda(v) -> 2 * v), (+))

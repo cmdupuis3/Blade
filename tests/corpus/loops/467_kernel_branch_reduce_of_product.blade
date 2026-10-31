@@ -6,7 +6,7 @@
 // "reduce over a deferred computation must be bound to a let". Each arm of a
 // scalar branching return is now a body of its own. `guarded` shows why the
 // let must stay in its arm: at k = 0 the arm reads pts(k - 1).
-let pts: Array<Float like Idx<3>, Idx<2>> = [[3.0, 4.0], [1.0, 0.0], [6.0, 8.0]]
+let pts: Array<Float64 like Idx<3>, Idx<2>> = [[3.0, 4.0], [1.0, 0.0], [6.0, 8.0]]
 let norms = method_for(range<Idx<3>>) <@> lambda(k) -> {
     let d = pts(k)
     if k > 0 then sqrt(reduce(d * d, (+))) else 0.0

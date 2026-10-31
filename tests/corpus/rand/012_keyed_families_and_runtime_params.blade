@@ -19,7 +19,7 @@ import rand as r
 let a = r.gamma(77, 2.0, 1.0, 4)
 let b = r.gamma(77, 2.0, 1.0, 4)
 let c = r.gamma(78, 2.0, 1.0, 4)
-let rate = 1.0 + 1.0
+let rate: Float64 = 1.0 + 1.0
 let d = r.exponential(11, rate, 6)
 let sa = reduce(a, (+))
 let sc = reduce(c, (+))

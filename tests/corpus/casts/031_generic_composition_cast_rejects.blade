@@ -4,4 +4,4 @@
 function toint(x: T^0) -> Int64 = Int64(x)
 function sq(x: Float64) -> Float64 = x * x
 let h = sq >> toint
-let w = h(2.5)
+let w = h(Float64(2.5))

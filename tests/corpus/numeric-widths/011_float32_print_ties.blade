@@ -1,0 +1,25 @@
+// TEST: Float32 Print Ties
+// ============================================================================
+// Six significant digits are rounded from the float's EXACT binary value,
+// ties to even, in every lane: 123456.5f is an exact decimal tie at the
+// sixth digit (prints 123456.0), 123457.5f rounds up to the even 123458.0,
+// 1234565.0f ties down to 1.23456e+06, 8388609.0f (2^23 + 1) prints
+// 8.38861e+06. A Float64 tie at the fifteenth digit (1000000000000005.0)
+// rounds to even the same way.
+// ============================================================================
+let t1: Float32 = 123456.5
+let t2: Float32 = 123457.5
+let t3: Float32 = 1234565.0
+let t4: Float32 = 8388609.0
+let t5: Float32 = 0.000123456
+let t6: Float32 = 99999.95
+let w1: Float64 = 1000000000000005.0
+let w2: Float64 = 0.1
+// EXPECT: t1 = 123456.0
+// EXPECT: t2 = 123458.0
+// EXPECT: t3 = 1.23456e+06
+// EXPECT: t4 = 8.38861e+06
+// EXPECT: t5 = 0.000123456
+// EXPECT: t6 = 100000.0
+// EXPECT: w1 = 1e+15
+// EXPECT: w2 = 0.1

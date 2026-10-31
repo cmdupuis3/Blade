@@ -1,7 +1,7 @@
 // TEST: Output Type: Distinct Comm Groups
 // Two distinct comm groups
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let L = method_for(A, A, B, B)
 let f = lambda(x, y, z, w) where comm(x, y), comm(z, w) -> x * y * z * w
 let result = L <@> f |> compute

@@ -27,12 +27,12 @@
 // are left unpinned (the value IS the platform library's) and the interpreter
 // differential compares them byte for byte against the compiled lane.
 // ============================================================================
-let one = exp(0.0)
+let one: Float64 = exp(0.0)
 let zs: Array<Complex128 like Idx<8>> = [complex(3.0 * one, 4.0), complex(-3.0 * one, -4.0), complex(0.5 * one, 0.5), complex(1.0e-20 * one, 0.3), complex(1.0e-9 * one, -2.0), complex(1.0e20 * one, 1.0), complex(-0.7 * one, 1.3), complex(2.0e-8 * one, 0.75)]
 let ta = atan(zs)
 let sa = asin(zs)
 let ca = acos(zs)
-let amp_t = (imag(ta(2)) - 0.402359478108525) * 1.0e17
+let amp_t = (imag(ta(Int64(2))) - 0.402359478108525) * 1.0e17
 let amp_s = (real(sa(0)) - 0.633983865639177) * 1.0e17
 let amp_c = (imag(ca(6)) + 1.14979944558426) * 1.0e17
 // EXPECT: one = 1.0

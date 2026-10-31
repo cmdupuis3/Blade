@@ -8,8 +8,8 @@
 // the 3 squares (14) even if it had. isInlineForm now lifts the forced apply to
 // a let-RHS, routing it through the co-iterating statement path. The explicit
 // method_for spelling is 017; this pins the sugar it should agree with.
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 // self dot: 1 + 4 + 9 = 14 (NOT (1+2+3)^2 = 36)
 let selfdot = reduce(A * A, (+))
 // dot: 4 + 10 + 18 = 32 (NOT (1+2+3)*(4+5+6) = 90)

@@ -8,7 +8,7 @@
 // the intrinsic it builds, so the typed rand node carries it (it used to
 // carry none, and the refusal pointed at the enclosing `function` line).
 import rand as r
-function f(k: Int64) -> Float = {
+function f(k: Int64) -> Float64 = {
     let u = r.uniform(k, 5)
     reduce(u, (+))
 }

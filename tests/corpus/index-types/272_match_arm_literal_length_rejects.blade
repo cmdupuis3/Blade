@@ -6,8 +6,8 @@
 // outside a match. checkMatch used to swallow that error and retry with a
 // lenient unify that ignores extents, so the program type-checked and died
 // later (BL7001).
-let n = 0
+let n: Int64 = 0
 let x: Array<Float64 like Idx<3>> = match n with
     | 0 -> [1.0, 2.0]
     | _ -> [1.0, 2.0, 3.0]
-let v = x(2)
+let v = x(Int64(2))

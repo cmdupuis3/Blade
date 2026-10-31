@@ -6,10 +6,10 @@
 // interpreter alone ran it. A Float64 argument cannot be an index, so the
 // parameter is the function `(Float64) -> r`, exactly the arrow an
 // `f: (Float64) -> Float64` annotation spells.
-function hh(f) = f(2.0) + 1.0
+function hh(f) = f(Float64(2.0)) + 1.0
 let q = hh(lambda(x) -> x * 3.0)
 // EXPECT: q = 7.0
 
-function ap(f) = f(2.0, 3.0)
+function ap(f) = f(Float64(2.0), Float64(3.0))
 let a = ap(lambda(x, y) -> x * y)
 // EXPECT: a = 6.0

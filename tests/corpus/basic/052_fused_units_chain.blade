@@ -8,9 +8,9 @@
 Unit meters
 Unit seconds
 type I = Idx<4>
-let pos: Array<Float<meters> like I> = method_for(range<I>) <@> lambda(i) -> Float64(i) * 2.0 |> compute
-let vel: Array<Float<meters / seconds> like I> = method_for(range<I>) <@> lambda(i) -> Float64(i) * 0.5 |> compute
-let dt: Float<seconds> = 3.0
+let pos: Array<Float64<meters> like I> = method_for(range<I>) <@> lambda(i) -> Float64(i) * 2.0 |> compute
+let vel: Array<Float64<meters / seconds> like I> = method_for(range<I>) <@> lambda(i) -> Float64(i) * 0.5 |> compute
+let dt: Float64<seconds> = 3.0
 
 let moved = pos + vel * dt
 // EXPECT: moved = [0.0, 3.5, 7.0, 10.5]

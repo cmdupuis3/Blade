@@ -106,6 +106,16 @@ this arc). Sections 2.7-2.13 are the P1-P5 additions: named families and
 their densities, exact and approximate sampling, the two MCMC engines and
 their diagnostics, and closed-form/exact multivariate inference.
 
+**Numeric width (round 6).** PPL computes in Float64 this round. Every user
+scalar a former hoists into a synthesized binding -- a mixture weight, a family
+parameter, an evaluation point, a chain's start, scale or step -- is read
+through `Float64(...)` (an RNG key through `Int64(...)`). So a literal argument
+takes Float64 exactly, as if annotated (`ppl.dist_mix(1.0, d1, 2.0, d2)`,
+`ppl.logpdf(gaussian(1.5, 2.0), 0.1)`: corpus `ppl/141`), and a Float32 or
+Int32 VARIABLE passed there is CONVERTED, not refused (`ppl/142`); so is an integer
+weight or parameter (`ppl.dist_mix(1, d1, 2, d2)`), which the mixing rule used to refuse. A
+width-generic PPL is a follow-up.
+
 ### 2.1 Estimators
 
 Single-sweep, fused sufficient-statistic pipelines over a compile-time-shaped
@@ -343,9 +353,9 @@ let post = ppl.dist_reweight(d, 1.0 - 0.2*vhat*vhat, 0.4*vhat, 0.0 - 0.2)
 // degree-2 weight: order-4 prior -> order-2 posterior
 let p1 = ppl.cumulant(post, 1)
 let p2 = ppl.cumulant(post, 2)
-// EXPECT: evidence = 0.794666666666667
-// EXPECT: p1 = [1.20134228187919]
-// EXPECT: p2 = [0.570199540561236]
+// EXPECT: evidence = 0.794666687647502
+// EXPECT: p1 = [1.2013423145663]
+// EXPECT: p2 = [0.570199528875265]
 ```
 
 Tests: `ppl/043-048`.

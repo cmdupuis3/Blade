@@ -7,7 +7,7 @@
 let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
 type CrystalIdx = TreeIdx<crystal>
 let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
-let k = 1
+let k: Int64 = 1
 let bad = T((k, 0))
 // ERROR: BL4003
 // ERROR-CONTAINS: compile-time integer literal

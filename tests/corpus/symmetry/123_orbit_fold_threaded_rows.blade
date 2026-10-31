@@ -11,8 +11,8 @@
 // Integer-valued cells: every association is exact, so the pins hold with
 // threads, without (BLADE_OMP_THREADS=1), in the LLVM lane's serial pass and
 // under BLADE_FP_REPRO=1's logical walk.
-let static p = 37
-let static n = 3
+let static p: Int64 = 37
+let static n: Int64 = 3
 type Var = Idx<p>
 type Obs = Idx<n>
 let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute

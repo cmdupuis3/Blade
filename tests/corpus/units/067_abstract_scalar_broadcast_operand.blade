@@ -44,8 +44,8 @@ function fromEpoch(x: T<second>^1, x0: T<second>^0) = reduce(x0 - x, (+))
 // ...and the broadcast result folded through prodsum, the shape lsdft uses.
 function scaledShift(x: T<second>^1, x0: T<second>^0) = prodsum(x - x0, x - x0)
 
-let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
-let t0: Float<second> = 1.0
+let ts: Array<Float64<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let t0: Float64<second> = 1.0
 let c = centered(ts, t0)
 let back = fromEpoch(ts, t0)
 let q = scaledShift(ts, t0)

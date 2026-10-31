@@ -16,5 +16,5 @@ import ml as ml
 let static A = [(0, 0, 1), (1, 1, 1)]
 let static SOUT = [(0, 0, 1)]
 
-let x: Array<Float like IrrepsIdx<A>> = [1.0, 2.0, -0.5, 0.25]
-let bad: Array<Float like IrrepsIdx<SOUT>> = ml.derive_poly(A, 5, SOUT, x, [1.0])
+let x: Array<Float64 like IrrepsIdx<A>> = [1.0, 2.0, -0.5, 0.25]
+let bad: Array<Float64 like IrrepsIdx<SOUT>> = ml.derive_poly(A, 5, SOUT, x, [1.0])

@@ -16,8 +16,8 @@ function both(b: T^1, c: Float64) -> T^0 = {
     let s2 = reduce(scaled(b, 1.0), (+), 0.5)
     s1 + s2
 }
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let c = 3.0
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
+let c: Float64 = 3.0
 let s = reduce(scaled(A, c), (+))
 let y = method_for(scaled(A, 0.5)) <@> lambda(v) -> v + 1.0 |> compute
 let b2 = both(A, 2.0)

@@ -8,8 +8,8 @@
 // function body forced it at its let (r_fn = 20, counter 4); every lane
 // agreed, so no differential saw the scope dependence.
 type I = Idx<4>
-let mut GB = [0]
-let mut GF = [0]
+let mut GB = Int64([0])
+let mut GF = Int64([0])
 let r_block = {
     let m = method_for(range<I>) <@> lambda(i) -> { GB(0) = GB(0) + 1; GB(0) }
     let s = reduce(m, (+))

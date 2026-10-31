@@ -6,11 +6,11 @@
 // the declared storage class). Values are the true ones, read in both
 // triangles.
 function hyp(a: Float64, b: Float64) -> Float64 = sqrt(a * a + b * b)
-let w = [3.0, 4.0, 0.0]
+let w = Float64([3.0, 4.0, 0.0])
 let S: Array<Float64 like SymIdx<2, 3>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
-let idx = [0, 1, 2]
+let idx = Int64([0, 1, 2])
 let r = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> hyp(w(i), w(j)) + w(i) * w(j) + S(i, j) |> compute
-let r01 = r(0, 1)
+let r01 = r(Int64(0), Int64(1))
 let r10 = r(1, 0)
 let r21 = r(2, 1)
 let r12 = r(1, 2)

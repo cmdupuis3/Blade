@@ -11,7 +11,7 @@
 // and a call from inside a user kernel's body.
 from stats import mean, variance, stddev
 
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let m = mean(x)
 // EXPECT: m = 2.0
 let v = variance(x)
@@ -19,7 +19,7 @@ let v = variance(x)
 let s = stddev(x)
 // EXPECT: s = 0.816496580927726
 
-let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let B = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let rowmeans = method_for(B) <@> mean |> compute
 // EXPECT: rowmeans = [2.0, 4.0]
 let rowvars = method_for(B) <@> variance |> compute

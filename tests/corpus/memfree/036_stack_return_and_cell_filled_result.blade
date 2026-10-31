@@ -27,8 +27,8 @@ type T = Idx<120>
 
 let mut checksum: Float64 = 0.0
 
-function fill(w: Array<Float like C>) -> Array<Float like C> = {
-    let mut out = method_for(range<C>) <@> lambda(i) -> 0.0 |> compute
+function fill(w: Array<Float64 like C>) -> Array<Float64 like C> = {
+    let mut out = method_for(range<C>) <@> lambda(i) -> Float64(0.0) |> compute
     out((0 : C)) = w((0 : C)) * 0.5
     out((1 : C)) = w((1 : C)) * 0.5 + 0.25
     out((2 : C)) = w((2 : C)) * 0.5
@@ -36,12 +36,12 @@ function fill(w: Array<Float like C>) -> Array<Float like C> = {
     out
 }
 
-function smooth(f: Array<Float like R, C>) -> Array<Float like R, C> = {
+function smooth(f: Array<Float64 like R, C>) -> Array<Float64 like R, C> = {
     let spec: Array<Complex128 like R, C> = sp.fft2(f)
     sp.ifft2(spec)
 }
 
-function step(n: Int64, st: Array<Float like S, C>) -> Array<Float like S, C> = {
+function step(n: Int64, st: Array<Float64 like S, C>) -> Array<Float64 like S, C> = {
     let u = st((0 : S))
     let v = st((1 : S))
     let un = fill(u + 0.1 * v)
@@ -50,14 +50,14 @@ function step(n: Int64, st: Array<Float like S, C>) -> Array<Float like S, C> = 
     stack(un, vn, u)
 }
 
-let field0: Array<Float like R, C> = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, 0.0, -1.0], [2.0, 2.0, 2.0, 2.0], [-1.0, 0.0, 1.0, 0.0]]
-let u0: Array<Float like C> = [1.0, 2.0, 3.0, 4.0]
-let v0: Array<Float like C> = [0.5, -0.5, 0.5, -0.5]
-let z0: Array<Float like C> = [0.0, 0.0, 0.0, 0.0]
-function seed(u: Array<Float like C>) -> Array<Float like S, C> = stack(u, v0, z0)
+let field0: Array<Float64 like R, C> = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, 0.0, -1.0], [2.0, 2.0, 2.0, 2.0], [-1.0, 0.0, 1.0, 0.0]]
+let u0: Array<Float64 like C> = [1.0, 2.0, 3.0, 4.0]
+let v0: Array<Float64 like C> = [0.5, -0.5, 0.5, -0.5]
+let z0: Array<Float64 like C> = [0.0, 0.0, 0.0, 0.0]
+function seed(u: Array<Float64 like C>) -> Array<Float64 like S, C> = stack(u, v0, z0)
 
 let final = {
-    let rec traj: Array<Float like T, S, C> =
+    let rec traj: Array<Float64 like T, S, C> =
         match traj with
         | zero -> zero
         | zero :: s -> zero :: seed(u0)

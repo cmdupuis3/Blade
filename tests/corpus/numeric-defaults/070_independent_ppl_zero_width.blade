@@ -1,0 +1,12 @@
+// TEST: PPL independent zero blocks retain Float64 component types
+import ppl as ppl
+let x: Array<Float64 like Idx<1>, Idx<2>> = [[1.0, 2.0]]
+let y: Array<Float64 like Idx<1>, Idx<2>> = [[3.0, 4.0]]
+let _ = ppl.independent(x, y)
+let covariance = ppl.comoments(x, y)
+let mixed_block = ppl.mixed_cumulants(x, y, 1, 2)
+// Indexing a named result cannot adapt its already-fixed element width.
+let c: Float64 = covariance(0, 0)
+let k: Float64 = mixed_block(0)
+// EXPECT: c = 0.0
+// EXPECT: k = 0.0

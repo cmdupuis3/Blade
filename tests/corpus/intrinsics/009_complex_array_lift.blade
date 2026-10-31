@@ -6,8 +6,8 @@
 // Array<...>") and users hand-wrote the zip form -- which is precisely what
 // the lift re-synthesizes, so `Z` and `Zman` must agree cell for cell.
 // ============================================================================
-let A: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
-let B: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let A: Array<Float64 like Idx<3>> = [3.0, 0.0, -1.0]
+let B: Array<Float64 like Idx<3>> = [4.0, 2.0, 0.0]
 let Z = complex(A, B) |> compute
 let Zman = (zip(A, B) <@> lambda(a, b) -> complex(a, b)) |> compute
 let Zre = complex(A, 0.0) |> compute

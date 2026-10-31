@@ -27,7 +27,7 @@ import ad as ad
 // the interpreter calls its transcription, which is exactly the byte-identity
 // claim pinned in intrinsics/010.
 // ============================================================================
-function f(a: Float) -> Float = a * log(2.5) - lgamma(a) + (a - 1.0) * log(1.75)
-let (fv, dfda) = ad.grad(f)(3.5)
+function f(a: Float64) -> Float64 = a * log(2.5) - lgamma(a) + (a - 1.0) * log(1.75)
+let (fv, dfda) = ad.grad(f)(Float64(3.5))
 // EXPECT: fv = 3.405083429051024
 // EXPECT: dfda = 0.37274987916433466

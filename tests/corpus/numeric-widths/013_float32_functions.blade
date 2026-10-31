@@ -1,0 +1,22 @@
+// TEST: Float32 Functions
+// ============================================================================
+// A generic function instantiated at Float32 computes in float throughout:
+// its parameters, its fold and its
+// return value; an Int32 instance wraps. Float32 cells feed a kernel that
+// chains a float product and a float sum.
+// ============================================================================
+function sumsq(x: T^1) -> T^0 = reduce(x * x, (+))
+let x: Array<Float32 like Idx<5>> = [0.1, 0.2, 0.3, 0.4, 0.5]
+let y: Array<Float32 like Idx<5>> = [1.0, 1.1, 1.2, 1.3, 1.4]
+let q = sumsq(x)
+let k = method_for(zip(x, y)) <@> lambda(v, w) -> v * w + v |> compute
+let n: Int32 = 1000000
+let ns: Array<Int32 like Idx<3>> = [n, n, n]
+let nsq = sumsq(ns)
+// EXPECT: x = [0.1, 0.2, 0.3, 0.4, 0.5]
+// EXPECT: y = [1.0, 1.1, 1.2, 1.3, 1.4]
+// EXPECT: q = 0.55
+// EXPECT: k = [0.2, 0.42, 0.66, 0.92, 1.2]
+// EXPECT: n = 1000000
+// EXPECT: ns = [1000000, 1000000, 1000000]
+// EXPECT: nsq = 2112827392

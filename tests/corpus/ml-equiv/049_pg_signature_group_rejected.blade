@@ -13,9 +13,9 @@ let static EC = [("E", 1)]
 let static ED = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 
-function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
-             other: Array<Float like PgIrrepsIdx<D4, ED>>)
-             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function bad(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>,
+             other: Array<Float64 like PgIrrepsIdx<D4, ED>>)
+             where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     ml.derive_pg_linear(C4, EC, EC, x, w)
 }
 

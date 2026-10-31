@@ -9,8 +9,8 @@
 let static big = 3000000000
 
 static struct Wide {
-    i: Int<min=0, max=big>,
-    j: Int<min=0, max=4>
+    i: Int32<min=0, max=big>,
+    j: Int32<min=0, max=4>
 } where i - j <= 2
 
 let R = method_for(range<Wide>) <@> lambda(i, j) -> i + j |> compute

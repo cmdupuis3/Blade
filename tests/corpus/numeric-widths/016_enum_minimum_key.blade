@@ -1,0 +1,18 @@
+// TEST: Enum grouping preserves the minimum Int64 key
+// Enumerating the declared keys exercises both signed-minimum renderers.
+let static min_key: Int64 = -9223372036854775807 - 1
+type Code = EnumIdx<[0x8000000000000000, 7]>
+let codes = range<Code> |> compute
+let groups = group_keys(codes)
+let counts = extents(groups)
+let values: Array<Int64 like Code> = [10, 20]
+function group_totals(keys: Array<Code like Code>, data: Array<Int64 like Code>) = {
+    let gk = group_keys(keys)
+    let rows = group_by(data, gk)
+    method_for(rows) <@> lambda(row: Array<Int64 like RaggedIdx<_>>) -> reduce(row, (+), 0) |> compute
+}
+let totals = group_totals(codes, values)
+// EXPECT: totals = [10, 20]
+// EXPECT: min_key = -9223372036854775808
+// EXPECT: codes = [-9223372036854775808, 7]
+// EXPECT: counts = [1, 1]

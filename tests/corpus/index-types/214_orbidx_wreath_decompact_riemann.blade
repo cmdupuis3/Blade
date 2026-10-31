@@ -17,7 +17,7 @@
 // against 81 dense, and of those 81 exactly 4*4 = 16 are nonzero (the 4
 // off-diagonal (i,j) pairs times the 4 off-diagonal (k,l) pairs), which is what
 // the six orbits of size 2 or 4 sum to.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let h = lambda(p, q) where comm(p, q) -> p * q

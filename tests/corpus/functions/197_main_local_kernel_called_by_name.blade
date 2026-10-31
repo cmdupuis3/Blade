@@ -19,8 +19,8 @@
 //
 // All five spellings below were BL9002 before.
 from stats import mean
-let x = [1.0, 2.0, 3.0, 6.0]
-let two = 2.0
+let x = Float64([1.0, 2.0, 3.0, 6.0])
+let two: Float64 = 2.0
 function scale(v: Array<Float64 like Idx<4>>) -> Float64 = mean(v) * two
 
 // scale(x * x) = mean([1, 4, 9, 36]) * 2 = 25.

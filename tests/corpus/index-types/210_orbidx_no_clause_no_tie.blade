@@ -12,7 +12,7 @@
 // neither invariant nor anti-invariant under the swap, so the confirm-and-pin
 // suggestion (BL4010) does not fire and the test measures the tie rule alone
 // rather than the suggestion machinery.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) -> 2.0 * p + q

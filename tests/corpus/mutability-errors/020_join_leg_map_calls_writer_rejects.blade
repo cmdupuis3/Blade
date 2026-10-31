@@ -4,7 +4,7 @@
 // Gap G43 (Codex review of W2-F, blocker 3): the shared map's kernel writes
 // nothing itself; it calls `bump`, which writes the module-level `G`.
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 function bump() -> Int64 = {
     G(0) = G(0) + 1
     G(0)

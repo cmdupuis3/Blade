@@ -48,18 +48,18 @@ import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
 
 // TYPED-SUGGEST: twice_partial|O3
-function twice_partial(x) -> Array<Float like IrrepsIdx<S>> =
+function twice_partial(x) -> Array<Float64 like IrrepsIdx<S>> =
     x + x
 
 // The pinned twin: the same map, annotated, carrying the conjunct the typed
 // walker proposes. No SUGGEST line — a certified function is checked, not a
 // candidate — and no TYPED-SUGGEST line either, for the same reason on the
 // other side.
-function twice_tight(x: Array<Float like IrrepsIdx<S>>)
-                     where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function twice_tight(x: Array<Float64 like IrrepsIdx<S>>)
+                     where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     x + x
 
-let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let xv = Float64([1.0, 4.0, 0.0 - 2.0, 6.0])
 
 let p = twice_partial(xv)
 // EXPECT: p = [2.0, 8.0, -4.0, 12.0]

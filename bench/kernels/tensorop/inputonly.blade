@@ -2,9 +2,9 @@
 // kernel and checksum omitted (kernels/README.md section 3.3: incremental = median(total) -
 // median(inputonly)).
 
-let static n1 = 89    // SIZE n1
-let static n2 = 97    // SIZE n2
-let static n3 = 101   // SIZE n3
+let static n1: Int64 = 89    // SIZE n1
+let static n2: Int64 = 97    // SIZE n2
+let static n3: Int64 = 101   // SIZE n3
 type I = Idx<n1>
 type J = Idx<n2>
 type K = Idx<n3>
@@ -50,5 +50,5 @@ let (checksum, input_checksum) = {
     let am = gen_a()
     let bm = gen_b()
     let cm = gen_c()
-    (0.0, input_sum(x, am, bm, cm))
+    (Float64(0.0), input_sum(x, am, bm, cm))
 }

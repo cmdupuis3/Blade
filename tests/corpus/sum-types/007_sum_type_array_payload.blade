@@ -3,7 +3,7 @@
 // dispatch uses std::holds_alternative + std::get<>::value on the
 // indexed array element. Tests both Yes(n) extraction and No fallback
 // across distinct array elements.
-type Maybe = Yes : Int | No
+type Maybe = Yes : Int32 | No
 let arr: Array<Maybe like Idx<3>> = [Yes(10), No, Yes(30)]
 let v0 = match arr[0] with
     | Yes(n) -> n

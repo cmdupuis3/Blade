@@ -56,14 +56,14 @@ Conditionals: `if`/`then`/`else` and `match` are expressions; results can be
 let-bound.
 
 ```blade cont
-let test1 = if a == 2 then True else False
+let test1 = if a == 2 then true else false
 
 function test2(n: Nat) -> Bool = {
     match n with
-    | 1 -> True
-    | 2 -> False
-    | 3 -> False
-    | _ -> True
+    | 1 -> true
+    | 2 -> false
+    | 3 -> false
+    | _ -> true
 }
 let t2 = test2(2)
 // EXPECT: test1 = true
@@ -86,7 +86,7 @@ type Stations = Idx<N>
 type LatIdx = Idx<180>
 type LonIdx = Idx<360>
 
-type EarthArray = Array<Float like LatIdx, LonIdx>
+type EarthArray = Array<Float64 like LatIdx, LonIdx>
 ```
 
 Index types don't evaluate to values, so you cannot see the numbers inside,
@@ -167,7 +167,7 @@ currying — which is what guarantees cache-optimal iteration.
 ## 4. Function Basics
 
 Blade has two parallel type systems: *concrete types* and *abstract types*.
-`EarthArray` is concrete — a 180 × 360 `Array` of `Float`. Functions are on a
+`EarthArray` is concrete — a 180 × 360 `Array` of `Float64`. Functions are on a
 need-to-know basis; they only need abstract types. A function written over
 `T^2` accepts any rank-2 array:
 
@@ -181,7 +181,7 @@ let M = add1([[1, 2], [3, 4]])
 
 An abstract type is a value type and a rank, plus a *symmetry vector* of length
 `rank` that the compiler tracks for you (the formalism writes it
-`T^r(σ)`: a dense matrix is `Float^2(1, 2)`, a symmetric one `Float^2(1, 1)`).
+`T^r(σ)`: a dense matrix is `Float64^2(1, 2)`, a symmetric one `Float64^2(1, 1)`).
 You write only `T^r`; ignore symmetry for now.
 
 Scoping and mutability work intuitively. A caller's array can only be
@@ -190,7 +190,7 @@ mutate through element writes (a scalar result is simply returned):
 
 ```blade
 let mut xs = [1.0, 2.0, 3.0]
-function bump(v: mut Array<Float64 like Idx<3>>) -> Float64 = {
+function bump(v: mut Array<Float32 like Idx<3>>) -> Float32 = {
     v(0) = v(0) + 10.0
     v(0)
 }
@@ -222,7 +222,7 @@ let twelve = addTen(2.0)
 ## 5. Structure-First Math
 
 Say we want an average global temperature over a
-`temps : Array<Float like Idx<100>, Idx<120>>`. The primitive `+` has type
+`temps : Array<Float64 like Idx<100>, Idx<120>>`. The primitive `+` has type
 `T^0 -> T^0 -> T^0`; Blade looks at *all* the dimensions in a call before
 iterating. Adding a scalar to a 2D array wraps `+` in two loops, and so does
 calling a scalar function on two arrays of one shape — the arrays are
@@ -337,7 +337,7 @@ behavior and the symmetry above. But how can triangular iteration live in a
 type like this?
 
 ```blade
-type Square = Array<Float like Idx<100>, Idx<100>>
+type Square = Array<Float64 like Idx<100>, Idx<100>>
 ```
 
 It can't! The bounds of a triangular loop depend on each other. We need an
@@ -347,17 +347,19 @@ about half the memory of a dense 100×100 array — and encodes the triangular
 iteration pattern:
 
 ```blade
-type SymArray = Array<Float like SymIdx<2, 100>>
+type SymArray = Array<Float64 like SymIdx<2, 100>>
 ```
 
 Now the covariance of a 2D+time array, concretely (a 3 × 2 grid, four time
-steps; `mean` comes from the standard library's `stats` module):
+steps; `mean` comes from the standard library's `stats` module).
+`mean` returns Float64, so the kernel converts each row to Float64 before
+centering it; the inputs may use either floating-point width:
 
 ```blade prelude
 from stats import mean
 
-function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 =
-    mean((a - mean(a)) * (b - mean(b)))
+function cov(a: T^1, b: T^1) where comm(a, b) =
+    mean((Float64(a) - mean(a)) * (Float64(b) - mean(b)))
 
 type X = Idx<3>
 type Y = Idx<2>
@@ -399,7 +401,7 @@ as first-class values. The apply combinator `<@>` completes them, and
 let P = [1.0, 2.0]
 let Q = [10.0, 20.0, 30.0]
 let R = [100.0, 200.0]
-function func(a: Float64, b: Float64, c: Float64) -> Float64 = a + b * c
+function func(a: Float32, b: Float32, c: Float32) -> Float32 = a + b * c
 
 let result1 = object_for(func) <@> (P, Q, R) |> compute
 let result2 = method_for(P, Q, R) <@> func |> compute
@@ -458,8 +460,8 @@ sit between the parameter list and the return type:
 ```blade prelude
 from stats import mean
 
-function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 =
-    mean((a - mean(a)) * (b - mean(b)))
+function cov(a: T^1, b: T^1) where comm(a, b) =
+    mean((Float64(a) - mean(a)) * (Float64(b) - mean(b)))
 ```
 
 `comm(a, b)` declares the arguments interchangeable (and the compiler checks
@@ -509,10 +511,12 @@ function comoment_generator(A: Poly<T^1>) where comm(A) -> T^0 = {
 
 let A = [[1.0, 2.0, 4.0, 7.0], [2.0, 1.0, 0.0, 1.0], [3.0, 3.0, 5.0, 5.0]]    // 3 series x 4 steps
 
+// stats.mean computes in Float64; convert at this kernel boundary.
+let A64 = Float64(A)
 let comomentLoop = object_for(comoment_generator)
-let covariance = comomentLoop <@> (A, A) |> compute
-let coskewness = comomentLoop <@> (A, A, A) |> compute
-let cokurtosis = comomentLoop <@> (A, A, A, A) |> compute
+let covariance = comomentLoop <@> (A64, A64) |> compute
+let coskewness = comomentLoop <@> (A64, A64, A64) |> compute
+let cokurtosis = comomentLoop <@> (A64, A64, A64, A64) |> compute
 let var0 = covariance(0, 0)
 // EXPECT: var0 = 5.25
 ```
@@ -535,9 +539,9 @@ Primitive types can carry units:
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-type Distance = Float<meters>
-type Time = Float<seconds>
-type Speed = Float<mps>
+type Distance = Float64<meters>
+type Time = Float64<seconds>
+type Speed = Float64<mps>
 
 let speed1 = 4.0: Speed
 let speed2 = 3.0: Speed
@@ -556,7 +560,7 @@ let wrong = speed1 + dist                     // mps + meters
 // ERROR: BL3006
 ```
 
-Types can carry valid ranges (`Float<meters, min=0.0>`), encoding physical
+Types can carry valid ranges (`Float64<meters, min=0.0>`), encoding physical
 constraints — salinity that can never go negative, and so on. A binding
 annotated with a bounded type is checked when it is bound (as is an ascription
 `e : Salinity`), and a function's bounded parameters and return value at
@@ -564,9 +568,9 @@ every call; a violation stops the program with BL8001:
 
 ```blade
 Unit psu
-type Salinity = Float<psu, min=0.0>
+type Salinity = Float64<psu, min=0.0>
 let s: Salinity = 35.0
-function freshen(x: Salinity, dilution: Float<psu>) -> Salinity = x - dilution
+function freshen(x: Salinity, dilution: Float64<psu>) -> Salinity = x - dilution
 let fresher = freshen(s, 5.0)        // freshen(s, 40.0) would stop with BL8001
 let mixed = (fresher + 2.0) : Salinity   // (fresher - 40.0) : Salinity would too
 // EXPECT: fresher = 30.0

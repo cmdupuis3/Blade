@@ -14,18 +14,18 @@
 // ============================================================================
 let static pspec = [("E", 1)]
 
-function total(v: Array<Float like Idx<2>>) -> Float = {
+function total(v: Array<Float64 like Idx<2>>) -> Float64 = {
     v(0) + v(1)
 }
 
-function pg_head(v: Array<Float like PgIrrepsIdx<C4, pspec>>) -> Float = {
+function pg_head(v: Array<Float64 like PgIrrepsIdx<C4, pspec>>) -> Float64 = {
     v(0)
 }
 
-let p: Array<Float like PgIrrepsIdx<C4, pspec>> = [3.0, 4.0]
+let p: Array<Float64 like PgIrrepsIdx<C4, pspec>> = [3.0, 4.0]
 let t = total(p)
 // EXPECT: t = 7.0
 
-let plain: Array<Float like Idx<2>> = [10.0, 20.0]
+let plain: Array<Float64 like Idx<2>> = [10.0, 20.0]
 let h = pg_head(plain)
 // EXPECT: h = 10.0

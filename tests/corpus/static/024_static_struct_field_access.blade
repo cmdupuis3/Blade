@@ -3,7 +3,7 @@
 // it splices back as a designated struct literal — runtime field access on
 // the folded value is well-typed C++ member access, and a further
 // `let static` field read folds at compile time.
-struct P { x: Int, y: Int }
+struct P { x: Int32, y: Int32 }
 let static ok = P { x = 1, y = 2 }
 let static sx = ok.x
 let v = ok.x

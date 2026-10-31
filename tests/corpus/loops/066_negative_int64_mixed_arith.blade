@@ -23,7 +23,7 @@ let QD = method_for(range<Idx<3>>) <@> lambda(i: Int64) -> (i - 3) / 2 |> comput
 // k=0..3, so the read at the last element is sum 0.5*(k-1) -> 1.0. The
 // slice's `(n - 1) - 1` produces the negative intermediate the size_t bug
 // wrapped unsigned before promotion.
-let rec FIacc: Array<Float like Idx<5>> =
+let rec FIacc: Array<Float64 like Idx<5>> =
     match FIacc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

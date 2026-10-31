@@ -29,18 +29,18 @@
 // the two, and the box volumes (27) would diverge before the counts do.
 // ============================================================================
 static struct CGm112 {
-    m1:    Int in -1 .. 2,
-    m2:    Int in -1 .. 2,
-    m_out: Int in -1 .. 2
+    m1:    Int32 in -1 .. 2,
+    m2:    Int32 in -1 .. 2,
+    m_out: Int32 in -1 .. 2
 } where m1 + m2 == m_out
 
 let static CARD = idx_card(CGm112)
 // EXPECT: CARD = 7
 
 static struct CGm112c {
-    m1:    Int<min=-1, max=1>,
-    m2:    Int<min=-1, max=1>,
-    m_out: Int<min=-1, max=1>
+    m1:    Int32<min=-1, max=1>,
+    m2:    Int32<min=-1, max=1>,
+    m_out: Int32<min=-1, max=1>
 } where m1 + m2 == m_out
 
 let static CARDC = idx_card(CGm112c)
@@ -51,9 +51,9 @@ let static CARDC = idx_card(CGm112c)
 // form pin the plan asks for, and it also proves the 7 above is the constraint
 // doing work rather than the enumerator quietly dropping cells.
 static struct Box27 {
-    m1:    Int<min=-1, max=1>,
-    m2:    Int<min=-1, max=1>,
-    m_out: Int<min=-1, max=1>
+    m1:    Int32<min=-1, max=1>,
+    m2:    Int32<min=-1, max=1>,
+    m_out: Int32<min=-1, max=1>
 }
 
 let static VOL = idx_card(Box27)

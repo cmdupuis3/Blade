@@ -13,7 +13,7 @@ function inputs(m: Int64) -> Array<Float64 like Ix> = {
 function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
     let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
     let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
-    let t = ("a label long enough to leave any small-string buffer, past sixty chars", 1.0)[1]
+    let t = ("a label long enough to leave any small-string buffer, past sixty chars", Float64(1.0))[1]
     s + t
 }
 let (checksum, input_checksum) = {

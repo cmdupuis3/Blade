@@ -12,7 +12,7 @@
 type Row = Idx<11>
 let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5, 0, -5]
 let amount: Array<Int64 like Row> = [100, 20, 50, 70, 80, 90, 30, 5, 7, 11, 13]
-let eligible = [3, 3, 1, -5]
+let eligible = Int64([3, 3, 1, -5])
 let keep = mask(customer, lambda(c) -> contains(eligible, c))
 let y = compound(amount, keep)
 let n = extents(y)

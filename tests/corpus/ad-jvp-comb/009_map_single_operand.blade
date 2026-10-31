@@ -12,7 +12,7 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let sq = method_for(a) <@> lambda(x) -> x * x |> compute
     reduce(sq, (+))
 }

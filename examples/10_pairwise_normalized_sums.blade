@@ -35,7 +35,7 @@ type J = Idx<37>      // sample positions (the summed-over axis)
 let x = 0.25 * Float64(range<I>) - 2.0
 let xs = 0.17 * Float64(range<J>) - 3.0
 let ys = sin(0.5 * Float64(range<J>))
-let h = 0.6
+let h: Float64 = 0.6
 
 // ---------------------------------------------------------------------------
 // 1. Kernel-weighted mean (Nadaraya-Watson). The Gaussian kernel is bounded
@@ -84,13 +84,13 @@ let attended = (method_for(range<I>) <@> lambda(i) -> {
 // ---------------------------------------------------------------------------
 let attended_online = (method_for(range<I>) <@> lambda(i) -> {
     let qi = x(i)
-    let s = reduce(method_for(zip(xs, ys)) <@> lambda(b, y) -> (score(qi, b), 1.0, y),
+    let s = reduce(method_for(zip(xs, ys)) <@> lambda(b, y) -> (score(qi, b), Float64(1.0), y),
                    lambda(a, b) -> {
                        let m = if a[0] > b[0] then a[0] else b[0]
                        let ca = exp(a[0] - m)
                        let cb = exp(b[0] - m)
                        (m, a[1] * ca + b[1] * cb, a[2] * ca + b[2] * cb)
-                   }, (-1.0e300, 0.0, 0.0))
+                   }, (-1.0e300, Float64(0.0), Float64(0.0)))
     s[2] / s[1]
 }) |> compute
 

@@ -304,7 +304,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
                 (match arrayDims n with
                  | Some ds -> Ok { Axes = ds; Readers = [ fun ixs -> syn (ExprApp (v n, ixs)) ]; Window = None }
                  | None ->
-                     err fname $"reverse mode needs each map operand to be a named array with statically-known extents (v1); '{n}' has none here -- annotate it `Array<Float like Idx<n>, ...>` or pass it as a parameter")
+                     err fname $"reverse mode needs each map operand to be a named array with statically-known extents (v1); '{n}' has none here -- annotate it `Array<Float64 like Idx<n>, ...>` or pass it as a parameter")
             | ExprKind.ExprZip zs ->
                 let named =
                     zs |> List.map (fun z ->
@@ -369,7 +369,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
                 match arrayLiteralExtents (resolveArrayTy ctx t) with
                 | Some (true, ds) when ds = dims -> Ok (Some t)
                 | _ ->
-                    err fname $"the annotation on '{name}' does not read as `Array<Float like Idx<n>, ...>` matching the map's iteration space {dims} (v1); drop it, or spell the extents literally"
+                    err fname $"the annotation on '{name}' does not read as `Array<Float64 like Idx<n>, ...>` matching the map's iteration space {dims} (v1); drop it, or spell the extents literally"
         annotOk |> Result.bind (fun keptAnnot ->
         // -- substitution -------------------------------------------------------
         let idxNames = dims |> List.map (fun _ -> fresh ctx "__mi")
@@ -509,7 +509,7 @@ let internal expandPartialFold (fname: string) (ctx: Ctx) (dimsOf: string -> int
                 | Some t when not resDims.IsEmpty ->
                     (match arrayLiteralExtents (resolveArrayTy ctx t) with
                      | Some (true, ds) when ds = resDims -> Ok (Some t)
-                     | _ -> err fname $"the annotation on '{name}' does not read as `Array<Float like Idx<n>, ...>` matching the fold's result shape {resDims} (v1); drop it, or spell the extents literally")
+                     | _ -> err fname $"the annotation on '{name}' does not read as `Array<Float64 like Idx<n>, ...>` matching the fold's result shape {resDims} (v1); drop it, or spell the extents literally")
                 | other -> Ok other
             keptAnnot |> Result.map (fun keptAnnot ->
                 let idxNames = dims |> List.map (fun _ -> fresh ctx "__pf")
@@ -1082,7 +1082,7 @@ let rec internal zerosLikeLiteral (e: Expr) : Expr option =
         let zs = elems |> List.map (fun el ->
             match zerosLikeLiteral el with
             | Some z -> z
-            | None -> fLit 0.0)
+            | None -> f64Lit 0.0)
         Some (inheritSpan e (ExprArrayLit zs))
     | ConstFill (cnt, _) -> Some (zeroFill cnt)
     | _ -> None
@@ -1093,7 +1093,7 @@ let rec internal zerosLikeLiteral (e: Expr) : Expr option =
 let internal zerosOfType (fname: string) (t: TypeExpr) : Result<Expr, string> =
     let rec go t =
         match t with
-        | _ when isFloatTy t -> Ok (fLit 0.0)
+        | _ when isFloatTy t -> Ok (f64Lit 0.0)
         | TyArray (elem, idxs) ->
             let folded =
                 idxs |> traverseR (fun ix ->
@@ -1175,6 +1175,7 @@ let internal analyze (fname: string) (ctx: Ctx)
                 let rec isFloatLit (e: Expr) =
                     match e.Kind with
                     | ExprKind.ExprArrayLit es -> es |> List.forall isFloatLit
+                    | ExprKind.ExprTyped (inner, _) -> isFloatLit inner
                     | ExprKind.ExprLit (LitFloat _) -> true
                     | _ -> false
                 touches value |> Result.map (fun t ->

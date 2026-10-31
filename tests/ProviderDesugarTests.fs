@@ -498,7 +498,7 @@ let ck = repo.checkout("v1.0", z.tag)
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let ck = repo.checkout("main")
     x
 }
@@ -510,7 +510,7 @@ function pick(x: Float) -> Float = {
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = repo.checkout("main")
+function pick(x: Float64) -> Float64 = repo.checkout("main")
 """
      positional "checkout as a whole function body" src)
 
@@ -582,7 +582,7 @@ let ck = repo.checkout(name)
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(repo: Float) -> Float = {
+function pick(repo: Float64) -> Float64 = {
     let ck = repo.checkout("main")
     repo
 }
@@ -596,7 +596,7 @@ function pick(repo: Float) -> Float = {
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let repo = 1.0
     let ck = repo.checkout("main")
     x
@@ -613,7 +613,7 @@ import icechunk as ic
 
 let repo = ic.load("r")
 let other = 42
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let ck = other.checkout("main")
     x
 }

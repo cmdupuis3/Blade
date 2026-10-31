@@ -5,7 +5,7 @@
 // variants compiles to `==` comparisons on the underlying enum int.
 type Status = Pending | Active | Completed
 let states: Array<Status like Idx<3>> = [Pending, Active, Completed]
-let v = match states[1] with
+let v: Int64 = match states[1] with
     | Pending -> 1
     | Active -> 2
     | Completed -> 3

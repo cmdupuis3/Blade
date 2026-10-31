@@ -9,7 +9,7 @@
 // compiled lane and the interpreter print it (the llvm lane takes a rank-1,
 // trailing-free compound -- G9's compaction -- and falls back to C++ for the
 // rank-2 mask and the trailing-dim compound below).
-let x = [1.0, -2.0, 3.0, -4.0, 5.0]
+let x = Float64([1.0, -2.0, 3.0, -4.0, 5.0])
 let m = mask(x, lambda(v) -> v > 0.0)
 let y = compound(x, m)
 // EXPECT: y = [1.0, 3.0, 5.0]
@@ -19,7 +19,7 @@ let n = extents(y)
 let z = method_for(y) <@> lambda(v) -> v * 2.0 |> compute
 // EXPECT: z = [2.0, 6.0, 10.0]
 // A rank-2 mask: the present cells in lex (row-major) order.
-let grid = [[1, 2, 3], [4, 5, 6]]
+let grid = Int64([[1, 2, 3], [4, 5, 6]])
 let gm = mask(grid, lambda(v) -> v % 2 == 0)
 let g = compound(grid, gm)
 // EXPECT: g = [2, 4, 6]

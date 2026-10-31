@@ -16,7 +16,7 @@
 // shape, which is the silent-wrong-shape outcome this refusal exists to
 // prevent. The message names the working route: decompact(W, 0) first, then
 // slice the dense result -- exactly what 215 does.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

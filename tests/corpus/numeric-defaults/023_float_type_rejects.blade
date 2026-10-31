@@ -1,0 +1,8 @@
+// TEST: the width-less Float type is refused (rejects)
+// ============================================================================
+// Rule 3: only bit-sized numeric type names remain; `Float` (and `Float<u>`)
+// is steered to Float32 / Float64.
+// ============================================================================
+let x: Float = 1.0
+// ERROR: BL1004
+// ERROR-CONTAINS: `Float` has no width: write `Float32` or `Float64`

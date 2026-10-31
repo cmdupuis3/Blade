@@ -18,7 +18,7 @@
 // The bare-comma binder (`021`) inherits this for free: it produces the same
 // `PatTuple` the parenthesized form does.
 // ============================================================================
-let t = 1.0, 2.0
+let t = Float64(1.0), Float64(2.0)
 let a, b, c = t
 let s = a + b + c
 // EXPECT: typecheck failure -- three names against a 2-tuple

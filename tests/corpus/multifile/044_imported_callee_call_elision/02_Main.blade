@@ -12,7 +12,7 @@ function body(a: T^1) -> T^0 = {
     let x = prep(a)
     reduce(x, (+), 0.5)
 }
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let s = reduce(prep(A), (+))
 let y = method_for(Helpers.prep(A)) <@> lambda(v) -> v * 10.0 |> compute
 let b = body(A)

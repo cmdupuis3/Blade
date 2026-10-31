@@ -1,0 +1,27 @@
+// TEST: index-like counts retain Int64 through stacks and static replicate
+// Count arguments accept width casts and static arithmetic; extents and
+// range elements keep Int64 even when ordinary literals default to Int32.
+static function copies() = 2
+let static extra = 1
+let a = [1.0, 2.0]
+let s = stack(a, a)
+let dims: (Int64, Int64) = extents(s)
+let repeated = replicate(Int64(3), a) |> compute
+let static_repeated = replicate(copies() + extra, a) |> compute
+let arithmetic_repeated = replicate(1 + 2, a) |> compute
+let n: Int64 = extents(repeated)[0]
+let range_cell: Int64 = (0..4)(2)
+let shifted_cell: Int64 = (10..14)(2)
+type SmallIndex = Idx<4>
+let named_cell: Int64 = Int64((range<SmallIndex>)(2))
+function range_read(i: Int32) = (10..14)(i)
+let runtime_cell: Int64 = range_read(Int32(1))
+// EXPECT: dims = (2, 2)
+// EXPECT: repeated = [1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+// EXPECT: static_repeated = [1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+// EXPECT: arithmetic_repeated = [1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+// EXPECT: n = 3
+// EXPECT: range_cell = 2
+// EXPECT: shifted_cell = 12
+// EXPECT: named_cell = 2
+// EXPECT: runtime_cell = 11

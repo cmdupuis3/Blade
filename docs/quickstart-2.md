@@ -12,7 +12,7 @@ arrays in an outer-product pattern:
 ```blade
 let A = [[1.0, 2.0], [3.0, 4.0]]
 let B = [[10.0, 20.0], [30.0, 40.0]]
-function func(a: Float64, b: Float64) -> Float64 = a * b
+function func(a: Float32, b: Float32) -> Float32 = a * b
 let loop = object_for(func)
 let result = loop <@> (A, B) |> compute     // rank 4: every (A cell, B cell) pair
 let r = result(1, 0, 0, 1)                  // A(1, 0) * B(0, 1)
@@ -102,7 +102,7 @@ Let-bound `for` loops are sugar for `method_for`/`object_for`:
 ```blade
 let A = [1.0, 2.0]
 let B = [3.0, 4.0, 5.0]
-function f(a: Float64, b: Float64) -> Float64 = a * b
+function f(a: Float32, b: Float32) -> Float32 = a * b
 let loop1 = for (A, B)                 // method_for(A, B)
 let result1 = loop1 <@> f |> compute
 let loop2 = for f                      // object_for(f)
@@ -187,7 +187,8 @@ function comoment_prod(a: Poly<T^1>) where comm(a) -> T^1 = {
 }
 let x = [1.0, 2.0, 3.0]
 let y = [2.0, 4.0, 6.0]
-let centered = comoment_prod(x, y)
+// stats.mean computes in Float64; convert at this kernel boundary.
+let centered = comoment_prod(Float64(x), Float64(y))
 // EXPECT: centered = [2.0, 0.0, 2.0]
 ```
 
@@ -214,7 +215,7 @@ fact, not a style note).
 Parallelism in Blade is declared per-function, in the `where` clause:
 
 ```blade
-function weight(a: Float64, b: Float64) where comm(a, b), omp(a: 1) -> Float64 = a * b
+function weight(a: Float32, b: Float32) where comm(a, b), omp(a: 1) -> Float32 = a * b
 let A = [1.0, 2.0, 3.0]
 let W = weight <@> (A, A) |> compute      // the loop over a's level may carry threads
 ```
@@ -231,7 +232,7 @@ to a loop built around the function** — the caller's co-iteration when the
 function is used in kernel position:
 
 ```blade
-function cov(a: Float64, b: Float64) where omp(a: 1) -> Float64 = a * b
+function cov(a: Float32, b: Float32) where omp(a: 1) -> Float32 = a * b
 let A = [1.0, 2.0]
 let B = [3.0, 4.0]
 let m = object_for(cov) <@> (A, B) |> compute   // <- the licensed nest
@@ -509,7 +510,7 @@ let static S = [(0, 0, 2), (1, 1, 1)]      // two scalars and one vector: 5 cell
 ```
 
 ```blade
-function f(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function f(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     x + x
 let out = f([1.0, 2.0, 3.0, 4.0, 5.0])
 // EXPECT: out = [2.0, 4.0, 6.0, 8.0, 10.0]
@@ -520,13 +521,13 @@ product of two representation-typed values is basis-dependent, and so is
 reading one component of a vector:
 
 ```blade rejects
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
     x(2)
 // ERROR: BL4008
 ```
 
 The two systems compose: a stress tensor is stored as
-`Array<Float like SymIdx<2, IrrepsIdx<spec>>>` — triangular storage from the
+`Array<Float64 like SymIdx<2, IrrepsIdx<spec>>>` — triangular storage from the
 index type — and the functions that produce or consume it carry the
 `ml.equiv` pin. The full equivariant ML stack (irreps, tensor products,
 spherical harmonics, message passing) is the subject of
@@ -544,7 +545,7 @@ let static n = 100
 static function triangle(k) = k * (k + 1) / 2
 let static packed_n = triangle(n)
 
-type PackedSym = Array<Float like Idx<packed_n>>   // Idx<5050>
+type PackedSym = Array<Float64 like Idx<packed_n>>   // Idx<5050>
 let cells = extents(range<Idx<packed_n>>)
 // EXPECT: cells = 5050
 ```

@@ -9,7 +9,7 @@ type I = Idx<2>
 type F = (Float64) -> Float64
 type R = Array<Float64 like I>
 type H = (F) -> R
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + 1.0
@@ -19,7 +19,7 @@ function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) 
 function call0(p: (H, Int64), f: F) -> R = p[0](f)
 function via(h: H, f: F) -> R = {
     let k = h
-    let t = (k, 0)
+    let t = (k, Int64(0))
     call0(t, f)
 }
 let a = launch(ident)

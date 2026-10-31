@@ -29,14 +29,14 @@ function sqsum(v) = {
     let r = method_for(v) <@> lambda(x) -> x * x |> compute
     reduce(r, (+))
 }
-let f1 = stats([1.0, 2.0, 3.0])
-let f2 = stats([1, 2, 3])
-let g1 = stats2([1.0, 2.0, 3.0])
-let g2 = stats2([1, 2, 3])
-let h1 = co([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
-let h2 = co([1, 2, 3], [4, 5, 6])
-let k1 = sqsum([1.5, 2.5])
-let k2 = sqsum([3, 4])
+let f1 = stats(Float64([1.0, 2.0, 3.0]))
+let f2 = stats(Int64([1, 2, 3]))
+let g1 = stats2(Float64([1.0, 2.0, 3.0]))
+let g2 = stats2(Int64([1, 2, 3]))
+let h1 = co(Float64([1.0, 2.0, 3.0]), Float64([4.0, 5.0, 6.0]))
+let h2 = co(Int64([1, 2, 3]), Int64([4, 5, 6]))
+let k1 = sqsum(Float64([1.5, 2.5]))
+let k2 = sqsum(Int64([3, 4]))
 // EXPECT: f1 = 50.0
 // EXPECT: f2 = 50
 // EXPECT: g1 = 50.0

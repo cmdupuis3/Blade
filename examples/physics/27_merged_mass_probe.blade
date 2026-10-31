@@ -37,8 +37,8 @@ let NC: Array<Float64 like Real> = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0,
 // invert the recoil once per realization -- the single-scatter formula lifted
 // over the whole recoil column -- then let the formers carry the tower: mean
 // off the raw block, variance off the central one.
-let m_C = 1.0
-let u = 2.0
+let m_C: Float64 = 1.0
+let u: Float64 = 2.0
 let MEFF = m_C * (u - VF) / (u + VF)
 let MEFFV: Array<Float64 like Idx<1>, Real> = [MEFF]
 let meff_m1 = ppl.moments(MEFFV, 1)
@@ -60,7 +60,7 @@ let sum_V = if abs(gap_sum) > 0.3 then "NOT_THE_SUM" else "SUM_LIKE"
 let near_V = if abs(gap_near) > 0.3 then "NOT_ONE_BALL" else "SINGLE_HIT_LIKE"
 
 // --- the cascade branch is fuzzy: rattle probability ---
-let R2 = reduce(method_for(NC) <@> lambda(n) -> (if n > 1.5 then 1.0 else 0.0), (+))
+let R2 = reduce(method_for(NC) <@> lambda(n) -> (if n > 1.5 then Float64(1.0) else Float64(0.0)), (+))
 let P_rattle = R2 / 25.0
 
 // --- the probe re-measures which-is-where: m_eff WHERE the near ball (B)

@@ -24,7 +24,7 @@
 // n = 3, so the 21-cell pool decompacts to 3^4 = 81 dense cells -- a 3.9x
 // expansion, which is the cost §1 calls the escape hatch and §5 says always
 // allocates (pack and dense share no layout, so there is no in-place form).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

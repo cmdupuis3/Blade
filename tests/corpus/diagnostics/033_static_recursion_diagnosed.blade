@@ -46,10 +46,10 @@
 // in a `where` conjunct and is caught per cell under the much smaller
 // `cellBudget`.
 // ============================================================================
-static function bomb(n: Int) -> Int = bomb(n + 1)
+static function bomb(n: Int32) -> Int32 = bomb(n + 1)
 
 let static X = bomb(0)
 
-function main() -> Int = X
+function main() -> Int32 = X
 // ERROR: BL4002
 // ERROR-CONTAINS: nesting depth limit exceeded (4096 levels

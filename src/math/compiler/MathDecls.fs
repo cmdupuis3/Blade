@@ -20,8 +20,10 @@ open Blade.Ast
 
 // AST construction helpers (mirroring MLElaborate's style)
 let v (n: string) = syn (ExprVar n)
-let fLit (x: float) = syn (ExprLit (LitFloat x))
-let iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
+// These generated kernels have an explicit Float64/Complex128 contract. Their
+// coefficients, work buffers, and Int64 coordinates must not inherit user literal defaults.
+let fLit (x: float) = syn (ExprApp (v "Float64", [syn (ExprLit (LitFloat x))]))
+let iLit (n: int) = syn (ExprApp (v "Int64", [syn (ExprLit (LitInt (int64 n)))]))
 let add a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
 let sub a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let mul a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
@@ -44,7 +46,7 @@ let zerosLit (n: int) =
     syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
                                       syn (ExprMethodFor [ syn (ExprRange [ TyIdx (iLit n) ]) ]),
                                       syn (ExprLambda (ps, None, fLit 0.0))))))
-let tyFloat = TyNamed ("Float", [])
+let tyFloat = TyNamed ("Float64", [])
 let tyFloatArr (n: int) = TyArray (tyFloat, [ TyIdx (iLit n) ])
 
 let mkFunc name (ps: (string * TypeExpr) list) retTy body : FunctionDecl =

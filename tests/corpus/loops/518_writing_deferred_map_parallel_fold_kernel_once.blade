@@ -9,7 +9,7 @@
 // (The licensed fold of stored cells is a plain fold; nothing about the
 // effect moves into the reordered form.)
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 function twice() -> Int64 = {
     let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
     let s = reduce(m, lambda(a: Int64, b: Int64) where omp -> a + b, 0)

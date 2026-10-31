@@ -6,7 +6,7 @@
 // the module-level G -- the cells would race (threads on; with threads off
 // the program is refused all the same). The callback is judged through every
 // call site's argument; one that cannot be resolved is refused too.
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + v
     G(0)

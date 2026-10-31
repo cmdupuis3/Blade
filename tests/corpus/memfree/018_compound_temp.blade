@@ -15,17 +15,17 @@
 // ============================================================================
 type C = Idx<6>
 type Steps = Idx<5>
-let SRC: Array<Float like C> = [3.0, -1.0, 4.0, -2.0, 5.0, -3.0]
+let SRC: Array<Float64 like C> = [3.0, -1.0, 4.0, -2.0, 5.0, -3.0]
 let DBL = method_for(SRC) <@> lambda(x) -> x * 2.0 |> compute
 let POS = compound(DBL, mask(DBL, lambda(x) -> x > 0.0))
-function cstep(n: Int64) -> Float = {
+function cstep(n: Int64) -> Float64 = {
     let t = method_for(DBL) <@> lambda(x) -> x + Float64(n) |> compute
     let m = mask(t, lambda(x) -> x > 0.0)
-    let mf = method_for(m) <@> lambda(b) -> (if b then 1.0 else 0.0) |> compute
+    let mf = method_for(m) <@> lambda(b) -> (if b then Float64(1.0) else Float64(0.0)) |> compute
     let mcount = reduce(mf, (+))
     POS(0) + POS(2) + POS(4) + mcount + Float64(n) * 0.001
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

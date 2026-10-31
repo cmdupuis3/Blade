@@ -21,5 +21,5 @@ function inputs(seed: Int64) -> Array<Float64 like Ix> = {
 let (checksum, input_checksum) = {
     let x = inputs(10000019)
     let y = inputs(20000038)
-    (0.0, reduce(x, (+)) + reduce(y, (+)))
+    (Float64(0.0), reduce(x, (+)) + reduce(y, (+)))
 }

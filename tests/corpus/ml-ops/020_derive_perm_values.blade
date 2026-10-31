@@ -42,8 +42,8 @@ import ml as ml
 // formula written out in-language.
 let static DS_W = ml.perm_weight_dim(1, 1, 4)
 // EXPECT: DS_W = 2
-let xd: Array<Float like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
-let wd = [2.0, -1.0]
+let xd: Array<Float64 like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
+let wd = Float64([2.0, -1.0])
 let yd = ml.derive_perm_linear(1, 1, 4, xd, wd)
 // EXPECT: yd = [-2.0, 0.0, -10.0, 4.0]
 let sd = reduce(xd, (+))
@@ -65,15 +65,15 @@ let sq_d = reduce(dd * dd, (+))
 let static MI_W = ml.perm_weight_dim(2, 0, 3)
 // EXPECT: MI_W = 2
 // M = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]: trace 15, total 45.
-let xm: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-let tr = ml.derive_perm_linear(2, 0, 3, xm, [1.0, 0.0])
+let xm: Array<Float64 like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let tr = ml.derive_perm_linear(2, 0, 3, xm, Float64([1.0, 0.0]))
 let tot = ml.derive_perm_linear(2, 0, 3, xm, [0.0, 1.0])
 // EXPECT: tr = [15.0]
 // EXPECT: tot = [45.0]
 // A general weight vector is the corresponding combination: 2*trace - 3*total.
 let mix = ml.derive_perm_linear(2, 0, 3, xm, [2.0, 0.0 - 3.0])
 // EXPECT: mix = [-105.0]
-let dm = mix(0) - (2.0 * tr(0) - 3.0 * tot(0))
+let dm = mix(Int64(0)) - (2.0 * tr(0) - 3.0 * tot(0))
 // EXPECT: dm = 0.0
 
 // --- 3. Maron et al. k = l = 2: Bell(4) = 15, N = 4 --------------------------
@@ -88,7 +88,7 @@ let dm = mix(0) - (2.0 * tr(0) - 3.0 * tot(0))
 // entries, so identity, transpose and diagonal-broadcast cannot be confused.
 let static MARON_W = ml.perm_weight_dim(2, 2, 4)
 // EXPECT: MARON_W = 15
-let x4: Array<Float like Idx<16>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+let x4: Array<Float64 like Idx<16>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
                                      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
 
 // (a) slot 6, RGS 0101 = {{i0, o0}, {i1, o1}} — both blocks MIXED, so both are
@@ -96,7 +96,7 @@ let x4: Array<Float like Idx<16>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
 // output axis 0, v1 indexes input axis 1 and output axis 1:
 //     inIdx = 4*v0 + v1,  outIdx = 4*v0 + v1   =>   Y[a][b] = X[a][b]
 // the IDENTITY map. Output = the input buffer verbatim.
-let one6 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let one6 = Float64([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 let g_id = ml.derive_perm_linear(2, 2, 4, x4, one6)
 // EXPECT: g_id = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
 
@@ -105,7 +105,7 @@ let g_id = ml.derive_perm_linear(2, 2, 4, x4, one6)
 // axis 0, so
 //     inIdx = 4*v0 + v1,  outIdx = 4*v1 + v0   =>   Y[b][a] = X[a][b]
 // the TRANSPOSE. Output = X^T, row-major.
-let one8 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let one8 = Float64([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 let g_tr = ml.derive_perm_linear(2, 2, 4, x4, one8)
 // EXPECT: g_tr = [1.0, 5.0, 9.0, 13.0, 2.0, 6.0, 10.0, 14.0, 3.0, 7.0, 11.0, 15.0, 4.0, 8.0, 12.0, 16.0]
 
@@ -115,13 +115,13 @@ let g_tr = ml.derive_perm_linear(2, 2, 4, x4, one8)
 // so v0 gathers X[a][a] and v1, appearing only on the output side, broadcasts
 // it along the second output axis:  Y[a][b] = X[a][a] for every b.
 // diag(X) = [1, 6, 11, 16], each repeated 4 times.
-let one1 = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let one1 = Float64([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 let g_db = ml.derive_perm_linear(2, 2, 4, x4, one1)
 // EXPECT: g_db = [1.0, 1.0, 1.0, 1.0, 6.0, 6.0, 6.0, 6.0, 11.0, 11.0, 11.0, 11.0, 16.0, 16.0, 16.0, 16.0]
 
 // Linearity in w over those three slots: one call with all three weights set
 // must equal the sum of the three one-hot outputs (checked elementwise).
-let one168 = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let one168 = Float64([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 let g_sum = ml.derive_perm_linear(2, 2, 4, x4, one168)
 let dg = g_sum - (g_id + g_tr + g_db)
 let sq_g = reduce(dg * dg, (+))
@@ -136,7 +136,7 @@ let sq_g = reduce(dg * dg, (+))
 // With b = [5, 2] the result is 2 everywhere plus 5 on the diagonal.
 let static BW = ml.perm_bias_dim(2, 3)
 // EXPECT: BW = 2
-let bias = ml.derive_perm_bias(2, 3, [5.0, 2.0])
+let bias = ml.derive_perm_bias(2, 3, Float64([5.0, 2.0]))
 // EXPECT: bias = [7.0, 2.0, 2.0, 2.0, 7.0, 2.0, 2.0, 2.0, 7.0]
 let bdiag = ml.derive_perm_bias(2, 3, [1.0, 0.0])
 let bones = ml.derive_perm_bias(2, 3, [0.0, 1.0])
@@ -146,7 +146,7 @@ let bones = ml.derive_perm_bias(2, 3, [0.0, 1.0])
 // The L = 0 bias is the constant readout: Bell(0) = 1 weight, one Idx<1> cell.
 let static B0 = ml.perm_bias_dim(0, 3)
 // EXPECT: B0 = 1
-let b0 = ml.derive_perm_bias(0, 3, [-2.5])
+let b0 = ml.derive_perm_bias(0, 3, Float64([-2.5]))
 // EXPECT: b0 = [-2.5]
 
 // --- 5. a full affine layer: K = L = 1 with a bias, N = 4 --------------------
@@ -155,7 +155,7 @@ let b0 = ml.derive_perm_bias(0, 3, [-2.5])
 let static AB = ml.perm_bias_dim(1, 4)
 // EXPECT: AB = 1
 let aff_lin = ml.derive_perm_linear(1, 1, 4, xd, wd)
-let aff_bias = ml.derive_perm_bias(1, 4, [10.0])
+let aff_bias = ml.derive_perm_bias(1, 4, Float64([10.0]))
 let affine = aff_lin + aff_bias
 // EXPECT: aff_bias = [10.0, 10.0, 10.0, 10.0]
 // EXPECT: affine = [8.0, 10.0, 0.0, 14.0]

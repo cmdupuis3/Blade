@@ -9,6 +9,6 @@
 // ============================================================================
 type I = Idx<5>
 let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
-let d = lambda(w) -> a(w(1)) - a(w(-1))
+let d = lambda(w) -> a(w(Int64(1))) - a(w(-1))
 let d_alias = d
 let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> d(w) |> compute

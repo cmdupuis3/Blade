@@ -41,6 +41,9 @@ type Value =
     | VFloat of float
     | VFloat32 of float32
     | VComplex of re: float * im: float
+    /// A Complex64 (std::complex<float>): float parts, float arithmetic
+    /// (round 6 -- the Complex64 twin of VFloat32).
+    | VComplex64 of re32: float32 * im32: float32
     | VBool of bool
     | VString of string
     | VChar of char
@@ -95,13 +98,19 @@ and BladeArray = {
 // models regular multi-level nesting (array-of-arrays with uniform sub-shape);
 // SRagged is the CSR-style per-row layout shared by RaggedIdx / DepIdx / group
 // members (CodeGen's Ragged<T>: flat backing + per-row lens + prefix offsets,
-// CodeGen.fs ~4237). Known gap: no SFloat32 / SInt32 / SComplex64 stores --
-// narrow element types widen into SFloat / SInt / SComplex or fall to SObj
-// (scalar Float32/Int32 ARE exact in Numerics; this is only their array form).
+// CodeGen.fs ~4237). SFloat32 / SInt32 are the Float32 / Int32 element stores
+// (round 6): a cell holds exactly what the compiled lanes' `float` /
+// `int32_t` cell holds, reads as a VFloat32 / VInt32, and a write rounds to
+// float / wraps to 32 bits -- so every consumer computes at the declared
+// width. Known gap: no SComplex64 store (Complex64 cells are SComplex with
+// float-rounded parts).
 and Store =
     | SFloat of float[]
     | SInt of int64[]
+    | SFloat32 of float32[]
+    | SInt32 of int32[]
     | SComplex of struct(float * float)[]
+    | SComplex64 of struct(float32 * float32)[]
     | SBool of bool[]
     | SObj of Value[]
     | SNested of Store[]
@@ -271,7 +280,10 @@ let rec copyStore (s: Store) : Store =
     match s with
     | SFloat a -> SFloat (Array.copy a)
     | SInt a -> SInt (Array.copy a)
+    | SFloat32 a -> SFloat32 (Array.copy a)
+    | SInt32 a -> SInt32 (Array.copy a)
     | SComplex a -> SComplex (Array.copy a)
+    | SComplex64 a -> SComplex64 (Array.copy a)
     | SBool a -> SBool (Array.copy a)
     | SObj a -> SObj (Array.copy a)
     | SNested a -> SNested (a |> Array.map copyStore)

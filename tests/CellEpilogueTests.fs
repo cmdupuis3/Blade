@@ -1001,12 +1001,12 @@ let runCellEpilogueTests () : BlockResult =
      let scenarios =
          [ ("kfail", "let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute\nlet before = reduce(jg, (+))\n", "gfail", "jg", false,
             Some "error[BL8013]: integer division by zero", "--> <file>:7", [ "at gfail" ])
-           ("dop", "let jd = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s)\nlet before = 1.5\n", "group_h", "jd", true, None, "", [])
-           ("dfign", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before = 2.5\n", "gign", "jf", true,
+           ("dop", "let jd = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s)\nlet before: Float64 = 1.5\n", "group_h", "jd", true, None, "", [])
+           ("dfign", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before: Float64 = 2.5\n", "gign", "jf", true,
             Some "error[BL8013]: integer division by zero", "--> <file>:10", [])
-           ("dfuse", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before = 2.5\n", "group_h", "jf", true,
+           ("dfuse", "let jf = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a) * Float64(7 / zz)\nlet before: Float64 = 2.5\n", "group_h", "jf", true,
             Some "error[BL8013]: integer division by zero", "--> <file>:10", [])
-           ("compete", "let da = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a) * Float64(7 / zz)\nlet db = method_for(range<P, S>) <@> lambda(a, s) -> Float64(Int64(floor(Float64(a) / 0.0 * 0.0)))\nlet before = 3.5\n", "g2", "da, db", true,
+           ("compete", "let da = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a) * Float64(7 / zz)\nlet db = method_for(range<P, S>) <@> lambda(a, s) -> Float64(Int64(floor(Float64(a) / 0.0 * 0.0)))\nlet before: Float64 = 3.5\n", "g2", "da, db", true,
             Some "error[BL8013]: integer division by zero", "--> <file>:10", []) ]
      let keep (l: string) =
          let l = l.Trim()

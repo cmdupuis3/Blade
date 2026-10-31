@@ -11,13 +11,13 @@
 // Holds at array position too, through the elementwise lift.
 // ============================================================================
 Unit meters
-let dy: Float<meters> = 1.0
-let dx: Float<meters> = 1.0
+let dy: Float64<meters> = 1.0
+let dx: Float64<meters> = 1.0
 let ang = atan2(dy, dx)
 let plusBare = ang + 1.0
 
-let DY: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
-let DX: Array<Float<meters> like Idx<3>> = [1.0, 1.0, 1.0]
+let DY: Array<Float64<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let DX: Array<Float64<meters> like Idx<3>> = [1.0, 1.0, 1.0]
 let angs = atan2(DY, DX) |> compute
 let shifted = (angs <@> lambda(a) -> a + 1.0) |> compute
 

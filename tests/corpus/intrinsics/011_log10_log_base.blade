@@ -13,25 +13,25 @@
 // Both are transcendental, so both reject a dimensioned operand
 // (unit-errors/007, unit-errors/008).
 // ============================================================================
-let d = log10(1000.0)
-let g = log_base(8.0, 2.0)
+let d: Float64 = log10(1000.0)
+let g: Float64 = log_base(8.0, 2.0)
 
-let P: Array<Float like Idx<3>> = [1.0, 10.0, 100.0]
+let P: Array<Float64 like Idx<3>> = [1.0, 10.0, 100.0]
 let l10 = log10 <@> P |> compute
 let l10b = object_for(log10) <@> P |> compute
 
 // log_base over two arrays co-iterates; over an array and a scalar it
 // broadcasts, in either slot.
-let V: Array<Float like Idx<3>> = [2.0, 9.0, 8.0]
-let B: Array<Float like Idx<3>> = [2.0, 3.0, 2.0]
+let V: Array<Float64 like Idx<3>> = [2.0, 9.0, 8.0]
+let B: Array<Float64 like Idx<3>> = [2.0, 3.0, 2.0]
 let lb = log_base(V, B) |> compute
 let lbman = (zip(V, B) <@> lambda(x, b) -> log_base(x, b)) |> compute
 let lbeta = (method_for(zip(V, B)) <@> log_base) |> compute
 let lbs = log_base(P, 10.0) |> compute
 let lbs2 = log_base(64.0, B) |> compute
 
-let static s1 = log10(100.0)
-let static s2 = log_base(81.0, 3.0)
+let static s1: Float64 = log10(100.0)
+let static s2: Float64 = log_base(81.0, 3.0)
 let folded = s1 + s2
 
 // EXPECT: d = 3.0

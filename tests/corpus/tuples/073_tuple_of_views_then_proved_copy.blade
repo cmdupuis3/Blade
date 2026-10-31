@@ -53,7 +53,7 @@ let pair = (m(0), m(1))
 let r0 = pair[0]
 let mut row = r0
 row(1) = 9.0
-let pair2 = match 0 with
+let pair2 = match Int64(0) with
     | 0 -> (m(0), m(1))
     | _ -> (m(1), m(0))
 let r0b = pair2[0]
@@ -86,7 +86,7 @@ let q18 = q17
 let q19 = q18
 let q20 = q19
 let cc = reduce(xx, (+)) > 5.0
-let tt = if cc then (q20, 1.0) else (q20, 2.0)
+let tt = if cc then (q20, Float64(1.0)) else (q20, Float64(2.0))
 let ss = tt[1]
 let mt = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
 let t = transpose(mt, [0, 1])
@@ -125,13 +125,13 @@ let zb: Array<Int64 like RowB> = [0]
 let gb2 = method_for(zb) <@> lambda(v) -> 10 / (v + 1)
 let rb = {
     let a = zb((zb(0) : RowB))
-    (if gb2(0) > 0 then gb2(0) else a, 1)
+    (if gb2(0) > 0 then gb2(0) else a, Int64(1))
 }
 type RowU = Idx<1>
 let zu: Array<Int64 like RowU> = [0]
 let gs = method_for(zu) <@> lambda(v) -> 10 / (v + 1)
 let ru1 = (gs |> compute, (if gs(0) > 0 then gs(0) else 0))
-let ru2 = ((gs |> compute, 1.0), (if gs(0) > 0 then gs(0) else 0))
+let ru2 = ((gs |> compute, Float64(1.0)), (if gs(0) > 0 then gs(0) else 0))
 type RowV = Idx<1>
 let zv: Array<Int64 like RowV> = [0]
 let gv = method_for(zv) <@> lambda(v) -> 10 / (v + 1)
@@ -141,7 +141,7 @@ type RowX = Idx<1>
 let zx: Array<Int64 like RowX> = [0]
 let gx = method_for(zx) <@> lambda(v) -> 10 / (v + 1)
 let rx1 = (gx(0), (if zx(0) > 0 then gx(0) else 0))
-let rx2 = ((gx(0), 1), (if zx(0) > 0 then gx(0) else 0))
+let rx2 = ((gx(0), Int64(1)), (if zx(0) > 0 then gx(0) else 0))
 type RowY = Idx<1>
 let zy: Array<Int64 like RowY> = [0]
 let gy = method_for(zy) <@> lambda(v) -> 10 / (v + 1)
@@ -174,21 +174,21 @@ let rw3 = {
 type RowK = Idx<1>
 let zk: Array<Int64 like RowK> = [0]
 let gk = method_for(zk) <@> lambda(v) -> 10 / (v + 1)
-let nk = 1
+let nk: Int64 = 1
 let rk1 = {
     let t = Float64(nk)
     if gk(0) > 0 then Float64(gk(0)) + t else t
 }
 let rk2 = {
-    let t = sin(0.0)
+    let t: Float64 = sin(0.0)
     if gk(0) > 0 then Float64(gk(0)) + t else t
 }
 let rk3 = {
-    let t = 2.0 ^ nk
+    let t = Float64(2.0) ^ nk
     if gk(0) > 0 then Float64(gk(0)) + t else t
 }
-let rk4 = guard(gk(0) > 0, 1) + (if zk(0) > 0 then gk(0) else 0)
-let rk5 = (gk(0) <|> 0) + (if zk(0) > 0 then gk(0) else 0)
+let rk4 = guard(gk(0) > 0, Int64(1)) + (if zk(0) > 0 then gk(0) else 0)
+let rk5 = (gk(0) <|> Int64(0)) + (if zk(0) > 0 then gk(0) else 0)
 type RowT13 = Idx<1>
 let zt13: Array<Int64 like RowT13> = [0]
 let gt13 = method_for(zt13) <@> lambda(v) -> 10 / (v + 1)

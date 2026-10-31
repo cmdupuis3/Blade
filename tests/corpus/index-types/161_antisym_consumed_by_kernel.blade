@@ -11,7 +11,7 @@
 // row runs off the end of the pool. The visible symptom is a result rotated
 // left by one with a garbage/zero cell at the end, which a set-equality check
 // cannot see. Hence the exact ordered pin below.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute

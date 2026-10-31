@@ -4,8 +4,8 @@
 // carries `where omp`, its body is a parallel body and the captured write is
 // a data race the front end refuses outright -- in every build, before any
 // emitter decides whether the join threads.
-let mut counter = 0
-let x = [1.0, 2.0, 3.0]
+let mut counter: Int64 = 0
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let (s1, s2) = reduce((l <@> lambda(v) where omp -> {
     counter = counter + 1

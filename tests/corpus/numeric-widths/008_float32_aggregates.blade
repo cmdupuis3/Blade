@@ -1,0 +1,22 @@
+// TEST: Float32 Aggregates
+// ============================================================================
+// Tuples and structs print each Float32 field with 6 significant digits and
+// each Float64 field with 15; a Complex64 prints both parts with 6.
+// ============================================================================
+struct P { a: Float32, b: Float64, n: Int32 }
+let x: Float32 = 0.1
+let y: Float64 = 0.1
+let t = (x, y)
+let p = P { a = x, b = y, n = Int32(3) }
+let ps = [P { a = x, b = y, n = Int32(1) }, P { a = x * 2.0, b = y * 2.0, n = Int32(2) }]
+let z = Complex64(complex(y, y * 3.0))
+let zz = z * z
+let zw = complex(y, y)
+// EXPECT: x = 0.1
+// EXPECT: y = 0.1
+// EXPECT: t = (0.1, 0.1)
+// EXPECT: p = P { a = 0.1, b = 0.1, n = 3 }
+// EXPECT: ps = [P { a = 0.1, b = 0.1, n = 1 }, P { a = 0.2, b = 0.2, n = 2 }]
+// EXPECT: z = (0.1,0.3)
+// EXPECT: zz = (-0.08,0.06)
+// EXPECT: zw = (0.1,0.1)

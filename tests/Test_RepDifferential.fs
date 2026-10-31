@@ -286,12 +286,12 @@ let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
 let static WD = ml.hom_dim(SIN, SOUT)
 
-function layer_loose(x: Array<Float like IrrepsIdx<SIN>>, w: Array<Float like Idx<WD>>)
-                     -> Array<Float like IrrepsIdx<SOUT>> =
+function layer_loose(x: Array<Float64 like IrrepsIdx<SIN>>, w: Array<Float64 like Idx<WD>>)
+                     -> Array<Float64 like IrrepsIdx<SOUT>> =
     ml.derive_linear(SIN, SOUT, w, x)
 
-let wv = [0.5, 0.0 - 1.0, 2.0, 0.25]
-let xv = [1.0, 2.0, 3.0, 0.0 - 1.0, 0.5]
+let wv = Float64([0.5, 0.0 - 1.0, 2.0, 0.25])
+let xv = Float64([1.0, 2.0, 3.0, 0.0 - 1.0, 0.5])
 let loose = layer_loose(xv, wv)
 """
 
@@ -382,7 +382,7 @@ let runRepDifferentialTests () : BlockResult =
     // 5. Directive parsing.
     let dirSource =
         "// TEST: x\n// TYPED-EXEMPT: engine\n   // TYPED-SUGGEST: scale_partial|O3\n"
-        + "// a normal comment\n// TYPED-SUGGEST: helper|C4\nfunction f() = 1\n"
+        + "// a normal comment\n// TYPED-SUGGEST: helper|C4\nfunction f() = Int64(1)\n"
     let dirs = parseDirectives dirSource
     check "directives: exempt and pins parse"
         (dirs.Exempt = Some "engine"

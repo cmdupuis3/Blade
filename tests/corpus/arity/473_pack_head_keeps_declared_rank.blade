@@ -10,15 +10,15 @@
 // ============================================================================
 function outer(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1.0
+    | 0 -> Float64(1.0)
     | _ -> {
         let head :: tail = a
         head [*] outer(tail)
     }
 }
-let x = [1.0, 2.0]
-let y = [3.0, 4.0, 5.0]
-let z = [10.0, 20.0]
+let x = Float64([1.0, 2.0])
+let y = Float64([3.0, 4.0, 5.0])
+let z = Float64([10.0, 20.0])
 let o1 = outer(x)
 // EXPECT: o1 = [1.0, 2.0]
 let o2 = outer(x, y)
@@ -43,19 +43,19 @@ let second = o2t(1)
 // An integer pack and an integer identity.
 function outeri(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1
+    | 0 -> Int64(1)
     | _ -> {
         let head :: tail = a
         head [*] outeri(tail)
     }
 }
-let p2 = outeri([1, 2], [3, 4, 5])
+let p2 = outeri(Int64([1, 2]), Int64([3, 4, 5]))
 // EXPECT: p2 = [[3, 4, 5], [6, 8, 10]]
 
 // A settled element type: the head is the declared slice itself.
 function outerf(a: Poly<Float64^1>) = {
     match arity(a) with
-    | 0 -> 1.0
+    | 0 -> Float64(1.0)
     | _ -> {
         let head :: tail = a
         head [*] outerf(tail)

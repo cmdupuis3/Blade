@@ -8,10 +8,10 @@ import ml as ml
 // callee's boost-variant parameters require boost-variant arguments.
 // Values are exact integer arithmetic; the +10 boost shadows are inline.
 // ============================================================================
-function du(u: Array<Float like Idx<8>>, i: Int, j: Int) where ml.galilean(u) -> Float =
+function du(u: Array<Float64 like Idx<8>>, i: Int32, j: Int32) where ml.galilean(u) -> Float64 =
   u(i) - u(j)
 
-function fluct_energy(u: Array<Float like Idx<8>>, um: Float) where ml.galilean(u, um) -> Float = {
+function fluct_energy(u: Array<Float64 like Idx<8>>, um: Float64) where ml.galilean(u, um) -> Float64 = {
     // The fluctuation d = u(k) - um is a BVar - BVar difference — the boost
     // cancels INSIDE the kernel, certified by the former-transparent
     // galilean judgment (kernel params carry the source arrays' statuses).
@@ -22,7 +22,7 @@ function fluct_energy(u: Array<Float like Idx<8>>, um: Float) where ml.galilean(
     reduce(dsq, (+))
 }
 
-function pair_diff(u: Array<Float like Idx<8>>) where ml.galilean(u) -> Float =
+function pair_diff(u: Array<Float64 like Idx<8>>) where ml.galilean(u) -> Float64 =
   du(u, 3, 1) * du(u, 2, 0)
 
 let e = fluct_energy([1.0, 2.0, 4.0, 8.0, 3.0, 5.0, 7.0, 9.0], 4.0)

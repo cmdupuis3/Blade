@@ -9,17 +9,17 @@
 // the interpreter declines complex asin/acos/atan as not-yet-bit-verified and
 // that would skip this whole file out of the interp differential.
 // ============================================================================
-let a = asin(0.5)
-let b = acos(0.5)
-let c = atan(1.0)
+let a: Float64 = asin(0.5)
+let b: Float64 = acos(0.5)
+let c: Float64 = atan(1.0)
 
-let A: Array<Float like Idx<3>> = [0.0, 0.5, 1.0]
+let A: Array<Float64 like Idx<3>> = [0.0, 0.5, 1.0]
 let asins = asin <@> A |> compute
 let acoss = object_for(acos) <@> A |> compute
 let atans = method_for(A) <@> atan |> compute
 
-let static sa = asin(0.5)
-let static sc = atan(1.0)
+let static sa: Float64 = asin(0.5)
+let static sc: Float64 = atan(1.0)
 let folded = sa + sc
 
 // EXPECT: a = 0.523598775598299

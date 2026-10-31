@@ -33,8 +33,8 @@ let static EC = [("E", 1)]
 // route to this map is `ml.derive_pg_linear(C4, EC, EC, x, [0.0, 1.0])`, which
 // composition certifies. Written out in components it is the same map — and
 // composition rejects it at the first `x(1)`. The engine discharges it.
-function rot(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function rot(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+             where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     [0.0 - x(1), x(0)]
 
 // THE UNCERTIFIED TWIN. Stage 6a's inference channel runs the SAME judgment
@@ -43,8 +43,8 @@ function rot(x: Array<Float like PgIrrepsIdx<C4, EC>>)
 // proposal appears. That inheritance is why 6b needed no new inference code.
 //
 // SUGGEST: function 'rot_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]> -> PgIrrepsIdx<C4, [("E", 1)]>]
-function rot_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                   -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function rot_loose(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                   -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     [0.0 - x(1), x(0)]
 
 let y = rot([3.0, 4.0])
@@ -67,8 +67,8 @@ let yr = rot([0.0 - 4.0, 3.0])
 // shipped linear/bilinear former — and it is exactly what the degree ≤ 4 cap
 // exists to cover. Composition has no arm for it at all; the engine reads it
 // as six monomials per component and checks all four group elements.
-function radial3(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                 where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function radial3(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                 where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     let r2 = x(0) * x(0) + x(1) * x(1)
     [r2 * x(0), r2 * x(1)]
 }
@@ -86,8 +86,8 @@ let cr = radial3([0.0 - 4.0, 3.0])
 // `s·x + J(x)` needs no component spelling at all — and it is still a body
 // composition would accept for the `s·x` half and refuse for the `J(x)` half,
 // which is the point: the engine judges the WHOLE body, not a seam.
-function twist(x: Array<Float like PgIrrepsIdx<C4, EC>>, s: Float)
-               where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function twist(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, s: Float64)
+               where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     let j = [0.0 - x(1), x(0)]
     x * s + j
 }

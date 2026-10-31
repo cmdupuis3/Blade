@@ -43,7 +43,7 @@ let plain = plot.heatmap(ax, ax, g)
 // same untouched ordinal.
 // ...and rides the Heat colorscale (index 5, an inline stop ARRAY rather
 // than a quoted name -- the __cmap_json seam), pinned through both lanes.
-let zoomable_cf = plot.contourf(ax, ax, g, "cf-view": plotid, "cx,cy,r": camera, 12: levels, 5: cmap, 1: smoothing)
+let zoomable_cf = plot.contourf(ax, ax, g, "cf-view": plotid, "cx,cy,r": camera, Int64(12): levels, Int64(5): cmap, Int64(1): smoothing)
 
 // EXPECT: zoomable = true
 // EXPECT: zoomable_cf = true

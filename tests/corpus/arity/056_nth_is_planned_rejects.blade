@@ -9,4 +9,4 @@ function depth(args: Poly<T^0>) -> Int64 = {
     | _ -> let head :: tail = args
            depth(tail)
 }
-let d = depth(1.0, 2.0, 3.0)
+let d = depth(Float64(1.0), Float64(2.0), Float64(3.0))

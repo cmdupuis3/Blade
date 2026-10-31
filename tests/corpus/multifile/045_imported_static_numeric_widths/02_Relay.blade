@@ -1,0 +1,8 @@
+// TEST: imported statics retain explicit wide and intentional narrow widths
+// MODULE: Relay
+module Relay
+import Widths
+let static real_wide = Widths.real_wide
+let static real_small = Widths.real_small
+let static int_wide = Widths.int_wide + 1
+let static int_small = Widths.int_small + 1

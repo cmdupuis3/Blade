@@ -5,8 +5,8 @@
 // by table. The message names both facts and the linear spellings that
 // would enumerate in closed form.
 static struct Big {
-    i: Int<min=0, max=399>,
-    j: Int<min=0, max=399>
+    i: Int32<min=0, max=399>,
+    j: Int32<min=0, max=399>
 } where (i * j) % 7 == 1
 
 let R = method_for(range<Big>) <@> lambda(i, j) -> i + j |> compute

@@ -6,8 +6,8 @@
 // MAP kernel assigns a captured `let mut` inside a fused `<&!>` tree, and a
 // join defines no order for that write -- refused in every lane (BL4005),
 // with or without the `where omp` request on the fold kernel.
-let mut counter = 0
-let x = [1.0, 2.0, 3.0]
+let mut counter: Int64 = 0
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let (s1, s2) = reduce((l <@> lambda(v) -> {
     counter = counter + 1

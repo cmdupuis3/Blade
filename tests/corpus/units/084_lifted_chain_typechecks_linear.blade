@@ -12,7 +12,7 @@
 // links (~1e9 resolutions before) typecheck in well under a second.
 // The values are exact: 2 D / (D + D) = 1 at powers of two.
 // ----------------------------------------------------------------------------
-let D = [1.0, 2.0, 4.0, 8.0]
+let D = Float64([1.0, 2.0, 4.0, 8.0])
 let Y0 = D * 1.5
 let Y1 = Y0 * 2.0 * D / (D + D)
 let Y2 = Y1 * 2.0 * D / (D + D)

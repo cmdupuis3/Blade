@@ -1,0 +1,6 @@
+// TEST: Joined folds refuse a fixed seed of another width (rejects)
+// ERROR: BL3001
+let a = Float64([1.0, 2.0])
+let (first, second) = object_for(<&!>) <@> (
+    reduce(a, (+), -0.0),
+    reduce(a, (+), Float32(-0.0)))

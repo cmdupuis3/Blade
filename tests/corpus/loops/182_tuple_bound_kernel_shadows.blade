@@ -10,18 +10,18 @@ type I = Idx<3>
 
 let inc = lambda(x) -> x + 1.0
 
-function apply_local(a: Array<Float like I>) -> Array<Float like I> = {
+function apply_local(a: Array<Float64 like I>) -> Array<Float64 like I> = {
     let (inc, dec) = (lambda(x) -> x * 10.0, lambda(x) -> x - 1.0)
     inc <$> a |> compute
 }
 
 // The control: a single-name rebind, which the PatVar arm always shadowed.
-function apply_single(a: Array<Float like I>) -> Array<Float like I> = {
+function apply_single(a: Array<Float64 like I>) -> Array<Float64 like I> = {
     let inc = lambda(x) -> x * 10.0
     inc <$> a |> compute
 }
 
-let data = [1.0, 2.0, 3.0]
+let data = Float64([1.0, 2.0, 3.0])
 let tup = apply_local(data)
 let sing = apply_single(data)
 // EXPECT: tup = [10.0, 20.0, 30.0]

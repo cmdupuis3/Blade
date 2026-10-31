@@ -9,7 +9,7 @@ import ad as ad
 type R = Idx<4>
 type GK = Idx<3>
 
-function loss(v: Array<Float64 like R>, pk: Array<GK like R>) -> Float = {
+function loss(v: Array<Float64 like R>, pk: Array<GK like R>) -> Float64 = {
     let gk = group_keys(pk)
     let g = group_by(v, gk)
     let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute

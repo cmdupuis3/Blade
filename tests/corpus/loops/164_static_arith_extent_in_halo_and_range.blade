@@ -12,7 +12,7 @@
 // This is what lets a program derive its cell count from its segment count
 // instead of hand-writing both (examples/lswosa.blade).
 // ============================================================================
-let static n_seg = 10
+let static n_seg: Int64 = 10
 type CellIdx = Idx<n_seg + 1>
 
 let n_cells = extents(range<CellIdx>)

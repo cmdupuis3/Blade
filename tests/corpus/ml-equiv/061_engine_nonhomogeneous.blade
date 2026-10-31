@@ -26,8 +26,8 @@ import ml as ml
 let static SD = [("A", 1), ("E", 1)]
 
 // A bias in the A cell, the identity on the E plane. Degree 0 + degree 1.
-function biased(x: Array<Float like PgIrrepsIdx<C4, SD>>)
-                where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, SD>> =
+function biased(x: Array<Float64 like PgIrrepsIdx<C4, SD>>)
+                where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, SD>> =
     [x(0) + 2.0, x(1), x(2)]
 
 let b0 = biased([1.0, 3.0, 4.0])
@@ -42,8 +42,8 @@ let b1 = biased([1.0, 0.0 - 4.0, 3.0])
 // Degree 2: the squared norm of the E plane, which is an A-cell quantity.
 // Every one of the three is separately equivariant, and the engine checks them
 // as one polynomial without ever naming the splitting.
-function graded(x: Array<Float like PgIrrepsIdx<C4, SD>>, s: Float)
-                where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, SD>> = {
+function graded(x: Array<Float64 like PgIrrepsIdx<C4, SD>>, s: Float64)
+                where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, SD>> = {
     let r2 = x(1) * x(1) + x(2) * x(2)
     [x(0) + r2 + 2.0, x(1) * s, x(2) * s]
 }
@@ -61,8 +61,8 @@ let g1 = graded([1.0, 0.0 - 4.0, 3.0], 2.0)
 // invariant parameter is a constant of the polynomial too, and it is equally
 // legal in a trivial-label cell (and equally illegal in an E cell). Here the
 // bias is `s` itself.
-function biased_atom(x: Array<Float like PgIrrepsIdx<C4, SD>>, s: Float)
-                     where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, SD>> =
+function biased_atom(x: Array<Float64 like PgIrrepsIdx<C4, SD>>, s: Float64)
+                     where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, SD>> =
     [x(0) + s, x(1), x(2)]
 
 let p0 = biased_atom([1.0, 3.0, 4.0], 5.0)

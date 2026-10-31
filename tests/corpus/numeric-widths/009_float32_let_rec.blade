@@ -1,0 +1,13 @@
+// TEST: Float32 Let Rec
+// ============================================================================
+// A recursive Float32 array keeps a float buffer: each step rounds to float.
+// ============================================================================
+type Step = Idx<8>
+let rec x: Array<Float32 like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: Float32(0.1)
+    | prefix :: n -> prefix :: prefix(n - 1) * 1.1 + 0.3
+let total = reduce(x, (+))
+// EXPECT: x = [0.1, 0.41, 0.751, 1.1261, 1.53871, 1.99258, 2.49184, 3.04102]
+// EXPECT: total = 11.4513

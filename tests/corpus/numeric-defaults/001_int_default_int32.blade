@@ -1,0 +1,9 @@
+// TEST: an integer literal defaults to Int32 (rejects)
+// ============================================================================
+// Rule 4 (formalism 2.4): with nothing fixing its width, `1` is an Int32, so
+// the binding is an Int32 VARIABLE and an Int64 annotation of it is a width
+// mismatch -- a variable never adapts, only a literal does.
+// ============================================================================
+let a = 1
+let b: Int64 = a
+// ERROR: BL3001

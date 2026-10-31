@@ -3,9 +3,9 @@
 // The outer write is summarized per function and inherited by its callers:
 // `outer_step` never assigns anything itself, but it calls `bump`, which
 // writes the module-level `count`, and a `where omp` body calls it per cell.
-let mut count = [0.0]
+let mut count = Float64([0.0])
 function bump(x: Float64) -> Float64 = { count(0) = count(0) + 1.0; x }
 function outer_step(x: Float64) -> Float64 = bump(x) * 2.0
 function par(x: Float64) where omp(x: 1) = outer_step(x) + 1.0
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let r = method_for(a) <@> par |> compute

@@ -32,16 +32,16 @@
 //   row 0: (1+4+9)   * [1,2,3,4] = 14  * [1,2,3,4]
 //   row 1: (16+25+36)* [1,2,3,4] = 77  * [1,2,3,4]
 // ============================================================================
-let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let fs: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let fs: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 
-function spec(r: Array<Float like Idx<3>>, f: Array<Float like Idx<4>>) = {
+function spec(r: Array<Float64 like Idx<3>>, f: Array<Float64 like Idx<4>>) = {
     (f <@> lambda(x) -> x * prodsum(r, r)) |> compute
 }
 
-let gridCall = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) -> spec(r, fs) |> compute
+let gridCall = method_for(m) <@> lambda(r: Array<Float64 like Idx<3>>) -> spec(r, fs) |> compute
 
-let gridInline = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) ->
+let gridInline = method_for(m) <@> lambda(r: Array<Float64 like Idx<3>>) ->
     (fs <@> lambda(x) -> x * prodsum(r, r)) |> compute
 
 // EXPECT: gridCall = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0]]

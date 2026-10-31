@@ -11,7 +11,7 @@
 // ERROR-CONTAINS: `<&!>` (full fusion) joins several computations
 import ad as ad
 
-function f(a: Array<Float like Idx<3>>, b: Array<Float like Idx<3>>) -> Float = {
+function f(a: Array<Float64 like Idx<3>>, b: Array<Float64 like Idx<3>>) -> Float64 = {
     let c = a <&!> b
     reduce(a, (+))
 }

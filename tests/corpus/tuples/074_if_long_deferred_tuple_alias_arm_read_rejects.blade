@@ -33,7 +33,7 @@ let p18 = p17
 let p19 = p18
 let p20 = p19
 let c = reduce(x, (+)) > 5.0
-let t = if c then (p20, 1.0) else (p20, h(0))
+let t = if c then (p20, Float64(1.0)) else (p20, h(0))
 // ERROR: BL6002 @ 35:1
 // ERROR-CONTAINS: whose arm reads the deferred computation `h`
 // REJECT-AT: lower

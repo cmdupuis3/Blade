@@ -108,10 +108,10 @@ let internal suiteClearedKnobs =
 /// defines into every program the suite emits.
 let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "off" ]
 
-/// A program the LLVM lane REFUSES (a Float32 scalar: that lane lowers Int64 /
-/// Float64 / Bool only), so `blade plan` under BLADE_LLVM=1 falls back to the
-/// C++ lane -- the cli case that pins the pool-retention scope of a fallback.
-let private poolFallbackSource = "let x = Float32(1.5)\nlet y = x * Float32(2.0)\n"
+/// A program the LLVM lane REFUSES (it has no complex values), so `blade plan`
+/// under BLADE_LLVM=1 falls back to the C++ lane -- the cli case that pins the
+/// pool-retention scope of a fallback (a Float32 program, before round 6).
+let private poolFallbackSource = "let z: Complex128 = complex(1.5, 2.0)\nlet w = z * z\n"
 
 /// Run `f` in the suite's pristine environment: every `suiteClearedKnobs`
 /// variable unset, every `suitePinnedKnobs` variable pinned, the caller's
@@ -145,7 +145,7 @@ let runCliSmokeTests () : TH.BlockResult =
         Directory.CreateDirectory(tmpDir) |> ignore
         try
             let srcFile = Path.Combine(tmpDir, "smoke.edgi")
-            File.WriteAllText(srcFile, "let x = 1 + 2 * 3\n")
+            File.WriteAllText(srcFile, "let x: Int64 = 1 + 2 * 3\n")
             match compileToExe srcFile None false false with
             | Error e ->
                 record runTest TH.Fail (e.Replace("\n", " | "))
@@ -207,9 +207,9 @@ let runCliSmokeTests () : TH.BlockResult =
     //
     // Emission-only cases need no toolchain; the run cases skip without g++.
     let printSrc =
-        "let x = 1 + 2 * 3\n\
+        "let x: Int64 = 1 + 2 * 3\n\
          let y = x * 2\n\
-         let z = [1.0, 2.0, 3.0]\n"
+         let z = Float64([1.0, 2.0, 3.0])\n"
     let withPrint (v: string option) (f: unit -> unit) =
         let prior = System.Environment.GetEnvironmentVariable "BLADE_PRINT"
         System.Environment.SetEnvironmentVariable("BLADE_PRINT", (match v with Some s -> s | None -> null))
@@ -265,7 +265,7 @@ let runCliSmokeTests () : TH.BlockResult =
          function total(x: T^1) -> T^0 = reduce(x, (+))\n\
          let g = sq\n\
          let h = total\n\
-         let r = g(3.0) + h([1.0, 2.0])\n"
+         let r = g(3.0) + h(Float64([1.0, 2.0]))\n"
     for (sel, what) in [ ("g", "a non-generic function alias"); ("h", "an eliminated generic function alias") ] do
         withPrint (Some sel) (fun () ->
             (match cppOf ("print_fn_" + sel) fnSrc with
@@ -287,7 +287,7 @@ let runCliSmokeTests () : TH.BlockResult =
     let aggSrc =
         "struct P {\n    a: Float64,\n    b: Float64\n}\n\
          type Direction = North | South\n\
-         let t = (1, 2.0)\n\
+         let t = (Int64(1), Float64(2.0))\n\
          let p = P { a = 1.0, b = 2.0 }\n\
          let d = South\n"
     for sel in [ "t"; "p" ] do
@@ -313,7 +313,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // echoed by default -- a ppl program printed a screenful of them -- but a
     // bare expression's `__expr<n>` is the user's value and prints, and a
     // selected internal name prints.
-    let internalSrc = "let __hidden = 1\nlet shown = 2\n3 + 4\n"
+    let internalSrc = "let __hidden = 1\nlet shown: Int64 = 2\n3 + 4\n"
     (match cppOf "internal_names" internalSrc with
      | Error e -> record "print: elaborator-internal bindings are not echoed" TH.Fail e
      | Ok cpp ->
@@ -334,7 +334,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // located at the declaration being emitted: it used to pass `nullptr, 0`,
     // which a notebook showed at 1:1. (No file here -- the source is a string
     // -- so the location is the line alone; `blade run` adds the file.)
-    (match cppOf "guard_line" "let n = reduce([1, 2], (+))\nlet row = Float64(0..n)\nlet final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]\n" with
+    (match cppOf "guard_line" "let n = reduce(Int64([1, 2]), (+))\nlet row = Float64(0..n)\nlet final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]\n" with
      | Error e -> record "guards: a runtime guard panic carries its declaration's line" TH.Fail e
      | Ok cpp ->
          recordCase "guards: a runtime guard panic carries its declaration's line"
@@ -482,7 +482,7 @@ let runCliSmokeTests () : TH.BlockResult =
             let ok = code = 0 && out.Contains "Usage:" && not (Directory.Exists(Path.Combine(dir, "generated_cpp_tests")))
             recordCase "cli: bare `blade` prints usage (and does not start the suite)" ok
                 (if ok then "" else out.Substring(0, min 200 out.Length))
-            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x: Int64 = 1 + 2 * 3\n")
             let (code, out, err) = spawn dir [ "check"; "v.blade"; "--verbose" ]
             recordCase "cli: `check f --verbose` is a check, not an unrecognized command"
                 (code = 0 && out.Contains "OK") (out + err)
@@ -500,12 +500,12 @@ let runCliSmokeTests () : TH.BlockResult =
             // rule where it sits is refused by check itself -- coded BL6002 and
             // spanned at the expression -- not first by `emit`, spanless.
             File.WriteAllText(Path.Combine(dir, "cf.blade"),
-                "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+                "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
                 + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
                 + "    let c = compound(x, m)\n"
                 + "    reduce(c, (+))\n"
                 + "}\n"
-                + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+                + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
                 + "let s = f(a)\n")
             let (code, out, err) = spawn dir [ "check"; "cf.blade" ]
             recordCase "cli: `check` reports a lowering refusal as spanned BL6002"
@@ -760,12 +760,17 @@ let runCliSmokeTests () : TH.BlockResult =
                 recordCase "cli: `plan` (C++ lane) scatters a Float32 strict walk"
                     (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5") (out + err)
                 let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
+                // Since round 6 the LLVM lane EMITS this Float32 program; its own
+                // scatter is Float64 / Int64 only, so its emitter declines it
+                // (the walk, bitwise the scatter under repro) and the record
+                // says so beside the C++ lane's applied scatter.
                 recordCase "cli: `plan` under BLADE_LLVM=1 does not claim a Float32 scatter for the LLVM lane"
                     (code = 0
-                     && (out.Contains "but the LLVM lane refused"
-                         || out.Contains "ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)")
-                     && not (out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"))
-                    (out + err)                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
+                     && out.Contains "lane: LLVM"
+                     && out.Contains "declined -- ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)"
+                     && not (out.Contains "applied [fold form: ordered orbit scatter"))
+                    (out + err)
+                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
                 // materializes through the shared C core in the LLVM lane, and
                 // the plan says so in this lane's words (not the C++ lane's
                 // dsyrk_tri, which this executable does not contain).
@@ -794,7 +799,7 @@ let runCliSmokeTests () : TH.BlockResult =
                     + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64(i * 3 + c + s) |> compute\n"
                     + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute\n")
                 File.WriteAllText(Path.Combine(dir, "sym3.blade"),
-                    "type V = Idx<29>\ntype S = Idx<67>\nlet static n = 67\n"
+                    "type V = Idx<29>\ntype S = Idx<67>\nlet static n: Int64 = 67\n"
                     + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
                     + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute\n")
                 let rowEnv (knob: string) (value: string) (repro: string) =
@@ -997,7 +1002,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
                 + "    2.0 * (Float64(h2) / 2147483648.0)\n"
                 + "}\n"
-                + "let k = reduce([300, 400, 303], (+))\n"
+                + "let k = reduce(Int64([300, 400, 303]), (+))\n"
                 + "let ks = 0..k |> compute\n"
                 + "let x = method_for(ks) <@> lambda(i) -> gen(i) |> compute\n"
                 + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
@@ -1015,7 +1020,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
                 + "    2.0 * (Float64(h2) / 2147483648.0)\n"
                 + "}\n"
-                + "let k = reduce([300, 400, 303], (+))\n"
+                + "let k = reduce(Int64([300, 400, 303]), (+))\n"
                 + "let ks = 0..k |> compute\n"
                 + "let x = method_for(ks) <@> lambda(i) -> gen(i) |> compute\n"
                 + "let c2 = method_for(ks) <@> lambda(i) -> gen(i + 5) |> compute\n"
@@ -1055,7 +1060,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 + "let zz = compound(bumped(p), other)\nlet s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n")
             File.WriteAllText(Path.Combine(dir, "hhot.blade"),
                 "import rand as r\ntype I = Idx<2>\ntype J = Idx<2>\nfunction bump(a: mut Array<Float64 like I, J>) -> Int64 = {\n    a(0, 0) = 9.0\n    7\n}\n"
-                + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute\nlet noise = r.uniform(bump(p), 1)\n"
+                + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> Float64(1.0) |> compute\nlet noise = r.uniform(bump(p), 1)\n"
                 + "let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)\n")
             File.WriteAllText(Path.Combine(dir, "hcrow.blade"),
                 "import rand as r\ntype I = Idx<2>\nfunction bump(a: mut Array<Float64 like SymIdx<2, I>>) -> Int64 = {\n    a(0, 1) = 9.0\n    7\n}\n"
@@ -1748,7 +1753,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 + $"    {tail}\n}}\n"
                 + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\n"
             let matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
-            let mGuard = "    let m = match i with\n        | 5 -> 1\n"
+            let mGuard = "    let m: Int64 = match i with\n        | 5 -> 1\n"
             let dGuard = "    let q = 10 / d\n"
             let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz = 0.0\n"
             let a7c =
@@ -1757,13 +1762,13 @@ let runCliSmokeTests () : TH.BlockResult =
                 + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, k: Int64) -> Float64 = {\n"
                 + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
                 + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
-                + "    let m = match k with\n        | 5 -> 1\n"
+                + "    let m: Int64 = match k with\n        | 5 -> 1\n"
                 + "    s + Float64(m)\n}\n"
                 + "let (checksum, input_checksum) = {\n    let x = inputs(7)\n    let y = inputs(5)\n"
                 + "    (kernel(x, y, 4), reduce(x, (+)) + reduce(y, (+)))\n}\n"
             let blockFn (destructure: bool) =
-                "let base = [10, 20, 30]\nlet r = {\n    let k = 0\n"
-                + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m = match q with\n            | 5 -> 1\n"
+                "let base = Int64([10, 20, 30])\nlet r = {\n    let k: Int64 = 0\n"
+                + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m: Int64 = match q with\n            | 5 -> 1\n"
                 + (if destructure then "        (q, m)\n    }\n    let (u, v) = cap(5)\n    u + v\n}\n" else "        q + m\n    }\n    cap(5)\n}\n")
             let bl8006 = "error[BL8006]: index out of bounds: a group_keys key outside 0 .. 2"
             let bl8003 = "error[BL8003]: reduce: empty array, no reduction possible"
@@ -1783,8 +1788,8 @@ let runCliSmokeTests () : TH.BlockResult =
                   ("cast_tuple", castFn "" "(n, n + 1)" + "let (a, b) = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
                   ("cast_plain", castFn " -> Int64" "n + 1" + "let a = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
                   ("nested", matchFn "" mGuard "(m, m)" + "function outer(i: Int64) -> Int64 = {\n    let (x, y) = cls(i, 1)\n    x + y\n}\nlet a = outer(4)\n", bl8002, Some 1, [ "cls"; "outer" ], [])
-                  ("lam_in_fn", "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> 1\n    |> compute\n    (v, 1)\n}\nlet (a, b) = f(1)\n", bl8002, Some 2, [ "f" ], [])
-                  ("let_lambda", "let k = lambda(i: Int64) -> match i with\n    | 5 -> 1\nlet base = [10, 20, 30]\nlet a = k(base(0) - 6)\n", bl8002, Some 1, [ "k" ], [])
+                  ("lam_in_fn", "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> Int64(1)\n    |> compute\n    (v, Int64(1))\n}\nlet (a, b) = f(1)\n", bl8002, Some 2, [ "f" ], [])
+                  ("let_lambda", "let k = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = k(base(0) - 6)\n", bl8002, Some 1, [ "k" ], [])
                   ("block_tuple", blockFn true, bl8002, None, [ "cap" ], [])
                   ("block_plain", blockFn false, bl8002, None, [ "cap" ], [])
                   ("a7c_default", a7c, bl8002, Some 5, [ "kernel" ], [])
@@ -1795,7 +1800,7 @@ let runCliSmokeTests () : TH.BlockResult =
                   // anonymous test used to be a prefix test)
                   ("lname_tuple", (matchFn "" mGuard "(m, m + 1)").Replace("function cls(", "function lambda_guard(") + "let (a, b) = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
                   ("lname_plain", (matchFn " -> Int64" mGuard "m + 1").Replace("function cls(", "function lambda_guard(") + "let a = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
-                  ("lname_let", "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> 1\nlet base = [10, 20, 30]\nlet a = lambda_kernel(base(0) - 6)\n", bl8002, Some 1, [ "lambda_kernel" ], [])
+                  ("lname_let", "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = lambda_kernel(base(0) - 6)\n", bl8002, Some 1, [ "lambda_kernel" ], [])
                   // ...and a MULTI-MODULE program (NEW 3): a guard raised in an
                   // IMPORTED function's body is located at that function's line in
                   // ITS file (GuardLib.blade, written below) -- module qualification
@@ -1815,19 +1820,19 @@ let runCliSmokeTests () : TH.BlockResult =
                   // calls the function, so it is located at its declaration -- the LLVM
                   // lane, which inlines the kernel, used to say the fold's line (W4B-D
                   // found it; EmitLlvm.applyKernelFramed now takes the callee's declaration)
-                  ("fk_local", "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n", bl8002, Some 2, [ "gsel"; "folded" ], [])
+                  ("fk_local", "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n", bl8002, Some 2, [ "gsel"; "folded" ], [])
                   ("mm_foldguard", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.gsel, 100)\nlet s = folded()\n", bl8002, Some 22, [ "gsel"; "folded" ], []) ]
             // the imported module of the mm_ cases; its line numbers are pinned above
             File.WriteAllText(Path.Combine(dir, "GuardLib.blade"),
-                "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
-                + "function pick(i: Int64) -> Int64 = {\n    let m = match i with\n        | 5 -> 1\n    m + 1\n}\n"
+                "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
+                + "function pick(i: Int64) -> Int64 = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    m + 1\n}\n"
                 + "type Region = Idx<3>\ntype Row = Idx<4>\n"
                 + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) -> Int64 = {\n"
                 + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
                 + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
                 + "    reduce(s, (+))\n}\n"
                 + "function idiv(a: Int64, b: Int64) -> Int64 = a / b\n"
-                + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m = match b with\n        | 5 -> 1\n    a + m\n}\n")
+                + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\n")
             let locFileOf (prog: string) = if prog.StartsWith "mm_" then "GuardLib" else prog
             let failureLines (e: string) =
                 e.Replace("\r\n", "\n").Split('\n')
@@ -2111,8 +2116,8 @@ let runCliSmokeTests () : TH.BlockResult =
                       "type Ev = Idx<37>"
                       "type Big = Idx<211>"
                       "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5, 0, -5]"
-                      "let small = [3, 3, 1, -5]"
-                      "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]"
+                      "let small = Int64([3, 3, 1, -5])"
+                      "let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])"
                       "let wide = [9223372036854775807, -9223372036854775807 - 1, 0, -1, 1, 1000000007, -1000000007, 4611686018427387904, -4611686018427387904, 123456789012345, -98765432109876, 77, -77, 1 - 9223372036854775807, 9223372036854775806, 5, 5, 0]"
                       "let none = compound(customer, mask(customer, lambda(v) -> v > 100))"
                       "let picked = compound(customer, mask(customer, lambda(v) -> v % 3 == 0))"
@@ -2199,7 +2204,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 String.concat "\n"
                     [ "type Row = Idx<5>"
                       "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
-                      "let stored = [4, 9, 7]"
+                      "let stored = Int64([4, 9, 7])"
                       "let S1 = stored"
                       "let S2 = S1"
                       "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute"
@@ -2502,8 +2507,8 @@ let runCliSmokeTests () : TH.BlockResult =
         let dir = Path.Combine(Path.GetTempPath(), "blade_cli_build_" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory dir |> ignore
         try
-            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x = 1 + 2 * 3\n")
-            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y = 40 + 2\n")
+            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x: Int64 = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y: Int64 = 40 + 2\n")
             // A header of the user's own that happens to share a runtime
             // header's name: no compile may touch it.
             File.WriteAllText(Path.Combine(dir, "index_types.h"), "// mine\n")
@@ -2608,7 +2613,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // BL2009 refusal now) instead of replacing the first.
     recordCase "repl: struct, static struct, interface and impl cells have a rebind key"
         (Blade.ReplSession.bindingName "struct P { x: Float64 }" = Some "P"
-         && Blade.ReplSession.bindingName "static struct Band { i: Int<min=0, max=3> }" = Some "Band"
+         && Blade.ReplSession.bindingName "static struct Band { i: Int32<min=0, max=3> }" = Some "Band"
          && Blade.ReplSession.bindingName "interface Shape {" = Some "Shape"
          && Blade.ReplSession.bindingName "impl Shape for Box {" = Some "impl Shape for Box") ""
     (let (src, _) =
@@ -2668,7 +2673,7 @@ let runCliSmokeTests () : TH.BlockResult =
         + "let s = outer(A)\n"
     let hmAbort =
         "function divide(x: T^0, y: T^0) = x / y\n"
-        + "let a = divide(4.0, 2.0)\n"
+        + "let a = divide(Float64(4.0), Float64(2.0))\n"
         + "let i: Int64 = 1\n"
         + "let z: Int64 = 0\n"
         + "let b = divide(i, z)\n"
@@ -2683,7 +2688,7 @@ let runCliSmokeTests () : TH.BlockResult =
            + "let r = call_it(4)\n",
            [ "  at f"; "  at call_it" ])
           ("kernel-lambda",
-           "let xs = [4, 2, 0]\n"
+           "let xs = Int64([4, 2, 0])\n"
            + "let r = reduce(xs, lambda(a, b) -> a / b)\n",
            [ "  at lambda in r" ])
           ("returned-closure",
@@ -2709,7 +2714,7 @@ let runCliSmokeTests () : TH.BlockResult =
            + "let v = h(7)\n",
            [ "  at pick"; "  at h" ])
           ("section",
-           "let xs = [4, 2, 0]\n"
+           "let xs = Int64([4, 2, 0])\n"
            + "let r = reduce(xs, (/))\n",
            [ "  at (/) in r" ])
           ("partial-application",
@@ -2768,7 +2773,7 @@ let runCliSmokeTests () : TH.BlockResult =
             // the callee as written (`mymean`, not its specialization).
             File.WriteAllText(Path.Combine(dir, "l.blade"),
                 "function mymean(row: Float64^1) -> Float64 = reduce(row, (+)) / Float64(extents(row))\n"
-                + "let a = [1.0, 2.0, 3.0, 4.0]\n"
+                + "let a = Float64([1.0, 2.0, 3.0, 4.0])\n"
                 + "let c = a - mymean(a)\n"
                 + "let e = method_for(a) <@> lambda(x) -> x - mymean(a) |> compute\n"
                 + "let k = lambda(x: Float64) -> {\n"
@@ -2789,11 +2794,11 @@ let runCliSmokeTests () : TH.BlockResult =
             // nest's bounds in the struct's own field names, and whether the
             // consumer streams it (a fold) or fills an array (a map).
             File.WriteAllText(Path.Combine(dir, "d.blade"),
-                "let static n = 13\n"
-                + "let static w = 3\n"
+                "let static n: Int64 = 13\n"
+                + "let static w: Int64 = 3\n"
                 + "static struct Band {\n"
-                + "    i: Int<min=0, max=n-1>,\n"
-                + "    j: Int<min=0, max=n-1>\n"
+                + "    i: Int32<min=0, max=n-1>,\n"
+                + "    j: Int32<min=0, max=n-1>\n"
                 + "} where abs(i - j) <= w\n"
                 + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * j, (+))\n"
                 + "let R = method_for(range<Band>) <@> lambda(i, j) -> i + j |> compute\n")
@@ -2810,8 +2815,8 @@ let runCliSmokeTests () : TH.BlockResult =
             // 1: the split everywhere cost the input generators +27%). The two
             // spellings are the same double, so only the emission is pinned.
             File.WriteAllText(Path.Combine(dir, "c.blade"),
-                "let static n = 13\n"
-                + "let static w = 3\n"
+                "let static n: Int64 = 13\n"
+                + "let static w: Int64 = 3\n"
                 + "type Nx = Idx<n>\n"
                 + "static struct Band {\n"
                 + "    i: Int64<min=0, max=n-1>,\n"
@@ -2857,8 +2862,8 @@ let runCliSmokeTests () : TH.BlockResult =
                 "type Row = Idx<1>\n"
                 + "let a: Array<Int64 like Row> = [1]\n"
                 + "let z: Array<Int64 like Row> = [1]\n"
-                + "let x0 = 3.0\n"
-                + "let t = (1.0, 2.0)\n"
+                + "let x0: Float64 = 3.0\n"
+                + "let t: (Float64, Float64) = (1.0, 2.0)\n"
                 + "let p = (x0 + 1.0, x0 * 2.0)\n"
                 + "let u = (a((a(0) : Row)), 1 / z(0))\n")
             let (code, out, err) = spawn dir [ "emit"; "tup.blade" ]
@@ -2891,7 +2896,7 @@ let runCliSmokeTests () : TH.BlockResult =
     (let src =
         "type L = Idx<3>\n"
         + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
-        + "let v = [10.0, 20.0, 30.0, 40.0]\n"
+        + "let v = Float64([10.0, 20.0, 30.0, 40.0])\n"
         + "function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)\n"
         + "let s = walk(A, 2)\n"
         + "let sv = walk(v, 3)\n"
@@ -2927,7 +2932,7 @@ let runCliSmokeTests () : TH.BlockResult =
         + "let f = lambda(x: Int64) -> x / z\n"
         + "function mk(i: Int64) = lambda(j: Int64) -> j / i\n"
         + "let g = mk(2)\n"
-        + "let xs = [4, 2, 1]\n"
+        + "let xs = Int64([4, 2, 1])\n"
         + "let r = reduce(xs, lambda(a, b) -> a / b)\n"
         + "let s = reduce(xs, (/))\n"
         + "function add(a: Int64, b: Int64) -> Int64 = a + b\n"
@@ -2968,7 +2973,7 @@ let private runStrictPinTests () : TH.BlockResult =
     let unpinned =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let pinned = unpinned.Replace("function covariance(a, b) =",
                                   "function covariance(a, b) where comm(a, b) =")
@@ -3069,7 +3074,7 @@ let private runValidationCodeTests () : TH.BlockResult =
         "function toint(x: T^0) -> Int64 = Int64(x)\n\
          function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)\n\
          function outer(x: T^0) -> Int64 = applyG(toint, x)\n\
-         let r = outer(2.5)\n"
+         let r = outer(Float64(2.5))\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_validation_codes_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
     let quietly (f: unit -> 'a) : 'a =
@@ -3124,7 +3129,7 @@ let private runSurfacingTests () : TH.BlockResult =
     let unpinned =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     // Plus an unrelated hard type error in a LATER declaration: the checker
     // must record the suggestion before it fails on the later error.
@@ -3319,13 +3324,13 @@ let private runIdeServeTests () : TH.BlockResult =
     // An HM-polymorphic value binding: the typed AST keeps `T` for both lets
     // (the scheme is only instantiated per call site), while monomorphization
     // during lowering resolves them. Exactly the fast/full split.
-    let hmSource = "function id(x: T) -> T = x\nlet r = id(42)\nlet s = id(3.5)\n"
+    let hmSource = "function id(x: T) -> T = x\nlet r = id(Int64(42))\nlet s = id(Float64(3.5))\n"
     // Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
     // whose ABSENCE proves the next request started clean.
     let warnSource =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_ideserve_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
@@ -3403,7 +3408,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // against the REQUEST file's directory.
         let provPath = Path.Combine(tmpDir, "prov.blade")
         let provSource =
-            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a = 1\n"
+            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a: Int64 = 1\n"
         let (code, responses, _) =
             drive [ checkReq 15 "full" provPath provSource; pingReq 16; shutdownReq ]
         let name = "full tier: a missing store is refused at its load site, payload and loop intact"
@@ -3494,7 +3499,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // different file and must inherit none of it.
         let (code, responses, _) =
             drive [ checkReq 21 "fast" warnPath warnSource
-                    checkReq 22 "fast" cleanPath "let a = 1\n"
+                    checkReq 22 "fast" cleanPath "let a: Int64 = 1\n"
                     shutdownReq ]
         let name = "consecutive checks of different files share no state"
         match responses with
@@ -3577,40 +3582,82 @@ let private runIdeServeTests () : TH.BlockResult =
         // g++ build and the risk lives here: a slot mapped to the wrong
         // binding renders a plausible picture of the wrong place.
         let camSrc =
-            "import plot\n\nlet a = 1\n\nlet cam_cx = -0.5\n"
-            + "let cam_cy = 0.25\nlet cam_r = 0.004\nlet cam_px = 256\n"
+            "import plot\n\nlet a: Int64 = 1\n\nlet cam_cx: Float64 = -0.5\n"
+            + "let cam_cy: Float64 = 0.25\nlet cam_r: Float64 = 0.004\nlet cam_px: Int64 = 256\n"
             + "\nlet z = cam_cx + cam_r\n"
         let name = "the camera erasure rewrites each binding to its own CSV slot"
         match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"]
                                                 @"C:\tmp\camera.csv" with
         | Ok out when out.StartsWith "import csv as __blade_cam_csv"
-                      && out.Contains "let cam_cx = __blade_cam_slots(0, 0)"
-                      && out.Contains "let cam_cy = __blade_cam_slots(0, 1)"
-                      && out.Contains "let cam_r = __blade_cam_slots(0, 2)"
+                      && out.Contains "let cam_cx: Float64 = __blade_cam_slots(0, 0)"
+                      && out.Contains "let cam_cy: Float64 = __blade_cam_slots(0, 1)"
+                      && out.Contains "let cam_r: Float64 = __blade_cam_slots(0, 2)"
                       // Not named, so not erased: the resolution stays literal.
-                      && out.Contains "let cam_px = 256"
+                      && out.Contains "let cam_px: Int64 = 256"
                       // Forward slashes -- a Windows separator inside a Blade
                       // string literal would read as an escape.
                       && out.Contains "__blade_cam_csv.load(\"C:/tmp/camera.csv\")"
                       // The reader precedes the EARLIEST camera binding, and so
                       // precedes every use of the camera.
-                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx =" ->
+                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx: Float64 =" ->
             record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure preserves bounded annotations and trailing comments"
+        let bounded = "let cam_r: Float64<min=0.0, max=1.0> = 0.1 // keep\r\n"
+        match Blade.IdeServe.cameraErasedSource bounded ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "let cam_r: Float64<min=0.0, max=1.0> = __blade_cam_slots(0, 0) // keep\r\n" ->
+            record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure accepts an unannotated binding without counting a local shadow"
+        let local = "function f() = { let cam_r = 0.2; cam_r }\nlet cam_r = 0.1\n"
+        match Blade.IdeServe.cameraErasedSource local ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "let cam_r = __blade_cam_slots(0, 0)"
+                      && out.Contains "function f() = { let cam_r = 0.2; cam_r }" ->
+            record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure is unchanged when only typed camera values move"
+        let moved = camSrc.Replace("-0.5", "0.750000001").Replace("0.25", "-1.0").Replace("0.004", "0.000000000001")
+        match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"] "c.csv",
+              Blade.IdeServe.cameraErasedSource moved ["cam_cx"; "cam_cy"; "cam_r"] "c.csv" with
+        | Ok before, Ok after when before = after -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure refuses static and destructured targets"
+        let invalidTargets = [ "let static cam_r = 0.1\n"; "let (cam_r, other) = (0.1, 0.2)\n" ]
+        let refused =
+            invalidTargets |> List.forall (fun src ->
+                match Blade.IdeServe.cameraErasedSource src ["cam_r"] "c.csv" with
+                | Error e -> e.Contains "simple runtime let"
+                | _ -> false)
+        if refused then record name TH.Pass "" else record name TH.Fail "an unsupported target was not refused"
 
         // ...and the refusals, which are the safety property. A camera name the
         // erasure cannot pin down exactly once would leave a literal standing
         // and render from a camera the caller never set -- silently, and to a
         // picture that looks entirely reasonable.
         let name = "the camera erasure refuses a name bound more than once"
-        let dupSrc = "let cam_r = 0.1\n\nlet cam_r = 0.2\n"
+        let dupSrc = "let cam_r: Float64 = 0.1\n\nlet cam_r = 0.2\n"
         match Blade.IdeServe.cameraErasedSource dupSrc ["cam_r"] "c.csv" with
         | Error e when e.Contains "cam_r" && e.Contains "2 times" -> record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
 
         let name = "the camera erasure refuses a name that is not bound at all"
-        match Blade.IdeServe.cameraErasedSource ("let q = 1\n") ["cam_r"] "c.csv" with
+        match Blade.IdeServe.cameraErasedSource ("let q: Int64 = 1\n") ["cam_r"] "c.csv" with
         | Error e when e.Contains "cam_r" && e.Contains "0 times" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure refuses repeated requested binding names"
+        match Blade.IdeServe.cameraErasedSource "let cam_r: Float64 = 0.1\n" ["cam_r"; "cam_r"] "c.csv" with
+        | Error e when e.Contains "requested more than once" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera reader preserves an indented declaration's whitespace"
+        match Blade.IdeServe.cameraErasedSource "  let cam_r: Float64 = 0.1\r\n" ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "read\n  let cam_r: Float64 = __blade_cam_slots(0, 0)\r\n" ->
+            record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
 
         // The camera crosses as text, so it has to cross EXACTLY: a lens moved
@@ -3697,7 +3744,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // advisories (which ride the warning log alone). Skipping the code
         // wholesale to avoid a duplicate dropped the second kind entirely.
         let domainSource =
-            "static struct Prod { i: Int<min=0, max=6>, j: Int<min=0, max=6> } where (i * j) % 3 == 1\n"
+            "static struct Prod { i: Int32<min=0, max=6>, j: Int32<min=0, max=6> } where (i * j) % 3 == 1\n"
             + "let R = method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j |> compute\n"
         let body = oneCheck "fast" "domain.blade" domainSource
         let name = "a constrained-domain advisory (BL4010 off the warning log) reaches the payload, at its span"
@@ -3712,12 +3759,12 @@ let private runIdeServeTests () : TH.BlockResult =
         // A lowering refusal carries a span, and the full tier used to throw
         // it away: the CLI pointed at the expression, the editor at 1:1.
         let lowerRefusal =
-            "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+            "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
             + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
             + "    let c = compound(x, m)\n"
             + "    reduce(c, (+))\n"
             + "}\n"
-            + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+            + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
             + "let s = f(a)\n"
         let body = oneCheck "full" "lower.blade" lowerRefusal
         // This is also the file that TYPECHECKS but will not lower: the fast
@@ -3732,7 +3779,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // "Void" is not a more concrete spelling of a static tuple's type; it
         // is what lowering leaves behind once the static evaluator has
         // consumed the binding.
-        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n = 4\n"
+        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n: Int64 = 4\n"
         let name = "tier=full never upgrades a binding's type to Void"
         if body.Contains "\"name\":\"dims\"" && not (body.Contains "\"concreteType\":\"Void\"") then
             record name TH.Pass ""
@@ -3744,7 +3791,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // the full one.
         let body =
             oneCheck "fast" "nostore.blade"
-                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n = 1\n"
+                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n: Int64 = 1\n"
         let name = "a store that cannot be read is BL2008 at the load site, on the fast tier"
         if body.Contains "\"code\":\"BL2008\"" && body.Contains "\"line\":2,\"col\":9"
            && body.Contains "not a Zarr store" then record name TH.Pass ""
@@ -3774,7 +3821,7 @@ let private runIdeServeTests () : TH.BlockResult =
         let mkSession (suffix: string) (owner: int option) (ageHours: float) =
             let dir = Path.Combine(sweepRoot, Blade.ReplSession.sessionDirPrefix + suffix)
             Directory.CreateDirectory dir |> ignore
-            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x = 1\n")
+            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x: Int64 = 1\n")
             (match owner with
              | Some pid -> File.WriteAllText(Path.Combine(dir, Blade.ReplSession.ownerMarkerName), string pid)
              | None -> ())
@@ -3933,7 +3980,11 @@ let private runSurfaceTests () : TH.BlockResult =
             yield sprintf "ternary intrinsics = %A" (mathIntrinsic "ternary")
           if mathIntrinsic "unary" |> List.isEmpty then yield "unary intrinsics empty"
           if mathIntrinsic "complex" |> List.isEmpty then yield "complex intrinsics empty"
-          if scalarTypes.Length <> 16 then yield $"{scalarTypes.Length} scalar types"
+          if scalarTypes.Length <> 13 then yield $"{scalarTypes.Length} scalar types (expected 13)"
+          for t in [ "Int32"; "Int64"; "Float32"; "Float64"; "Complex64"; "Complex128" ] do
+              if not (List.contains t scalarTypes) then yield $"scalarTypes lacks {t}"
+          for t in [ "Int"; "Float"; "Double" ] do
+              if List.contains t scalarTypes then yield $"scalarTypes still lists removed spelling {t}"
           if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
           for b in coreBuiltins do
             if not (Set.contains b builtins) then yield $"builtins lacks {b}"
@@ -4117,7 +4168,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         // its "return value" (a trailing bare expression) and nothing else, so
         // the binding's value is read back by a later bare-identifier cell.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "x"; shutdownReq ]
         let name = "eval keeps a declaration silently; a bare identifier reads it back"
         match responses with
         | [decl; probe] when code = 0 && decl.Contains "\"id\":1" && decl.Contains "\"kept\":true"
@@ -4133,7 +4184,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         // it, and reports under the EMPTY name -- the transient wrapper's own
         // name is an implementation detail the client never sees.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x + 1"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "x + 1"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a bare expression echoes under the empty name and is not kept"
         match responses with
@@ -4151,8 +4202,8 @@ let private runIdeEvalTests () : TH.BlockResult =
         // PLACE, so the dependent expression recomputes rather than seeing a
         // shadowed duplicate (which would not even compile).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "let y = x * 10"
-                    evalReq 3 "nb" "let x = 5"; evalReq 4 "nb" "y"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "let y = x * 10"
+                    evalReq 3 "nb" "let x: Int64 = 5"; evalReq 4 "nb" "y"; shutdownReq ]
         let name = "rebinding a name splices in place and dependents recompute"
         match responses with
         | [_; _; rebind; after] when code = 0
@@ -4175,9 +4226,9 @@ let private runIdeEvalTests () : TH.BlockResult =
         // (no comment above it) spliced correctly while `a` did not, so the
         // cell half-applied. 456 is the fixed answer; 756 was the bug.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let a = 1.0\nlet b = 2.0\nlet c = 3.0"
+            drive [ evalReq 1 "nb" "let a: Float64 = 1.0\nlet b: Float64 = 2.0\nlet c: Float64 = 3.0"
                     evalReq 2 "nb" "let s = a * 100.0 + b * 10.0 + c"
-                    evalReq 3 "nb" "// the camera\nlet a = 4.0\nlet b = 5.0\nlet c = 6.0"
+                    evalReq 3 "nb" "// the camera\nlet a: Float64 = 4.0\nlet b: Float64 = 5.0\nlet c: Float64 = 6.0"
                     evalReq 4 "nb" "s"; shutdownReq ]
         let name = "a comment-led rebind still supersedes (every binding in the cell)"
         match responses with
@@ -4218,7 +4269,7 @@ let (a, b) = pair(7.0)
         // 4. Two notebooks, one serve process, the same name in both: the
         // sessions are keyed independently or this whole design is unusable.
         let (code, responses, _) =
-            drive [ evalReq 1 "nbA" "let x = 2"; evalReq 2 "nbB" "let x = 99"
+            drive [ evalReq 1 "nbA" "let x: Int64 = 2"; evalReq 2 "nbB" "let x: Int64 = 99"
                     evalReq 3 "nbA" "x"; evalReq 4 "nbB" "x"; shutdownReq ]
         let name = "two sessions with clashing names do not leak into each other"
         match responses with
@@ -4232,7 +4283,7 @@ let (a, b) = pair(7.0)
         // binding goes, and an unknown key is a no-op rather than an error
         // (restart fires before the first cell has ever run).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; resetReq 2 "nb"; evalReq 3 "nb" "x"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; resetReq 2 "nb"; evalReq 3 "nb" "x"
                     resetReq 4 "never-seen"; shutdownReq ]
         let name = "resetSession clears the session and tolerates unknown keys"
         match responses with
@@ -4249,8 +4300,8 @@ let (a, b) = pair(7.0)
         // line, four lines into the assembled session file), no bindings are
         // claimed, and the session evaluates afterwards exactly as before.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    evalReq 2 "nb" "let bad = 1\nlet worse = undefined_name_xyz"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    evalReq 2 "nb" "let bad: Int64 = 1\nlet worse = undefined_name_xyz"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a rejected snippet reports cell-local spans and leaves the session intact"
         match responses with
@@ -4272,8 +4323,8 @@ let (a, b) = pair(7.0)
         Directory.CreateDirectory(tmpDir) |> ignore
         let otherPath = Path.Combine(tmpDir, "other.blade")
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    checkReq 2 otherPath "let unrelated = 41 + 1\n"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    checkReq 2 otherPath "let unrelated: Int64 = 41 + 1\n"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a check interleaved between two evals disturbs neither"
         match responses with
@@ -4291,9 +4342,9 @@ let (a, b) = pair(7.0)
         // meaning in this cell. Those clamp to 1:1 and say where they really
         // came from, instead of squiggling an innocent line.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let xs = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let xs = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let tot = reduce(xs, (+))"
-                    evalReq 3 "nb" "let xs = 1.0"
+                    evalReq 3 "nb" "let xs: Float64 = 1.0"
                     evalReq 4 "nb" "tot"; shutdownReq ]
         let name = "a rebind that breaks a LATER snippet clamps and says so"
         match responses with
@@ -4319,7 +4370,7 @@ let (a, b) = pair(7.0)
         // 10. Framing, on a response whose own content contains newlines: the
         // multi-line submission escapes INTO the line, never through it.
         let (code, responses, raw) =
-            drive [ evalReq 1 "nb" "let a = 1\nlet b = undefined_name_xyz"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let a: Int64 = 1\nlet b = undefined_name_xyz"; shutdownReq ]
         let name = "an eval response is exactly one newline-terminated line"
         if code = 0 && responses.Length = 1 && raw.EndsWith "\n" && raw.Split('\n').Length = 2 then
             record name TH.Pass ""
@@ -4343,7 +4394,7 @@ let (a, b) = pair(7.0)
         // 12. A :paste-shaped cell declares several names at once. All of them
         // bind -- silently. A later cell reads any of them back.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let m = 3\nlet n = m + 4"; evalReq 2 "nb" "n"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let m: Int64 = 3\nlet n = m + 4"; evalReq 2 "nb" "n"; shutdownReq ]
         let name = "a multi-declaration cell is silent and binds every name"
         match responses with
         | [decls; probe] when code = 0
@@ -4360,7 +4411,7 @@ let (a, b) = pair(7.0)
                     "{\"id\":32,\"cmd\":\"eval\",\"source\":\"let x = 1\"}"
                     "{\"id\":33,\"cmd\":\"resetSession\"}"
                     "{\"id\":34,\"cmd\":\"evaluate\",\"session\":\"nb\",\"source\":\"let x = 1\"}"
-                    evalReq 35 "nb" "let x = 1"; shutdownReq ]
+                    evalReq 35 "nb" "let x: Int64 = 1"; shutdownReq ]
         let name = "incomplete eval requests error without stopping the loop"
         match responses with
         | [noSource; noSession; noKey; unknownCmd; good] when
@@ -4382,7 +4433,7 @@ let (a, b) = pair(7.0)
         // line (`--> line 1`, cell coordinates), and the diagnostic is rebuilt
         // from it at that line (column 1 -- the panic carries no column).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"
+            drive [ evalReq 1 "nb" "let z: Int64 = 1 / 0"; evalReq 2 "nb" "let ok: Int64 = 6"
                     evalReq 3 "nb" "ok"; shutdownReq ]
         let name = "a runtime panic is not kept and names itself"
         match responses with
@@ -4407,7 +4458,7 @@ let (a, b) = pair(7.0)
         // span in an EARLIER cell says "elsewhere in session" rather than
         // squiggling this one.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let a = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
+            drive [ evalReq 1 "nb" "let a: Float64 = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
                     evalReq 2 "nb2" "struct Pos {\n    v: Float64\n} where v >= 0.0"
                     evalReq 3 "nb2" "let p = Pos { v = -5.0 }"
                     shutdownReq ]
@@ -4443,7 +4494,7 @@ let (a, b) = pair(7.0)
         // that failed. It is neither: it is three statements -- and the cell
         // displays exactly ONE value, its trailing expression's.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let t1 = 2\nlet t2 = 3\nt1 + t2"
+            drive [ evalReq 1 "nb" "let t1: Int64 = 2\nlet t2: Int64 = 3\nt1 + t2"
                     evalReq 2 "nb" "t2"; shutdownReq ]
         let name = "a cell mixing declarations with a trailing expression runs whole"
         match responses with
@@ -4462,7 +4513,7 @@ let (a, b) = pair(7.0)
         // whole-array `bindings` equality, because "exactly one echo" is the
         // property under test.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let p = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
+            drive [ evalReq 1 "nb" "let p: Int64 = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
                     shutdownReq ]
         let name = "an interleaved cell displays only its final expression"
         let expectedOrder =
@@ -4476,7 +4527,7 @@ let (a, b) = pair(7.0)
         // still evaluates against the session without joining it. Only the
         // last expression displays; the earlier one runs for effect.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let e1 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
+            drive [ evalReq 1 "nb" "let e1: Int64 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
                     evalReq 3 "nb" "e1 + 1\ne1 * 2"; shutdownReq ]
         let name = "an expression-only cell echoes its final value and joins nothing"
         let finalValue =
@@ -4495,8 +4546,8 @@ let (a, b) = pair(7.0)
         // declared twice (which would not compile) and the expressions -- being
         // transient -- leave no second copy behind either.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let m = 1\nlet n = m + 1\nn * 10"
-                    evalReq 2 "nb" "let m = 5\nlet n = m + 1\nn * 10"
+            drive [ evalReq 1 "nb" "let m: Int64 = 1\nlet n = m + 1\nn * 10"
+                    evalReq 2 "nb" "let m: Int64 = 5\nlet n = m + 1\nn * 10"
                     evalReq 3 "nb" "n"; shutdownReq ]
         let name = "re-running a mixed cell replaces it instead of redeclaring it"
         match responses with
@@ -4515,8 +4566,8 @@ let (a, b) = pair(7.0)
         // a later cell rebinding `g1` would supersede the snippet entire,
         // taking `g2` down with it and leaving every downstream cell unbound.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let g1 = 1\nlet g2 = 2\ng1 + g2"
-                    evalReq 2 "nb" "let mut g1 = 7"
+            drive [ evalReq 1 "nb" "let g1: Int64 = 1\nlet g2: Int64 = 2\ng1 + g2"
+                    evalReq 2 "nb" "let mut g1: Int64 = 7"
                     evalReq 3 "nb" "g1 + g2"; shutdownReq ]
         let name = "rebinding one name of a mixed cell leaves its other names standing"
         match responses with
@@ -4532,8 +4583,8 @@ let (a, b) = pair(7.0)
         // read on the next line of the SAME cell has to see.
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
-                        ("let mut buf = [0.0, 0.0, 0.0]\n"
-                         + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+                        ("let mut buf = Float64([0.0, 0.0, 0.0])\n"
+                         + "function fill(out: mut Array<Float64 like Idx<3>>) = {\n"
                          + "    out(0) += 1.5\n}\nfill(buf)\nbuf")
                     shutdownReq ]
         let name = "a call-for-effect statement mutates what the next statement reads"
@@ -4549,7 +4600,7 @@ let (a, b) = pair(7.0)
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
                         ("function csum(a: T^1, b: T^1)\nwhere comm(a, b) = {\n    a + b\n}\n"
-                         + "csum([1.0, 2.0], [3.0, 4.0])")
+                         + "csum(Float64([1.0, 2.0]), Float64([3.0, 4.0]))")
                     shutdownReq ]
         let name = "a where clause on its own line does not start a new statement"
         match responses with
@@ -4564,7 +4615,7 @@ let (a, b) = pair(7.0)
         // echoed a binding literally called `rec`, with no type and no value.
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
-                        ("let rec seq: Array<Float like Idx<4>> =\n    match seq with\n"
+                        ("let rec seq: Array<Float64 like Idx<4>> =\n    match seq with\n"
                          + "    | zero -> zero\n    | zero :: s -> zero :: 1.0\n"
                          + "    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
                          + "reduce(seq, (+))")
@@ -4585,7 +4636,7 @@ let (a, b) = pair(7.0)
         // pattern it read as a bare expression, was wrapped in a TRANSIENT
         // binding, and its write left the session with the wrapper.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let arr = [1.0, 2.0, 3.0]\narr(0) = 9.0"
+            drive [ evalReq 1 "nb" "let arr = Float64([1.0, 2.0, 3.0])\narr(0) = 9.0"
                     evalReq 2 "nb" "arr"; shutdownReq ]
         let name = "an element write is a reassignment and persists in the session"
         match responses with
@@ -4603,8 +4654,8 @@ let (a, b) = pair(7.0)
         // CELL's coordinates -- which is what the per-statement placements are
         // for, since each statement is now its own snippet in the session file.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let keepme = 1"
-                    evalReq 2 "nb" "let bad1 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
+            drive [ evalReq 1 "nb" "let keepme: Int64 = 1"
+                    evalReq 2 "nb" "let bad1: Int64 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
                     evalReq 3 "nb" "keepme"; shutdownReq ]
         let name = "a failing mixed cell reports cell-local spans and keeps nothing"
         match responses with
@@ -4632,7 +4683,7 @@ let (a, b) = pair(7.0)
             drive [ evalReq 1 "nb" "from stats import mean"
                     evalReq 2 "nb" "function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }"
                     evalReq 3 "nb" "covariance"
-                    evalReq 4 "nb" "let after = 6"
+                    evalReq 4 "nb" "let after: Int64 = 6"
                     shutdownReq ]
         let name = "a bare reference to an unapplied generic echoes without diagnostics"
         match responses with
@@ -4672,7 +4723,7 @@ let (a, b) = pair(7.0)
                     evalReq 3 "nb" "poly   // : the commented spelling"
                     evalReq 4 "nb" "// a note above it\npoly"
                     evalReq 5 "nb" "function conc(x: Float64) -> Float64 = x + 1.0\nconc"
-                    evalReq 6 "nb" "let plainval = 6\nplainval"
+                    evalReq 6 "nb" "let plainval: Int64 = 6\nplainval"
                     shutdownReq ]
         let name = "a bare function reference echoes the declaration, comments and all"
         let pretty = "{\"name\":\"poly\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
@@ -4751,7 +4802,7 @@ let (a, b) = pair(7.0)
         let mlCell = "let static s2 = [(0, 0, 2)]\nlet lout = ml.linear(s2, s2, [2.0, 1.0, 0.0, 3.0], [5.0, 7.0])"
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "import ml as ml"
-                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 3 "nb" mlCell
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
@@ -4770,7 +4821,7 @@ let (a, b) = pair(7.0)
         // worth anything if the skipped initializer would have produced this.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "import ml as ml"
-                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 3 "nb" mlCell
                     evalReq 4 "nb" "base_a"
                     shutdownReq ]
@@ -4786,9 +4837,9 @@ let (a, b) = pair(7.0)
         // longer matches and the whole memo goes. Shape agreement is not
         // permission to reuse a value whose defining text changed.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let derived = reduce(base_a, (+))"
-                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    evalReq 3 "nb" "let base_a = Float64([4.0, 5.0, 6.0])"
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
         let name = "editing an earlier binding still drops the memo"
@@ -4799,9 +4850,9 @@ let (a, b) = pair(7.0)
 
         // ...and the dependent recomputes off the NEW value, not the cached one.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let derived = reduce(base_a, (+))"
-                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    evalReq 3 "nb" "let base_a = Float64([4.0, 5.0, 6.0])"
                     evalReq 4 "nb" "derived"
                     shutdownReq ]
         let name = "a dependent of an edited binding recomputes from the new value"
@@ -4824,7 +4875,7 @@ let (a, b) = pair(7.0)
         let plotCell = "import display as d
 let pic = d.emit(\"image/png\", \"AA==\")"
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" plotCell
                     evalReq 3 "nb" "let tail_v = reduce(seed, (+))"
                     shutdownReq ]
@@ -4851,9 +4902,9 @@ let pic = d.emit(\"image/png\", \"AA==\")"
 let total = reduce(seed, (+))
 let shown = d.emit(\"image/png\", \"AA==\")"
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" readingPlot
-                    evalReq 3 "nb" "let seed = [10.0, 20.0, 30.0]"
+                    evalReq 3 "nb" "let seed = Float64([10.0, 20.0, 30.0])"
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
         let name = "editing the data under a plot drops its cached frame too"
@@ -4870,7 +4921,7 @@ let shown = d.emit(\"image/png\", \"AA==\")"
         let firstRun = responses |> List.tryHead |> Option.defaultValue ""
         let (code2, responses2, _) =
             drive [ evalReq 1 "nb" plotCell
-                    evalReq 2 "nb" "let unrelated = 1"
+                    evalReq 2 "nb" "let unrelated: Int64 = 1"
                     shutdownReq ]
         let name = "a replayed frame is byte-identical to the computed one"
         // Just the display array: the rest of the response legitimately
@@ -4898,7 +4949,7 @@ let shown = d.emit(\"image/png\", \"AA==\")"
         // `a` and `b` are all adopted and only the new cell's binding runs.
         let midCell = "let a = reduce(seed, (+))\na\nlet b = a * 2.0"
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" midCell
                     evalReq 3 "nb" "let c = b + 1.0"
                     shutdownReq ]
@@ -4913,7 +4964,7 @@ let shown = d.emit(\"image/png\", \"AA==\")"
 
         // ...and the adopted values are the ones the cell computed.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" midCell
                     evalReq 3 "nb" "let c = b + 1.0\nc"
                     shutdownReq ]
@@ -4928,8 +4979,8 @@ let shown = d.emit(\"image/png\", \"AA==\")"
         // read, so its run is not reusable and the memo goes, exactly as for
         // any other dropped snippet that is not provably mutation-free.
         let pokeCell =
-            "let mut buf = [0.0, 0.0, 0.0]\n"
-            + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+            "let mut buf = Float64([0.0, 0.0, 0.0])\n"
+            + "function fill(out: mut Array<Float64 like Idx<3>>) = {\n"
             + "    out(0) += 1.5\n}\nfill(buf)\nlet after = buf(0)"
         let (code, responses, _) =
             drive [ evalReq 1 "nb" pokeCell
@@ -5034,9 +5085,9 @@ let private runIdeCellsTests () : TH.BlockResult =
         // so neither "drop the earlier" nor "drop the later" is enough on its
         // own -- the later text has to take the earlier one's place.
         let demoCells =
-            [ "let xs = [1.0, 2.0, 3.0]"
+            [ "let xs = Float64([1.0, 2.0, 3.0])"
               "reduce(xs, (+)) |> compute"
-              "let xs = [10.0, 20.0, 30.0, 40.0]"
+              "let xs = Float64([10.0, 20.0, 30.0, 40.0])"
               "let xloop = method_for(xs, xs)" ]
 
         // 1. The shape contract: one window per cell, in cell order.
@@ -5099,8 +5150,8 @@ let private runIdeCellsTests () : TH.BlockResult =
         // every keystroke, so committing anything to a session would corrupt
         // the notebook the user is actually running.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    cellsReq 2 "fast" nbPath [ "let unrelated = 9" ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    cellsReq 2 "fast" nbPath [ "let unrelated: Int64 = 9" ]
                     evalReq 3 "nb" "x"; shutdownReq ]
         let name = "checkCells commits nothing to an eval session"
         match responses with
@@ -5114,7 +5165,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // 8. The full tier reaches monomorphization here exactly as it does
         // for a single file -- a notebook is where HM values are most common.
         let (code, responses, _) =
-            drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(42)" ]; shutdownReq ]
+            drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(Int64(42))" ]; shutdownReq ]
         let fullBody = match responses with [r] -> r | _ -> ""
         // The HM binding is concrete in the typed AST itself now (the call
         // judgment instantiates `id` per call), so the full tier has nothing
@@ -5181,7 +5232,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // WHOLE notebook, so a single mixed cell used to blank every other
         // cell's hovers and squiggles.
         let mixedCells =
-            [ "let mx = 2\nlet my = 3\nmx + my"
+            [ "let mx: Int64 = 2\nlet my: Int64 = 3\nmx + my"
               "let mz = mx * my" ]
         let (code, responses, _) = drive [ cellsReq 71 "fast" nbPath mixedCells; shutdownReq ]
         let mixedBody = match responses with [r] -> r | _ -> ""
@@ -5202,7 +5253,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // first (there is one wrap pair on the wire); what matters here is that
         // all of them parsed.
         let (code, responses, _) =
-            drive [ cellsReq 72 "fast" nbPath [ "let ma = 1\nma + 1\nlet mb = 2\nmb + 1" ]
+            drive [ cellsReq 72 "fast" nbPath [ "let ma: Int64 = 1\nma + 1\nlet mb: Int64 = 2\nmb + 1" ]
                     shutdownReq ]
         let multiBody = match responses with [r] -> r | _ -> ""
         let name = "several bare expressions in one cell each take their own wrapper"
@@ -5275,7 +5326,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
 
     // 1. The base case: a value binding, and both of its uses on the next line.
     expect "a let binding reports its name token and every use"
-        "let x = 10\nlet y = x + x\n"
+        "let x: Int64 = 10\nlet y = x + x\n"
         [ "x value 1:5-1:6 [2:9-2:10 2:13-2:14]"
           "y value 2:5-2:6 []" ]
 
@@ -5284,7 +5335,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // name instead of IRId, this would be one entry with a merged use list and
     // rename would corrupt the file.
     expect "a shadowed name yields two entries with disjoint uses"
-        "let x = 1\nfunction shadow(p) = {\n    let x = p + 1\n    x * 2\n}\n"
+        "let x: Int64 = 1\nfunction shadow(p) = {\n    let x = p + 1\n    x * 2\n}\n"
         [ "x value 1:5-1:6 []"
           "shadow function 2:10-2:16 []"
           "p param 2:17-2:18 [3:13-3:14]"
@@ -5309,7 +5360,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 5. Kernel parameters: a lambda can sit anywhere in an expression, so
     // these come from a full-tree sweep rather than the declaration walk.
     expect "lambda kernel parameters are reported like any other param"
-        "let data = [[1.0, 2.0], [3.0, 4.0]]\n\
+        "let data = Float64([[1.0, 2.0], [3.0, 4.0]])\n\
          let out = object_for(lambda(u, w) -> u * w) <@> (data, data) |> compute\n"
         [ "data value 1:5-1:9 [2:50-2:54 2:56-2:60]"
           "out value 2:5-2:8 []"
@@ -5319,7 +5370,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 6. `type` names have no IRId and nothing ever refers to one through a
     // variable node, so they are def-only entries located in the source text.
     expect "a type declaration is a def-only entry of kind \"type\""
-        "type Small = Idx<4>\nlet g = 1\n"
+        "type Small = Idx<4>\nlet g: Int64 = 1\n"
         [ "Small type 1:6-1:11 []"
           "g value 2:5-2:6 []" ]
 
@@ -5330,7 +5381,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     let broadSource =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let broad = refsOf broadSource
     let name = "no synthesized names and no declaration-wide phantom spans"
@@ -5356,14 +5407,14 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 8. A file with a type error still navigates: the checker's PARTIAL typed
     // program feeds references exactly as it already feeds bindings and calls.
     expect "a type error still yields references for the parts that checked"
-        "let good = 5\nfunction useit(v) = v + good\nlet bad: Int64 = \"nope\"\n"
+        "let good: Int64 = 5\nfunction useit(v) = v + good\nlet bad: Int64 = \"nope\"\n"
         [ "good value 1:5-1:9 [2:25-2:29]"
           "useit function 2:10-2:15 []"
           "v param 2:16-2:17 [2:21-2:22]" ]
 
     // 9. A binding nobody reads is still renameable, so it still gets an entry.
     expect "an unused binding keeps an entry with an empty use list"
-        "let orphan = 42\n"
+        "let orphan: Int64 = 42\n"
         [ "orphan value 1:5-1:11 []" ]
 
     // 10. `let rec` used to stamp the whole `match ... with` block onto its
@@ -5404,10 +5455,10 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 12. The `bindings[]` companion change: `endLine`/`endCol` close the
     // DECLARATION span that `line`/`col` already opened, appended last so the
     // leading field run every existing client matches on is byte-identical.
-    let (json, _) = Blade.Ide.ideCheckSource "refs.blade" "let x = 10\n"
+    let (json, _) = Blade.Ide.ideCheckSource "refs.blade" "let x: Int64 = 10\n"
     let name = "bindings[] gained end corners without disturbing the leading fields"
     if json.Contains "\"name\":\"x\",\"kind\":\"let\",\"line\":1,\"col\":1,\"type\":\"Int64\""
-       && json.Contains "\"endLine\":1,\"endCol\":11" then
+       && json.Contains "\"endLine\":1,\"endCol\":18" then
         record name TH.Pass ""
     else
         record name TH.Fail json

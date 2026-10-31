@@ -6,7 +6,7 @@
 //   Float64(3) * z                    -> an integer converts explicitly
 //                                        (`3 * z` is BL3020, casts/530)
 //   z * z     (complex * complex)     -> same type
-let z = complex(1.0, 2.0)
+let z: Complex128 = complex(1.0, 2.0)
 let dz = 2.0 * z
 let zp = z + 1.0
 let iz = Float64(3) * z

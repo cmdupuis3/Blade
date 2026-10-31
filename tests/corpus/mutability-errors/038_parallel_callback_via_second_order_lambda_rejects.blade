@@ -5,7 +5,7 @@
 // writer spelled as a lambda argument of the indirect call (a lambda is
 // lifted to a callable, then propagated like a named one).
 type I = Idx<2>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
 function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)

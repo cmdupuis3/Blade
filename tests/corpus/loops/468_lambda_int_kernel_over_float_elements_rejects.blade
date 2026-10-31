@@ -1,9 +1,9 @@
 // TEST: a lambda handing a Float64 element to an Int64 parameter (rejects)
-// ERROR: BL3001 @ 8:51
+// ERROR: BL3001 @ 8:60
 // The lambda spelling of loops/441. The call `g(x)` was judged while the
 // lambda's `x` was still open (the row decides it), so nothing refused it,
 // and g++ met a double where `g` takes an int64_t (BL9002). The call is now
 // judged again once the row is known, exactly as `g(1.5)` would be: refused
 // at the argument.
 function g(i: Int64) = i * 2
-let d = method_for([1.5, 2.5]) <@> lambda(x) -> g(x) |> compute
+let d = method_for(Float64([1.5, 2.5])) <@> lambda(x) -> g(x) |> compute

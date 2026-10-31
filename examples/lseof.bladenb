@@ -40,18 +40,18 @@ Unit flux
 Unit time: day
 Unit angular_frequency: 1 / day
 
-let i = complex(0.0, 1.0)
-let two_pi = 6.283185307179586
+let i: Complex128 = complex(0.0, 1.0)
+let two_pi: Float64 = 6.283185307179586
 
 // Everything is at full resolution: 48 points, 240 samples, 24 frequency bins.
 // `n_freq` is the one size that reaches the eigenproblem (see the covariance
 // cell), but even so the solve is a 48 x 48 Jacobi — a few million scalar
 // operations, i.e. milliseconds of real work.
-let static n_lat = 6
-let static n_lon = 8
+let static n_lat: Int64 = 6
+let static n_lon: Int64 = 8
 let static n_space = n_lat * n_lon
-let static n_t = 240
-let static n_freq = 24
+let static n_t: Int64 = 240
+let static n_freq: Int64 = 24
 let static n_dual = 2 * n_freq
 type Lat = Idx<n_lat>
 type Lon = Idx<n_lon>
@@ -79,7 +79,7 @@ let rec ts_days: Array<Float64 like Time> = match ts_days with
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: {
         let jf = Float64(n)
-        let burst = if sin(937.11 * jf + 0.3) > 0.8 then 6.0 else 1.0
+        let burst: Float64 = if sin(937.11 * jf + 0.3) > 0.8 then 6.0 else 1.0
         prefix(n - 1) + 0.125 * burst * (1.0 + 0.4 * sin(5.7 * jf + 0.9))
     }
 
@@ -241,7 +241,7 @@ let lats = Float64(range<Lat>)
 // %%
 plot.heatmap(lons, lats, to_grid(amp_flat), "LSDFT diurnal amplitude": title)
 // %%
-plot.heatmap(lons, lats, to_grid(phase_flat), 4: cmap, "LSDFT diurnal phase": title)
+plot.heatmap(lons, lats, to_grid(phase_flat), Int64(4): cmap, "LSDFT diurnal phase": title)
 
 // %% [markdown]
 // ## Covariance in spectral space — solved on its small side
@@ -348,14 +348,14 @@ let eof1 = eof(0)
 let eof1_amp = abs(eof1)
 let eof1_phase = arg(eof1)
 plot.heatmap(lons, lats, to_grid(eof1_amp), "EOF 1 amplitude": title)
-plot.heatmap(lons, lats, to_grid(eof1_phase), 4: cmap, "EOF 1 phase": title)
+plot.heatmap(lons, lats, to_grid(eof1_phase), Int64(4): cmap, "EOF 1 phase": title)
 
 // %%
 let eof2 = eof(2)
 let eof2_amp = abs(eof2)
 let eof2_phase = arg(eof2)
 plot.heatmap(lons, lats, to_grid(eof2_amp), "EOF 2 amplitude": title)
-plot.heatmap(lons, lats, to_grid(eof2_phase), 4: cmap, "EOF 2 phase": title)
+plot.heatmap(lons, lats, to_grid(eof2_phase), Int64(4): cmap, "EOF 2 phase": title)
 
 // %% [markdown]
 // ## Where to take this next

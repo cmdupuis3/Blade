@@ -13,7 +13,7 @@
 // plus at most one catch-all. The condition belongs INSIDE the chosen arm's
 // body -- see 054 for the accepted spelling.
 // ============================================================================
-let threshold = 1.5
+let threshold: Float64 = 1.5
 function packsum(A: Poly<T^0>) -> T^0 = {
     match arity(A) with
     | 1 if threshold > 0.0 -> A[0]
@@ -23,4 +23,4 @@ function packsum(A: Poly<T^0>) -> T^0 = {
         head + packsum(tail)
     }
 }
-let result = packsum(1.0, 2.0, 3.0, 4.0)
+let result = packsum(Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0))

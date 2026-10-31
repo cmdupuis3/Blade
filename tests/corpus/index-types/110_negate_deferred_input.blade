@@ -6,7 +6,7 @@
 // index the input by name, so its codegen forces the deferred binding in
 // place first (shared forceDeferredArrayInput helper). Values mirror
 // 033_transpose_antisym_negate.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let anti = L <@> reynolds(g, Antisymmetric)

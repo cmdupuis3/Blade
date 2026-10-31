@@ -1,0 +1,13 @@
+// TEST: a defaulted local inside a generic body is a Float32 variable (rejects)
+// ============================================================================
+// Lead ruling A3: `let c = 0.1` has nothing fixing its width, so `c` is a
+// Float32 VARIABLE; `x * c` at a Float64 instance mixes widths and is refused
+// at the call (spell `let c: Float64 = 0.1`, or keep the literal beside `x`).
+// ============================================================================
+function f(x: T) -> T = {
+    let c = 0.1
+    x * c
+}
+let d: Float64 = 2.0
+let r = f(d)
+// ERROR: BL3019

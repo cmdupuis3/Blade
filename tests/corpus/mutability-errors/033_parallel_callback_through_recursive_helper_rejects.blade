@@ -4,7 +4,7 @@
 // Gap G41, Codex review W2F-6 finding 23: the kernel hands its callback to a
 // self-recursive helper that finally calls it; the only candidate writes G.
 // A cycle through a callback is joined like any other.
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function bump(v: Int64) -> Float64 = {
     G(0) = G(0) + 1.0
     G(0)

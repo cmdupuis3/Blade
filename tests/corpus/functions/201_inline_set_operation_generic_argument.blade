@@ -16,31 +16,31 @@
 // `/ extents(row)` would put an Int64 beside a Float64 element.
 function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 function center(v: T^1) -> T^1 = v - lmean(v)
-let x = [1.0, 2.0, 3.0, 6.0]
+let x = Float64([1.0, 2.0, 3.0, 6.0])
 
 // [2, 6], in x's order
-let ci = center(intersect(x, [2.0, 6.0, 9.0]))
+let ci = center(intersect(x, Float64([2.0, 6.0, 9.0])))
 // EXPECT: ci = [-2.0, 2.0]
 
 // [1, 2, 3, 6, 9]: mean 4.2
-let cu = center(union(x, [9.0, 1.0]))
+let cu = center(union(x, Float64([9.0, 1.0])))
 // EXPECT: cu = [-3.2, -2.2, -1.2, 1.8, 4.8]
 
 // [3, 1, 5]
-let cq = center(unique([3.0, 1.0, 3.0, 5.0]))
+let cq = center(unique(Float64([3.0, 1.0, 3.0, 5.0])))
 // EXPECT: cq = [0.0, -2.0, 2.0]
 
 // Nested, and an Int64 element.
-let cn = center(unique(intersect(x, [6.0, 2.0, 6.0])))
+let cn = center(unique(intersect(x, Float64([6.0, 2.0, 6.0]))))
 // EXPECT: cn = [-2.0, 2.0]
-let xi = [4, 8, 8, 12]
+let xi = Int64([4, 8, 8, 12])
 let ciq = center(unique(xi))
 // EXPECT: ciq = [-4, 0, 4]
 
 // Straight into the T^0 helper.
-let m = lmean(intersect(x, [2.0, 6.0, 9.0]))
+let m = lmean(intersect(x, Float64([2.0, 6.0, 9.0])))
 // EXPECT: m = 4.0
 
 // An empty result: the specialization reads the run-time length.
-let n_empty = extents(center(intersect(x, [100.0])))
+let n_empty = extents(center(intersect(x, Float64([100.0]))))
 // EXPECT: n_empty = 0

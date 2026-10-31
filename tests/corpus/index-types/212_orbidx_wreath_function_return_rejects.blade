@@ -13,7 +13,7 @@
 // annotation-only check would have let exactly this case through.
 let h = lambda(p, q) where comm(p, q) -> p + q
 function tie(X: Array<Float64 like SymIdx<2, 3>>) = method_for(X, X) <@> h |> compute
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let W = tie(S)

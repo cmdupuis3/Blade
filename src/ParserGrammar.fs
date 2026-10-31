@@ -475,6 +475,12 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
 and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (TokIdent ("True" | "False" as name)) ->
+        let line, col = currentPos tokens
+        errorC "BL1003" (capitalBoolMessage name) line col
+    | Some (TokIdent name) when isWidthlessTypeName name && (match peek (advance tokens) with Some TokLParen -> true | _ -> false) ->
+        let line, col = currentPos tokens
+        errorC "BL1004" (widthlessTypeMessage name + $" -- a cast is spelled with the target's full name, `Float64(x)`") line col
 
     // Wildcard hole `_` (e.g. a free axis in a compound index B((a, _, c))):
     // a general token whose meaning comes from the consuming context;
@@ -1260,6 +1266,9 @@ and parseGuardMultiplicative (tokens: Token list) : ParseResult<Expr> =
 and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (TokIdent ("True" | "False" as name)) ->
+        let line, col = currentPos tokens
+        errorC "BL1003" (capitalBoolMessage name) line col
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with

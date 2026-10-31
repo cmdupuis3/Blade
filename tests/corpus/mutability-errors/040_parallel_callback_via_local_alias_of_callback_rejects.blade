@@ -7,7 +7,7 @@
 // launch's `f` (804516d1 matched the head by name, found neither a callable
 // nor a callback, and lost the edge: it compiled).
 type I = Idx<2>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + 1.0

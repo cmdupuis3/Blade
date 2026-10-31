@@ -3,5 +3,5 @@
 // ============================================================================
 // Only arrays and functions take arguments: a scalar is refused at the
 // argument, not lowered to a call of a double.
-let u = lambda(c) -> c(0) + 1.0
+let u = lambda(c) -> c(Int64(0)) + 1.0
 let w = u(2.0)

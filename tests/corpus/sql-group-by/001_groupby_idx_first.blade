@@ -16,8 +16,8 @@
 // can opt into Case 1 (positional Idx<N>) or Case 2 (EnumIdx reverse lookup)
 // by annotating the keys array; otherwise Case 3 (dynamic max+1) fires.
 // First element of each group; no annotation -> Case 3 dynamic.
-let region = [0, 1, 2, 0, 1, 2]
-let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute

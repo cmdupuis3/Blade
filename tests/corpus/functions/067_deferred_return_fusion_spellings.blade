@@ -21,14 +21,14 @@
 // forcing, `reduce` sees a materialized array rather than a deferred
 // computation, so this is the eager path, not genReduceComputeBinding's.
 // ============================================================================
-let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let a: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 
-function mk(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
-function mk2(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x + 1.0 }
+function mk(xs: Array<Float64 like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
+function mk2(xs: Array<Float64 like Idx<4>>) = { xs <@> lambda(x) -> x + 1.0 }
 
 let dbl = object_for(lambda(x: Float64) -> x * 2.0)
 let inc = object_for(lambda(x: Float64) -> x + 1.0)
-function comp(xs: Array<Float like Idx<4>>) = { (dbl >>@ inc) <@> (xs) }
+function comp(xs: Array<Float64 like Idx<4>>) = { (dbl >>@ inc) <@> (xs) }
 
 let folded = reduce(mk(a), (+))
 let (fusedA, fusedB) = (mk(a) <&> mk2(a)) |> compute

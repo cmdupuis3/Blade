@@ -1,0 +1,16 @@
+// TEST: grad and jvp of a Float64 function at literal arguments
+// ============================================================================
+// The AD engine differentiates Float64 functions; literal arguments adapt to
+// the Float64 parameters (rule 5) and the synthesized derivative code binds
+// its own literal constants width-flexibly, so the flip of the literal
+// defaults changes nothing here.
+// ============================================================================
+import ad as ad
+function f(x: Float64) -> Float64 = x * x * x + 2.0 * x
+let (fv, dfdx) = ad.grad(f)(2.0)
+let d64: Float64 = dfdx
+let (pv, tv) = ad.jvp(f)(2.0, 1.0)
+// EXPECT: fv = 12.0
+// EXPECT: d64 = 14.0
+// EXPECT: pv = 12.0
+// EXPECT: tv = 14.0

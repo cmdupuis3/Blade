@@ -1,0 +1,31 @@
+// TEST: generic default literals take shared argument widths and retain units
+function offset(x: T^0, origin: T^0 = 0.0) = x - origin
+let raw32 = offset(Float32(4.0))
+let scalar32: Float32 = raw32
+let raw64 = offset(Float64(5.0))
+let scalar64: Float64 = raw64
+let explicit64: Float64 = offset(Float64(5.0), 1.0)
+
+Unit meters
+function shift(xs: T<meters>^1, origin: T<meters> = 0.0) = xs - origin
+let xs32: Array<Float32<meters> like Idx<2>> = [1.0, 2.0]
+let xs64: Array<Float64<meters> like Idx<2>> = [3.0, 4.0]
+let ys32: Array<Float32<meters> like Idx<2>> = shift(xs32)
+let ys64: Array<Float64<meters> like Idx<2>> = shift(xs64)
+let explicit_unit64: Array<Float64<meters> like Idx<2>> = shift(xs64, 1.0)
+let first32: Float32<meters> = ys32(0)
+let first64: Float64<meters> = ys64(0)
+let first_explicit64: Float64<meters> = explicit_unit64(0)
+
+// The default must not specialize the signature before checking this body.
+// This is the minimized lsdft failure: Complex128 sees an open real element.
+let imaginary: Complex128 = complex(0.0, 1.0)
+function phase(xs: T<meters>^1, origin: T<meters> = 0.0) = imaginary * (xs - origin)
+let phase64 = phase(xs64)
+
+// EXPECT: scalar32 = 4.0
+// EXPECT: scalar64 = 5.0
+// EXPECT: explicit64 = 4.0
+// EXPECT: first32 = 1.0
+// EXPECT: first64 = 3.0
+// EXPECT: first_explicit64 = 2.0

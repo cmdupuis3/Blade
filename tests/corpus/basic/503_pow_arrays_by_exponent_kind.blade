@@ -6,16 +6,16 @@
 // floating exponent is libm pow, and two arrays co-iterate -- a Float64 base
 // array against an Int64 exponent array squares each cell.
 // ============================================================================
-let xs = [1.5, 2.0, 3.0]
-let n = 3
-let es = [3, 2, -1]
-let is = [2, 3, 4]
+let xs = Float64([1.5, 2.0, 3.0])
+let n: Int64 = 3
+let es = Int64([3, 2, -1])
+let is = Int64([2, 3, 4])
 let a = xs ^ 2
 let b = xs ^ n
 let c = is ^ 3
 let d = xs ^ 0.5
 let e = xs ^ es
-let f = [2.0, 3.0] ^ [0.5, 2.0]
+let f = Float64([2.0, 3.0]) ^ Float64([0.5, 2.0])
 // EXPECT: a = [2.25, 4.0, 9.0]
 // EXPECT: b = [3.375, 8.0, 27.0]
 // EXPECT: c = "[8, 27, 64]"

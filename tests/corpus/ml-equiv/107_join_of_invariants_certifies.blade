@@ -4,7 +4,7 @@
 // refused BL4008 "the body is unclassifiable" under `where ml.equiv(O3)`.
 import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
-function both(a: Array<Float like IrrepsIdx<S>>, b: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like Idx<4>> =
+function both(a: Array<Float64 like IrrepsIdx<S>>, b: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float64 like Idx<4>> =
     join(ml.norms(S, a), ml.norms(S, b), 0)
-let v = both([1.0, 3.0, 4.0, 0.0], [2.0, 0.0, 0.0, 1.0])
+let v = both(Float64([1.0, 3.0, 4.0, 0.0]), Float64([2.0, 0.0, 0.0, 1.0]))
 // EXPECT: v = [1.0, 5.0, 2.0, 1.0]

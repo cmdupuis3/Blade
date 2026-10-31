@@ -6,7 +6,7 @@
 // code the LAPACK route raises on a non-zero info; its message also says
 // "did not converge").
 import math as m
-let bad = 0.0 / 0.0
+let bad: Float64 = 0.0 / 0.0
 let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, bad, 1.0], [0.0, 1.0, 2.0]]
 let (U, SV, V) = m.svd(S)
 // ABORT: error[BL8008]

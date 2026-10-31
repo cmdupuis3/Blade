@@ -22,6 +22,6 @@ function g(A: Array<Float64 like Idx<n>>) -> Float64 = {
     let P = L <@> lambda(x: Float64, y: Float64) -> x * 10.0 + y |> compute
     P(1, 2) + P(2, 1)
 }
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let s = g(a)
 // EXPECT: s = 55.0

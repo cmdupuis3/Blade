@@ -10,7 +10,7 @@
 // G = 8). A write has no single order inside a join, so it is refused, like a
 // write in a parallel body. Force the map first, or fold the legs separately.
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 let r = {
     let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
     let (s, t) = object_for(<&!>) <@> (reduce(m, (+)), reduce(m, (+)))

@@ -2,7 +2,7 @@
 // ============================================================================
 // `a(0)<-1` failed to parse: the lexer glued `<-` into one token. It is
 // `a(0) < -1`.
-let a = [3, -4, 5]
+let a = Int64([3, -4, 5])
 let b = a(1)<-1
 // EXPECT: b = true
 let c = a(0)<-1

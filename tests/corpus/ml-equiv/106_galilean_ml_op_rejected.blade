@@ -27,7 +27,7 @@ import ml as ml
 
 // The rejection: `u` is the declared boost-variant parameter, and its
 // components flow straight into an ml op. BL4009.
-function bad(u: Array<Float like Idx<3>>) where ml.galilean(u) -> Float = {
+function bad(u: Array<Float64 like Idx<3>>) where ml.galilean(u) -> Float64 = {
     let sh = ml.y_to(1, u(0), u(1), u(2))
     sh(0)
 }

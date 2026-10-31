@@ -55,8 +55,8 @@ let static RV = ml.pg_restrict("C4", V)
 // body is the polynomial x1, the declared output is the trivial rep, and the
 // identity f(rho(g) x) = f(x) fails at the generator r, which sends x1 to -x2.
 // BL4008 either way.
-function axis_readout(x: Array<Float like PgIrrepsIdx<C4, RV>>)
-                      where ml.equiv(C4) -> Float =
+function axis_readout(x: Array<Float64 like PgIrrepsIdx<C4, RV>>)
+                      where ml.equiv(C4) -> Float64 =
     x(1)
 
 let out = axis_readout([1.0, 3.0, 4.0])

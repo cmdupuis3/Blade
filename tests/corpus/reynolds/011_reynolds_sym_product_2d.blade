@@ -17,8 +17,8 @@
 // Symmetric product kernel: x*y → both perms identical → 1 term × 2
 // reynolds(f)(x,y) = 2*x*y
 // A=[1,2], B=[3,4]: [i][j] = 2*A[i]*B[j]
-let A = [1.0, 2.0]
-let B = [3.0, 4.0]
+let A = Float64([1.0, 2.0])
+let B = Float64([3.0, 4.0])
 let L = method_for(A, B)
 let g = lambda(x, y) -> x * y
 let result = L <@> reynolds(g) |> compute

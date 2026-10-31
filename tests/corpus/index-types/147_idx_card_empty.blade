@@ -28,9 +28,9 @@
 // the contradiction rather than to an accidentally degenerate box.
 // ============================================================================
 static struct Impossible {
-    a: Int<min=0, max=3>,
-    b: Int<min=0, max=3>,
-    s: Int<min=0, max=6>
+    a: Int32<min=0, max=3>,
+    b: Int32<min=0, max=3>,
+    s: Int32<min=0, max=6>
 } where a + b == s, s % 2 == 0, (a + b) % 2 == 1
 
 let static EMPTY = idx_card(Impossible)
@@ -41,9 +41,9 @@ let static EMPTY = idx_card(Impossible)
 // sum 0..6 is inside s's range, so the count saturates at the dense pair
 // count exactly as index-types/146's lo = 2 case does.
 static struct Possible {
-    a: Int<min=0, max=3>,
-    b: Int<min=0, max=3>,
-    s: Int<min=0, max=6>
+    a: Int32<min=0, max=3>,
+    b: Int32<min=0, max=3>,
+    s: Int32<min=0, max=6>
 } where a + b == s
 
 let static FULL = idx_card(Possible)
@@ -53,9 +53,9 @@ let static FULL = idx_card(Possible)
 // on the same box — 0+0, 0+2, 1+1, 1+3, 2+0, 2+2, 3+1, 3+3 and the rest:
 // of the 16 pairs, those with even sum are the 8 where a and b share parity.
 static struct EvenOnly {
-    a: Int<min=0, max=3>,
-    b: Int<min=0, max=3>,
-    s: Int<min=0, max=6>
+    a: Int32<min=0, max=3>,
+    b: Int32<min=0, max=3>,
+    s: Int32<min=0, max=6>
 } where a + b == s, s % 2 == 0
 
 let static EVENS = idx_card(EvenOnly)

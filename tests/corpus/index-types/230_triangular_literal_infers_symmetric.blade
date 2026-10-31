@@ -10,7 +10,7 @@
 // profile now carries its annotation (`RaggedIdx<lens>`, 019) — index-types
 // 022/023/024/025 and the inference probes are the files that say so. Any
 // other row profile is untouched: 232 pins that.
-let R = [[1, 2, 3], [4, 5], [6]]
+let R = Int64([[1, 2, 3], [4, 5], [6]])
 let r10 = R(1, 0)
 let r01 = R(0, 1)
 let r11 = R(1, 1)

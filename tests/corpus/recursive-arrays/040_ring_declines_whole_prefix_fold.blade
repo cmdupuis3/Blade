@@ -8,7 +8,7 @@
 type T = Idx<10>
 
 let out = {
-    let rec traj: Array<Float like T> =
+    let rec traj: Array<Float64 like T> =
         match traj with
         | zero -> zero
         | zero :: s -> zero :: 1.0

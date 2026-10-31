@@ -13,19 +13,19 @@ import ad as ad
 
 type R = Idx<5>
 
-let k0 = [0, 1, 0, 0, 1]
+let k0 = Int64([0, 1, 0, 0, 1])
 let mgk = group_keys(k0)
 
-function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+function loss(v: Array<Float64 like R>, cw: Array<Float64 like Idx<2>>) -> Float64 = {
     let g = group_by(v, mgk)
-    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
     reduce(m * cw, (+))
 }
 
-let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
-let c0 = [2.0, 5.0]
-let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0]
-let mut dc = [0.0, 0.0]
+let v0 = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
+let c0 = Float64([2.0, 5.0])
+let mut dv = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let mut dc = Float64([0.0, 0.0])
 let gv = ad.grad(loss)(v0, c0, dv, dc)
 // 018's pins, unchanged:
 // EXPECT: gv = 228.333333333333
@@ -33,7 +33,7 @@ let gv = ad.grad(loss)(v0, c0, dv, dc)
 // EXPECT: dc = [26.6666666666667, 35.0]
 
 let (jp, jt) = ad.jvp(loss)(v0, c0, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
-let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let dot = reduce(dv * Float64([1.0, 0.0, -2.0, 3.0, 0.5]), (+))
 let resid = jt - dot
 // EXPECT: jp = 228.333333333333
 // EXPECT: resid = 0.0

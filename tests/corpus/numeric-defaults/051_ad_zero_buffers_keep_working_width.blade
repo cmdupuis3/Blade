@@ -1,0 +1,15 @@
+// TEST: AD zero buffers keep the Float64 derivative working width
+import ad as ad
+type Samples = Idx<5>
+function loss(a: Array<Float64 like Samples>) -> Float64 = {
+    let differences = method_for(halo<Samples, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute
+    reduce(differences, (+))
+}
+let a: Array<Float64 like Samples> = [0.0, 1.0, 2.0, 3.0, 4.0]
+let mut gradient: Array<Float64 like Samples> = [0.0, 0.0, 0.0, 0.0, 0.0]
+let value: Float64 = ad.grad(loss)(a, gradient)
+let (primal, tangent) = ad.jvp(loss)(a, [1.0, 0.0, 0.0, 0.0, 1.0])
+// EXPECT: value = 6.0
+// EXPECT: gradient = [-1.0, -1.0, 0.0, 1.0, 1.0]
+// EXPECT: primal = 6.0
+// EXPECT: tangent = 0.0

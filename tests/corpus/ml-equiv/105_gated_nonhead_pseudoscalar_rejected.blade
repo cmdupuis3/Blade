@@ -18,6 +18,6 @@ import ml as ml
 // ============================================================================
 let static STRAP = [(0, 0, 1), (1, 1, 1), (0, 1, 1)]
 
-function bad(x: Array<Float like IrrepsIdx<STRAP>>) where ml.equiv(O3)
-    -> Array<Float like IrrepsIdx<STRAP>> =
+function bad(x: Array<Float64 like IrrepsIdx<STRAP>>) where ml.equiv(O3)
+    -> Array<Float64 like IrrepsIdx<STRAP>> =
   ml.gated(STRAP, x)

@@ -1,0 +1,12 @@
+// TEST: a float literal outside the Float32 finite range defaults to Float64
+// ============================================================================
+// Rule 4 at both ends (lead ruling R1): a magnitude above FLT_MAX, and a
+// NONZERO value whose Float32 rounding would be zero or subnormal, are
+// Float64 by default -- so the Float64 annotations of the variables hold.
+// ============================================================================
+let huge = 1e300
+let tiny = 1e-50
+let h: Float64 = huge
+let t: Float64 = tiny
+let ok = h > 1e299 && t < 1e-49
+// EXPECT: ok = true

@@ -145,7 +145,7 @@ let private memoTypeAgrees (cachedTy: IRType) (nowTy: IRType) : bool =
 /// env-free the conservative answer is to recompute them.
 let rec private memoizableValue (v: Value) : bool =
     match v with
-    | VInt _ | VInt32 _ | VFloat _ | VFloat32 _ | VComplex _
+    | VInt _ | VInt32 _ | VFloat _ | VFloat32 _ | VComplex _ | VComplex64 _
     | VBool _ | VString _ | VChar _ | VUnit -> true
     | VArray _ -> true
     | VTuple vs -> Array.forall memoizableValue vs
@@ -477,10 +477,16 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 let extents = observed |> Array.ofList
                 let store =
                     match ArrayOps.elemThrough arrTy.ElemType, data.Payload with
-                    | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PFloats xs -> SFloat xs
-                    | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PInts xs -> SFloat (xs |> Array.map float)
-                    | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PInts xs -> SInt xs
-                    | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PFloats xs -> SInt (xs |> Array.map int64)
+                    | Some ETFloat64, Blade.ProviderRegistry.PFloats xs -> SFloat xs
+                    | Some ETFloat64, Blade.ProviderRegistry.PInts xs -> SFloat (xs |> Array.map float)
+                    | Some ETInt64, Blade.ProviderRegistry.PInts xs -> SInt xs
+                    | Some ETInt64, Blade.ProviderRegistry.PFloats xs -> SInt (xs |> Array.map int64)
+                    // Float32 / Int32 elements: the cell the compiled lane's
+                    // `float` / `int32_t` pool holds (one rounding / a wrap).
+                    | Some ETFloat32, Blade.ProviderRegistry.PFloats xs -> SFloat32 (xs |> Array.map float32)
+                    | Some ETFloat32, Blade.ProviderRegistry.PInts xs -> SFloat32 (xs |> Array.map float32)
+                    | Some ETInt32, Blade.ProviderRegistry.PInts xs -> SInt32 (xs |> Array.map int32)
+                    | Some ETInt32, Blade.ProviderRegistry.PFloats xs -> SInt32 (xs |> Array.map int32)
                     | _ ->
                         raise (Core.InterpUnsupported
                                 $"provider read of '{spec.VarName}' into a non-numeric element type")

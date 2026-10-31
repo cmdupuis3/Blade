@@ -202,7 +202,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // operator[] type; a cast would make the wrapper-vs-raw-pointer
         // subscript overloads ambiguous.
         let wS = exprToCppCore subst names w
-        $"{wS}[({off}L)][0]"
+        $"{wS}[({(int64LiteralToCpp (int64 off))})][0]"
     | IRBinOp (_, op, l, r, loc) ->
         let render (lStr: string) (rStr: string) =
             match renderContractBinOp op l r lStr rStr inferExprType loc, op with
@@ -220,8 +220,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             let applied = render "__bo" "__bo"
             $"([&]() {{ const auto __bo = {once}; return {applied}; }}())"
         else
-        let lStr = exprToCppCore subst names l
-        let rStr = exprToCppCore subst names r
+        // A bare integer literal beside an Int32 renders as an `int`
+        // (int32AdaptedLiterals: the 32-bit width on every data model).
+        let (la, ra) = int32AdaptedLiterals inferExprType l r
+        let lStr = match l with IRLit (IRLitInt n) when la -> int32LiteralToCpp n | _ -> exprToCppCore subst names l
+        let rStr = match r with IRLit (IRLitInt n) when ra -> int32LiteralToCpp n | _ -> exprToCppCore subst names r
         render lStr rStr
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
@@ -252,8 +255,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // Float32, so we inspect either component (they match) and pick
         // the corresponding C++ template instantiation.
         let cppType =
-            match inferExprType re with
-            | IRTScalar ETFloat32 -> complexCppTypeName ETComplex64
+            match scalarElemOf (inferExprType re) with
+            | Some ETFloat32 -> complexCppTypeName ETComplex64
             | _ -> complexCppTypeName ETComplex128  // Float64 default
         $"{cppType}({(exprToCppCore subst names re)}, {(exprToCppCore subst names im)})"
     | IRTupleProj _ when (flatTupleProjection expr).IsSome ->
@@ -371,7 +374,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let rank = match inferExprType arr with
                    | ArrayElem at -> arrayRank at
                    | _ -> 0
-        $"{rank}L"
+        int64LiteralToCpp (int64 rank)
     | IRExtent (arr, dim) ->
         renderExtentExpr subst names arr dim
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
@@ -695,8 +698,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let zeroStr =
             match inferExprType body with
             | IRTScalar ETBool -> "false"
-            | IRTScalar ETInt64 | IRTScalar ETInt32 -> "0L"
-            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> "0L"
+            | t when scalarElemOf t = Some ETInt32 -> "0"
+            | t when scalarElemOf t = Some ETInt64 -> "0LL"
+            // A Float32 zero is a float: `c ? x : 0.0` is a DOUBLE, and the
+            // arithmetic around it would run in double.
+            | t when scalarElemOf t = Some ETFloat32 -> "0.0f"
             | _ -> "0.0"
         $"({condStr} ? {bodyStr} : {zeroStr})"
     | IRCompose (f, g) ->
@@ -1976,7 +1982,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
     match inferExprType arr with
     | ArrayElem at when dim < at.IndexTypes.Length ->
         match tryEvalIntIR at.IndexTypes.[dim].Extent with
-        | Some n -> $"{n}L"
+        | Some n -> int64LiteralToCpp n
         | None ->
             let arrName = exprToCppCore subst names arr
             // A rank-1 ragged/dep-idx operand is a RaggedRow<T> (per
@@ -2017,7 +2023,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
         match arr with
         | IRRange (idxTys, _) when dim < idxTys.Length ->
             (match tryEvalIntIR idxTys.[dim].Extent with
-             | Some n -> $"{n}L"
+             | Some n -> int64LiteralToCpp n
              | None when namesOnlyInScope idxTys.[dim].Extent ->
                  $"(int64_t)({exprToCppCore subst names idxTys.[dim].Extent})"
              | None -> exprError "extents(range<...>): the range's extent is not statically evaluable, and a virtual range has no runtime object to read it from -- take extents of a materialized array instead")

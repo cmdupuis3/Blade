@@ -555,7 +555,19 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         | Some plan when (match plan.Form with Blade.Optimize.RowFold -> true | _ -> false)
                          && plan.EmittedCpp.Value.IsSome ->
             let rsName = plan.EmittedCpp.Value.Value
-            let rsVar = IRVar (plan.RowSumId, plan.RowSumType)
+            // This publication belongs to this producer/consumer emission.
+            // A later shape specialization may take the flat producer path,
+            // which creates no row-sum buffer and must use its ordinary fold.
+            plan.EmittedCpp.Value <- None
+            // Shape clones share the plan's let ids, so RowSumType may carry
+            // a sibling clone's static row count. The published buffer owns
+            // this emission's extent; fold its actual rows, not that metadata.
+            let rsType =
+                match plan.RowSumType with
+                | ArrayElem at ->
+                    mkArrayLike { at with IndexTypes = at.IndexTypes |> List.map (fun ix -> { ix with Extent = IRParam ("?", 0, IRTNat None) }) }
+                | ty -> ty
+            let rsVar = IRVar (plan.RowSumId, rsType)
             let ctxR = { ctx with VarNames = Map.add plan.RowSumId rsName ctx.VarNames }
             let note =
                 [ $"{ind}// hot-row fold: the row values of `{plan.ProducerName}`'s row map were computed behind each produced row into {rsName} (Blade.Optimize.planHotRowFolds); this is the outer combine over them, same order, same seed" ]
@@ -1344,7 +1356,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 let bucketEntries =
                     let renderVal v =
                         match v with
-                        | EVInt n -> $"{n}LL"
+                        | EVInt n -> int64LiteralToCpp n
                         | EVString s -> escapeStringLit s
                     values
                     |> List.mapi (fun i v ->
@@ -1655,7 +1667,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // output's NAME, for the duration of this one emission (the
         // function-body twin is CodeGen's IRCompute(IRApplyCombinator) arm).
         (match Blade.Optimize.HotRowTable.tryProducer binding.Id with
-         | Some plan -> (hotRowPendingCell ()).[name] <- plan
+         | Some plan -> plan.EmittedCpp.Value <- None; (hotRowPendingCell ()).[name] <- plan
          | None -> ())
         // Compact row classes (planCompactRowClasses): the same hand-over.
         (match Blade.Optimize.CompactRowTable.tryProducer binding.Id with
@@ -1975,7 +1987,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     | IRTScalar ETBool -> IRLit (IRLitBool false)
                     | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
-                    | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
+                    | t when scalarElemOf t = Some ETFloat32 -> IRLit (IRLitFloat32 0.0f)
                     | _ -> IRLit (IRLitFloat 0.0)
                 let buildGuarded (c: IRCallable) : IRExpr =
                     let zeroVal = zeroForReturnType c.RetType
@@ -2026,8 +2038,9 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 let zeroStr =
                     match arr.ElemType with
                     | IRTScalar ETBool -> "false"
-                    | IRTScalar (ETInt64 | ETInt32) -> "0L"
-                    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> "0L"
+                    | t when scalarElemOf t = Some ETInt32 -> "0"
+                    | t when scalarElemOf t = Some ETInt64 -> "0LL"
+                    | t when scalarElemOf t = Some ETFloat32 -> "0.0f"
                     | _ -> "0.0"
                 let extentsAlias = $"{ind}const size_t* {name}_extents = {bodyName}.extents;"
                 let allocDecl = $$"""{{ind}}Array<{{elemType}}, {{rank}}> {{name}} = { allocate<typename promote<{{elemType}}, {{rank}}>::type, nullptr>({{name}}_extents), {{name}}_extents };"""
@@ -3662,7 +3675,7 @@ and genGroupAggKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (key: IREx
             let groupOf =
                 match plan.Regime with
                 | Blade.Optimize.GaEnum vs ->
-                    let entries = vs |> List.mapi (fun i v -> $"{{{v}LL, (size_t){i}}}") |> String.concat ", "
+                    let entries = vs |> List.mapi (fun i v -> $"{{{int64LiteralToCpp v}, (size_t){i}}}") |> String.concat ", "
                     [ $"""{ind}    size_t __g = {name}__bucket({(keysAt "__ki")});""" ],
                     [ $"{ind}static const std::unordered_map<int64_t, size_t> {name}__bucket_map = {{{entries}}};"
                       $$"""{{ind}}auto {{name}}__bucket = [](const int64_t& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", {{declPanicArgs ()}}); return it->second; };""" ]
@@ -7806,8 +7819,8 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             let head = [ $"{ind}{elem} {cfcName} = 0;   // cell epilogue: this row's prodsum chain (Blade.Optimize.CellFoldTable)" ]
             if chainBlock > 0L then
                 (head,
-                 [ $"{ind}for (int64_t __cbk = {loStr}; __cbk < {hiStr}; __cbk += {chainBlock}L) {{"
-                   $"{ind}const int64_t __cbe = __cbk + {chainBlock}L < {hiStr} ? __cbk + {chainBlock}L : {hiStr};"
+                 [ $"{ind}for (int64_t __cbk = {loStr}; __cbk < {hiStr}; __cbk += {chainBlock}LL) {{"
+                   $"{ind}const int64_t __cbe = __cbk + {chainBlock}LL < {hiStr} ? __cbk + {chainBlock}LL : {hiStr};"
                    forLoopFrom ind varName "__cbk" "__cbe" ],
                  [ $"{ind}}}" ])
             else (head, [ forLoopFrom ind varName loStr hiStr ], [])
@@ -7983,7 +7996,7 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             lagCode @ cellCode @ partial)
     let region =
         [ ind + $"{{   // rec-step-parallel v1: one persistent team over the recursion's steps -- fixed contiguous x ownership, no per-step synchronization (a worker reads only its own cells of earlier rows)"
-          i1 + $"const size_t {rn} = (size_t){entry.Cells}L;"
+          i1 + $"const size_t {rn} = (size_t){entry.Cells}LL;"
           i1 + $"int {t} = blade_omp_get_max_threads();"
           i1 + $"if ((size_t){t} > {rn}) {t} = (int){rn};"
           i1 + $"if ({t} < 1) {t} = 1;" ]

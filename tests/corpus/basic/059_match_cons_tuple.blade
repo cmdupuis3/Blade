@@ -10,7 +10,7 @@
 // no 1-tuple (`(x)` IS `x`), so a PAIR's remainder is the bare element, and
 // a longer tuple's remainder is a tuple of what is left.
 
-let t = (1.0, 2.0, 3.0)
+let t = (Float64(1.0), Float64(2.0), Float64(3.0))
 let head_only = match t with
     | h :: rest -> h
 // EXPECT: head_only = 1.0
@@ -28,15 +28,15 @@ let peeled = match t with
 // EXPECT: peeled = 123.0
 
 // The pair case, where the remainder degrades: `rest` is the second element.
-let pair = (4.0, 5.0)
+let pair = (Float64(4.0), Float64(5.0))
 let sum2 = match pair with
     | h :: rest -> h + rest
 // EXPECT: sum2 = 9.0
 
 // A literal HEAD makes the cons arm refutable, so the fall-through is real.
 // (Integers -- float patterns are not parser-reachable.)
-let ti = (1, 2, 3)
+let ti = (Int64(1), Int64(2), Int64(3))
 let picked = match ti with
-    | 9 :: rest -> 0
+    | 9 :: rest -> Int64(0)
     | h :: rest -> h * 2
 // EXPECT: picked = 2

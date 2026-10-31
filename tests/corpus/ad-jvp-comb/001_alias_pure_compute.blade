@@ -7,7 +7,7 @@
 // f = w0*w1 + w2 at [2,3,4]: 10; seed [1,0,0] -> df/dw0 = w1 = 3.
 import ad as ad
 
-function f(w: Array<Float like Idx<3>>) -> Float = {
+function f(w: Array<Float64 like Idx<3>>) -> Float64 = {
     let b = w
     let c = pure(b(0) * b(1)) |> compute
     c + b(2)

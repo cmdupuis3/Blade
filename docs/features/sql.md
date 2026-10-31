@@ -568,7 +568,7 @@ let temps  = [20.0, 25.0, 22.0, 30.0, 27.0]
 let gk    = group_keys(region)
 let sums  = method_for(group_by(temps, gk)) <@> lambda(g) -> reduce(g, (+)) |> compute
 let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
-let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float64(n)) |> compute
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float32(n)) |> compute
 // EXPECT: sizes = [2, 2, 1]
 // EXPECT: means = [21.0, 26.0, 30.0]
 ```
@@ -616,12 +616,12 @@ let fs  = files(T)                            // the FILE level of a tiled axis:
 let v   = ungroup([v1, v2], T)                // a variable living in both stores, named over T
 let tiles = segments(C0, C1)                  // a rank-2 array's TILE grouping: one group per (g0, g1), slot order
 let t2  = segments(a)                         // the same, read off a's own annotation `Array<T like C0, C1>`
-let A: Array<Float like CX> = s.vars.A |> z.stream   // NOT materialized; consumers below stream it
+let A: Array<Float64 like CX> = s.vars.A |> z.stream   // NOT materialized; consumers below stream it
 let total = reduce(A, (+))                    // block-by-block in storage order: bitwise the flat fold
 let g = group_by(A, segments(A))              // one run read per group (rank 2: one TILE window per group)
 let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute   // run + ghost cells per segment
 let e = A * 2.0                               // elementwise: one block (rank 2: one band of rows) at a time
-let T: Array<Float like CLat, CLon> = s.vars.T |> z.stream    // a 2-D variable chunked in both dims
+let T: Array<Float64 like CLat, CLon> = s.vars.T |> z.stream    // a 2-D variable chunked in both dims
 let tiles = group_by(T, segments(T))          // each tile one window read; with inherited edges, one chunk file
 ```
 
@@ -735,8 +735,8 @@ let b = [1.0, 1.0, 2.0, 2.0, 3.0]
 let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)
-let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
-                                              rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float32 like RaggedIdx<_>>,
+                                              rb: Array<Float32 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
 // per-group dot product
 // EXPECT: dots = [7.0, 17.0, 8.0]
 ```

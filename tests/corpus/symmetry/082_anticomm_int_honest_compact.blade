@@ -3,7 +3,7 @@
 // 0 in wrapping Int64, so the diagonal check passes and the output is the
 // strict triangle (no diagonal cells printed), with mirrored reads negated
 // and the diagonal read 0.
-let A = [1, 2, 4]
+let A = Int64([1, 2, 4])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) * 3 |> compute
 let r01 = R(0, 1)
 let r10 = R(1, 0)

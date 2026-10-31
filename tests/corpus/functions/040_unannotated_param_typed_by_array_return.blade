@@ -13,9 +13,9 @@
 // to a silent Float64 default; the signature decides it, or each call does.
 // 042 spells the same parameter annotated.
 // ============================================================================
-function f(x, s: Float) -> Array<Float like Idx<4>> =
+function f(x, s: Float64) -> Array<Float64 like Idx<4>> =
     x * s
 
-let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let xv = Float64([1.0, 4.0, 0.0 - 2.0, 6.0])
 let r = f(xv, 2.0)
 // EXPECT: r = [2.0, 8.0, -4.0, 12.0]

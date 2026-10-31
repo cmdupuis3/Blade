@@ -20,7 +20,7 @@
 // inconsistent type that every downstream cell count reads differently. The
 // wreath arm runs BEFORE the dimension resolution so that code is never
 // reached with a level list in hand.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

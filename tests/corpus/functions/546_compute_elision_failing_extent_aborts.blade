@@ -8,10 +8,10 @@
 // compute and its failure site.
 function f(z: Int64) -> Int64 = {
     let x = method_for(0..(10 / z)) <@> lambda(v) -> v + 1 |> compute
-    let a = [8, 9]
+    let a = Int64([8, 9])
     let bad = a(z - 1)
     let s = reduce(x, (+), 0)
     s + bad
 }
-let t = f(0)
+let t = f(Int64(0))
 // ABORT: BL8013

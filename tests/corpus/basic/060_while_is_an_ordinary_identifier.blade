@@ -6,10 +6,10 @@
 // unbound variable carrying the declarative-iteration steer rather than as a
 // parse error. This pins the identifier half.
 
-let while = 5
+let while: Int64 = 5
 let y = while + 1
 // EXPECT: y = 6
 
-let do = 2.5
+let do: Float64 = 2.5
 let z = do * 2.0
 // EXPECT: z = 5.0

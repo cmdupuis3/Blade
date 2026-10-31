@@ -9,9 +9,9 @@ import ad as ad
 
 type I = Idx<3>
 
-function loopy(x: Float) -> Float = x * loopy(x)
+function loopy(x: Float64) -> Float64 = x * loopy(x)
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let sq = method_for(a) <@> lambda(x) -> loopy(x) |> compute
     sq(0)
 }

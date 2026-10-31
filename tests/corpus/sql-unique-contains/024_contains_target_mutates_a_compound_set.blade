@@ -15,7 +15,7 @@
 // -- its IRContains arm reads a compound set's compact cells in place after
 // the target all the same.
 // ============================================================================
-let ids = [1, 2, 3]
+let ids = Int64([1, 2, 3])
 let keep = mask(ids, lambda(v) -> v > 0)
 let mut B = compound(ids, keep)
 function own_hit(a: mut Array<Int64 like CompoundIdx<keep>>) -> Int64 = {

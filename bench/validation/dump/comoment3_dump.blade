@@ -4,8 +4,8 @@
 // cell through the packed simplex's canonicalizing accessor (all six orderings of a cell).
 // Run (C++ lane): BLADE_BLAS=0 blade run comoment3_dump.blade --print T,checksum,input_checksum
 // Compared against ref_comoment3.py by validate_A.py.
-let static p = 13
-let static n = 11
+let static p: Int64 = 13
+let static n: Int64 = 11
 type Var = Idx<p>
 type Obs = Idx<n>
 

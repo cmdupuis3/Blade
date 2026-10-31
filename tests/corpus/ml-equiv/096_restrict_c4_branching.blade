@@ -178,8 +178,8 @@ let static HXY = ml.pg_hom_dim("C4", R1, R1E)
 let static WL = ml.pg_hom_dim("C4", R1, R1)
 // EXPECT: WL = 3
 
-function c4_layer(x: Array<Float like PgIrrepsIdx<C4, R1>>, w: Array<Float like Idx<WL>>)
-                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, R1>> =
+function c4_layer(x: Array<Float64 like PgIrrepsIdx<C4, R1>>, w: Array<Float64 like Idx<WL>>)
+                  where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, R1>> =
     ml.derive_pg_linear(C4, R1, R1, x, w)
 
 // LAYOUT, and this is the whole point of section 4: the restricted spec puts
@@ -206,8 +206,8 @@ let yr = c4_layer([1.0, 0.0 - 4.0, 3.0], [2.0, 0.0, 1.0])
 // literal); the polynomial ENGINE discharges it against all four group elements
 // exactly. Same theorem name, different route — the pin says `equiv(C4)` and
 // never which one ran.
-function scale_invariant(x: Array<Float like PgIrrepsIdx<C4, R1>>)
-                         where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, R1>> =
+function scale_invariant(x: Array<Float64 like PgIrrepsIdx<C4, R1>>)
+                         where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, R1>> =
     [2.0 * x(0), x(1), x(2)]
 
 let s = scale_invariant([1.0, 3.0, 4.0])

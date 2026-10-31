@@ -11,10 +11,10 @@
 // exists to catch, and it needs a capture that is NOT module-global to see it.
 // ----------------------------------------------------------------------------
 function wsum(xs: T^1) -> T^0 = {
-    let w = 2.0
+    let w: Float64 = 2.0
     reduce(xs, lambda(p, q) -> p + w * q)
 }
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let out = wsum(A)
 // ((1 + 2*2) + 2*3) = 11
 // EXPECT: out = 11.0

@@ -134,7 +134,7 @@ let private emissionCases : (string * (string * string) list * string list * str
        [ ("Main",
           "function rowsums(x: T^2) = reduce(x, (+))\n"
           + "function outer(x: T^2) = rowsums(x * 2.0)\n"
-          + "let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+          + "let A = Float64([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n"
           + "let r = outer(A)\n") ],
        [ "rowsums_HM_"; "_shape_" ],
        [ "_double(Array<double, 2> x)" ])

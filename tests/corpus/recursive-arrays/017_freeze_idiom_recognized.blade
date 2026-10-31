@@ -8,8 +8,8 @@
 // values are exactly what the else-arm would have written.
 
 type It = Idx<30>
-let tol = 0.000000001
-let rec xs: Array<Float like It> =
+let tol: Float64 = 0.000000001
+let rec xs: Array<Float64 like It> =
     match xs with
     | zero -> zero
     | zero :: s -> zero :: 1.0

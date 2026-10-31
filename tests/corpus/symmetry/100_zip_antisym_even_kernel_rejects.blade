@@ -7,6 +7,6 @@
 // class would negate every mirrored read -- the G16 silent wrong value in its
 // written spelling. The infix `R * R` gathers the symmetric result instead
 // (symmetry/096).
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
 let S = method_for(zip(R, R)) <@> lambda(a, b) -> a * b |> compute

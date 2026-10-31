@@ -14,7 +14,7 @@
 //   rf : the same in a function body (forced at its let there)
 //   rw, seen : a WRITING left side at module level -- the forced binding is
 //        stored once, so both folds read it and the counter is 3
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let q = (method_for(x) <@> lambda(v) -> v - 2.0) <|> (method_for(x) <@> lambda(v) -> v * 10.0)
 let r1 = reduce(q, (+))
 let r2 = reduce(q, (+), 1.0)
@@ -27,8 +27,8 @@ function f(s: Float64) -> Float64 = {
     let qf = (method_for(x) <@> lambda(v) -> v - s) <|> (method_for(x) <@> lambda(v) -> v * 10.0)
     reduce(qf, (+)) + reduce(qf, (+), 1.0)
 }
-let rf = f(2.0)
-let mut counter = 0
+let rf = f(Float64(2.0))
+let mut counter: Int64 = 0
 let w = (method_for(x) <@> lambda(v) -> {
     counter = counter + 1
     v * 2.0

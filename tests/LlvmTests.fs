@@ -469,7 +469,7 @@ let private emitUnder (pins: (string * string option) list) (name: string) (sour
 /// program, which is what makes "exactly the accumulator chain" checkable.
 let private licensedFoldSource = """
 type Ix = Idx<8>
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
 let scaled = xs * 0.5
 let total = reduce(scaled, (+))
 """
@@ -479,7 +479,7 @@ let total = reduce(scaled, (+))
 let private unlicensedFoldSource = """
 type Ix = Idx<8>
 function skew(a: Float64, b: Float64) -> Float64 = { a * 0.75 + b }
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
 let total = reduce(xs, skew)
 """
 
@@ -490,7 +490,7 @@ let private readonlyAndRecursionSource = """
 type Ix = Idx<6>
 function total(row: T^1) -> T^0 = reduce(row, (+))
 function fact(n: Int64) -> Int64 = { if n <= 1 then 1 else n * fact(n - 1) }
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let s = total(xs)
 let f = fact(5)
 """
@@ -501,20 +501,20 @@ let f = fact(5)
 /// a NAMED index type would want a tagged subscript and this block's output
 /// would carry three BL4003 warnings that have nothing to do with the facts.
 let private elementWriteSource = """
-function accumulate_into(x: Array<Float like Idx<3>>, out: mut Array<Float like Idx<3>>) -> Float = {
+function accumulate_into(x: Array<Float64 like Idx<3>>, out: mut Array<Float64 like Idx<3>>) -> Float64 = {
     out(0) = x(0)
     x(0)
 }
-let src = [1.0, 2.0, 3.0]
-let mut dst = [0.0, 0.0, 0.0]
+let src = Float64([1.0, 2.0, 3.0])
+let mut dst = Float64([0.0, 0.0, 0.0])
 let r = accumulate_into(src, dst)
 """
 
 /// `^` at each exponent kind (formalism 2.4): Float ^ Int, Float ^ Float,
 /// Int ^ Int, all with run-time operands so no literal shortcut applies.
 let private powKindsSource = """
-let x = 1.1
-let n = 7
+let x: Float64 = 1.1
+let n: Int64 = 7
 let a = x ^ n
 let b = x ^ 2.5
 let i = n ^ n
@@ -522,25 +522,25 @@ let i = n ^ n
 
 /// A band over a static struct (structural/06): the fold streams the nest.
 let private domainBandFoldSource = """
-let static n = 23
-let static w = 3
+let static n: Int64 = 23
+let static w: Int64 = 3
 static struct Band {
-    i: Int<min=0, max=n-1>,
-    j: Int<min=0, max=n-1>
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
 } where abs(i - j) <= w
 let total = reduce(method_for(range<Band>) <@> lambda(i, j) -> Float64(i * j) * 0.5, (+))
 """
 
 /// The same band materialized and read by key.
 let private domainBandKeyedSource = """
-let static n = 23
-let static w = 3
+let static n: Int64 = 23
+let static w: Int64 = 3
 static struct Band {
-    i: Int<min=0, max=n-1>,
-    j: Int<min=0, max=n-1>
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
 } where abs(i - j) <= w
 let R = method_for(range<Band>) <@> lambda(i, j) -> i * 100 + j |> compute
-let k = 7
+let k: Int64 = 7
 let v = R((k, k + 2))
 """
 
@@ -569,7 +569,7 @@ type MemberHoistRoute =
 /// EQUAL (`memberHoistRouteCoverage`), so a new unlisted file fails too.
 let memberHoistRoutes : MemberHoistRoute list =
     let row cat test hosts compound refusal = { Category = cat; Test = test; Hosts = hosts; CompoundBuilds = compound; LlvmRefusal = refusal }
-    let compoundParam = Some "parameter 'a' of 'own_hit' has type Array<Int64 like Idx<?>> -- the llvm lane handles Int64/Float64/Bool/String scalars only"
+    let compoundParam = Some "parameter 'a' of 'own_hit' has type Array<Int64 like Idx<?>> -- the llvm lane handles Int64/Int32/Float64/Float32/Bool/String scalars only"
     [ row "sql-unique-contains" "Contains Present" [] 0 None
       row "sql-unique-contains" "Contains Absent" [] 0 None
       row "sql-unique-contains" "Contains Empty After Mask" [] 0 None
@@ -816,10 +816,10 @@ let runLlvmFactTests () : BlockResult =
     // Corpus functions/280 and 420-425 pin the printed traces.
     let frameStore = "ptr @blade_frame_depth"
     check "an Int64 division kernel keeps its frame, named as its binding" []
-        "let xs = [4, 2, 1]\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        "let xs = Int64([4, 2, 1])\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
         [ frameStore; "@blade_frame_stack"; "c\"lambda in r\\00\"" ] [ "__BLADE_FRAME" ]
     check "a Float64 division kernel reaches no panic and has no frame" []
-        "let xs = [4.0, 2.0, 1.0]\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        "let xs = Float64([4.0, 2.0, 1.0])\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
         [ "fdiv " ] [ frameStore; "lambda in r"; "__BLADE_FRAME" ]
     check "a caller keeps its frame through a callee that panics" []
         "function divide(x: Int64, y: Int64) -> Int64 = x / y\nfunction twice(x: Int64, y: Int64) -> Int64 = divide(x, y) * 2\nlet z: Int64 = 1\nlet b = twice(4, z)\n"
@@ -875,7 +875,7 @@ let runLlvmFactTests () : BlockResult =
     // lane would not print -- here a typo -- refuses, so the program reaches
     // the C++ lane, which owns the BL7004 text. The differential cannot see
     // either half: it never sets the selection.
-    let printSource = "let x = [1.0, 2.0, 3.0]\nlet y = 4.0\nlet s = reduce(x, (+))\n"
+    let printSource = "let x = Float64([1.0, 2.0, 3.0])\nlet y: Float64 = 4.0\nlet s = reduce(x, (+))\n"
     check "a selection prints only the selected binding" [ "BLADE_PRINT", Some "s" ] printSource
         [ "c\"s\\00\""; "call void @blade_print_f64(" ]
         // An array prints through its own `x = [` label.
@@ -914,7 +914,7 @@ let runLlvmFactTests () : BlockResult =
     // so). Negative control: a program with no omp request carries no line.
     (let src = """
 type Ix = Idx<9>
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
 let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
 """
      let census = "; [omp] requested but emitted serial: the LLVM lane has no thread-level form"
@@ -939,7 +939,7 @@ let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
     // same fold to its serial chain); the pure twin keeps `reassoc nsz`.
     (let writing = """
 type Ix = Idx<9>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
     G(0) = G(0) + 1.0
     G(0) * 1.5
@@ -965,13 +965,13 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 1.5, (+))
     // accumulator's instruction is pinned exactly.
     (let choice (body: string) = $"""
 type Ix = Idx<9>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let x = method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 0.5 |> compute
 let total = reduce((method_for(x) <@> lambda(v) -> {body}) <|> (method_for(x) <@> lambda(v) -> v), (+))
 """
      let kernel (body: string) = $"""
 type Ix = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let m = method_for(range<Ix>) <@> lambda(i) -> {body}
 let k = lambda(a: Float64, b: Float64) where comm(a, b) -> {{
     let z = reduce(m, (+))
@@ -1020,13 +1020,13 @@ let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
      let view (rhs: string) = $"""
 type I = Idx<2>
 type J = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let m = {rhs}
 let row = m((0 : I))
 let total = reduce(row, (+), 0.0)
 """
      let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
-     let zeroRhs = mapRhs "0.0"
+     let zeroRhs = mapRhs "Float64(0.0)"
      let choiceRhs = "(" + mapRhs writer + ") <|> (" + zeroRhs + ")"
      let name = "G41-12 / G45 / G50: a fold over a named partial view of a writing value reads stored cells"
      match emitUnder [] "g4112w" (view choiceRhs), emitUnder [] "g4112p" (view (mapRhs "Float64(i + j) * 0.5")),
@@ -1047,15 +1047,15 @@ let total = reduce(row, (+), 0.0)
     (let tupleView (rhs: string) = $"""
 type I = Idx<2>
 type J = Idx<3>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let m = {rhs}
-let pair = (m((0 : I)), 0.0)
+let pair = (m((0 : I)), Float64(0.0))
 let row = pair[0]
 let total = reduce(row, (+), 0.0)
 """
      let mapRhs (body: string) = $"method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}"
      let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
-     let choiceRhs = "(" + mapRhs writer + ") <|> (" + mapRhs "0.0" + ")"
+     let choiceRhs = "(" + mapRhs writer + ") <|> (" + mapRhs "Float64(0.0)" + ")"
      let name = "G41-19 / G50: a fold over a tuple-held view of a named writing choice reads stored cells"
      match emitUnder [] "g4119w" (tupleView choiceRhs), emitUnder [] "g4119p" (tupleView (mapRhs "Float64(i + j) * 0.5")) with
      | Error e, _ | _, Error e -> fail name e
@@ -1103,7 +1103,7 @@ let seen = G(0)
     // to C++ (its `blade test llvm tuples` pass would otherwise compare the C++
     // lane against itself).
     (let src = """
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
 let q1 = t[1]
@@ -1186,7 +1186,7 @@ let t = reduce(method_for(range<P>) <@> lambda(j) -> l(0, j), (+))
     let sym3Src (p: int) (n: int) (tail: string) = $"""
 type V = Idx<{p}>
 type S = Idx<{n}>
-let static nn = {n}
+let static nn: Int64 = {n}
 let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) %% 5) - 2.0 |> compute
 let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c){tail} |> compute
 let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
@@ -1278,9 +1278,9 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
     let memberSrc = """
 type Row = Idx<16>
 let probes: Array<Int64 like Row> = [-3, 0, 1, 2, 7, 12, 30, 31, 44, 45, 46, 57, 58, 60, 61, 62]
-let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]
+let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])
 let hit = mask(probes, lambda(p) -> contains(evens, p))
-let one = contains(evens, 44)
+let one = contains(evens, Int64(44))
 """
     let memberOn = [ "BLADE_MEMBER_HOIST", None ]
     check "member hoist: a planned mask host builds, probes and frees through the shim"
@@ -1297,7 +1297,7 @@ let one = contains(evens, 44)
     check "member hoist: BLADE_MEMBER_HOIST=0 keeps the linear scan everywhere"
         [ "BLADE_MEMBER_HOIST", Some "0" ] memberSrc [ "has.cond" ] [ "blade_member_" ]
     check "contains over a Float64 set: IEEE == in the scan"
-        memberOn "let fs = [1.5, -0.0, 2.5]\nlet z = contains(fs, 0.0)\n" [ "fcmp oeq double" ] [ "blade_member_" ]
+        memberOn "let fs = Float64([1.5, -0.0, 2.5])\nlet z = contains(fs, Float64(0.0))\n" [ "fcmp oeq double" ] [ "blade_member_" ]
     // THE ROUTE of every contains program in the corpus (Codex diff reviews
     // of W2-1, finding 4 and the second look's NEW 1-2): the table covers the
     // corpus's contains programs EXACTLY (no missing, no stale row); a row
@@ -2163,7 +2163,7 @@ let runSimplexAgreementTests () : BlockResult =
     // what keeps every symmetric corpus file on exactly its pre-brick nest.
     let smallSym = """
 type Ix = Idx<4>
-let v: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0]
+let v: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0]
 let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
     // Large enough that the pre-measurement auto policy would have bricked it;
@@ -2470,9 +2470,9 @@ let runLlvmBlockForceTwins () : BlockResult =
           // finding 2: a tuple INITIALIZER inside the block is covered by the
           // pre-pass, not member-ordered
           "block_tuple_initializer_keeps_statement_boundary",
-          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let t = (0, g(0) + g(1))\n    t[0] + t[1]\n}\n"
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let t = (Int64(0), g(0) + g(1))\n    t[0] + t[1]\n}\n"
           "block_tuple_initializer_after_failing_statement (aborts)",
-          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let t = (0, g(0) + g(1))\n    t[0] + t[1] + early\n}\n"
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let t = (Int64(0), g(0) + g(1))\n    t[0] + t[1] + early\n}\n"
           // codex-diff-W4B-B-4 finding 1: prodsum operands are pre-pass reads
           "block_alias_with_later_prodsum_keeps_statement_boundary",
           "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    prodsum(g, g)\n}\n"

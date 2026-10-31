@@ -12,19 +12,19 @@ import ad as ad
 //          = 0.2490234375 + 0.125 * 0.328125 = 0.2900390625
 // The forward tangents along (1, 0) and (0, 1) are the same numbers.
 // ============================================================================
-function f(x: Float, r: Float) -> Float = {
-    let rec s: Array<Float like Idx<4>> =
+function f(x: Float64, r: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<4>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: x
         | prefix :: n -> prefix :: r * prefix(n - 1) * (1.0 - prefix(n - 1))
     s(3)
 }
-let (gv, gx, gr) = ad.grad(f)(0.25, 2.0)
+let (gv, gx, gr) = ad.grad(f)(Float64(0.25), Float64(2.0))
 // EXPECT: gv = 0.498046875
 // EXPECT: gx = 0.0625
 // EXPECT: gr = 0.2900390625
-let (fx, tx) = ad.jvp(f)(0.25, 2.0, 1.0, 0.0)
+let (fx, tx) = ad.jvp(f)(Float64(0.25), Float64(2.0), Float64(1.0), Float64(0.0))
 let (fr, tr) = ad.jvp(f)(0.25, 2.0, 0.0, 1.0)
 // EXPECT: tx = 0.0625
 // EXPECT: tr = 0.2900390625

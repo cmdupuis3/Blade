@@ -10,19 +10,19 @@
 // ============================================================================
 type C = Idx<5>
 type Steps = Idx<5>
-let BASE: Array<Float like C> = [3.0, 1.0, 4.0, 1.0, 5.0]
-function score(n: Int64) -> Float = {
+let BASE: Array<Float64 like C> = [3.0, 1.0, 4.0, 1.0, 5.0]
+function score(n: Int64) -> Float64 = {
     let t = method_for(BASE) <@> lambda(x) -> x + 0.5 * Float64(n) |> compute
     let s = sort(t, lambda(x) -> 0.0 - x)
     let sv = method_for(s) <@> lambda(x) -> x |> compute
     let u = unique(t)
     let uv = method_for(u) <@> lambda(x) -> x |> compute
     let m = mask(t, lambda(x) -> x > 4.0)
-    let mf = method_for(m) <@> lambda(b) -> (if b then 1.0 else 0.0) |> compute
+    let mf = method_for(m) <@> lambda(b) -> (if b then Float64(1.0) else Float64(0.0)) |> compute
     let mcount = reduce(mf, (+))
     sv(0) - sv(4) + reduce(uv, (+)) * 0.001 + mcount
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

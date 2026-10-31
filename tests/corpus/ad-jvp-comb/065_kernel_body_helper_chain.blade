@@ -13,11 +13,11 @@ import ad as ad
 
 type I = Idx<3>
 
-function center(x: Float) -> Float = x - 1.0
-function scaled(x: Float) -> Float = center(x) * 2.0
-function energy(x: Float, w: Float) -> Float = scaled(x) * scaled(x) + w * x
+function center(x: Float64) -> Float64 = x - 1.0
+function scaled(x: Float64) -> Float64 = center(x) * 2.0
+function energy(x: Float64, w: Float64) -> Float64 = scaled(x) * scaled(x) + w * x
 
-function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>, b: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a, b) <@> lambda(x, y) -> energy(x, y) |> compute
     m(0, 1) + m(2, 0)
 }

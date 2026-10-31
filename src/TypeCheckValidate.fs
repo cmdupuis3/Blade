@@ -127,8 +127,10 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
 /// this one runs pre-typing, directly on the surface AST.
 let rec internal staticValueToImportExpr sp (v: StaticEval.StaticValue) : Expr =
     match v with
-    | StaticEval.SVInt i -> mkExpr sp (ExprLit (LitInt i))
-    | StaticEval.SVFloat f -> mkExpr sp (ExprLit (LitFloat f))
+    | StaticEval.SVInt i -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Int64"), [mkExpr sp (ExprLit (LitInt i))]))
+    | StaticEval.SVInt32 i -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Int32"), [mkExpr sp (ExprLit (LitInt (int64 i)))]))
+    | StaticEval.SVFloat f -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Float64"), [mkExpr sp (ExprLit (LitFloat f))]))
+    | StaticEval.SVFloat32 f -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Float32"), [mkExpr sp (ExprLit (LitFloat (float f)))]))
     | StaticEval.SVBool b -> mkExpr sp (ExprLit (LitBool b))
     | StaticEval.SVString s -> mkExpr sp (ExprLit (LitString s))
     | StaticEval.SVUnit -> mkExpr sp (ExprLit LitUnit)
@@ -218,6 +220,20 @@ let internal seedImportedStaticsIntoDecls (seed: Map<string, StaticEval.StaticVa
 /// not-yet-checked modules are silently skipped, same as the existing
 /// DeclImport handling in checkDecl.
 let internal importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map<string, StaticEval.StaticValue> =
+    // Exported static values are normalized for structural consumers. Their
+    // checked variable types retain the numeric widths; restore those widths
+    // solely for reifying the expressions fed to the next module's evaluator.
+    let rec atType ty value =
+        match IR.stripUnits (env.Subst.Resolve ty), value with
+        | IRTScalar ETInt32, StaticEval.SVInt n -> StaticEval.SVInt32 (int32 n)
+        | IRTScalar ETFloat32, StaticEval.SVFloat f -> StaticEval.SVFloat32 (float32 f)
+        | IRTTuple ts, StaticEval.SVTuple vs when ts.Length = vs.Length ->
+            StaticEval.SVTuple (List.map2 atType ts vs)
+        | _ -> value
+    let exportValue (exports: TypeModuleExport) name value =
+        match Map.tryFind name exports.Variables with
+        | Some v -> atType v.Type value
+        | None -> value
     decls
     |> List.fold (fun acc locDecl ->
         match locDecl.Value with
@@ -229,11 +245,11 @@ let internal importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map
                 | ImportQualified aliasOpt ->
                     let alias = aliasOpt |> Option.defaultValue (List.last qname)
                     exports.StaticValues
-                    |> Map.fold (fun acc2 k v -> Map.add $"{alias}.{k}" v acc2) acc
+                    |> Map.fold (fun acc2 k v -> Map.add $"{alias}.{k}" (exportValue exports k v) acc2) acc
                 | ImportSelective names ->
                     names |> List.fold (fun acc2 n ->
                         match Map.tryFind n exports.StaticValues with
-                        | Some v -> Map.add n v acc2
+                        | Some v -> Map.add n (exportValue exports n v) acc2
                         | None -> acc2) acc
             | None -> acc
         | _ -> acc) Map.empty

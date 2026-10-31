@@ -6,7 +6,7 @@
 // target therefore aborts with BL8013 in every lane (the C++ lane used to
 // skip the target of an empty scan and print `r = false`).
 // ============================================================================
-let ids = [1, 2, 3]
+let ids = Int64([1, 2, 3])
 let none = compound(ids, mask(ids, lambda(v) -> v > 100))
-let z0 = reduce([0, 0], (+))
+let z0 = reduce(Int64([0, 0]), (+))
 let r = contains(none, 100 / z0)

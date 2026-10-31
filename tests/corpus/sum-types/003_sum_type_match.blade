@@ -1,6 +1,6 @@
 // TEST: Sum Type Match
 // Pattern matching on sum type — multiple cases
-type Result = Ok : Int | Err : Int
+type Result = Ok : Int32 | Err : Int32
 let r1 = Ok(100)
 let r2 = Err(404)
 let v1 = match r1 with

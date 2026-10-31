@@ -9,7 +9,7 @@
 // not a square with a triangle to compact. The compact-storage suggestion
 // (BL4010) is gated on outer-product formers for exactly that reason and does
 // not fire here (pinning `where comm` would change nothing).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let dot = reduce(method_for(zip(A, A)) <@> lambda(x, y) -> x * y, (+))
 let sq = method_for(zip(A, A)) <@> lambda(x, y) -> x * y |> compute
 // self dot product: 1 + 4 + 9

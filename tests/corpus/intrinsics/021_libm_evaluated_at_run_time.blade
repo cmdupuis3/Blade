@@ -16,16 +16,16 @@
 // compares it byte for byte against the compiled lane.
 
 let xs: Array<Float64 like Idx<3>> = [7.35615, 6.53071, 1.64944]
-let s_lit = sin(7.35615)
-let e_lit = exp(6.53071)
-let l_lit = log(1.64944)
+let s_lit: Float64 = sin(7.35615)
+let e_lit: Float64 = exp(6.53071)
+let l_lit: Float64 = log(1.64944)
 let s_arr = sin(xs)
 let e_arr = exp(xs)
 let l_arr = log(xs)
 let same_sin = s_lit == s_arr(0)
 let same_exp = e_lit == e_arr(1)
 let same_log = l_lit == l_arr(2)
-let amp_sin = (sin(7.35615) - 0.87862006801244397) * 1.0e17
+let amp_sin: Float64 = (sin(7.35615) - 0.87862006801244397) * 1.0e17
 let same_pow = 7.35615 ^ 3.5 == xs(0) ^ 3.5
 let same_atan2 = atan2(6.53071, 1.64944) == atan2(xs(1), xs(2))
 // EXPECT: same_sin = true

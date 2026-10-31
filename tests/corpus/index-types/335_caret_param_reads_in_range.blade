@@ -6,7 +6,7 @@ type L = Idx<3>
 type K = Idx<2>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
 let M: Array<Float64 like L, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-let v = [10.0, 20.0, 30.0, 40.0]
+let v = Float64([10.0, 20.0, 30.0, 40.0])
 
 function g(m: T^1, k: Int64) = m(k)
 function g2(m: T^2, i: Int64, j: Int64) = m(i, j)

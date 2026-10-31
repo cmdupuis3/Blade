@@ -19,11 +19,11 @@
 // reference walker `RecFusion.countVarOcc` does -- that one deliberately
 // ignores shadowing; a capture analysis may not.
 let out = {
-    let c = 3.0
-    let n = 100.0
-    let prefix = 500.0
-    let k = lambda(i: Int) -> {
-        let rec q: Array<Float like Idx<4>> =
+    let c: Float64 = 3.0
+    let n: Float64 = 100.0
+    let prefix: Float64 = 500.0
+    let k = lambda(i: Int32) -> {
+        let rec q: Array<Float64 like Idx<4>> =
             match q with
             | zero -> zero
             | zero :: s -> zero :: 1.0

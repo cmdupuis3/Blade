@@ -71,7 +71,7 @@ let DIG: Array<Int64 like Idx<192>, Idx<97>> = DIG_h.vars.data |> csvd.read
 // lambda_k = v0 + 2 v1 cos(pi k / 97), with (e0, v0, v1) exact 9- and
 // 27-term sums over the digit combinations -- the whole truth side is
 // computed in-language, no matrix needed.
-let MVAL = [0.92, 1.0, 1.08]
+let MVAL = Float64([0.92, 1.0, 1.08])
 // the transfer kernel: bond j transmits rt(m_j, m_(j+1))
 function rt(mj: Float64, mk: Float64) -> Float64 = 2.0 * mj / (mj + mk)
 let digmean = reduce(Float64(DIG), (+), axes = 2) / 18624.0
@@ -104,7 +104,7 @@ let v1r = v1 / v0
 // row j of Y), and tr(A B) = sum_i dot(row i of A, row i of B) for symmetric B
 function dot(x: Float64^1, y: Float64^1) -> Float64 = prodsum(x, y)
 let REGW = method_for(range<Idx<96>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> (rt(MVAL(DIG(a, i)), MVAL(DIG(a, i + 1))) - e0) / sqrt(192.0) |> compute
-let SQW = method_for(range<Idx<1>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> 1.0 / sqrt(192.0) |> compute
+let SQW = method_for(range<Idx<1>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> Float64(1.0) / sqrt(Float64(192.0)) |> compute
 let MUW = method_for(REGW, SQW) <@> dot |> compute
 let AW = method_for(REGW, REGW) <@> dot |> compute
 let AW2 = method_for(AW, AW) <@> dot |> compute

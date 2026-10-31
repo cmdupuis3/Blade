@@ -8,17 +8,17 @@
 // interpreter consumes the same optimized tree, so only the pinned value
 // (and `blade test opt-diff`) can see this class of bug.
 type I = Idx<7>
-function bump(a: mut Array<Float like I>) -> Float = {
+function bump(a: mut Array<Float64 like I>) -> Float64 = {
     a((0 : I)) = 100.0
     0.0
 }
-function g(x: Array<Float like I>) -> Float = {
+function g(x: Array<Float64 like I>) -> Float64 = {
     let mut y = x * 2.0
     let s1 = reduce(y, (+))
     let z = bump(y)
     let s2 = reduce(y, (+))
     s2 - s1 + z
 }
-let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
 let m = g(a)
 // EXPECT: m = 98.0

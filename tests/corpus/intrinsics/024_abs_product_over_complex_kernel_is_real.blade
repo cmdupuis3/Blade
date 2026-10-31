@@ -10,7 +10,7 @@
 // real; the same holds through negation and division.
 // Hand values: |3+4i| = 5, |1| = 1, |-2i| = 2.
 // ============================================================================
-let zs = [complex(3.0, 4.0), complex(1.0, 0.0), complex(0.0, -2.0)]
+let zs = Complex128([complex(3.0, 4.0), complex(1.0, 0.0), complex(0.0, -2.0)])
 let power = (zs <@> lambda(w) -> abs(w) * abs(w)) |> compute
 // EXPECT: power = [25.0, 1.0, 4.0]
 let power_m = method_for(zs) <@> lambda(w) -> abs(w) * abs(w) |> compute

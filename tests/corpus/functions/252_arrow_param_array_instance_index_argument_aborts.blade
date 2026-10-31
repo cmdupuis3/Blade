@@ -8,6 +8,6 @@
 type L = Idx<3>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
 function pick(c, i) = c(i)
-let k = 7
+let k: Int64 = 7
 let b = pick(A, k)
 // ABORT: BL8006

@@ -13,7 +13,7 @@ function tripled(a: T^1) -> T^1 = {
     let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute
     x
 }
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let k = second(a)
 let r = tripled(a)
 // EXPECT: k = 6.0

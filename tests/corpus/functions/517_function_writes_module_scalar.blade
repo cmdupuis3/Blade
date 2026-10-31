@@ -3,7 +3,7 @@
 // must land in the one storage location main reads: the C++ lane captures by
 // reference; the LLVM lane publishes the binding to a global that main's own
 // slot re-points at.
-let mut s = 1
+let mut s: Int64 = 1
 function bump() -> Int64 = {
     s = s + 1
     s

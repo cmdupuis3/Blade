@@ -9,8 +9,8 @@
 // to -(2^53 + 4) -- any conversion that is not round-to-nearest-even, or that
 // rounds twice, moves the sums. Every term is an integer-valued double, so the
 // licensed fold reads the same under any association.
-let static n = 37
-let static w = 5
+let static n: Int64 = 37
+let static w: Int64 = 5
 
 static struct Band {
     i: Int64<min=0, max=n-1>,
@@ -22,7 +22,7 @@ let static K = 9007199254740992
 function above(i: Int64, j: Int64) -> Float64 = Float64(K + (i - j)) - 9007199254740992.0
 function below(i: Int64, j: Int64) -> Float64 = Float64(3 * (i - j) - K) + 9007199254740992.0
 
-let cells = reduce(method_for(range<Band>) <@> lambda(i, j) -> 1, (+))
+let cells = reduce(method_for(range<Band>) <@> lambda(i, j) -> Int64(1), (+))
 // EXPECT: cells = 377
 let s_above = reduce(method_for(range<Band>) <@> lambda(i, j) -> above(i, j), lambda(p, q) where omp -> p + q, 0.0)
 // EXPECT: s_above = -34.0

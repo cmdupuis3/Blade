@@ -8,6 +8,6 @@
 // from the unit table: `i * t` does NOT cancel.
 Unit second
 Unit day = 86400 * second
-let i = complex(0.0, 1.0)
-let t: Float<day> = 1.0
+let i: Complex128 = complex(0.0, 1.0)
+let t: Float64<day> = 1.0
 let bad = exp(i * t)

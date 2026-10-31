@@ -226,7 +226,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
     // SAME condition (emitted code may use if/else freely).
     | ExprKind.ExprPure inner | ExprKind.ExprCompute inner -> adjointOf rc inner cot
     | ExprKind.ExprGuard (c, inner) ->
-        adjointOf rc inner (inheritSpan e (ExprIf (c, cot, fLit 0.0)))
+        adjointOf rc inner (inheritSpan e (ExprIf (c, cot, f64Lit 0.0)))
     | ExprKind.ExprBinOp (_, OpAdd, l, r) ->
         adjointOf rc l cot |> Result.bind (fun sl ->
         adjointOf rc r cot |> Result.map (fun sr -> sl @ sr))
@@ -385,7 +385,7 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
         | ExprKind.ExprTyped (inner, _) | ExprKind.ExprCompute inner | ExprKind.ExprPure inner ->
             flow cotIdent cotAt dims inner
         | ExprKind.ExprGuard (c, inner) ->
-            flow false (fun idx -> syn (ExprIf (c, cotAt idx, fLit 0.0))) dims inner
+            flow false (fun idx -> syn (ExprIf (c, cotAt idx, f64Lit 0.0))) dims inner
         | ExprKind.ExprTranspose (inner, d1, d2) ->
             let swap (xs: 'a list) =
                 xs |> List.mapi (fun i x -> if i = d1 then xs.[d2] elif i = d2 then xs.[d1] else x)
@@ -688,7 +688,7 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
                         | NLet (m, _, init) when m = n -> zerosLikeLiteral init
                         | _ -> None) with
                 | Some z -> NLet (dName n, true, z)
-                | None -> NLet (dName n, true, fLit 0.0))
+                | None -> NLet (dName n, true, f64Lit 0.0))
         let folded =
             List.rev body
             |> traverseR (adjointOfStmt rc)
@@ -723,7 +723,7 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
                         | NLet (m, _, init) when m = n -> zerosLikeLiteral init
                         | _ -> None) with
                 | Some z -> NLet (dName n, true, z)
-                | None -> NLet (dName n, true, fLit 0.0))
+                | None -> NLet (dName n, true, f64Lit 0.0))
         let folded =
             List.rev body
             |> traverseR (adjointOfStmt rc)
@@ -915,6 +915,11 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         // Branch of tangents under the same condition (see walkExpr's arm).
         tangentOfExpr rc t |> Result.bind (fun tt ->
         tangentOfExpr rc f |> Result.map (fun tf ->
+            // Keep the condition evaluated even when both derivatives are
+            // zero, but materialize that conditional at the AD working width.
+            let tt, tf =
+                if isZeroLit tt && isZeroLit tf then f64Lit 0.0, f64Lit 0.0
+                else tt, tf
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
     // C2-C5: the rank-0 MAP. See `tangentOfMap`. A bare-name loop side
@@ -923,6 +928,13 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfMap rc e m.Mode m.Ops m.Kern
     | { Kind = ExprKind.ExprBinOp (_, OpApply, _, _) } ->
         err rc.Fname "differentiating `<@>` supports `method_for(<operands>) <@> <kernel>` and `object_for(<kernel>) <@> <operands>` (v1, directly or through a let-bound loop object); pipelines and section kernels are not yet differentiable"
+    // Preserve guard evaluation even for an inactive tangent. Its payload
+    // materializes at the derivative working width: the predicate prevents
+    // a surrounding numeric operation from adapting a bare zero payload.
+    | { Kind = ExprKind.ExprGuard (condition, inner) } ->
+        tangentOfExpr rc inner |> Result.map (fun t ->
+            let t = if isZeroLit t then f64Lit 0.0 else t
+            inheritSpan e (ExprGuard (condition, t)))
     // C1: same form, tangent operands (see the LinearForm doc comment).
     | LinearForm (ops, rebuild) ->
         ops |> traverseR (tangentOfExpr rc) |> Result.map rebuild
@@ -1189,6 +1201,9 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
         slots |> List.choose (function Choice2Of2 (p, _) -> Some p.Name | _ -> None) |> Set.ofList
     let rc' = { rc with Known = Set.union rc.Known passthroughNames }
     tangentOfExpr rc' bodyExpanded |> Result.map (fun tBody ->
+        // The kernel result becomes an array cell, including when the whole
+        // tangent simplified to zero (for example a cotangent zero-fill).
+        let tBody = if isZeroLit tBody then f64Lit 0.0 else tBody
         let operandsOut =
             slots |> List.map (function
                 | Choice1Of2 (_, _, idxTys, _) -> syn (ExprRange idxTys)
@@ -1208,7 +1223,7 @@ let rec internal tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | ExprKind.ExprArrayLit elems ->
         elems |> traverseR (tangentOfLit rc)
         |> Result.map (fun ts -> inheritSpan e (ExprArrayLit ts))
-    | _ -> tangentOfExpr rc e
+    | _ -> tangentOfExpr rc e |> Result.map (fun t -> if isZeroLit t then f64Lit 0.0 else t)
 
 /// The loop-object environment AFTER `s`. Loop-object bindings are resolved at
 /// their APPLICATION sites, so the environment has to be position-aware: a body
@@ -1346,7 +1361,11 @@ and internal tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> 
                          let total = temps |> List.map (fun (nm, _) -> v nm) |> List.reduce add
                          [s] @ (temps |> List.map (fun (nm, e) -> NLet (nm, false, e))) @ [ NLet (tName x, isMut, total) ])))
              | ConstFill (cnt, _) -> Ok [s; NLet (tName x, isMut, zeroFill cnt)]
-             | _ -> tangentOfExpr rc value |> Result.map (fun t -> [s; NLet (tName x, isMut, t)]))
+             | _ -> tangentOfExpr rc value |> Result.map (fun t ->
+                 // The simplifier keeps raw zero literals until a tangent is
+                 // materialized as state; that state has the AD working width.
+                 let t = if isZeroLit t then f64Lit 0.0 else t
+                 [s; NLet (tName x, isMut, t)]))
     | NAssign (lhs, rhs) ->
         let tangentLhs =
             match lhs.Kind with

@@ -3,7 +3,7 @@
 // expression inside the nest, where sort has no rendering (BL7001 "no rule for
 // IRSort in expression position"), while the block spelling
 // `{ let r = sort(..); r }` compiled. The bare body is now bound the same way.
-let rows: Array<Float like Idx<4>, Idx<3>> = [[3.0, 1.0, 2.0], [0.5, 0.25, 1.0], [9.0, 8.0, 7.0], [1.0, 1.0, 0.0]]
+let rows: Array<Float64 like Idx<4>, Idx<3>> = [[3.0, 1.0, 2.0], [0.5, 0.25, 1.0], [9.0, 8.0, 7.0], [1.0, 1.0, 0.0]]
 let by_index = method_for(range<Idx<4>>) <@> lambda(c) -> sort(rows(c), lambda(x) -> x) |> compute
 let by_row = method_for(rows) <@> lambda(row) -> sort(row, lambda(x) -> 0.0 - x) |> compute
 // EXPECT: rows = [[3.0, 1.0, 2.0], [0.5, 0.25, 1.0], [9.0, 8.0, 7.0], [1.0, 1.0, 0.0]]

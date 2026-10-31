@@ -6,5 +6,5 @@
 // the negation for every mirrored read, so this is the same silent-corruption
 // class the comm validator rejects, with the parities exchanged. PBottom
 // bodies stay trusted — only the provable contradiction rejects.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let bad = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * y |> compute

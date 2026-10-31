@@ -44,13 +44,13 @@
 // function terminates, and the fence's job is to say so when one does not,
 // at a cell the user can look at.
 // ============================================================================
-static function bomb(n: Int) -> Int = bomb(n + 1)
+static function bomb(n: Int32) -> Int32 = bomb(n + 1)
 
 static struct Boom {
-    p: Int<min=0, max=3>,
-    q: Int<min=0, max=3>
+    p: Int32<min=0, max=3>,
+    q: Int32<min=0, max=3>
 } where p + q == bomb(0)
 
 let static CARD = idx_card(Boom)
 
-function main() -> Int = CARD
+function main() -> Int32 = CARD

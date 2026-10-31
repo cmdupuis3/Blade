@@ -8,5 +8,5 @@ import ml as ml
 // that forbids raw component indexing).
 // ============================================================================
 let static TAUSPEC = [(0, 0, 1), (2, 0, 1)]
-function bad(t: Array<Float like IrrepsIdx<TAUSPEC>>) where ml.equiv(O3) -> Array<Float like Idx<6>> =
+function bad(t: Array<Float64 like IrrepsIdx<TAUSPEC>>) where ml.equiv(O3) -> Array<Float64 like Idx<6>> =
   ml.irreps_to_sym(t)

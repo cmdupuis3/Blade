@@ -6,11 +6,11 @@
 // f = x * 2x = 2x^2, so f(3) = 18 and df/dx = 4x = 12.
 import ad as ad
 
-function f(x: Float) -> Float = {
+function f(x: Float64) -> Float64 = {
     let a = [x, 2.0 * x]
     a(0) * a(1)
 }
 
-let (fv, dfv) = ad.grad(f)(3.0)
+let (fv, dfv) = ad.grad(f)(Float64(3.0))
 // EXPECT: fv = 18.0
 // EXPECT: dfv = 12.0

@@ -7,8 +7,8 @@
 //   checksum, input_checksum as in the kernel
 // Run in the C++ lane.
 
-let static n = 211
-let static w = 5
+let static n: Int64 = 211
+let static w: Int64 = 5
 type Nx = Idx<n>
 
 static struct Band {
@@ -37,7 +37,7 @@ function phi(i: Int64, j: Int64) -> Float64 = {
 }
 
 function fingerprint(x: Array<Float64 like Nx>) = {
-    let cells = reduce(method_for(range<Band>) <@> lambda(i, j) -> 1, (+))
+    let cells = reduce(method_for(range<Band>) <@> lambda(i, j) -> Int64(1), (+))
     let lexsum = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * 1000 + j, (+))
     let horner = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Nx)) * x((j : Nx)),
                         lambda(a, b) -> 0.999 * a + b, 0.0)

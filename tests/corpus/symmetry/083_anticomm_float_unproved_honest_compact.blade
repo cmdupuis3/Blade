@@ -3,7 +3,7 @@
 // body unproved and the witness decides: the sign law holds at every sample
 // and the diagonal (the else branch, -((a - a) * 0.5)) is zero, so the claim
 // stands and the output is the strict triangle.
-let A = [1.0, 2.5, 4.0]
+let A = Float64([1.0, 2.5, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> if x > y then (x - y) * 0.5 else -((y - x) * 0.5) |> compute
 let r01 = R(0, 1)
 let r10 = R(1, 0)

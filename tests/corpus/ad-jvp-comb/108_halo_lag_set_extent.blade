@@ -11,7 +11,7 @@ import ad as ad
 
 type T = Idx<8>
 
-function f(a: Array<Float like T>) -> Float = {
+function f(a: Array<Float64 like T>) -> Float64 = {
     let d = method_for(halo<T, [-2, -4]>) <@> lambda(w) -> a(w(0)) * a(w(-2)) |> compute
     reduce(d, (+))
 }

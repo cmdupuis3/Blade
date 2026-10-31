@@ -20,7 +20,7 @@ function firstpos(A: Poly<T^1>) = {
     let s = tot(head)
     head > 0.0
 }
-let p = firstpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+let p = firstpos(Float64([1.0, -2.0, 6.0]), Float64([3.0, 4.0, -2.0]))
 // EXPECT: p = [true, false, true]
 
 function lastpos(A: Poly<T^1>) = {
@@ -36,7 +36,7 @@ function lastpos(A: Poly<T^1>) = {
         lastpos(tail)
     }
 }
-let lp = lastpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0], [-1.0, 0.5, 2.0])
+let lp = lastpos(Float64([1.0, -2.0, 6.0]), Float64([3.0, 4.0, -2.0]), Float64([-1.0, 0.5, 2.0]))
 // EXPECT: lp = [false, true, true]
 
 function above_total(A: Poly<T^1>) = {
@@ -44,7 +44,7 @@ function above_total(A: Poly<T^1>) = {
     let s = reduce(head, (+))
     head > s
 }
-let af = above_total([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+let af = above_total(Float64([1.0, -2.0, 6.0]), Float64([3.0, 4.0, -2.0]))
 // EXPECT: af = [false, false, true]
-let ai = above_total([9, -1, -2], [3, 4, -2])
+let ai = above_total(Int64([9, -1, -2]), Int64([3, 4, -2]))
 // EXPECT: ai = [true, false, false]

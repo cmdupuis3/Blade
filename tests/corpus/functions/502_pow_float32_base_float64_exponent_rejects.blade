@@ -5,4 +5,4 @@
 // the base-typed (Float32) result would narrow: refused at the base. Any
 // integer exponent keeps a Float32 base Float32 (functions/500).
 function pw(x: T, n: U) = x ^ n
-let r = pw(Float32(2.0), 0.5)
+let r = pw(Float32(2.0), Float64(0.5))

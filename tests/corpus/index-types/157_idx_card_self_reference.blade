@@ -39,9 +39,9 @@
 // worth keeping — the depth guard is necessary and is not sufficient.
 // ============================================================================
 static struct R {
-    p: Int<min=0, max=2>
+    p: Int32<min=0, max=2>
 } where p == idx_card(R)
 
 let static CARD = idx_card(R)
 
-function main() -> Int = CARD
+function main() -> Int32 = CARD

@@ -10,7 +10,7 @@ type Row = Idx<1>
 let z: Array<Int64 like Row> = [0]
 let g = method_for(z) <@> lambda(v) -> 1 / v
 let r = {
-    let t = sin(0.0)
+    let t: Float64 = sin(0.0)
     if g(0) > 0 then Float64(g(0)) + t else t
 }
 // ABORT: BL8013

@@ -29,8 +29,8 @@
 // sub-array — which was its design purpose in Leg 1.
 // Per-group sum via reduce. The peel binds g to a sub-array sized by the
 // group; reduce iterates that sub-array using its emitted _extents.
-let region = [0, 1, 2, 0, 1, 2]
-let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute

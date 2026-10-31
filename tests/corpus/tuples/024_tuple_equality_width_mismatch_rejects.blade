@@ -11,5 +11,5 @@
 // BL3001 rather than a new code because that is what it is: the width of a
 // tuple-typed name is STATIC (Design C, `004`), so two widths are two types.
 // ============================================================================
-let r = (2, 3) == (2, 3, 4)
+let r = (Int64(2), Int64(3)) == (Int64(2), Int64(3), Int64(4))
 // EXPECT: typecheck failure -- a 2-tuple and a 3-tuple are different types

@@ -14,7 +14,7 @@
 // kernel-produced pool against that closed form (rather than reading cells
 // back out of the array) is deliberate — a read-write roundtrip through the
 // same subscript arithmetic cannot see a pool shift.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let D = decompact(C, 0)

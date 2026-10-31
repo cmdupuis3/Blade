@@ -27,10 +27,10 @@ import ml as ml
 // ============================================================================
 let c = [0.0, 1.0, 2.0, 3.0]
 
-function bad_global(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+function bad_global(x: Array<Float64 like Idx<4>>) where ml.perm_equiv(4) -> Array<Float64 like Idx<4>> =
     x + c
 
-function mk() -> Array<Float like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
+function mk() -> Array<Float64 like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
 
-function bad_call(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> =
+function bad_call(x: Array<Float64 like Idx<4>>) where ml.perm_equiv(4) -> Array<Float64 like Idx<4>> =
     x + mk()

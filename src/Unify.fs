@@ -792,6 +792,7 @@ type Subst() =
     /// `let x = 1` stays Int64) and its *kind* for the no-narrowing bind
     /// guard in `unify`. Parallels `arityConstraints`.
     let mutable literalDefaults : Map<int, ElemType> = Map.empty
+    let mutable wideDefaultVars : Set<int> = Set.empty
     let mutable knownTypeVarNames : Set<string> = Set.empty
     /// IDs of type variables HM-polymorphic at a function boundary:
     /// preserved by zonking (not defaulted to Float64) so IR-phase HM
@@ -1137,6 +1138,14 @@ type Subst() =
     member _.GetLiteralDefault(id: int) : ElemType option =
         Map.tryFind id literalDefaults
 
+    /// Round 6: a literal var of a COMPILER-SYNTHESIZED literal-only binding
+    /// (a `__` binder an elaborator wrote): its uses fix its width, and if
+    /// nothing does it defaults to its class's OLD wide width (Int64 /
+    /// Float64 / Complex128), not the seed -- an isolated synthesized
+    /// constant keeps today's value. Read by Zonk.
+    member _.MarkWideDefault(id: int) = wideDefaultVars <- Set.add id wideDefaultVars
+    member _.IsWideDefault(id: int) : bool = Set.contains id wideDefaultVars
+
     member _.SetLiteralDefault(id: int, et: ElemType) =
         literalDefaults <- Map.add id et literalDefaults
 
@@ -1173,13 +1182,13 @@ type Subst() =
     /// is NOT rolled back -- ids minted by the discarded attempt stay unused,
     /// so nothing it built can collide with what is minted next.
     member _.Snapshot() : obj =
-        box (map, typeVarScope, arityConstraints, literalDefaults, knownTypeVarNames, polymorphicIds,
+        box (map, typeVarScope, arityConstraints, literalDefaults, wideDefaultVars, knownTypeVarNames, polymorphicIds,
              rankLowerBounds, indexDefaults, paramDefaults,
              (elemCasts, elemCastMemo, elemCastPartner, elemCastDropUnits, elemBoolMemo, scalarPins))
 
     member _.Restore(s: obj) =
-        let (m, tvs, ac, ld, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp)) =
-            unbox<Map<int, IRType> * Map<string, IRType * int> * Map<int, int> * Map<int, ElemType> * Set<string>
+        let (m, tvs, ac, ld, wd, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp)) =
+            unbox<Map<int, IRType> * Map<string, IRType * int> * Map<int, int> * Map<int, ElemType> * Set<int> * Set<string>
                   * Set<int> * Map<int, int> * Set<int> * Map<int, ElemType>
                   * (Map<int, int * ElemType> * Map<int * ElemType, int> * Map<int, int> * Set<int>
                      * Map<int * int * ElemType, int> * Set<int>)> s
@@ -1187,6 +1196,7 @@ type Subst() =
         typeVarScope <- tvs
         arityConstraints <- ac
         literalDefaults <- ld
+        wideDefaultVars <- wd
         knownTypeVarNames <- kn
         polymorphicIds <- poly
         rankLowerBounds <- rlb

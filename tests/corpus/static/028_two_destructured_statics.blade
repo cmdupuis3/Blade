@@ -23,8 +23,8 @@
 // rule, 026 for the cons rule (head is element 0, tail is the REMAINDER, not
 // element 1). A tuple-typed binding prints nothing, so `tail` is re-destructured
 // into scalars to be observed.
-let static (a, b) = (1, 2)
-let static head :: tail = (10, 20, 30)
+let static (a, b) = (Int64(1), Int64(2))
+let static head :: tail = (Int64(10), Int64(20), Int64(30))
 let s1 = a * 10 + b
 let h = head
 let (t0, t1) = tail

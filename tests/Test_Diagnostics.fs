@@ -159,7 +159,7 @@ let runDiagnosticsCoreTests () : BlockResult =
         ($"got: {(Render.renderShort d3)}")
 
     // -- render: header, arrow line, snippet, underline -------------------
-    let sm = SourceMap.ofSources [ "a.blade", "let a = 1\nlet b = zz + 1\nlet c = 2" ]
+    let sm = SourceMap.ofSources [ "a.blade", "let a: Int64 = 1\nlet b = zz + 1\nlet c: Int64 = 2" ]
     let d4 = mkError "BL2001" PhResolve (span (Some "a.blade") 2 9 2 11) "Unbound variable: zz"
     let rendered = Render.render false (Some sm) d4
     let lines = rendered.Split '\n'

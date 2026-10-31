@@ -17,7 +17,7 @@ function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) 
 function tag(p: (H, Int64)) -> Int64 = p[1]
 function via(h: H, f: F) -> R = {
     let k = h
-    let t = (k, 0)
+    let t = (k, Int64(0))
     let n = tag(t)
     h(f) + Float64(n)
 }

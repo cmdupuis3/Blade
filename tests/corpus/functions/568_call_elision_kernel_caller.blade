@@ -17,13 +17,13 @@ function scaledk(a: T^1, c: Float64) -> T^1 = {
 }
 type Rw = Idx<2>
 type Cl = Idx<3>
-let A = [1.0, 2.0, 3.0]
-let ws = [10.0, 20.0]
+let A = Float64([1.0, 2.0, 3.0])
+let ws = Float64([10.0, 20.0])
 let u = method_for(ws) <@> lambda(w) -> reduce(prep(A), (+), w) |> compute
 let R: Array<Float64 like Rw, Cl> = [[0.0, 1.0, 2.0], [4.0, 5.0, 6.0]]
 let rs = method_for(R) <@> lambda(row) -> reduce(prep(row), (+)) |> compute
 let uk = method_for(ws) <@> lambda(w) -> reduce(scaledk(A, w), (+)) |> compute
-let mut C = [1.0, 1.0, 1.0]
+let mut C = Float64([1.0, 1.0, 1.0])
 let uc = method_for(ws) <@> lambda(w) -> reduce(prep(C), (+), w) |> compute
 C(1) = 5.0
 let up = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute

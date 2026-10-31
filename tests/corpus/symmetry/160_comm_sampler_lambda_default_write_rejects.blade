@@ -6,10 +6,10 @@
 // because the two names alias -- while `f(1.0)` makes them differ). The
 // default writes A, so B is an ordinary copy with its own identity, the
 // witness samples A and B independently, and the comm claim is refused.
-let mut A = [1.0, 2.0, 3.0]
+let mut A = Float64([1.0, 2.0, 3.0])
 let B = A
 let f = lambda(x: Float64, d: Float64 = { A(0) = 9.0; 0.0 }) -> x + d
 let r = f(1.0)
-let idx = [0, 1, 2]
+let idx = Int64([0, 1, 2])
 let P = method_for(idx, idx) <@> lambda(i, j) where comm(i, j) -> A(i) * B(j) |> compute
 // ERROR: BL4013 @ 13:25

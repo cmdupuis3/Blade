@@ -23,7 +23,7 @@
 // The values are 172's and 174's, unchanged -- the tag fix moves no data.
 type I3 = Idx<3>
 type S2 = SymIdx<2, I3>
-let v: Array<Float like I3> = [2.0, 3.0, 5.0]
+let v: Array<Float64 like I3> = [2.0, 3.0, 5.0]
 let sym = method_for(range<S2>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute
 // EXPECT: sym = [[4.0, 6.0, 10.0], [9.0, 15.0], [25.0]]
 
@@ -32,5 +32,5 @@ let sym = method_for(range<S2>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> comp
 // carve-out beside it already did. So an array annotated with the ALIAS and one
 // annotated with the group written INLINE are the same type, and this
 // assignment is legal rather than a nominal mismatch.
-let inline_spelled: Array<Float like SymIdx<2, I3>> = sym
+let inline_spelled: Array<Float64 like SymIdx<2, I3>> = sym
 // EXPECT: inline_spelled = [[4.0, 6.0, 10.0], [9.0, 15.0], [25.0]]

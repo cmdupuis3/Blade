@@ -174,11 +174,11 @@ function covariance(a: T^1, b: T^1) where comm(a, b) =
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-type Speed = Float<mps>          // unit-carrying scalar type
+type Speed = Float64<mps>          // unit-carrying scalar type
 
 type LatIdx = Idx<180>           // named index types give structural identity
 type LonIdx = Idx<360>
-type EarthArray = Array<Float like LatIdx, LonIdx>
+type EarthArray = Array<Float64 like LatIdx, LonIdx>
 ```
 
 - Functions see **abstract types** `T^r` (element type + rank + symmetry); arrays have
@@ -231,7 +231,7 @@ first-class construct:
 | peel the innermost axis (partial reduction) | bare `reduce(A, (+))` — the default is `axes = 1`, so on rank ≥ 2 it returns an array, not a scalar | manual row loops |
 | several statistics in ONE pass | `reduce((L <@> k1) <&!> (L <@> k2) <&!> (L <@> k3), (+))` then tuple-destructure | separate passes |
 | filter / WHERE | `mask(xs, pred)` + `compound(data, mask)`; compose masks with `&&`/`\|\|` | a filter loop |
-| iterate a constrained index domain (a band, a triangle, a selection rule) | `static struct Band { i: Int<min=0, max=n-1>, j: Int<min=0, max=n-1> } where abs(i - j) <= w` then `method_for(range<Band>) <@> lambda(i, j) -> ...` -- linear conjuncts enumerate in closed form, only the solutions are visited (reads `R((i, j))`, `reduce(R, (+))`) | a dense nest with an `if` in the kernel; a mask over the whole box |
+| iterate a constrained index domain (a band, a triangle, a selection rule) | `static struct Band { i: Int32<min=0, max=n-1>, j: Int32<min=0, max=n-1> } where abs(i - j) <= w` then `method_for(range<Band>) <@> lambda(i, j) -> ...` -- linear conjuncts enumerate in closed form, only the solutions are visited (reads `R((i, j))`, `reduce(R, (+))`) | a dense nest with an `if` in the kernel; a mask over the whole box |
 | stencil / lags / rolling window | `method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1))` | index arithmetic with edge guards |
 | index generation | `0..8` anonymous range (a first-class rank-1 array), or `range<I>` when the named tag should flow | materialized iota; `method_for(range) <@> lambda(i) -> i \|> compute` |
 | coordinate axis / linspace | `x0 + dx * Float64(0..n)` — implicit lifting over the range | `method_for(range<I>) <@> lambda(j) -> x0 + dx * Float64(j)` for a body that is just affine in the index |
@@ -280,7 +280,7 @@ induction on the leading axis (`docs/formalism.md` §7.5):
 ```blade
 // tests/corpus/recursive-arrays/002_running_reduce.blade
 type Step = Idx<6>
-let rec x: Array<Float like Step> =
+let rec x: Array<Float64 like Step> =
     match x with
     | zero -> zero
     | zero :: s -> zero :: 1.0

@@ -13,7 +13,7 @@
 type Y = Idx<2>
 type X = Idx<2>
 type T = Idx<200>
-function rk4(u: Array<Float like Y, X>) -> Array<Float like Y, X> = {
+function rk4(u: Array<Float64 like Y, X>) -> Array<Float64 like Y, X> = {
     let k1 = 0.0 - u
     let k2 = 0.0 - (u + 0.05 * k1)
     let k3 = 0.0 - (u + 0.05 * k2)
@@ -22,10 +22,10 @@ function rk4(u: Array<Float like Y, X>) -> Array<Float like Y, X> = {
 }
 
 let final = {
-    let rec traj: Array<Float like T, Y, X> =
+    let rec traj: Array<Float64 like T, Y, X> =
         match traj with
         | zero -> zero
-        | zero :: s -> zero :: [[1.0, 2.0], [3.0, 4.0]]
+        | zero :: s -> zero :: Float64([[1.0, 2.0], [3.0, 4.0]])
         | prefix :: n -> prefix :: rk4(prefix(n - 1))
     traj((199 : T))
 }

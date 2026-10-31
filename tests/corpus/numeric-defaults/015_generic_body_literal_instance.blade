@@ -1,0 +1,15 @@
+// TEST: a literal beside a generic variable follows the instance
+// ============================================================================
+// Lead ruling A3: in a generic body `x * 0.5 + 0.25` beside `x: T` takes the
+// width of the instance (a Float32 instance computes in Float32, a Float64
+// one in Float64).
+// ============================================================================
+function f(x: T) -> T = x * 0.5 + 0.25
+let x32: Float32 = 3.0
+let x64: Float64 = 3.0
+let a = f(x32)
+let b = f(x64)
+let a32: Float32 = a
+let b64: Float64 = b
+// EXPECT: a32 = 1.75
+// EXPECT: b64 = 1.75

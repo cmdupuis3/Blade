@@ -12,13 +12,13 @@ import ad as ad
 
 type I = Idx<5>
 
-function f(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> 0.0 - x)
+function f(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> 0.0 - x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 
-let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
-let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
+let mut da = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let gv = ad.grad(f)(Float64([3.0, 1.0, 4.0, 1.5, 2.0]), da)
 // EXPECT: gv = 27.0
 // EXPECT: da = [2.0, 5.0, 1.0, 4.0, 3.0]
 

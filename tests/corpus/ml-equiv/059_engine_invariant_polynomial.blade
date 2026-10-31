@@ -23,8 +23,8 @@ let static EC = [("E", 1)]
 let static AC = [("A", 1)]
 
 // --- 1. THE SQUARED NORM ----------------------------------------------------
-function normsq(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                where ml.equiv(C4) -> Float =
+function normsq(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float64 =
     x(0) * x(0) + x(1) * x(1)
 
 let n0 = normsq([3.0, 4.0])
@@ -45,8 +45,8 @@ let d3 = n0 - n3
 // A's every generator matrix is the identity, so an A-labelled cell IS an
 // invariant slot: returning the squared norm as `PgIrrepsIdx<C4, [("A", 1)]>`
 // is the same theorem with a 1×1 identity output action, written as a rep.
-function normsq_a(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, AC>> =
+function normsq_a(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                  where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, AC>> =
     [x(0) * x(0) + x(1) * x(1)]
 
 let a0 = normsq_a([3.0, 4.0])
@@ -58,8 +58,8 @@ let a1 = normsq_a([0.0 - 4.0, 3.0])
 // `w` is invariant, so it enters the normal form as an atom and rides through
 // every coefficient untouched. The discharge never evaluates it: the identity
 // holds as a polynomial in w, which is what "the caller holds it fixed" means.
-function weighted(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Float)
-                  where ml.equiv(C4) -> Float =
+function weighted(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Float64)
+                  where ml.equiv(C4) -> Float64 =
     w * (x(0) * x(0) + x(1) * x(1))
 
 let w0 = weighted([3.0, 4.0], 2.0)
@@ -76,8 +76,8 @@ let dw = w0 - w1
 // where they are legitimate: a scale on the invariant, and a scale on the
 // second invariant. (What the weights CANNOT do is break the isotropy — that
 // is corpus 060.)
-function weighted_arr(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<2>>)
-                      where ml.equiv(C4) -> Float = {
+function weighted_arr(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<2>>)
+                      where ml.equiv(C4) -> Float64 = {
     let r2 = x(0) * x(0) + x(1) * x(1)
     w(0) * r2 + w(1) * (r2 * r2)
 }
@@ -95,8 +95,8 @@ let dv = v0 - v1
 // Nothing here depends on the distinction (the identity holds for any
 // coefficient on an invariant), but the arithmetic path is the one the
 // near-miss diagnostic guards, so it is exercised.
-function scaled(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                where ml.equiv(C4) -> Float =
+function scaled(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float64 =
     (3.0 / 10.0) * (x(0) * x(0) + x(1) * x(1))
 
 let s0 = scaled([3.0, 4.0])

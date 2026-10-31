@@ -1,0 +1,16 @@
+// TEST: a literal argument takes a generic variable fixed by another argument
+// ============================================================================
+// Rule 6: in `scale(d, 0.1)` the non-literal `d` fixes `T` at Float64, so the
+// literal is the double 0.1 and the instance is Float64 (the result is a
+// Float64 variable: the annotation holds). With two literal arguments the
+// variable is the widest default (Float32).
+// ============================================================================
+function scale(a: T, s: T) -> T = a * s
+let d: Float64 = 1.0
+let r = scale(d, 0.1)
+let q: Float64 = r
+let z = q - 0.1
+let w = scale(2.0, 3.0)
+let w32: Float32 = w
+// EXPECT: z = 0.0
+// EXPECT: w32 = 6.0

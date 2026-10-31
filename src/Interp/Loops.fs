@@ -75,15 +75,21 @@ let private isNonZero (v: Value) : bool =
     | VFloat f -> f <> 0.0
     | VFloat32 f -> f <> 0.0f
     | VComplex (r, i) -> r <> 0.0 || i <> 0.0
+    | VComplex64 (r, i) -> r <> 0.0f || i <> 0.0f
     | _ -> false
 
 /// The zero seed of a scalar element type -- mirrors `T name = 0;` (the scalar
-/// accumulator declaration in genApplyCombinator's IRTScalar branch).
+/// accumulator declaration in genApplyCombinator's IRTScalar branch). At the
+/// element's WIDTH: a Float32 accumulator seeded with a double zero would run
+/// its whole chain in double.
 let private zeroOfElem (et: ElemType) : Value =
     match et with
-    | ETInt64 | ETInt32 -> VInt 0L
+    | ETInt64 -> VInt 0L
+    | ETInt32 -> VInt32 0
     | ETBool -> VBool false
-    | ETComplex128 | ETComplex64 -> VComplex (0.0, 0.0)
+    | ETComplex128 -> VComplex (0.0, 0.0)
+    | ETComplex64 -> VComplex64 (0.0f, 0.0f)
+    | ETFloat32 -> VFloat32 0.0f
     | _ -> VFloat 0.0
 
 let private nodeCase (e: IRExpr) : string =
@@ -578,6 +584,7 @@ and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr
             | VInt _ -> VInt 0L
             | VInt32 _ -> VInt32 0
             | VComplex _ -> VComplex (0.0, 0.0)
+            | VComplex64 _ -> VComplex64 (0.0f, 0.0f)
             | VBool _ -> VBool false
             | other -> other
 
@@ -1943,6 +1950,13 @@ and private interpretNest
         let cell = { V = VUnit }
         paramCells.[p.VarId] <- cell
         envBindRef kenv p.VarId cell
+    // A zero-level nest passes whole operands to its kernel. No peel runs
+    // to fill the parameter cells (e.g. a fused partial fold specialized to
+    // a rank-one row), so bind the resolved arrays directly. This mirrors
+    // genLoopNestStreamed's zero-level parameter-name initialization.
+    if n = 0 && cg.KernelParams.Length = cg.InputArrayNames.Length then
+        cg.KernelParams |> List.iteri (fun pos p ->
+            paramCells.[p.VarId].V <- VArray (realAt pos))
 
     // Reynolds term plan (precomputed once per nest; iteration-invariant). The
     // kernel is summed over the surviving parameter permutations exactly as
@@ -2725,4 +2739,7 @@ and private valuesEqual (a: Value) (b: Value) : bool =
     | VBool x, VBool y -> x = y
     | VString x, VString y -> System.String.Equals(x, y, System.StringComparison.Ordinal)
     | VComplex (r1, i1), VComplex (r2, i2) -> r1 = r2 && i1 = i2
+    | VFloat32 x, VFloat32 y -> x = y
+    | VInt32 x, VInt32 y -> x = y
+    | VComplex64 (r1, i1), VComplex64 (r2, i2) -> r1 = r2 && i1 = i2
     | _ -> false

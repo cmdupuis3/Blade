@@ -24,17 +24,17 @@ import ad as ad
 //   loss(y, arr)   = 6 y     ->  lv = 12 at y = 2,  dly = 6,  darr(i) = y = 2
 // ============================================================================
 type I = Idx<3>
-function helper(p: Float, arr: Array<Float like I>) -> Float = {
-    let scaled = method_for(arr) <@> lambda(y: Float) -> y * p |> compute
+function helper(p: Float64, arr: Array<Float64 like I>) -> Float64 = {
+    let scaled = method_for(arr) <@> lambda(y: Float64) -> y * p |> compute
     reduce(scaled, (+))
 }
-function loss(y: Float, arr: Array<Float like I>) -> Float = helper(y, arr)
+function loss(y: Float64, arr: Array<Float64 like I>) -> Float64 = helper(y, arr)
 // (The lowered read `arr(__mi)` used to draw a BL4003 untagged-index note
 // pointing at a subscript the author never wrote; a subscript that mentions
 // a compiler-reserved `__` name is now recognized as synthesized, like a
 // `__` buffer, and the note is not raised.)
-let mut darr = [0.0, 0.0, 0.0]
-let (lv, dly) = ad.grad(loss)(2.0, [1.0, 2.0, 3.0], darr)
+let mut darr = Float64([0.0, 0.0, 0.0])
+let (lv, dly) = ad.grad(loss)(Float64(2.0), Float64([1.0, 2.0, 3.0]), darr)
 // EXPECT: lv = 12.0
 // EXPECT: dly = 6.0
 // EXPECT: darr = [2.0, 2.0, 2.0]

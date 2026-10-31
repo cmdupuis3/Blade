@@ -10,7 +10,7 @@ function packmax(a: Poly<T^0>) where comm(a) -> T^0 = {
     | _ -> { let head :: tail = a
              if head > packmax(tail) then head else packmax(tail) }
 }
-let A = [1.0, 5.0, 3.0]
+let A = Float64([1.0, 5.0, 3.0])
 let result = object_for(packmax) <@> (A, A) |> compute
 let r02 = result(0, 2)
 let r20 = result(2, 0)

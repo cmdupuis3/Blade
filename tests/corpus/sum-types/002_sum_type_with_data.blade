@@ -1,6 +1,6 @@
 // TEST: Sum Type With Data
 // Sum type with payload — construct and extract via match
-type Option = Some : Int | None
+type Option = Some : Int32 | None
 let x = Some(42)
 let val = match x with
     | Some(n) -> n

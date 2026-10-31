@@ -7,11 +7,11 @@
 // C++ compilation failed with "'g' was not declared in this scope".
 // `pure_fn` pins the negative: no module refs anywhere in its call graph,
 // so it stays a free function.
-let static K = 4.0
-static function g(x: Float) -> Float = x + K
-function f(y: Float) -> Float = g(y)
-function h(z: Float) -> Float = f(z) * 2.0
-function pure_fn(w: Float) -> Float = w + 1.0
+let static K: Float64 = 4.0
+static function g(x: Float64) -> Float64 = x + K
+function f(y: Float64) -> Float64 = g(y)
+function h(z: Float64) -> Float64 = f(z) * 2.0
+function pure_fn(w: Float64) -> Float64 = w + 1.0
 let r = h(1.0)
 let s = pure_fn(r)
 // EXPECT: r = 10.0

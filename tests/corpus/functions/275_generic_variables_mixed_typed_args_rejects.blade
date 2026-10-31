@@ -6,5 +6,5 @@
 // Float64 argument disagree about it: the Int64 sum would truncate the 2.5.
 // Convert one: `add(Float64(n), 2.5)`.
 function add(x: T, y: U) = x + y
-let n = 1
-let s = add(n, 2.5)
+let n: Int64 = 1
+let s = add(n, Float64(2.5))

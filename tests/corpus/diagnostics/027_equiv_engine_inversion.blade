@@ -11,8 +11,8 @@ import ml as ml
 // three TRUE vectors is a PSEUDOscalar. The message says so, and names both
 // honest repairs (declare (l=0, odd), or weaken to SO3).
 let static V = [(1, 1, 1)]
-function tri(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
-             where ml.equiv(O3) -> Float =
+function tri(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
+             where ml.equiv(O3) -> Float64 =
   (u(0) * (v(1) * w(2) - v(2) * w(1))
    + u(1) * (v(2) * w(0) - v(0) * w(2))
    + u(2) * (v(0) * w(1) - v(1) * w(0)))

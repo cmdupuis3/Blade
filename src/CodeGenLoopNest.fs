@@ -268,7 +268,7 @@ let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: El
         let centerExpr =
             match offset with
             | None -> level.IndexName
-            | Some (IRLit (IRLitInt n)) -> $"({level.IndexName} + {n}L)"
+            | Some (IRLit (IRLitInt n)) -> $"({level.IndexName} + {(int64LiteralToCpp n)})"
             | Some off -> $"({level.IndexName} + {(exprToCpp Map.empty off)})"
         let code =
             $"const std::array<size_t, 1>* {elem.ParamName} = &{elem.ArrayName}_cidx->rank_to_tuple[{centerExpr}];"
@@ -315,7 +315,7 @@ let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: El
         let valueExpr =
             match offset with
             | None -> level.IndexName
-            | Some (IRLit (IRLitInt n)) -> $"({level.IndexName} + {n}L)"
+            | Some (IRLit (IRLitInt n)) -> $"({level.IndexName} + {(int64LiteralToCpp n)})"
             | Some off -> $"({level.IndexName} + {(exprToCpp Map.empty off)})"
         let code = $"int64_t {elem.ParamName} = {valueExpr};"
         (code, elem.ParamName)
@@ -1516,8 +1516,18 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let mutable currentNames : Map<int, string> =
         codeGen.InputArrayNames |> List.mapi (fun i n -> (i, n)) |> Map.ofList
 
-    // Track final peeled name for each param VarId (for kernel body substitution)
-    let mutable paramFinalNames : Map<int, string> = Map.empty
+    // Track final peeled name for each param VarId (for kernel body substitution).
+    // A zero-level nest passes whole operands to its kernel: no element peel
+    // runs to register their names. This occurs after a fused pipeline's
+    // partial fold specializes to a rank-one input (its row is the whole
+    // array). Bind those parameters directly to the already-evaluated inputs.
+    let mutable paramFinalNames : Map<int, string> =
+        if codeGen.Bindings.IsEmpty
+           && codeGen.KernelParams.Length = codeGen.InputArrayNames.Length then
+            List.zip codeGen.KernelParams codeGen.InputArrayNames
+            |> List.map (fun (p, name) -> p.VarId, name)
+            |> Map.ofList
+        else Map.empty
 
     // Streamed sources: accumulated ABSOLUTE site coordinates per array
     // position (consumed by the fiber read at the S/T boundary).

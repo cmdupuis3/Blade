@@ -3,9 +3,9 @@
 // ABORT: outside its group's rows
 // G1: `k % 3` is 2 here and group 0 has two rows; the coordinate is bound
 // once and checked, not read past the group.
-let region = [0, 1, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0]
+let region = Int64([0, 1, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
-let k = 5
+let k: Int64 = 5
 let bad = grouped(0, k % 3)

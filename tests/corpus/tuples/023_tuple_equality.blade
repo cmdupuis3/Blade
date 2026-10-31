@@ -22,9 +22,9 @@
 // THE NOTEBOOK SHAPE (docs/quickstart-1.bladenb, section 3): construct, then
 // cons-destructure, then compare the tail against a literal pair -- written as
 // the bare top-level EXPRESSION the cell actually is.
-let a = 1
-let b = 2
-let c = 3
+let a: Int64 = 1
+let b: Int64 = 2
+let c: Int64 = 3
 let myTuple = a, b, c
 let head :: tail = myTuple
 tail == (b, c)
@@ -33,46 +33,46 @@ tail == (b, c)
 
 // Equal and unequal at the same width, both operators. `!=` is not merely
 // "not ==" by accident here: it is its own IR node reaching its own arm.
-let eqSame = (2, 3) == (2, 3)
+let eqSame = (Int64(2), Int64(3)) == (Int64(2), Int64(3))
 // EXPECT: eqSame = true
-let eqDiff = (2, 3) == (2, 4)
+let eqDiff = (Int64(2), Int64(3)) == (Int64(2), Int64(4))
 // EXPECT: eqDiff = false
-let neDiff = (2, 3) != (2, 4)
+let neDiff = (Int64(2), Int64(3)) != (Int64(2), Int64(4))
 // EXPECT: neDiff = true
-let neSame = (2, 3) != (2, 3)
+let neSame = (Int64(2), Int64(3)) != (Int64(2), Int64(3))
 // EXPECT: neSame = false
 
 // A tuple built by the bare comma compares equal to the parenthesized literal
 // it matches byte-for-byte from the checker down (formalism 2.8).
 let t = b, c
-let bareVsParen = t == (2, 3)
+let bareVsParen = t == (Int64(2), Int64(3))
 // EXPECT: bareVsParen = true
 
 // Mixed but COMPATIBLE component types promote per the ordinary unification
 // rules: an Int64 slot against a Float64 slot is one comparison, not a refusal.
-let promoted = (2, 3) == (2.0, 3.0)
+let promoted = (Int64(2), Int64(3)) == (Float64(2.0), Float64(3.0))
 // EXPECT: promoted = true
-let mixedElems = (2, 3.5) == (2, 3.5)
+let mixedElems = (Int64(2), Float64(3.5)) == (Int64(2), Float64(3.5))
 // EXPECT: mixedElems = true
 
 // NESTED components recurse structurally, so a differing leaf inside a nested
 // node decides the whole comparison. `((1, 2), 3)` is TWO top-level slots
 // (formalism 2.8: nesting is preserved, never re-counted), and the comparison
 // reads it that way.
-let nestSame = ((1, 2), 3) == ((1, 2), 3)
+let nestSame = ((Int64(1), Int64(2)), Int64(3)) == ((Int64(1), Int64(2)), Int64(3))
 // EXPECT: nestSame = true
-let nestDiff = ((1, 2), 3) == ((1, 9), 3)
+let nestDiff = ((Int64(1), Int64(2)), Int64(3)) == ((Int64(1), Int64(9)), Int64(3))
 // EXPECT: nestDiff = false
 
 // Ordered comparisons are lexicographic: the first differing component
 // decides, and "every component equal" is what `<=` / `>=` answer true to.
-let lt = (2, 3) < (2, 4)
+let lt = (Int64(2), Int64(3)) < (Int64(2), Int64(4))
 // EXPECT: lt = true
-let ltFalse = (2, 4) < (2, 3)
+let ltFalse = (Int64(2), Int64(4)) < (Int64(2), Int64(3))
 // EXPECT: ltFalse = false
-let leEqual = (2, 3) <= (2, 3)
+let leEqual = (Int64(2), Int64(3)) <= (Int64(2), Int64(3))
 // EXPECT: leEqual = true
-let gtFirst = (2, 3) > (1, 9)
+let gtFirst = (Int64(2), Int64(3)) > (Int64(1), Int64(9))
 // EXPECT: gtFirst = true
 
 // UNIT-CARRYING components compare when their units AGREE. The check is
@@ -82,10 +82,10 @@ let gtFirst = (2, 3) > (1, 9)
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-let v1 = 4.0: Float<mps>
-let v2 = 4.0: Float<mps>
-let v3 = 5.0: Float<mps>
-let unitSame = (v1, 1) == (v2, 1)
+let v1 = 4.0: Float64<mps>
+let v2 = 4.0: Float64<mps>
+let v3 = 5.0: Float64<mps>
+let unitSame = (v1, Int64(1)) == (v2, Int64(1))
 // EXPECT: unitSame = true
-let unitDiff = (v1, 1) == (v3, 1)
+let unitDiff = (v1, Int64(1)) == (v3, Int64(1))
 // EXPECT: unitDiff = false

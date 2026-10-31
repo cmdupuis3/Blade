@@ -6,9 +6,9 @@
 // reported a dangling VarId (BL6001). The arity specializer now folds a
 // constant index expression and resolves the read like a literal one.
 // (arity/062: an index that folds past the pack's end.)
-let x = [1.0, 2.0, 3.0]
-let y = [10.0, 20.0, 30.0, 40.0, 50.0]
-let z = [100.0]
+let x = Float64([1.0, 2.0, 3.0])
+let y = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
+let z = Float64([100.0])
 
 function scaled_last(P: Poly<T^1>) -> T^1 = P[arity(P) - 1] * 2.0
 let sl = scaled_last(x, y)

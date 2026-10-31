@@ -9,5 +9,5 @@ function packalt(a: Poly<T^0>) where comm(a) -> T^0 = {
     | _ -> { let head :: tail = a
              head - packalt(tail) }
 }
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let result = object_for(packalt) <@> (A, A) |> compute

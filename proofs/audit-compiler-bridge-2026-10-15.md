@@ -33,7 +33,7 @@ same sources. Probe sources are inline.
 passes `f.K`, which stores a bound looser than the box, so it is ignored.
 
 ```blade
-static struct Big { i: Int<min=0, max=200000> } where i > 199998   // 2 solutions
+static struct Big { i: Int32<min=0, max=200000> } where i > 199998   // 2 solutions
 let R = method_for(range<Big>) <@> lambda(i) -> 1 |> compute
 let n = extents(R)
 let s = reduce(R, (+))

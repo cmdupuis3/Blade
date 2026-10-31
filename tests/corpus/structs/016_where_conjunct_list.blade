@@ -1,9 +1,9 @@
 // TEST: Struct Where Conjunct List
 // Comma-separated where conjuncts, all satisfied.
 struct Ranged {
-    lo: Int,
-    hi: Int,
-    mid: Int
+    lo: Int32,
+    hi: Int32,
+    mid: Int32
 } where lo <= mid, mid <= hi
 let r = Ranged { lo = 1, mid = 5, hi = 9 }
 let m = r.mid

@@ -8,14 +8,14 @@ import ad as ad
 
 type I = Idx<3>
 
-function f1(a: Array<Float like I>) -> Float = {
+function f1(a: Array<Float64 like I>) -> Float64 = {
     let Lp = method_for(a, a)
     let m = Lp <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     m(0, 2) + m(1, 1)
 }
 
-function sq(u: Float) -> Float = u * u
-function f2(a: Array<Float like I>) -> Float = {
+function sq(u: Float64) -> Float64 = u * u
+function f2(a: Array<Float64 like I>) -> Float64 = {
     let L = object_for(sq)
     let m = L <@> a |> compute
     reduce(m, (+))

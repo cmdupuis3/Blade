@@ -7,7 +7,7 @@
 // table is built and the keyed read binary-searches it (12345 at position 0).
 module Data
 
-let x = [12345, -3, 4]
+let x = Int64([12345, -3, 4])
 let keep = mask(x, lambda(v) -> v > 0)
 let y = compound(x, keep)
 let ysum = reduce(y, (+))

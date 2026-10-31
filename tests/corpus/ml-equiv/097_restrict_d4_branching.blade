@@ -146,8 +146,8 @@ let static WD = ml.pg_hom_dim("D4", R2, R2)
 let static WL = ml.pg_hom_dim("D4", R1, R1)
 // EXPECT: WL = 2
 
-function d4_layer(x: Array<Float like PgIrrepsIdx<D4, R1>>, w: Array<Float like Idx<WL>>)
-                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, R1>> =
+function d4_layer(x: Array<Float64 like PgIrrepsIdx<D4, R1>>, w: Array<Float64 like Idx<WL>>)
+                  where ml.equiv(D4) -> Array<Float64 like PgIrrepsIdx<D4, R1>> =
     ml.derive_pg_linear(D4, R1, R1, x, w)
 
 // The restricted layout puts the A2 cell at index 0 and the E pair at 1 and 2 —

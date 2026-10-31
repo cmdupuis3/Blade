@@ -9,14 +9,14 @@ struct P {
 }
 struct Q {
     p: P,
-    v: Array<Float like Idx<3>>,
+    v: Array<Float64 like Idx<3>>,
     n: Int64,
     name: String
 }
 let p = P { a = 1.0, b = 2.0 }
 let q = Q { p = p, v = [1.0, 2.0, 3.0], n = 3, name = "Ann" }
-let pr = (p, 4)
-let w = ((1, 2), 3.5)
+let pr = (p, Int64(4))
+let w = ((Int64(1), Int64(2)), Float64(3.5))
 // EXPECT: p = P { a = 1.0, b = 2.0 }
 // EXPECT: q = Q { p = P { a = 1.0, b = 2.0 }, v = [1.0, 2.0, 3.0], n = 3, name = Ann }
 // EXPECT: pr = (P { a = 1.0, b = 2.0 }, 4)

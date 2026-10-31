@@ -10,7 +10,7 @@
 // pass that guards floor (intrinsics/016) covers both binary intrinsics --
 // every binaryMathIntrinsic is real-only by construction, so no name filter is
 // needed on that arm. log_base is refused identically.
-let RE: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
-let IM: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let RE: Array<Float64 like Idx<3>> = [3.0, 0.0, -1.0]
+let IM: Array<Float64 like Idx<3>> = [4.0, 2.0, 0.0]
 let Z = (zip(RE, IM) <@> lambda(a, b) -> complex(a, b)) |> compute
 let bad = (method_for(Z) <@> lambda(z) -> atan2(z, 1.0)) |> compute

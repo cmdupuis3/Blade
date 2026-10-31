@@ -10,8 +10,8 @@
 
 function addPair(t: Tuple<2>) -> Float64 = t[0] + t[1]
 
-let b = 1.0
-let c = 2.0
+let b: Float64 = 1.0
+let c: Float64 = 2.0
 
 // A BOUND tuple as the argument.
 let p = b, c
@@ -28,7 +28,7 @@ let fromLiteral = addPair((b, c))
 // constrains only the width, so a (Float64, Int64) pair is fine as long as
 // the body's use of each slot types.
 function mixed(t: Tuple<3>) -> Float64 = t[0] + t[2]
-let m = mixed((1.5, 7, 2.5))
+let m = mixed((Float64(1.5), Int64(7), Float64(2.5)))
 // EXPECT: m = 4.0
 
 // RETURN-type position takes the annotation too.
@@ -39,7 +39,7 @@ let rv = r[0] + r[1]
 
 // LAMBDA parameter position, with the projection inside the lambda BODY.
 let lam = lambda(q: Tuple<2>) -> q[0] * q[1]
-let lv = lam((3.0, 4.0))
+let lv = lam((Float64(3.0), Float64(4.0)))
 // EXPECT: lv = 12.0
 
 // The bare-comma construction feeds an annotated parameter directly, which is

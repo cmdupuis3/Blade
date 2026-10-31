@@ -55,7 +55,7 @@ function total(g: Array<Float64 like Idx<nr>, Idx<nc>>) -> Float64 = reduce(redu
 /// Iterations as a function of depth: boundary detail needs more per decade
 /// of magnification, steeply so once the filaments are thinner than a pixel.
 function view_kmax(r: Float64) -> Float64 = {
-    let knee = 1.0e-6
+    let knee: Float64 = 1.0e-6
     let shallow = 116.0 + 45.0 * log(1.5 / r) / log(10.0)
     if r >= knee then shallow else shallow + 1155.0 * log(knee / r) / log(10.0)
 }
@@ -71,17 +71,22 @@ function view_kmax(r: Float64) -> Float64 = {
 // grid is the escape time over their outer product.
 //
 // %%
-let cx = -0.75
-let cy = 0.0
-let r = 1.0
+let cx: Float64 = -0.75
+let cy: Float64 = 0.0
+let r: Float64 = 1.0
 
-let xs = cx - 1.5 * r + (3.0 * r / 450.0) * Float64(0..450)
-let ys = cy - r + (2.0 * r / 300.0) * Float64(0..300)
+// Keep the real-axis row exactly zero: coordinate contraction would move it.
+function camera_axes(cx: Float64, cy: Float64, r: Float64) where repro = {
+    let xs = cx - 1.5 * r + (3.0 * r / 450.0) * Float64(0..450)
+    let ys = cy - r + (2.0 * r / 300.0) * Float64(0..300)
+    (xs, ys)
+}
+let (xs, ys) = camera_axes(cx, cy, r)
 let kmax = view_kmax(r)
 let set = (method_for(ys, xs) <@> lambda(y, x) where omp(y: 1) -> mandel(x, y, kmax)) |> compute
 
 let (lo, hi) = field_range(set, kmax)
-let shown = plot.heatmap(xs, ys, set, 5: cmap, lo: zmin, hi: zmax,
+let shown = plot.heatmap(xs, ys, set, Int64(5): cmap, lo: zmin, hi: zmax,
     "The Mandelbrot set (scroll to zoom)": title, "Re(c)": xlabel, "Im(c)": ylabel,
     "cx,cy,r": camera)
 let set_sum = total(set)
@@ -98,9 +103,9 @@ set_sum
 // same number, and the picture is one value repeated.
 //
 // %%
-let floor_r = 1.0e-14
+let floor_r: Float64 = 1.0e-14
 let floor_xs = cx + (2.0 * floor_r / 256.0) * Float64(0..4)
-let collided = floor_xs(2) - floor_xs(1) == 0.0
+let collided = floor_xs(Int64(2)) - floor_xs(1) == 0.0
 collided
 // EXPECT: collided = true
 
@@ -180,8 +185,8 @@ function qd_norm(terms: Array<Float64 like Idx<n>>) -> QD =
 
 /// a * b: of the sixteen limb products the ten with i + j <= 3 reach the
 /// fourth limb, each contributing its rounded product and its fma residual.
-let __qi = [0, 0, 0, 0, 1, 1, 1, 2, 2, 3]
-let __qj = [0, 1, 2, 3, 0, 1, 2, 0, 1, 0]
+let __qi = Int64([0, 0, 0, 0, 1, 1, 1, 2, 2, 3])
+let __qj = Int64([0, 1, 2, 3, 0, 1, 2, 0, 1, 0])
 function qd_mul(a: QD, b: QD) -> QD = {
     let al = [a.l0, a.l1, a.l2, a.l3]
     let bl = [b.l0, b.l1, b.l2, b.l3]
@@ -214,7 +219,7 @@ function star_poly(c: QD) -> QD = {
     qd_add(qd_mul(qd_add(qd_mul(qd_add(c, two), c), two), c), two)
 }
 /// One Newton step, c - p(c) / p'(c0), with the reciprocal a Float64.
-let star_seed = -1.5436890126920764
+let star_seed: Float64 = -1.5436890126920764
 let star_recip = 1.0 / (3.0 * star_seed * star_seed + 4.0 * star_seed + 2.0)
 function newton_step(c: QD) -> QD = qd_add(c, qd_neg(qd_mul(star_poly(c), qd_lift(star_recip))))
 
@@ -255,7 +260,7 @@ function ref_step(z: Array<Float64 like Idx<8>>, cr: QD, ci: QD) -> Array<Float6
     let row = [nr.l0, nr.l1, nr.l2, nr.l3, ni.l0, ni.l1, ni.l2, ni.l3]
     if z(0) * z(0) + z(4) * z(4) > 16.0 then z else row
 }
-let ref_zero = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let ref_zero = Float64([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 /// Rebase when the delta has outgrown the orbit it rides (|z| < |dz|), when
 /// the reference has escaped, or when its buffer would run out.
@@ -314,16 +319,16 @@ function far_grid(ax: Array<Float64 like Idx<n>>, ref: Array<Float64 like Idx<nr
 // is a compiled render — every gesture already is one.
 //
 // %%
-let far_re0 = -1.5436890126920764
-let far_re1 = 6.156766738133783e-18
-let far_re2 = -1.1879318748378514e-34
+let far_re0: Float64 = -1.5436890126920764
+let far_re1: Float64 = 6.156766738133783e-18
+let far_re2: Float64 = -1.1879318748378514e-34
 let far_re3 = 8.252416427936383e-51
-let far_im0 = 0.0
-let far_im1 = 0.0
-let far_im2 = 0.0
-let far_im3 = 0.0
+let far_im0: Float64 = 0.0
+let far_im1: Float64 = 0.0
+let far_im2: Float64 = 0.0
+let far_im3: Float64 = 0.0
 let far_r = 1.0e-40
-let far_px = 64
+let far_px: Int64 = 64
 
 // %%
 let rec far_ref: Array<Float64 like Idx<8192>, Idx<8>> =
@@ -339,7 +344,7 @@ function far_show(ax: Array<Float64 like Idx<n>>, ref: Array<Float64 like Idx<81
     let kmax = fmin(floor(view_kmax(r)), 8191.0)
     let g = far_grid(ax, ref, 8191, r, kmax)
     let (lo, hi) = field_range(g, kmax)
-    let shown = plot.heatmap(ax, ax, g, 5: cmap, lo: zmin, hi: zmax,
+    let shown = plot.heatmap(ax, ax, g, Int64(5): cmap, lo: zmin, hi: zmax,
         "The far lens (scroll to dive)": title, "Re(c - C) / r": xlabel, "Im(c - C) / r": ylabel,
         "mandelbrot-far": plotid, "far_re0,far_re1,far_re2,far_re3,far_im0,far_im1,far_im2,far_im3,far_r": camera)
     total(g)
@@ -375,7 +380,7 @@ let rec trunc_ref: Array<Float64 like Idx<4096>, Idx<8>> =
     | zero :: s -> zero :: ref_zero
     | prefix :: n -> prefix :: ref_step(prefix(n - 1), cam_trunc, qd_zero)
 function flips(a: Array<Float64 like Idx<n>, Idx<n>>, b: Array<Float64 like Idx<n>, Idx<n>>) -> Int64 =
-    reduce(reduce((method_for(zip(a, b)) <@> lambda(x, y) -> if abs(x - y) > 1.0 then 1 else 0) |> compute, (+)), (+))
+    reduce(reduce((method_for(zip(a, b)) <@> lambda(x, y) -> if abs(x - y) > 1.0 then Int64(1) else Int64(0)) |> compute, (+)), (+))
 let unit16 = -1.0 + (2.0 / 16.0) * Float64(0..16)
 let at25 = flips(far_grid(unit16, far_ref, 8191, 1.0e-25, 2000.0), far_grid(unit16, trunc_ref, 4095, 1.0e-25, 2000.0))
 let at50 = flips(far_grid(unit16, far_ref, 8191, 1.0e-50, 2000.0), far_grid(unit16, trunc_ref, 4095, 1.0e-50, 2000.0))

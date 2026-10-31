@@ -8,12 +8,12 @@
 //   per-leg pack -- object_for(<&!>) <@> (reduce .., reduce .., reduce ..) with
 //                   seeds 10.0 / 20.0 / 30.0, one leg's fold kernel `where omp`
 // A seed duplicated into every chunk would print 6 + T * 10 instead.
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let (f1, f2, f3) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v + 1.0)
     <&!> (l <@> lambda(v) -> v + 2.0), lambda(u, v) where omp -> u + v, 10.0)
-let (p1, p2, p3) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, 10.0),
-    reduce(x, (+), 20.0), reduce(x, (+), 30.0))
+let (p1, p2, p3) = object_for(<&!>) <@> (reduce(x, lambda(p, q) where omp -> p + q, Float64(10.0)),
+    reduce(x, (+), Float64(20.0)), reduce(x, (+), Float64(30.0)))
 // EXPECT: f1 = 16.0
 // EXPECT: f2 = 19.0
 // EXPECT: f3 = 22.0

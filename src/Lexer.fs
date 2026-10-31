@@ -196,8 +196,6 @@ let keywordEntries : (string * Keyword) list =
       "reynolds", KwReynolds
       "true", KwTrue
       "false", KwFalse
-      "True", KwTrue
-      "False", KwFalse
       "in", KwIn
       "import", KwImport
       "from", KwFrom

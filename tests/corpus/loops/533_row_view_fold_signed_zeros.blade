@@ -21,7 +21,7 @@ type Y = Idx<521>
 type X = Idx<509>
 let (neg, neg_peeled, mixed, strict, strict_negative, strict_peeled, strict_peeled_negative) = {
     let z = method_for(range<Y, X>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute
-    let m = method_for(range<Y, X>) <@> lambda(i, j) -> if (i + j) % 2 == 0 then -0.0 else 0.0 |> compute
+    let m = method_for(range<Y, X>) <@> lambda(i, j) -> if (i + j) % 2 == 0 then -Float64(0.0) else Float64(0.0) |> compute
     let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), lambda(p, q) -> p + q, -0.0), lambda(p, q) where omp -> p + q, -0.0)
     let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(z(i), (+)), lambda(p, q) where omp -> p + q, -0.0)
     let c = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(m(i), lambda(p, q) -> p + q, -0.0), lambda(p, q) where omp -> p + q, -0.0)

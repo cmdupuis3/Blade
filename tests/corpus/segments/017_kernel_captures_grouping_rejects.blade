@@ -11,7 +11,7 @@
 // ERROR-CONTAINS: a kernel body captures the grouping 'seg'
 type X = Chunked<Idx<10>, 4>
 type K = Idx<3>
-let A: Array<Float like X> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 let seg = segments(X)
 let totals = method_for(range<K>) <@> lambda(k) -> {
     let g = group_by(A, seg)

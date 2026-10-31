@@ -28,11 +28,11 @@ let s = {
 }
 let a = {
     let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute
-    plot.heatmap(Float64(0..13), Float64(0..8), g, 4: cmap, "pieces": title)
+    plot.heatmap(Float64(0..13), Float64(0..8), g, Int64(4): cmap, "pieces": title)
 }
 let b = {
     let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute
-    plot.heatmap(Float64(0..13), Float64(0..8), g, 4: maxdim)
+    plot.heatmap(Float64(0..13), Float64(0..8), g, Int64(4): maxdim)
 }
 let c = {
     let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute

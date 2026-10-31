@@ -13,7 +13,7 @@
 Unit second
 Unit meter
 function scaled(x: T<second>^1, k: T<second>) = reduce(x, (+)) * k
-let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
-let k: Float<meter> = 2.0
+let ts: Array<Float64<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let k: Float64<meter> = 2.0
 let bad = scaled(ts, k)
 // EXPECT: typecheck failure -- a meter scalar cannot fill a T<second> slot

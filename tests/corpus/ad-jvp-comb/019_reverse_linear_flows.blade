@@ -12,22 +12,22 @@ import ad as ad
 
 type I = Idx<2>
 
-function flin(x: Array<Float like I>, y: Array<Float like I>) -> Float = {
+function flin(x: Array<Float64 like I>, y: Array<Float64 like I>) -> Float64 = {
     let b = x
     let s = stack(b, y)
     s(0, 0) * 3.0 + s(1, 1) * 5.0
 }
 
-function ftr(m: Array<Float like I, I>) -> Float = {
+function ftr(m: Array<Float64 like I, I>) -> Float64 = {
     let t = transpose(m, [0, 1])
     t(0, 1) * 10.0
 }
 
-let mut dx = [0.0, 0.0]
-let mut dy = [0.0, 0.0]
-let lv = ad.grad(flin)([1.0, 2.0], [3.0, 4.0], dx, dy)
-let mut dm = [[0.0, 0.0], [0.0, 0.0]]
-let tv = ad.grad(ftr)([[1.0, 2.0], [3.0, 4.0]], dm)
+let mut dx = Float64([0.0, 0.0])
+let mut dy = Float64([0.0, 0.0])
+let lv = ad.grad(flin)(Float64([1.0, 2.0]), Float64([3.0, 4.0]), dx, dy)
+let mut dm = Float64([[0.0, 0.0], [0.0, 0.0]])
+let tv = ad.grad(ftr)(Float64([[1.0, 2.0], [3.0, 4.0]]), dm)
 // EXPECT: lv = 23.0
 // EXPECT: dx = [3.0, 0.0]
 // EXPECT: dy = [0.0, 5.0]

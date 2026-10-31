@@ -5,7 +5,7 @@
 // Interior antisym cut, rank 4 d=1: result Idx -> Idx(freed) -> AntisymIdx<2>
 // (one surviving residual group + a degenerate arity-1 left side). Kernel uses
 // distinct exponents (x0^3 x1^2 x2) so the antisymmetrization does not vanish.
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let L = method_for(A, A, A, A)
 let f = lambda(w, x, y, z) where comm(w, x, y, z) -> w * w * w * x * x * y
 let anti = L <@> reynolds(f, Antisymmetric) |> compute

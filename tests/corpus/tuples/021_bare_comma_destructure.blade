@@ -10,14 +10,14 @@
 // compose without a rule to arbitrate them, which is what `let a, b = c, d`
 // below pins. No existing spelling changed meaning: a comma could not
 // previously follow a let pattern at all (`BL1001: Expected '=' but got ','`).
-let t = 1.0, 2.0
+let t = Float64(1.0), Float64(2.0)
 let a, b = t
 let s = a + b
 // EXPECT: s = 3.0
 
 // CONSTRUCTION ON THE RIGHT, DESTRUCTURING ON THE LEFT, in one statement.
-let c = 10.0
-let d = 20.0
+let c: Float64 = 10.0
+let d: Float64 = 20.0
 let e, f = c, d
 let s2 = e * 100.0 + f
 // EXPECT: s2 = 1020.0
@@ -30,8 +30,8 @@ let s3 = p * 100.0 + q
 // EXPECT: s3 = 608.0
 
 // Width 3, and the parenthesized form for comparison -- same program.
-let g1, g2, g3 = 1.0, 2.0, 3.0
-let (h1, h2, h3) = (1.0, 2.0, 3.0)
+let g1, g2, g3 = Float64(1.0), Float64(2.0), Float64(3.0)
+let (h1, h2, h3) = (Float64(1.0), Float64(2.0), Float64(3.0))
 let s4 = g1 * 100.0 + g2 * 10.0 + g3 + h1 * 100.0 + h2 * 10.0 + h3
 // EXPECT: s4 = 246.0
 
@@ -60,13 +60,13 @@ function pairSum(p: Tuple<Float64, Float64>) -> Float64 = {
     let l, r = p
     l * 10.0 + r
 }
-let ps = pairSum((7.0, 8.0))
+let ps = pairSum((Float64(7.0), Float64(8.0)))
 // EXPECT: ps = 78.0
 
 // FLAT destructuring is unchanged by the new spelling: a tuple pattern binds
 // one name per component, or one per FLATTENED leaf, and the parenthesized
 // form already did the latter (basic/024).
-let nested = (1.0, 2.0), 3.0
+let nested = (Float64(1.0), Float64(2.0)), Float64(3.0)
 let n1, n2, n3 = nested
 let s5 = n1 * 100.0 + n2 * 10.0 + n3
 // EXPECT: s5 = 123.0

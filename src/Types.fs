@@ -1217,16 +1217,16 @@ type ElemType =
 
 /// Explicit numeric cast heads: the surface scalar type names accepted in
 /// CALL position (`Float32(x)`, `Int64(floor(x))`), mapped to the target
-/// element type. Deliberately the same aliases as type position
-/// (TypeLower.lowerTypeExpr's scalar arms: "Int" is Int32, "Float"/"Double"
-/// are Float64) so a name means one thing in type and cast position alike.
+/// element type. Only BIT-SIZED names (round 6): the width-less `Int`,
+/// `Float` and `Double` are refused by the parser with a steer (BL1004), in
+/// type and cast position alike.
 /// Narrower than TypeLower.builtinScalarNames on purpose: Nat/Bool/String/
 /// Char/Void/Poly/Array are not value conversions. Keep the three tables'
 /// name sets consistent when adding a scalar.
 let numericCastTargets : Map<string, ElemType> =
     Map.ofList [
-        "Int", ETInt32; "Int32", ETInt32; "Int64", ETInt64
-        "Float", ETFloat64; "Float64", ETFloat64; "Double", ETFloat64
+        "Int32", ETInt32; "Int64", ETInt64
+        "Float64", ETFloat64
         "Float32", ETFloat32
         "Complex64", ETComplex64; "Complex128", ETComplex128 ]
 
@@ -1575,3 +1575,46 @@ let domainDiagonal (plan: DomainPlan) : DomainDiagonal option =
                 if card <> plan.Card then None
                 else Some { KLo = kLo; KHi = kHi; ILo = iLo; IHi = iHi; JLo = jLo; JHi = jHi }
     | _ -> None
+
+/// ROUND 6 NUMERIC DEFAULTS (formalism 2.4). The width a numeric literal
+/// takes when NOTHING fixes it -- no operator partner, annotation, parameter,
+/// cast, shared generic variable, branch or array-literal partner, index
+/// position (those adapt it, TypeCheckSupport's literal-only retype):
+/// an integer literal is an Int32 when its value fits Int32, else an Int64;
+/// a float literal is a Float32 unless its magnitude is past Float32's finite
+/// range (then a Float64). The one table every site reads (the checker's
+/// synthesis and literal-variable seeds, StaticEval).
+module LiteralDefaults =
+    /// The integer literal's default under the round-6 rule.
+    let intDefault (n: int64) : ElemType =
+        if n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue then ETInt32 else ETInt64
+
+    /// The float literal's default under the round-6 rule.
+    /// Past Float32's finite range at EITHER end (lead ruling R1): a
+    /// magnitude above FLT_MAX, or a NONZERO value whose Float32 rounding is
+    /// zero or subnormal, is a Float64.
+    let floatDefault (f: float) : ElemType =
+        if not (System.Double.IsFinite f) || f = 0.0 then ETFloat32
+        elif abs f > float System.Single.MaxValue then ETFloat64
+        else
+            let r = float32 f
+            if r = 0.0f || abs r < 1.17549435e-38f then ETFloat64 else ETFloat32
+
+    /// A literal VALUE a width can hold: an integer within the width's range,
+    /// a float within Float32's finite range (Float64 holds every literal).
+    let intFits (et: ElemType) (n: int64) : bool =
+        match et with
+        | ETInt32 -> n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue
+        | ETInt64 -> true
+        | _ -> false
+    let floatFits (et: ElemType) (f: float) : bool =
+        match et with
+        // Inside Float32's finite range at BOTH ends (lead ruling): a value
+        // past FLT_MAX, or a nonzero value whose Float32 rounding is zero or
+        // subnormal, does not fit.
+        | ETFloat32 ->
+            if not (System.Double.IsFinite f) || f = 0.0 then true
+            elif abs f > float System.Single.MaxValue then false
+            else abs (float32 f) >= 1.17549435e-38f
+        | ETFloat64 -> true
+        | _ -> false

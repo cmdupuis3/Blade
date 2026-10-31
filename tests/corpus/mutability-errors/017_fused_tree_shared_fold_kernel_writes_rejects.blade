@@ -5,8 +5,8 @@
 // scalar fold kernel the fused tree applies per leaf writes the captured `F`,
 // once per leaf per cell in the merged nest. The second leaf names the loop
 // object through an alias. Refused like any writing join leg.
-let mut F = [0.0]
-let x = [1.0, 2.0, 3.0]
+let mut F = Float64([0.0])
+let x = Float64([1.0, 2.0, 3.0])
 let L = method_for(x)
 let L2 = L
 let r = reduce((L <@> lambda(v) -> v) <&!> (L2 <@> lambda(v) -> 2.0 * v), lambda(a, b) -> { F(0) = F(0) + 1.0; a + b }, 0.0)

@@ -5,6 +5,6 @@
 // Knuth product-of-uniforms loop ran, and `p <= exp(-NaN)` never fires. The
 // parameter domain is now checked before the fill, in both lanes.
 import rand as r
-let z = 0.0
+let z: Float64 = 0.0
 let lam = z / z
 let p = r.poisson_at(7, 0, 0, lam, 3)

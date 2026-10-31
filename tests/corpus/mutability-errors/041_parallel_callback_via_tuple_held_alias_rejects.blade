@@ -6,7 +6,7 @@
 // Tuples are followed component-wise, so the head is {launch} and bump
 // reaches launch's `f` (804516d1 compiled it).
 type I = Idx<2>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + 1.0
@@ -15,7 +15,7 @@ function bump(v: Float64) -> Float64 = {
 function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
 function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = {
     let k = h
-    let t = (k, 0)
+    let t = (k, Int64(0))
     t[0](f)
 }
 let a = launch(ident)

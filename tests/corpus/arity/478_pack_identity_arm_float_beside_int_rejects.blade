@@ -4,10 +4,10 @@
 // beside an integer at every instance.
 function outerf(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1.0
+    | 0 -> Float64(1.0)
     | _ -> {
         let head :: tail = a
         head [*] outerf(tail)
     }
 }
-let p2 = outerf([1, 2], [3, 4, 5])
+let p2 = outerf(Int64([1, 2]), Int64([3, 4, 5]))

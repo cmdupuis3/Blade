@@ -7,7 +7,7 @@ import ad as ad
 //   dp/dx = 3*2^2   = 12
 //   dp/dy = 8*ln(2) = 5.545177444479562
 // ============================================================================
-function p(x: Float, y: Float) -> Float = x ^ y
+function p(x: Float64, y: Float64) -> Float64 = x ^ y
 let (pv, dpdx, dpdy) = ad.grad(p)(2.0, 3.0)
 // EXPECT: pv = 8.0
 // EXPECT: dpdx = 12.0
@@ -15,7 +15,7 @@ let (pv, dpdx, dpdy) = ad.grad(p)(2.0, 3.0)
 
 // The log term must NOT appear when the exponent is inactive: q's second
 // param is Int, so only dq/dx exists and a negative base stays finite.
-function q(x: Float, k: Int) -> Float = x ^ k
+function q(x: Float64, k: Int32) -> Float64 = x ^ k
 let (qv, dqdx) = ad.grad(q)(0.0 - 2.0, 3)
 // EXPECT: qv = -8.0
 // EXPECT: dqdx = 12.0

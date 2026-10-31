@@ -30,7 +30,7 @@ function f(k: Int64) -> Int64 = {
 let ok = {
     let p = (g, g)
     let q = (p, p)
-    7
+    Int64(7)
 }
 let fv = f(4)
 type I1 = Idx<1>
@@ -55,7 +55,7 @@ let rp = pickp(seenp)
 let rl = if gp(0) > 0 then Float64(gp(0)) + lgamma(2.0) else 0.0
 let rt = {
     let a = zs((zs(0) : RowS))
-    (if gs(0) > 0 then gs(0) else a, 1)
+    (if gs(0) > 0 then gs(0) else a, Int64(1))
 }
 // EXPECT: ok = 7
 // EXPECT: fv = 5

@@ -15,7 +15,7 @@ function pick(x, y) where anticomm(x, y) = match x + y with
     | _ -> x * y + 1.0
 // (5, 2): guard holds, first arm -> 5 * 2.
 // (2, 5): guard fails, second arm -> 2 * 5 + 1.
-let hi = pick(5.0, 2.0)
-let lo = pick(2.0, 5.0)
+let hi = pick(Float64(5.0), Float64(2.0))
+let lo = pick(Float64(2.0), Float64(5.0))
 // EXPECT: hi = 10.0
 // EXPECT: lo = 11.0

@@ -11,7 +11,7 @@ type I = Idx<5>
 let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 0.5, 2.0]
 let b: Array<Float64 like I> = [3.0, 1.0, 0.25, 8.0, 1.5]
 
-let dot, prod, biggest, offsum = object_for(<&!>) <@> (prodsum(a, b), reduce(a, (*), 1.0), reduce(b, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30), reduce(a, (+), 10.0))
+let dot, prod, biggest, offsum = object_for(<&!>) <@> (prodsum(a, b), reduce(a, (*), Float64(1.0)), reduce(b, lambda(p, q) -> if p > q then p else q, Float64(0.0) - Float64(1.0e30)), reduce(a, (+), Float64(10.0)))
 
 // Same four, computed separately.
 let e_dot = prodsum(a, b)

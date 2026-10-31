@@ -16,8 +16,8 @@
 // check (026) decides "same keys" by comparing the gk operands' binding
 // NAMES, which is only meaningful if a gk always IS its binding name. This is
 // the same rule, enforced at its source instead.
-let region = [0, 1, 0, 0, 1]
-let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let v = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let gk2 = gk
 let gv = group_by(v, gk2)

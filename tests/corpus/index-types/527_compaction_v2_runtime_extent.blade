@@ -8,7 +8,7 @@
 // B4's one fill+gather pass itself into the same buffers and chain (the cli
 // block runs both branches). Values are the as-written program's;
 // integer-valued data, every sum exact.
-let k = reduce([3, 4, 5], (+))
+let k = reduce(Int64([3, 4, 5]), (+))
 // EXPECT: k = 12
 let xs = 0..k |> compute
 let keep = mask(xs, lambda(v) -> v > 4)

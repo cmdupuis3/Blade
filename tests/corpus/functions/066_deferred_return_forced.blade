@@ -29,12 +29,12 @@
 // is refused with its own message -- it was never supported and still needs a
 // shared destination; see genFuncBodyScoped's branchingReturnMaterializes arm.
 // ============================================================================
-let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let a: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 
-function f(xs: Array<Float like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
+function f(xs: Array<Float64 like Idx<4>>) = { xs <@> lambda(x) -> x * 2.0 }
 
 // The return leaf sits behind a function-body let, not at the body's top node.
-function chained(xs: Array<Float like Idx<4>>, k: Float64) = {
+function chained(xs: Array<Float64 like Idx<4>>, k: Float64) = {
     let s = k * 3.0
     xs <@> lambda(x) -> x * s
 }

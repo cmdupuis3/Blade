@@ -6,8 +6,8 @@
 // (t(k, i, j)), and p = 2 has no all-distinct triple at all. A strict
 // AntisymIdx<3> pool: 3 even orderings read +x and 3 odd ones -x, and the
 // p^3 - 3! C(p, 3) cells with a repeated index read +0. Integer-valued cells.
-let static p = 7
-let static n = 4
+let static p: Int64 = 7
+let static n: Int64 = 4
 type Var = Idx<p>
 type Obs = Idx<n>
 let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute

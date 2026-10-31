@@ -6,5 +6,5 @@
 // `Array<int64>` is not an `Array<double>`. The old seam declined arrays in its
 // class check and this died in g++.
 function total(x: Array<Float64 like Idx<3>>) -> Float64 = reduce(x, (+))
-let ints = [1, 2, 3]
+let ints = Int64([1, 2, 3])
 let v = total(ints)

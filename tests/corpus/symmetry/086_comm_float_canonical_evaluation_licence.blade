@@ -10,11 +10,11 @@
 // `where` clause no compact storage happens (dense, 1.0 at (1, 2, 0)), so
 // the declaration is the licence -- as BLADE_FP_REASSOC licenses a
 // reassociated fold.
-let A = [1.0, 1.0e16, -1.0e16]
+let A = Float64([1.0, 1.0e16, -1.0e16])
 let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x + y + z |> compute
 let canonical = R(0, 1, 2)
 let permuted = R(1, 2, 0)
-let body_in_permuted_order = 1.0e16 + -1.0e16 + 1.0
+let body_in_permuted_order: Float64 = 1.0e16 + -1.0e16 + 1.0
 // EXPECT: canonical = 0.0
 // EXPECT: permuted = 0.0
 // EXPECT: body_in_permuted_order = 1.0

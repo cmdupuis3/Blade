@@ -36,25 +36,25 @@ let G = Gains { lo = 2.0, hi = 3.0 }
 // argument classified `Opaque`, `requireInv` refused it, the speculative
 // judgment failed, and the channel was silent.
 // SUGGEST: function 'layer_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, ws invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>]
-function layer_loose(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
-                     -> Array<Float like IrrepsIdx<S>> =
+function layer_loose(x: Array<Float64 like IrrepsIdx<S>>, ws: Array<Float64 like Idx<2>, Idx<WD>>)
+                     -> Array<Float64 like IrrepsIdx<S>> =
     ml.derive_linear(S, S, ws[0], x)
 
-function layer_pinned(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
-                      where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function layer_pinned(x: Array<Float64 like IrrepsIdx<S>>, ws: Array<Float64 like Idx<2>, Idx<WD>>)
+                      where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     ml.derive_linear(S, S, ws[0], x)
 
 // Field read of an invariant global. Before the arm: the body classified
 // `Opaque` and disagreed with the declared `Float` return.
 // SUGGEST: function 'score_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]> -> invariant]
-function score_loose(x: Array<Float like IrrepsIdx<S>>) -> Float =
+function score_loose(x: Array<Float64 like IrrepsIdx<S>>) -> Float64 =
     x(0) + G.lo
 
-function score_pinned(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function score_pinned(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
     x(0) + G.lo
 
-let wss = [[2.0, 0.5], [1.0, 1.0]]
-let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let wss = Float64([[2.0, 0.5], [1.0, 1.0]])
+let xv = Float64([1.0, 4.0, 0.0 - 2.0, 6.0])
 
 let loose = layer_loose(xv, wss)
 // EXPECT: loose = [2.0, 2.0, -1.0, 3.0]

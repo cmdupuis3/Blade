@@ -8,15 +8,15 @@
 // complex multiply -- (1 + i) ^ 2 is exactly 2i -- where Complex ^ Float is
 // the libm port's polar form (its real part is a rounding residue).
 // ============================================================================
-let x = 2.0
+let x: Float64 = 2.0
 let fp = x ^ 0.5
 let fsq = x ^ 2.0
 let f3 = x ^ 3.0
-let i3 = 2 ^ 3
+let i3: Int64 = 2 ^ 3
 let ilit = Float64(2) ^ 0.5
-let m = 2
+let m: Int64 = 2
 let ivar = Float64(m) ^ 0.5
-let z = complex(1.0, 1.0)
+let z: Complex128 = complex(1.0, 1.0)
 let zi = z ^ 2
 let zinv = z ^ -1
 let zf = z ^ 2.0

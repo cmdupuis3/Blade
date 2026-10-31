@@ -25,7 +25,7 @@
 // and the precedent is BL4015's inheritance gate (164), which refuses UNKNOWN
 // for the same reason and steers to decompact-first. 220 pins the other half:
 // a provably sign-EVEN kernel, the CommContradictsBody analog one level up.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

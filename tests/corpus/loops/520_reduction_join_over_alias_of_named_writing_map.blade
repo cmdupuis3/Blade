@@ -6,7 +6,7 @@
 // 1..4: s = t = 10, G = 4. A map read ONLY as join operands stays deferred and
 // is refused (mutability-errors/014, in a block and in a function body alike).
 type I = Idx<4>
-let mut G = [0]
+let mut G = Int64([0])
 let r = {
     let m = method_for(range<I>) <@> lambda(i) -> { G(0) = G(0) + 1; G(0) }
     let alias = m

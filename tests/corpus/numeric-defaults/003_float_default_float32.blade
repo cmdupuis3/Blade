@@ -1,0 +1,9 @@
+// TEST: a float literal defaults to Float32 (rejects)
+// ============================================================================
+// Rule 4: `1.5` with nothing fixing its width is a Float32 VARIABLE; the
+// Float64 annotation of the variable is a width mismatch (only a literal
+// adapts).
+// ============================================================================
+let x = 1.5
+let y: Float64 = x
+// ERROR: BL3001

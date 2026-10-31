@@ -12,7 +12,7 @@ let out = {
     let L = method_for(A, A)
     let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
     let sym = L <@> reynolds(g) |> compute
-    let k = lambda(i: Int) -> decompact(sym, 0)(i, 0)
+    let k = lambda(i: Int32) -> decompact(sym, 0)(i, 0)
     // M = [[6,9,12],[9,12,15],[12,15,18]]; column 0 is (6, 9, 12).
     k(0) + k(1)
 }

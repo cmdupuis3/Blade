@@ -7,7 +7,7 @@
 // callback table is a fixpoint over indirect calls: `h(f)` propagates via's
 // `f` candidates into launch's `f`, so launch's kernel sees `bump` too.
 type I = Idx<2>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function ident(v: Float64) -> Float64 = v
 function bump(v: Float64) -> Float64 = {
     G(0) = G(0) + 1.0

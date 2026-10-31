@@ -30,7 +30,7 @@ let total = reduce(grid, (+), axes = 2)
 
 // A binding may carry a colliding name too -- that one lands in a function body
 // and legally shadows the library declaration, so it is emitted verbatim.
-let remove = 2.0
+let remove: Float64 = 2.0
 // EXPECT: remove = 2.0
 let scaled = hours * remove
 // EXPECT: scaled = [0.0, 12.0, 24.0, 36.0]

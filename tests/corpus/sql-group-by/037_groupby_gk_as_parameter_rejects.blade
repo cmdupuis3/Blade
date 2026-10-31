@@ -11,8 +11,8 @@
 // The caret goes on the ARGUMENT: the three locals live in the frame that
 // declared them, so the escape happens where the gk crosses out of that frame,
 // and the function is only wrong because of what it was handed.
-let region = [0, 1, 0, 0, 1]
-let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let v = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 function per_group(vals: Array<Float64 like Idx<5>>, g) = {
     let gv = group_by(vals, g)
     method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute

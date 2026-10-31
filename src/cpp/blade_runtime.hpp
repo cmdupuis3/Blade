@@ -195,6 +195,34 @@ namespace blade_libm {
     return narrow_(pow(static_cast<double>(x), std::complex<double>(y))); }
 }
 
+// ---- Complex64 `*` and `/` (round 6): Blade's OWN algorithms over plain
+// float operations, so the interpreter (Numerics.c64Mul / c64Div) and this
+// lane agree bit for bit by construction under BLADE_FP_CONTRACT=off --
+// libgcc's __mulsc3 / __divsc3 (NaN recovery, scaling, a double-precision
+// intermediate in newer GCCs) are not reproduced. Complex128 keeps libgcc's.
+//   mul: (a + bi)(c + di) = (ac - bd) + (ad + bc)i, each product rounded.
+//   div: Smith's algorithm -- scale by the larger of |c|, |d|.
+// Panic-free (blade_arith is in codegen's panicFreeNamespaces).
+namespace blade_arith {
+  inline std::complex<float> c64_mul(std::complex<float> x, std::complex<float> y) {
+    const float a = x.real(), b = x.imag(), c = y.real(), d = y.imag();
+    const float ac = a * c, bd = b * d, ad = a * d, bc = b * c;
+    return std::complex<float>(ac - bd, ad + bc);
+  }
+  inline std::complex<float> c64_div(std::complex<float> x, std::complex<float> y) {
+    const float a = x.real(), b = x.imag(), c = y.real(), d = y.imag();
+    if (std::fabs(c) >= std::fabs(d)) {
+      const float r = d / c;
+      const float den = c + d * r;
+      return std::complex<float>((a + b * r) / den, (b - a * r) / den);
+    } else {
+      const float r = c / d;
+      const float den = c * r + d;
+      return std::complex<float>((a * r + b) / den, (b * r - a) / den);
+    }
+  }
+}
+
 // The PANIC-FREE half of the arithmetic contract (docs/formalism.md section
 // 2.4). Nothing in this namespace may reach blade_rt::panic: codegen lists
 // `blade_arith::` in panicFreeNamespaces, so a kernel that calls only these
@@ -575,6 +603,55 @@ namespace blade_rt {
   inline void typed_float_print(std::ostream& os) {
     os.imbue(std::locale(os.getloc(), new float_put));
   }
+
+  // ---- Float32 spelling (round 6 rule 8): a Float32 prints with 6
+  // significant digits (FLT_DIG), "%.6g" -- scientific iff the decimal
+  // exponent is < -4 or >= 6 -- where a Float64 keeps 15 (DBL_DIG). The
+  // facet above cannot tell a promoted float from a double, so every value
+  // print site in the generated code streams `blade_rt::pv(x)`: the identity
+  // for every other type, a print proxy for `float` and
+  // `std::complex<float>` (Complex64 prints "(re,im)", each part like a
+  // Float32). Same rules as the double spelling: "nan" with no sign,
+  // "inf"/"-inf", a bare digit run gains ".0" ("2.0", "-0.0"); under
+  // BLADE_PRINT_BITS the FLOAT's own raw bits follow as " #<8 hex digits>".
+  // Twins: CppFormat.formatFloat32 (interpreter), blade_fmt_f32 (LLVM shim).
+  inline bool print_bits_cached() {
+    static const bool b = print_bits_requested();
+    return b;
+  }
+  inline void fmt_f32(char* buf, std::size_t cap, float v) {
+    if (std::isnan(v)) std::snprintf(buf, cap, "nan");
+    else if (std::isinf(v)) std::snprintf(buf, cap, v < 0.0f ? "-inf" : "inf");
+    else {
+      int n = std::snprintf(buf, cap, "%.6g", (double)v);
+      if (n > 0 && (std::size_t)n + 3 <= cap) {
+        int i = (buf[0] == '-') ? 1 : 0;
+        bool bare = n > i;
+        for (int k = i; k < n; ++k)
+          if (buf[k] < '0' || buf[k] > '9') { bare = false; break; }
+        if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+      }
+    }
+    if (print_bits_cached()) {
+      std::uint32_t u;
+      std::memcpy(&u, &v, sizeof u);
+      std::size_t used = std::strlen(buf);
+      if (used + 12 < cap) std::snprintf(buf + used, cap - used, " #%08x", (unsigned)u);
+    }
+  }
+  struct f32_out { float v; };
+  inline std::ostream& operator<<(std::ostream& os, f32_out x) {
+    char b[64];
+    fmt_f32(b, sizeof b, x.v);
+    return os << b;
+  }
+  struct c64_out { std::complex<float> v; };
+  inline std::ostream& operator<<(std::ostream& os, const c64_out& x) {
+    return os << '(' << f32_out{x.v.real()} << ',' << f32_out{x.v.imag()} << ')';
+  }
+  template <class T> inline const T& pv(const T& x) { return x; }
+  inline f32_out pv(float x) { return f32_out{x}; }
+  inline c64_out pv(const std::complex<float>& x) { return c64_out{x}; }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
   // "Arithmetic semantics"). Each is transcribed into the interpreter

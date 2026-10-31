@@ -1,0 +1,5 @@
+// TEST: forwarded generic literal-fit obligations retain float values (rejects)
+function tiny(x: T) = x * 1e-50
+function forward(x: T) = tiny(x)
+let result = forward(Float32(1.0))
+// ERROR: BL3020

@@ -73,6 +73,12 @@ let private caseName (e: IRExpr) : string =
 type private Sc =
     | ScI64
     | ScF64
+    /// Float32 (`float`) and Int32 (`i32`): first-class since round 6 (the
+    /// default numeric widths). Every operation stays at its width -- an f32
+    /// op is an f32 instruction, an i32 op wraps at 32 bits -- the arithmetic
+    /// contract the C++ lane (`float` / `int32_t`) and the interpreter keep.
+    | ScF32
+    | ScI32
     | ScBool
     | ScStr
     | ScVoid
@@ -80,9 +86,16 @@ type private Sc =
 let private llTy = function
     | ScI64 -> "i64"
     | ScF64 -> "double"
+    | ScF32 -> "float"
+    | ScI32 -> "i32"
     | ScBool -> "i1"
     | ScStr -> "ptr"
     | ScVoid -> "void"
+
+/// A floating scalar (`fadd`/`fcmp` family) vs an integer one.
+let private isFloatSc = function ScF64 | ScF32 -> true | _ -> false
+/// An integer scalar of either width (Bool excluded).
+let private isIntSc = function ScI64 | ScI32 -> true | _ -> false
 
 /// Project a Blade type onto the scalar universe. `IRTIdxTagged` (nominal
 /// index tags) and `IRTUnitAnnotated` (physical units) are TRANSPARENT here
@@ -92,6 +105,8 @@ let rec private scalarTyOf (t: IRType) : Sc option =
     match t with
     | IRTScalar ETInt64 -> Some ScI64
     | IRTScalar ETFloat64 -> Some ScF64
+    | IRTScalar ETInt32 -> Some ScI32
+    | IRTScalar ETFloat32 -> Some ScF32
     | IRTScalar ETBool -> Some ScBool
     | IRTScalar ETString -> Some ScStr
     | IRTScalar ETUnit | IRTUnit -> Some ScVoid
@@ -103,7 +118,7 @@ let private requireScalar (what: string) (t: IRType) : Sc =
     match scalarTyOf t with
     | Some sc -> sc
     | None ->
-        refuse ($"{what} has type {(Blade.IRPrint.ppIRType t)} -- the llvm lane handles Int64/Float64/Bool/String scalars only")
+        refuse ($"{what} has type {(Blade.IRPrint.ppIRType t)} -- the llvm lane handles Int64/Int32/Float64/Float32/Bool/String scalars only")
 
 // ---------------------------------------------------------------------------
 // The fact layer (plan section 5)
@@ -1264,7 +1279,7 @@ let private paramAttr () : string =
 /// .NET integer arithmetic is unchecked -- and no overflow analysis exists to
 /// say otherwise).
 let private fmfFor (c: Ctx) (ty: Sc) : string =
-    if ty <> ScF64 || not (factEnabled factFmf) then ""
+    if not (isFloatSc ty) || not (factEnabled factFmf) then ""
     else
         let parts =
             [ if c.FoldFmf then
@@ -1351,6 +1366,11 @@ let private shimTable : Map<string, ShimFn> =
           "blade_imod", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_ipow", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
+          // ... and their Int32 twins (blade_rt::idiv32 / imod32 / ipow32 / f2i32).
+          "blade_idiv32", { Ret = "i32"; RetAttrs = ""; Args = [ "i32"; "i32"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_imod32", { Ret = "i32"; RetAttrs = ""; Args = [ "i32"; "i32"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_ipow32", { Ret = "i32"; RetAttrs = ""; Args = [ "i32"; "i32"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_f2i32", { Ret = "i32"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_fpow", io "double" [ "double"; "double" ]
           "blade_fpowi", io "double" [ "double"; "i64" ]
           // The rank-1 compound's keyed read (G9): the kept ordinal of `key`
@@ -1379,6 +1399,8 @@ let private shimTable : Map<string, ShimFn> =
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
+          "blade_out_f32", io "void" [ "float" ]
+          "blade_print_f32", io "void" [ "ptr"; "float" ]
           "blade_out_bool", io "void" [ "i32" ]
           "blade_print_i64", io "void" [ "ptr"; "i64" ]
           "blade_print_f64", io "void" [ "ptr"; "double" ]
@@ -1646,6 +1668,18 @@ let private popPoolScope (c: Ctx) (keepReg: string option) (emitFrees: bool) : u
 let private f64Const (x: float) =
     sprintf "0x%016X" (uint64 (BitConverter.DoubleToInt64Bits x))
 
+/// A float constant: `.ll` spells a `float` literal as the 16-hex-digit
+/// DOUBLE pattern of its (exactly representable) value, so this is the
+/// widened float's bit pattern -- a `float 0x...` the parser accepts only
+/// because the value round-trips through float32.
+let private f32Const (x: float32) = f64Const (float x)
+
+/// The zero of a numeric scalar, as an operand token.
+let private zeroOf = function
+    | ScF64 -> f64Const 0.0
+    | ScF32 -> f32Const 0.0f
+    | _ -> "0"
+
 /// Intern a string as a private constant and return its symbol. `ptr` is the
 /// symbol itself under opaque pointers -- no getelementptr needed.
 let private stringGlobal (c: Ctx) (s: string) : string =
@@ -1726,32 +1760,44 @@ let private coerce (c: Ctx) (target: Sc) (v: Val) : Val =
             ln c (renderConv { Dest = dest; Opcode = opcode; From = v.Ty; Value = v.Reg; To = target })
             { Reg = dest; Ty = target }
         match v.Ty, target with
-        | ScI64, ScF64 -> conv "sitofp"
-        | ScBool, ScI64 -> conv "zext"
-        | ScBool, ScF64 -> conv "uitofp"
+        | (ScI64 | ScI32), (ScF64 | ScF32) -> conv "sitofp"
+        | ScBool, (ScI64 | ScI32) -> conv "zext"
+        | ScBool, (ScF64 | ScF32) -> conv "uitofp"
         // C++ narrows double -> integral by truncation toward zero, which is
         // exactly fptosi.
-        | ScF64, ScI64 -> conv "fptosi"
-        | ScI64, ScBool ->
-            ln c (renderCmp { Dest = dest; Kind = "icmp"; Pred = "ne"; Ty = ScI64; Lhs = v.Reg; Rhs = "0" })
+        | (ScF64 | ScF32), (ScI64 | ScI32) -> conv "fptosi"
+        // Width changes within a class: float <-> double is fpext (exact) /
+        // fptrunc (one rounding, the implicit double -> float of C++); an
+        // integer widens by sign extension and narrows by truncation -- the
+        // two's-complement wrap of an Int64 -> Int32 conversion.
+        | ScF32, ScF64 -> conv "fpext"
+        | ScF64, ScF32 -> conv "fptrunc"
+        | ScI32, ScI64 -> conv "sext"
+        | ScI64, ScI32 -> conv "trunc"
+        | (ScI64 | ScI32), ScBool ->
+            ln c (renderCmp { Dest = dest; Kind = "icmp"; Pred = "ne"; Ty = v.Ty; Lhs = v.Reg; Rhs = "0" })
             { Reg = dest; Ty = ScBool }
-        | ScF64, ScBool ->
+        | (ScF64 | ScF32), ScBool ->
             // `(bool)x` in C++ is `x != 0`, and NaN converts to true -- `une`
             // (unordered-or-not-equal) is the predicate that says so.
-            ln c (renderCmp { Dest = dest; Kind = "fcmp"; Pred = "une"; Ty = ScF64; Lhs = v.Reg; Rhs = f64Const 0.0 })
+            ln c (renderCmp { Dest = dest; Kind = "fcmp"; Pred = "une"; Ty = v.Ty; Lhs = v.Reg; Rhs = zeroOf v.Ty })
             { Reg = dest; Ty = ScBool }
         | _ ->
             refuse ($"no conversion from {(llTy v.Ty)} to {(llTy target)}")
 
 /// The binary-operand common type. Mirrors `IR.promoteElemType` restricted to
 /// the widths v1 carries.
+/// Float32 with an Int64 is Float64 (the IR rule); Bool is the narrowest.
 let private promote (a: Sc) (b: Sc) : Sc =
     match a, b with
     | ScStr, _ | _, ScStr -> refuse "an operator applied to String operands"
     | ScVoid, _ | _, ScVoid -> refuse "an operator applied to a unit operand"
     | ScF64, _ | _, ScF64 -> ScF64
+    | ScF32, ScI64 | ScI64, ScF32 -> ScF64
+    | ScF32, _ | _, ScF32 -> ScF32
     | ScI64, _ | _, ScI64 -> ScI64
-    | _ -> ScBool
+    | ScI32, _ | _, ScI32 -> ScI32
+    | ScBool, ScBool -> ScBool
 
 // ---------------------------------------------------------------------------
 // Math intrinsics
@@ -1826,12 +1872,15 @@ let private callShim (c: Ctx) (name: string) (ret: Sc) (args: (Sc * string) list
 let private poolTy = function
     | ScI64 -> "i64"
     | ScF64 -> "double"
+    | ScF32 -> "float"
+    | ScI32 -> "i32"
     | ScBool -> "i8"
     | ScStr -> "ptr"
     | ScVoid -> refuse "an array of unit elements"
 
 let private poolElemBytes = function
     | ScBool -> 1L
+    | ScF32 | ScI32 -> 4L
     | _ -> 8L
 
 /// Does a rank-r simplex of extent n keep the emitted offset arithmetic inside
@@ -2591,8 +2640,7 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
         let ety = a.Elem
         let zero =
             match ety with
-            | ScF64 -> f64Const 0.0
-            | ScI64 -> "0"
+            | ScF64 | ScF32 | ScI64 | ScI32 -> zeroOf ety
             | _ -> refuse "an antisymmetric array of non-numeric elements"
         // BRANCHLESS guarded read. On a diagonal the strict groups' rows may
         // be EMPTY (i = n-1), so the unredirected offset lands one past the
@@ -2619,11 +2667,14 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
             coerce c ety (readCell c a redirected)
         let negated =
             match ety with
-            | ScF64 ->
+            | ScF64 | ScF32 ->
                 let d = freshReg c
-                ln c ($"{d} = fneg double {v.Reg}")
+                ln c ($"{d} = fneg {llTy ety} {v.Reg}")
                 d
-            | _ -> i64Bin c "sub" "0" v.Reg
+            | _ ->
+                let d = freshReg c
+                ln c ($"{d} = sub {llTy ety} 0, {v.Reg}")
+                d
         let signed = freshReg c
         ln c ($"{signed} = select i1 {swXor}, {(llTy ety)} {negated}, {(llTy ety)} {v.Reg}")
         let final = freshReg c
@@ -2939,11 +2990,10 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     match e with
     | IRLit (IRLitInt n) -> { Reg = string n; Ty = ScI64 }
     | IRLit (IRLitFloat f) -> { Reg = f64Const f; Ty = ScF64 }
-    // The LLVM lane has no ScF32 (IRTScalar ETFloat32 maps to no scalar and
-    // the gate declines Float32 programs), so a Float32 literal that somehow
-    // arrives is widened -- value-preserving, and unreachable until an f32
-    // scalar type exists here.
-    | IRLit (IRLitFloat32 f) -> { Reg = f64Const (float f); Ty = ScF64 }
+    // A Float32 literal is an f32 constant (the float the C++ lane spells
+    // `0.1f` and the interpreter holds as a float32): never widened, so the
+    // arithmetic around it stays in float.
+    | IRLit (IRLitFloat32 f) -> { Reg = f32Const f; Ty = ScF32 }
     | IRLit (IRLitBool b) -> { Reg = (if b then "true" else "false"); Ty = ScBool }
     | IRLit (IRLitString s) -> { Reg = stringGlobal c s; Ty = ScStr }
     | IRLit IRLitUnit -> { Reg = ""; Ty = ScVoid }
@@ -2991,15 +3041,19 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // fma(a, b, c) -> llvm.fma.f64: the fused op is the semantics, so it is
     // emitted as the intrinsic (not fmul+fadd with `contract`), and it
     // carries NO fast-math flags -- correctly rounded on every lane.
+    // Three Float32 operands are fmaf (llvm.fma.f32, std::fma(float, float,
+    // float) in the C++ lane): the IR types that node Float32.
     | IRFma (a, b, cc) ->
-        need c "declare double @llvm.fma.f64(double, double, double)"
-        let va = coerce c ScF64 (emitExpr c a)
-        let vb = coerce c ScF64 (emitExpr c b)
-        let vc = coerce c ScF64 (emitExpr c cc)
+        let w = match scalarTyOf (typeOf e) with Some ScF32 -> ScF32 | _ -> ScF64
+        let sfx = if w = ScF32 then "f32" else "f64"
+        need c ($"declare {llTy w} @llvm.fma.{sfx}({llTy w}, {llTy w}, {llTy w})")
+        let va = coerce c w (emitExpr c a)
+        let vb = coerce c w (emitExpr c b)
+        let vc = coerce c w (emitExpr c cc)
         let dest = freshReg c
-        ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@llvm.fma.f64"
-                           Args = [ ScF64, va.Reg; ScF64, vb.Reg; ScF64, vc.Reg ] })
-        { Reg = dest; Ty = ScF64 }
+        ln c (renderCall { Dest = Some dest; RetTy = w; Callee = "@llvm.fma." + sfx
+                           Args = [ w, va.Reg; w, vb.Reg; w, vc.Reg ] })
+        { Reg = dest; Ty = w }
 
     | IRIf (cond, tb, fb) ->
         let resTy = requireScalar "an if-expression" (typeOf e)
@@ -3273,7 +3327,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
         storeSlot c slot resTy (emitExpr c body)
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lElse
-        storeSlot c slot resTy { Reg = (match resTy with ScF64 -> f64Const 0.0 | ScBool -> "false" | _ -> "0"); Ty = resTy }
+        storeSlot c slot resTy { Reg = (match resTy with ScBool -> "false" | _ -> zeroOf resTy); Ty = resTy }
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lEnd
         (match slot with Some s -> loadSlot c s resTy | None -> { Reg = ""; Ty = ScVoid })
@@ -3322,7 +3376,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
              | APool _ -> ()
              | _ -> refuse "contains over a computed (unstored) set")
             (match a.Elem with
-             | ScI64 | ScF64 | ScBool -> ()
+             | ScI64 | ScF64 | ScI32 | ScF32 | ScBool -> ()
              | _ -> refuse "contains over a set of String cells")
             let x = coerce c a.Elem (emitExpr c valueExpr)
             // BLOCKED early exit: 64 cells at a time, each block a branch-free
@@ -3363,7 +3417,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
                 (match a.Elem with
                  // IEEE `==`, the C++ lane's and the interpreter's float
                  // equality: NaN matches nothing, -0.0 matches +0.0
-                 | ScF64 -> ln c (renderCmp { Dest = eq; Kind = "fcmp"; Pred = "oeq"; Ty = ScF64; Lhs = cell.Reg; Rhs = x.Reg })
+                 | ScF64 | ScF32 -> ln c (renderCmp { Dest = eq; Kind = "fcmp"; Pred = "oeq"; Ty = a.Elem; Lhs = cell.Reg; Rhs = x.Reg })
                  | ty -> ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ty; Lhs = cell.Reg; Rhs = x.Reg }))
                 let acc = freshReg c
                 ln c ($"{acc} = load i1, ptr {found}")
@@ -3616,18 +3670,18 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
     // factors of one element is a different reassociation nobody licensed.
     let accFlags =
         withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ty)
-    ln c ($"""store {(llTy ty)} {(match ty with ScF64 -> f64Const 0.0 | _ -> "0")}, ptr {acc}""")
+    ln c ($"""store {(llTy ty)} {(zeroOf ty)}, ptr {acc}""")
     emitCountedLoopTo c (soleExtentOp head) (fun t ->
         let iv = { Reg = t; Ty = ScI64 }
         let mutable prod = coerce c ty (readCell c head [ iv ])
         for o in List.tail ops do
             let v = coerce c ty (readCell c o [ iv ])
             let d = freshReg c
-            ln c (renderBin { Dest = d; Opcode = (if ty = ScF64 then "fmul" else "mul"); Flags = fmfFor c ty; Ty = ty; Lhs = prod.Reg; Rhs = v.Reg })
+            ln c (renderBin { Dest = d; Opcode = (if isFloatSc ty then "fmul" else "mul"); Flags = fmfFor c ty; Ty = ty; Lhs = prod.Reg; Rhs = v.Reg })
             prod <- { Reg = d; Ty = ty }
         let cur = loadSlot c acc ty
         let s = freshReg c
-        ln c (renderBin { Dest = s; Opcode = (if ty = ScF64 then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod.Reg })
+        ln c (renderBin { Dest = s; Opcode = (if isFloatSc ty then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod.Reg })
         ln c ($"store {(llTy ty)} {s}, ptr {acc}"))
     loadSlot c acc ty
 
@@ -3761,23 +3815,54 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
         // `^` is blade_fpow -- x * x at an exponent of exactly 2, else libm pow.
         let a0 = emitExpr c l
         let b0 = emitExpr c r
-        if promote a0.Ty b0.Ty = ScI64 then
-            let a = coerce c ScI64 a0
-            let b = coerce c ScI64 b0
+        // An INTEGER exponent keeps the base's width (formalism 2.4): an
+        // Int32 base ^ an integer is an Int32 power (blade_ipow32, the twin
+        // of blade_rt::ipow32 / ipow_nn32), wrapping modulo 2^32.
+        let intBase = isIntSc a0.Ty || a0.Ty = ScBool
+        if intBase && (isIntSc b0.Ty || b0.Ty = ScBool) then
+            let w = if a0.Ty = ScI32 then ScI32 else ScI64
+            let a = coerce c w a0
+            let b = coerce c w b0
             match literalIntOf r with
             | Some n when n >= 0L && n <= 8L ->
                 // A small literal exponent unrolls to a multiply chain: the
-                // same residue modulo 2^64 as the shim's square-and-multiply.
-                if n = 0L then { Reg = "1"; Ty = ScI64 }
+                // same residue modulo 2^w as the shim's square-and-multiply.
+                if n = 0L then { Reg = "1"; Ty = w }
                 else
                     let mutable acc = a
                     for _ in 2L .. n do
                         let dest = freshReg c
-                        ln c (renderBin { Dest = dest; Opcode = "mul"; Flags = ""; Ty = ScI64; Lhs = acc.Reg; Rhs = a.Reg })
-                        acc <- { Reg = dest; Ty = ScI64 }
+                        ln c (renderBin { Dest = dest; Opcode = "mul"; Flags = ""; Ty = w; Lhs = acc.Reg; Rhs = a.Reg })
+                        acc <- { Reg = dest; Ty = w }
                     acc
-            | _ -> callShim c "blade_ipow" ScI64 ([ ScI64, a.Reg; ScI64, b.Reg ] @ faultLocArgs c loc)
-        elif a0.Ty = ScF64 && b0.Ty = ScI64 then
+            | _ ->
+                let fn = if w = ScI32 then "blade_ipow32" else "blade_ipow"
+                callShim c fn w ([ w, a.Reg; w, b.Reg ] @ faultLocArgs c loc)
+        elif a0.Ty = ScF32 && isIntSc b0.Ty then
+            // Float32 ^ Int: blade_arith::fpowif -- the double repeated
+            // squaring rounded ONCE to float. A literal 2 is one product: the
+            // exact double square rounded once IS the float product.
+            match r with
+            | IRLit (IRLitInt 2L) ->
+                let dest = freshReg c
+                ln c (renderBin { Dest = dest; Opcode = "fmul"; Flags = fmfFor c ScF32; Ty = ScF32; Lhs = a0.Reg; Rhs = a0.Reg })
+                { Reg = dest; Ty = ScF32 }
+            | _ ->
+                let wide = callShim c "blade_fpowi" ScF64 [ ScF64, (coerce c ScF64 a0).Reg; ScI64, (coerce c ScI64 b0).Reg ]
+                coerce c ScF32 wide
+        elif a0.Ty = ScF32 && b0.Ty = ScF32 then
+            // Float32 ^ Float32: blade_arith::fpowf -- the double pow rounded
+            // once to float (x * x at exactly 2.0, which is the float product).
+            match r with
+            | IRLit (IRLitFloat32 2.0f) ->
+                let dest = freshReg c
+                ln c (renderBin { Dest = dest; Opcode = "fmul"; Flags = fmfFor c ScF32; Ty = ScF32; Lhs = a0.Reg; Rhs = a0.Reg })
+                { Reg = dest; Ty = ScF32 }
+            | _ ->
+                let wide = callShim c "blade_fpow" ScF64 [ ScF64, (coerce c ScF64 a0).Reg; ScF64, (coerce c ScF64 b0).Reg ]
+                coerce c ScF32 wide
+        elif a0.Ty = ScF64 && isIntSc b0.Ty then
+            let b0 = coerce c ScI64 b0
             // Float ^ Int: the exponent is NOT converted (formalism 2.4) --
             // repeated squaring, blade_fpowi, the twin of blade_arith::fpowi.
             // Not llvm.powi (unspecified multiply order, an i32 exponent, and
@@ -3800,16 +3885,23 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
             | _ -> callShim c "blade_fpow" ScF64 [ ScF64, a.Reg; ScF64, b.Reg ]
     | IRMath2 "log_base" ->
         // No libm log_base; the quotient IS the definition, matching
-        // CodeGenExprSupport.renderMath2.
-        let a = callLibm1 c "log" (coerce c ScF64 (emitExpr c l))
-        let b = callLibm1 c "log" (coerce c ScF64 (emitExpr c r))
+        // CodeGenExprSupport.renderMath2. Two Float32 operands: each log is
+        // the double log rounded once to float (blade_libm's float overload)
+        // and the quotient is the float division.
+        let av = emitExpr c l
+        let bv = emitExpr c r
+        let w = if av.Ty = ScF32 && bv.Ty = ScF32 then ScF32 else ScF64
+        let a = coerce c w (callLibm1 c "log" (coerce c ScF64 av))
+        let b = coerce c w (callLibm1 c "log" (coerce c ScF64 bv))
         let dest = freshReg c
-        ln c (renderBin { Dest = dest; Opcode = "fdiv"; Flags = fmfFor c ScF64; Ty = ScF64; Lhs = a.Reg; Rhs = b.Reg })
-        { Reg = dest; Ty = ScF64 }
+        ln c (renderBin { Dest = dest; Opcode = "fdiv"; Flags = fmfFor c w; Ty = w; Lhs = a.Reg; Rhs = b.Reg })
+        { Reg = dest; Ty = w }
     | IRMath2 "atan2" ->
-        let a = coerce c ScF64 (emitExpr c l)
-        let b = coerce c ScF64 (emitExpr c r)
-        callLibm2 c "atan2" a b
+        let av = emitExpr c l
+        let bv = emitExpr c r
+        let res = callLibm2 c "atan2" (coerce c ScF64 av) (coerce c ScF64 bv)
+        // Two Float32 operands: the double atan2 rounded once to float.
+        if av.Ty = ScF32 && bv.Ty = ScF32 then coerce c ScF32 res else res
     | IRMath2 name -> refuse ($"the binary math intrinsic '{name}'")
     | _ ->
         let a0 = emitExpr c l
@@ -3819,20 +3911,29 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
         // -- explicitly, not left to GVN. Pure read of one cell: no value or
         // order changes.
         let b0 = if l = r && Blade.CodeGenExpr.isBindOnceCompactRead typeOf l then a0 else emitExpr c r
-        let common = promote a0.Ty b0.Ty
+        // The operation width: the operands' promotion, except that a bare
+        // integer LITERAL that fits Int32 adapts to an Int32 partner (IR.typeOf's
+        // literal rule, formalism 2.4 "`i32 + 1` is Int32") -- so the add, the
+        // compare and the division all happen in i32.
+        let litFits (e: IRExpr) = match e with IRLit (IRLitInt n) -> Blade.IR.fitsInt32 n | _ -> false
+        let common =
+            if a0.Ty = ScI32 && litFits r then ScI32
+            elif b0.Ty = ScI32 && litFits l then ScI32
+            else promote a0.Ty b0.Ty
         let a = coerce c common a0
         let b = coerce c common b0
         let dest = freshReg c
+        let fl = isFloatSc common
         match op with
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe ->
-            let kind = if common = ScF64 then "fcmp" else "icmp"
+            let kind = if fl then "fcmp" else "icmp"
             let pred =
-                match common, op with
+                match fl, op with
                 // ORDERED comparisons except `!=`: C's `a != b` is `!(a == b)`,
                 // which is true when either operand is NaN -- `une`, not `one`.
-                | ScF64, IREq -> "oeq" | ScF64, IRNeq -> "une"
-                | ScF64, IRLt -> "olt" | ScF64, IRLe -> "ole"
-                | ScF64, IRGt -> "ogt" | ScF64, IRGe -> "oge"
+                | true, IREq -> "oeq" | true, IRNeq -> "une"
+                | true, IRLt -> "olt" | true, IRLe -> "ole"
+                | true, IRGt -> "ogt" | true, IRGe -> "oge"
                 | _, IREq -> "eq" | _, IRNeq -> "ne"
                 | _, IRLt -> "slt" | _, IRLe -> "sle"
                 | _, IRGt -> "sgt" | _, IRGe -> "sge"
@@ -3841,14 +3942,14 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
             { Reg = dest; Ty = ScBool }
         | _ ->
             let opcode =
-                match common, op with
-                | ScF64, IRAdd -> "fadd" | ScF64, IRSub -> "fsub"
-                | ScF64, IRMul -> "fmul" | ScF64, IRDiv -> "fdiv"
-                | ScF64, IRMod -> refuse "`%` applied to floating-point operands"
-                | ScI64, IRAdd -> "add" | ScI64, IRSub -> "sub"
-                | ScI64, IRMul -> "mul"
+                match fl, isIntSc common, op with
+                | true, _, IRAdd -> "fadd" | true, _, IRSub -> "fsub"
+                | true, _, IRMul -> "fmul" | true, _, IRDiv -> "fdiv"
+                | true, _, IRMod -> refuse "`%` applied to floating-point operands"
+                | _, true, IRAdd -> "add" | _, true, IRSub -> "sub"
+                | _, true, IRMul -> "mul"
                 // C++ integer division and `%` truncate toward zero: sdiv/srem.
-                | ScI64, IRDiv -> "sdiv" | ScI64, IRMod -> "srem"
+                | _, true, IRDiv -> "sdiv" | _, true, IRMod -> "srem"
                 | _ -> refuse ($"arithmetic on {(llTy common)} operands")
             match common, op, literalIntOf r with
             // A zero or -1 divisor (or one not known) goes through the shim:
@@ -3857,6 +3958,8 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
             // nonzero literal other than -1 can do neither: plain sdiv/srem.
             | ScI64, (IRDiv | IRMod), lit when (match lit with Some n -> n = 0L || n = -1L | None -> true) ->
                 callShim c (if op = IRDiv then "blade_idiv" else "blade_imod") ScI64 ([ ScI64, a.Reg; ScI64, b.Reg ] @ faultLocArgs c loc)
+            | ScI32, (IRDiv | IRMod), lit when (match lit with Some n -> n = 0L || n = -1L | None -> true) ->
+                callShim c (if op = IRDiv then "blade_idiv32" else "blade_imod32") ScI32 ([ ScI32, a.Reg; ScI32, b.Reg ] @ faultLocArgs c loc)
             | _ ->
                 ln c (renderBin { Dest = dest; Opcode = opcode; Flags = fmfFor c common; Ty = common; Lhs = a.Reg; Rhs = b.Reg })
                 { Reg = dest; Ty = common }
@@ -3884,12 +3987,12 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
         let v = emitExpr c x
         let dest = freshReg c
         (match v.Ty with
-         | ScF64 ->
-             ln c ($"{dest} = fneg{(fmfFor c ScF64)} double {v.Reg}")
-             { Reg = dest; Ty = ScF64 }
-         | ScI64 ->
-             ln c (renderBin { Dest = dest; Opcode = "sub"; Flags = ""; Ty = ScI64; Lhs = "0"; Rhs = v.Reg })
-             { Reg = dest; Ty = ScI64 }
+         | ScF64 | ScF32 ->
+             ln c ($"{dest} = fneg{(fmfFor c v.Ty)} {llTy v.Ty} {v.Reg}")
+             { Reg = dest; Ty = v.Ty }
+         | ScI64 | ScI32 ->
+             ln c (renderBin { Dest = dest; Opcode = "sub"; Flags = ""; Ty = v.Ty; Lhs = "0"; Rhs = v.Reg })
+             { Reg = dest; Ty = v.Ty }
          | other -> refuse ($"negation of a {(llTy other)} value"))
     | IRNot ->
         let v = coerce c ScBool (emitExpr c x)
@@ -3904,7 +4007,14 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     | IRArg -> refuse "arg() (complex phase)"
     | IRMath name ->
         (match Map.tryFind name libmUnary with
-         | Some fn -> callLibm1 c fn (coerce c ScF64 (emitExpr c x))
+         | Some fn ->
+             // A Float32 operand: the double function rounded ONCE to float
+             // (formalism 2.4; blade_libm's float overloads). For sqrt / floor
+             // / ceil / fabs that IS the float operation (correctly rounded,
+             // and a double carries every float exactly), so one rule serves.
+             let v = emitExpr c x
+             let res = callLibm1 c fn (coerce c ScF64 v)
+             if v.Ty = ScF32 then coerce c ScF32 res else res
          | None when name = "lgamma" || name = "digamma" ->
              refuse ($"{name} -- Blade's own series lives in blade_runtime.hpp and has no libm twin")
          | None -> refuse ($"the math intrinsic '{name}'"))
@@ -3919,8 +4029,17 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
     | IRCast (ETInt64, loc) ->
         let v = emitExpr c x
-        if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 ([ ScF64, v.Reg ] @ faultLocArgs c loc)
+        if isFloatSc v.Ty then callShim c "blade_f2i64" ScI64 ([ ScF64, (coerce c ScF64 v).Reg ] @ faultLocArgs c loc)
         else coerce c ScI64 v
+    // Float32: one rounding from the SOURCE (sitofp i64 -> float directly,
+    // fptrunc from double) -- C++'s static_cast<float>.
+    | IRCast (ETFloat32, _) -> coerce c ScF32 (emitExpr c x)
+    // Int32: a float panics BL8014 outside [-2^31, 2^31) (blade_f2i32, the
+    // twin of blade_rt::f2i32 on the widened value); an Int64 wraps.
+    | IRCast (ETInt32, loc) ->
+        let v = emitExpr c x
+        if isFloatSc v.Ty then callShim c "blade_f2i32" ScI32 ([ ScF64, (coerce c ScF64 v).Reg ] @ faultLocArgs c loc)
+        else coerce c ScI32 v
     | IRCast (et, _) -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
 
 /// `Float64(x)` of an Int64: the exact split conversion, the twin of the C++
@@ -4027,8 +4146,8 @@ and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMat
                     let lv = coerce c sv.Ty (emitExpr c (IRLit lit))
                     if sv.Ty = ScStr then refuse "a String literal pattern"
                     let r = freshReg c
-                    let kind = if sv.Ty = ScF64 then "fcmp" else "icmp"
-                    let pred = if sv.Ty = ScF64 then "oeq" else "eq"
+                    let kind = if isFloatSc sv.Ty then "fcmp" else "icmp"
+                    let pred = if isFloatSc sv.Ty then "oeq" else "eq"
                     ln c (renderCmp { Dest = r; Kind = kind; Pred = pred; Ty = sv.Ty; Lhs = sv.Reg; Rhs = lv.Reg })
                     let lBody = freshLbl c "match.body"
                     ln c (renderBr { Cond = r; IfTrue = lBody; IfFalse = lNext })
@@ -4637,7 +4756,7 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
         e ()
         ln c (sprintf "br label %%%s" lJ)
         lbl c lJ
-    let zeroOf (ty: Sc) = { Reg = (if ty = ScF64 then f64Const 0.0 else "0"); Ty = ty }
+    let zeroOf (ty: Sc) = { Reg = zeroOf ty; Ty = ty }
     let incr (p: string) =
         let cur = loadCell c ScI64 p
         storeCell c ScI64 p { Reg = i64Bin c "add" cur.Reg "1"; Ty = ScI64 }
@@ -4665,13 +4784,13 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
             let a = readSrc 0
             let b = readSrc 1
             let prod = freshReg c
-            ln c (renderBin { Dest = prod; Opcode = (if ty = ScF64 then "fmul" else "mul"); Flags = fmfFor c ty; Ty = ty; Lhs = a.Reg; Rhs = b.Reg })
+            ln c (renderBin { Dest = prod; Opcode = (if isFloatSc ty then "fmul" else "mul"); Flags = fmfFor c ty; Ty = ty; Lhs = a.Reg; Rhs = b.Reg })
             // emitProdSum's outer accumulation flags: its `+` is licensed by
             // construction, so the build's polarity decides
             let accFlags = withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ty)
             let cur = loadCell c ty accPtr
             let s = freshReg c
-            ln c (renderBin { Dest = s; Opcode = (if ty = ScF64 then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod })
+            ln c (renderBin { Dest = s; Opcode = (if isFloatSc ty then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod })
             storeCell c ty accPtr { Reg = s; Ty = ty }
         | _ -> ()
     let isCount (st: Blade.Optimize.GroupAggState) = (match st.Kind with Blade.Optimize.GaCount -> true | _ -> false)
@@ -5205,7 +5324,7 @@ and private tryBindCompactRowProducer (c: Ctx) (id: IRId) (name: string) (plan: 
                        | Some s -> c.Slots.[rv] <- s
                        | None -> c.Slots.Remove rv |> ignore)
                       res
-                  let zero = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+                  let zero = coerce c accTy (emitExpr c (if isFloatSc accTy then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
                   let s = if strict then 1L else 0L
                   emitCountedLoop c n (fun i ->
                       let rb = emitRowBase2 c n strict i
@@ -5249,7 +5368,7 @@ and private compactRowConsumer (c: Ctx) (plan: Blade.Optimize.CompactRowPlan) : 
         (match scalarTyOf (IRTScalar p.AccTy), scalarTyOf (IRTScalar p.ElemTy) with
          | Some accTy, Some elem ->
              let fold = (List.last p.Levels).Fold
-             let zero = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+             let zero = coerce c accTy (emitExpr c (if isFloatSc accTy then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
              let totals =
                  parts |> List.map (fun pool ->
                      let acc = allocaOf c (llTy accTy)
@@ -5449,7 +5568,7 @@ and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.O
                      let usable =
                          srcs |> List.forall (fun (_, e, av) ->
                              match e, av with
-                             | Some (ScI64 | ScF64 | ScBool as el), Some v -> v.Elem = el
+                             | Some (ScI64 | ScF64 | ScI32 | ScF32 | ScBool as el), Some v -> v.Elem = el
                              | _ -> false)
                      if usable then Some (s, srcs |> List.map (fun (cid, e, av) -> (cid, e.Value, av.Value))) else None
                  | _ -> None
@@ -5524,7 +5643,7 @@ and private tryBindCountedMask (c: Ctx) (id: IRId) (name: string) (plan: Blade.O
                             Blade.Optimize.SharedSelectionLlvm.Ready = false }
              let gatherElem =
                  match a.Elem with
-                 | ScI64 | ScF64 | ScBool when plan.GatherAtMask && plan.Shared.IsNone -> Some a.Elem
+                 | ScI64 | ScF64 | ScI32 | ScF32 | ScBool when plan.GatherAtMask && plan.Shared.IsNone -> Some a.Elem
                  | _ -> None
              match gatherElem with
              | _ when sharedSrcs.IsSome -> emitShared sharedSrcs.Value
@@ -6204,8 +6323,8 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
                 else
                     let r = freshReg c
                     (match elem with
-                     | ScF64 -> ln c ($"{r} = fneg double {v.Reg}")
-                     | _ -> ln c ($"{r} = sub i64 0, {v.Reg}"))
+                     | ScF64 | ScF32 -> ln c ($"{r} = fneg {llTy elem} {v.Reg}")
+                     | _ -> ln c ($"{r} = sub {llTy elem} 0, {v.Reg}"))
                     { Reg = r; Ty = elem }
             storeCell c elem (gepCell c elem ptr k) out)
         { a with Src = APool ptr; RowOpBytes = 0L }
@@ -6236,8 +6355,8 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
             refuse "a gram whose checked type disagrees with its operand shape"
         let ptr = allocPool c elem (string (shapeCells groups))
         let acc = allocaOf c (llTy elem)
-        let zero = if elem = ScF64 then f64Const 0.0 else "0"
-        let mulOp, addOp = if elem = ScF64 then "fmul", "fadd" else "mul", "add"
+        let zero = zeroOf elem
+        let mulOp, addOp = if isFloatSc elem then "fmul", "fadd" else "mul", "add"
         emitShapeNest c groups (fun idxs off ->
             let i = idxs.[0]
             let j = if isSameArray then { Reg = i64Add c i.Reg idxs.[1].Reg; Ty = ScI64 } else idxs.[1]
@@ -7545,15 +7664,19 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 if coeff = 1 then v
                 else
                     match elem with
-                    | ScF64 ->
+                    | ScF64 | ScF32 ->
                         let d = freshReg c2
-                        ln c2 (renderBin { Dest = d; Opcode = "fmul"; Flags = fmfFor c2 ScF64; Ty = ScF64
-                                           Lhs = f64Const (float coeff); Rhs = v.Reg })
-                        { Reg = d; Ty = ScF64 }
-                    | ScI64 -> { Reg = i64Bin c2 "mul" (string coeff) v.Reg; Ty = ScI64 }
+                        let k = if elem = ScF32 then f32Const (float32 coeff) else f64Const (float coeff)
+                        ln c2 (renderBin { Dest = d; Opcode = "fmul"; Flags = fmfFor c2 elem; Ty = elem
+                                           Lhs = k; Rhs = v.Reg })
+                        { Reg = d; Ty = elem }
+                    | ScI64 | ScI32 ->
+                        let d = freshReg c2
+                        ln c2 (renderBin { Dest = d; Opcode = "mul"; Flags = ""; Ty = elem; Lhs = string coeff; Rhs = v.Reg })
+                        { Reg = d; Ty = elem }
                     | _ -> refuse "a reynolds sum over non-numeric elements"
             match plan.Terms with
-            | [] -> { Reg = (match elem with ScF64 -> f64Const 0.0 | _ -> "0"); Ty = elem }
+            | [] -> { Reg = zeroOf elem; Ty = elem }
             | (c0, p0) :: rest ->
                 let mutable acc = scaled c0 (termOf p0)
                 for (coeff, perm) in rest do
@@ -7563,11 +7686,11 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                     // expression the C++ lane emits and the same bits.
                     let (opcode, rhs) =
                         if coeff < 0 then
-                            ((if elem = ScF64 then "fsub" else "sub"), scaled (abs coeff) t)
-                        else ((if elem = ScF64 then "fadd" else "add"), scaled coeff t)
+                            ((if isFloatSc elem then "fsub" else "sub"), scaled (abs coeff) t)
+                        else ((if isFloatSc elem then "fadd" else "add"), scaled coeff t)
                     let d = freshReg c2
                     ln c2 (renderBin { Dest = d; Opcode = opcode
-                                       Flags = (if elem = ScF64 then fmfFor c2 ScF64 else "")
+                                       Flags = (if isFloatSc elem then fmfFor c2 elem else "")
                                        Ty = elem; Lhs = acc.Reg; Rhs = rhs.Reg })
                     acc <- { Reg = d; Ty = elem }
                 acc) }
@@ -8163,7 +8286,7 @@ and private emitOrbitFold (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (a: ArrVal) (a
         c.FoldFmf <- inLoop && licensed
         try coerce c accTy (applyKernel c fold [ KScalar x; KScalar y ])
         finally c.FoldFmf <- saved
-    let zeroAcc = coerce c accTy (emitExpr c (if accTy = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
+    let zeroAcc = coerce c accTy (emitExpr c (if isFloatSc accTy then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L)))
     let accs = [ for _ in 1 .. p.AccCount -> allocaOf c (llTy accTy) ]
     for s in accs do ln c ($"store {(llTy accTy)} {zeroAcc.Reg}, ptr {s}")
     let bump (k: int) (v: Val) =
@@ -8233,13 +8356,13 @@ and private orbitCombineLlvm (c: Ctx) (p: Blade.OrbitFold.OrbitPlan) (elem: Sc) 
         match e with
         | Blade.OrbitFold.CAcc k -> accVals.[k]
         | Blade.OrbitFold.CZero ->
-            let z = emitExpr c (if elem = ScF64 then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L))
+            let z = emitExpr c (if isFloatSc elem then IRLit (IRLitFloat 0.0) else IRLit (IRLitInt 0L))
             evalAt p.Body (coerce c elem z)
         | Blade.OrbitFold.CNeg x ->
             let v = combine x
             let d = freshReg c
-            if accTy = ScF64 then ln c ($"{d} = fneg double {v.Reg}")
-            else ln c ($"{d} = sub i64 0, {v.Reg}")
+            if isFloatSc accTy then ln c ($"{d} = fneg {llTy accTy} {v.Reg}")
+            else ln c ($"{d} = sub {llTy accTy} 0, {v.Reg}")
             { Reg = d; Ty = accTy }
         | Blade.OrbitFold.CAdd (x, y) ->
             let x' = combine x
@@ -9385,6 +9508,16 @@ let private outVal (c: Ctx) (v: Val) : unit =
     | ScF64 ->
         needShim c "blade_out_f64"
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_out_f64"; Args = [ ScF64, v.Reg ] })
+    // A Float32 prints its 6 significant digits (blade_fmt_f32, rule 8); an
+    // Int32 prints its decimal, exactly the widened Int64's text.
+    | ScF32 ->
+        needShim c "blade_out_f32"
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_out_f32"; Args = [ ScF32, v.Reg ] })
+    | ScI32 ->
+        needShim c "blade_out_i64"
+        let w = freshReg c
+        ln c ($"{w} = sext i32 {v.Reg} to i64")
+        ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_out_i64"; Args = [ ScI64, w ] })
     | ScStr ->
         needShim c "blade_out_str"
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = "@blade_out_str"; Args = [ ScStr, v.Reg ] })
@@ -9673,6 +9806,11 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
                 match sc with
                 | ScI64 -> callPrint "blade_print_i64" ScI64 v.Reg
                 | ScF64 -> callPrint "blade_print_f64" ScF64 v.Reg
+                | ScF32 -> callPrint "blade_print_f32" ScF32 v.Reg
+                | ScI32 ->
+                    let w = freshReg c
+                    ln c ($"{w} = sext i32 {v.Reg} to i64")
+                    callPrint "blade_print_i64" ScI64 w
                 | ScStr -> callPrint "blade_print_str" ScStr v.Reg
                 | ScBool ->
                     // The shim's parameter is a C `int`: C has no i1 ABI, so the
@@ -9881,7 +10019,7 @@ let private emitSharedCompanion (c: Ctx) (b: IRBinding) (elem: Sc) (n: string) (
             (cid, el, pool))
     let usable =
         srcs |> List.forall (fun (_, el, pool) ->
-            pool.IsSome && (match el with Some (ScI64 | ScF64 | ScBool) -> true | _ -> false))
+            pool.IsSome && (match el with Some (ScI64 | ScF64 | ScI32 | ScF32 | ScBool) -> true | _ -> false))
     if not usable then false
     else
     let srcs = srcs |> List.map (fun (cid, el, pool) -> (cid, el.Value, pool.Value))
@@ -9984,7 +10122,7 @@ let private emitCompoundInit (c: Ctx) (b: IRBinding) (denseExpr: IRExpr) (maskEx
      | _ -> refuse "a compound-index initializer of an unexpected shape")
     let elem =
         match scalarTyOf arrTy.ElemType with
-        | Some (ScI64 | ScF64 | ScBool as e) -> e
+        | Some (ScI64 | ScF64 | ScI32 | ScF32 | ScBool as e) -> e
         | _ -> refuse "a compound-index initializer over a non-Int64/Float64/Bool element"
     // The dense source, then the mask, both STORED (a deferred source is forced
     // under its own name, as the C++ lane's forceDeferredArrayInput does), in

@@ -2,8 +2,8 @@
 // The N16 refusal (mutability-errors/011) is by binder id: `bump` reads the
 // global `x` by name, and passing a DIFFERENT array `y` to its `mut` parameter
 // has no alias. A parameter merely named like a global is not the global.
-let mut x = [1.0, 2.0]
-let mut y = [10.0, 20.0]
+let mut x = Float64([1.0, 2.0])
+let mut y = Float64([10.0, 20.0])
 function bump(a: mut Array<Float64 like Idx<2>>) -> Float64 = {
     a(0) = 5.0
     x(0) + a(0)

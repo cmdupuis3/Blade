@@ -12,9 +12,9 @@ Unit meters
 Unit seconds
 Unit mps = meters / seconds
 Unit area = meters^2
-type Speed = Float<mps>
+type Speed = Float64<mps>
 function top(vs: Speed^1) -> Speed = reduce(vs, (+))
-let v: Array<Float<mps> like Idx<3>> = [1.0, 2.0, 3.0]
+let v: Array<Float64<mps> like Idx<3>> = [1.0, 2.0, 3.0]
 let t = top(v)
 // EXPECT: t = 6.0
 
@@ -24,13 +24,13 @@ let ps = [P { x = 1.0, y = 2.0 }, P { x = 3.0, y = 4.0 }]
 let sx = sum_x(ps)
 // EXPECT: sx = 4.0
 
-let sq: Float<area> = 4.0
-let ar: Float<meters^2> = sq
+let sq: Float64<area> = 4.0
+let ar: Float64<meters^2> = sq
 // EXPECT: ar = 4.0
-let rate: Float<seconds^-1> = 2.0
+let rate: Float64<seconds^-1> = 2.0
 // EXPECT: rate = 2.0
 
-let static N = 3
+let static N: Int64 = 3
 type Sq = Idx<N^2>
 let n9 = extents(range<Sq>)
 // EXPECT: n9 = 9

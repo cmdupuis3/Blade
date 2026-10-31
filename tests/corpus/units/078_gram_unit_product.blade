@@ -7,11 +7,11 @@ Unit meters
 Unit seconds
 Unit m2 = meters * meters
 Unit msec = meters * seconds
-let A: Array<Float<meters> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let B: Array<Float<seconds> like Idx<2>, Idx<3>> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let A: Array<Float64<meters> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64<seconds> like Idx<2>, Idx<3>> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
 let G = gram(A, A)
-let sq: Float<m2> = G(0, 0)
+let sq: Float64<m2> = G(0, 0)
 let D = gram(A, B)
-let cross: Float<msec> = D(0, 1)
+let cross: Float64<msec> = D(0, 1)
 // EXPECT: sq = 14.0
 // EXPECT: cross = 2.0

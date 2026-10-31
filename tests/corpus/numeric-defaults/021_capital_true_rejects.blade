@@ -1,0 +1,8 @@
+// TEST: True is spelled true (rejects)
+// ============================================================================
+// Rule 2: the booleans are spelled only `true` / `false`; the capitalized
+// spelling is refused with a steer to the lower-case one.
+// ============================================================================
+let flag = True
+// ERROR: BL1003
+// ERROR-CONTAINS: is spelled `true`

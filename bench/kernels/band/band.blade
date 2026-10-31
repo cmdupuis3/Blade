@@ -8,8 +8,8 @@
 // the band's cells visited, no key table (`[domain-enum v1]`). The map over the domain is
 // read only by its fold, so it is never materialized. The fold carries the licence.
 
-let static n = 20011   // SIZE n
-let static w = 101     // SIZE w
+let static n: Int64 = 20011   // SIZE n
+let static w: Int64 = 101     // SIZE w
 type Nx = Idx<n>
 
 static struct Band {

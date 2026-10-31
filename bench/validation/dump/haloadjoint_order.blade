@@ -15,7 +15,7 @@ import ad as ad
 // reverse mode needs a LITERAL `Idx<n>` inner (BL5500 on `Idx<n>` of a static), so the
 // extent is written twice here
 type I = Idx<1013>
-let static n = 1013
+let static n: Int64 = 1013
 
 /// README section 5 input generator (as in the kernel source).
 function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
@@ -44,7 +44,7 @@ function at(a: Array<Float64 like I>, k: Int64) -> Float64 = a((k : I))
 /// U4 (-1), U5 (-2, left occurrence), U6 (-2, right occurrence), each only when its window
 /// centre c = j - offset lies in 2 .. n-3. (s = 1.0, so s * w(c) is written w(c).)
 function listed(x: Array<Float64 like I>, wt: Array<Float64 like I>, j: Int64) -> Float64 = {
-    let a0 = 0.0
+    let a0: Float64 = 0.0
     let a1 = if j >= 4 then a0 + at(wt, j - 2) * sin(at(x, j - 2)) else a0
     let a2 = if j >= 3 && j <= n - 2 then a1 + at(wt, j - 1) * at(x, j - 2) else a1
     let a3 = if j >= 2 && j <= n - 3 then a2 + (at(wt, j) * at(x, j + 2)) * cos(at(x, j)) else a2
@@ -65,6 +65,6 @@ let wt = field(20000038)
 let mut dx: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
 let mut dw: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute
 let lv = ad.grad(loss)(x, wt, dx, dw)
-let mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dx(j) == listed(x, wt, Int64(j)) then 0 else 1, (+))
-let dw_mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dw(j) == fprimal(x, Int64(j)) then 0 else 1, (+))
+let mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dx(j) == listed(x, wt, Int64(j)) then Int64(0) else Int64(1), (+))
+let dw_mismatches = reduce(method_for(range<I>) <@> lambda(j) -> if dw(j) == fprimal(x, Int64(j)) then Int64(0) else Int64(1), (+))
 let boundary_dw = abs(dw((0 : I))) + abs(dw((1 : I))) + abs(dw(((n - 2) : I))) + abs(dw(((n - 1) : I)))

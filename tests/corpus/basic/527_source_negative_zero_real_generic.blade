@@ -7,6 +7,6 @@
 let f: Float64 = -zero
 let fr = 1.0 / f
 function nzero(x: T) -> T = -zero
-let hr = 1.0 / nzero(2.0)
+let hr = 1.0 / nzero(Float64(2.0))
 // EXPECT: fr = "-inf"
 // EXPECT: hr = "-inf"

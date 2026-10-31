@@ -9,7 +9,7 @@ type Y = Idx<2>
 type X = Idx<3>
 let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
 let c = reduce(m(0), (+)) > 1.0
-let pair = if c then (m(0), 1.0) else (m(1), 2.0)
+let pair = if c then (m(0), Float64(1.0)) else (m(1), Float64(2.0))
 let row = pair[0]
 row(1) = 9.0
 let s = reduce(m, (+), axes = 2)

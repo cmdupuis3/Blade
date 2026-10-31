@@ -9,8 +9,8 @@
 type C = Idx<2>
 type T = Idx<60>
 
-function decay(start: Array<Float like C>) -> Array<Float like C> = {
-    let rec h: Array<Float like T, C> =
+function decay(start: Array<Float64 like C>) -> Array<Float64 like C> = {
+    let rec h: Array<Float64 like T, C> =
         match h with
         | zero -> zero
         | zero :: s -> zero :: start

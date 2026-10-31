@@ -6,7 +6,7 @@
 // have prefix-compatible loop structures, so the parallel tree merges into
 // the SAME staggered nest <&!> would emit (061 pins the mandatory form).
 // Same values either way — the merge is a pure loop-structure optimization.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let k1 = lambda(x) -> x
 let k2 = lambda(x, y) -> x * y
 let k3 = lambda(x, y, z) -> x * y * z

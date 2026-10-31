@@ -5,7 +5,7 @@
 // inclusive simplex), so they cannot co-iterate; this used to refuse BL3999.
 // The rule gathers the result over range<AntisymIdx<2, 3>>, reading each
 // operand by logical subscript.
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
 let Y = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 let T = R * Y

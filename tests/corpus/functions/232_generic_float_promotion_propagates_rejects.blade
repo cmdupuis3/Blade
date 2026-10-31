@@ -4,6 +4,6 @@
 // ============================================================================
 // `twice_up` passes its own `T` to `addone`, so `addone`'s demand is
 // `twice_up`'s too, and its Int64 call is refused at the argument.
-function addone(x: T) = x + 1.0
-function twice_up(x: T) = addone(x) * 2.0
-let n = twice_up(3)
+function addone(x: T) = x + Float64(1.0)
+function twice_up(x: T) = addone(x) * Float64(2.0)
+let n = twice_up(Int64(3))

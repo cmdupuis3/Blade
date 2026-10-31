@@ -7,11 +7,11 @@
 // innermost axis of whatever rank arrives (the default `axes = 1`).
 // ============================================================================
 function tot(x: T^k) = reduce(x, (+))
-let v = tot([1.0, 2.0])
+let v = tot(Float64([1.0, 2.0]))
 // EXPECT: v = 3.0
-let m = tot([[1.0, 2.0], [3.0, 4.0]])
+let m = tot(Float64([[1.0, 2.0], [3.0, 4.0]]))
 // EXPECT: m = [3.0, 7.0]
-let c = tot([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+let c = tot(Int64([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]))
 // EXPECT: c = [[3, 7], [11, 15]]
-let v2 = tot([4, 5, 6])
+let v2 = tot(Int64([4, 5, 6]))
 // EXPECT: v2 = 15

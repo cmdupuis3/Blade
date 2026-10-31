@@ -7,7 +7,7 @@
 // write"), the call stays, and the fold sees the snapshot: 2 + 4 + 6 = 12
 // (an elided call would have folded 2 + 4 + 200). The write is visible after.
 function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
-let mut M = [1.0, 2.0, 3.0]
+let mut M = Float64([1.0, 2.0, 3.0])
 let s = reduce(prep(M), lambda(acc, v) -> {
     M(2) = 100.0
     acc + v

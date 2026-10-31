@@ -6,7 +6,7 @@
 // kept cell at source position 2, doubled).
 module Data
 
-let x = [12345, -3, 4]
+let x = Int64([12345, -3, 4])
 let keep = mask(x, lambda(v) -> v > 0)
 let y = compound(x, keep)
 let z = y * 2 |> compute

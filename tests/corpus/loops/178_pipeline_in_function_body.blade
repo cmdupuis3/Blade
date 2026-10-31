@@ -10,23 +10,23 @@
 // Fusion rewrites all three into the ordinary map the body could always
 // emit, so all three now return (x+1)*2.
 type I = Idx<3>
-let A: Array<Float like I> = [1.0, 2.0, 3.0]
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
 let f = lambda(x) -> x + 1.0
 let g = lambda(x) -> x * 2.0
 
-function letbound(xs: Array<Float like I>) = {
+function letbound(xs: Array<Float64 like I>) = {
     let o1 = object_for(f)
     let o2 = object_for(g)
     let p = o1 >>@ o2
     p <@> xs |> compute
 }
 
-function fmap(xs: Array<Float like I>) = {
+function fmap(xs: Array<Float64 like I>) = {
     let c = method_for(xs) <@> f
     g <$> c |> compute
 }
 
-function mcomp(xs: Array<Float like I>) = {
+function mcomp(xs: Array<Float64 like I>) = {
     let L = method_for(xs)
     (L <@> f) @>> (L <@> g) |> compute
 }

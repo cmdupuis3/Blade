@@ -3,7 +3,7 @@
 // ERROR-CONTAINS: would receive COMPONENTS of a representation-typed source
 import ml as ml
 let static S = [(0, 0, 2), (1, 1, 1)]
-function bad(f: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float = {
+function bad(f: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 = {
   let g = method_for(f) <@> lambda(v) -> v * 2.0 |> compute
   g(2)
 }

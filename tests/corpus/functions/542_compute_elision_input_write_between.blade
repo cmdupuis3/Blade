@@ -7,13 +7,13 @@
 // 2 + 4 + 6 = 12 -- an elided x would have read 2 + 200 + 6 = 208. The
 // write itself is visible afterwards (w1).
 function snapshot() -> T^0 = {
-    let mut w = [1.0, 2.0, 3.0]
+    let mut w = Float64([1.0, 2.0, 3.0])
     let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
     w(1) = 100.0
     reduce(x, (+))
 }
 function after_write() -> T^0 = {
-    let mut w = [1.0, 2.0, 3.0]
+    let mut w = Float64([1.0, 2.0, 3.0])
     let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute
     w(1) = 100.0
     reduce(x, (+)) + w(1)

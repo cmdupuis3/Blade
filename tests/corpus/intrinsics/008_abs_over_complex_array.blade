@@ -8,8 +8,8 @@
 // `abs` came back as (magnitude, 0) pairs that propagated into every
 // downstream binding. real/imag/arg pin the neighbours in the same class.
 // ============================================================================
-let C2: Array<Float like Idx<3>> = [3.0, 0.0, -1.0]
-let S2: Array<Float like Idx<3>> = [4.0, 2.0, 0.0]
+let C2: Array<Float64 like Idx<3>> = [3.0, 0.0, -1.0]
+let S2: Array<Float64 like Idx<3>> = [4.0, 2.0, 0.0]
 let z2 = (zip(C2, S2) <@> lambda(a, b) -> complex(a, b)) |> compute
 let mags = (abs <@> z2) |> compute
 let res = (real <@> z2) |> compute

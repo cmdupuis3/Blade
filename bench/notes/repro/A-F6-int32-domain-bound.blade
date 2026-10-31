@@ -8,12 +8,12 @@
 // Observed: BL4001 "struct Band where-constraint: implicit numeric conversion: an Int32
 //   value meets an Int64 operand in `<=`"  (plus a follow-on BL3999 at `range<Band>`).
 // With a literal `<= 2` it compiles; with `i: Int64<min=0, max=n-1>` fields it compiles.
-let static n = 11
-let static w = 2
+let static n: Int64 = 11
+let static w: Int64 = 2
 
 static struct Band {
-    i: Int<min=0, max=n-1>,
-    j: Int<min=0, max=n-1>
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
 } where abs(i - j) <= w
 
 let checksum = {

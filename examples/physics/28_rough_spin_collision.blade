@@ -84,8 +84,8 @@ let LD1 = reduce(LDEV, (+))
 let J_V = if LD1 / 14.0 < 0.000000000000000000001 then "CONSERVED" else "LEAKS"
 
 // --- analytic self-test: head-on (d = 0), equal masses, smooth reduction ---
-let t_sf = 0.0
-let t_cf = 1.0
+let t_sf: Float64 = 0.0
+let t_cf: Float64 = 1.0
 let t_q1n = (1.0 - 1.0) * t_cf / 2.0
 let t_q2n = 2.0 * t_cf / 2.0
 let t_jt = 0.0 - 2.0 * (1.0 / 6.0) * (0.0 - t_sf)

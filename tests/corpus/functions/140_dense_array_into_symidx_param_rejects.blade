@@ -8,8 +8,8 @@
 // callee then read the dense buffer as triangular storage -- `s(2, 0)`
 // returned -10 where the dense cell is -2. The call judgment unifies the
 // instantiated parameter with the argument and refuses the slot structure.
-let A = [1.0, 2.0, 3.0]
-let B = [5.0, 7.0, 11.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([5.0, 7.0, 11.0])
 let D = method_for(A, B) <@> lambda(x, y) -> x - y |> compute
 function f(s: Array<Float64 like SymIdx<2, 3>>) -> Float64 = s(2, 0)
 let v = f(D)

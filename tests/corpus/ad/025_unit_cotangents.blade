@@ -15,20 +15,20 @@ Unit seconds
 Unit mps = meters / seconds
 Unit m2 = meters * meters
 
-function dist(t: Float<seconds>, v: Float<mps>) -> Float<meters> = v * t
+function dist(t: Float64<seconds>, v: Float64<mps>) -> Float64<meters> = v * t
 let (d, dd_dt, dd_dv) = ad.grad(dist)(2.0, 3.0)
-let chk_t: Float<mps> = dd_dt
-let chk_v: Float<seconds> = dd_dv
+let chk_t: Float64<mps> = dd_dt
+let chk_v: Float64<seconds> = dd_dv
 // EXPECT: d = 6.0
 // EXPECT: dd_dt = 3.0
 // EXPECT: dd_dv = 2.0
 // EXPECT: chk_t = 3.0
 // EXPECT: chk_v = 2.0
 
-function energy(x: Array<Float<meters> like Idx<3>>) -> Float<m2> =
+function energy(x: Array<Float64<meters> like Idx<3>>) -> Float64<m2> =
     reduce([x(0) * x(0), x(1) * x(1), x(2) * x(2)], (+))
-let x0: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
-let mut dx: Array<Float<meters> like Idx<3>> = [0.0, 0.0, 0.0]
+let x0: Array<Float64<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let mut dx: Array<Float64<meters> like Idx<3>> = [0.0, 0.0, 0.0]
 let e = ad.grad(energy)(x0, dx)
 // EXPECT: e = 14.0
 // EXPECT: dx = [2.0, 4.0, 6.0]
@@ -39,21 +39,21 @@ let e = ad.grad(energy)(x0, dx)
 // what the symbolic unit walk over the normalized body provides.
 // d(x^4)/dx = 4 x^3 = 32 at x = 2.
 Unit m4 = m2 * m2
-function quart(x: Float<meters>) -> Float<m4> = {
+function quart(x: Float64<meters>) -> Float64<m4> = {
     let y = x * x
     y * y
 }
 let (q, dq) = ad.grad(quart)(2.0)
-let chk_q: Float<meters * meters * meters> = dq
+let chk_q: Float64<meters * meters * meters> = dq
 // EXPECT: q = 16.0
 // EXPECT: dq = 32.0
 // EXPECT: chk_q = 32.0
 
 // A dimensionless loss over unit-carrying parameters: each cotangent is
 // 1/<parameter>. d(a/b)/da = 1/b, d(a/b)/db = -a/b^2, at (3, 2).
-function ratio(a: Float<meters>, b: Float<meters>) -> Float = a / b
+function ratio(a: Float64<meters>, b: Float64<meters>) -> Float64 = a / b
 let (r, dr_da, dr_db) = ad.grad(ratio)(3.0, 2.0)
-let chk_a: Float<1/meters> = dr_da
+let chk_a: Float64<1/meters> = dr_da
 // EXPECT: r = 1.5
 // EXPECT: dr_da = 0.5
 // EXPECT: dr_db = -0.75

@@ -11,19 +11,19 @@
 type C = Idx<4>
 type Outer = Idx<4>
 type Inner = Idx<4>
-function bump(u: Array<Float like C>, m: Int64) -> Array<Float like C> = {
+function bump(u: Array<Float64 like C>, m: Int64) -> Array<Float64 like C> = {
     let t = method_for(range<C>) <@> lambda(i) -> 1.0 * Float64(i) + 1.0 * Float64(m) |> compute
     u + 0.1 * t
 }
 
 let final = {
-    let rec otraj: Array<Float like Outer, C> =
+    let rec otraj: Array<Float64 like Outer, C> =
         match otraj with
         | zero -> zero
-        | zero :: s -> zero :: [1.0, 1.0, 1.0, 1.0]
+        | zero :: s -> zero :: Float64([1.0, 1.0, 1.0, 1.0])
         | prefix :: n -> prefix :: {
             let start = prefix(n - 1)
-            let rec itraj: Array<Float like Inner, C> =
+            let rec itraj: Array<Float64 like Inner, C> =
                 match itraj with
                 | zero -> zero
                 | zero :: s2 -> zero :: start

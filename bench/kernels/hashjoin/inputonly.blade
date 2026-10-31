@@ -7,7 +7,7 @@
 
 type L = Idx<2003>   // SIZE n
 type R = Idx<1009>   // SIZE m
-let static nkeys = 401   // SIZE k
+let static nkeys: Int64 = 401   // SIZE k
 
 /// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
 /// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
@@ -25,5 +25,5 @@ let (checksum, input_checksum) = {
     let la = method_for(range<L>) <@> lambda(i) -> Int64(floor(gen(Int64(i), 20000038, 0.0, 1024.0))) |> compute
     let rk = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 30000057, 0.0, Float64(nkeys)))) |> compute
     let ra = method_for(range<R>) <@> lambda(j) -> Int64(floor(gen(Int64(j), 40000076, 0.0, 1024.0))) |> compute
-    (0.0, Float64(reduce(lk, (+)) + reduce(la, (+)) + reduce(rk, (+)) + reduce(ra, (+))))
+    (Float64(0.0), Float64(reduce(lk, (+)) + reduce(la, (+)) + reduce(rk, (+)) + reduce(ra, (+))))
 }

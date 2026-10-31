@@ -444,11 +444,11 @@ let runZarrTests () =
             | Error errs -> errs |> List.map TypeEnv.formatCompileError |> String.concat "; "
             | Ok _ -> ""
     check "old spelling `import Providers.NetCDF` -> steering error"
-        ((typeErrOf "import Providers.NetCDF as NetCDF\nlet x = 1\n").Contains "import netcdf as")
-        (typeErrOf "import Providers.NetCDF as NetCDF\nlet x = 1\n")
+        ((typeErrOf "import Providers.NetCDF as NetCDF\nlet x: Int64 = 1\n").Contains "import netcdf as")
+        (typeErrOf "import Providers.NetCDF as NetCDF\nlet x: Int64 = 1\n")
     check "`from zarr import load` -> selective import rejected"
-        ((typeErrOf "from zarr import load\nlet x = 1\n").Contains "selective import")
-        (typeErrOf "from zarr import load\nlet x = 1\n")
+        ((typeErrOf "from zarr import load\nlet x: Int64 = 1\n").Contains "selective import")
+        (typeErrOf "from zarr import load\nlet x: Int64 = 1\n")
     check "bare `|> read` is a hard break (unbound identifier)"
         ((typeErrOf "let x = 5 |> read\n").Contains "read")
         (typeErrOf "let x = 5 |> read\n")
@@ -901,7 +901,7 @@ let sample = z.load("%s")
 type CX = Chunked<sample.index.x, store>
 let A = sample.vars.A |> z.stream
 let seg = segments(CX)
-function run_sums(k: Int64) -> Float = {
+function run_sums(k: Int64) -> Float64 = {
     let g = group_by(A, seg)
     let s = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
     reduce(s, (+)) + Float64(k)
@@ -1027,13 +1027,13 @@ let totals = method_for(range<K>) <@> lambda(k) -> {
             [ ("a fold inside a kernel body",
                "let totals = method_for(range<K>) <@> lambda(k) -> reduce(A, (+)) + Float64(k) |> compute")
               ("a fold inside a named function",
-               "function total_plus(k: Int64) -> Float = reduce(A, (+)) + Float64(k)\nlet totals = method_for(range<K>) <@> lambda(k) -> total_plus(k) |> compute")
+               "function total_plus(k: Int64) -> Float64 = reduce(A, (+)) + Float64(k)\nlet totals = method_for(range<K>) <@> lambda(k) -> total_plus(k) |> compute")
               ("an argument to a function",
-               "function total(v: Array<Float like CX>) -> Float = reduce(v, (+))\nlet t = total(A)")
+               "function total(v: Array<Float64 like CX>) -> Float64 = reduce(v, (+))\nlet t = total(A)")
               ("a scalar index",
                "let x = A((3 : CX)) + 1.0") ]
         for (what, body) in streamedLeaks do
-            let src = sprintf "import zarr as z\nlet sample = z.load(\"%s\")\ntype CX = Chunked<sample.index.x, store>\ntype K = Idx<3>\nlet A: Array<Float like CX> = sample.vars.A |> z.stream\n%s\n" segStore body
+            let src = sprintf "import zarr as z\nlet sample = z.load(\"%s\")\ntype CX = Chunked<sample.index.x, store>\ntype K = Idx<3>\nlet A: Array<Float64 like CX> = sample.vars.A |> z.stream\n%s\n" segStore body
             let label = $"streamed variable used as an array ({what}): refused before g++ (BL7004), with a steer"
             match lower src with
             | Ok ir ->
@@ -1097,7 +1097,7 @@ import zarr as z
 
 let sample = z.load("%s")
 type CX = Chunked<sample.index.x, store>
-let A: Array<Float like CX> = sample.vars.A |> z.stream
+let A: Array<Float64 like CX> = sample.vars.A |> z.stream
 let total = reduce(A, (+))
 let biggest = reduce(A, lambda(x, y) -> if x > y then x else y)
 let shifted = reduce(A, (+), 100.0)
@@ -1155,7 +1155,7 @@ import zarr as z
 
 let sample = z.load("%s")
 type CX = Chunked<sample.index.x, store>
-let A: Array<Float like CX> = sample.vars.A |> z.stream
+let A: Array<Float64 like CX> = sample.vars.A |> z.stream
 let (p, q) = {
     let s = reduce(A, (+))
     let t = reduce(A, (+), 1.0)
@@ -1216,7 +1216,7 @@ import zarr as z
 
 let sample = z.load("%s")
 type CX = Chunked<sample.index.x, store>
-let A: Array<Float like CX> = sample.vars.A |> z.stream
+let A: Array<Float64 like CX> = sample.vars.A |> z.stream
 let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute
 let d2 = method_for(halo<CX, [-2, 0, 2]>) <@> lambda(w) -> A(w(2)) * A(w(-2)) - A(w(0)) * A(w(0)) |> compute
 """
@@ -1271,10 +1271,10 @@ import zarr as z
 
 let sample = z.load("%s")
 type CX = Chunked<sample.index.x, store>
-let A: Array<Float like CX> = sample.vars.A |> z.stream
+let A: Array<Float64 like CX> = sample.vars.A |> z.stream
 let doubled = method_for(A) <@> lambda(x) -> x * 2.0 |> compute
 let shifted = A + 1.0
-let m: Array<Float like CX> = [0.5, 0.5, 0.5, 0.5, 0.5, 2.0, 2.0, 2.0, 2.0, 2.0]
+let m: Array<Float64 like CX> = [0.5, 0.5, 0.5, 0.5, 0.5, 2.0, 2.0, 2.0, 2.0, 2.0]
 let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
 """
                             segStore
@@ -1341,7 +1341,7 @@ import zarr as z
 let s = z.load("%s")
 type CLat = Chunked<s.index.lat, store>
 type CLon = Chunked<s.index.lon, store>
-let T: Array<Float like CLat, CLon> = s.vars.T |> z.stream
+let T: Array<Float64 like CLat, CLon> = s.vars.T |> z.stream
 let tiles = segments(T)
 let tsizes = extents(tiles)
 let g = group_by(T, tiles)

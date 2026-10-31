@@ -15,7 +15,7 @@
 /// by `blade test row-tile` and `blade test llvm tiles`.
 type V = Idx<27>
 type S = Idx<11>
-let static n = 11
+let static n: Int64 = 11
 let (ss, t000, t001, t149, t_perm, t333, t_edge, t_last) = {
     let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
     let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute

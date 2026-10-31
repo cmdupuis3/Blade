@@ -26,7 +26,7 @@
 // violation — the message below is therefore also an inclusivity pin.
 // ============================================================================
 struct Small {
-    n: Int<min=0, max=3>
+    n: Int32<min=0, max=3>
 }
 
 let static bad = Small { n = 4 }

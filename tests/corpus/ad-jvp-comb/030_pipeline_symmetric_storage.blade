@@ -13,7 +13,7 @@ type J = Idx<3>
 
 let post = lambda(p) -> p * 10.0
 
-function f(a: Array<Float like J>) -> Float = {
+function f(a: Array<Float64 like J>) -> Float64 = {
     let m = (object_for(lambda(x, y) where comm(x, y) -> x * y) >>@ object_for(post)) <@> (a, a) |> compute
     m(0, 2) + m(2, 0) + m(1, 1)
 }

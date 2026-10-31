@@ -15,7 +15,7 @@ import ad as ad
 
 type I = Idx<3>
 
-function loss(x: Array<Float like I>) -> Float = {
+function loss(x: Array<Float64 like I>) -> Float64 = {
     let m = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> x(p0) * x(p1) |> compute
     m(0, 1)
 }

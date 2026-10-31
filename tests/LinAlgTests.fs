@@ -276,7 +276,7 @@ let y = gram_apply(A, A, v)
       // not name the header at all — the include is collector-driven, not
       // unconditional, even though the file itself is deployed unconditionally.
       ("no_linalg_program_excludes_the_header", true,
-       "let A = [1.0, 2.0, 3.0]\nlet s = reduce(A, (+))\n",
+       "let A = Float64([1.0, 2.0, 3.0])\nlet s = reduce(A, (+))\n",
        [],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
 
@@ -1840,7 +1840,7 @@ let runRowContractionTileTests () : BlockResult =
         + $"let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where {licence} -> {body} |> compute\n"
     let antiBody = "prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))"
     let sym3Src (p: int) (n: int) (licence: string) (body: string) =
-        $"type V = Idx<{p}>\ntype S = Idx<{n}>\nlet static nn = {n}\n"
+        $"type V = Idx<{p}>\ntype S = Idx<{n}>\nlet static nn: Int64 = {n}\n"
         + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
         + $"let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where {licence} -> {body} |> compute\n"
     let cases : (string * (string * string) list * string * string list * string list) list =

@@ -16,10 +16,10 @@ import ml as ml
 let static GSPEC = [(0, 0, 1), (1, 0, 1), (2, 0, 1)]
 let static TAUSPEC = [(0, 0, 1), (2, 0, 1)]
 
-function bridge_g(g9: Array<Float like Idx<9>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<GSPEC>> =
+function bridge_g(g9: Array<Float64 like Idx<9>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<GSPEC>> =
   ml.tensor_to_irreps(g9)
 
-function bridge_s(s6: Array<Float like Idx<6>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<TAUSPEC>> =
+function bridge_s(s6: Array<Float64 like Idx<6>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<TAUSPEC>> =
   ml.sym_to_irreps(s6)
 
 let cg = bridge_g([0.6, -1.1, 0.4, 0.9, 0.3, -0.7, -0.2, 0.8, 1.2])

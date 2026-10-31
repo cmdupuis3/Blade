@@ -4,7 +4,7 @@
 // (rank 2 and rank 3), and folds of all -0.0 terms from -0.0 seeds stay -0.0
 // at every level -- pinned through the reciprocal's sign (`-inf`), because a
 // numeric `-0.0` pin also accepts +0.0. A +0.0 outer seed gives +0.0.
-let static p = 6
+let static p: Int64 = 6
 type Var = Idx<p>
 type Obs = Idx<3>
 function radd(a: Float64, b: Float64) where repro -> Float64 = a + b

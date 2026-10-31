@@ -6,4 +6,4 @@
 type L = Idx<4>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]
 function g(m: T^1, k) = m(k)
-let r = (method_for([1, 4]) <@> lambda(i) -> g(A, i)) |> compute
+let r = (method_for(Int64([1, 4])) <@> lambda(i) -> g(A, i)) |> compute

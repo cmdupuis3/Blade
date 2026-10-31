@@ -5,7 +5,7 @@
 // FLAT tuple under the left-nested type ((Float64, Float64), Float64). Both
 // destructurings are legal: the nested pattern binds the type's structure,
 // the flat one its leaves in order.
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let l = method_for(x)
 let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
 let q1 = t[1]

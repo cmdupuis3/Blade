@@ -27,11 +27,11 @@
 // would renumber this.
 // ============================================================================
 struct Plain {
-    m: Int<min=-zz_lim, max=zz_lim>
+    m: Int32<min=-zz_lim, max=zz_lim>
 }
 
 let static a_bad = Plain { m = 3 }
 
-let static zz_lim = 2
+let static zz_lim: Int64 = 2
 // ERROR: BL4002
 // ERROR-CONTAINS: Constraint violation in Plain (static, conjunct 2)

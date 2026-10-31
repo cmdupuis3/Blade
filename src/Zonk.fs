@@ -105,6 +105,12 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                 arr
             | _ ->
                 match subst.GetLiteralDefault(n) with
+                | Some et when subst.IsWideDefault n ->
+                    IRTScalar (match et with
+                               | ETInt32 | ETInt64 -> ETInt64
+                               | ETFloat32 | ETFloat64 -> ETFloat64
+                               | ETComplex64 | ETComplex128 -> ETComplex128
+                               | other -> other)
                 | Some et -> IRTScalar et
                 // A var passed to a concrete scalar PARAMETER takes its type.
                 | None when (subst.GetParamDefault n).IsSome -> IRTScalar (subst.GetParamDefault n).Value
@@ -672,6 +678,20 @@ let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : Typed
             // specialized copy the extent is a literal again, and the test of
             // an in-range literal folds away.
             match ix.IxKind, ix.Symmetry with
+            // A direct static range can lower to offset + ordinal, with no
+            // array storage left to check the ordinal. Preserve its indexing
+            // check explicitly, including an anonymous range's computed
+            // position (which the named-axis rule below does not cover).
+            | IxKPlain, SymNone when ix.Rank = 1 && rank = 1
+                                     && (match arr.Kind with TExprRange _ | TExprDotDot _ -> true | _ -> false)
+                                     && (Blade.IRPrint.tryEvalIntIR ix.Extent).IsSome
+                                     && not (isLiteralIndex a)
+                                     && not a.Kind.IsTExprWildcard
+                                     && not (ix.Tag |> Option.exists (fun tag -> isProvenIndex (Some tag) a))
+                                     && not (guardedOrHaloIndex a) ->
+                let n = (Blade.IRPrint.tryEvalIntIR ix.Extent).Value
+                let ext = mkAt a (TExprLit (Blade.Ast.LitInt n)) intTy
+                guardIndex a ext $"a position outside the range (0 .. {n - 1L})"
             | IxKPlain, SymNone when ix.Rank <= 1
                                      && isLiteralIndex a
                                      && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
@@ -1130,7 +1150,15 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         // Indexing
         | TExprApp (f, args) ->
             let f' = z f
-            TExprApp (f', guardIndexArgs f' (zs args))
+            let args' = zs args
+            // Inference can resolve an application to an array only after
+            // the original call node was built (including virtual ranges).
+            // Lowering treats it as indexing, so install the same guards here.
+            let guarded =
+                match f'.Type with
+                | ArrayElem _ -> guardSubscripts f' (foldProductSubscripts f' args')
+                | _ -> guardIndexArgs f' args'
+            TExprApp (f', guarded)
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
         // A CURRIED read of a grouped value, `grouped(i)(j)`, is judged as the

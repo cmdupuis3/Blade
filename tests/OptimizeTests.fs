@@ -46,31 +46,31 @@ let private bl8010Count (cpp: string) =
 /// lag-1 guard. Recognition must derive the break and must NOT add the abort.
 let private freezeIdiom =
     "type It = Idx<30>\n"
-    + "let tol = 0.000000001\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let tol: Float64 = 0.000000001\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
     + "    | prefix :: n -> prefix :: (if abs(prefix(n - 1) * prefix(n - 1) - 2.0) > tol then (prefix(n - 1) + 2.0 / prefix(n - 1)) * 0.5 else prefix(n - 1))\n"
-    + "let root = xs(29)\n"
+    + "let root = xs(Int64(29))\n"
 
 /// The `while` spelling of the same recurrence: break AND the BL8010 abort.
 let private whileSpelling =
     "type It = Idx<30>\n"
-    + "let tol = 0.000000001\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let tol: Float64 = 0.000000001\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
     + "    | prefix :: n while abs(prefix(n - 1) * prefix(n - 1) - 2.0) > tol -> prefix :: (prefix(n - 1) + 2.0 / prefix(n - 1)) * 0.5\n"
-    + "let root = xs(29)\n"
+    + "let root = xs(Int64(29))\n"
 
 /// A guard reading the step ordinal OUTSIDE a lag-1 prefix read. Freezing a
 /// slice does not freeze `n`, so falseness is not absorbing and recognition
 /// must decline -- the loop stays a plain full-budget ternary.
 let private ordinalGuardDeclines =
     "type It = Idx<10>\n"
-    + "let rec ys: Array<Float like It> =\n"
+    + "let rec ys: Array<Float64 like It> =\n"
     + "    match ys with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
@@ -86,12 +86,12 @@ let private ordinalGuardDeclines =
 let private effectfulGuardDeclines =
     "type C = Idx<1>\n"
     + "type It = Idx<8>\n"
-    + "function tick(c: mut Array<Float like C>) -> Bool = {\n"
+    + "function tick(c: mut Array<Float64 like C>) -> Bool = {\n"
     + "    c((0 : C)) += 1.0\n"
     + "    c((0 : C)) > 2.0\n"
     + "}\n"
-    + "let mut counter: Array<Float like C> = [0.0]\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let mut counter: Array<Float64 like C> = [0.0]\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
@@ -105,14 +105,14 @@ let private effectfulGuardDeclines =
 /// re-admission. v1 declined this by name; the flip is deliberate.
 let private pureHelperGuardRecognized =
     "type It = Idx<30>\n"
-    + "let tol = 0.000000001\n"
-    + "function residual(x: Float) -> Float = abs(x * x - 2.0)\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let tol: Float64 = 0.000000001\n"
+    + "function residual(x: Float64) -> Float64 = abs(x * x - 2.0)\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
     + "    | prefix :: n -> prefix :: (if residual(prefix(n - 1)) > tol then (prefix(n - 1) + 2.0 / prefix(n - 1)) * 0.5 else prefix(n - 1))\n"
-    + "let root = xs(29)\n"
+    + "let root = xs(Int64(29))\n"
 
 /// A guard whose `abs` is SHADOWED by a user FUNCTION of the same name. The
 /// intrinsic spelling no longer means the intrinsic, so the callee test must
@@ -121,14 +121,14 @@ let private pureHelperGuardRecognized =
 /// that function's own evidence.
 let private shadowedIntrinsicPureRecognized =
     "type It = Idx<30>\n"
-    + "let tol = 0.000000001\n"
-    + "function abs(x: Float) -> Float = if x < 0.0 then 0.0 - x else x\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let tol: Float64 = 0.000000001\n"
+    + "function abs(x: Float64) -> Float64 = if x < 0.0 then 0.0 - x else x\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
     + "    | prefix :: n -> prefix :: (if abs(prefix(n - 1) * prefix(n - 1) - 2.0) > tol then (prefix(n - 1) + 2.0 / prefix(n - 1)) * 0.5 else prefix(n - 1))\n"
-    + "let root = xs(29)\n"
+    + "let root = xs(Int64(29))\n"
 
 /// A guard calling a helper that LOOKS pure but calls the effectful `tick`
 /// underneath. The summary joins transitively, so the outer helper is not
@@ -136,13 +136,13 @@ let private shadowedIntrinsicPureRecognized =
 let private transitiveEffectfulGuardDeclines =
     "type C = Idx<1>\n"
     + "type It = Idx<8>\n"
-    + "function tick(c: mut Array<Float like C>) -> Bool = {\n"
+    + "function tick(c: mut Array<Float64 like C>) -> Bool = {\n"
     + "    c((0 : C)) += 1.0\n"
     + "    c((0 : C)) > 2.0\n"
     + "}\n"
-    + "let mut counter: Array<Float like C> = [0.0]\n"
-    + "function probe(x: Float) -> Bool = tick(counter) && x < 1000.0\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let mut counter: Array<Float64 like C> = [0.0]\n"
+    + "function probe(x: Float64) -> Bool = tick(counter) && x < 1000.0\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
@@ -153,24 +153,24 @@ let private transitiveEffectfulGuardDeclines =
 /// summaries compose through the call chain, so recognition proceeds.
 let private transitivePureGuardRecognized =
     "type It = Idx<30>\n"
-    + "let tol = 0.000000001\n"
-    + "function sq_err(x: Float) -> Float = x * x - 2.0\n"
-    + "function residual(x: Float) -> Float = abs(sq_err(x))\n"
-    + "let rec xs: Array<Float like It> =\n"
+    + "let tol: Float64 = 0.000000001\n"
+    + "function sq_err(x: Float64) -> Float64 = x * x - 2.0\n"
+    + "function residual(x: Float64) -> Float64 = abs(sq_err(x))\n"
+    + "let rec xs: Array<Float64 like It> =\n"
     + "    match xs with\n"
     + "    | zero -> zero\n"
     + "    | zero :: s -> zero :: 1.0\n"
     + "    | prefix :: n -> prefix :: (if residual(prefix(n - 1)) > tol then (prefix(n - 1) + 2.0 / prefix(n - 1)) * 0.5 else prefix(n - 1))\n"
-    + "let root = xs(29)\n"
+    + "let root = xs(Int64(29))\n"
 
 /// An elementwise chain the fusion pass fuses into one nest (plan-fortran-
 /// killer.md arc 1): the decision record must say so.
 let private fusionChain =
     "type I = Idx<5>\n"
-    + "let a: Array<Float like I> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
-    + "let b: Array<Float like I> = [2.0, 3.0, 4.0, 5.0, 6.0]\n"
-    + "let c: Array<Float like I> = [0.5, 0.5, 0.5, 0.5, 0.5]\n"
-    + "let d: Array<Float like I> = [1.0, 1.0, 1.0, 1.0, 1.0]\n"
+    + "let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    + "let b: Array<Float64 like I> = [2.0, 3.0, 4.0, 5.0, 6.0]\n"
+    + "let c: Array<Float64 like I> = [0.5, 0.5, 0.5, 0.5, 0.5]\n"
+    + "let d: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]\n"
     + "let y = a + b * c - d\n"
     + "let total = reduce(y, (+))\n"
 
@@ -178,16 +178,16 @@ let private fusionChain =
 /// would skip the inner evaluation on the untaken cells, so the pass declines
 /// (Optimize charter rule 1). The same inner read on every cell still fuses.
 let private fusionMayAbortConditional =
-    "let x = [1.0, 3.0, 2.0]
+    "let x = Float64([1.0, 3.0, 2.0])
 "
-    + "let c = [1.0, 0.0, 1.0]
+    + "let c = Float64([1.0, 0.0, 1.0])
 "
     + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> if k > 0.5 then g else 0.0) |> compute
 "
 let private fusionMayAbortUnconditional =
-    "let x = [1.0, 3.0, 2.0]
+    "let x = Float64([1.0, 3.0, 2.0])
 "
-    + "let c = [1.0, 0.0, 1.0]
+    + "let c = Float64([1.0, 0.0, 1.0])
 "
     + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
 "
@@ -226,7 +226,7 @@ let private sliceWriteFoldSrc =
     + "let rec a: Array<Float64 like T, X> =\n"
     + "    match a with\n"
     + "    | zero -> zero\n"
-    + "    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0, 6.0]\n"
+    + "    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0, 6.0])\n"
     + "    | prefix :: n -> prefix :: centered(prefix(n - 1)) * 0.5\n"
 
 /// Integer `/` by a value read from the prefix may panic (BL8013 on a zero
@@ -238,7 +238,7 @@ let private sliceWriteIntDivSrc =
     + "let rec d: Array<Int64 like T, X> =\n"
     + "    match d with\n"
     + "    | zero -> zero\n"
-    + "    | zero :: s -> zero :: [1, 2, 3]\n"
+    + "    | zero :: s -> zero :: Int64([1, 2, 3])\n"
     + "    | prefix :: n -> prefix :: prefix(n - 1) / prefix(0) + 7\n"
 
 /// A step that forces a module-level DEFERRED binding (corpus memfree/007):
@@ -250,10 +250,10 @@ let private sliceWriteDeferredSrc =
     + "let ll = method_for(range<C>) <@> lambda(m) -> Float64(m)\n"
     + "let neg = lambda(x) -> 0.0 - x\n"
     + "let dn = neg <$> ll\n"
-    + "let rec traj: Array<Float like Steps, C> =\n"
+    + "let rec traj: Array<Float64 like Steps, C> =\n"
     + "    match traj with\n"
     + "    | zero -> zero\n"
-    + "    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]\n"
+    + "    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0])\n"
     + "    | prefix :: n -> prefix :: {\n"
     + "        let start = prefix(n - 1)\n"
     + "        let forced = dn |> compute\n"
@@ -367,7 +367,7 @@ let private recarrayGradEmission () =
     | Ok cpp ->
         let loops = System.Text.RegularExpressions.Regex.Matches(cpp, @"for \(int64_t ").Count
         let triangular = cpp.Contains "__rk" || cpp.Contains "__rm"
-        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __kv\d+\)")
+        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1LL\) - __kv\d+\)")
         if loops = 3 && not triangular && descending then
             resultLine Pass name "3 counted loops (primal, replay, descending adjoint); no triangular ordinals"
             true
@@ -386,9 +386,9 @@ let private recarrayGradNonlinearEmission () =
     let src =
         "import ad as ad
 "
-        + "function f(x: Float, r: Float) -> Float = {
+        + "function f(x: Float64, r: Float64) -> Float64 = {
 "
-        + "    let rec s: Array<Float like Idx<4>> =
+        + "    let rec s: Array<Float64 like Idx<4>> =
 "
         + "        match s with
 "
@@ -402,14 +402,14 @@ let private recarrayGradNonlinearEmission () =
 "
         + "}
 "
-        + "let (gv, gx, gr) = ad.grad(f)(0.25, 2.0)
+        + "let (gv, gx, gr) = ad.grad(f)(Float64(0.25), Float64(2.0))
 "
     match cppOfSource name src with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let loops = System.Text.RegularExpressions.Regex.Matches(cpp, @"for \(int64_t ").Count
         let triangular = cpp.Contains "__rk" || cpp.Contains "__rm"
-        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1L\) - __kv\d+\)")
+        let descending = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"- 1LL\) - __kv\d+\)")
         if loops = 3 && not triangular && descending then
             resultLine Pass name "3 counted loops (primal, replay, descending adjoint); no triangular ordinals"
             true
@@ -429,13 +429,13 @@ let private haloDenseSourceReadsDirect () =
     let name = "halo_dense_source_reads_direct"
     let src =
         "type H = Idx<9>\n"
-        + "let a: Array<Float like H> = [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0]\n"
+        + "let a: Array<Float64 like H> = [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0]\n"
         + "let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute\n"
     match cppOfSource name src with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let carousel = cpp.Contains "halo carousel"
-        let direct = cpp.Contains "a[(w + 1L)]" && cpp.Contains "a[(w + -(1L))]"
+        let direct = cpp.Contains "a[(w + 1LL)]" && cpp.Contains "a[(w + -(1LL))]"
         let interior = cpp.Contains "for (size_t __i0 = 0; __i0 < 7; __i0++)"
         if not carousel && direct && interior then
             resultLine Pass name "no carousel; direct a[w + k] reads over the 7-cell interior"
@@ -718,10 +718,10 @@ let private inlineGatherEveryPositionSrc =
     + "let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]\n"
     + "let F = sparse(flat, K)\n"
     + "function head1(v: T^1) -> T^0 = v(0)\n"
-    + "let has2 = method_for(0..3) <@> lambda(i) -> contains(F((i, _)), 2.0) |> compute\n"
+    + "let has2 = method_for(0..3) <@> lambda(i) -> contains(F((i, _)), Float64(2.0)) |> compute\n"
     + "let first = method_for(0..3) <@> lambda(i) -> F((i, _))(0) |> compute\n"
     + "let viaCall = method_for(0..3) <@> lambda(i) -> head1(F((i, _))) * 10.0 |> compute\n"
-    + "let top = contains(F((2, _)), 1.0)\n"
+    + "let top = contains(F((2, _)), Float64(1.0))\n"
 
 let private inlineGatherEveryPosition () =
     let name = "inline_sparse_gather_every_scalar_position"
@@ -741,7 +741,7 @@ let private inlineGatherEveryPosition () =
 /// P3-16: a fused inner body the host reads twice is bound ONCE per cell --
 /// `e * e` over `exp(x) * 3.0` evaluated exp twice per cell after fusion.
 let private fusionRepeatedParamSrc =
-    "let x = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+    "let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
     + "let z = method_for(exp(x) * 3.0) <@> lambda(e) -> e * e |> compute\n"
 
 let private fusionRepeatedParamBoundOnce () =
@@ -857,7 +857,7 @@ let private recWindowCorpusCases () : bool list =
 
 /// The flagship case's EMISSION, both ways: windowed, the C++ allocates the
 /// 2-row ring (extents { 2, 2, 2 }) and no 200-row buffer, and indexes it
-/// `% 2L`; with BLADE_REC_WINDOW=0 the 200-row buffer is back and the
+/// `% 2LL`; with BLADE_REC_WINDOW=0 the 200-row buffer is back and the
 /// decision says why.
 let private recWindowEmission () : bool list =
     let path = System.IO.Path.Combine("tests", "corpus", "recursive-arrays", "033_ring_rk4_block_local_final_read.blade")
@@ -870,9 +870,9 @@ let private recWindowEmission () : bool list =
         match cppOfSource name src with
         | Error e -> resultLine Fail name e; false
         | Ok cpp ->
-            let ring = cpp.Contains "_extents[3] = { 2, 2, 2 }" && cpp.Contains "% 2L)"
+            let ring = cpp.Contains "_extents[3] = { 2, 2, 2 }" && cpp.Contains "% 2LL)"
             let full = cpp.Contains "{ 200, 2, 2 }"
-            if ring && not full then resultLine Pass name "ring extents { 2, 2, 2 }, `% 2L` subscripts, no { 200, 2, 2 } allocation"; true
+            if ring && not full then resultLine Pass name "ring extents { 2, 2, 2 }, `% 2LL` subscripts, no { 200, 2, 2 } allocation"; true
             else resultLine Fail name $"ring={ring} full200={full}"; false
     let off =
         let name = "rec_window_emission_gate_off: BLADE_REC_WINDOW=0 keeps the 200-row buffer and records why"
@@ -1431,7 +1431,7 @@ let private compactionV2SelCapFallback () =
 /// run-time cap test, the compound falls back to B4's pass into the same
 /// buffers otherwise.
 let private compactionV2RuntimeSrc =
-    "let k = reduce([3, 4, 5], (+))\n"
+    "let k = reduce(Int64([3, 4, 5]), (+))\n"
     + "let xs = 0..k |> compute\n"
     + "let keep = mask(xs, lambda(v) -> v > 4)\n"
     + "let y = compound(xs, keep)\n"
@@ -1459,7 +1459,7 @@ let private compactionV2DemandSrc (uses: string) =
     + uses
 let private compactionV2WritingProducerSrc =
     "type Ix = Idx<13>\n"
-    + "let mut calls = 0\n"
+    + "let mut calls: Int64 = 0\n"
     + "let x = method_for(range<Ix>) <@> lambda(i) -> {\n"
     + "    calls = calls + 1\n"
     + "    Float64(Int64(i) % 5)\n"
@@ -1506,7 +1506,7 @@ let private compactionV2ProviderWriteSrc =
     + "let s = reduce(y, (+))\n"
 // Two-module programs (finding 1: an imported lookup hidden in a random key).
 let private compactionV2ImportedKeySources (exported: string) (key: string) =
-    [ ("Data", "module Data\n\nlet x = [12345, -3, 4]\nlet keep = mask(x, lambda(v) -> v > 0)\nlet y = compound(x, keep)\n" + exported)
+    [ ("Data", "module Data\n\nlet x = Int64([12345, -3, 4])\nlet keep = mask(x, lambda(v) -> v > 0)\nlet y = compound(x, keep)\n" + exported)
       ("Main", "module Main\nimport Data\nimport rand as r\n\nlet u = r.uniform(" + key + ", 1)\n") ]
 let private compactionV2ImportedHelperSources =
     [ ("Helpers", "module Helpers\n\ntype Ix = Idx<2>\nfunction bump(a: mut Array<Float64 like Ix>) -> Int64 = {\n    a(0) = 9.0\n    7\n}\n")
@@ -1559,7 +1559,7 @@ let private compactionV2DecisionCases () =
           (compactionV2DemandSrc "let d: Array<Float64 like Ix> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]\nlet o = y <|:> d |> compute\n") "compaction-fusion"
           (fun d -> v2Applied d && evidenceHas "positions required by `y` as an operand of IRFallback" d) "positions required by a present read"
       decisionCase "decision_compaction_v2_derived_map_keyed_requires"
-          (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet z7 = z(7)\n") "compaction-fusion"
+          (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet z7 = z(Int64(7))\n") "compaction-fusion"
           (fun d -> v2Applied d && evidenceHas "positions required by a keyed read of `z` in `z7`" d) "positions required through a derived map"
       decisionCase "decision_compaction_v2_derived_map_fold_elides"
           (compactionV2DemandSrc "let z = y * 2.0 |> compute\nlet zs = reduce(z, (+))\n") "compaction-fusion"
@@ -2028,7 +2028,7 @@ let private t4cStorageProofCases () : bool list =
 // `gather` the run-time cap test at the mask with the first companion's
 // guarded joint pass into the same buffers.
 let private t4cRuntimeSrc =
-    "let k = reduce([3, 4, 5], (+))\n"
+    "let k = reduce(Int64([3, 4, 5]), (+))\n"
     + "let ks = 0..k |> compute\n"
     + "let xs = method_for(ks) <@> lambda(i) -> i * 1 |> compute\n"
     + "let ws = method_for(ks) <@> lambda(i) -> i * 3 + 1 |> compute\n"
@@ -2124,7 +2124,7 @@ let private intervalHotRowRandomKeySrc =
     "import rand as r\n"
     + "type I = Idx<2>\ntype J = Idx<2>\n"
     + "function bump(a: mut Array<Float64 like I, J>) -> Int64 = {\n    a(0, 0) = 9.0\n    7\n}\n"
-    + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> 1.0 |> compute\n"
+    + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> Float64(1.0) |> compute\n"
     + "let noise = r.uniform(bump(p), 1)\n"
     + "let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)\n"
 let private intervalCompactRowRandomKeySrc =
@@ -2200,7 +2200,7 @@ let private hotRowLateCaptureSrc =
     + "function f() -> Float64 = {\n"
     + "    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute\n"
     + "    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) -> u(wr(-1), wc(0)) + u(wr(0), wc(1)) - 2.0 * u(wr(0), wc(0)) |> compute\n"
-    + "    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> 0.5, (+))\n"
+    + "    let w2 = reduce(method_for(range<X>) <@> lambda(j) -> Float64(0.5), (+))\n"
     + "    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) * w2, (+))\n"
     + "    s\n"
     + "}\n"
@@ -2210,14 +2210,14 @@ let private hotRowLateCaptureSrc =
 /// (the corpus twin is loops/485).
 /// G41 finding 14: the producer bumps G(0); the row kernel reads G(0).
 let private hotRowWritingProducerSrc =
-    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = [0.0]\n"
-    + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    0.0\n} |> compute\n"
+    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = Float64([0.0])\n"
+    + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    Float64(0.0)\n} |> compute\n"
     + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), (+), 0.0)\n"
 
 /// G41 finding 17: a pure producer, but the OUTER fold kernel writes G(0),
 /// which the row map reads (fused 1.0 / G=[2.0]; hot-row 0.0 / G=[2.0]).
 let private hotRowWritingOuterKernelSrc =
-    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = [0.0]\n"
+    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = Float64([0.0])\n"
     + "function k(a: Float64, b: Float64) -> Float64 = {\n    G(0) = G(0) + 1.0\n    a + b\n}\n"
     + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
     + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), k, 0.0)\n"
@@ -2225,8 +2225,8 @@ let private hotRowWritingOuterKernelSrc =
 /// G41 finding 16: the compact producer bumps the scalar G; the walk reads it
 /// (two-pass 12 / seen 3; row partials 9).
 let private compactRowWritingProducerSrc =
-    "type I = Idx<2>\nlet x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute\nlet mut G = 0.0\n"
-    + "let p = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> {\n    G = G + 1.0\n    0.0\n} |> compute\n"
+    "type I = Idx<2>\nlet x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute\nlet mut G: Float64 = 0.0\n"
+    + "let p = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> {\n    G = G + 1.0\n    Float64(0.0)\n} |> compute\n"
     + "let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j) + G, (+), 0.0), (+), 0.0)\n"
 
 let private hotRowMayFailSrc =
@@ -3356,7 +3356,7 @@ let private eplDecisionCases () =
             (declinedMentioning "the producer runs a thread team; the strict legs x-sum, y-sum keep their serial pass")
             "declined: mt8 (strict legs never split per thread)"))
       eplDecisionCase "decision_epilogue_legs_declined_producer_writes"
-          (eplBlockSrc "lambda(u, v) -> {\n        cnt = cnt + 1.0\n        u + v\n    }" "" eplSums |> fun s -> s.Replace("    let xa = x\n", "    let mut cnt = 0.0\n"))
+          (eplBlockSrc "lambda(u, v) -> {\n        cnt = cnt + 1.0\n        u + v\n    }" "" eplSums |> fun s -> s.Replace("    let xa = x\n", "    let mut cnt: Float64 = 0.0\n"))
           (declinedMentioning "may write (scheduleMayWriteIn)") "declined: the producer kernel writes"
       // leg row: the output, an alias, a team-requesting leg kernel
       eplDecisionCase "decision_epilogue_legs_declined_output_leg" (eplBlockSrc eplPlain "" "reduce(y2, (+)) + reduce(x, (+))")
@@ -3618,12 +3618,12 @@ let private hoistGuardedSrc =
 /// it is not repeatable and runs once per cell exactly as written.
 let private hoistEffectfulSrc =
     "type C = Idx<1>\n"
-    + "function tick(c: mut Array<Float like C>) -> Float = {\n"
+    + "function tick(c: mut Array<Float64 like C>) -> Float64 = {\n"
     + "    c((0 : C)) += 1.0\n"
     + "    c((0 : C))\n"
     + "}\n"
-    + "let mut counter: Array<Float like C> = [0.0]\n"
-    + "let x = [1.0, 2.0, 3.0]\n"
+    + "let mut counter: Array<Float64 like C> = [0.0]\n"
+    + "let x = Float64([1.0, 2.0, 3.0])\n"
     + "let y = method_for(x) <@> lambda(e) -> e + tick(counter) |> compute\n"
 
 /// A call that may abort, read only under the kernel's branch: the kernel
@@ -3631,7 +3631,7 @@ let private hoistEffectfulSrc =
 /// raise a BL8003 the program never raised. It stays in the kernel.
 let private hoistConditionalSrc =
     "function avg(row: T^1) -> Float64 = Float64(reduce(row, (+))) / Float64(extents(row))\n"
-    + "let x = [1.0, 2.0, 3.0]\n"
+    + "let x = Float64([1.0, 2.0, 3.0])\n"
     + "let y = method_for(x) <@> lambda(e) -> if e > 1.5 then e - avg(x) else 0.0 |> compute\n"
 
 /// The LATE array/scalar broadcast (IRMono.lowerArrayBinOpsModule). `lmean`
@@ -3647,8 +3647,8 @@ let private hoistConditionalSrc =
 let private lateBroadcastSrc =
     "function lmean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))\n"
     + "function center(v: T^1) -> T^1 = v - lmean(v)\n"
-    + "let x = [1.0, 2.0, 3.0, 6.0]\n"
-    + "let common = intersect(x, [2.0, 6.0, 9.0])\n"
+    + "let x = Float64([1.0, 2.0, 3.0, 6.0])\n"
+    + "let common = intersect(x, Float64([2.0, 6.0, 9.0]))\n"
     + "let c = center(common)\n"
 
 /// Nest store statements (`name[__i0] = ...` / `__fp_name[__fk] = ...`) that
@@ -3680,7 +3680,7 @@ let private hoistGuardsOnNonEmptyNest () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let inNest = perCellAvgCalls cpp
-        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0L\)\) \? avg").Count
+        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0LL\)\) \? avg").Count
         if inNest = 0 && guarded = 2 then
             resultLine Pass name "two guarded lets (`<non-empty> ? avg(..) : 0.0`), no `avg` call in the nest"
             true
@@ -3709,7 +3709,7 @@ let private lateBroadcastGuardedOnNonEmptyNest () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let inNest = perCellCalls "lmean" cpp
-        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0L\) \? lmean").Count
+        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0LL\) \? lmean").Count
         let unconditional = System.Text.RegularExpressions.Regex.Matches(cpp, @"auto __v\d+ = lmean").Count
         if inNest = 0 && guarded = 1 && unconditional = 0 then
             resultLine Pass name "one guarded let (`<non-empty> ? lmean(v) : 0.0`), no unconditional one, no `lmean` call in the nest"
@@ -3751,29 +3751,29 @@ let private notAppliedCase (name: string) (src: string) (rule: string) (why: str
 /// second fold must see the write (tests/corpus/functions/134 pins 98).
 let private cseMutParamCallSrc =
     "type I = Idx<7>\n"
-    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "function bump(a: mut Array<Float64 like I>) -> Float64 = {\n"
     + "    a((0 : I)) = 100.0\n"
     + "    0.0\n"
     + "}\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let mut y = x * 2.0\n"
     + "    let s1 = reduce(y, (+))\n"
     + "    let z = bump(y)\n"
     + "    let s2 = reduce(y, (+))\n"
     + "    s2 - s1 + z\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     + "let m = g(a)\n"
 
 /// CSE across a call that writes a module-level `let mut`.
 let private cseGlobalWriteCallSrc =
     "type I = Idx<3>\n"
-    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
-    + "function poke() -> Float = {\n"
+    + "let mut G: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "function poke() -> Float64 = {\n"
     + "    G((0 : I)) = 100.0\n"
     + "    0.0\n"
     + "}\n"
-    + "function g() -> Float = {\n"
+    + "function g() -> Float64 = {\n"
     + "    let s1 = reduce(G, (+))\n"
     + "    let z = poke()\n"
     + "    let s2 = reduce(G, (+))\n"
@@ -3785,23 +3785,23 @@ let private cseGlobalWriteCallSrc =
 /// float literal: NOT the same value (the old `%A` key merged them).
 let private cseFloatLiteralSrc =
     "type I = Idx<7>\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
     + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.10000000001)\n"
     + "    (s2 - s1) * 1.0e12\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     + "let m = g(a)\n"
 
 /// ... nor do `0.0` and `-0.0` (IEEE-equal, bitwise different).
 let private cseSignedZeroSrc =
     "type I = Idx<3>\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.0)\n"
     + "    let s2 = reduce(x, lambda(a, b) -> a + b * -0.0)\n"
     + "    1.0 / s1 - 1.0 / s2\n"
     + "}\n"
-    + "let a = [-1.0, -2.0, -3.0]\n"
+    + "let a = Float64([-1.0, -2.0, -3.0])\n"
     + "let m = g(a)\n"
 
 /// Two folds with identical inline lambda kernels ARE the same value: the
@@ -3809,44 +3809,44 @@ let private cseSignedZeroSrc =
 /// no effect summary of its own, so it is judged by its body).
 let private cseIdenticalLambdasSrc =
     "type I = Idx<7>\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
     + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
     + "    s2 - s1\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     + "let m = g(a)\n"
 
 /// A call that writes NOTHING is not a barrier (tests/corpus/functions/137).
 let private cseAcrossPureCallSrc =
     "type I = Idx<7>\n"
-    + "function sumsq(v: Array<Float like I>) -> Float = reduce(v * v, (+))\n"
-    + "function scaled(x: Array<Float like I>) -> Float = {\n"
+    + "function sumsq(v: Array<Float64 like I>) -> Float64 = reduce(v * v, (+))\n"
+    + "function scaled(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let y = x * 2.0\n"
     + "    let s1 = reduce(y, (+))\n"
     + "    let q = sumsq(y)\n"
     + "    let s2 = reduce(y, (+))\n"
     + "    s1 * 0.5 + s2 * 0.25 + q\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     + "let r = scaled(a)\n"
 
 /// Twins, one written through a `mut` argument: never merged, in either
 /// role (tests/corpus/functions/138).
 let private cseTwinOfMutatedSrc =
     "type I = Idx<7>\n"
-    + "function dbl(v: Array<Float like I>) -> Array<Float like I> = v * 2.0\n"
-    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "function dbl(v: Array<Float64 like I>) -> Array<Float64 like I> = v * 2.0\n"
+    + "function bump(a: mut Array<Float64 like I>) -> Float64 = {\n"
     + "    a((0 : I)) = 100.0\n"
     + "    0.0\n"
     + "}\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let mut y1 = dbl(x)\n"
     + "    let y2 = dbl(x)\n"
     + "    let z = bump(y1)\n"
     + "    reduce(y2, (+)) + z\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])\n"
     + "let t = g(a)\n"
 
 /// A kernel reached through a local alias (`let k = lambda ..`) that writes a
@@ -3854,8 +3854,8 @@ let private cseTwinOfMutatedSrc =
 /// so the name is the worst case (tests/corpus/functions/139).
 let private cseLambdaAliasKernelSrc =
     "type I = Idx<3>\n"
-    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
-    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "let mut G: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "function g(x: Array<Float64 like I>) -> Float64 = {\n"
     + "    let k = lambda(a, b) -> {\n"
     + "        G((0 : I)) = G((0 : I)) + 1.0\n"
     + "        a + b\n"
@@ -3864,7 +3864,7 @@ let private cseLambdaAliasKernelSrc =
     + "    let s2 = reduce(x, k)\n"
     + "    s1 + s2\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let m = g(a)\n"
 
 /// The structural/05 D7 advisory: gram, decompact, a row prodsum -- recorded
@@ -3938,7 +3938,7 @@ let private planCommDistinctSrc =
 /// packed and triangular, and the record names both operands as written.
 /// tests/corpus/symmetry/146.
 let private planDeferredAliasSrc =
-    "let x = [1.0, 2.0, 3.0]\n"
+    "let x = Float64([1.0, 2.0, 3.0])\n"
     + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
     + "let g2 = g\n"
     + "let r = method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
@@ -3946,7 +3946,7 @@ let private planDeferredAliasSrc =
 /// The same alias bound inside a BLOCK is a forcing copy (10.2): two arrays,
 /// declined. tests/corpus/symmetry/151.
 let private planBlockDeferredAliasSrc =
-    "let x = [1.0, 2.0, 3.0]\n"
+    "let x = Float64([1.0, 2.0, 3.0])\n"
     + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
     + "let r = {\n    let b = g\n    method_for(g, b) <@> lambda(a, c) where comm(a, c) -> a * c |> compute\n}\n"
 
@@ -4014,8 +4014,8 @@ let private coIterIdentityPins () : bool list =
 /// and `f(A, B)` the generic declaration, declined as before.
 /// tests/corpus/symmetry/149, 154.
 let private planSharingSrc =
-    "let A = [1.0, 2.0, 3.0]\n"
-    + "let B = [4.0, 5.0, 6.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\n"
+    + "let B = Float64([4.0, 5.0, 6.0])\n"
     + "function f(x: T^1, y: T^1) where comm(x, y) = method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute\n"
     + "let PAA = f(A, A)\n"
     + "let PAB = f(A, B)\n"
@@ -4033,10 +4033,10 @@ let private planSharingDeclaredSrc =
 /// tests/corpus/ad-jvp-comb/115.
 let private planSharingAdSrc =
     "import ad as ad\ntype I = Idx<2>\ntype K = Idx<3>\n"
-    + "function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {\n    let g = gram(a, b)\n    g(0, 1) * 2.0 + g(1, 0)\n}\n"
-    + "let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
-    + "let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]\n"
-    + "let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]\n"
+    + "function floss(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Float64 = {\n    let g = gram(a, b)\n    g(0, 1) * 2.0 + g(1, 0)\n}\n"
+    + "let a0 = Float64([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n"
+    + "let mut da = Float64([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])\n"
+    + "let mut db = Float64([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])\n"
     + "let gv = ad.grad(floss)(a0, a0, da, db)\n"
 
 /// A dense ascription fixes the elaboration of a call the partition would
@@ -4049,7 +4049,7 @@ let private planSharingAscribedSrc =
 
 /// An `omp`-licensed outer product: the placed construct is recorded.
 let private planOmpSrc =
-    "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\nlet B = Float64([4.0, 5.0, 6.0])\n"
     + "let m = method_for(A, B) <@> lambda(x, y) where omp(x: 1) -> x * y |> compute\n"
 
 let private planMatmulSrc (m: int) (k: int) (n: int) =
@@ -4108,7 +4108,7 @@ let private planAntiOmpSrc (p: int) (n: int) =
 let private planSym3Src (p: int) (n: int) =
     $"type V = Idx<{p}>
 type S = Idx<{n}>
-let static nn = {n}
+let static nn: Int64 = {n}
 "
     + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i + s) |> compute
 "
@@ -4359,7 +4359,7 @@ let private declSpanResetIsolated () =
     IR.recordDeclSpan "__parent_marker" marker
     let child =
         System.Threading.Tasks.Task.Run(fun () ->
-            match lower "let c = 1\nlet d = c + 1\n" with
+            match lower "let c: Int64 = 1\nlet d = c + 1\n" with
             | Ok _ -> true
             | Error _ -> false)
     let childLowered = child.Result
@@ -4385,7 +4385,7 @@ let private parallelEmissionIsolated () =
     let name = "parallel_emission_cells_isolated"
     withGate "BLADE_BLAS" "0" (fun () ->
     withGate "OPENBLAS_DIR" null (fun () ->
-        match lower (planMatmulSrc 20 16 110), lower "let x = [1.0, 2.0, 3.0]\nlet y = x + 1.0\n" with
+        match lower (planMatmulSrc 20 16 110), lower "let x = Float64([1.0, 2.0, 3.0])\nlet y = x + 1.0\n" with
         | Error e, _ | _, Error e -> resultLine Fail name ($"lower: {e}"); false
         | Ok big, Ok small ->
             // Touch every cell in THIS flow first: the children inherit it.
@@ -4445,7 +4445,7 @@ let private planFoldLanesThreadedSrc =
 // `u`, whose cell term is `body` and whose fold is `kernSeed`. `bump` writes
 // a cell of the pool through a `mut` parameter (an intervening writer).
 let private planActionSrcWith (prelude: string) (between: string) (body: string) (kernSeed: string) =
-    "let static p = 13\ntype Var = Idx<p>\ntype Obs = Idx<3>\n"
+    "let static p: Int64 = 13\ntype Var = Idx<p>\ntype Obs = Idx<3>\n"
     + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
     + "function bump(a: mut Array<Float64 like SymIdx<2, Var>>) -> Int64 = {\n    a(0, 1) = 2.5\n    7\n}\n"
     + prelude
@@ -4626,9 +4626,9 @@ let private planActionCases () : bool list =
       pullGates [ ("BLADE_FP_REPRO", null); ("BLADE_OMP_THREADS", "1") ] (fun () ->
           planCase "plan_orbit_action_declined_mixed_nest"
               ("type Three = Idx<3>\nfunction radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
-               + "let ones = method_for(range<Three>) <@> lambda(i) -> 1.0 |> compute\n"
+               + "let ones = method_for(range<Three>) <@> lambda(i) -> Float64(1.0) |> compute\n"
                + "let s1 = method_for(ones, ones) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a * b |> compute\n"
-               + "let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then 1.0e16 else if i == 1 then -1.0e16 else 1.0 |> compute\n"
+               + "let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then 1.0e16 else if i == 1 then -Float64(1.0e16) else Float64(1.0) |> compute\n"
                + "let wmn = reduce(method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)), radd, 0.0)\n")
               "fold-form"
               (actionDeclined "a mixed nest: level 2's fold carries a reorder licence and level 1's does not (v1 keeps the walk; making the licensed level strict would change the default build's bits)")
@@ -4657,7 +4657,7 @@ let private planActionCases () : bool list =
               "a pool whose producer writes (the producer party)")
       repro (fun () ->
           planCase "plan_orbit_action_declined_assigned_free_scalar"
-              (planActionSrcWith "let mut c = 0.5\nc = 0.75\n" "" "g(i, j) * v(j) + c" "(+)")
+              (planActionSrcWith "let mut c: Float64 = 0.5\nc = 0.75\n" "" "g(i, j) * v(j) + c" "(+)")
               "fold-form" (actionDeclined "`__expr1` may write between `c` and the action")
               "a free scalar assigned between its binding and the action (the intervening party)")
       repro (fun () ->
@@ -5824,7 +5824,7 @@ let private siblingFailingCalleeSite () =
     | Ok cpp ->
         let fnStart = cpp.IndexOf "int64_t risky(Array<int64_t, 1> v) {"
         let frame = if fnStart >= 0 then cpp.IndexOf("BLADE_FRAME(\"risky\"", fnStart) else -1
-        let site = if fnStart >= 0 then System.Text.RegularExpressions.Regex.Match(cpp.Substring fnStart, @"idiv64\(100L, [^,]+, [^,]+, 3\)") else System.Text.RegularExpressions.Match.Empty
+        let site = if fnStart >= 0 then System.Text.RegularExpressions.Regex.Match(cpp.Substring fnStart, @"idiv64\(100LL, [^,]+, [^,]+, 3\)") else System.Text.RegularExpressions.Match.Empty
         let called = (mainOf cpp).Contains "risky(__v"
         if fnStart >= 0 && frame > fnStart && site.Success && called then
             resultLine Pass name "the division stays in risky's body (line 3, under BLADE_FRAME(\"risky\")); main calls risky"
@@ -6269,7 +6269,7 @@ let private groupAggCppPositional () =
               "if ((size_t)__k >= 4) blade_rt::panic(\"BL8006\", \"index out of bounds: a group_keys key outside 0 .. 3\""
               "size_t __g = (size_t)__k;"
               "for (size_t __g = 0; __g < 4; __g++) "
-              "__agg0[__g] = 100L;"
+              "__agg0[__g] = 100LL;"
               "__agg1[__g] += v[__ki] * v[__ki];" ]
         let missing = want |> List.filter (fun s -> not (cpp.Contains s))
         if missing.IsEmpty && not (cpp.Contains "__perm[") then
@@ -6346,10 +6346,10 @@ let private memberHead =
     "type Row = Idx<9>\n"
     + "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5]\n"
 let private memberSmallSrc =
-    memberHead + "let eligible = [3, 3, 1, -5]\nlet keep = mask(customer, lambda(c) -> contains(eligible, c))\n"
+    memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet keep = mask(customer, lambda(c) -> contains(eligible, c))\n"
 let private memberBitmapSrc =
     memberHead
-    + "let evens = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60]\n"
+    + "let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])\n"
     + "let keep = mask(customer, lambda(c) -> contains(evens, c))\n"
 let private memberExtremeSrc =
     memberHead
@@ -6361,35 +6361,35 @@ let private memberComputedSrc =
     + "let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7) % 61 |> compute\n"
     + "let flags = method_for(cust) <@> lambda(c) where omp -> contains(elig, c) |> compute\n"
 let private memberFoldSrc =
-    memberHead + "let B = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34]\n"
+    memberHead + "let B = Int64([2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34])\n"
     + "let weighted = reduce(method_for(customer) <@> lambda(x) -> if contains(B, x) then x * 10 else 1, (+), 1000)\n"
 let private memberWritingKernelSrc =
     "type One = Idx<1>\n" + memberHead
     + "let mut calls: Array<Int64 like One> = [0]\n"
     + "function tick(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    x\n}\n"
-    + "let B = [8, 23, 99]\nlet keep = mask(customer, lambda(v) -> contains(B, tick(calls, v)))\n"
+    + "let B = Int64([8, 23, 99])\nlet keep = mask(customer, lambda(v) -> contains(B, tick(calls, v)))\n"
 let private memberWritingProducerSrc =
     "type One = Idx<1>\ntype Three = Idx<3>\n" + memberHead
     + "let mut log: Array<Int64 like One> = [0]\n"
     + "function make(l: mut Array<Int64 like One>) -> Array<Int64 like Three> = {\n    l(0) = l(0) + 1\n    [4, 8, 15]\n}\n"
     + "let logged = make(log)\nlet keep = mask(customer, lambda(v) -> contains(logged, v))\n"
 let private memberAssignedSrc =
-    memberHead + "let mut moving = [1, 2, 3]\nmoving(0) = 9\nlet keep = mask(customer, lambda(v) -> contains(moving, v))\n"
+    memberHead + "let mut moving = Int64([1, 2, 3])\nmoving(0) = 9\nlet keep = mask(customer, lambda(v) -> contains(moving, v))\n"
 let private memberDeferredSetSrc =
     "type Three = Idx<3>\n" + memberHead
     + "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) * 8 + 8\n"
     + "let keep = mask(customer, lambda(v) -> contains(lazy, v))\n"
 let private memberDeferredHostSrc =
-    memberHead + "let eligible = [3, 3, 1, -5]\nlet flags = method_for(customer) <@> lambda(c) -> contains(eligible, c)\nlet n = reduce(method_for(flags) <@> lambda(b) -> if b then 1 else 0, (+), 0)\n"
+    memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet flags = method_for(customer) <@> lambda(c) -> contains(eligible, c)\nlet n = reduce(method_for(flags) <@> lambda(b) -> if b then 1 else 0, (+), 0)\n"
 let private memberSharedKernelSrc =
-    memberHead + "let eligible = [3, 3, 1, -5]\nlet pred = lambda(c: Int64) -> contains(eligible, c)\nlet k1 = mask(customer, pred)\nlet k2 = mask(customer, pred)\n"
+    memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet pred = lambda(c: Int64) -> contains(eligible, c)\nlet k1 = mask(customer, pred)\nlet k2 = mask(customer, pred)\n"
 let private memberFloatSrc =
-    "type Row = Idx<4>\nlet xs: Array<Float64 like Row> = [1.5, 2.5, 0.0, -1.0]\nlet fs = [1.5, -0.0, 2.5]\nlet keep = mask(xs, lambda(x) -> contains(fs, x))\n"
+    "type Row = Idx<4>\nlet xs: Array<Float64 like Row> = [1.5, 2.5, 0.0, -1.0]\nlet fs = Float64([1.5, -0.0, 2.5])\nlet keep = mask(xs, lambda(x) -> contains(fs, x))\n"
 let private memberWritingSeedSrc =
     "type One = Idx<1>\n" + memberHead
     + "let mut log: Array<Int64 like One> = [0]\n"
     + "function seed(l: mut Array<Int64 like One>) -> Int64 = {\n    l(0) = l(0) + 1\n    1000\n}\n"
-    + "let B = [2, 4, 6]\n"
+    + "let B = Int64([2, 4, 6])\n"
     + "let weighted = reduce(method_for(customer) <@> lambda(x) -> if contains(B, x) then x else 0, (+), seed(log))\n"
 let private memberDeferredAliasSrc =
     "type Three = Idx<3>\ntype Row = Idx<5>\n"
@@ -6398,7 +6398,7 @@ let private memberDeferredAliasSrc =
     + "let B = lazy\nlet C = B\n"
     + "let flags_b = method_for(src) <@> lambda(v) -> contains(B, v) |> compute\n"
     + "let flags_c = method_for(src) <@> lambda(v) -> contains(C, v) |> compute\n"
-    + "let stored = [4, 9, 7]\nlet S1 = stored\nlet S2 = S1\n"
+    + "let stored = Int64([4, 9, 7])\nlet S1 = stored\nlet S2 = S1\n"
     + "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute\n"
 let private memberRule = "member-hoist"
 let private memberApplied (subject: string) (d: Blade.Effects.Decision) = applied d && d.Subject = subject
@@ -6479,7 +6479,7 @@ let private memberHoistDecisionCases () =
       // the canonical semijoin keeps its mask INLINE in the compound's side
       // table: the compound binding (whose site runs the mask) is the host
       decisionCase "decision_member_hoist_inline_semijoin_compound_host"
-          (memberHead + "let eligible = [3, 3, 1, -5]\nlet semi = compound(customer, mask(customer, lambda(c) -> contains(eligible, c)))\n") memberRule
+          (memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet semi = compound(customer, mask(customer, lambda(c) -> contains(eligible, c)))\n") memberRule
           (fun d -> memberApplied "semi" d && evidenceHas "built immediately before `semi`" d)
           "applied: the compound whose inline mask probes is the host" ]
 
@@ -6868,7 +6868,7 @@ let private cmP1Src =
     + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
     + "    reduce(x, (+))\n"
     + "}\n"
-    + "let t = total([1.0, 2.0, 3.0])\n"
+    + "let t = total(Float64([1.0, 2.0, 3.0]))\n"
 let private cmP2Src =
     "type I4 = Idx<4>\n"
     + "function ratio(a: Array<Float64 like I4>, b: Array<Float64 like I4>) -> Array<Float64 like I4> = {\n"
@@ -7019,7 +7019,7 @@ let private tnfDoubleSrcForCost =
     "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
     + "let T2 = transpose(transpose(M, [0, 1]), [0, 1])\n"
 let private tnfSymSrcForCost =
-    "let A = [1.0, 2.0, 3.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let L = method_for(A, A)\n"
     + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
     + "let S = L <@> reynolds(g) |> compute\n"
@@ -7076,7 +7076,7 @@ let private rcTranscendentalSrc =
     + "    let q = reduce(x, (*))\n"
     + "    s + q\n"
     + "}\n"
-    + "let t = stats([1.0, 2.0, 3.0])\n"
+    + "let t = stats(Float64([1.0, 2.0, 3.0]))\n"
 
 // Codex review witnesses: two map consumers whose result pools coexist (the
 // peak carries y while z is built), and a consumer whose OTHER operand
@@ -7088,7 +7088,7 @@ let private rcTwoMapsSrc =
     + "    let z = method_for(zip(x, y)) <@> lambda(v, w) -> v + w |> compute\n"
     + "    reduce(y, (+), 0.0) + reduce(z, (+), 0.0)\n"
     + "}\n"
-    + "let t = two_maps([1.0, 2.0, 3.0])\n"
+    + "let t = two_maps(Float64([1.0, 2.0, 3.0]))\n"
 
 let private rcFanInSrc =
     "type I3 = Idx<3>\n"
@@ -7221,7 +7221,7 @@ let private ceFoldSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
     + "    reduce(x, (+))\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let t = total(a)\n"
 
 let private ceMapSrc =
@@ -7229,8 +7229,8 @@ let private ceMapSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
     + "    method_for(zip(x, b)) <@> lambda(p, q) -> p + q |> compute\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
-    + "let b = [10.0, 20.0, 30.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
+    + "let b = Float64([10.0, 20.0, 30.0])\n"
     + "let r = scale_add(a, b)\n"
 
 let private ceTwoSrc =
@@ -7238,12 +7238,12 @@ let private ceTwoSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v + 1.0 |> compute\n"
     + "    reduce(x, (+)) * reduce(x, (*))\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let p = sum_and_product(a)\n"
 
 let private ceWriteSrc =
     "function snapshot() -> T^0 = {\n"
-    + "    let mut w = [1.0, 2.0, 3.0]\n"
+    + "    let mut w = Float64([1.0, 2.0, 3.0])\n"
     + "    let x = method_for(w) <@> lambda(v) -> v * 2.0 |> compute\n"
     + "    w(1) = 100.0\n"
     + "    reduce(x, (+))\n"
@@ -7255,7 +7255,7 @@ let private ceKeyedSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute\n"
     + "    x(1)\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let k = second(a)\n"
 
 let private ceReturnedSrc =
@@ -7263,7 +7263,7 @@ let private ceReturnedSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v * 3.0 |> compute\n"
     + "    x\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let r = tripled(a)\n"
 
 let private ceEmptySrc =
@@ -7281,7 +7281,7 @@ let private ceSeedReaderSrc =
     + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
     + "    reduce(x, (+), x(0))\n"
     + "}\n"
-    + "let t = seeded_by_x([1.0, 2.0, 3.0])\n"
+    + "let t = seeded_by_x(Float64([1.0, 2.0, 3.0]))\n"
 
 let private ceExtentReaderSrc =
     "function extent_of_x(a: T^1) -> Int64 = {\n"
@@ -7295,12 +7295,12 @@ let private ceExtentReaderSrc =
 let private ceFailingExtentSrc =
     "function f(z: Int64) -> Int64 = {\n"
     + "    let x = method_for(0..(10 / z)) <@> lambda(v) -> v + 1 |> compute\n"
-    + "    let a = [8, 9]\n"
+    + "    let a = Int64([8, 9])\n"
     + "    let bad = a(z - 1)\n"
     + "    let s = reduce(x, (+), 0)\n"
     + "    s + bad\n"
     + "}\n"
-    + "let t = f(0)\n"
+    + "let t = f(Int64(0))\n"
 
 let private ceExtentWriteSrc =
     "function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {\n"
@@ -7308,7 +7308,7 @@ let private ceExtentWriteSrc =
     + "    3\n"
     + "}\n"
     + "function f() -> Int64 = {\n"
-    + "    let mut a = [1, 2, 3]\n"
+    + "    let mut a = Int64([1, 2, 3])\n"
     + "    let x = method_for(a) <@> lambda(v) -> v + 1 |> compute\n"
     + "    let y = method_for(0..bump(a)) <@> lambda(v) -> v + 1 |> compute\n"
     + "    let s = reduce(x, (+), 0)\n"
@@ -7390,12 +7390,12 @@ let private ceChainSrc =
     + "    let x2 = method_for(x1) <@> lambda(u) -> u * 3.0 |> compute\n"
     + "    reduce(x2, (+))\n"
     + "}\n"
-    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let a = Float64([1.0, 2.0, 3.0])\n"
     + "let t = chain(a)\n"
     + "let t3 = deeper(a)\n"
 
 let private ceTopSrc =
-    "let A = [1.0, 2.0, 3.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let x = method_for(A) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
     + "let s = reduce(x, (+))\n"
 
@@ -7513,12 +7513,12 @@ let private clTopFoldSrc =
 let private clBodyFoldSrc =
     clPrep
     + "function total(b: T^1) -> T^0 = { reduce(prep(b), (+)) }\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let t = total(A)\n"
 
 let private clMapSrc =
     clPrep
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let y = method_for(prep(A)) <@> lambda(v) -> v * 10.0 |> compute\n"
 
 let private clSpineSrc =
@@ -7531,7 +7531,7 @@ let private clSpineSrc =
     + "    let s2 = reduce(scaled(b, 1.0), (+), 0.5)\n"
     + "    s1 + s2\n"
     + "}\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let t = both(A, 2.0)\n"
 
 let private clRecursiveSrc =
@@ -7539,7 +7539,7 @@ let private clRecursiveSrc =
     + "    let k = if n == 0 then 0.0 else reduce(deep(a, n - 1), (+))\n"
     + "    method_for(a) <@> lambda(v) -> v + k |> compute\n"
     + "}\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let s = reduce(deep(A, 2), (+))\n"
 
 let private clMutSrc =
@@ -7547,25 +7547,25 @@ let private clMutSrc =
     + "    a(0) = 10.0\n"
     + "    method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n"
     + "}\n"
-    + "let mut M = [1.0, 2.0, 3.0]\n"
+    + "let mut M = Float64([1.0, 2.0, 3.0])\n"
     + "let s = reduce(prep(M), (+))\n"
 
 let private clOmpSrc =
     "function kpar(xs: Float64^1) -> Float64^1 = {\n"
     + "    method_for(xs) <@> lambda(x) where omp(x: 1) -> x + 1.0 |> compute\n"
     + "}\n"
-    + "let A = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0, 4.0])\n"
     + "let t = reduce(kpar(A), (+))\n"
 
 let private clTwoCallsSrc =
     clPrep
-    + "let A = [1.0, 2.0, 3.0]\n"
-    + "let B = [10.0, 20.0, 30.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
+    + "let B = Float64([10.0, 20.0, 30.0])\n"
     + "let y = prep(A) + prep(B)\n"
 
 let private clWriteSrc =
     clPrep
-    + "let mut M = [1.0, 2.0, 3.0]\n"
+    + "let mut M = Float64([1.0, 2.0, 3.0])\n"
     + "let s = reduce(prep(M), lambda(acc, v) -> {\n"
     + "    M(2) = 100.0\n"
     + "    acc + v\n"
@@ -7579,13 +7579,13 @@ let private clEmptySrc =
 let private clValueRefSrc =
     "function inc(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v + 1.0 |> compute }\n"
     + "function apply_to(f: T^1 -> T^1, a: T^1) -> T^1 = { f(a) }\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let viaValue = reduce(apply_to(inc, A), (+))\n"
     + "let direct = reduce(inc(A), (+))\n"
 
 let private clOtherSitesSrc =
     clPrep
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let s = reduce(prep(A), (+))\n"
     + "let r = prep(A)\n"
 
@@ -7594,7 +7594,7 @@ let private clCapturingLetSrc =
     + "    let k = (lambda(x: Float64) -> c + x)(1.0)\n"
     + "    method_for(a) <@> lambda(v) -> v * k |> compute\n"
     + "}\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let s = reduce(prep(A, 2.0), (+))\n"
 
 let private clCalls (fnPrefix: string) (body: string) =
@@ -7732,13 +7732,13 @@ let private nfBodySrc =
 let private nfKernelSrc =
     clPrep
     + "let A = 0.5 * Float64(0..1001)\n"
-    + "let ws = [10.0, 20.0]\n"
+    + "let ws = Float64([10.0, 20.0])\n"
     + "let u = method_for(ws) <@> lambda(w) -> w + reduce(prep(A), (+)) |> compute\n"
 
 let private nfSameSrc =
     "function same(a: T^1) -> T^1 = { a }\n"
     + "function body(a: T^1) -> T^0 = { 2.0 * reduce(same(a), (+)) }\n"
-    + "let A = [1.0, 2.0, 3.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let t = body(A)\n"
 
 /// (calls of `callee` on the busiest emitted line outside its declarations,
@@ -7800,43 +7800,43 @@ let private nestedFoldCallCases () : bool list =
 
 let private p4LetFoldSrc =
     clPrep
-    + "function folded(a: T^1) -> T^0 = {\n    let x = prep(a)\n    let k = 0.5\n    reduce(x, (+), k)\n}\n"
-    + "let A = [1.0, 2.0, 3.0]\nlet f = folded(A)\n"
+    + "function folded(a: T^1) -> T^0 = {\n    let x = prep(a)\n    let k: Float64 = 0.5\n    reduce(x, (+), k)\n}\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet f = folded(A)\n"
 
 let private p4LetMapSrc =
     clPrep
     + "function mapped(a: T^1, b: T^1) -> T^1 = {\n    let x = prep(a)\n    method_for(zip(x, b)) <@> lambda(u, w) -> u + w |> compute\n}\n"
-    + "let A = [1.0, 2.0, 3.0]\nlet B = [10.0, 20.0, 30.0]\nlet m = mapped(A, B)\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet B = Float64([10.0, 20.0, 30.0])\nlet m = mapped(A, B)\n"
 
 let private p4LetDeclineSrc =
     clPrep
     + "function twice(a: T^1) -> T^0 = {\n    let x = prep(a)\n    let s1 = reduce(x, (+))\n    s1 + reduce(x, (*))\n}\n"
     + "function written(a: mut Array<Float64 like Idx<3>>) -> Float64 = {\n    let x = prep(a)\n    a(2) = 100.0\n    reduce(x, (+))\n}\n"
-    + "let A = [1.0, 2.0, 3.0]\nlet t = twice(A)\nlet mut M = [1.0, 2.0, 3.0]\nlet w = written(M)\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet t = twice(A)\nlet mut M = Float64([1.0, 2.0, 3.0])\nlet w = written(M)\n"
 
 let private p4KernelSrc =
     clPrep
-    + "let A = [1.0, 2.0, 3.0]\nlet ws = [10.0, 20.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet ws = Float64([10.0, 20.0])\n"
     + "let u = method_for(ws) <@> lambda(w) -> reduce(prep(A), (+), w) |> compute\n"
 
 let private p4KernelOmpSrc =
     clPrep
-    + "let A = [1.0, 2.0, 3.0]\nlet ws = [10.0, 20.0]\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet ws = Float64([10.0, 20.0])\n"
     + "let up = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute\n"
 
 let private p4ArrayLetSrc =
     "function prep2(a: T^1) -> T^1 = {\n    let t = method_for(a) <@> lambda(v) -> v * 2.0 |> compute\n    method_for(t) <@> lambda(v) -> v + 1.0 |> compute\n}\n"
-    + "let A = [1.0, 2.0, 3.0]\nlet s = reduce(prep2(A), (+))\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\nlet s = reduce(prep2(A), (+))\n"
 
 let private p4ForeignSources =
     [ ("Helpers",
-       "module Helpers\n\nlet scale = 3.0\nfunction sq(v: Float64) -> Float64 = { v * v }\n"
+       "module Helpers\n\nlet scale: Float64 = 3.0\nfunction sq(v: Float64) -> Float64 = { v * v }\n"
        + "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }\n"
        + "function scaled(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * scale |> compute }\n"
        + "function squared(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> sq(v) |> compute }\n")
       ("Main",
        "module Main\nimport Helpers\nfrom Helpers import prep\n\n"
-       + "let A = [1.0, 2.0, 3.0]\nlet s = reduce(prep(A), (+))\n"
+       + "let A = Float64([1.0, 2.0, 3.0])\nlet s = reduce(prep(A), (+))\n"
        + "let z = reduce(Helpers.scaled(A), (+))\nlet q = reduce(Helpers.squared(A), (+))\n") ]
 
 let private cppOfMulti (name: string) (sources: (string * string) list) : Result<string, string> =
@@ -7938,7 +7938,7 @@ let private tnfRank3Src =
     + "let R2 = transpose(transpose(A, [0, 1]), [1, 2])\n"
 
 let private tnfSymPrefix =
-    "let A = [1.0, 2.0, 3.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let L = method_for(A, A)\n"
     + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
     + "let S = L <@> reynolds(g) |> compute\n"
@@ -7948,7 +7948,7 @@ let private tnfSymSourceWrittenSrc = tnfSymPrefix + "S(0, 1) = 100.0\n"
 let private tnfSymAliasWrittenSrc = tnfSymPrefix + "ST(0, 1) = 100.0\n"
 
 let private tnfAntisymSrc =
-    "let A = [1.0, 2.0, 3.0]\n"
+    "let A = Float64([1.0, 2.0, 3.0])\n"
     + "let L = method_for(A, A)\n"
     + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
     + "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n"
@@ -8080,9 +8080,9 @@ let private transposeNormalFormCases () =
 let private tnfM = "let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
 let private tnfNamedSrc = tnfM + "let C = transpose(M, [0, 1])\n" + "let D = transpose(C, [0, 1])\n"
 let private tnfNamedReadSrc = tnfNamedSrc + "let c10 = C(1, 0)\n"
-let private tnfNamedWrittenSrc = tnfM + "let C = transpose(M, [0, 1])\n" + "C(0, 1) = 40.0\n" + "let D = transpose(C, [0, 1])\n"
+let private tnfNamedWrittenSrc = tnfM + "let C = transpose(M, [0, 1])\n" + "C(0, 1) = Float64(40.0)\n" + "let D = transpose(C, [0, 1])\n"
 let private tnfAntisymDoubleSrc =
-    "let A = [1.0, 1.0, 3.0]\n"
+    "let A = Float64([1.0, 1.0, 3.0])\n"
     + "let L = method_for(A, A)\n"
     + "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n"
     + "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n"
@@ -8320,11 +8320,11 @@ let private hashJoinDecisionCases () =
           (hjDeclined "the producer `right_amount` may write") "declined: a producer's initializer writes (the shared write analysis)"
       // producer kernels
       decisionCase "decision_hash_join_declined_writing_payload"
-          ("let mut calls = 0\n" + hjHead + "let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> {\n    calls = calls + 1\n    l * r\n}, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))\n" + hjTail) hjRule
+          ("let mut calls: Int64 = 0\n" + hjHead + "let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> {\n    calls = calls + 1\n    l * r\n}, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))\n" + hjTail) hjRule
           (hjDeclined "the payload kernel pk may write") "declined: the payload kernel writes"
       decisionCase "decision_hash_join_declined_payload_not_total" (hjHead + hjJoin "lambda(l, r) -> l / r" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
           (hjDeclined "the payload kernel is not a pure, total scalar") "declined: integer `/` in the payload kernel"
-      decisionCase "decision_hash_join_declined_payload_capture" (hjHead + "let s = 3\n" + hjJoin "lambda(l, r) -> l * r + s" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
+      decisionCase "decision_hash_join_declined_payload_capture" (hjHead + "let s: Int64 = 3\n" + hjJoin "lambda(l, r) -> l * r + s" "lambda(l, r) -> l == r" "lambda(e) -> e" + hjTail) hjRule
           (hjDeclined "the payload kernel captures a value") "declined: the payload kernel captures"
       decisionCase "decision_hash_join_declined_predicate" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> !e" + hjTail) hjRule
           (hjDeclined "a non-identity mask predicate") "declined: a non-identity predicate (the anti-join spelling)"

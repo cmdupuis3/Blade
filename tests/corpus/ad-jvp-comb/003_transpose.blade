@@ -4,7 +4,7 @@
 // f = 10 * m(1,0); m(1,0) = 3 -> 30. Seed has 1.0 at (1,0) -> 10.
 import ad as ad
 
-function f(m: Array<Float like Idx<2>, Idx<2>>) -> Float = {
+function f(m: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = {
     let mt = transpose(m, [0, 1])
     mt(0, 1) * 10.0
 }

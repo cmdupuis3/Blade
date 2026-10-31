@@ -108,6 +108,10 @@ let isComplexMathIntrinsic (name: string) : bool = Set.contains name complexMath
 // `syn` stamps each node with the ambient `synthSpan` (set to the
 // differentiated decl's span in expand).
 let internal fLit (v: float) = syn (ExprLit (LitFloat v))
+/// AD's materialized cotangents/tangents use Float64, including a zero buffer
+/// with no typed operand from which literal-width inference could learn it.
+/// Keep ordinary fLit flexible for the scalar derivative simplifiers.
+let internal f64Lit (value: float) = syn (ExprTyped (fLit value, TyFloat64))
 let internal iLit (n: int64) = syn (ExprLit (LitInt n))
 let internal v (name: string) = syn (ExprVar name)
 let internal add a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
@@ -660,7 +664,16 @@ let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt 
             match binding.Pattern.Kind with
             | PatternKind.PatVar name ->
                 let isMut = (binding.Mutability = BindMut)
-                Ok (NLet (name, isMut, binding.Value))
+                // NStmt has no annotation field. Keep scalar width context
+                // on the value so replaying an explicitly wide literal does
+                // not silently make the primal narrow under smaller defaults.
+                let value =
+                    match binding.Type with
+                    | Some ((TyFloat32 | TyFloat64 | TyInt32 | TyInt64 | TyComplex64 | TyComplex128) as ty)
+                    | Some (TyNamed (("Float32" | "Float64" | "Int32" | "Int64" | "Complex64" | "Complex128"), []) as ty) ->
+                        inheritSpan binding.Value (ExprTyped (binding.Value, ty))
+                    | _ -> binding.Value
+                Ok (NLet (name, isMut, value))
             | _ -> err fname "tuple/struct patterns in let are not differentiable (v1); bind names individually"
         | StmtExpr { Kind = ExprKind.ExprAssign (lhs, rhs) } ->
             Ok (NAssign (lhs, rhs))
@@ -702,13 +715,14 @@ let internal convertBody (fname: string) (body: Expr) : Result<NStmt list * Expr
 /// Captures (count expr, fill literal).
 let internal (|ConstFill|_|) (e: Expr) =
     match e.Kind with
-    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprLit lit } }) } -> Some (cnt, lit)
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprLit lit } }) }
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit lit }, TyFloat64) } }) } -> Some (cnt, lit)
     | _ -> None
 
 /// A ConstFill of the same count with the fill value zeroed.
 let internal zeroFill (cnt: Expr) : Expr =
     let re k = inheritSpan cnt k
-    re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (re (ExprLit (LitFloat 0.0))))))))
+    re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (f64Lit 0.0))))))
 
 /// The C1 LINEAR CLOSURE: combinator forms that only REINDEX or WRAP, so
 /// their tangent is the same form applied to the tangents of their

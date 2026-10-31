@@ -25,25 +25,25 @@ import ad as ad
 // Exact in binary floating point (all inputs are dyadic), so the pins below
 // are the derivation verbatim -- and they are the pre-deletion ad/004 pins.
 // ============================================================================
-let mat_x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let mat_x = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 // the inner `for j` accumulation: additive reduce over an inline literal
-function yrow(w: Array<Float like Idx<2>>, i: Int) -> Float =
+function yrow(w: Array<Float64 like Idx<2>>, i: Int32) -> Float64 =
     reduce([mat_x(i * 2 + 0) * w(0), mat_x(i * 2 + 1) * w(1)], (+))
-function q(w: Array<Float like Idx<2>>) -> Float = {
+function q(w: Array<Float64 like Idx<2>>) -> Float64 = {
     // the outer `for i` CONSTRUCTION loop
-    let rec y: Array<Float like Idx<3>> =
+    let rec y: Array<Float64 like Idx<3>> =
         match y with
         | zero -> zero
         | prefix :: i -> prefix :: yrow(w, i)
     // the READING loop: ||y||^2, built then folded
-    let rec sq: Array<Float like Idx<3>> =
+    let rec sq: Array<Float64 like Idx<3>> =
         match sq with
         | zero -> zero
         | prefix :: i -> prefix :: y(i) * y(i)
     reduce(sq, (+))
 }
-let wq = [1.0, 0.5]
-let mut dq = [0.0, 0.0]
+let wq = Float64([1.0, 0.5])
+let mut dq = Float64([0.0, 0.0])
 let qv = ad.grad(q)(wq, dq)
 // EXPECT: qv = 93.0
 // EXPECT: dq = [114.0, 144.0]

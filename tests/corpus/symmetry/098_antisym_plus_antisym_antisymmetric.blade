@@ -6,7 +6,7 @@
 // mirrored cell, so they flip sign TOGETHER, and `a + b` is jointly odd. The
 // joint question is also what refuses the even self-product zip
 // (symmetry/100).
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
 let Q = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x * x - y * y |> compute
 let S = R + Q
@@ -22,7 +22,7 @@ let d21 = D(2, 1)
 // EXPECT: d21 = -10.0
 // The written zip co-iteration answers the same joint question.
 let Z = method_for(zip(R, Q)) <@> lambda(a, b) -> 2.0 * a - b |> compute
-let z01 = Z(0, 1)
+let z01 = Z(Int64(0), Int64(1))
 let z10 = Z(1, 0)
 // EXPECT: z01 = 1.0
 // EXPECT: z10 = -1.0

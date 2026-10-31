@@ -14,13 +14,13 @@
 // its element type), so the one body serves Int64 and Float64 rows without an
 // implicit conversion (formalism 2.4).
 function imean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
-let xi = [1, 2, 4]
+let xi = Int64([1, 2, 4])
 let a = imean(xi)
 // EXPECT: a = 2
-let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let B = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let rowmeans = method_for(B) <@> imean |> compute
 // EXPECT: rowmeans = [2.0, 4.0]
 let c = imean(xi)
 // EXPECT: c = 2
-let d = imean([1.5, 2.0])
+let d = imean(Float64([1.5, 2.0]))
 // EXPECT: d = 1.75

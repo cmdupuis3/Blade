@@ -11,8 +11,8 @@ import ad as ad
 
 type I = Idx<3>
 
-function g(a: Array<Float like I>, c: Float) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x * c)
+function g(a: Array<Float64 like I>, c: Float64) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x * c)
     s(0) * 2.0
 }
 

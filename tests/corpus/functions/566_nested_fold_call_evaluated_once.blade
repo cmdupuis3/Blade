@@ -21,18 +21,18 @@ function combine(x: Float64, y: Float64) -> Float64 = { x + y }
 function inner(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
     combine(bump(a), 1.0 + reduce(doubled(a), (+)))
 }
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let s = 1.0 + reduce(prep(A), (+))
 let sd = 1.0 + reduce(prep(A), (+), 0.5)
 let t = body(A)
-let ws = [10.0, 20.0]
+let ws = Float64([10.0, 20.0])
 let u = method_for(ws) <@> lambda(w) -> w + reduce(prep(A), (+)) |> compute
 let p = 2.0 * reduce(same(A), (+))
-let mut M = [1.0, 2.0, 3.0]
+let mut M = Float64([1.0, 2.0, 3.0])
 let o2 = combine(bump(M), 1.0 + reduce(doubled(M), (+)))
-let mut N = [1.0, 2.0, 3.0]
+let mut N = Float64([1.0, 2.0, 3.0])
 let o3 = bump(N) + reduce(doubled(N), (+))
-let mut K = [1.0, 2.0, 3.0]
+let mut K = Float64([1.0, 2.0, 3.0])
 let o4 = inner(K)
 // EXPECT: s = 13.0
 // EXPECT: sd = 13.5

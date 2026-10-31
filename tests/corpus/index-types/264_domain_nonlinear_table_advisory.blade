@@ -6,8 +6,8 @@
 // -- the loop still visits only the 8 solutions, and the BL4010 advisory
 // says the box was paid and how to avoid it.
 static struct Prod {
-    i: Int<min=0, max=6>,
-    j: Int<min=0, max=6>
+    i: Int32<min=0, max=6>,
+    j: Int32<min=0, max=6>
 } where (i * j) % 3 == 1
 
 let static CARD = idx_card(Prod)

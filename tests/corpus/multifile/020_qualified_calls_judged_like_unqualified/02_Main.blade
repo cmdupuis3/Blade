@@ -9,21 +9,21 @@
 module Main
 import Phys
 
-let t: Float<seconds> = 1.5
+let t: Float64<seconds> = 1.5
 let ps = Phys.per_sec(t)
 // EXPECT: ps = 3.0
 
-let mut arr = [1.0, 2.0, 3.0]
+let mut arr = Float64([1.0, 2.0, 3.0])
 let b = Phys.bump(arr)
 // EXPECT: b = 99.0
 
-let five = [1.0, 2.0, 3.0, 4.0, 5.0]
+let five = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let n5 = Phys.need5(five)
 // EXPECT: n5 = 5.0
 
-let tf = Phys.total([1.5, 2.5])
+let tf = Phys.total(Float64([1.5, 2.5]))
 // EXPECT: tf = 4.0
-let ti = Phys.total([1, 2, 3])
+let ti = Phys.total(Int64([1, 2, 3]))
 // EXPECT: ti = 6
 
 let sd = Phys.scaled(2.0)

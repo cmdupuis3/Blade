@@ -9,8 +9,8 @@
 // `head(m)` is a call of head's array instance.
 function head(c) = c(0)
 function h(m: T^1) = head(m)
-let h1 = h([1.0, 2.0])
+let h1 = h([Float64(1.0), Float64(2.0)])
 // EXPECT: h1 = 1.0
-let iv = [4, 5]
+let iv = Int64([4, 5])
 let h2 = h(iv)
 // EXPECT: h2 = 4

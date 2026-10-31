@@ -4,7 +4,7 @@
 // strict canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1. transpose negates each stored
 // element -> (0,1)=1 (0,2)=2 (1,2)=1; the storage shape (strict triangular) is
 // unchanged, so the print walks the same canonical layout.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let anti = L <@> reynolds(g, Antisymmetric) |> compute

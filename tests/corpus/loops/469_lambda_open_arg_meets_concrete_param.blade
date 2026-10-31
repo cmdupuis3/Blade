@@ -7,9 +7,9 @@
 type I = Idx<3>
 function g(i: Int64) = i * 2
 let a = method_for(range<I>) <@> lambda(x) -> g(x) |> compute
-let b = method_for([4, 5]) <@> lambda(x) -> g(x) + 1 |> compute
+let b = method_for(Int64([4, 5])) <@> lambda(x) -> g(x) + 1 |> compute
 let h = lambda(x) -> g(x)
-let c = h(7)
+let c = h(Int64(7))
 // EXPECT: a = [0, 2, 4]
 // EXPECT: b = [9, 11]
 // EXPECT: c = 14

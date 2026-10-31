@@ -109,10 +109,25 @@ let private cotUnit (lossUnit: UnitExpr option) (valueUnit: UnitExpr option) : U
     | None, Some p -> Some (UnitDiv (UnitOne, p))
     | Some l, Some p -> Some (UnitDiv (l, p))
 
+/// Round 6: the AD engine differentiates FLOAT64 functions (its cotangents
+/// and tangents are Float64); a Float32 parameter or result -- the width
+/// float literals now default to -- is refused up front with that reason,
+/// not as a type error from inside the synthesized derivative. Float32 AD is
+/// a recorded follow-up (cotangents at the function's own width).
+let private float32Mention (ctx: Ctx) (fd: FunctionDecl) : bool =
+    let rec has (t: TypeExpr) =
+        match t with
+        | TyFloat32 -> true
+        | TyNamed ("Float32", _) -> true
+        | TyArray (elem, _) -> has elem
+        | _ -> false
+    let tys = (fd.Params |> List.choose (fun p -> p.Type)) @ (fd.ReturnType |> Option.toList)
+    tys |> List.exists (fun t -> has t || has (resolveTy ctx t))
+
 let private floatOfUnit (u: UnitExpr option) : TypeExpr =
     match u with
-    | None -> TyNamed ("Float", [])
-    | Some ue -> TyNamed ("Float", [TyUnitExpr ue])
+    | None -> TyNamed ("Float64", [])
+    | Some ue -> TyNamed ("Float64", [TyUnitExpr ue])
 
 /// The declared type of a parameter's cotangent: <loss unit> / <parameter
 /// unit> on the parameter's own index domain (plan-fortran-killer-2.md
@@ -319,6 +334,9 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
         err fname $"a function named '{fname}{suffix}' already exists in this module; {modeName} would synthesize a colliding declaration -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
+    if float32Mention ctx fd then
+        err fname $"ad.{modeName} differentiates Float64 functions; this one is Float32 (Float32 AD is not supported yet) -- declare its parameters and result Float64"
+    else
     // Return type must be a Float scalar (checked syntactically; the
     // typechecker re-verifies the generated function anyway). A unit-carrying
     // loss is fine: its unit is the numerator of every cotangent's unit.
@@ -328,7 +346,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     match vjp, fd.ReturnType |> Option.map (resolveTy ctx) with
     | false, Some t when isFloatScalar t -> Ok ()
     | false, Some _ -> err fname "grad requires a function returning Float (scalar loss); for an array-valued function use ad.vjp"
-    | false, None -> err fname "grad requires an explicit `-> Float` return annotation"
+    | false, None -> err fname "grad requires an explicit `-> Float64` return annotation"
     | true, Some (TyArray (elem, _)) when isFloatScalar (resolveTy ctx elem) -> Ok ()
     | true, Some _ -> err fname "vjp requires a function returning an array of Float; for a scalar loss use ad.grad"
     | true, None -> err fname "vjp requires an explicit `-> Array<...>` return annotation"
@@ -376,10 +394,14 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // before units were admitted.
     let localUnits = unitGuessOfBody ctx fd stmts
     let ascribeCot (n: string) (zero: Expr) (dims: int list option) : Expr =
+        let dimensionlessZero =
+            match dims with
+            | None -> syn (ExprTyped (zero, TyFloat64))
+            | Some _ -> zero
         match Map.tryFind n localUnits with
         | Some vu ->
             (match cotUnit lossUnit vu with
-             | None -> zero
+             | None -> dimensionlessZero
              | Some cu ->
                  let elemTy = floatOfUnit (Some cu)
                  let ty =
@@ -387,7 +409,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
                      | Some ds -> TyArray (elemTy, ds |> List.map (fun d -> TyIdx (iLit (int64 d))))
                      | None -> elemTy
                  syn (ExprTyped (zero, ty)))
-        | None -> zero
+        | None -> dimensionlessZero
     let localDecls =
         stmts |> List.choose (fun s ->
             match s with
@@ -415,7 +437,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // exist, for reasons worth stating.
     let badArrayLocal =
         let dimsMsg (form: string) =
-            $"is initialized by {form}, whose shape is not statically known here; the reverse sweep sizes a cotangent BUFFER from it, so a partial answer is not available -- annotate the binding `Array<Float like Idx<n>, ...>`, or build it from operands with literal extents"
+            $"is initialized by {form}, whose shape is not statically known here; the reverse sweep sizes a cotangent BUFFER from it, so a partial answer is not available -- annotate the binding `Array<Float64 like Idx<n>, ...>`, or build it from operands with literal extents"
         stmts |> List.tryPick (fun s ->
             match s with
             | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
@@ -468,7 +490,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     let scalarCots =
         scalarDiff |> List.map (fun p ->
             let cty = cotangentTy ctx lossUnit (paramTyOf p)
-            let zero = if carriesUnit cty then syn (ExprTyped (fLit 0.0, cty)) else fLit 0.0
+            let zero = syn (ExprTyped (fLit 0.0, cty))
             NLet (dName p, true, zero))
 
     // seed: adjoint of the final expression with cotangent 1.0. The seed is
@@ -567,6 +589,9 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
         err fname $"a function named '{fname}{jvpSuffix}' already exists in this module; jvp would synthesize a colliding declaration -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
+    if float32Mention ctx fd then
+        err fname "ad.jvp differentiates Float64 functions; this one is Float32 (Float32 AD is not supported yet) -- declare its parameters and result Float64"
+    else
     match fd.ReturnType |> Option.map (resolveTy ctx) with
     | Some t when isFloatish t -> Ok ()   // units included: the tangent carries the same
     // All-Float tuples: the shape of a synthesized source's return
@@ -587,7 +612,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
                                     | TyArray (elem, _) -> isFloatish (resolveTy ctx elem)
                                     | rt -> isFloatish rt) -> Ok ()
     | Some _ -> err fname "jvp requires a function returning Float, an array of Float, or a tuple of those (v1)"
-    | None -> err fname "jvp requires an explicit `-> Float` (or `-> Array<...>`) return annotation"
+    | None -> err fname "jvp requires an explicit `-> Float64` (or `-> Array<...>`) return annotation"
     |> Result.bind (fun () ->
     // Tuple-returning sources (f__grad's `(primal, dscalars...)`) sweep
     // per component; the surrogate keeps taint/validation walks off the

@@ -10,7 +10,7 @@ import ppl as ppl
 // support term carries the -inf, the closed form reads x moved onto the
 // support (so it stays finite -- no log of a negative, no lgamma pole), and
 // x * log(y) is xlogy (0 * log 0 = 0).
-let ninf = log(0.0)
+let ninf: Float64 = log(0.0)
 
 // ---- off the support: -inf, never a finite value or NaN ----
 let exp_off = ppl.logpdf(exponential(1.0), -5.0)
@@ -60,7 +60,7 @@ let ber_in = ppl.logpdf(bernoulli(0.3), 1.0)
 // EXPECT: ber_in = -1.2039728043259361
 
 // ---- NaN stays NaN (the oracle's negated tests: NaN is not "off support")
-let nanv = log(-1.0)
+let nanv: Float64 = log(-1.0)
 let e_nan = ppl.logpdf(exponential(1.0), nanv)
 let g_nan = ppl.logpdf(gamma(2.0, 1.0), nanv)
 let l_nan = ppl.logpdf(lognormal(0.0, 1.0), nanv)

@@ -4,10 +4,10 @@
 // Gap G43 (Codex review of W2-F, blocker 3): mutability-errors/016 with the
 // writing fold kernel named through a let (`w`): the alias resolves to the
 // same callable.
-let mut G = [0.0]
-let x = [1.0, 2.0, 3.0]
+let mut G = Float64([0.0])
+let x = Float64([1.0, 2.0, 3.0])
 let w = lambda(a: Float64, b: Float64) -> { G(0) = G(0) + 1.0; a + b }
 let r = {
-    let (s, t) = object_for(<&!>) <@> (reduce(x, w, 0.0), reduce(method_for(x) <@> lambda(v) -> v + G(0), (+)))
+    let (s, t) = object_for(<&!>) <@> (reduce(x, w, Float64(0.0)), reduce(method_for(x) <@> lambda(v) -> v + G(0), (+)))
     s * 100.0 + t
 }

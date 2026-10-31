@@ -7,6 +7,6 @@ type I0 = Idx<10>
 type I1 = Idx<6>
 type C0 = Chunked<I0, 4>
 type C1 = Chunked<I1, 4>
-let a: Array<Float like I0, I1> = method_for(range<I0>, range<I1>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let a: Array<Float64 like I0, I1> = method_for(range<I0>, range<I1>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
 let tiles = segments(C1, C0)
 let g = group_by(a, tiles)

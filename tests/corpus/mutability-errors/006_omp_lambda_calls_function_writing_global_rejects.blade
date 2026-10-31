@@ -4,7 +4,7 @@
 // body. The same store reached through a CALL races just the same (#17): `h`
 // keeps its write channel when called serially, but here it runs in every
 // cell of a `#pragma omp parallel for` at once.
-let mut g = [0.0, 0.0]
+let mut g = Float64([0.0, 0.0])
 function h(x: Float64) -> Float64 = { g(0) = g(0) + x; x }
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let r = a <@> lambda(x) where omp(x: 1) -> h(x) |> compute

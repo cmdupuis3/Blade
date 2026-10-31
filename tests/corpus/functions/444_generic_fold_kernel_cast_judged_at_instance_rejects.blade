@@ -5,5 +5,5 @@
 // the Float64 one would make `Int64(a + b)` truncate a float -- refused at the
 // kernel reference rather than left to the instance's emitted body.
 function f(a, b) = Int64(a + b)
-let ok = reduce([1, 2, 3], f)
+let ok = reduce(Int64([1, 2, 3]), f)
 let r2 = reduce([1.5, 2.5], f)

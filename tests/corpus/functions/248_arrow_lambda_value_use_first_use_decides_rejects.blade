@@ -7,5 +7,5 @@
 // same program without the alias, and runs).
 let u = lambda(c) -> c(0) + 1.0
 let g = u
-let a = g([5.0, 6.0])
+let a = g(Float64([5.0, 6.0]))
 let b = u(lambda(i) -> Float64(i))

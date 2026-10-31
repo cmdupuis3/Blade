@@ -13,8 +13,8 @@ import ad as ad
 
 type I = Idx<5>
 
-function f(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> 0.0 - x)
+function f(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> 0.0 - x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 
@@ -34,8 +34,8 @@ let (v2, t2) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15
 // A key that is not a bare parameter read at all: sorting by the SQUARE puts
 // 1.0 first and 4.0 last, which is the ascending order here, but the composed
 // key still has to reach the permutation for the plan recovery to find it.
-function g(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x * x)
+function g(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x * x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 let (v3, t3) = ad.jvp(g)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])

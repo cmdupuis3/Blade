@@ -27,5 +27,5 @@ function values() -> Array<Float64 like Ix> = {
 let (checksum, input_checksum) = {
     let key = keys()
     let x = values()
-    (0.0, reduce(x, (+)) + Float64(reduce(key, (+))))
+    (Float64(0.0), reduce(x, (+)) + Float64(reduce(key, (+))))
 }

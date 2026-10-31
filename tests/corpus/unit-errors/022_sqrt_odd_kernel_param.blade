@@ -8,5 +8,5 @@
 // rejection at the apply site rather than a silently unconstrained element.
 Unit meters
 type SIdx = Idx<2>
-let S: Array<Float<meters> like SIdx> = [9.0, 16.0]
+let S: Array<Float64<meters> like SIdx> = [9.0, 16.0]
 let bad = method_for(S) <@> lambda(s) -> sqrt(s) |> compute

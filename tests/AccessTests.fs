@@ -40,15 +40,15 @@ let private cppOf (name: string) (gate: string option) (src: string) : Result<st
             | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir name))
         with ex -> Error $"codegen raised: {ex.Message}")
 
-/// The gather loop's window guard, `((0L <= __vN) && (__vN < ML))`:
+/// The gather loop's window guard, `((0LL <= __vN) && (__vN < MLL))`:
 /// generated-name-anchored, so user identifiers cannot match it.
 let private gatherGuardCount (cpp: string) =
-    System.Text.RegularExpressions.Regex.Matches(cpp, @"\(\(0L <= __v\d+\) && \(__v\d+ < \d+L\)\)").Count
+    System.Text.RegularExpressions.Regex.Matches(cpp, @"\(\(0LL <= __v\d+\) && \(__v\d+ < \d+LL\)\)").Count
 
-/// Halo nests, counted by their window-centre binding `int64_t w = (__iN + kL);`
+/// Halo nests, counted by their window-centre binding `int64_t w = (__iN + kLL);`
 /// (a dense window reads its source directly, so no carousel marks it).
 let private haloNestCount (cpp: string) =
-    System.Text.RegularExpressions.Regex.Matches(cpp, @"int64_t \w+ = \(__i\d+ \+ \d+L\);").Count
+    System.Text.RegularExpressions.Regex.Matches(cpp, @"int64_t \w+ = \(__i\d+ \+ \d+LL\);").Count
 
 let private corpusSource (file: string) : Result<string, string> =
     let path = Path.Combine("tests", "corpus", "ad", file)
@@ -222,12 +222,12 @@ let private differential (name: string) (src: string) : bool option =
 let private wideProgram =
     "import ad as ad\n"
     + "type H = Idx<127>\n"
-    + "function f(a: Array<Float like H>) -> Float = {\n"
+    + "function f(a: Array<Float64 like H>) -> Float64 = {\n"
     + "    let d = method_for(halo<H, [-2, 0, 2]>) <@> lambda(w) -> a(w(2)) * a(w(-2)) - a(w(0)) * a(w(0)) |> compute\n"
     + "    reduce(d, (+))\n"
     + "}\n"
-    + "let a0: Array<Float like H> = 1.0 + 0.013 * Float64(0..127)\n"
-    + "let mut da: Array<Float like H> = 0.0 * Float64(0..127)\n"
+    + "let a0: Array<Float64 like H> = 1.0 + 0.013 * Float64(0..127)\n"
+    + "let mut da: Array<Float64 like H> = 0.0 * Float64(0..127)\n"
     + "let fv = ad.grad(f)(a0, da)\n"
     + "let gsum = reduce(da, (+))\n"
 
@@ -237,13 +237,13 @@ let private wideProgram =
 let private scalarCaptureProgram =
     "import ad as ad\n"
     + "type H = Idx<9>\n"
-    + "function f(a: Array<Float like H>, s: Float) -> Float = {\n"
+    + "function f(a: Array<Float64 like H>, s: Float64) -> Float64 = {\n"
     + "    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> s * a(w(1)) * a(w(-1)) - a(w(0)) |> compute\n"
     + "    reduce(d, (+))\n"
     + "}\n"
-    + "let a0: Array<Float like H> = 1.0 + 0.5 * Float64(0..9)\n"
-    + "let mut da: Array<Float like H> = 0.0 * Float64(0..9)\n"
-    + "let (fv, ds) = ad.grad(f)(a0, 0.7, da)\n"
+    + "let a0: Array<Float64 like H> = 1.0 + 0.5 * Float64(0..9)\n"
+    + "let mut da: Array<Float64 like H> = 0.0 * Float64(0..9)\n"
+    + "let (fv, ds) = ad.grad(f)(a0, Float64(0.7), da)\n"
     + "let gsum = reduce(da, (+))\n"
 
 /// Two DIFFERENT windowed arrays, both differentiable: two cotangent
@@ -251,14 +251,14 @@ let private scalarCaptureProgram =
 let private twoArrayProgram =
     "import ad as ad\n"
     + "type H = Idx<11>\n"
-    + "function f(a: Array<Float like H>, b: Array<Float like H>) -> Float = {\n"
+    + "function f(a: Array<Float64 like H>, b: Array<Float64 like H>) -> Float64 = {\n"
     + "    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) * b(w(-1)) + exp(b(w(0))) |> compute\n"
     + "    reduce(d, (+))\n"
     + "}\n"
-    + "let a0: Array<Float like H> = 1.0 + 0.1 * Float64(0..11)\n"
-    + "let b0: Array<Float like H> = 0.5 - 0.07 * Float64(0..11)\n"
-    + "let mut da: Array<Float like H> = 0.0 * Float64(0..11)\n"
-    + "let mut db: Array<Float like H> = 0.0 * Float64(0..11)\n"
+    + "let a0: Array<Float64 like H> = 1.0 + 0.1 * Float64(0..11)\n"
+    + "let b0: Array<Float64 like H> = 0.5 - 0.07 * Float64(0..11)\n"
+    + "let mut da: Array<Float64 like H> = 0.0 * Float64(0..11)\n"
+    + "let mut db: Array<Float64 like H> = 0.0 * Float64(0..11)\n"
     + "let fv = ad.grad(f)(a0, b0, da, db)\n"
 
 // ---------------------------------------------------------------------------
@@ -289,12 +289,12 @@ let private twoArrayProgram =
 let private zeroFillHaloProgram (n: int) =
     "import ad as ad\n"
     + $"type H = Idx<{n}>\n"
-    + "function f(a: Array<Float like H>) -> Float = {\n"
+    + "function f(a: Array<Float64 like H>) -> Float64 = {\n"
     + "    let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) * a(w(-1)) |> compute\n"
     + "    d(1) * 2.0 + d(5)\n"
     + "}\n"
-    + $"let a0: Array<Float like H> = 1.0 + 0.25 * Float64(0..{n})\n"
-    + $"let mut da: Array<Float like H> = 0.0 * Float64(0..{n})\n"
+    + $"let a0: Array<Float64 like H> = 1.0 + 0.25 * Float64(0..{n})\n"
+    + $"let mut da: Array<Float64 like H> = 0.0 * Float64(0..{n})\n"
     + "let fv = ad.grad(f)(a0, da)\n"
     + "let gsum = reduce(da, (+))\n"
     + "let gsq = reduce(da * da, (+))\n"
@@ -308,14 +308,14 @@ let private zeroFillGramProgram (n: int) =
     "import ad as ad\n"
     + $"type I = Idx<{n}>\n"
     + "type K = Idx<3>\n"
-    + "function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {\n"
+    + "function floss(a: Array<Float64 like I, K>, b: Array<Float64 like I, K>) -> Float64 = {\n"
     + "    let g = gram(a, b)\n"
     + "    g(0, 1) * 2.0 + g(1, 0)\n"
     + "}\n"
     + "let a0 = method_for(range<I, K>) <@> lambda(i, k) -> 1.0 + Float64(i) + 0.5 * Float64(k) |> compute\n"
     + "let b0 = method_for(range<I, K>) <@> lambda(i, k) -> Float64(k) - 0.25 * Float64(i) |> compute\n"
-    + "let mut da = method_for(range<I, K>) <@> lambda(i, k) -> 0.0 |> compute\n"
-    + "let mut db = method_for(range<I, K>) <@> lambda(i, k) -> 0.0 |> compute\n"
+    + "let mut da = method_for(range<I, K>) <@> lambda(i, k) -> Float64(0.0) |> compute\n"
+    + "let mut db = method_for(range<I, K>) <@> lambda(i, k) -> Float64(0.0) |> compute\n"
     + "let gv = ad.grad(floss)(a0, b0, da, db)\n"
     + "let dasum = reduce(reduce(da, (+)), (+))\n"
     + "let dbsum = reduce(reduce(db, (+)), (+))\n"

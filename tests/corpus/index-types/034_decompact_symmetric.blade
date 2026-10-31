@@ -11,7 +11,7 @@
 // as (0,0)=6 (0,1)=9 (0,2)=12 (1,1)=12 (1,2)=15 (2,2)=18. Decompacting the
 // symmetric group yields a dense 3×3 symmetric matrix (each canonical written
 // to both (i,j) and (j,i); diagonal once).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let sym = L <@> reynolds(g) |> compute

@@ -5,7 +5,7 @@
 // Right of @>> requires a single extractable kernel (which a
 // compose chain doesn't have), so we don't test compose-apply on
 // the right — only on the left.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x) -> x + 1.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x - 5.0

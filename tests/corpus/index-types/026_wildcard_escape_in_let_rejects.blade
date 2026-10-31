@@ -16,7 +16,7 @@
 // value-forming-boundary guard in inferLetBindingValue; before that guard it
 // slipped to a lowering failwith, which is the wrong (unlocated, exception-
 // based) mechanism.
-let a = 1
-let c = 3
+let a: Int64 = 1
+let c: Int64 = 3
 let t = (a, _, c)
 // EXPECT: typecheck failure — a wildcard hole cannot be bound as a value.

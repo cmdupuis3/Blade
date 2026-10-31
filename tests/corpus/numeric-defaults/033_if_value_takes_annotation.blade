@@ -1,0 +1,9 @@
+// TEST: an annotated if value pushes its width into literal branches
+// ============================================================================
+// Rule 5: `let x: Float64 = if c then 0.1 else 0.2` computes both branches as
+// Float64 literals (the annotation fixes them).
+// ============================================================================
+let c = true
+let x: Float64 = if c then 0.1 else 0.2
+let d = x - 0.1
+// EXPECT: d = 0.0

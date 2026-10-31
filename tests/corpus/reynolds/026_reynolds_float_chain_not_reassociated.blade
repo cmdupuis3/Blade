@@ -11,9 +11,9 @@
 //   (x + z) + y = 1
 //   (y + z) + x = 0   (1 - 1e16 rounds to -1e16)
 // Exact permutation sum: 2*0 + 2*1 + 2*0 = 2 (the merged form gave 0).
-let A = [10000000000000000.0]
-let B = [1.0]
-let C = [-10000000000000000.0]
+let A = Float64([10000000000000000.0])
+let B = Float64([1.0])
+let C = Float64([-10000000000000000.0])
 let L = method_for(A, B, C)
 let g = lambda(x, y, z) -> x + y + z
 let result = L <@> reynolds(g) |> compute

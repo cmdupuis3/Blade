@@ -30,7 +30,7 @@ from stats import mean
 
 function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }
 
-let B: Array<Float like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
+let B: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
 
 // Pairs in canonical order (0,0) (0,1) (0,2) (1,1) (1,2) (2,2):
 //   xx = [1,0,1]  xy = [2,0,2]  xz = [2,0,2]

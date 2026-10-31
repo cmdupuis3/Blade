@@ -7,7 +7,7 @@
 // i < j stores f(A[i], A[j]) verbatim, and a read of (j, i) negates through
 // the index type's own negate-on-swap transform. No permutation sum, no
 // reynolds, same C(n,2) strict-simplex storage (diagonal implicitly zero).
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where anticomm(x, y) -> x - y
 let result = L <@> g |> compute

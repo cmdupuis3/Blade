@@ -252,7 +252,7 @@ Probe (private dir), `blade check` → OK, `blade run` → completes:
 
 ```blade
 type H = Idx<5>
-let a: Array<Float like H> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let a: Array<Float64 like H> = [1.0, 2.0, 4.0, 7.0, 11.0]
 let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(2)) - a(w(-1)) |> compute
 // printed: d = [6, 9, -4]
 ```

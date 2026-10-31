@@ -6,7 +6,7 @@
 // variable agree exactly (formalism 2.4; this was BL3001 from the call
 // judgment before the shared-variable refusal became exact). The specialization built
 // from the first teaching was handed the second verbatim and g++ refused it.
-let A = [1.0, 2.0, 3.0]
-let B = [1, 2, 3]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Int64([1, 2, 3])
 function second(a: T^1, b: T^1) -> T^1 = b
 let r = second(A, B)

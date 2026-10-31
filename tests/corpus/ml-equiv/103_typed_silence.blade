@@ -39,13 +39,13 @@ import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
 
 // Scalars in, scalar out. No candidate under any group.
-function halve(a: Float, b: Float) -> Float = (a + b) * 0.5
+function halve(a: Float64, b: Float64) -> Float64 = (a + b) * 0.5
 
 // A plain buffer is not a representation space.
-function shift(u: Array<Float like Idx<3>>, k: Float) -> Array<Float like Idx<3>> = u + k
+function shift(u: Array<Float64 like Idx<3>>, k: Float64) -> Array<Float64 like Idx<3>> = u + k
 
 // Signature-eligible and genuinely not equivariant.
-function peek(x: Array<Float like IrrepsIdx<S>>) -> Float = x(2) * x(2)
+function peek(x: Array<Float64 like IrrepsIdx<S>>) -> Float64 = x(2) * x(2)
 
 let h = halve(3.0, 5.0)
 // EXPECT: h = 4.0

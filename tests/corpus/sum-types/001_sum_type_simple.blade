@@ -8,7 +8,7 @@
 // Simple sum type (enum-like) — match extracts tag as int
 type Direction = North | South | East | West
 let d = South
-let val = match d with
+let val: Int64 = match d with
     | North -> 1
     | South -> 2
     | East -> 3

@@ -7,8 +7,8 @@
 // S_- = -S_+, so its logical sum cancels to exactly zero; any other kernel
 // accumulates f(x) and f(-x) apart. p = 1 has an EMPTY pool but one logical
 // cell, the diagonal's +0: f(+0) is its sum. Integer-valued cells.
-let static p = 6
-let static n = 3
+let static p: Int64 = 6
+let static n: Int64 = 3
 type Part = Idx<p>
 type Comp = Idx<2>
 type Obs = Idx<n>

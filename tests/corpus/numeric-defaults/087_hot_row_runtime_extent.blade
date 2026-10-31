@@ -1,0 +1,18 @@
+// TEST: Generic hot row folds use their published buffer extent
+// A 300-row specialization shares the hot-row plan with the generic body.
+// Abstract row builders keep the 7-row and 307-row calls on that generic path.
+function fmin(a: Float64, b: Float64) -> Float64 = if a < b then a else b
+function low(g: Array<Float64 like Idx<nr>, Idx<nc>>, cap: Float64) -> Float64 = {
+    let escaped = (method_for(g) <@> lambda(v) -> if v == 0.0 then cap else v) |> compute
+    let lo = reduce(reduce(escaped, fmin, 1.0e300), fmin, 1.0e300)
+    lo - 1.0
+}
+function rows(ax: Float64^1) -> Float64^2 =
+    (method_for(ax, Float64([1.0, 2.0])) <@> lambda(a, b) -> b - a) |> compute
+let known = (method_for(Float64(0..300), Float64([1.0, 2.0])) <@> lambda(a, b) -> b - a) |> compute
+let fixed = low(known, 100.0)
+let short = low(rows(Float64(0..7)), 100.0)
+let long = low(rows(Float64(0..307)), 100.0)
+// EXPECT: fixed = -299.0
+// EXPECT: short = -6.0
+// EXPECT: long = -306.0

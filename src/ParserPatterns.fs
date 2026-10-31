@@ -23,6 +23,10 @@ and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
     | Some TokUnderscore ->
         success (mkPat (headSpan tokens) PatWildcard) (advance tokens)
 
+    | Some (TokIdent ("True" | "False" as name)) ->
+        let line, col = currentPos tokens
+        errorC "BL1003" (capitalBoolMessage name) line col
+
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with

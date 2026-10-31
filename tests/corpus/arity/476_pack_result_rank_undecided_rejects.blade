@@ -6,11 +6,11 @@
 // truncate the value; the instance is refused instead.
 function loopy(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1.0
+    | 0 -> Float64(1.0)
     | _ -> {
         let head :: tail = a
         if reduce(head, (+)) > 100.0 then head [*] loopy(a) else head [*] loopy(tail)
     }
 }
-let x = [1.0, 2.0]
+let x = Float64([1.0, 2.0])
 let l1 = loopy(x)

@@ -6,8 +6,8 @@
 // concurrently. The front end's check is lexical; the storage-provenance
 // analysis refuses it before any SIMD or team pragma is emitted.
 type K = Idx<2>
-let mut G = method_for(range<K>, range<K>) <@> lambda(i, j) -> 0.0 |> compute
-let x = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut G = method_for(range<K>, range<K>) <@> lambda(i, j) -> Float64(0.0) |> compute
+let x = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let p = method_for(x) <@> lambda(v) where omp -> {
     let t = G((0 : K))
     t((0 : K)) = t((0 : K)) + v

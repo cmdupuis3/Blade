@@ -17,7 +17,7 @@ let (s_block, tag) = {
     let k2 = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> a((1 : Dim)) * b((1 : Dim)) |> compute
     let shift = reduce(reduce(pts, (+)), (+)) / 8.0
     let t = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k2(i, j) + shift, (+)), (+))
-    (t, 1)
+    (t, Int64(1))
 }
 // EXPECT: s_block = 46.125
 // EXPECT: tag = 1

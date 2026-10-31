@@ -25,7 +25,7 @@ type Draw = Idx<6>
 type D2 = Idx<6>
 
 // a(0) = 1 (seed); a(1) = a(-2) = 0; a(2) = a(-1) = 0; a(3) = a(0) = 1; ...
-let rec a: Array<Float like Draw> =
+let rec a: Array<Float64 like Draw> =
     match a with
     | zero -> zero
     | zero :: s -> zero :: 1.0
@@ -33,7 +33,7 @@ let rec a: Array<Float like Draw> =
 // EXPECT: a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 // The same stream amplified: an exact zero stays zero, garbage does not.
-let rec b: Array<Float like D2> =
+let rec b: Array<Float64 like D2> =
     match b with
     | zero -> zero
     | zero :: s -> zero :: 1.0

@@ -1,0 +1,18 @@
+// TEST: forwarded arrow results retain literal operand widths
+function first(c) = c(0) + 1.0
+function twice_first(c) = first(c) * 2.0
+function forward(c) = twice_first(c) + 1.0
+let narrow: Float32 = twice_first([1.0, 2.0])
+let wide: Float64 = twice_first(Float64([1.0, 2.0]))
+let forward_narrow: Float32 = forward([1.0, 2.0])
+let forward_wide: Float64 = forward(Float64([1.0, 2.0]))
+function narrow_cell(i: Int32) = Float32(i) + 1.0
+function wide_cell(i: Int64) = Float64(i) + 1.0
+let callable_narrow: Float32 = forward(narrow_cell)
+let callable_wide: Float64 = forward(wide_cell)
+// EXPECT: narrow = 4.0
+// EXPECT: wide = 4.0
+// EXPECT: forward_narrow = 5.0
+// EXPECT: forward_wide = 5.0
+// EXPECT: callable_narrow = 5.0
+// EXPECT: callable_wide = 5.0

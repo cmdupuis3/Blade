@@ -6,5 +6,5 @@
 // there is no position where a wreath array can be handled: a caller would
 // have had to allocate it.
 function trace4(R: Array<Float64 like OrbIdx<[(2,-), (2,+)], 4>>) -> Float64 = R(0, 1, 0, 1)
-let x = 1
+let x: Int64 = 1
 // EXPECT: typecheck failure — depth-2 OrbIdx storage is not emitted yet.

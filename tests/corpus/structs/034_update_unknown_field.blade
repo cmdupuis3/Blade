@@ -2,8 +2,8 @@
 // ERROR: BL3008
 // The explicit fields of a spread literal still validate against the decl.
 struct Point {
-    x: Float,
-    y: Float
+    x: Float64,
+    y: Float64
 }
 let p = Point { x = 1.0, y = 2.0 }
 let q = Point { w = 9.0, ..p }

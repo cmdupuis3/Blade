@@ -29,7 +29,7 @@ function lsdft(st_raw: Tuple<U^1, T<second>^1>, omegas: T<second>^1) = {
     reduce(s_raw, (+)) * (reduce(t_raw, (+)) + reduce(omegas, (+)))
 }
 let s: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
-let t: Array<Float<meter> like Idx<3>> = [1.0, 2.0, 3.0]
-let w: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
+let t: Array<Float64<meter> like Idx<3>> = [1.0, 2.0, 3.0]
+let w: Array<Float64<second> like Idx<3>> = [1.0, 2.0, 3.0]
 let r = lsdft((s, t), w)
 // EXPECT: typecheck failure -- a meter array cannot fill a T<second>^1 component

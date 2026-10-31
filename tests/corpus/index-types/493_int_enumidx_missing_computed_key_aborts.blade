@@ -5,6 +5,6 @@
 // a key of R either: a subscript into R is a key.
 type R = EnumIdx<[100, 200, 300]>
 let w: Array<Float64 like R> = [1.0, 2.0, 3.0]
-let k = 0 + 1
+let k: Int64 = 0 + 1
 let u = w(k)
 // ABORT: BL8006

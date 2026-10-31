@@ -15,13 +15,13 @@ import ml as ml
 // there too, for the component read. BL4012.
 let static W = ml.perm_weight_dim(1, 1, 4)
 
-function shuffle(z: Array<Float like Idx<4>>) -> Array<Float like Idx<4>> = {
+function shuffle(z: Array<Float64 like Idx<4>>) -> Array<Float64 like Idx<4>> = {
     let head = z(0)
     [head, head, head, head]
 }
 
-function bad(x: Array<Float like Idx<4>>, w: Array<Float like Idx<W>>)
-             where ml.perm_equiv(4) -> Array<Float like Idx<4>> = {
+function bad(x: Array<Float64 like Idx<4>>, w: Array<Float64 like Idx<W>>)
+             where ml.perm_equiv(4) -> Array<Float64 like Idx<4>> = {
     let h = ml.derive_perm_linear(1, 1, 4, x, w)
     shuffle(h)
 }

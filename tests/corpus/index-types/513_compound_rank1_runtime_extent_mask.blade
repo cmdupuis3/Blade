@@ -4,7 +4,7 @@
 // count pass's trip count are runtime operands: the compaction (G9) reads
 // them off the mask, as the hashed index did. Values are unchanged. (The LLVM
 // lane bakes range extents and hands this program to the C++ lane.)
-let k = reduce([3, 4, 5], (+))
+let k = reduce(Int64([3, 4, 5]), (+))
 // EXPECT: k = 12
 let xs = 0..k |> compute
 // EXPECT: xs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]

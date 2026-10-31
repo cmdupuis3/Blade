@@ -5,5 +5,5 @@
 // `x + 1.0` over `x: T` is typed `T` (functions/228). At an Int64 instance the
 // value is a Float64, which the Int64-typed result would truncate, so the
 // call is refused at its argument -- convert it first, `addone(Float64(3))`.
-function addone(x: T) = x + 1.0
-let n = addone(3)
+function addone(x: T) = x + Float64(1.0)
+let n = addone(Int64(3))

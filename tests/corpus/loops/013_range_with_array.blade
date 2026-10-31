@@ -1,6 +1,6 @@
 // TEST: Range With Array
 // Mix range with a real array
-let A = [10.0, 20.0, 30.0]
+let A = Float64([10.0, 20.0, 30.0])
 let L = method_for(A, range<Idx<3>>)
 let f = lambda(a, i) -> a + Float64(i)
 let result = L <@> f |> compute

@@ -10,5 +10,5 @@
 // sign law itself fails -- a conservative refusal even for the one c where
 // it would hold off the diagonal.
 let c = -9223372036854775807 - 1
-let A = [1, 2, 3]
+let A = Int64([1, 2, 3])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) + c |> compute

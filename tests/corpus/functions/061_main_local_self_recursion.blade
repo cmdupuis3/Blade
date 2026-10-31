@@ -11,8 +11,8 @@
 // The pin matters because main-locality has no forward declarations at all,
 // so it is order-sensitive by construction; this fixes the one recursive
 // shape that IS legal. The mutual case, which is not, is pinned by 060.
-let K = 1.0
+let K: Float64 = 1.0
 function countdown(n: Float64) -> Float64 = if n <= 0.0 then K else n + countdown(n - 1.0)
-let r = countdown(4.0)
+let r = countdown(Float64(4.0))
 // 4 + 3 + 2 + 1 + K
 // EXPECT: r = 11.0

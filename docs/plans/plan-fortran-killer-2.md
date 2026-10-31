@@ -646,12 +646,12 @@ private temporary working directory. Only `BLADE_FREEZE_IDIOM` changed between r
 ```blade
 type C = Idx<1>
 type It = Idx<8>
-function tick(c: mut Array<Float like C>) -> Bool = {
+function tick(c: mut Array<Float64 like C>) -> Bool = {
     c((0 : C)) += 1.0
     c((0 : C)) > 2.0
 }
-let mut counter: Array<Float like C> = [0.0]
-let rec xs: Array<Float like It> =
+let mut counter: Array<Float64 like C> = [0.0]
+let rec xs: Array<Float64 like It> =
     match xs with
     | zero -> zero
     | zero :: s -> zero :: 1.0

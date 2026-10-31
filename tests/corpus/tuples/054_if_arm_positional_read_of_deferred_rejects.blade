@@ -13,7 +13,7 @@ let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
 let g = method_for(x) <@> lambda(v) -> v * 2.0
 let m = method_for(x) <@> lambda(v) -> v + 1.0
 let c = reduce(x, (+)) > 5.0
-let t = if c then (g(0), m |> compute) else (0.0, m |> compute)
+let t = if c then (g(0), m |> compute) else (Float64(0.0), m |> compute)
 // ERROR: BL6002 @ 15:1
 // ERROR-CONTAINS: whose arm reads the deferred computation `g`
 // REJECT-AT: lower

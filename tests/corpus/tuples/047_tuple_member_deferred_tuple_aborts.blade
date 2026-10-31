@@ -12,7 +12,7 @@ let z: Array<Int64 like Row> = [0]
 let g = method_for(z) <@> lambda(v) -> 1 / v
 let ok = method_for(a) <@> lambda(v) -> v + 1
 let p = (g, ok)
-let q = (p, 1.0)
+let q = (p, Float64(1.0))
 let bad = a((a(0) : Row))
 // ABORT: BL8013
 // ABORT: integer division by zero

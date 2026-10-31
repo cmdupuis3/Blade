@@ -3,5 +3,5 @@
 // The subscript judgment's CLASS rule (formalism 3.10): a subscript is an
 // integer or an index value. `A(1.5)` used to typecheck and reach g++ as a
 // `double` subscript.
-let A = [10.0, 20.0, 30.0]
+let A = Float64([10.0, 20.0, 30.0])
 let v = A(1.5)

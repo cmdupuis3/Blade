@@ -2,8 +2,8 @@
 // Struct with where constraint - INVALID construction (should abort)
 // ABORT: Constraint violation in Balanced
 struct Balanced {
-    a: Int,
-    b: Int,
-    total: Int
+    a: Int32,
+    b: Int32,
+    total: Int32
 } where a + b == total
 let x = Balanced { a = 3, b = 7, total = 99 }

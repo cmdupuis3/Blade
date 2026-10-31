@@ -10,16 +10,16 @@ import ad as ad
 
 type I = Idx<3>
 
-function inner_fn(p: Array<Float like I>) -> Float = {
+function inner_fn(p: Array<Float64 like I>) -> Float64 = {
     let m = method_for(p) <@> lambda(q) -> q * q |> compute
     reduce(m, (+))
 }
 
-function outer_fn(q: Array<Float like I>) -> Float = {
+function outer_fn(q: Array<Float64 like I>) -> Float64 = {
     let t = inner_fn(q)
     t + 1.0
 }
 
-let (jv, jt) = ad.jvp(outer_fn)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+let (jv, jt) = ad.jvp(outer_fn)(Float64([1.0, 2.0, 3.0]), Float64([1.0, 1.0, 1.0]))
 // EXPECT: jv = 15.0
 // EXPECT: jt = 12.0

@@ -24,8 +24,8 @@
 //   k=1: sin0 + sin1   + sin2   + sin3
 //   k=2: sin0 + sin1.5 + sin3   + sin4.5
 // ============================================================================
-let w: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
-let t: Array<Float like Idx<4>> = [0.0, 0.5, 1.0, 1.5]
+let w: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let t: Array<Float64 like Idx<4>> = [0.0, 0.5, 1.0, 1.5]
 
 let out = w <@> lambda(f) -> {
     let wt = f * t

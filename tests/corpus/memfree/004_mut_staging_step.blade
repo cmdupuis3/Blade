@@ -9,7 +9,7 @@
 type C = Idx<4>
 type Steps = Idx<5>
 let mut STG = method_for(range<C>) <@> lambda(i) -> 0.0 * Float64(i) |> compute
-function stepf(n: Int64) -> Float = {
+function stepf(n: Int64) -> Float64 = {
     let t = method_for(range<C>) <@> lambda(i) -> Float64(i) + 2.0 * Float64(n) |> compute
     STG((0 : C)) = t((0 : C))
     STG((1 : C)) = t((1 : C))
@@ -17,7 +17,7 @@ function stepf(n: Int64) -> Float = {
     STG((3 : C)) = t((3 : C))
     reduce(t, (+)) * 0.5
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

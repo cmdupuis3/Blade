@@ -30,14 +30,14 @@ from stats import mean
 Unit meters
 Unit celsius
 type StationIdx = Idx<6>
-let elevation_m: Array<Float<meters> like StationIdx> = [42.0, 388.0, 1204.0, 15.0, 730.0, 2210.0]
-let region = [0, 1, 2, 0, 1, 2]
+let elevation_m: Array<Float64<meters> like StationIdx> = [42.0, 388.0, 1204.0, 15.0, 730.0, 2210.0]
+let region = Int64([0, 1, 2, 0, 1, 2])
 
 // ---- readings log (18 readings, 3 per station, station-major order) --------
 type ReadIdx = Idx<18>
-let r_station: Array<Int like ReadIdx> = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5]
-let r_temp: Array<Float<celsius> like ReadIdx> = [14.0, 16.0, 18.0, 11.0, 13.0, 12.0, 3.0, 5.0, 4.0, 17.0, 15.0, 19.0, 10.0, 14.0, 12.0, -2.0, 0.0, -1.0]
-let r_qc: Array<Int like ReadIdx> = [0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0]
+let r_station: Array<Int32 like ReadIdx> = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5]
+let r_temp: Array<Float64<celsius> like ReadIdx> = [14.0, 16.0, 18.0, 11.0, 13.0, 12.0, 3.0, 5.0, 4.0, 17.0, 15.0, 19.0, 10.0, 14.0, 12.0, -2.0, 0.0, -1.0]
+let r_qc: Array<Int32 like ReadIdx> = [0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0]
 
 // ============================================================================
 // (a) Quality control -- SQL: SELECT temp FROM readings WHERE qc = 0
@@ -58,7 +58,7 @@ let sum_good = reduce(good_temps, (+))
 // Today each contains() is a linear scan, so this is O(|readings|*|audited|);
 // the O(|A|+|B|) hash-set fusion is a planned optimization.
 // ============================================================================
-let audited = [1, 4, 5]
+let audited = Int64([1, 4, 5])
 let from_audited = mask(r_station, lambda(s) -> contains(audited, s))
 let audited_temps = compound(r_temp, from_audited)
 let n_audited = extents(audited_temps)
@@ -166,7 +166,7 @@ let n_contact = extents(contactlist)
 // input: region codes covered by the audit vs. regions under a weather alert.
 let audited_regions_all = method_for(audited) <@> lambda(s) -> region(s) |> compute
 let audited_regions = unique(audited_regions_all)
-let alert_regions = [0, 1]
+let alert_regions = Int64([0, 1])
 let regions_both = intersect(audited_regions, alert_regions)
 let regions_either = union(audited_regions, alert_regions)
 // EXPECT: audited_regions = [1, 2]
@@ -185,7 +185,7 @@ let regions_either = union(audited_regions, alert_regions)
 let G = method_for(zip(r_temp, r_qc))
 let k_sum = lambda(t, q) -> if q == 0 then t else 0.0
 let k_sq = lambda(t, q) -> if q == 0 then t * t else 0.0
-let k_one = lambda(t, q) -> if q == 0 then 1.0 else 0.0
+let k_one = lambda(t, q) -> if q == 0 then Float64(1.0) else Float64(0.0)
 let (g_sum, g_sq, g_cnt) = reduce((G <@> k_sum) <&!> (G <@> k_sq) <&!> (G <@> k_one), (+))
 let mean_good = g_sum / g_cnt
 let var_good = g_sq / g_cnt - mean_good * mean_good

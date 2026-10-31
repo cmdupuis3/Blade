@@ -5,13 +5,13 @@
 // built from the same enumeration -- two passes and O(card) keys. A map over
 // a closed-form domain that only its fold reads is spliced into the fold and
 // left unforced, so the body is one affine nest with a scalar accumulator.
-let static n = 11
-let static w = 2
+let static n: Int64 = 11
+let static w: Int64 = 2
 type Pts = Idx<n>
 
 static struct Band {
-    i: Int<min=0, max=n-1>,
-    j: Int<min=0, max=n-1>
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
 } where abs(i - j) <= w
 
 function lcg(k: Int64, seed: Int64) -> Float64 = {

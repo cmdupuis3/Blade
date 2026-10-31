@@ -9,10 +9,10 @@ import ad as ad
 
 type I = Idx<3>
 
-function k2(x: Float, y: Float) -> Float = x * y
-function post(z: Float) -> Float = z * 10.0
+function k2(x: Float64, y: Float64) -> Float64 = x * y
+function post(z: Float64) -> Float64 = z * 10.0
 
-function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>, b: Array<Float64 like I>) -> Float64 = {
     let m = (object_for(k2) >>@ object_for(post)) <@> (a, b) |> compute
     m(0, 1) + m(2, 2) + m(1, 0)
 }

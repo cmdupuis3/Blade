@@ -6,7 +6,7 @@ import ad as ad
 
 type R = Idx<4>
 
-function f(a: Array<Float like R>) -> Float = {
+function f(a: Array<Float64 like R>) -> Float64 = {
     let s = method_for(halo<R, [-1, 0, 1]>) <@> lambda(w: T^1) -> a(w(0)) |> compute
     s(0)
 }

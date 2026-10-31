@@ -8,5 +8,5 @@
 // the OpMath catch-all's transcendental rule is what refuses it here, while
 // floor/ceil (unit-errors/015) hit the dedicated scale-invariance case.
 Unit meters
-let D: Array<Float<meters> like Idx<3>> = [10.0, 100.0, 1000.0]
+let D: Array<Float64<meters> like Idx<3>> = [10.0, 100.0, 1000.0]
 let bad = (method_for(D) <@> lambda(d) -> log10(d)) |> compute

@@ -6,9 +6,9 @@
 // (e.g. Clebsch-Gordan coefficients). Literals must round-trip exactly:
 // scalar, dense array literal, and static-substituted paths.
 // ============================================================================
-let x = 0.6931471805599453
+let x: Float64 = 0.6931471805599453
 let scaled = x * 1000000000.0
-let arr = [0.6931471805599453, 1.4142135623730951]
+let arr = Float64([0.6931471805599453, 1.4142135623730951])
 let arrscaled = method_for(arr) <@> lambda(v) -> v * 1000000000.0 |> compute
 // EXPECT: x = 0.6931471805599453
 // EXPECT: scaled = 693147180.5599453

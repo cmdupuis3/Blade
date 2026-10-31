@@ -4,11 +4,11 @@
 // were invisible, and `--print t` exited 0 having printed nothing. A tuple
 // now prints spelled like its literal, each component in its own print form:
 // scalars as their type prints them, a dense array as its values.
-let t = (1, 2.0, true)
-let M = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let t = (Int64(1), Float64(2.0), true)
+let M = Float64([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 let e = extents(M)
-let v = [1.0, 2.0, 3.0]
-let u = (v, 3, "hi")
+let v = Float64([1.0, 2.0, 3.0])
+let u = (v, Int64(3), "hi")
 // EXPECT: t = (1, 2.0, true)
 // EXPECT: e = (2, 3)
 // EXPECT: u = ([1.0, 2.0, 3.0], 3, hi)

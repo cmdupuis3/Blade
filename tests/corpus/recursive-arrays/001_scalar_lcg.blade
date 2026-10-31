@@ -7,7 +7,7 @@
 // Stream pinned from the float-mod formula (matches physics/44's spelling).
 // ============================================================================
 type Draw = Idx<4>
-let rec lcg: Array<Float like Draw> =
+let rec lcg: Array<Float64 like Draw> =
     match lcg with
     | zero -> zero
     | zero :: s -> zero :: 7.0

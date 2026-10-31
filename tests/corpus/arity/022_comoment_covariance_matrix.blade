@@ -21,6 +21,6 @@ function comoment(a: Poly<T^1>) -> T^0 = mean(comoment_prod(a))
 // x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
 // cov = [[var(x), cov(x,y)], [cov(y,x), var(y)]]
 //     = [[2/3, 4/3], [4/3, 8/3]]  (symmetric)
-let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let result = object_for(lambda(x, y) -> comoment(x, y)) <@> (data, data) |> compute
 // EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]

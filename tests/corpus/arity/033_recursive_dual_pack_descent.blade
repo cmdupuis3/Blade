@@ -12,5 +12,5 @@ function dotpack(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
         ha * hb + dotpack(ta, tb)
       }
 }
-let result = dotpack((1.0, 2.0, 3.0), (4.0, 5.0, 6.0))
+let result = dotpack((Float64(1.0), Float64(2.0), Float64(3.0)), (Float64(4.0), Float64(5.0), Float64(6.0)))
 // EXPECT: result = 32.0

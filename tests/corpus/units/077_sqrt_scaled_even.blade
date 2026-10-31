@@ -9,20 +9,20 @@ Unit meters
 Unit km = 1000 * meters
 Unit km2 = km ^ 2
 
-let area: Float<km2> = 4.0
+let area: Float64<km2> = 4.0
 let side = sqrt(area)
 
 // Same magnitude on both sides: no conversion, plain addition in km.
-let one_km: Float<km> = 1.0
+let one_km: Float64<km> = 1.0
 let plus_km = side + one_km
 
 // Cross-magnitude: the LEFT operand's magnitude wins (units/045), so the
 // metre converts INTO km -- 1 m is 0.001 km, not 1.
-let one_m: Float<meters> = 1.0
+let one_m: Float64<meters> = 1.0
 let plus_m = side + one_m
 
 // The ascription is the third witness: 2 km is 2000 m.
-let side_m: Float<meters> = side
+let side_m: Float64<meters> = side
 
 // EXPECT: area = 4.0
 // EXPECT: side = 2.0

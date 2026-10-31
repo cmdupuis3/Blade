@@ -3,7 +3,7 @@
 // ERROR-CONTAINS: a parallel kernel (`where omp` / cuda) writes storage captured from outside it
 // Gap G41, Codex review W2F-7 finding 24, the writing twin of loops/506: the
 // nullary callback's only candidate writes the captured G.
-let mut G = [0.0]
+let mut G = Float64([0.0])
 function bump() -> Float64 = {
     G(0) = G(0) + 1.0
     G(0)

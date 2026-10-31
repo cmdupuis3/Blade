@@ -151,7 +151,7 @@ because both existing counters are unsound for this job:
   ```blade
   let out = {
       let L: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-      let k = lambda(i: Int) -> transpose(L, [0, 1])(i, 0)
+      let k = lambda(i: Int32) -> transpose(L, [0, 1])(i, 0)
       k(0) + k(1)
   }
   ```

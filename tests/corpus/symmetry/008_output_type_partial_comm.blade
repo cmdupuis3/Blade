@@ -1,7 +1,7 @@
 // TEST: Output Type: Partial Comm
 // Partial comm: only (x,y) are commutative, not z
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y) -> x * y * z
 let result = L <@> f |> compute

@@ -10,8 +10,8 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(a: Array<Float like I>) -> Float = {
-    sort(a, lambda(x: Float) -> x)(0) * 2.0
+function f(a: Array<Float64 like I>) -> Float64 = {
+    sort(a, lambda(x: Float64) -> x)(0) * 2.0
 }
 
 let (v, t) = ad.jvp(f)([3.0, 1.0, 2.0], [1.0, 0.0, 0.0])

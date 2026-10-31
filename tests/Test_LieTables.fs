@@ -342,14 +342,14 @@ let private src (body: string) = srcHeader + body
 // The triple product, spelled once per return shape. Module-level so the
 // `"""` terminators sit at column 0 without closing the enclosing binding.
 let private tripleScalarTemplate : Printf.StringFormat<string -> string -> string -> string> = """
-function %s(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
+function %s(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
             where ml.equiv(%s) -> %s =
     u(0)*(v(1)*w(2) - v(2)*w(1)) + u(1)*(v(2)*w(0) - v(0)*w(2)) + u(2)*(v(0)*w(1) - v(1)*w(0))
 """
 
 let private tripleOddTemplate : Printf.StringFormat<string -> string> = """
-function tri_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
-            where ml.equiv(%s) -> Array<Float like IrrepsIdx<PS>> =
+function tri_odd(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
+            where ml.equiv(%s) -> Array<Float64 like IrrepsIdx<PS>> =
     [u(0)*(v(1)*w(2) - v(2)*w(1)) + u(1)*(v(2)*w(0) - v(0)*w(2)) + u(2)*(v(0)*w(1) - v(1)*w(0))]
 """
 
@@ -518,23 +518,23 @@ let runLieTablesTests () : BlockResult =
     // =======================================================================
     let dotSrc =
         src """
-function dot3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-              where ml.equiv(O3) -> Float =
+function dot3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+              where ml.equiv(O3) -> Float64 =
     u(0) * v(0) + u(1) * v(1) + u(2) * v(2)
 """
     let dotJ = judgeSource dotSrc "dot3"
     check "dot(u,v) of two ODD vectors is an O3 INVARIANT (the engine certifies what composition's raw-index rule cannot)"
           (dotJ.Engine = Some (Ok ())) ""
     let crossBody = """
-function cross3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<VE>> =
+function cross3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<VE>> =
     [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
 """
     check "cross(u,v) of two ODD vectors certifies at an EVEN l=1 target (a pseudovector)"
           ((judgeSource (src crossBody) "cross3").Engine = Some (Ok ())) ""
     let crossOddBody = """
-function cross_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<V>> =
+function cross_odd(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+                   where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<V>> =
     [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
 """
     let crossOdd = (judgeSource (src crossOddBody) "cross_odd").Engine
@@ -552,12 +552,12 @@ function cross_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like Irreps
         sprintf tripleScalarTemplate name grp ret
     let tripleOdd (grp: string) = sprintf tripleOddTemplate grp
     check "TRIPLE 1/3: u.(v x w) certifies under SO3 declared EVEN (a plain Float return)"
-          ((judgeSource (src (tripleBody "tri_so3_even" "SO3" "Float")) "tri_so3_even").Engine = Some (Ok ())) ""
+          ((judgeSource (src (tripleBody "tri_so3_even" "SO3" "Float64")) "tri_so3_even").Engine = Some (Ok ())) ""
     check "TRIPLE 2/3: the same body certifies under SO3 declared ODD (l=0 odd block)"
           ((judgeSource (src (tripleOdd "SO3")) "tri_odd").Engine = Some (Ok ())) ""
     check "TRIPLE 3/3a: under O3 it certifies ONLY as (0, odd) — the pseudoscalar reading"
           ((judgeSource (src (tripleOdd "O3")) "tri_odd").Engine = Some (Ok ())) ""
-    let tripleEvenO3 = (judgeSource (src (tripleBody "tri_o3_even" "O3" "Float")) "tri_o3_even").Engine
+    let tripleEvenO3 = (judgeSource (src (tripleBody "tri_o3_even" "O3" "Float64")) "tri_o3_even").Engine
     check "TRIPLE 3/3b: under O3 declared (0, even) it is REFUSED, by -I and by nothing else"
           (match tripleEvenO3 with
            | Some (Error m) ->
@@ -572,8 +572,8 @@ function cross_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like Irreps
     // genuine radical vectors, and componentwise-zero accepts exactly. This is
     // what "the linearity resolution beats the l <= 1 restriction" means.
     let radialBody = """
-function radial(x: Array<Float like IrrepsIdx<Q>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> = {
+function radial(x: Array<Float64 like IrrepsIdx<Q>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<Q>> = {
     let r2 = x(0)*x(0) + x(1)*x(1) + x(2)*x(2) + x(3)*x(3) + x(4)*x(4)
     [r2*x(0), r2*x(1), r2*x(2), r2*x(3), r2*x(4)]
 }
@@ -591,8 +591,8 @@ function radial(x: Array<Float like IrrepsIdx<Q>>)
     // (a) one coefficient perturbed by an EXACT 1/7 (written as a literal
     //     division, so the extractor reads 1/7 and not a truncated decimal).
     let perturbed = """
-function radial_bad(x: Array<Float like IrrepsIdx<Q>>)
-                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> = {
+function radial_bad(x: Array<Float64 like IrrepsIdx<Q>>)
+                    where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<Q>> = {
     let r2 = x(0)*x(0) + x(1)*x(1) + x(2)*x(2) + x(3)*x(3) + x(4)*x(4)
     [(1.0 + 1.0/7.0)*r2*x(0), r2*x(1), r2*x(2), r2*x(3), r2*x(4)]
 }
@@ -614,8 +614,8 @@ function radial_bad(x: Array<Float like IrrepsIdx<Q>>)
     //     the synthesized (Schur-certified) basis. Writing 0.5773502 for
     //     1/sqrt(3) must produce the near-miss note pointing at both hatches.
     let nearMissSrc = """
-function quad(x: Array<Float like IrrepsIdx<V>>)
-              where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> =
+function quad(x: Array<Float64 like IrrepsIdx<V>>)
+              where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<Q>> =
     [x(0)*x(2),
      x(0)*x(1),
      0.5773502 * (x(1)*x(1) - 0.5*x(0)*x(0) - 0.5*x(2)*x(2)),
@@ -637,8 +637,8 @@ function quad(x: Array<Float like IrrepsIdx<V>>)
     //     triple; here the OTHER direction, an even input pair claimed odd
     //     out, to pin that -I is checked for INPUT parities too.
     let parityCtl = """
-function scale_even(x: Array<Float like IrrepsIdx<VE>>)
-                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<V>> =
+function scale_even(x: Array<Float64 like IrrepsIdx<VE>>)
+                    where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<V>> =
     [x(0), x(1), x(2)]
 """
     let pc = (judgeSource (src parityCtl) "scale_even").Engine
@@ -650,28 +650,28 @@ function scale_even(x: Array<Float like IrrepsIdx<VE>>)
     // =======================================================================
     let diffCases =
         [ "add", """
-function add2(x: Array<Float like IrrepsIdx<SV>>, y: Array<Float like IrrepsIdx<SV>>)
-              where ml.equiv(O3) -> Array<Float like IrrepsIdx<SV>> =
+function add2(x: Array<Float64 like IrrepsIdx<SV>>, y: Array<Float64 like IrrepsIdx<SV>>)
+              where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SV>> =
     x + y
 """
           "scale", """
-function scale2(x: Array<Float like IrrepsIdx<SV>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<SV>> =
+function scale2(x: Array<Float64 like IrrepsIdx<SV>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SV>> =
     x * 2.0
 """
           "identity", """
-function id2(x: Array<Float like IrrepsIdx<SV>>)
-             where ml.equiv(O3) -> Array<Float like IrrepsIdx<SV>> =
+function id2(x: Array<Float64 like IrrepsIdx<SV>>)
+             where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SV>> =
     x
 """
           "invariant read", """
-function head(x: Array<Float like IrrepsIdx<SV>>)
-              where ml.equiv(O3) -> Float =
+function head(x: Array<Float64 like IrrepsIdx<SV>>)
+              where ml.equiv(O3) -> Float64 =
     x(0)
 """
           "weighted mix", """
-function mix(x: Array<Float like IrrepsIdx<SV>>, y: Array<Float like IrrepsIdx<SV>>, s: Float)
-             where ml.equiv(O3) -> Array<Float like IrrepsIdx<SV>> =
+function mix(x: Array<Float64 like IrrepsIdx<SV>>, y: Array<Float64 like IrrepsIdx<SV>>, s: Float64)
+             where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SV>> =
     x * s + y
 """ ]
     let names = [ "add2"; "scale2"; "id2"; "head"; "mix" ]
@@ -690,8 +690,8 @@ function mix(x: Array<Float like IrrepsIdx<SV>>, y: Array<Float like IrrepsIdx<S
     // The other direction, on the same harness: a body composition REFUSES and
     // the engine also refuses (no verdict is invented on either side).
     let bothRefuse = """
-function tilt(x: Array<Float like IrrepsIdx<SV>>)
-              where ml.equiv(O3) -> Array<Float like IrrepsIdx<SV>> =
+function tilt(x: Array<Float64 like IrrepsIdx<SV>>)
+              where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SV>> =
     [x(0), x(2), x(1), x(3)]
 """
     let brj = judgeSource (src bothRefuse) "tilt"

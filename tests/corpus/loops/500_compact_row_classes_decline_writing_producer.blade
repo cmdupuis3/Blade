@@ -7,10 +7,10 @@
 // producer is never scheduled behind its own rows now.
 type I = Idx<2>
 let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
-let mut G = 0.0
+let mut G: Float64 = 0.0
 let p = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> {
     G = G + 1.0
-    0.0
+    Float64(0.0)
 } |> compute
 let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j) + G, (+), 0.0), (+), 0.0)
 let seen = G

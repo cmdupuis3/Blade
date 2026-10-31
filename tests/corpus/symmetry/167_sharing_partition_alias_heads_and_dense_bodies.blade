@@ -23,7 +23,7 @@ function h(x: Array<Float64 like I>) -> Array<Float64 like I, I> =
     f(x, x)
 let H = h(A)
 let D: Array<Float64 like I, I> = {
-    let s = 1.0
+    let s: Float64 = 1.0
     f(A, A)
 }
 let FA = f(A, A)

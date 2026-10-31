@@ -13,7 +13,7 @@ type Row = Idx<3>
 let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
 let g = method_for(x) <@> lambda(v) -> v * 2.0
 function local_writer(k: Float64) -> Float64 = {
-    let mut g = [0.0, 0.0, 0.0]
+    let mut g = Float64([0.0, 0.0, 0.0])
     g(1) = k
     g(1) + 1.0
 }
@@ -22,7 +22,7 @@ function param_writer(g: mut Array<Float64 like Row>) -> Float64 = {
     g(2)
 }
 let s = reduce(g, (+))
-let w = local_writer(3.0)
+let w = local_writer(Float64(3.0))
 let mut y: Array<Float64 like Row> = [1.0, 1.0, 1.0]
 let p = param_writer(y)
 // EXPECT: s = 12.0

@@ -1,0 +1,9 @@
+// TEST: an array-literal argument takes the parameter element width
+// ============================================================================
+// Rule 5: `first([0.1, 0.2])` into an `Array<Float64 like ..>` parameter
+// passes Float64 cells (the double 0.1), as a scalar literal argument would.
+// ============================================================================
+function first(x: Array<Float64 like Idx<2>>) -> Float64 = x(0)
+let r = first([0.1, 0.2])
+let d = r - 0.1
+// EXPECT: d = 0.0

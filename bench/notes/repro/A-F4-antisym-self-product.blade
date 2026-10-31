@@ -11,7 +11,7 @@
 // Observed: s01 = 1.0, s10 = -1.0, total = 0.0   (every lane)
 // Spelling that is right today: decompact(R, 0) * decompact(R, 0), or a gather
 // method_for(range<I>, range<I>) <@> lambda(i, j) -> R(i, j) * R(i, j).
-let A = [1.0, 2.0, 4.0]
+let A = Float64([1.0, 2.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
 let S = R * R
 let s01 = S(0, 1)

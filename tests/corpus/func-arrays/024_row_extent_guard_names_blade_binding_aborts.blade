@@ -5,7 +5,7 @@
 // `final`, a C++ keyword, is `final_` there, and a long REPL session could show
 // a stale rename), so the two lanes could name one binding two ways. Both now
 // use the Blade name.
-let n = reduce([1, 2], (+))
+let n = reduce(Int64([1, 2]), (+))
 let row = Float64(0..n)
 let final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]
 // ABORT: BL8006

@@ -15,7 +15,7 @@
 // result is a fully dense 3x3x3 array: dense[p][q][r] = product over sorted
 // (p,q,r) = A[p]*A[q]*A[r] (order-independent by symmetry). Confirms that
 // composed decompaction densifies, and that surrounding dims map identically.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A, A)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let sym = L <@> f |> compute

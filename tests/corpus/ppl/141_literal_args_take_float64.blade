@@ -1,0 +1,21 @@
+// TEST: PPL literal arguments take Float64
+import ppl as ppl
+// Round 6 (numeric defaults): the ppl elaborator binds every user scalar it
+// hoists into a synthesized `let` (a weight, a family parameter, an
+// evaluation point) through a Float64 cast, so a LITERAL argument takes
+// Float64 exactly -- no annotation needed -- instead of the Float32 default a
+// bare synthesized `let` would give it. The pins carry 15 significant digits,
+// which a Float32 tower or closed form would not reproduce.
+// Mixture of A = {0, 1, 2} and B = {4, 6} at weights 1:2: kappa2 = 40/9.
+// logpdf: -log(4 pi)/2 - (0.1 - 1.5)^2 / 4 at the double nearest 0.1.
+type TimeIdx = Idx<3>
+type PairIdx = Idx<2>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
+let B: Array<Float64 like Idx<1>, PairIdx> = [[4.0, 6.0]]
+let d1 = ppl.dist(A, 3)
+let d2 = ppl.dist(B, 3)
+let mx = ppl.dist_mix(1.0, d1, 2.0, d2)
+let k2 = ppl.cumulant(mx, 2)
+let lp = ppl.logpdf(gaussian(1.5, 2.0), 0.1)
+// EXPECT: k2 = [4.44444444444444]
+// EXPECT: lp = -1.75551212348465

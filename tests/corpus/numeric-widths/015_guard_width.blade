@@ -1,0 +1,14 @@
+// TEST: Guard Keeps Numeric Width
+// A guard's zero arm must not widen its value before surrounding arithmetic.
+// In particular, an Int32 guard plus one wraps before the comparison.
+function guarded_next(p: Bool, x: Int32) -> Bool = guard(p, x) + 1 > x
+let wraps = guarded_next(true, Int32(2147483647))
+let drops = guarded_next(false, Int32(2147483647))
+let a = Float32([0.1, 0.2])
+let kept = guard(true, a) |> compute
+let zeroed = guard(false, a) |> compute
+// EXPECT: wraps = false
+// EXPECT: drops = false
+// EXPECT: a = [0.1, 0.2]
+// EXPECT: kept = [0.1, 0.2]
+// EXPECT: zeroed = [0.0, 0.0]

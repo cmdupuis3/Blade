@@ -5,7 +5,7 @@
 // balances the (unequal) per-slab work. Inner dependent loops stay sequential
 // (collapse is unsafe on a non-rectangular space). Values are independent of
 // the parallelization strategy — a race would corrupt them.
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 
 // Symmetric kernel on same array - triangular iteration
 let loop = method_for(A, A)

@@ -9,17 +9,17 @@ import ml as ml
 // The reject sides live in ml-ops/006 and index-types/115.
 // ============================================================================
 let static s2 = [(0, 0, 2)]
-let lout: Array<Float like IrrepsIdx<s2>> = ml.linear(s2, s2, [1.0, 0.0, 0.0, 1.0], [5.0, 7.0])
+let lout: Array<Float64 like IrrepsIdx<s2>> = ml.linear(s2, s2, Float64([1.0, 0.0, 0.0, 1.0]), Float64([5.0, 7.0]))
 // EXPECT: lout = [5.0, 7.0]
-let gout: Array<Float like IrrepsIdx<s2>> = ml.gated(s2, [0.0, 2.0])
+let gout: Array<Float64 like IrrepsIdx<s2>> = ml.gated(s2, Float64([0.0, 2.0]))
 // EXPECT: gout = [0.0, 1.7615941559557646]
 
 let static sh2 = ml.sh_spec(2)
-let sh: Array<Float like IrrepsIdx<sh2>> = ml.y_to(2, 1.0, 2.0, 3.0)
+let sh: Array<Float64 like IrrepsIdx<sh2>> = ml.y_to(2, Float64(1.0), Float64(2.0), Float64(3.0))
 // EXPECT: sh = [0.28209479177387814, 0.9772050238058398, 1.4658075357087597, 0.4886025119029199, 2.1850968611841584, 6.555290583552475, 4.100090348282761, 3.2776452917762376, -1.6388226458881188]
 
 let static tiny = [(0, 0, 1)]
 let static tinycfg = (tiny, tiny, tiny)
-let tx: Array<Float like IrrepsIdx<tiny>> = [2.0]
-let tout: Array<Float like IrrepsIdx<tiny>> = ml.tensor_product(tinycfg, tx, [3.0], [0.5])
+let tx: Array<Float64 like IrrepsIdx<tiny>> = [2.0]
+let tout: Array<Float64 like IrrepsIdx<tiny>> = ml.tensor_product(tinycfg, tx, Float64([3.0]), Float64([0.5]))
 // EXPECT: tout = [3.0]

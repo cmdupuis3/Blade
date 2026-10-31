@@ -9,13 +9,13 @@
 //
 // HAND DERIVATION: a = 1, b = 2, c = 3, so a + b + c = 6 and (a - b) * c = -3.
 
-let t = ((1.0, 2.0), 3.0)
+let t = ((Float64(1.0), Float64(2.0)), Float64(3.0))
 let r = match t with
     | ((a, b), c) -> a + b + c
 // EXPECT: r = 6.0
 
 // Nested on the RIGHT, and three deep -- the leaf must ride two projections.
-let u = (1.0, (2.0, (3.0, 4.0)))
+let u = (Float64(1.0), (Float64(2.0), (Float64(3.0), Float64(4.0))))
 let s = match u with
     | (a, (b, (c, d))) -> a + b * 10.0 + c * 100.0 + d * 1000.0
 // EXPECT: s = 4321.0
@@ -23,7 +23,7 @@ let s = match u with
 // A nested LITERAL makes the outer pattern refutable: the test rides the
 // same recursion the binders do, so arm one must be skipped for arm two.
 // (Integers -- float patterns are not parser-reachable.)
-let ti = ((1, 2), 3)
+let ti = ((Int64(1), Int64(2)), Int64(3))
 let v = match ti with
     | ((9, b), c) -> b + c
     | ((a, b), c) -> a * 100 + b * 10 + c

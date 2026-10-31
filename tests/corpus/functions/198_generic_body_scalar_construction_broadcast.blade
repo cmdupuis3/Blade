@@ -16,7 +16,7 @@
 // (casts/546), including the ones these generic bodies forward.
 function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 function lsum(row: T^1) -> T^0 = reduce(row, (+))
-let x = [1.0, 2.0, 3.0, 6.0]
+let x = Float64([1.0, 2.0, 3.0, 6.0])
 
 // mean(x * x) = 12.5
 function rms_normalize(v: T^1) -> T^1 = v / sqrt(lmean(v * v))
@@ -44,7 +44,7 @@ let nx = negmean(x)
 // An integer instance: `lmean` divides as Int64 (10 / 4 = 2), `abs` of an
 // Int64 stays Int64 -- the value hoisted out of the loop keeps that type.
 function shifted(v: T^1) -> T^1 = v + abs(lmean(v) - lsum(v))
-let xi = [1, 2, 3, 4]
+let xi = Int64([1, 2, 3, 4])
 let si = shifted(xi)
 // EXPECT: si = [9, 10, 11, 12]
 let sf = shifted(x)
@@ -64,6 +64,6 @@ let cd = center(d)
 
 // A row empty only at run time: the scalar is never evaluated (its fold of an
 // empty row would be BL8003), as for every array/scalar map.
-let none = intersect(x, [100.0])
+let none = intersect(x, Float64([100.0]))
 let n_none = extents(rms_normalize(none))
 // EXPECT: n_none = 0

@@ -16,12 +16,12 @@ let osel = compound(other, keep)
 // sel = [3, 1, 3, 1, 4, 3], osel = [1, 1, 5, 7, 8, 9]
 let i = intersect(sel, osel)
 let u = union(sel, osel)
-let mixed = intersect([4, 9, 1], sel)
+let mixed = intersect(Int64([4, 9, 1]), sel)
 // EXPECT: i = [1]
 // EXPECT: u = [3, 1, 4, 5, 7, 8, 9]
 // EXPECT: mixed = [4, 1]
 
-let di = intersect([3, 1, 3, 1, 4, 3], [1, 1, 5, 7, 8, 9])
-let du = union([3, 1, 3, 1, 4, 3], [1, 1, 5, 7, 8, 9])
+let di = intersect(Int64([3, 1, 3, 1, 4, 3]), Int64([1, 1, 5, 7, 8, 9]))
+let du = union(Int64([3, 1, 3, 1, 4, 3]), Int64([1, 1, 5, 7, 8, 9]))
 // EXPECT: di = [1]
 // EXPECT: du = [3, 1, 4, 5, 7, 8, 9]

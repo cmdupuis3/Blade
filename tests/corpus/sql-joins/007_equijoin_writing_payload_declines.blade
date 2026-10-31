@@ -13,7 +13,7 @@ let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
 let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
 let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
 let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
-let mut calls = 0
+let mut calls: Int64 = 0
 let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> {
     calls = calls + 1
     l * r

@@ -7,7 +7,7 @@
 type C = Idx<4>
 type R = Idx<3>
 type Steps = Idx<5>
-function vbump(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
+function vbump(u: Array<Float64 like C>, n: Int64) -> Array<Float64 like C> = {
     let T2 = method_for(range<R, C>) <@> lambda(i, j) -> (Float64(i) + 1.0) * (Float64(j) + Float64(n)) |> compute
     let r1 = T2((1 : R))
     let mid = reduce(r1, (+))
@@ -15,10 +15,10 @@ function vbump(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
     let r2 = T2((2 : R))
     u + 0.1 * r0 + 0.01 * r2
 }
-let rec traj: Array<Float like Steps, C> =
+let rec traj: Array<Float64 like Steps, C> =
     match traj with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0])
     | prefix :: n -> prefix :: vbump(prefix(n - 1), n)
 let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))

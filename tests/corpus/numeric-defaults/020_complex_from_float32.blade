@@ -1,0 +1,17 @@
+// TEST: complex of two Float32 values is a Complex64
+// ============================================================================
+// The complex width comes from the components: two Float32 values build a
+// Complex64, two Float64 values a Complex128, and a literal component takes
+// the width of the other component.
+// ============================================================================
+let x: Float32 = 1.0
+let y: Float32 = 2.0
+let z = complex(x, y)
+let z64: Complex64 = z
+let a: Float64 = 1.0
+let w = complex(a, 0.5)
+let w128: Complex128 = w
+let re = real(z64)
+let im = imag(w128)
+// EXPECT: re = 1.0
+// EXPECT: im = 0.5

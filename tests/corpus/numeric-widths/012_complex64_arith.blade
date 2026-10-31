@@ -1,0 +1,49 @@
+// TEST: Complex64 Arith
+// ============================================================================
+// Complex64 arithmetic is float arithmetic in every lane: `+` `-` and the
+// mixed real overloads are componentwise float operations, `*` is
+// (ac - bd, ad + bc) with every product rounded, and `/` is Smith's
+// division -- Blade's own algorithms (blade_arith::c64_mul / c64_div), not
+// libgcc's __mulsc3 / __divsc3. Each part prints like a Float32.
+// `m = abs(z)` is the magnitude of a Complex64: a Float32.
+// ============================================================================
+let a: Float64 = 0.1
+let b: Float64 = 0.7
+let z = Complex64(complex(a, b))
+let w = Complex64(complex(b, 0.0 - a))
+let s = z + w
+let d = z - w
+let p = z * w
+let q = z / w
+let x: Float32 = 3.0
+let zx = z * x
+let xz = x / z
+let pw = z ^ 3
+let m = abs(z)
+let e = exp(z)
+let zs: Array<Complex64 like Idx<3>> = [Complex64(complex(1.5, -2.0)), Complex64(complex(0.1, 0.2)), Complex64(complex(-3.0, 0.5))]
+let zsum = reduce(zs, (+))
+let zprod = reduce(zs, (*))
+let ws: Array<Complex64 like Idx<3>> = [Complex64(complex(0.3, 0.9)), Complex64(complex(-1.7, 0.4)), Complex64(complex(2.2, -0.6))]
+let zquot = reduce(zs, lambda(p, r) -> p / r)
+let zdiv = method_for(zip(zs, ws)) <@> lambda(p, r) -> p / r |> compute
+// EXPECT: a = 0.1
+// EXPECT: b = 0.7
+// EXPECT: z = (0.1,0.7)
+// EXPECT: w = (0.7,-0.1)
+// EXPECT: s = (0.8,0.6)
+// EXPECT: d = (-0.6,0.8)
+// EXPECT: p = (0.14,0.48)
+// EXPECT: q = (0.0,1.0)
+// EXPECT: x = 3.0
+// EXPECT: zx = (0.3,2.1)
+// EXPECT: xz = (0.6,-4.2)
+// EXPECT: pw = (-0.146,-0.322)
+// EXPECT: e = (0.845281,0.711971)
+// EXPECT: zs = [(1.5,-2.0), (0.1,0.2), (-3.0,0.5)]
+// EXPECT: zsum = (-1.4,-1.3)
+// EXPECT: zprod = (-1.7,-0.025)
+// EXPECT: ws = [(0.3,0.9), (-1.7,0.4), (2.2,-0.6)]
+// EXPECT: zquot = (1.08108,3.51351)
+// EXPECT: zdiv = [(-1.5,-2.16667), (-0.0295082,-0.12459), (-1.32692,-0.134615)]
+// EXPECT: m = 0.707107

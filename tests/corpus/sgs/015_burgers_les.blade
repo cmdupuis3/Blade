@@ -35,7 +35,7 @@ type L = Idx<16>
 type Blk = Idx<9>
 type LT = Idx<81>
 
-let pi = 3.141592653589793
+let pi: Float64 = 3.141592653589793
 let hd = 2.0 * pi / 64.0
 let hl = 2.0 * pi / 16.0
 
@@ -49,16 +49,16 @@ let jma: Array<Int64 like L> = [15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
 let jppa: Array<Int64 like L> = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1]
 let jmma: Array<Int64 like L> = [14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
-let u0: Array<Float like XD> = [0.41266780745483916, 0.447677510598231, 0.46830600316099974, 0.4765561438702567, 0.4748523764520039, 0.46592115755171093, 0.452660553824885, 0.4380042663075381, 0.4247855444890299, 0.4156064446225211, 0.4127176671410404, 0.41791378517932154, 0.43244806654079837, 0.45697031859957027, 0.49149027948043295, 0.5353680744449058, 0.5873321925451609, 0.6455243564035266, 0.7075695992583589, 0.7706688691164143, 0.8317105884243723, 0.8873968436226417, 0.934379291497262, 0.9693994712188443, 0.9894280178840651, 0.9917972929038612, 0.9743221781811069, 0.9354042159950311, 0.8741148983355782, 0.790254694387101, 0.6843853229389262, 0.557833792556852, 0.41266780745483944, 0.25164322993911, 0.07812535912874319, -0.10401321063866739, -0.2905144882781752, -0.47687231610028424, -0.6584799122143186, -0.8307823020197528, -0.9894280178840649, -1.130414462102952, -1.2502215574640498, -1.3459287435173883, -1.4153109984817749, -1.4569103528648475, -1.4700802813260279, -1.455001378899488, -1.4126678074548393, -1.3448450969408678, -1.254000961548102, -1.1432118023480038, -1.0160484765982007, -0.8764456850740685, -0.728559933107829, -0.5766214355066295, -0.42478554448903033, -0.2769892754234306, -0.13681828785809746, -0.007389257656964632, 0.10874803360539786, 0.20968533987817617, 0.2942046789066689, 0.3617995118977306]
+let u0: Array<Float64 like XD> = [0.41266780745483916, 0.447677510598231, 0.46830600316099974, 0.4765561438702567, 0.4748523764520039, 0.46592115755171093, 0.452660553824885, 0.4380042663075381, 0.4247855444890299, 0.4156064446225211, 0.4127176671410404, 0.41791378517932154, 0.43244806654079837, 0.45697031859957027, 0.49149027948043295, 0.5353680744449058, 0.5873321925451609, 0.6455243564035266, 0.7075695992583589, 0.7706688691164143, 0.8317105884243723, 0.8873968436226417, 0.934379291497262, 0.9693994712188443, 0.9894280178840651, 0.9917972929038612, 0.9743221781811069, 0.9354042159950311, 0.8741148983355782, 0.790254694387101, 0.6843853229389262, 0.557833792556852, 0.41266780745483944, 0.25164322993911, 0.07812535912874319, -0.10401321063866739, -0.2905144882781752, -0.47687231610028424, -0.6584799122143186, -0.8307823020197528, -0.9894280178840649, -1.130414462102952, -1.2502215574640498, -1.3459287435173883, -1.4153109984817749, -1.4569103528648475, -1.4700802813260279, -1.455001378899488, -1.4126678074548393, -1.3448450969408678, -1.254000961548102, -1.1432118023480038, -1.0160484765982007, -0.8764456850740685, -0.728559933107829, -0.5766214355066295, -0.42478554448903033, -0.2769892754234306, -0.13681828785809746, -0.007389257656964632, 0.10874803360539786, 0.20968533987817617, 0.2942046789066689, 0.3617995118977306]
 
 // one explicit-Euler DNS step of viscous Burgers (advective form), periodic
-function burgers_step(u: Array<Float like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float) -> Array<Float like XD> =
+function burgers_step(u: Array<Float64 like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float64) -> Array<Float64 like XD> =
     (method_for(range<XD>) <@> lambda(i) ->
         u(i) + 0.01 * (0.05 * ((u(ip(i)) - 2.0 * u(i) + u(im(i))) / (h * h)) - u(i) * ((u(ip(i)) - u(im(i))) / (2.0 * h)))
     ) |> compute
 
 // ten DNS steps = one sampling block
-function dns10(u: Array<Float like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float) -> Array<Float like XD> = {
+function dns10(u: Array<Float64 like XD>, ip: Array<Int64 like XD>, im: Array<Int64 like XD>, h: Float64) -> Array<Float64 like XD> = {
     let u1 = burgers_step(u, ip, im, h)
     let u2 = burgers_step(u1, ip, im, h)
     let u3 = burgers_step(u2, ip, im, h)
@@ -72,13 +72,13 @@ function dns10(u: Array<Float like XD>, ip: Array<Int64 like XD>, im: Array<Int6
 }
 
 // W=4 box filter, 64 -> 16
-function filter16(f: Array<Float like XD>) -> Array<Float like L> =
+function filter16(f: Array<Float64 like XD>) -> Array<Float64 like L> =
     (method_for(range<L>) <@> lambda(j) ->
         (f(4 * j + 0) + f(4 * j + 1) + f(4 * j + 2) + f(4 * j + 3)) / 4.0
     ) |> compute
 
 // Smagorinsky-form shape g = -2 Delta^2 |S| S, S = d(ubar)/dx (central)
-function smag_g(ub: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float) -> Array<Float like L> =
+function smag_g(ub: Array<Float64 like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float64) -> Array<Float64 like L> =
     (method_for(range<L>) <@> lambda(j) -> {
         let sb = (ub(jp(j)) - ub(jm(j))) / (2.0 * h)
         let gv = -2.0 * h * h * abs(sb) * sb
@@ -87,7 +87,7 @@ function smag_g(ub: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int6
 
 // per-sample a-priori regression contribution [sum_j tau*g, sum_j g*g]:
 // tau = mean(u^2 | tile) - ubar^2 is the exact subgrid stress (a comoment)
-function contrib(f: Array<Float like XD>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float) -> Array<Float like Idx<2>> = {
+function contrib(f: Array<Float64 like XD>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, h: Float64) -> Array<Float64 like Idx<2>> = {
     let ub = filter16(f)
     let fsq = f * f
     let msq = filter16(fsq)
@@ -99,13 +99,13 @@ function contrib(f: Array<Float like XD>, jp: Array<Int64 like L>, jm: Array<Int
 
 // the ONE certified piece: the closure model term at a coarse cell, from
 // the two neighboring filtered-velocity samples
-function tau_model(up: Float, um: Float, h: Float, c: Float) where ml.galilean(up, um) -> Float = {
+function tau_model(up: Float64, um: Float64, h: Float64, c: Float64) where ml.galilean(up, um) -> Float64 = {
     let s = (up - um) / (2.0 * h)
     c * (-2.0 * h * h * abs(s) * s)
 }
 
 // one coarse LES step (advective form + closure-stress divergence)
-function les_step(v: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, jpp: Array<Int64 like L>, jmm: Array<Int64 like L>, h: Float, c: Float) -> Array<Float like L> =
+function les_step(v: Array<Float64 like L>, jp: Array<Int64 like L>, jm: Array<Int64 like L>, jpp: Array<Int64 like L>, jmm: Array<Int64 like L>, h: Float64, c: Float64) -> Array<Float64 like L> =
     (method_for(range<L>) <@> lambda(j) -> {
         let tp = tau_model(v(jpp(j)), v(j), h, c)
         let tm = tau_model(v(j), v(jmm(j)), h, c)
@@ -116,7 +116,7 @@ function les_step(v: Array<Float like L>, jp: Array<Int64 like L>, jm: Array<Int
 // a-priori samples are blk(0..7) (t = 0, 10, ..., 70) and the final field is
 // blk(8). C = <tau g>/<g g> folds the 8 per-sample contributions. ----
 let c_learned = {
-    let rec blk: Array<Float like Blk, XD> =
+    let rec blk: Array<Float64 like Blk, XD> =
         match blk with
         | zero -> zero
         | zero :: s -> zero :: u0
@@ -144,7 +144,7 @@ let c_learned = {
 
 // filtered final DNS field, the a-posteriori reference
 let dns_bar = {
-    let rec blk: Array<Float like Blk, XD> =
+    let rec blk: Array<Float64 like Blk, XD> =
         match blk with
         | zero -> zero
         | zero :: s -> zero :: u0
@@ -158,7 +158,7 @@ let dns_bar = {
 // lm with the learned closure, ln with none (c = 0) ----
 let lm = {
     let lm0 = filter16(u0)
-    let rec lm_traj: Array<Float like LT, L> =
+    let rec lm_traj: Array<Float64 like LT, L> =
         match lm_traj with
         | zero -> zero
         | zero :: s -> zero :: lm0
@@ -169,7 +169,7 @@ let lm = {
 
 let ln = {
     let ln0 = filter16(u0)
-    let rec ln_traj: Array<Float like LT, L> =
+    let rec ln_traj: Array<Float64 like LT, L> =
         match ln_traj with
         | zero -> zero
         | zero :: s -> zero :: ln0
@@ -188,5 +188,5 @@ let err_nomodel = {
     prodsum(d, d)
 }
 // EXPECT: err_nomodel = 2.001755107285999
-let closure_improves_les = if err_model < err_nomodel then 1.0 else 0.0
+let closure_improves_les: Float64 = if err_model < err_nomodel then 1.0 else 0.0
 // EXPECT: closure_improves_les = 1.0

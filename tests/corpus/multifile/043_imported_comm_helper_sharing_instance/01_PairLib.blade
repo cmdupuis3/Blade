@@ -6,6 +6,6 @@
 // PairLib's binding wherever the instance is placed.
 module PairLib
 
-let scale = 2.0
+let scale: Float64 = 2.0
 function pair(x: T^1, y: T^1) where comm(x, y) =
     method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b * scale |> compute

@@ -1,0 +1,4 @@
+// TEST: an explicit Float64 array cast cannot adapt to a Float32 parameter (rejects)
+function narrow(xs: Array<Float32 like Idx<2>>) = xs(0)
+let x = narrow(Float64([1.0, 2.0]))
+// ERROR: BL3001

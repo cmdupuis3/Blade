@@ -1,8 +1,8 @@
 // TEST: Foreign Key Co-iteration
 // Zip temps and region for element-wise pairing, use region values to look up weights
-let temps = [20.0, 25.0, 30.0]
-let region = [0, 1, 2]
-let weights = [1.0, 2.0, 3.0]
+let temps = Float64([20.0, 25.0, 30.0])
+let region = Int64([0, 1, 2])
+let weights = Float64([1.0, 2.0, 3.0])
 
 // Co-iterate: each (temp, region) pair, look up weight by region index
 let L = method_for(zip(temps, region))

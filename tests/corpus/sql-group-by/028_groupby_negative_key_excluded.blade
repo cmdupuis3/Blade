@@ -7,8 +7,8 @@
 // The drop happens in group_keys' offsets construction (every pass that walks
 // the key array skips it), so a dropped row contributes to no group's offsets
 // and group_by never gathers it.
-let keys = [-1, 0, 1, 0]
-let vals = [0.5, 1.5, 2.5, 3.5]
+let keys = Int64([-1, 0, 1, 0])
+let vals = Float64([0.5, 1.5, 2.5, 3.5])
 let gk = group_keys(keys)
 let g = group_by(vals, gk)
 // Row 0 is dropped. Two groups remain, in first-occurrence order:
@@ -36,7 +36,7 @@ let psizes = method_for(pg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> e
 // STRING keys are unaffected: there is no negative string, so no guard is
 // emitted and grouping is exactly as before.
 let names = ["a", "b", "a"]
-let nvals = [1.0, 2.0, 3.0]
+let nvals = Float64([1.0, 2.0, 3.0])
 let ngk = group_keys(names)
 let ng = group_by(nvals, ngk)
 let nsums = method_for(ng) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
@@ -45,7 +45,7 @@ let nsums = method_for(ng) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> re
 // SELECTION BY KEY FUNCTION, the motivating idiom: a float key computed by
 // floor, with the out-of-range prefix keyed negative. Segment width 2.0, so
 // t < 0 selects itself out and the rest partition by floor(t / 2).
-let t = [-3.0, 0.5, 1.5, 2.5, 4.5, -1.0]
+let t = Float64([-3.0, 0.5, 1.5, 2.5, 4.5, -1.0])
 let seg = (t <@> lambda(x) -> floor(x / 2.0)) |> compute
 // seg = [-2, 0, 0, 1, 2, -1]: rows 0 and 5 drop out
 let sgk = group_keys(seg)

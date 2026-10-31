@@ -23,7 +23,7 @@ let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range
 let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
 let gs = method_for(g0) <@> lambda(v: Float64) -> v + 1.0
 let tsym = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> gs(i, j), (+), 0.0), (+), 0.0)
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let gw = method_for(g0) <@> lambda(v: Float64) -> {
     G(0) = G(0) + 1.0
     G(0)

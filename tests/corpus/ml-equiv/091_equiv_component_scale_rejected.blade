@@ -30,7 +30,7 @@ struct Gains {
 
 let G = Gains { lo = 2.0, hi = 3.0 }
 
-function bad(px: Float, py: Float, pz: Float) where ml.equiv(O3) -> Array<Float like Idx<2>> = {
+function bad(px: Float64, py: Float64, pz: Float64) where ml.equiv(O3) -> Array<Float64 like Idx<2>> = {
     let v = ml.y_to(1, px, py, pz)
     ml.norms(S, v * G.hi)
 }

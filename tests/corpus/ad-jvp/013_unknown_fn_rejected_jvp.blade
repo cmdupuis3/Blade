@@ -6,7 +6,7 @@
 // ERROR-CONTAINS: 'nonexistent' is not a top-level function
 import ad as ad
 
-function f(x: Float) -> Float = x * x
+function f(x: Float64) -> Float64 = x * x
 
 let (fv, dfv) = ad.jvp(nonexistent)(2.0, 1.0)
 fv

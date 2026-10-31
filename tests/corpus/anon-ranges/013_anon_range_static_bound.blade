@@ -7,11 +7,11 @@
 // `reduce(0..N, (+))` was refused as statically empty (BL3007). A static
 // START folds too: `L..H` carries its literal extent and offset, where it
 // used to lower to `H - L` over the names (`extents(L..H)` refused BL7004).
-let static N = 5
-let static L = 2
+let static N: Int64 = 5
+let static L: Int64 = 2
 let static H = L + 4
-let x0 = 1.5
-let dx = 0.25
+let x0: Float64 = 1.5
+let dx: Float64 = 0.25
 let axis = x0 + dx * Float64(0..N)
 let casted = Float64(0..N)
 let sizes = [extents(casted), extents(0..N), extents(L..H)]

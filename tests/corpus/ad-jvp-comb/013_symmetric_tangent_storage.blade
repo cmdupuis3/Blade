@@ -14,7 +14,7 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a, a) <@> lambda(x, y) where comm(x, y) -> x * y + x + y |> compute
     m(0, 2) + m(2, 0) + m(1, 1)
 }

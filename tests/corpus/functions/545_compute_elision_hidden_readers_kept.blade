@@ -16,7 +16,7 @@ function extent_of_x(a: T^1) -> Int64 = {
     let s = reduce(x, (+), 0)
     s + reduce(y, (+), 0)
 }
-let t = seeded_by_x([1.0, 2.0, 3.0])
+let t = seeded_by_x(Float64([1.0, 2.0, 3.0]))
 let e = extent_of_x([1, 2, 3])
 // EXPECT: t = 14.0
 // EXPECT: e = 15

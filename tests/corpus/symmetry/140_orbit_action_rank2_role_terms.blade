@@ -18,7 +18,7 @@
 // (1, 0): the packed READ is invariant, the cell TERM is not -- so own_2(1) is
 // 2 * 5 + 4 * 5 = 30, where one weighted term reused at both endpoints would
 // give 6 + 20 = 26.
-let static p = 13
+let static p: Int64 = 13
 type Var = Idx<p>
 type Obs = Idx<3>
 type Two = Idx<2>
@@ -28,7 +28,7 @@ let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + 
 let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute
 let v = method_for(range<Var>) <@> lambda(i) -> Float64((i * 5) % 7) * 0.25 - 0.5 |> compute
 let y = method_for(range<Var>) <@> lambda(i) -> Float64((i * 3) % 5) * 0.5 + 0.125 |> compute
-let c = 0.375
+let c: Float64 = 0.375
 let a0 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j), (+), -0.0) |> compute
 let a1 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * v(j), radd, 0.75) |> compute
 let a2 = method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * (v(j) - y(i)), rhalf, -1.25) |> compute

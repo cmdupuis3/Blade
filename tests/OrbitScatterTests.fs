@@ -315,9 +315,9 @@ let runOrbitScatterTests () : BlockResult =
     let reproSrc =
         "type One = Idx<1>\ntype Two = Idx<2>\n"
         + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
-        + "let v1 = method_for(range<One>) <@> lambda(i) -> 1.0 + 7.450580596923828125e-9 |> compute\n"
+        + "let v1 = method_for(range<One>) <@> lambda(i) -> Float64(1.0) + Float64(7.450580596923828125e-9) |> compute\n"
         + "let g1 = method_for(v1, v1) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> if a > b then a else b |> compute\n"
-        + "let v2 = method_for(range<Two>) <@> lambda(i) -> 1.0 + 7.450580596923828125e-9 |> compute\n"
+        + "let v2 = method_for(range<Two>) <@> lambda(i) -> Float64(1.0) + Float64(7.450580596923828125e-9) |> compute\n"
         + "let g2 = method_for(v2, v2) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> if a > b then a else b |> compute\n"
         + "let a1 = reduce(method_for(range<One>) <@> lambda(i) -> reduce(method_for(range<One>) <@> lambda(j) -> g1(i, j) * g1(i, j), radd, -1.0 - 1.4901161193847656e-8), radd, 0.0)\n"
         + "let b1 = reduce(method_for(range<One>) <@> lambda(i) -> reduce(method_for(range<One>) <@> lambda(j) -> g1(i, j) * g1(j, i), radd, -1.0 - 1.4901161193847656e-8), radd, 0.0)\n"
@@ -1094,7 +1094,7 @@ let runOrbitScatterTests () : BlockResult =
         // -0.0 terms fold to -0.0 in the DEFAULT build as under REPRO (the base
         // +0.0 seed gave +0.0, base 94487a90), and all nine writes happen.
         let wmSrc =
-            "type Ix = Idx<9>\nlet mut G = [0.0]\n"
+            "type Ix = Idx<9>\nlet mut G = Float64([0.0])\n"
             + "let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {\n    G(0) = G(0) + 1.0\n    let r = -0.0 * G(0)\n    r\n}, (+))\n"
             + "let writes = G(0)\n"
         for reproB in [ false; true ] do
@@ -1113,7 +1113,7 @@ let runOrbitScatterTests () : BlockResult =
             + "function add(a: Float64, b: Float64) where comm(a, b), omp -> Float64 = a + b\n"
             + "function stored() where repro -> Float64 = reduce(v, add, 0.0)\n"
             + "function deferred() where repro -> Float64 = reduce(method_for(v) <@> lambda(x) -> x * 1.0, add, 0.0)\n"
-            + "function joined() where repro -> Float64 = {\n    let a, b = object_for(<&!>) <@> (reduce(v, add, 0.0), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))\n    a + b\n}\n"
+            + "function joined() where repro -> Float64 = {\n    let a, b = object_for(<&!>) <@> (reduce(v, add, Float64(0.0)), reduce(method_for(v) <@> lambda(x) -> x * 1.0, (+)))\n    a + b\n}\n"
             + "let s = stored()\nlet d = deferred()\nlet j = joined()\nlet lics = reduce(v, add, 0.0)\n"
         let nkRoute (lane: string) (text: string) =
             if lane <> "cpp" then
@@ -1322,9 +1322,9 @@ let runOrbitScatterTests () : BlockResult =
         add 13 "g13" "(+)" "-0.0" "-0.0 * abs(g13(i, j)) * abs(v13(j))" "if g13(j, i) > 1.0e300 then 0.0 else -0.0 * abs(g13(i, j)) * abs(v13(j))"
         // D/5's mixed-nest row: S = ones, V = [1e16, -1e16, 1]
         sb.Append("type Three = Idx<3>\n") |> ignore
-        sb.Append("let ones = method_for(range<Three>) <@> lambda(i) -> 1.0 |> compute\n") |> ignore
+        sb.Append("let ones = method_for(range<Three>) <@> lambda(i) -> Float64(1.0) |> compute\n") |> ignore
         sb.Append("let s1 = method_for(ones, ones) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a * b |> compute\n") |> ignore
-        sb.Append("let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then 1.0e16 else if i == 1 then -1.0e16 else 1.0 |> compute\n") |> ignore
+        sb.Append("let vmn = method_for(range<Three>) <@> lambda(i) -> if i == 0 then Float64(1.0e16) else if i == 1 then -Float64(1.0e16) else Float64(1.0) |> compute\n") |> ignore
         sb.Append("let amn = method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)) |> compute\n") |> ignore
         sb.Append("let wmn = reduce(method_for(range<Three>) <@> lambda(i) -> reduce(method_for(range<Three>) <@> lambda(j) -> s1(i, j) * vmn(j), (+)), radd, 0.0)\n") |> ignore
         // THE SEEDLESS all -0.0 witness (the G74 record's, Codex diff review of

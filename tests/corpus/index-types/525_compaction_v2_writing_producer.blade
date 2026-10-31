@@ -8,7 +8,7 @@
 // positions still apply in every mode. Every value is the as-written
 // program's: the kernel runs once per cell.
 type Ix = Idx<13>
-let mut calls = 0
+let mut calls: Int64 = 0
 let x = method_for(range<Ix>) <@> lambda(i) -> {
     calls = calls + 1
     Float64(Int64(i) % 5)

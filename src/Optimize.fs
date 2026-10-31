@@ -2530,7 +2530,8 @@ type HotRowPlan = {
     /// the nest emitter when it actually placed the epilogue (a dispatched,
     /// flat, sliced or collapse-pragma nest never does), read by the
     /// consumer's emission to choose between the row-sum fold and the
-    /// two-pass form. Lives on the plan so it resets with the table.
+    /// two-pass form. Cleared at each producer emission and after consumption,
+    /// so reused let ids in shape specializations cannot reuse a stale buffer.
     EmittedCpp: string option ref
 }
 
@@ -10658,8 +10659,14 @@ let private recordTransposeNF (subject: string) (outcome: Blade.Effects.Decision
 /// forms (a deferred map is not stored; reading it re-runs its kernel on
 /// current inputs) and minus calls (a callee may hand back storage a module
 /// binding owns). None = not proved fresh.
-let private freshRootForm (v: IRExpr) : string option =
+let rec private freshRootForm (v: IRExpr) : string option =
     match v with
+    // Literal operands of a forced map are hoisted into a let prelude.
+    // Its result still owns the fresh pool allocated by the final form:
+    // earlier bindings cannot name that later allocation. Follow only the
+    // result, retaining the refusals for returned variables, views and calls.
+    // aliasWriteClosure separately audits the entire prelude for writes.
+    | IRLet (_, _, body) -> freshRootForm body
     | IRApplyCombinator _ | IRComposeApply _ | IRApp _ -> None
     | IRArrayLit _ -> Some "an array literal"
     | IRCompute _ when isFreshPoolFormWith (fun _ -> false) v -> Some "a `|> compute`"

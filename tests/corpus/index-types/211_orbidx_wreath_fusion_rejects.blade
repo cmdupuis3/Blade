@@ -10,7 +10,7 @@
 // as BL9001 "internal compiler error, please report it" -- the wrong story for
 // a language limitation. The front-end gate makes it BL4003; the buildSymmVec
 // failwith stays as the backstop for an internal producer.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let L = method_for(S, S)

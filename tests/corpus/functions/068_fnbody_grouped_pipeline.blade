@@ -33,17 +33,17 @@ where omp(st: 1) = {
     (f <@> lambda(x) -> x * prodsum(a, b) + z) |> compute
 }
 function famG(ts: T^1, s: U^1, f: V^1, cut: T) = {
-    let keys = (ts <@> lambda(t) -> if t < cut then 0.0 else 1.0) |> compute
+    let keys = (ts <@> lambda(t) -> if t < cut then Float64(0.0) else Float64(1.0)) |> compute
     let gk = group_keys(keys)
     let gt = group_by(ts, gk)
     let gs = group_by(s, gk)
     let grid = method_for(zip(gt, gs)) <@> lambda(tr: T^1, vr: U^1) -> {
-        let sw = taperG((tr, vr), 0.0, 5.0)
-        specG((sw, tr), f, 0.0)
+        let sw = taperG((tr, vr), Float64(0.0), Float64(5.0))
+        specG((sw, tr), f, Float64(0.0))
     } |> compute
     transpose(grid, [0, 1])
 }
-let tg = famG(tms, vals, fs, 3.0)
+let tg = famG(tms, vals, fs, Float64(3.0))
 // EXPECT: tg = [[6.26099033699941, 37.6180807591243], [12.5219806739988, 75.2361615182487], [18.7829710109982, 112.854242277373], [25.0439613479976, 150.472323036497]]
 
 function sq(z: Float64) = z * z

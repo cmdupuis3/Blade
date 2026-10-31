@@ -1,14 +1,14 @@
 // TEST: Static Match
 // Static function with match expression
-static function dim(l) = match l with
-    | 0 -> 1
-    | 1 -> 3
-    | 2 -> 5
+static function dim(l: Int64) = match l with
+    | 0 -> Int64(1)
+    | 1 -> Int64(3)
+    | 2 -> Int64(5)
     | _ -> 2 * l + 1
-let static d0 = dim(0)
-let static d1 = dim(1)
-let static d2 = dim(2)
-let static d3 = dim(3)
+let static d0 = dim(Int64(0))
+let static d1 = dim(Int64(1))
+let static d2 = dim(Int64(2))
+let static d3 = dim(Int64(3))
 let a = d0
 let b = d1
 let c = d2

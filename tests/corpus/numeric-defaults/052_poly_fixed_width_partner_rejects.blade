@@ -1,0 +1,9 @@
+// TEST: Poly elements obey fixed numeric partner obligations (rejects)
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+function centered_product(a: Poly<T^1>) where comm(a) -> T^1 = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> let head :: tail = a; (head - mean(head)) * centered_product(tail)
+}
+let result = centered_product([1.0, 2.0, 3.0], [2.0, 4.0, 6.0])
+// ERROR: BL3019

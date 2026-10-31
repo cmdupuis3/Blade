@@ -6,8 +6,8 @@
 // ============================================================================
 let inc = lambda(x) -> x + 1
 let incf = lambda(x) -> x + 1.0
-let a: Int64 = inc(6) / 4
-let b: Float64 = incf(2.5)
+let a: Int64 = inc(Int64(6)) / 4
+let b: Float64 = incf(Float64(2.5))
 // EXPECT: a = 1
 // EXPECT: b = 3.5
 
@@ -16,7 +16,7 @@ let b: Float64 = incf(2.5)
 // nothing and the parameter fell to the Float64 default (`f(6) / 4` = 1.75).
 let f = lambda(x) -> x + 1
 let h = f
-let c: Int64 = f(6) / 4
+let c: Int64 = f(Int64(6)) / 4
 let d: Int64 = h(10)
 // EXPECT: c = 1
 // EXPECT: d = 11
@@ -25,7 +25,7 @@ let d: Int64 = h(10)
 // explicitly (an integer literal never means a float, formalism 2.4).
 let k = lambda(x) -> x + x
 let k2 = k
-let e: Float64 = k(1.25)
+let e: Float64 = k(Float64(1.25))
 let g: Float64 = k(Float64(3))
 // EXPECT: e = 2.5
 // EXPECT: g = 6.0

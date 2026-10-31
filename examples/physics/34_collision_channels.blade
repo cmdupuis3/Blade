@@ -60,7 +60,7 @@
 // ============================================================================
 import math as m
 
-let MVAL = [0.92, 1.0, 1.08]
+let MVAL = Float64([0.92, 1.0, 1.08])
 type Chan = Array<Float64 like Idx<12>, Idx<12>>
 
 // one collision's transfer factor: the front leaves mass i into mass j
@@ -131,7 +131,7 @@ let erho2 = reduce(RHO * RHO, (+), axes = 2) / 9.0
 let lam1 = c20p1 / c19p1
 let lam2 = c20p2 / c19p2
 let itm = lam2 / (lam1 * lam1)
-let grid20 = 3486784401.0
+let grid20: Float64 = 3486784401.0
 let rv6 = c6p2 / (c6p1 * c6p1) - 1.0
 let rv20 = c20p2 / (c20p1 * c20p1) - 1.0
 let amgm_tax = (1.0 - lam1) * 2.0
@@ -139,8 +139,8 @@ let amgm_tax = (1.0 - lam1) * 2.0
 // ---- part B: the closure dial on a rational (inference) channel ----
 // one calibration rung at v = 0.4: increment X = ln((2-v-eta)/(v+eta)) -
 // ln((2-v)/v), noise = exact 5-point binomial (nodes +-2h, +-h, 0; h = 2e-3)
-let NW = [1.0, 4.0, 6.0, 4.0, 1.0]
-let NE = [-0.004, -0.002, 0.0, 0.002, 0.004]
+let NW = Float64([1.0, 4.0, 6.0, 4.0, 1.0])
+let NE = Float64([-0.004, -0.002, 0.0, 0.002, 0.004])
 // the increment at each noise node, exact and through each truncated jet,
 // lifted over the five nodes; moments are NW-weighted sums (NW sums to 16)
 let XE = log((1.6 - NE) / (0.4 + NE)) - log(4.0)

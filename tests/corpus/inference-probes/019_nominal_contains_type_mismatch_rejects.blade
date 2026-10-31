@@ -4,6 +4,6 @@
 // Passing a Float64 to an Int64-array contains should reject in typecheck,
 // not silently coerce or pick a default. The unify in the ExprContains
 // rule (TypeCheck.fs) is the rejection point.
-let ints = [1, 2, 3]
+let ints = Int64([1, 2, 3])
 let bad = contains(ints, 5.0)
 // EXPECT: typecheck failure — Int64 vs Float64 in contains value

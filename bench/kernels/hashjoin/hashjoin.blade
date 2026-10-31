@@ -17,7 +17,7 @@
 
 type L = Idx<2003>   // SIZE n
 type R = Idx<1009>   // SIZE m
-let static nkeys = 401   // SIZE k
+let static nkeys: Int64 = 401   // SIZE k
 
 /// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
 /// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).

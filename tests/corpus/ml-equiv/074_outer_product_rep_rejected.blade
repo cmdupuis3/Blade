@@ -10,5 +10,5 @@ import ml as ml
 // its own terms rather than lean on the type checker. BL4008.
 // ============================================================================
 let static S = [(0, 0, 1), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>, w: Array<Float like Idx<4>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bad(x: Array<Float64 like IrrepsIdx<S>>, w: Array<Float64 like Idx<4>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
   x [*] w

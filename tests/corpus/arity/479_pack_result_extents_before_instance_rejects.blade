@@ -4,11 +4,11 @@
 // rank-1 array before `outer(x, y)`'s instance (rank 2) exists.
 function outer(a: Poly<T^1>) = {
     match arity(a) with
-    | 0 -> 1.0
+    | 0 -> Float64(1.0)
     | _ -> {
         let head :: tail = a
         head [*] outer(tail)
     }
 }
-let o2 = outer([1.0, 2.0], [3.0, 4.0, 5.0])
+let o2 = outer(Float64([1.0, 2.0]), Float64([3.0, 4.0, 5.0]))
 let e2 = extents(o2)

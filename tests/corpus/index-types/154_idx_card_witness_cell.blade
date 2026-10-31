@@ -54,8 +54,8 @@
 // first-failing-somewhere-interesting.
 // ============================================================================
 static struct Witness {
-    p: Int<min=0, max=4>,
-    q: Int<min=0, max=4>
+    p: Int32<min=0, max=4>,
+    q: Int32<min=0, max=4>
 } where p + q == not_a_static
 
 let static CARD = idx_card(Witness)

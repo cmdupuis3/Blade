@@ -11,7 +11,7 @@ function mm(p: Array<Float64 like I, I>, q: Array<Float64 like I, I>) -> Array<F
 }
 
 function expm6(a: Array<Float64 like I, I>) -> Array<Float64 like I, I> = {
-    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let id = Float64([[1.0, 0.0], [0.0, 1.0]])
     let b = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> a(i, j) / 8.0 |> compute
     let b2 = mm(b, b)
     let b3 = mm(b2, b)
@@ -28,7 +28,7 @@ function expm6(a: Array<Float64 like I, I>) -> Array<Float64 like I, I> = {
 // scalar readout for grad: 2 E(0, 1) + E(1, 1)
 function loss(a: Array<Float64 like I, I>) -> Float64 = {
     let e = expm6(a)
-    2.0 * e(0, 1) + e(1, 1)
+    2.0 * e(Int64(0), Int64(1)) + e(1, 1)
 }
 
 let A: Array<Float64 like I, I> = [[0.0, 0.5], [-0.5, 0.0]]
@@ -45,7 +45,7 @@ let alg_ok = abs(2.0 * E(0, 1) + E(1, 1) - 1.8364336391069036) < 0.0000000000000
 
 let mut dA: Array<Float64 like I, I> = [[0.0, 0.0], [0.0, 0.0]]
 let lv = ad.grad(loss)(A, dA)
-let h = 0.000001
+let h: Float64 = 0.000001
 let E10: Array<Float64 like I, I> = [[0.0, 0.0], [1.0, 0.0]]
 let fd10 = (loss(A + h * E10) - loss(A - h * E10)) / (2.0 * h)
 let grad_fd_ok = abs(fd10 - dA(1, 0)) < 0.000001 * (abs(dA(1, 0)) + 1.0)

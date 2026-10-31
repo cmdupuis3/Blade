@@ -1779,3 +1779,8 @@ let sanitizeFileName (name: string) : string =
         .Replace("\"", "")
         .Replace("*", "_")
         .Replace("?", "_")
+    // Native Windows toolchains may encode an output path through the
+    // active code page and create a replacement-character filename. Keep
+    // diagnostic test names intact, but make their artifact stems ASCII;
+    // encode each non-ASCII code unit so distinct names stay distinguishable.
+    |> String.collect (fun c -> if int c > 127 then sprintf "_u%04X_" (int c) else string c)

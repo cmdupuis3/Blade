@@ -5,8 +5,8 @@
 // block-bodied named function, which fusion declines to inline.
 // The check has to key off the COMPUTATION rather than the deduced output
 // type; that is what 166's comment explains, and it is what this pins.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
-function even_blocky(v: Float) -> Float = { v * v }
+function even_blocky(v: Float64) -> Float64 = { v * v }
 let out = even_blocky <$> (method_for(C) <@> lambda(w) -> w) |> compute

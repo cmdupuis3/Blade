@@ -18,10 +18,10 @@
 // (glibc/libSystem complex trig are different algorithms) and score
 // SKIP-UNSUPPORTED. The regime-by-regime battery is intrinsics/022.
 // ============================================================================
-let z = complex(0.0, 0.5)
+let z: Complex128 = complex(0.0, 0.5)
 let za = atan(z)
 
-let w = complex(0.5, 0.0)
+let w: Complex128 = complex(0.5, 0.0)
 let ws = asin(w)
 let wc = acos(w)
 

@@ -9,7 +9,7 @@
 // +0.0 -- while every write happens, in order. QUOTED pins: a numeric -0.0
 // pin accepts either zero; the reciprocal pins the sign.
 type Ix = Idx<9>
-let mut G = [0.0]
+let mut G = Float64([0.0])
 let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
     G(0) = G(0) + 1.0
     let r = -0.0 * G(0)

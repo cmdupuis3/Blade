@@ -450,42 +450,90 @@ let cameraCsvText (values: float list) : string =
 /// picture would look perfectly plausible, which is the worst way to be wrong.
 let cameraErasedSource (source: string) (names: string list) (csvPath: string)
                        : Result<string, string> =
-    if List.isEmpty names then Error "no camera bindings were named" else
-    // Forward slashes: this path lands inside a Blade string literal, where a
-    // Windows separator would read as an escape.
-    let path = csvPath.Replace("\\", "/")
-    let located =
-        names |> List.mapi (fun slot n ->
-            let re =
-                Text.RegularExpressions.Regex(
-                    "(?m)^[ \t]*let[ \t]+"
-                    + Text.RegularExpressions.Regex.Escape n + "[ \t]*=.*$")
-            let ms = re.Matches source
-            if ms.Count = 1 then Ok (slot, n, ms.[0])
-            else
-                Error (sprintf
-                        "camera binding %s is bound %d times at top level (expected exactly once)"
-                        n ms.Count))
-    match located |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
-    | Some e -> Error e
-    | None ->
-        let hits = located |> List.choose (function Ok x -> Some x | Error _ -> None)
-        // Rewrite from the LAST binding backwards, so the earlier offsets this
-        // loop has yet to use are not disturbed by its own edits.
-        let mutable out = source
-        for (slot, n, m) in hits |> List.sortByDescending (fun (_, _, m) -> m.Index) do
-            out <- out.Substring(0, m.Index)
-                   + sprintf "let %s = __blade_cam_slots(0, %d)" n slot
-                   + out.Substring(m.Index + m.Length)
-        // The reader goes immediately above the EARLIEST camera binding: that
-        // precedes every use of the camera without moving anything else in a
-        // session whose declaration order belongs to the user.
-        let firstIdx = hits |> List.map (fun (_, _, m) -> m.Index) |> List.min
-        let preamble =
-            sprintf "let __blade_cam_store = __blade_cam_csv.load(\"%s\")\n" path
-            + "let __blade_cam_slots = __blade_cam_store.vars.data |> __blade_cam_csv.read\n"
-        out <- out.Substring(0, firstIdx) + preamble + out.Substring firstIdx
-        Ok ("import csv as __blade_cam_csv\n\n" + out)
+    if List.isEmpty names then Error "no camera bindings were named"
+    elif (names |> List.distinct |> List.length) <> names.Length then
+        Error "a camera binding was requested more than once; each CSV slot must name a distinct binding"
+    else
+    match Blade.Parser.parseProgram source with
+    | Error e -> Error ($"cannot locate camera bindings: {e.Message}")
+    | Ok program ->
+        // Count actual top-level declarations, including annotated bindings.
+        // A textual '=' search cannot distinguish an initializer from a bound
+        // inside a type annotation. Replacing only the parsed RHS also keeps
+        // the annotation, comments and the rest of the source intact.
+        let rec bindingName (p: Blade.Ast.Pattern) =
+            match p.Kind with
+            | Blade.Ast.PatVar n -> Some n
+            | Blade.Ast.PatTyped (inner, _) -> bindingName inner
+            | _ -> None
+        let rec boundNames (p: Blade.Ast.Pattern) =
+            match p.Kind with
+            | Blade.Ast.PatVar n -> [n]
+            | Blade.Ast.PatTuple ps -> ps |> List.collect boundNames
+            | Blade.Ast.PatCons (a, b) -> boundNames a @ boundNames b
+            | Blade.Ast.PatStruct (_, fields) -> fields |> List.collect (snd >> boundNames)
+            | Blade.Ast.PatVariant (_, Some inner)
+            | Blade.Ast.PatGuarded (inner, _)
+            | Blade.Ast.PatTyped (inner, _) -> boundNames inner
+            | _ -> []
+        let bindings =
+            program.Modules |> List.collect (_.Decls)
+            |> List.collect (fun d ->
+                match d.Value with
+                | Blade.Ast.DeclLet b | Blade.Ast.DeclStatic b ->
+                    let simple =
+                        match d.Value with
+                        | Blade.Ast.DeclLet _ when b.Mutability = Blade.Ast.BindLet -> bindingName b.Pattern
+                        | _ -> None
+                    boundNames b.Pattern |> List.map (fun n ->
+                        n, d.Span, (if simple = Some n then Some b.Value.Span else None))
+                | _ -> [])
+        let lineStarts =
+            [| yield 0
+               for i = 0 to source.Length - 1 do
+                   if source.[i] = '\n' then yield i + 1 |]
+        let offset line col =
+            if line > 0 && line <= lineStarts.Length && col > 0 then
+                let i = lineStarts.[line - 1] + col - 1
+                if i <= source.Length then Some i else None
+            else None
+        let located =
+            names |> List.mapi (fun slot n ->
+                let found = bindings |> List.filter (fun (name, _, _) -> name = n)
+                match found with
+                | [(_, decl, Some value)] ->
+                    match offset decl.StartLine decl.StartCol,
+                          offset value.StartLine value.StartCol,
+                          offset value.EndLine value.EndCol with
+                    | Some first, Some a, Some b when first <= a && a < b -> Ok (slot, first, a, b)
+                    | _ -> Error ($"cannot locate the value of camera binding {n}")
+                | [(_, _, None)] -> Error ($"camera binding {n} is not a simple runtime let binding")
+                | _ ->
+                    Error (sprintf
+                            "camera binding %s is bound %d times at top level (expected exactly once)"
+                            n found.Length))
+        match located |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
+        | Some e -> Error e
+        | None ->
+            let hits = located |> List.choose (function Ok x -> Some x | Error _ -> None)
+            // Rewrite backwards so the original offsets remain valid.
+            let mutable out = source
+            for (slot, _, a, b) in hits |> List.sortByDescending (fun (_, _, a, _) -> a) do
+                out <- out.Substring(0, a)
+                       + sprintf "__blade_cam_slots(0, %d)" slot
+                       + out.Substring(b)
+            // The reader precedes the earliest camera declaration and its uses.
+            let firstDecl = hits |> List.map (fun (_, first, _, _) -> first) |> List.min
+            let lineStart = if firstDecl = 0 then 0 else source.LastIndexOf('\n', firstDecl - 1) + 1
+            let firstIdx =
+                if String.IsNullOrWhiteSpace(source.Substring(lineStart, firstDecl - lineStart)) then lineStart
+                else firstDecl
+            let path = csvPath.Replace("\\", "/")
+            let preamble =
+                sprintf "let __blade_cam_store = __blade_cam_csv.load(\"%s\")\n" path
+                + "let __blade_cam_slots = __blade_cam_store.vars.data |> __blade_cam_csv.read\n"
+            out <- out.Substring(0, firstIdx) + preamble + out.Substring firstIdx
+            Ok ("import csv as __blade_cam_csv\n\n" + out)
 
 /// Which frames of a render to actually send, as indices into this run's
 /// `digests`, given the digests of what the session's LAST render showed.

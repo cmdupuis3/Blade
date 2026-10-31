@@ -9,7 +9,7 @@ import ml as ml
 // ============================================================================
 let static SIN = [(0, 0, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 1)]
-let zf: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, [3.0], [2.0])
+let zf: Array<Float64 like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, Float64([3.0]), Float64([2.0]))
 // EXPECT: zf = [6.0, 0.0, 0.0, 0.0]
 
 let static DIN = [(0, 0, 1), (0, 0, 1)]
@@ -17,5 +17,5 @@ let static DOUT = [(0, 0, 1)]
 let static DWD = ml.hom_dim(DIN, DOUT)
 let dwd = DWD
 // EXPECT: dwd = 2
-let dup: Array<Float like IrrepsIdx<DOUT>> = ml.derive_linear(DIN, DOUT, [2.0, 0.5], [3.0, 4.0])
+let dup: Array<Float64 like IrrepsIdx<DOUT>> = ml.derive_linear(DIN, DOUT, Float64([2.0, 0.5]), Float64([3.0, 4.0]))
 // EXPECT: dup = [8.0]

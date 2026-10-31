@@ -8,7 +8,7 @@
 type Y = Idx<2>
 type X = Idx<3>
 let g = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Int64(i) * 10 + Int64(j)
-let held = (g, 7)
+let held = (g, Int64(7))
 let m = held[0]
 let corner = m(1, 2)
 let total = reduce(m, (+), axes = 2)

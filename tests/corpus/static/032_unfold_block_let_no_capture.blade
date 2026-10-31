@@ -6,7 +6,7 @@
 // `first(m, B)` became `{ let m = B; m }` -- B, not m -- and s printed
 // [20, 40, 60].
 static function first(x, k) = { let m = k; x }
-let m = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0, 30.0]
+let m = Float64([1.0, 2.0, 3.0])
+let B = Float64([10.0, 20.0, 30.0])
 let s = static method_for(first(m, B)) <@> lambda(a) -> a * 2.0 |> compute
 // EXPECT: s = [2.0, 4.0, 6.0]

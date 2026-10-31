@@ -12,34 +12,34 @@ import ad as ad
 // ============================================================================
 
 // h(x) = sin(x)^2 + cos(x)^2 == 1, so dh/dx == 0 everywhere.
-function h(x: Float) -> Float = {
+function h(x: Float64) -> Float64 = {
     let t = sin(x)
     let t2 = t * t
     let t = cos(x)
     t2 + t * t
 }
-let (hv, hg) = ad.grad(h)(0.7)
+let (hv, hg) = ad.grad(h)(Float64(0.7))
 // EXPECT: hv = 1.0
 // EXPECT: hg = 0.0
 let (hjv, hjt) = ad.jvp(h)(0.7, 1.0)
 // EXPECT: hjt = 0.0
 
 // g(x) = x*x + 5 with an unrelated rebinding in between: dg/dx = 2x = 6 at 3.
-function g(x: Float) -> Float = {
+function g(x: Float64) -> Float64 = {
     let t = x
     let u = t * t
-    let t = 5.0
+    let t: Float64 = 5.0
     u + t
 }
-let (gv, gg) = ad.grad(g)(3.0)
+let (gv, gg) = ad.grad(g)(Float64(3.0))
 // EXPECT: gv = 14.0
 // EXPECT: gg = 6.0
-let (gjv, gjt) = ad.jvp(g)(3.0, 1.0)
+let (gjv, gjt) = ad.jvp(g)(Float64(3.0), Float64(1.0))
 // EXPECT: gjt = 6.0
 
 // A parameter rebound by a let: the first read is the parameter.
 // p(x) = (2x)^2 = 4x^2 -> dp/dx = 8x = 12 at 1.5.
-function p(x: Float) -> Float = {
+function p(x: Float64) -> Float64 = {
     let x = 2.0 * x
     x * x
 }
@@ -51,14 +51,14 @@ let (pv, pg) = ad.grad(p)(1.5)
 //   b = a^2 (summed), then b = 3a (summed): f = sum a^2 + 3 sum a
 //   df/da(k) = 2 a(k) + 3 = [5, 7, 9] at a = [1, 2, 3]; f = 14 + 18 = 32.
 type I = Idx<3>
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let b = method_for(a) <@> lambda(x) -> x * x |> compute
     let s = reduce(b, (+))
     let b = method_for(a) <@> lambda(x) -> 3.0 * x |> compute
     s + reduce(b, (+))
 }
-let a0: Array<Float like I> = [1.0, 2.0, 3.0]
-let mut da: Array<Float like I> = [0.0, 0.0, 0.0]
+let a0: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let mut da: Array<Float64 like I> = [0.0, 0.0, 0.0]
 let fv = ad.grad(f)(a0, da)
 // EXPECT: fv = 32.0
 // EXPECT: da = [5.0, 7.0, 9.0]
@@ -66,16 +66,16 @@ let fv = ad.grad(f)(a0, da)
 // A scalar read INSIDE a recursive array, then rebound after it:
 //   y(i) = c * a(i) with c = 2 (the FIRST c); c' = sum y = 2 sum a; r = c'^2
 //   r = 4 (sum a)^2 = 144 at a = [1, 2, 3]; dr/da(k) = 8 sum a = 48.
-function r(a: Array<Float like I>) -> Float = {
-    let c = 2.0
-    let rec y: Array<Float like I> =
+function r(a: Array<Float64 like I>) -> Float64 = {
+    let c: Float64 = 2.0
+    let rec y: Array<Float64 like I> =
         match y with
         | zero -> zero
         | prefix :: i -> prefix :: c * a(i)
     let c = reduce(y, (+))
     c * c
 }
-let mut dr: Array<Float like I> = [0.0, 0.0, 0.0]
+let mut dr: Array<Float64 like I> = [0.0, 0.0, 0.0]
 let rv = ad.grad(r)(a0, dr)
 // EXPECT: rv = 144.0
 // EXPECT: dr = [48.0, 48.0, 48.0]

@@ -65,7 +65,7 @@ let rec FLOW: Array<Float64 like Idx<4>, Idx<3>> =
     | zero :: s -> zero :: C0
     | prefix :: n -> prefix :: kick(prefix(n - 1))
 // rebuild each step's tower from its cells and re-meter it
-let q1 = ppl.dist_atoms(4, -2.0, FLOW(1, 0), 0.0, FLOW(1, 1), 2.0, FLOW(1, 2))
+let q1 = ppl.dist_atoms(4, -2.0, FLOW(Int64(1), Int64(0)), 0.0, FLOW(1, 1), 2.0, FLOW(1, 2))
 let n1 = ppl.dist_negativity(q1, -2.0, 0.0, 2.0)
 let q2 = ppl.dist_atoms(4, -2.0, FLOW(2, 0), 0.0, FLOW(2, 1), 2.0, FLOW(2, 2))
 let n2 = ppl.dist_negativity(q2, -2.0, 0.0, 2.0)
@@ -83,9 +83,9 @@ let mass3 = reduce(FLOW(3), (+))
 // point tower at +2
 let pt = ppl.dist_atoms(4, -2.0, 0.0, 0.0, 0.0, 2.0, 1.0)
 let ptn = ppl.dist_negativity(pt, -2.0, 0.0, 2.0)
-let bm = -0.1
-let bz = 0.0
-let bp = 1.1
+let bm: Float64 = -0.1
+let bz: Float64 = 0.0
+let bp: Float64 = 1.1
 let qb = ppl.dist_atoms(4, -2.0, bm, 0.0, bz, 2.0, bp)
 let nb = ppl.dist_negativity(qb, -2.0, 0.0, 2.0)
 let unlawful_V = if ptn < 1.0e-12 && nb > 0.09 then "SIGNED_KERNELS_MANUFACTURE_NONCLASSICALITY" else "NO"

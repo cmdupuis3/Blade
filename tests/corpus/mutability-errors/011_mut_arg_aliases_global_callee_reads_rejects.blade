@@ -4,7 +4,7 @@
 // module-level `x` to a `mut` parameter of a function that ALSO reads `x` by
 // name is the same aliasing (N16): `bump` writes a(0) and then reads x(0),
 // which is the same cell, so the read would see the write.
-let mut x = [1.0, 2.0]
+let mut x = Float64([1.0, 2.0])
 function bump(a: mut Array<Float64 like Idx<2>>) -> Float64 = {
     a(0) = 5.0
     x(0)

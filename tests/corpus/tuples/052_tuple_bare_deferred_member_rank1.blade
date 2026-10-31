@@ -8,7 +8,7 @@
 type Row = Idx<3>
 let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
 let g = method_for(x) <@> lambda(v) -> v * 2.0
-let held = (g, 1.0)
+let held = (g, Float64(1.0))
 let h0 = held[0]
 let s = reduce(h0, (+))
 // EXPECT: held = ([2.0, 4.0, 6.0], 1.0)

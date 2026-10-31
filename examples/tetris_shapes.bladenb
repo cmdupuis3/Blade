@@ -35,10 +35,10 @@ type SampTr = store.index.samp_tr
 type SampTe = store.index.samp_te
 type Klass = store.index.klass
 
-let pieces: Array<Float like Piece, Pt, Xyz> = store.vars.pieces |> z.read
-let pos_tr: Array<Float like SampTr, Pt, Xyz> = store.vars.pos_train |> z.read
-let y_tr: Array<Float like SampTr, Klass> = store.vars.y_train |> z.read
-let pos_te: Array<Float like SampTe, Pt, Xyz> = store.vars.pos_test |> z.read
+let pieces: Array<Float64 like Piece, Pt, Xyz> = store.vars.pieces |> z.read
+let pos_tr: Array<Float64 like SampTr, Pt, Xyz> = store.vars.pos_train |> z.read
+let y_tr: Array<Float64 like SampTr, Klass> = store.vars.y_train |> z.read
+let pos_te: Array<Float64 like SampTe, Pt, Xyz> = store.vars.pos_test |> z.read
 let lab_te: Array<Int64 like SampTe> = store.vars.label_test |> z.read
 let shape_names = ["chiral 1", "chiral 2", "square", "line", "corner", "L", "T", "zigzag"]
 
@@ -53,7 +53,7 @@ let mirror_pair = [pieces(0, 3, 0), pieces(0, 3, 1), pieces(0, 3, 2), pieces(1, 
 // is not a bond, is NaN -- the gap that separates one segment from the next.
 let pair_a: Array<Int64 like Idx<6>> = [0, 0, 0, 1, 1, 2]
 let pair_b: Array<Int64 like Idx<6>> = [1, 2, 3, 2, 3, 3]
-function gallery(k: Int64, c: Int64) -> Float = {
+function gallery(k: Int64, c: Int64) -> Float64 = {
     let s = k / 18
     let p = pieces((s : Piece))
     let a = p((pair_a((k / 3) % 6) : Pt))
@@ -124,8 +124,8 @@ sizes
 // **This cell fails on purpose.**
 
 // %%
-function hadamard(x: Array<Float like IrrepsIdx<HSPEC>>, y: Array<Float like IrrepsIdx<HSPEC>>)
-                  where ml.equiv(O3) -> Array<Float like IrrepsIdx<HSPEC>> =
+function hadamard(x: Array<Float64 like IrrepsIdx<HSPEC>>, y: Array<Float64 like IrrepsIdx<HSPEC>>)
+                  where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<HSPEC>> =
     x * y
 
 // %% [markdown]
@@ -138,7 +138,7 @@ function hadamard(x: Array<Float like IrrepsIdx<HSPEC>>, y: Array<Float like Irr
 // **This cell fails on purpose.**
 
 // %%
-function peek(x: Array<Float like IrrepsIdx<HSPEC>>) where ml.equiv(O3) -> Float =
+function peek(x: Array<Float64 like IrrepsIdx<HSPEC>>) where ml.equiv(O3) -> Float64 =
     x(2)
 
 // %% [markdown]
@@ -151,8 +151,8 @@ function peek(x: Array<Float like IrrepsIdx<HSPEC>>) where ml.equiv(O3) -> Float
 // **This cell fails on purpose.**
 
 // %%
-function triple(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
-                where ml.equiv(O3) -> Float =
+function triple(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Float64 =
     (u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0)))
@@ -163,14 +163,14 @@ function triple(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx
 // only SO(3), which is connected and does not contain the inversion.
 
 // %%
-function triple_o3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
-                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<PS1>> =
+function triple_o3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
+                   where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<PS1>> =
     [u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0))]
 
-function triple_so3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>, w: Array<Float like IrrepsIdx<V>>)
-                    where ml.equiv(SO3) -> Float =
+function triple_so3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>, w: Array<Float64 like IrrepsIdx<V>>)
+                    where ml.equiv(SO3) -> Float64 =
     (u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0)))
@@ -189,8 +189,8 @@ handedness
 // This cell compiles; the warning *is* the output.
 
 // %%
-function invariants(h: Array<Float like IrrepsIdx<HSPEC>>, m: Array<Float like IrrepsIdx<MSPEC>>)
-                    -> Array<Float like Idx<12>> = {
+function invariants(h: Array<Float64 like IrrepsIdx<HSPEC>>, m: Array<Float64 like IrrepsIdx<MSPEC>>)
+                    -> Array<Float64 like Idx<12>> = {
     let nh = ml.norms(HSPEC, h)
     let nm = ml.norms(MSPEC, m)
     [nh(0), nh(1), nh(2), nh(3), nh(4), nh(5),
@@ -213,9 +213,9 @@ function invariants(h: Array<Float like IrrepsIdx<HSPEC>>, m: Array<Float like I
 // representation — and the certified functions accept nothing without one.
 
 // %%
-let static NC = 8
+let static NC: Int64 = 8
 
-function pooled(p: Array<Float like Pt, Xyz>) -> Array<Float like Idx<18>> = {
+function pooled(p: Array<Float64 like Pt, Xyz>) -> Array<Float64 like Idx<18>> = {
     let s0 = ml.y_to(2, p(0, 0), p(0, 1), p(0, 2))
     let s1 = ml.y_to(2, p(1, 0), p(1, 1), p(1, 2))
     let s2 = ml.y_to(2, p(2, 0), p(2, 1), p(2, 2))
@@ -228,7 +228,7 @@ function pooled(p: Array<Float like Pt, Xyz>) -> Array<Float like Idx<18>> = {
      a(4), a(5), a(6), a(7), a(8), b(4), b(5), b(6), b(7), b(8)]
 }
 
-function as_h(f: Array<Float like Idx<18>>) -> Array<Float like IrrepsIdx<HSPEC>> = (f : IrrepsIdx<HSPEC>)
+function as_h(f: Array<Float64 like Idx<18>>) -> Array<Float64 like IrrepsIdx<HSPEC>> = (f : IrrepsIdx<HSPEC>)
 
 let h_tr = method_for(range<SampTr>) <@> lambda(n) -> pooled(pos_tr(n)) |> compute
 let h_te = method_for(range<SampTe>) <@> lambda(n) -> pooled(pos_te(n)) |> compute
@@ -260,30 +260,30 @@ scale_channel
 //   invariant, so this certifies — under `SO3`, and only under `SO3`.
 
 // %%
-function eq_block(x: Array<Float like IrrepsIdx<HSPEC>>,
-                  wtp: Array<Float like Idx<WTP>>,
-                  wl: Array<Float like Idx<WL>>)
-                  where ml.equiv(O3) -> Array<Float like IrrepsIdx<MSPEC>> = {
+function eq_block(x: Array<Float64 like IrrepsIdx<HSPEC>>,
+                  wtp: Array<Float64 like Idx<WTP>>,
+                  wl: Array<Float64 like Idx<WL>>)
+                  where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<MSPEC>> = {
     let t = ml.tensor_product(CFG, x, x, wtp)
     let g = ml.gated(MSPEC, t)
     ml.linear(MSPEC, MSPEC, wl, g)
 }
 
-function chirality(x: Array<Float like IrrepsIdx<HSPEC>>,
-                   wa: Array<Float like Idx<WA>>,
-                   wc: Array<Float like Idx<WC>>)
-                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<PSSPEC>> = {
+function chirality(x: Array<Float64 like IrrepsIdx<HSPEC>>,
+                   wa: Array<Float64 like Idx<WA>>,
+                   wc: Array<Float64 like Idx<WC>>)
+                   where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<PSSPEC>> = {
     let ax = ml.tensor_product(CFGA, x, x, wa)
     ml.tensor_product(CFGC, ax, x, wc)
 }
 
-function head_even(ev: Array<Float like IrrepsIdx<EVSPEC>>, we: Array<Float like Idx<WHE>>)
-                   where ml.equiv(O3) -> Array<Float like Idx<NC>> =
+function head_even(ev: Array<Float64 like IrrepsIdx<EVSPEC>>, we: Array<Float64 like Idx<WHE>>)
+                   where ml.equiv(O3) -> Array<Float64 like Idx<NC>> =
     ml.scalars(OUTE, ml.derive_linear(EVSPEC, OUTE, we, ev))
 
-function head(ev: Array<Float like IrrepsIdx<EVSPEC>>, od: Array<Float like IrrepsIdx<PSSPEC>>,
-              we: Array<Float like Idx<WHE>>, wo: Array<Float like Idx<WHO>>)
-              where ml.equiv(SO3) -> Array<Float like Idx<NC>> = {
+function head(ev: Array<Float64 like IrrepsIdx<EVSPEC>>, od: Array<Float64 like IrrepsIdx<PSSPEC>>,
+              we: Array<Float64 like Idx<WHE>>, wo: Array<Float64 like Idx<WHO>>)
+              where ml.equiv(SO3) -> Array<Float64 like Idx<NC>> = {
     let a = ml.derive_linear(EVSPEC, OUTE, we, ev)
     let b = ml.derive_linear(PSSPEC, OUTO, wo, od)
     [a(0) + b(0), a(1) + b(1), a(2) + b(2), a(3) + b(3),
@@ -303,9 +303,9 @@ function head(ev: Array<Float like IrrepsIdx<EVSPEC>>, od: Array<Float like Irre
 // **This cell fails on purpose.**
 
 // %%
-function head_o3(ev: Array<Float like IrrepsIdx<EVSPEC>>, od: Array<Float like IrrepsIdx<PSSPEC>>,
-                 we: Array<Float like Idx<WHE>>, wo: Array<Float like Idx<WHO>>)
-                 where ml.equiv(O3) -> Array<Float like Idx<NC>> = {
+function head_o3(ev: Array<Float64 like IrrepsIdx<EVSPEC>>, od: Array<Float64 like IrrepsIdx<PSSPEC>>,
+                 we: Array<Float64 like Idx<WHE>>, wo: Array<Float64 like Idx<WHO>>)
+                 where ml.equiv(O3) -> Array<Float64 like Idx<NC>> = {
     let a = ml.derive_linear(EVSPEC, OUTE, we, ev)
     let b = ml.derive_linear(PSSPEC, OUTO, wo, od)
     [a(0) + b(0), a(1) + b(1), a(2) + b(2), a(3) + b(3),
@@ -338,7 +338,7 @@ let w_c = method_for(range<Idx<WC>>) <@> lambda(k) -> __wb(WTP + WL + WA + k) |>
 // Calibration on one training cloud per shape (rows 0, 12, 24, ...): per
 // channel mean and spread, transposed so each channel is one row.
 from stats import mean, stddev
-function h_cal(i: Int64) -> Array<Float like IrrepsIdx<HSPEC>> = as_h(h_tr((12 * i : SampTr)))
+function h_cal(i: Int64) -> Array<Float64 like IrrepsIdx<HSPEC>> = as_h(h_tr((12 * i : SampTr)))
 let f0 = method_for(range<Idx<8>>) <@> lambda(i) -> invariants(h_cal(i), eq_block(h_cal(i), w_tp, w_l)) |> compute
 let f0t = method_for(range<Idx<12>>, range<Idx<8>>) <@> lambda(k, i) -> f0(i, k) |> compute
 let f_mu = method_for(f0t) <@> mean |> compute
@@ -351,11 +351,11 @@ let o_sc = method_for(c0t) <@> lambda(row) -> 1.0 / sqrt(mean(row * row)) |> com
 
 // The readout's two inputs per cloud, calibrated: 12 invariants (`EVSPEC`) and
 // 2 pseudoscalars (`PSSPEC`), as plain rows for tabulating.
-function ev_of(f: Array<Float like Idx<18>>) -> Array<Float like Idx<12>> = {
+function ev_of(f: Array<Float64 like Idx<18>>) -> Array<Float64 like Idx<12>> = {
     let h = as_h(f)
     (invariants(h, eq_block(h, w_tp, w_l)) - f_mu) * f_sc
 }
-function od_of(f: Array<Float like Idx<18>>) -> Array<Float like Idx<2>> = chirality(as_h(f), w_a, w_c) * o_sc
+function od_of(f: Array<Float64 like Idx<18>>) -> Array<Float64 like Idx<2>> = chirality(as_h(f), w_a, w_c) * o_sc
 
 // The pseudoscalar on the eight canonical shapes: zero on the six achiral ones
 // (five exactly, `corner` to 5e-18), equal and opposite on the mirror pair.
@@ -381,7 +381,7 @@ chi_pieces
 
 // %%
 // The spin test: rotation by t about the axis (1, 2, 2) / 3 (Rodrigues).
-function rmat(t: Float) -> Array<Float like Xyz, Xyz> = {
+function rmat(t: Float64) -> Array<Float64 like Xyz, Xyz> = {
     let c = cos(t)
     let s = sin(t)
     let u = 1.0 - c
@@ -389,7 +389,7 @@ function rmat(t: Float) -> Array<Float like Xyz, Xyz> = {
      [2.0 * u / 9.0 + 2.0 * s / 3.0, c + 4.0 * u / 9.0, 4.0 * u / 9.0 - s / 3.0],
      [2.0 * u / 9.0 - 2.0 * s / 3.0, 4.0 * u / 9.0 + s / 3.0, c + 4.0 * u / 9.0]]
 }
-function spin(p: Array<Float like Pt, Xyz>, t: Float) -> Array<Float like Pt, Xyz> = {
+function spin(p: Array<Float64 like Pt, Xyz>, t: Float64) -> Array<Float64 like Pt, Xyz> = {
     let m = rmat(t)
     method_for(range<Pt>, range<Xyz>) <@> lambda(a, c) -> m(c, 0) * p(a, 0) + m(c, 1) * p(a, 1) + m(c, 2) * p(a, 2) |> compute
 }
@@ -433,9 +433,9 @@ let fig_fingerprint = plot.heatmap(Float64(0..13), Float64(0..8), fingerprint, 4
 let static NP = WHE + WHO
 let static NP2 = NP + NP
 let static SW = NP2 + 1
-let static LR = 0.02
-let static MU = 0.9
-let static NSTEP = 100
+let static LR: Float64 = 0.02
+let static MU: Float64 = 0.9
+let static NSTEP: Int64 = 100
 let static NROW = NSTEP + 1
 
 let ev_tr = method_for(range<Idx<8>>) <@> lambda(i) -> ev_of(h_tr((12 * i : SampTr))) |> compute
@@ -444,15 +444,15 @@ let yc_tr = method_for(range<Idx<8>>, range<Idx<8>>) <@> lambda(i, c) -> y_tr((1
 
 // Slices of the state. Inside `ad.grad`, a `range` must spell its extent as a
 // literal (96 = WHE, 16 = WHO): the expansion that differentiates a map reads it.
-function we_of(s: Array<Float like Idx<SW>>) -> Array<Float like Idx<WHE>> = {
+function we_of(s: Array<Float64 like Idx<SW>>) -> Array<Float64 like Idx<WHE>> = {
     let o = method_for(range<Idx<96>>) <@> lambda(k) -> s(k) |> compute
     o
 }
-function wo_of(s: Array<Float like Idx<SW>>) -> Array<Float like Idx<WHO>> = {
+function wo_of(s: Array<Float64 like Idx<SW>>) -> Array<Float64 like Idx<WHO>> = {
     let o = method_for(range<Idx<16>>) <@> lambda(k) -> s(WHE + k) |> compute
     o
 }
-function block(s: Array<Float like Idx<SW>>, base: Int64) -> Array<Float like Idx<NP>> = {
+function block(s: Array<Float64 like Idx<SW>>, base: Int64) -> Array<Float64 like Idx<NP>> = {
     let o = method_for(range<Idx<NP>>) <@> lambda(k) -> s(base + k) |> compute
     o
 }
@@ -461,23 +461,23 @@ function block(s: Array<Float like Idx<SW>>, base: Int64) -> Array<Float like Id
 // branch, because reverse mode wants straight-line arithmetic. The clause is
 // the one the compiler offers (BL4011) when it is left off: the loss term is
 // itself a certified SO(3) invariant of the sample.
-function sq_err(s: Array<Float like Idx<SW>>, ev: Array<Float like IrrepsIdx<EVSPEC>>,
-                od: Array<Float like IrrepsIdx<PSSPEC>>, y: Array<Float like Idx<8>>)
-                where ml.equiv(SO3) -> Float = {
+function sq_err(s: Array<Float64 like Idx<SW>>, ev: Array<Float64 like IrrepsIdx<EVSPEC>>,
+                od: Array<Float64 like IrrepsIdx<PSSPEC>>, y: Array<Float64 like Idx<8>>)
+                where ml.equiv(SO3) -> Float64 = {
     let sc = head(ev, od, we_of(s), wo_of(s))
     let e = method_for(range<Idx<8>>) <@> lambda(c) -> (sc(c) - y(c)) * (sc(c) - y(c)) |> compute
     reduce(e, (+))
 }
-function loss(s: Array<Float like Idx<SW>>) -> Float = {
+function loss(s: Array<Float64 like Idx<SW>>) -> Float64 = {
     let errs = method_for(range<Idx<8>>) <@> lambda(i) -> sq_err(s, (ev_tr(i) : IrrepsIdx<EVSPEC>), (od_tr(i) : IrrepsIdx<PSSPEC>), yc_tr(i)) |> compute
     reduce(errs, (+)) / 8.0
 }
-function sgd_step(s: Array<Float like Idx<SW>>) -> Array<Float like Idx<SW>> = {
-    let mut ds = replicate(SW, pure(0.0)) |> compute
+function sgd_step(s: Array<Float64 like Idx<SW>>) -> Array<Float64 like Idx<SW>> = {
+    let mut ds = replicate(SW, pure(Float64(0.0))) |> compute
     let lv = ad.grad(loss)(s, ds)
     let v = MU * block(s, NP) - LR * block(ds, 0)
     let w = block(s, 0) + v
-    let lrow: Array<Float like Idx<1>> = [lv]
+    let lrow: Array<Float64 like Idx<1>> = [lv]
     join(w, v, lrow, 0)
 }
 
@@ -487,7 +487,7 @@ let __n0 = r.normal(31415926, SW)
 let w0 = method_for(range<Idx<SW>>) <@> lambda(k) -> (if k < NP then 0.1 * __n0(k) else 0.0) |> compute
 
 let traj = {
-    let rec t: Array<Float like Idx<NROW>, Idx<SW>> =
+    let rec t: Array<Float64 like Idx<NROW>, Idx<SW>> =
         match t with
         | zero -> zero
         | zero :: n -> zero :: w0
@@ -523,9 +523,9 @@ let fig_loss = plot.line(Float64(0..NSTEP), loss_curve, "readout training: one-v
 // the 12 chiral test clouds alone.
 
 // %%
-function scores_full(f: Array<Float like Idx<18>>) -> Array<Float like Idx<NC>> =
+function scores_full(f: Array<Float64 like Idx<18>>) -> Array<Float64 like Idx<NC>> =
     head((ev_of(f) : IrrepsIdx<EVSPEC>), (od_of(f) : IrrepsIdx<PSSPEC>), we_of(final_row), wo_of(final_row))
-function scores_even(f: Array<Float like Idx<18>>) -> Array<Float like Idx<NC>> =
+function scores_even(f: Array<Float64 like Idx<18>>) -> Array<Float64 like Idx<NC>> =
     head_even((ev_of(f) : IrrepsIdx<EVSPEC>), we_of(final_row))
 // The predicted class is the argmax: a left fold over the class indices.
 let pred_full = method_for(range<SampTe>) <@> lambda(n) -> {
@@ -538,8 +538,8 @@ let pred_even = method_for(range<SampTe>) <@> lambda(n) -> {
 } |> compute
 
 // Confusion matrices, true shape x predicted shape: a count over the test set.
-function conf_cell(pred: Array<Int64 like SampTe>, t: Int64, p: Int64) -> Float = {
-    let hits = method_for(zip(lab_te, pred)) <@> lambda(l, q) -> (if l == t && q == p then 1.0 else 0.0) |> compute
+function conf_cell(pred: Array<Int64 like SampTe>, t: Int64, p: Int64) -> Float64 = {
+    let hits = method_for(zip(lab_te, pred)) <@> lambda(l, q) -> (if l == t && q == p then Float64(1.0) else Float64(0.0)) |> compute
     reduce(hits, (+))
 }
 let conf_full = method_for(range<Idx<8>>, range<Idx<8>>) <@> lambda(t, p) -> conf_cell(pred_full, t, p) |> compute

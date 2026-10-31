@@ -5,8 +5,8 @@
 // lower triangle negated, diagonal the implicit zero), so a sign or mirror error shows up.
 // Run (C++ lane): BLADE_BLAS=0 blade run antisym_dump.blade --print L,checksum,input_checksum
 // Compared against ref_antisym.py by validate_A.py.
-let static p = 23
-let static n = 11
+let static p: Int64 = 23
+let static n: Int64 = 11
 type Part = Idx<p>
 type Comp = Idx<2>
 type Obs = Idx<n>

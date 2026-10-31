@@ -20,5 +20,5 @@ function inputs() -> Array<Float64 like Ix> = {
 
 let (checksum, input_checksum) = {
     let x = inputs()
-    (0.0, reduce(x, (+)))
+    (Float64(0.0), reduce(x, (+)))
 }

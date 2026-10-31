@@ -10,10 +10,10 @@ type C = Idx<3>
 type T = Idx<100>
 
 let span_sum = {
-    let rec r: Array<Float like T, C> =
+    let rec r: Array<Float64 like T, C> =
         match r with
         | zero -> zero
-        | zero :: s -> zero :: [1.0, 2.0, 3.0]
+        | zero :: s -> zero :: Float64([1.0, 2.0, 3.0])
         | prefix :: n -> prefix :: prefix(n - 1) + 0.5
     let first = r((0 : T))
     let last = r((99 : T))

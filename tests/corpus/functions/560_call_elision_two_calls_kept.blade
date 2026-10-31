@@ -5,8 +5,8 @@
 // in one statement" and every call keeps its materialized return.
 function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
 function first(a: T^1) -> T^0 = { a(0) }
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0, 30.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([10.0, 20.0, 30.0])
 let y = prep(A) + prep(B)
 let s = reduce(prep(A), (+), first(B))
 // EXPECT: y = [22.0, 44.0, 66.0]

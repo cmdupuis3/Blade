@@ -3157,7 +3157,7 @@ let ck = repo.checkout("main")
         // at the load site (line 3 of this program), with zarr's own text.
         (let (zjson, zcode) =
             checkPayload "zarr_absent.blade"
-                "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a = 1\n"
+                "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a: Int64 = 1\n"
          check "check: a MISSING ZARR store refuses AT TYPECHECK too, as BL2008 at the load site"
              (zcode <> 0 && zjson.Contains "\"code\":\"BL2008\"" && zjson.Contains "\"line\":3"
               && zjson.Contains "not a Zarr store")

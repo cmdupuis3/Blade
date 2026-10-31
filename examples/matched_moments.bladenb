@@ -44,25 +44,25 @@ import plot
 from stats import mean, variance, stddev
 
 let store = z.load("examples/data/moments.zarr")
-let static NTR = 400
-let static NTE = 200
-let static NPT = 120
+let static NTR: Int64 = 400
+let static NTE: Int64 = 200
+let static NPT: Int64 = 120
 // Class-major: train rows 0..99 iso, 100..199 octa, 200..299 tetra, 300..399
 // heavy; test rows in blocks of 50, same order. The `_yzx` copies are in the
 // raw l = 1 order (y, z, x) that `ml.derive_poly` takes; the Cartesian copies
 // feed the rotation check, where the stored 3x3 matrices act.
-let pos_tr: Array<Float like Idx<NTR>, Idx<NPT>, Idx<3>> = store.vars.pos_train_yzx |> z.read
-let pos_te: Array<Float like Idx<NTE>, Idx<NPT>, Idx<3>> = store.vars.pos_test_yzx |> z.read
-let cart_tr: Array<Float like Idx<NTR>, Idx<NPT>, Idx<3>> = store.vars.pos_train |> z.read
-let cart_te: Array<Float like Idx<NTE>, Idx<NPT>, Idx<3>> = store.vars.pos_test |> z.read
-let y_tr: Array<Float like Idx<NTR>, Idx<4>> = store.vars.y_train |> z.read
-let y_te: Array<Float like Idx<NTE>, Idx<4>> = store.vars.y_test |> z.read
+let pos_tr: Array<Float64 like Idx<NTR>, Idx<NPT>, Idx<3>> = store.vars.pos_train_yzx |> z.read
+let pos_te: Array<Float64 like Idx<NTE>, Idx<NPT>, Idx<3>> = store.vars.pos_test_yzx |> z.read
+let cart_tr: Array<Float64 like Idx<NTR>, Idx<NPT>, Idx<3>> = store.vars.pos_train |> z.read
+let cart_te: Array<Float64 like Idx<NTE>, Idx<NPT>, Idx<3>> = store.vars.pos_test |> z.read
+let y_tr: Array<Float64 like Idx<NTR>, Idx<4>> = store.vars.y_train |> z.read
+let y_te: Array<Float64 like Idx<NTE>, Idx<4>> = store.vars.y_test |> z.read
 let perm: Array<Int64 like Idx<2>, Idx<NTR>> = store.vars.perm |> z.read
-let rots: Array<Float like Idx<8>, Idx<9>> = store.vars.rot3 |> z.read
-let shell_mu: Array<Float like Idx<5>> = store.vars.shell_mu |> z.read
-let shell_sg: Array<Float like Idx<5>> = store.vars.shell_sg |> z.read
-let ref_radii: Array<Float like Idx<NPT>> = store.vars.ref_radii |> z.read
-let demo_ico: Array<Float like Idx<NPT>, Idx<3>> = store.vars.demo_icosa_yzx |> z.read
+let rots: Array<Float64 like Idx<8>, Idx<9>> = store.vars.rot3 |> z.read
+let shell_mu: Array<Float64 like Idx<5>> = store.vars.shell_mu |> z.read
+let shell_sg: Array<Float64 like Idx<5>> = store.vars.shell_sg |> z.read
+let ref_radii: Array<Float64 like Idx<NPT>> = store.vars.ref_radii |> z.read
+let demo_ico: Array<Float64 like Idx<NPT>, Idx<3>> = store.vars.demo_icosa_yzx |> z.read
 let class_names = ["iso", "octa", "tetra", "heavy"]
 
 // One training cloud per class, side by side (x-y projection): whitened and
@@ -118,28 +118,28 @@ let spec_dims = [DS2, DS3, DS4, DI2, DI3, DI4, XL1, XL2, XL3, XL4]
 
 // The derive_poly weights are all ones: the plain monomial basis of each order.
 // Jet layout: 0 K2 l0 | 1..5 K2 l2 | 6..8 K3 l1 | 9..15 K3 l3 | 16 K4 l0 | 17..21 K4 l2 | 22..30 K4 l4.
-function jet(v: Array<Float like IrrepsIdx<PT>>) -> Array<Float like Idx<31>> = {
-    let d2: Array<Float like Idx<6>> = ml.derive_poly(PT, 2, SK2, v, [1.0, 1.0])
-    let d3: Array<Float like Idx<10>> = ml.derive_poly(PT, 3, SK3, v, [1.0, 1.0])
-    let d4: Array<Float like Idx<15>> = ml.derive_poly(PT, 4, SK4, v, [1.0, 1.0, 1.0])
+function jet(v: Array<Float64 like IrrepsIdx<PT>>) -> Array<Float64 like Idx<31>> = {
+    let d2: Array<Float64 like Idx<6>> = ml.derive_poly(PT, 2, SK2, v, [1.0, 1.0])
+    let d3: Array<Float64 like Idx<10>> = ml.derive_poly(PT, 3, SK3, v, [1.0, 1.0])
+    let d4: Array<Float64 like Idx<15>> = ml.derive_poly(PT, 4, SK4, v, [1.0, 1.0, 1.0])
     join(d2, d3, d4, 0)
 }
-function vec3(a: Float, b: Float, c: Float) -> Array<Float like IrrepsIdx<PT>> = [a, b, c]
-function point(p: Array<Float like Idx<NPT>, Idx<3>>, k: Int64) -> Array<Float like IrrepsIdx<PT>> = vec3(p(k, 0), p(k, 1), p(k, 2))
-function jet_mean(p: Array<Float like Idx<NPT>, Idx<3>>) -> Array<Float like Idx<31>> = {
+function vec3(a: Float64, b: Float64, c: Float64) -> Array<Float64 like IrrepsIdx<PT>> = [a, b, c]
+function point(p: Array<Float64 like Idx<NPT>, Idx<3>>, k: Int64) -> Array<Float64 like IrrepsIdx<PT>> = vec3(p(k, 0), p(k, 1), p(k, 2))
+function jet_mean(p: Array<Float64 like Idx<NPT>, Idx<3>>) -> Array<Float64 like Idx<31>> = {
     let t = method_for(range<Idx<NPT>>) <@> lambda(k) -> jet(point(p, k)) |> compute
     reduce(t, lambda(a: T^1, b: T^1) -> a + b) / 120.0
 }
 
 // The odd order is an odd map: P3(v) + P3(-v) cancels bitwise, point by point.
-function negv(v: Array<Float like IrrepsIdx<PT>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<PT>> =
+function negv(v: Array<Float64 like IrrepsIdx<PT>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<PT>> =
     [0.0 - v(0), 0.0 - v(1), 0.0 - v(2)]
-function k3_sym(v: Array<Float like IrrepsIdx<PT>>) -> Array<Float like Idx<10>> =
+function k3_sym(v: Array<Float64 like IrrepsIdx<PT>>) -> Array<Float64 like Idx<10>> =
     0.5 * (ml.derive_poly(PT, 3, SK3, v, [1.0, 1.0]) + ml.derive_poly(PT, 3, SK3, negv(v), [1.0, 1.0]))
 let j3sym_point0 = k3_sym(point(pos_tr(200), 0))(0)
 // EXPECT: j3sym_point0 = 0.0
 
-let v0: Array<Float like IrrepsIdx<PT>> = [0.3, -1.2, 0.7]
+let v0: Array<Float64 like IrrepsIdx<PT>> = [0.3, -1.2, 0.7]
 let d1 = ml.derive_poly(PT, 1, SK1, v0, [1.0])
 let k1_identity_gap = abs(d1(0) - v0(0)) + abs(d1(1) - v0(1)) + abs(d1(2) - v0(2))
 k1_identity_gap
@@ -162,12 +162,12 @@ let sub_mean = method_for(range<Idx<3>>) <@> lambda(c) -> mean(method_for(range<
 let sub_cloud: Array<Float64 like Idx<3>, Idx<12>> = method_for(range<Idx<3>>, range<Idx<12>>) <@> lambda(c, k) -> cart_tr(200, k, c) - sub_mean(c) |> compute
 let sub_cov = ppl.comoments(sub_cloud, 2)
 let route_ppl = ml.sym_to_irreps(sub_cov)
-function k2_of(v: Array<Float like IrrepsIdx<PT>>) -> Array<Float like Idx<6>> = ml.derive_poly(PT, 2, SK2, v, [1.0, 1.0])
+function k2_of(v: Array<Float64 like IrrepsIdx<PT>>) -> Array<Float64 like Idx<6>> = ml.derive_poly(PT, 2, SK2, v, [1.0, 1.0])
 let sub_jet = method_for(range<Idx<12>>) <@> lambda(k) -> k2_of(vec3(sub_cloud(1, k), sub_cloud(2, k), sub_cloud(0, k))) |> compute
 let route_poly = reduce(sub_jet, lambda(a: T^1, b: T^1) -> a + b) / 12.0
 let three_route_ratio = method_for(range<Idx<6>>) <@> lambda(m) -> route_poly(m) / route_ppl(m) |> compute
 let three_route_bad = reduce(method_for(range<Idx<6>>) <@> lambda(m) ->
-    (if abs(three_route_ratio(m) - (if m == S2L0 then 0.0 - 1.0 else 1.0)) > 0.000000001 then 1.0 else 0.0) |> compute, (+))
+    (if abs(three_route_ratio(m) - (if m == S2L0 then Float64(0.0) - Float64(1.0) else Float64(1.0))) > 0.000000001 then Float64(1.0) else Float64(0.0)) |> compute, (+))
 three_route_ratio
 // EXPECT: three_route_bad = 0.0
 
@@ -189,30 +189,30 @@ three_route_ratio
 
 // %%
 // All 600 clouds in one table: train rows 0..399, then test.
-function cloud(n: Int64) -> Array<Float like Idx<NPT>, Idx<3>> = if n < 400 then pos_tr(n) else pos_te(n - 400)
-function coord_mean(p: Array<Float like Idx<NPT>, Idx<3>>, c: Int64) -> Float =
+function cloud(n: Int64) -> Array<Float64 like Idx<NPT>, Idx<3>> = if n < 400 then pos_tr(n) else pos_te(n - 400)
+function coord_mean(p: Array<Float64 like Idx<NPT>, Idx<3>>, c: Int64) -> Float64 =
     mean(method_for(range<Idx<NPT>>) <@> lambda(k) -> p(k, c) |> compute)
-function second_moment(p: Array<Float like Idx<NPT>, Idx<3>>, u: Int64) -> Float =
+function second_moment(p: Array<Float64 like Idx<NPT>, Idx<3>>, u: Int64) -> Float64 =
     mean(method_for(range<Idx<NPT>>) <@> lambda(k) -> p(k, u / 3) * p(k, u % 3) |> compute)
-function white_residual(p: Array<Float like Idx<NPT>, Idx<3>>) -> Float = {
+function white_residual(p: Array<Float64 like Idx<NPT>, Idx<3>>) -> Float64 = {
     let k1 = method_for(range<Idx<3>>) <@> lambda(c) -> abs(coord_mean(p, c)) |> compute
-    let cov = method_for(range<Idx<9>>) <@> lambda(u) -> abs(second_moment(p, u) - (if u % 4 == 0 then 1.0 else 0.0)) |> compute
+    let cov = method_for(range<Idx<9>>) <@> lambda(u) -> abs(second_moment(p, u) - (if u % 4 == 0 then Float64(1.0) else Float64(0.0))) |> compute
     reduce(k1, (+)) + reduce(cov, (+))
 }
 let white_res = method_for(range<Idx<600>>) <@> lambda(n) -> white_residual(cloud(n)) |> compute
-let whitening_bad = reduce(method_for(white_res) <@> lambda(x) -> (if x > 0.000000000001 then 1.0 else 0.0) |> compute, (+))
+let whitening_bad = reduce(method_for(white_res) <@> lambda(x) -> (if x > 0.000000000001 then Float64(1.0) else Float64(0.0)) |> compute, (+))
 // EXPECT: whitening_bad = 0.0
 
 let k1_all = method_for(range<Idx<600>>, range<Idx<3>>) <@> lambda(n, c) -> coord_mean(cloud(n), c) |> compute
-function radius(p: Array<Float like Idx<NPT>, Idx<3>>, k: Int64) -> Float = sqrt(p(k, 0) * p(k, 0) + p(k, 1) * p(k, 1) + p(k, 2) * p(k, 2))
+function radius(p: Array<Float64 like Idx<NPT>, Idx<3>>, k: Int64) -> Float64 = sqrt(p(k, 0) * p(k, 0) + p(k, 1) * p(k, 1) + p(k, 2) * p(k, 2))
 let radii = method_for(range<Idx<600>>, range<Idx<NPT>>) <@> lambda(n, k) -> radius(cloud(n), k) |> compute
 let rad_mom = method_for(range<Idx<600>>, range<Idx<2>>) <@> lambda(n, e) ->
     mean(method_for(range<Idx<NPT>>) <@> lambda(k) -> (if e == 0 then radii(n, k) * radii(n, k) else radii(n, k) * radii(n, k) * radii(n, k) * radii(n, k)) |> compute) |> compute
-function shell_weight(x: Float, mu: Float, sg: Float) -> Float = {
+function shell_weight(x: Float64, mu: Float64, sg: Float64) -> Float64 = {
     let d = (x - mu) / sg
     exp(0.0 - 0.5 * d * d)
 }
-function occupancy(n: Int64, s: Int64) -> Float =
+function occupancy(n: Int64, s: Int64) -> Float64 =
     mean(method_for(range<Idx<NPT>>) <@> lambda(k) -> shell_weight(radii(n, k), shell_mu(s), shell_sg(s)) |> compute)
 let occ = method_for(range<Idx<600>>, range<Idx<5>>) <@> lambda(n, s) -> occupancy(n, s) |> compute
 
@@ -256,7 +256,7 @@ k2_jet_sample0
 // Every feature slot: the 3 K1 slots, then the 31 jet slots.
 let slots = method_for(range<Idx<600>>, range<Idx<34>>) <@> lambda(n, m) -> (if m < 3 then k1_all(n, m) else jets(n, m - 3)) |> compute
 let slot_var = method_for(range<Idx<34>>) <@> lambda(m) -> variance(method_for(range<Idx<600>>) <@> lambda(n) -> slots(n, m) |> compute) |> compute
-let k2_var_over_1e24 = reduce(method_for(range<Idx<9>>) <@> lambda(m) -> (if slot_var(m) > 0.000000000000000000000001 then 1.0 else 0.0) |> compute, (+))
+let k2_var_over_1e24 = reduce(method_for(range<Idx<9>>) <@> lambda(m) -> (if slot_var(m) > 0.000000000000000000000001 then Float64(1.0) else Float64(0.0)) |> compute, (+))
 // EXPECT: k2_var_over_1e24 = 0.0
 let k2_var_total = reduce(method_for(range<Idx<9>>) <@> lambda(m) -> slot_var(m) |> compute, (+))
 
@@ -264,10 +264,10 @@ let k2_var_total = reduce(method_for(range<Idx<9>>) <@> lambda(m) -> slot_var(m)
 // against the 100 heavy ones.
 let occ_matched_var = reduce(method_for(range<Idx<5>>) <@> lambda(s) -> variance(method_for(range<Idx<300>>) <@> lambda(n) -> occ(n, s) |> compute) |> compute, (+))
 let occ_heavy_var = reduce(method_for(range<Idx<5>>) <@> lambda(s) -> variance(method_for(range<Idx<100>>) <@> lambda(n) -> occ(300 + n, s) |> compute) |> compute, (+))
-let occ_contrast = [(if occ_matched_var < 0.0000000000000000000001 then 1.0 else 0.0), (if occ_heavy_var > 0.0001 then 1.0 else 0.0)]
+let occ_contrast = [(if occ_matched_var < 0.0000000000000000000001 then Float64(1.0) else Float64(0.0)), (if occ_heavy_var > 0.0001 then Float64(1.0) else Float64(0.0))]
 // EXPECT: occ_contrast = [1.0, 1.0]
 
-let slot_order = method_for(range<Idx<34>>) <@> lambda(m) -> (if m < 3 then 0 else (if m < 9 then 1 else (if m < 19 then 2 else 3))) |> compute
+let slot_order = method_for(range<Idx<34>>) <@> lambda(m) -> (if m < 3 then 0 else (if m < 9 then 1 else (if m < 19 then Int64(2) else Int64(3)))) |> compute
 let log_var = method_for(slot_var) <@> lambda(v) -> log(v + 0.0000000000000000000000000000001) / log(10.0) |> compute
 let fig_cliff = plot.groups(Float64(0..34), log_var, slot_order, ["K1", "K2", "K3", "K4"],
                             "log10 across-sample variance of every feature slot": title, "slot": xlabel, "log10 variance": ylabel)
@@ -302,13 +302,13 @@ let class_jet = method_for(range<Idx<4>>, range<Idx<31>>) <@> lambda(c, m) ->
 // Blocks as [first, last) slot ranges of the jet.
 let block_lo: Array<Int64 like Idx<7>> = [0, 1, 6, 9, 16, 17, 22]
 let block_hi: Array<Int64 like Idx<7>> = [1, 6, 9, 16, 17, 22, 31]
-function block_norm(v: Array<Float like Idx<31>>, b: Int64) -> Float =
+function block_norm(v: Array<Float64 like Idx<31>>, b: Int64) -> Float64 =
     sqrt(reduce(method_for(range<Idx<31>>) <@> lambda(m) -> (if m >= block_lo(b) && m < block_hi(b) then v(m) * v(m) else 0.0) |> compute, (+)))
-function gap(c: Int64, b: Int64) -> Float = block_norm(class_jet(c) - class_jet(0), b)
+function gap(c: Int64, b: Int64) -> Float64 = block_norm(class_jet(c) - class_jet(0), b)
 let k3_norms = method_for(range<Idx<4>>) <@> lambda(c) -> sqrt(reduce(method_for(range<Idx<10>>) <@> lambda(m) -> class_jet(c, 6 + m) * class_jet(c, 6 + m) |> compute, (+))) |> compute
-let attribution = [(if gap(1, 4) < 0.000000001 then 1.0 else 0.0), (if gap(1, 6) > 0.1 then 1.0 else 0.0),
-                   (if gap(3, 4) > 1.0 then 1.0 else 0.0), (if gap(3, 4) > 5.0 * gap(3, 6) then 1.0 else 0.0),
-                   (if k3_norms(2) > 2.0 * k3_norms(1) then 1.0 else 0.0), (if k3_norms(3) > 3.0 * k3_norms(0) then 1.0 else 0.0)]
+let attribution = [(if gap(1, 4) < 0.000000001 then Float64(1.0) else Float64(0.0)), (if gap(1, 6) > 0.1 then Float64(1.0) else Float64(0.0)),
+                   (if gap(3, 4) > 1.0 then Float64(1.0) else Float64(0.0)), (if gap(3, 4) > 5.0 * gap(3, 6) then Float64(1.0) else Float64(0.0)),
+                   (if k3_norms(2) > 2.0 * k3_norms(1) then Float64(1.0) else Float64(0.0)), (if k3_norms(3) > 3.0 * k3_norms(0) then Float64(1.0) else Float64(0.0))]
 // EXPECT: attribution = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 // The centrosymmetrized twin of tetra train sample 200: its whole K3 is zero.
@@ -335,27 +335,27 @@ attribution
 // iso class's sampling floor, an order of magnitude under a real octa sample.
 
 // %%
-let phi = (1.0 + sqrt(5.0)) / 2.0
+let phi: Float64 = (1.0 + sqrt(5.0)) / 2.0
 let ib = 1.0 / sqrt(2.0 + phi)
 let ia = ib * phi
 // The exact vertex sets (both closed under coordinate permutation, so the
 // (y, z, x) feeding order only relabels them).
-let icosa: Array<Float like Idx<12>, Idx<3>> = [[0.0, ia, ib], [0.0, 0.0 - ia, ib], [0.0, ia, 0.0 - ib], [0.0, 0.0 - ia, 0.0 - ib],
+let icosa: Array<Float64 like Idx<12>, Idx<3>> = [[0.0, ia, ib], [0.0, 0.0 - ia, ib], [0.0, ia, 0.0 - ib], [0.0, 0.0 - ia, 0.0 - ib],
                                                 [ib, 0.0, ia], [ib, 0.0, 0.0 - ia], [0.0 - ib, 0.0, ia], [0.0 - ib, 0.0, 0.0 - ia],
                                                 [ia, ib, 0.0], [0.0 - ia, ib, 0.0], [ia, 0.0 - ib, 0.0], [0.0 - ia, 0.0 - ib, 0.0]]
-let octa: Array<Float like Idx<6>, Idx<3>> = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]]
+let octa: Array<Float64 like Idx<6>, Idx<3>> = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]]
 // Anisotropy of a jet: everything except its two l = 0 slots.
-function aniso(v: Array<Float like Idx<31>>) -> Float =
+function aniso(v: Array<Float64 like Idx<31>>) -> Float64 =
     reduce(method_for(range<Idx<31>>) <@> lambda(m) -> (if m == 0 || m == 16 then 0.0 else v(m) * v(m)) |> compute, (+))
 let ico_jets = method_for(range<Idx<12>>) <@> lambda(k) -> jet(vec3(icosa(k, 0), icosa(k, 1), icosa(k, 2))) |> compute
 let oct_jets = method_for(range<Idx<6>>) <@> lambda(k) -> jet(vec3(octa(k, 0), octa(k, 1), octa(k, 2))) |> compute
 let vertex_aniso = [aniso(reduce(ico_jets, lambda(a: T^1, b: T^1) -> a + b) / 12.0), aniso(reduce(oct_jets, lambda(a: T^1, b: T^1) -> a + b) / 6.0)]
-let icosa_exact = [(if vertex_aniso(0) < 0.000000000001 then 1.0 else 0.0), (if vertex_aniso(1) > 0.1 then 1.0 else 0.0)]
+let icosa_exact = [(if vertex_aniso(0) < 0.000000000001 then Float64(1.0) else Float64(0.0)), (if vertex_aniso(1) > 0.1 then Float64(1.0) else Float64(0.0))]
 // EXPECT: icosa_exact = [1.0, 1.0]
 
 let demo_aniso = aniso(jet_mean(demo_ico))
 let iso_mean_aniso = mean(method_for(range<Idx<100>>) <@> lambda(n) -> aniso(jets(n)) |> compute)
-let demo_isotropic = [(if demo_aniso < 3.0 * iso_mean_aniso then 1.0 else 0.0), (if aniso(jets(100)) > 3.0 * demo_aniso then 1.0 else 0.0)]
+let demo_isotropic = [(if demo_aniso < 3.0 * iso_mean_aniso then Float64(1.0) else Float64(0.0)), (if aniso(jets(100)) > 3.0 * demo_aniso then Float64(1.0) else Float64(0.0))]
 demo_isotropic
 // EXPECT: demo_isotropic = [1.0, 1.0]
 
@@ -370,7 +370,7 @@ demo_isotropic
 // %%
 let moment_res = method_for(range<Idx<600>>, range<Idx<2>>) <@> lambda(n, e) ->
     (if e == 0 then abs(jets(n, 0) * sqrt(3.0) + rad_mom(n, 0)) else abs(jets(n, 16) * sqrt(5.0) - rad_mom(n, 1))) |> compute
-let moment_pins_bad = reduce(method_for(range<Idx<1200>>) <@> lambda(u) -> (if moment_res(u / 2, u % 2) > 0.000000001 then 1.0 else 0.0) |> compute, (+))
+let moment_pins_bad = reduce(method_for(range<Idx<1200>>) <@> lambda(u) -> (if moment_res(u / 2, u % 2) > 0.000000001 then Float64(1.0) else Float64(0.0)) |> compute, (+))
 moment_pins_bad
 // EXPECT: moment_pins_bad = 0.0
 
@@ -413,7 +413,7 @@ let r2 = method_for(range<Idx<3>>, range<Idx<39>>, range<Idx<4>>) <@> lambda(e, 
     if vf < 0.00000000000000000001 then 0.0 else (cov * cov) / (vf * 0.1875)
 } |> compute
 // A rung's ceiling: its slots [lo, hi) of the row, all four classes.
-function ceiling(e: Int64, lo: Int64, hi: Int64) -> Float =
+function ceiling(e: Int64, lo: Int64, hi: Int64) -> Float64 =
     reduce(method_for(range<Idx<39>>, range<Idx<4>>) <@> lambda(k, c) -> (if k >= lo && k < hi then r2(e, k, c) else 0.0) |> compute, axes = 2)
 let rung_lo: Array<Int64 like Idx<4>> = [0, 5, 5, 5]
 let rung_hi: Array<Int64 like Idx<4>> = [5, 14, 24, 39]
@@ -421,7 +421,7 @@ let ceilings = method_for(range<Idx<3>>, range<Idx<4>>) <@> lambda(e, rg) -> cei
 let ceil_k2 = method_for(range<Idx<3>>) <@> lambda(e) -> ceilings(e, 1) |> compute
 // EXPECT: ceil_k2 = [0.0, 0.0, 0.0]
 // The pattern: K0 real clears 1.5x its null sum, +K3 real does NOT, the full jet does again.
-function clears(rg: Int64) -> Float = if ceilings(0, rg) > 1.5 * (ceilings(1, rg) + ceilings(2, rg)) then 1.0 else 0.0
+function clears(rg: Int64) -> Float64 = if ceilings(0, rg) > 1.5 * (ceilings(1, rg) + ceilings(2, rg)) then 1.0 else 0.0
 let ceil_pattern = [clears(0), 1.0 - clears(2), clears(3)]
 // EXPECT: ceil_pattern = [1.0, 1.0, 1.0]
 let fig_ceiling = plot.lines(Float64(0..4), ceilings, ["real labels", "shuffled A", "shuffled B"], 2: mode,
@@ -507,22 +507,22 @@ let rung_params = [WE0 + 2 * (WT0 + WL0) + WR0 + 4, WE2 + 2 * (WT2 + WL2) + WR2 
 let rung_weight_dims = [WE0, WE2, WE3, WE4, WT0, WT2, WT3, WT4, WL0, WL2, WL3, WL4, WR0, WR2, WR3, WR4]
 // EXPECT: rung_weight_dims = [15, 4, 6, 10, 27, 24, 39, 61, 9, 6, 7, 8, 36, 48, 60, 72]
 
-function embed0(x: Array<Float like IrrepsIdx<OSPEC>>, we: Array<Float like Idx<WE0>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB0>> =
+function embed0(x: Array<Float64 like IrrepsIdx<OSPEC>>, we: Array<Float64 like Idx<WE0>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB0>> =
     ml.derive_linear(OSPEC, EMB0, we, x)
-function embed2(x: Array<Float like IrrepsIdx<ISPEC2>>, we: Array<Float like Idx<WE2>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB2>> =
+function embed2(x: Array<Float64 like IrrepsIdx<ISPEC2>>, we: Array<Float64 like Idx<WE2>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB2>> =
     ml.derive_linear(ISPEC2, EMB2, we, x)
-function embed3(x: Array<Float like IrrepsIdx<ISPEC3>>, we: Array<Float like Idx<WE3>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB3>> =
+function embed3(x: Array<Float64 like IrrepsIdx<ISPEC3>>, we: Array<Float64 like Idx<WE3>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB3>> =
     ml.derive_linear(ISPEC3, EMB3, we, x)
-function embed4(x: Array<Float like IrrepsIdx<ISPEC4>>, we: Array<Float like Idx<WE4>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB4>> =
+function embed4(x: Array<Float64 like IrrepsIdx<ISPEC4>>, we: Array<Float64 like Idx<WE4>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB4>> =
     ml.derive_linear(ISPEC4, EMB4, we, x)
-function block0(x: Array<Float like IrrepsIdx<EMB0>>, wt: Array<Float like Idx<WT0>>, wl: Array<Float like Idx<WL0>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB0>> = ml.linear(EMB0, EMB0, wl, ml.gated(EMB0, ml.tensor_product(CFG0, x, x, wt)))
-function block2(x: Array<Float like IrrepsIdx<EMB2>>, wt: Array<Float like Idx<WT2>>, wl: Array<Float like Idx<WL2>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB2>> = ml.linear(EMB2, EMB2, wl, ml.gated(EMB2, ml.tensor_product(CFG2, x, x, wt)))
-function block3(x: Array<Float like IrrepsIdx<EMB3>>, wt: Array<Float like Idx<WT3>>, wl: Array<Float like Idx<WL3>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB3>> = ml.linear(EMB3, EMB3, wl, ml.gated(EMB3, ml.tensor_product(CFG3, x, x, wt)))
-function block4(x: Array<Float like IrrepsIdx<EMB4>>, wt: Array<Float like Idx<WT4>>, wl: Array<Float like Idx<WL4>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMB4>> = ml.linear(EMB4, EMB4, wl, ml.gated(EMB4, ml.tensor_product(CFG4, x, x, wt)))
+function block0(x: Array<Float64 like IrrepsIdx<EMB0>>, wt: Array<Float64 like Idx<WT0>>, wl: Array<Float64 like Idx<WL0>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB0>> = ml.linear(EMB0, EMB0, wl, ml.gated(EMB0, ml.tensor_product(CFG0, x, x, wt)))
+function block2(x: Array<Float64 like IrrepsIdx<EMB2>>, wt: Array<Float64 like Idx<WT2>>, wl: Array<Float64 like Idx<WL2>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB2>> = ml.linear(EMB2, EMB2, wl, ml.gated(EMB2, ml.tensor_product(CFG2, x, x, wt)))
+function block3(x: Array<Float64 like IrrepsIdx<EMB3>>, wt: Array<Float64 like Idx<WT3>>, wl: Array<Float64 like Idx<WL3>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB3>> = ml.linear(EMB3, EMB3, wl, ml.gated(EMB3, ml.tensor_product(CFG3, x, x, wt)))
+function block4(x: Array<Float64 like IrrepsIdx<EMB4>>, wt: Array<Float64 like Idx<WT4>>, wl: Array<Float64 like Idx<WL4>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<EMB4>> = ml.linear(EMB4, EMB4, wl, ml.gated(EMB4, ml.tensor_product(CFG4, x, x, wt)))
 
 // The frozen bodies: slices of two seeded draws (rungs K0, K<=2 and +K3 share
 // the first, laid end to end; the full-jet rung has the second to itself).
@@ -554,7 +554,7 @@ let e4_l2 = method_for(range<Idx<WL4>>) <@> lambda(k) -> __wc(140 + k) |> comput
 // Each rung's invariant channels: the norms of its embedding and of both
 // blocks. The clauses are the ones the compiler offers (BL4011) when they are
 // left off.
-function chans0(x: Array<Float like IrrepsIdx<OSPEC>>) where ml.equiv(O3) -> Array<Float like Idx<9>> = {
+function chans0(x: Array<Float64 like IrrepsIdx<OSPEC>>) where ml.equiv(O3) -> Array<Float64 like Idx<9>> = {
     let e = embed0(x, e0_we)
     let b1 = block0(e, e0_t1, e0_l1)
     let ne = ml.norms(EMB0, e)
@@ -562,7 +562,7 @@ function chans0(x: Array<Float like IrrepsIdx<OSPEC>>) where ml.equiv(O3) -> Arr
     let n2 = ml.norms(EMB0, block0(b1, e0_t2, e0_l2))
     [ne(0), ne(1), ne(2), n1(0), n1(1), n1(2), n2(0), n2(1), n2(2)]
 }
-function chans2(x: Array<Float like IrrepsIdx<ISPEC2>>) where ml.equiv(O3) -> Array<Float like Idx<12>> = {
+function chans2(x: Array<Float64 like IrrepsIdx<ISPEC2>>) where ml.equiv(O3) -> Array<Float64 like Idx<12>> = {
     let e = embed2(x, e2_we)
     let b1 = block2(e, e2_t1, e2_l1)
     let ne = ml.norms(EMB2, e)
@@ -570,7 +570,7 @@ function chans2(x: Array<Float like IrrepsIdx<ISPEC2>>) where ml.equiv(O3) -> Ar
     let n2 = ml.norms(EMB2, block2(b1, e2_t2, e2_l2))
     [ne(0), ne(1), ne(2), ne(3), n1(0), n1(1), n1(2), n1(3), n2(0), n2(1), n2(2), n2(3)]
 }
-function chans3(x: Array<Float like IrrepsIdx<ISPEC3>>) where ml.equiv(O3) -> Array<Float like Idx<15>> = {
+function chans3(x: Array<Float64 like IrrepsIdx<ISPEC3>>) where ml.equiv(O3) -> Array<Float64 like Idx<15>> = {
     let e = embed3(x, e3_we)
     let b1 = block3(e, e3_t1, e3_l1)
     let ne = ml.norms(EMB3, e)
@@ -578,7 +578,7 @@ function chans3(x: Array<Float like IrrepsIdx<ISPEC3>>) where ml.equiv(O3) -> Ar
     let n2 = ml.norms(EMB3, block3(b1, e3_t2, e3_l2))
     [ne(0), ne(1), ne(2), ne(3), ne(4), n1(0), n1(1), n1(2), n1(3), n1(4), n2(0), n2(1), n2(2), n2(3), n2(4)]
 }
-function chans4(x: Array<Float like IrrepsIdx<ISPEC4>>) where ml.equiv(O3) -> Array<Float like Idx<18>> = {
+function chans4(x: Array<Float64 like IrrepsIdx<ISPEC4>>) where ml.equiv(O3) -> Array<Float64 like Idx<18>> = {
     let e = embed4(x, e4_we)
     let b1 = block4(e, e4_t1, e4_l1)
     let ne = ml.norms(EMB4, e)
@@ -593,7 +593,7 @@ let idx2: Array<Int64 like Idx<9>> = [8, 5, 6, 7, 9, 10, 11, 12, 13]
 let idx3: Array<Int64 like Idx<19>> = [8, 5, 6, 7, 14, 15, 16, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23]
 let idx4: Array<Int64 like Idx<34>> = [8, 24, 5, 6, 7, 14, 15, 16, 9, 10, 11, 12, 13, 25, 26, 27, 28, 29,
                                        17, 18, 19, 20, 21, 22, 23, 30, 31, 32, 33, 34, 35, 36, 37, 38]
-function gather(row: Array<Float like Idx<39>>, idx: Array<Int64 like Idx<n>>) -> Array<Float like Idx<n>> =
+function gather(row: Array<Float64 like Idx<39>>, idx: Array<Int64 like Idx<n>>) -> Array<Float64 like Idx<n>> =
     method_for(idx) <@> lambda(i) -> row(i) |> compute
 let ch0 = method_for(range<Idx<600>>) <@> lambda(n) -> chans0((gather(full_rows(n), idx0) : IrrepsIdx<OSPEC>)) |> compute
 let ch2 = method_for(range<Idx<600>>) <@> lambda(n) -> chans2((gather(full_rows(n), idx2) : IrrepsIdx<ISPEC2>)) |> compute
@@ -618,7 +618,7 @@ let ch4 = method_for(range<Idx<600>>) <@> lambda(n) -> chans4((gather(full_rows(
 // mini-batches — and the four trajectories are one row map.
 
 // %%
-function padded(rg: Int64, n: Int64, j: Int64) -> Float = {
+function padded(rg: Int64, n: Int64, j: Int64) -> Float64 = {
     let v = if rg == 0 then (if j < 9 then ch0(n, j) else 0.0)
             else (if rg == 1 then (if j < 12 then ch2(n, j) else 0.0)
             else (if rg == 2 then (if j < 15 then ch3(n, j) else 0.0) else ch4(n, j)))
@@ -631,37 +631,37 @@ let X = method_for(range<Idx<4>>, range<Idx<600>>, range<Idx<18>>) <@> lambda(rg
     (raw_ch(rg, n, j) - ch_mu(rg, j)) * (if ch_sd(rg, j) < 0.00000001 then 0.0 else 1.0 / ch_sd(rg, j)) |> compute
 // Theorem 2 in one number: how many of the K <= 2 rung's twelve channels
 // survive calibration. None — every one is constant across the training split.
-let k2_live_channels = reduce(method_for(range<Idx<12>>) <@> lambda(j) -> (if ch_sd(1, j) < 0.00000001 then 0.0 else 1.0) |> compute, (+))
+let k2_live_channels = reduce(method_for(range<Idx<12>>) <@> lambda(j) -> (if ch_sd(1, j) < 0.00000001 then Float64(0.0) else Float64(1.0)) |> compute, (+))
 // EXPECT: k2_live_channels = 0.0
 
-let static NW = 76
-let static SW = 153
-let static LR = 0.05
-let static MU = 0.9
-function score(s: Array<Float like Idx<SW>>, x: Array<Float like Idx<18>>, c: Int64) -> Float = {
+let static NW: Int64 = 76
+let static SW: Int64 = 153
+let static LR: Float64 = 0.05
+let static MU: Float64 = 0.9
+function score(s: Array<Float64 like Idx<SW>>, x: Array<Float64 like Idx<18>>, c: Int64) -> Float64 = {
     let t = method_for(range<Idx<18>>) <@> lambda(j) -> s(18 * c + j) * x(j) |> compute
     reduce(t, (+)) + s(72 + c)
 }
 // One-vs-rest squared error against the one-hot target.
-function sq_err(s: Array<Float like Idx<SW>>, x: Array<Float like Idx<18>>, y: Array<Float like Idx<4>>) -> Float = {
+function sq_err(s: Array<Float64 like Idx<SW>>, x: Array<Float64 like Idx<18>>, y: Array<Float64 like Idx<4>>) -> Float64 = {
     let sc = method_for(range<Idx<4>>) <@> lambda(c) -> score(s, x, c) |> compute
     let e = method_for(range<Idx<4>>) <@> lambda(c) -> (sc(c) - y(c)) * (sc(c) - y(c)) |> compute
     reduce(e, (+))
 }
-function loss(s: Array<Float like Idx<SW>>, rg: Int64, b: Int64) -> Float = {
+function loss(s: Array<Float64 like Idx<SW>>, rg: Int64, b: Int64) -> Float64 = {
     let errs = method_for(range<Idx<100>>) <@> lambda(j) -> sq_err(s, X(rg, 4 * j + b), y_tr(4 * j + b)) |> compute
     reduce(errs, (+)) / 100.0
 }
-function block76(s: Array<Float like Idx<SW>>, base: Int64) -> Array<Float like Idx<NW>> = {
+function block76(s: Array<Float64 like Idx<SW>>, base: Int64) -> Array<Float64 like Idx<NW>> = {
     let o = method_for(range<Idx<NW>>) <@> lambda(k) -> s(base + k) |> compute
     o
 }
-function sgd_step(s: Array<Float like Idx<SW>>, rg: Int64, b: Int64) -> Array<Float like Idx<SW>> = {
-    let mut ds = replicate(SW, pure(0.0)) |> compute
+function sgd_step(s: Array<Float64 like Idx<SW>>, rg: Int64, b: Int64) -> Array<Float64 like Idx<SW>> = {
+    let mut ds = replicate(SW, pure(Float64(0.0))) |> compute
     let lv = ad.grad(loss)(s, rg, b, ds)
     let v = MU * block76(s, NW) - LR * block76(ds, 0)
     let w = block76(s, 0) + v
-    let lrow: Array<Float like Idx<1>> = [lv]
+    let lrow: Array<Float64 like Idx<1>> = [lv]
     join(w, v, lrow, 0)
 }
 
@@ -672,8 +672,8 @@ let __r2 = r.normal(31462, 105)
 let __r3 = r.normal(31463, 129)
 let __r4 = r.normal(31464, 153)
 let rung_width: Array<Int64 like Idx<4>> = [9, 12, 15, 18]
-function draw(rg: Int64, i: Int64) -> Float = if rg == 0 then __r0(i) else (if rg == 1 then __r2(i) else (if rg == 2 then __r3(i) else __r4(i)))
-function init_weight(rg: Int64, k: Int64) -> Float = {
+function draw(rg: Int64, i: Int64) -> Float64 = if rg == 0 then __r0(i) else (if rg == 1 then __r2(i) else (if rg == 2 then __r3(i) else __r4(i)))
+function init_weight(rg: Int64, k: Int64) -> Float64 = {
     let cw = rung_width(rg)
     let v = if k >= NW then 0.0
             else (if k >= 72 then 0.1 * draw(rg, 4 * cw + k - 72)
@@ -682,9 +682,9 @@ function init_weight(rg: Int64, k: Int64) -> Float = {
 }
 let starts = method_for(range<Idx<4>>, range<Idx<SW>>) <@> lambda(rg, k) -> init_weight(rg, k) |> compute
 
-let static NSTEP = 120
-function train(rg: Int64) -> Array<Float like Idx<121>, Idx<SW>> = {
-    let rec t: Array<Float like Idx<121>, Idx<SW>> =
+let static NSTEP: Int64 = 120
+function train(rg: Int64) -> Array<Float64 like Idx<121>, Idx<SW>> = {
+    let rec t: Array<Float64 like Idx<121>, Idx<SW>> =
         match t with
         | zero -> zero
         | zero :: n -> zero :: starts(rg)
@@ -710,10 +710,10 @@ final_losses
 // row's total of exactly 50 is theorem 2's accuracy consequence, measured.
 
 // %%
-function test_hit(rg: Int64, n: Int64) -> Float = {
+function test_hit(rg: Int64, n: Int64) -> Float64 = {
     let sc = method_for(range<Idx<4>>) <@> lambda(c) -> score(trajs(rg, NSTEP), X(rg, 400 + n), c) |> compute
     let truth = reduce(sc * y_te(n), (+))
-    if reduce(method_for(sc) <@> lambda(v) -> (if v > truth then 1.0 else 0.0) |> compute, (+)) < 0.5 then 1.0 else 0.0
+    if reduce(method_for(sc) <@> lambda(v) -> (if v > truth then Float64(1.0) else Float64(0.0)) |> compute, (+)) < 0.5 then 1.0 else 0.0
 }
 let hits = method_for(range<Idx<4>>, range<Idx<NTE>>) <@> lambda(rg, n) -> test_hit(rg, n) |> compute
 let matrix = method_for(range<Idx<4>>, range<Idx<4>>) <@> lambda(rg, c) ->
@@ -747,7 +747,7 @@ rung_totals
 // %%
 // Rotation k of test cloud n, in (y, z, x) order: output component c is the
 // rotated Cartesian component (c + 1) % 3.
-function rotated(k: Int64, n: Int64) -> Array<Float like Idx<NPT>, Idx<3>> =
+function rotated(k: Int64, n: Int64) -> Array<Float64 like Idx<NPT>, Idx<3>> =
     method_for(range<Idx<NPT>>, range<Idx<3>>) <@> lambda(p, c) ->
         rots(k, 3 * ((c + 1) % 3)) * cart_te(n, p, 0) + rots(k, 3 * ((c + 1) % 3) + 1) * cart_te(n, p, 1)
         + rots(k, 3 * ((c + 1) % 3) + 2) * cart_te(n, p, 2) |> compute
@@ -759,7 +759,7 @@ let rot_dev = method_for(range<Idx<8>>, range<Idx<8>>, range<Idx<4>>) <@> lambda
     let x = method_for(range<Idx<18>>) <@> lambda(j) -> (raw(j) - ch_mu(3, j)) * (if ch_sd(3, j) < 0.00000001 then 0.0 else 1.0 / ch_sd(3, j)) |> compute
     abs(score(trajs(3, NSTEP), x, c) - score(trajs(3, NSTEP), X(3, 400 + probe_n(i)), c))
 } |> compute
-let rotation_bad = reduce(method_for(range<Idx<256>>) <@> lambda(u) -> (if rot_dev(u / 32, (u / 4) % 8, u % 4) > 0.000000000001 then 1.0 else 0.0) |> compute, (+))
+let rotation_bad = reduce(method_for(range<Idx<256>>) <@> lambda(u) -> (if rot_dev(u / 32, (u / 4) % 8, u % 4) > 0.000000000001 then Float64(1.0) else Float64(0.0)) |> compute, (+))
 rotation_bad
 // EXPECT: rotation_bad = 0.0
 
@@ -777,7 +777,7 @@ rotation_bad
 // session, so nothing downstream is disturbed.
 
 // %%
-function leak(x: Array<Float like IrrepsIdx<ISPEC4>>) where ml.equiv(O3) -> Float =
+function leak(x: Array<Float64 like IrrepsIdx<ISPEC4>>) where ml.equiv(O3) -> Float64 =
     x(XL4)
 
 // %% [markdown]

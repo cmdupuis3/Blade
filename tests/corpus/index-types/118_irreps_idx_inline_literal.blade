@@ -8,7 +8,7 @@
 // (IrrepsIdx<sh_spec(2)>) is NOT part of the simple-expression grammar —
 // bind a `let static` first.
 // ============================================================================
-let x: Array<Float like IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>> = [1.5, 2.5, 3.5, 4.5]
+let x: Array<Float64 like IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>> = [1.5, 2.5, 3.5, 4.5]
 // EXPECT: x = [1.5, 2.5, 3.5, 4.5]
 let v = x(2)
 // EXPECT: v = 3.5

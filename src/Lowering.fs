@@ -53,6 +53,10 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
     match v with
     | StaticEval.SVInt n -> IRLit (IRLitInt n)
     | StaticEval.SVFloat f -> IRLit (IRLitFloat f)
+    // Never reached through a consumer (StaticEval normalizes), but total:
+    // a Float32 is its float32 literal, an Int32 the cast-form Int32 literal.
+    | StaticEval.SVFloat32 f -> IRLit (IRLitFloat32 f)
+    | StaticEval.SVInt32 n -> IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), IRLit (IRLitInt (int64 n)))
     | StaticEval.SVBool b -> IRLit (IRLitBool b)
     // A folded STRING is an ordinary IR literal (IR.inferExprType types it
     // ETString and CodeGen.litToCpp emits std::string). Lowering it to
@@ -540,6 +544,25 @@ let private alignRangeOperandExtents (arrays: IRExpr list) (arrayTypes: IRArrayT
         (arrayTypes |> List.map (fun at -> { at with IndexTypes = at.IndexTypes |> List.map fix }),
          shared |> List.map fix)
 
+/// A direct cell of a plain static virtual range is its ordinal plus the
+/// offset, without a materialized iota. Zonk has already proved or guarded
+/// the subscript, so retain that expression (including its guard) exactly
+/// once. Limit this fold to static bounds: discarding a runtime range's
+/// extent could otherwise discard evaluation of its upper-bound expression.
+let private lowerRangeIndex (arr: IRExpr) (indices: IRExpr list) identity : IRExpr =
+    match arr, indices with
+    | IRRange ([ix], offset), [index]
+        when ix.IxKind = IxKPlain && ix.Rank = 1
+             && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true)
+             && (tryEvalIntIR ix.Extent).IsSome
+             && (offset |> Option.forall (fun e -> (tryEvalIntIR e).IsSome)) ->
+        let ordinal = IRUnaryOp (IRCast (ETInt64, SrcLoc.Nowhere), index)
+        match offset |> Option.bind tryEvalIntIR with
+        | Some n when n <> 0L ->
+            IRBinOp (IRElementwise, IRAdd, IRLit (IRLitInt n), ordinal, SrcLoc.Nowhere)
+        | _ -> ordinal
+    | _ -> IRIndex (arr, indices, identity)
+
 /// THE ZERO-LEVEL APPLY (gap G64; formalism §6, "a zero-level application is
 /// a call"): `object_for(f) <@> y` where f takes every operand WHOLE (no
 /// S-dimension level on any operand: `SDimsPerArray` all 0) and returns a
@@ -575,7 +598,20 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     if isUnseededSeed texpr then lowerUnseededSeed env texpr else
     match texpr.Kind with
     | TExprLit lit ->
-        IRLit (lowerLiteralValued lit texpr.Type)
+        // An Int32-TYPED integer literal (round 6: the default of a literal
+        // that fits Int32, or one adapted to Int32) carries its width into the
+        // IR as a cast -- IRLitInt has no width and types Int64 -- so
+        // exprTypeIfKnown, HM instance selection and every lane agree with the
+        // checker (`inc(5)` is an Int32 instance). A bare operand of an
+        // elementwise binop beside an Int32 partner is unwrapped again below
+        // (IR's own "a literal adapts" rule types it there).
+        // An arity-polymorphic scalar base arm can carry its declared
+        // array result type. It still produces one scalar, at that array's
+        // element width, rather than falling back to a wide literal.
+        let literalTy = match texpr.Type with ArrayElem a -> a.ElemType | ty -> ty
+        match lit, literalTy with
+        | LitInt n, AnyPrimElem ETInt32 -> IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), IRLit (IRLitInt n))
+        | _ -> IRLit (lowerLiteralValued lit literalTy)
 
     | TExprWildcard ->
         // A wildcard `_` is a hole, not a value. It is only meaningful where a
@@ -601,8 +637,28 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRParam (String.concat "." names, 0, texpr.Type)
     
     | TExprBinOp (mode, op, left, right) ->
+        // A literal operand beside a NON-literal Int32 partner stays a bare
+        // IRLitInt (see the TExprLit arm): `i32 + 1` emits as it always did.
+        let rec isLitInt (t: TypedExpr) =
+            match t.Kind with
+            | TExprLit (LitInt _) -> true
+            | TExprUnaryOp (OpNeg, x) -> isLitInt x
+            | _ -> false
+        let i32Partner (t: TypedExpr) =
+            not (isLitInt t)
+            && (match stripUnits t.Type with
+                | IRTScalar ETInt32 -> true
+                | ArrayElem a -> (match stripUnits a.ElemType with IRTScalar ETInt32 -> true | _ -> false)
+                | _ -> false)
+        let rec unwrapI32 (e: IRExpr) =
+            match e with
+            | IRUnaryOp (IRCast (ETInt32, _), (IRLit (IRLitInt _) as lit)) -> lit
+            | IRUnaryOp (IRNeg, inner) -> IRUnaryOp (IRNeg, unwrapI32 inner)
+            | _ -> e
         let l = lowerTypedExpr env left
         let r = lowerTypedExpr env right
+        let l = if mode = Elementwise && isLitInt left && i32Partner right then unwrapI32 l else l
+        let r = if mode = Elementwise && isLitInt right && i32Partner left then unwrapI32 r else r
         lowerTypedBinOp env mode op l r left right texpr.Type (SrcLoc.Of texpr.Span)
     
     | TExprUnaryOp (op, operand) ->
@@ -664,7 +720,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // workaround) makes the body's shape correct regardless of whether
         // the lambda is inlined or lifted to a top-level function.
         match func.Type with
-        | ArrayElem _ -> IRIndex (f, as', None)
+        | ArrayElem _ -> lowerRangeIndex f as' None
         | _ ->
             // The call's span, for the opt-in kept inline's BL7005 (G69).
             (match f with IRVar (fid, _) -> Optimize.CallSpanTable.record fid as' texpr.Span | _ -> ())
@@ -673,7 +729,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprIndex (array, indices, identity) ->
         let arr = lowerTypedExpr env array
         let idxs = indices |> List.map (lowerTypedExpr env)
-        IRIndex (arr, idxs, identity)
+        lowerRangeIndex arr idxs identity
     
     | TExprTupleIndex (tuple, index) ->
         let tup = lowerTypedExpr env tuple
@@ -905,6 +961,12 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         let computeWrap (x: IRExpr) =
             match x with
             | IRApp (IRObjectFor _, _, _) -> x
+            // A literal array is already materialized. Numeric array casts
+            // keep a Compute boundary during typing so literal adaptation
+            // cannot change their explicit width; the lowered array now
+            // carries that fixed element type itself. Expose it to the
+            // ordinary literal-argument hoister before expression emission.
+            | IRArrayLit _ -> x
             | _ -> IRCompute x
         (match e.Kind with
          | TExprReplicate (cnt, body) ->
@@ -1920,13 +1982,29 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         let (primary, env') =
             match (if binding.SubBindings.IsEmpty then Map.tryFind binding.Name env.StaticValues else None) with
             | Some sv ->
-                let irValue = staticValueToIR sv
-                let ty = match sv with
-                         | StaticEval.SVInt _ -> IRTScalar ETInt64
-                         | StaticEval.SVFloat _ -> IRTScalar ETFloat64
-                         | StaticEval.SVBool _ -> IRTScalar ETBool
-                         | StaticEval.SVStruct (n, _) -> IRTNamed n
-                         | _ -> IRTUnit
+                // The binding's CHECKED width decides a numeric static's IR
+                // form (round 6): a Float32 static is the float32 literal of
+                // its (already float-rounded) fold, an Int32 static the Int32
+                // literal -- the cast form core's Lowering gives every
+                // standalone Int32 literal. StaticEval folded it at that width.
+                let narrow =
+                    match IR.stripUnits binding.Type, sv with
+                    | IRTScalar ETFloat32, StaticEval.SVFloat f ->
+                        Some (IRLit (IRLitFloat32 (float32 f)), binding.Type)
+                    | IRTScalar ETInt32, StaticEval.SVInt n ->
+                        Some (IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), IRLit (IRLitInt (int64 (int32 n)))), binding.Type)
+                    | _ -> None
+                let irValue, ty =
+                    match narrow with
+                    | Some (v, t) -> v, t
+                    | None ->
+                    staticValueToIR sv,
+                    (match sv with
+                     | StaticEval.SVInt _ -> IRTScalar ETInt64
+                     | StaticEval.SVFloat _ -> IRTScalar ETFloat64
+                     | StaticEval.SVBool _ -> IRTScalar ETBool
+                     | StaticEval.SVStruct (n, _) -> IRTNamed n
+                     | _ -> IRTUnit)
                 let bd = { Id = binding.VarId; Name = binding.Name; Type = ty; Value = irValue; IsConst = true; IsMutable = false }
                 let env' = bindTypedVar binding.Name binding.VarId env
                 (bd, env')
@@ -4249,6 +4327,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // values is refused (keys are represented as positions, D2).
         IRMono.refuseEnumKeyArithModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
+        // Array operators recovered after arity specialization can expose a
+        // literal-only scalar base inside a newly minted broadcast kernel.
+        // Its concrete cell partner now supplies the literal width.
+        let irModule = IRMono.adaptFloatLiteralsModule irModule
         // every unseeded fold's seed by its EFFECTIVE route (gap G74), before any
         // optimizer pass reads a seed (the repro twins of gap G80 are in place)
         let irModule = resolveUnseededSeedsModule (foldedProgramFuncs.Force()) irModule

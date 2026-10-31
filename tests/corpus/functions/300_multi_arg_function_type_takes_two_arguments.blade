@@ -20,9 +20,9 @@ let rl = ap2(g, [10.0, 2.0], 4.0)
 
 // Three slots, generic over the element type.
 function ap3(f: (T, T, T) -> T, a: T, b: T, c: T) -> T = f(a, b, c)
-let r3 = ap3(lambda(x, y, z) -> x - y - z, 10, 2, 3)
+let r3 = ap3(lambda(x, y, z) -> x - y - z, Int64(10), Int64(2), Int64(3))
 // EXPECT: r3 = 5
-let r3f = ap3(lambda(x, y, z) -> x - y - z, 10.0, 2.0, 3.0)
+let r3f = ap3(lambda(x, y, z) -> x - y - z, Float64(10.0), Float64(2.0), Float64(3.0))
 // EXPECT: r3f = 5.0
 
 // A curried arrow is written as one: `A -> B -> C`.

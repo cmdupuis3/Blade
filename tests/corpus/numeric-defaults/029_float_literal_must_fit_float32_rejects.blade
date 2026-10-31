@@ -1,0 +1,8 @@
+// TEST: a float literal that underflows a Float32 partner is refused (rejects)
+// ============================================================================
+// A nonzero float literal whose Float32 rounding would be zero or subnormal
+// does not fit a Float32 partner: `x * 1e-50` over a Float32 `x` is refused.
+// ============================================================================
+let x: Float32 = 1.0
+let y = x * 1e-50
+// ERROR: BL3020

@@ -17,7 +17,7 @@
 // resolves statically from the type, but the test pins down that behavior.)
 // rank(captured) inside a lambda — should be fine because rank resolves
 // statically from the type, no runtime capture needed.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x: Int64) -> rank(A) + x
 let result = f(10)
 // EXPECT: result = 11

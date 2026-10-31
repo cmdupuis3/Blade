@@ -18,7 +18,7 @@
 //        class, as the binding-level copy and the interpreter do
 type K = Idx<2>
 type I = Idx<3>
-let G = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let G = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute
 let r = method_for(range<I>) <@> lambda(i) -> {
     let mut c = G
     c((0 : K)) = Float64(i)
@@ -29,7 +29,7 @@ let rp = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {
     c((0 : K)) = Float64(i)
     c((0 : K)) + G((0 : K))
 } |> compute
-let mut Gm = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute
+let mut Gm = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute
 function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {
     buf((0 : K)) = v
     v

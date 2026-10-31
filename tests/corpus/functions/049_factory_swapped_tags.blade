@@ -6,11 +6,11 @@
 // its default exactly as the plain defaults machinery does.
 Unit levels: 1
 Unit cmap: 1
-function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
-let a = plot(1.0, 2.0: levels, 3.0: cmap)
-let b = plot(1.0, 3.0: cmap, 2.0: levels)
-let c = plot(1.0, 5.0: cmap)
-let n2 = (4.0: levels)
+function plot(x: Float64, n: Float64<levels> = 10.0, c: Float64<cmap> = 0.0) -> Float64 = x + n * 100.0 + c * 7.0
+let a = plot(1.0, Float64(2.0): levels, Float64(3.0): cmap)
+let b = plot(1.0, Float64(3.0): cmap, Float64(2.0): levels)
+let c = plot(1.0, Float64(5.0): cmap)
+let n2 = (Float64(4.0): levels)
 let g = plot(1.0, n2)
 // EXPECT: a = 222.0
 // EXPECT: b = 222.0

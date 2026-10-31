@@ -7,7 +7,7 @@
 // at rank 3, W0(i0) + i1 at rank 2. Symmetric rank 3 in permuted orders,
 // strict rank 3 with its signs and repeated-index zeros, symmetric rank 2,
 // and literal subscripts (the table terms fold). Integer-valued cells.
-let static p = 11
+let static p: Int64 = 11
 type Var = Idx<p>
 type Obs = Idx<4>
 let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 5 + s * 3) % 7) - 2.0 |> compute

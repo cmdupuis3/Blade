@@ -13,6 +13,6 @@
 // `max=3` is inclusive, so 4 is the first violating value.
 // ABORT: Constraint violation in Small (conjunct 2)
 struct Small {
-    n: Int<min=0, max=3>
+    n: Int32<min=0, max=3>
 }
 let bad = Small { n = 4 }

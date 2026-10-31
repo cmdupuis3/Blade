@@ -1,0 +1,12 @@
+// TEST: arity lifting adapts scalar literal widths before its shape gate
+function add0(a: T^0, b: T^0) -> T^0 = a + b
+let wide: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let left = add0(wide, 2.5)
+let right = add0(100.0, wide)
+let small = [1.0, 2.0, 3.0]
+let narrow = add0(small, 2.5)
+let cell: Float32 = narrow(0)
+// EXPECT: left = [3.5, 4.5, 5.5]
+// EXPECT: right = [101.0, 102.0, 103.0]
+// EXPECT: narrow = [3.5, 4.5, 5.5]
+// EXPECT: cell = 3.5

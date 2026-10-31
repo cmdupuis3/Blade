@@ -9,8 +9,8 @@
 // parameter downstream baked a length the value does not have. When the
 // arguments teach one variable different literal extents, the result keeps
 // the declared (symbolic) return, and the value is read at its real length.
-let A = [1.0, 2.0, 3.0]
-let B = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 function second(a: T^1, b: T^1) -> T^1 = b
 let r = second(B, A)
 let r3: Array<Float64 like Idx<3>> = r

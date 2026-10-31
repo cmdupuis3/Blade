@@ -15,7 +15,7 @@ let x_val = x
 // The imported static also drives elaboration positions directly: the
 // replicate count evaluates M.k through the qualified-name seed
 // (StaticEval.evalExpr's ExprField arm over env.Values).
-let A = [1.0, 2.0]
+let A = Float64([1.0, 2.0])
 let L = method_for(A)
 let c = L <@> lambda(q) -> q + 1.0
 let reps = replicate(M.k, c) |> compute

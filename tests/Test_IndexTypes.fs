@@ -38,7 +38,7 @@ let runInstanceGuardEmissionTests () : BlockResult =
     let header =
         "type L = Idx<3>\n\
          let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n\
-         let v = [1.0, 2.0, 3.0]\n"
+         let v = Float64([1.0, 2.0, 3.0])\n"
     let cases =
         [ "a computed Int64 read through T^1 at a named axis is guarded", true,
           header + "function g(m: T^1, k: Int64) = m(k)\nlet s = g(A, 1)\n"
@@ -66,7 +66,7 @@ let runInstanceGuardEmissionTests () : BlockResult =
     match Blade.Tests.Functions.cppOf "enum_key_table" enumSrc with
     | Ok cpp ->
         check "an integer EnumIdx observation reads the per-type key table (F5)"
-            (cpp.Contains "blade_arith::key_table<100LL, 200LL, 300LL>::tab[" && not (cpp.Contains "== 1L) ?"))
+            (cpp.Contains "blade_arith::key_table<100LL, 200LL, 300LL>::tab[" && not (cpp.Contains "== 1LL) ?"))
             "expected a key_table read and no position if-chain"
     | Error e -> check "an integer EnumIdx observation reads the per-type key table (F5)" false e
     { Block = "Array-Instance Subscript Guards"

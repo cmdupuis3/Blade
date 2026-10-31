@@ -16,9 +16,9 @@ import ad as ad
 
 Unit meters
 Unit km = 1000 * meters
-type Dist = Float<km>
+type Dist = Float64<km>
 
-function f(x: Dist, y: Float<meters>) -> Float<km> = x + y
+function f(x: Dist, y: Float64<meters>) -> Float64<km> = x + y
 
-let (fv, dfx, dfy) = ad.grad(f)(2.0, 500.0)
+let (fv, dfx, dfy) = ad.grad(f)(Float64(2.0), Float64(500.0))
 fv

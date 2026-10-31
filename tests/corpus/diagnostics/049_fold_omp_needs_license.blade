@@ -15,7 +15,7 @@
 // cross-checked against the body's parity) and a builtin fold body
 // (a + b, a * b, a && b, a || b), which carries both properties outright.
 // ============================================================================
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let s = reduce(A, lambda(a, b) where omp -> a - b)
 // ERROR: BL4016
 // ERROR-CONTAINS: parallel reduction needs comm(...) or a builtin op

@@ -361,7 +361,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // the output's NAME (it never sees the let id), for the duration
             // of this one emission.
             (match Blade.Optimize.HotRowTable.tryProducer id with
-             | Some plan -> (hotRowPendingCell ()).[varName] <- plan
+             | Some plan -> plan.EmittedCpp.Value <- None; (hotRowPendingCell ()).[varName] <- plan
              | None -> ())
             (match Blade.Optimize.CompactRowTable.tryProducer id with
              | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[varName] <- plan
@@ -2606,7 +2606,7 @@ let genTypeDefs (modul: IRModule) : string list =
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
-    [$"    cout << \"{name} = \" << {(sanitizeCppName name)} << endl;"]
+    [$"    cout << \"{name} = \" << blade_rt::pv({(sanitizeCppName name)}) << endl;"]
 
 /// The print blocks' loop variables. HYGIENIC: a print block sits in the
 /// scope of every top-level binding, so a loop var spelled like a user name
@@ -2637,7 +2637,7 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
       $$"""        for (size_t {{j}} = 0; {{j}} < {{innerBound}}; {{j}}++) {"""
       $"            if (!{firstVar}) cout << \", \";"
       $"            {firstVar} = false;"
-      $"            cout << {v}[{i}][{j}];"
+      $"            cout << blade_rt::pv({v}[{i}][{j}]);"
       "        }"
       "        cout << \"]\";"
       "    }"
@@ -2677,7 +2677,7 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
             let idx = [ for d in 0 .. rank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
             [ $"{ind}if (!{firstVar}) cout << \", \";"
               $"{ind}{firstVar} = false;"
-              $"{ind}cout << {v}{idx};" ]
+              $"{ind}cout << blade_rt::pv({v}{idx});" ]
         let closes =
             [ for d in rank - 1 .. -1 .. 0 ->
                 $"""    {(String.replicate d "    ")}}}""" ]
@@ -2726,7 +2726,7 @@ let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
           $"{ind}        cout << \"[\";"
           $$"""{{ind}}        for (size_t __f1 = 0; __f1 < {{expr}}.extents[1]; __f1++) {"""
           $"{ind}            if (__f1) cout << \", \";"
-          $"{ind}            cout << {expr}[__f0][__f1];"
+          $"{ind}            cout << blade_rt::pv({expr}[__f0][__f1]);"
           $"{ind}        }}"
           $"{ind}        cout << \"]\";"
           $"{ind}    }}"
@@ -2744,7 +2744,7 @@ let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
         @ loops
         @ [ $"{inner}if (!__ffirst) cout << \", \";"
             $"{inner}__ffirst = false;"
-            $"{inner}cout << {expr}{idx};" ]
+            $"{inner}cout << blade_rt::pv({expr}{idx});" ]
         @ [ for d in rank - 1 .. -1 .. 0 -> $"""{ind}    {(String.replicate d "    ")}}}""" ]
         @ [ $"{ind}    cout << \"]\";"
             $"{ind}}}" ]
@@ -2832,7 +2832,7 @@ let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option
 /// value's type) in its literal spelling, no name and no newline.
 let rec genPrintAggregate (ap: AggregatePrint) (expr: string) (ind: string) : string list =
     match ap with
-    | APScalar -> [ $"{ind}cout << {expr};" ]
+    | APScalar -> [ $"{ind}cout << blade_rt::pv({expr});" ]
     | APKeyed keys ->
         let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
         [ $"{ind}cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[{expr}];" ]
@@ -2840,7 +2840,7 @@ let rec genPrintAggregate (ap: AggregatePrint) (expr: string) (ind: string) : st
     | APKeyedArray (rank, keys) ->
         let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
         let e = System.Text.RegularExpressions.Regex.Escape expr
-        let cellRe = System.Text.RegularExpressions.Regex($@"cout << ({e}(\[[^\]]+\])+);")
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({e}(\[[^\]]+\])+)\);")
         genPrintFieldArray expr rank ind
         |> List.map (fun l -> cellRe.Replace(l, $"cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[$1];"))
     | APOpaque text -> [ $"{ind}cout << \"{text}\";" ]
@@ -2952,7 +2952,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         let inner = [
             $"{innerIndent}if (!{firstVar}) cout << \", \";"
             $"{innerIndent}{firstVar} = false;"
-            $"{innerIndent}cout << {v}{idx};" ]
+            $"{innerIndent}cout << blade_rt::pv({v}{idx});" ]
         let closes =
             [for d in rank - 1 .. -1 .. 0 ->
                 $"""    {(String.replicate d "    ")}}}"""]
@@ -2982,7 +2982,7 @@ let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int6
       $"    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<{levelArgs}>({extent}); __ok++) {{"
       $"        if (!{firstVar}) cout << \", \";"
       $"        {firstVar} = false;"
-      $"        cout << {v}[__ok];"
+      $"        cout << blade_rt::pv({v}[__ok]);"
       "    }"
       "    cout << \"]\" << endl;" ]
 
@@ -3099,8 +3099,8 @@ let private intEnumKeyedPrint (modul: IRModule) (b: IRBinding) (lines: string li
     match intEnumKeysOfBindingType modul b.Type with
     | Some keys when not lines.IsEmpty ->
         let v = System.Text.RegularExpressions.Regex.Escape (sanitizeCppName b.Name)
-        let scalarRe = System.Text.RegularExpressions.Regex($"<< ({v}) << endl;")
-        let cellRe = System.Text.RegularExpressions.Regex($@"cout << ({v}(\[[^\]]+\])+);")
+        let scalarRe = System.Text.RegularExpressions.Regex($@"<< blade_rt::pv\(({v})\) << endl;")
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({v}(\[[^\]]+\])+)\);")
         let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
         let body =
             lines |> List.map (fun l ->
@@ -3286,7 +3286,7 @@ let genPrintStatements (modul: IRModule) : string list =
                           "        cout << \"[\";"
                           $$"""        for (size_t {{j}} = 0; {{j}} < {{v}}.trailing_stride; {{j}}++) {"""
                           $"            if ({j}) cout << \", \";"
-                          $"            cout << {v}.data[{i} * {v}.trailing_stride + {j}];"
+                          $"            cout << blade_rt::pv({v}.data[{i} * {v}.trailing_stride + {j}]);"
                           "        }"
                           "        cout << \"]\";"
                           "    }"
@@ -3295,7 +3295,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         [ $"    cout << \"{b.Name} = [\";"
                           $$"""    for (size_t {{i}} = 0; {{i}} < {{v}}.size(); {{i}}++) {"""
                           $"        if ({i}) cout << \", \";"
-                          $"        cout << {v}.data[{i}];"
+                          $"        cout << blade_rt::pv({v}.data[{i}]);"
                           "    }"
                           "    cout << \"]\" << endl;" ]
                 | None ->
@@ -3430,7 +3430,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""        for (size_t __rj = 0, __rn = {{gk}}__offsets[__ri + 1] - {{gk}}__offsets[__ri]; __rj < __rn; __rj++) {"""
                         $"            if (!{firstVar}) cout << \", \";"
                         $"            {firstVar} = false;"
-                        $"            cout << {gv}[__ri][__rj];"
+                        $"            cout << blade_rt::pv({gv}[__ri][__rj]);"
                         "        }"
                         "        cout << \"]\";"
                         "    }"
@@ -3447,7 +3447,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""    for (size_t __rk = 0; __rk < {{bv}}.len; __rk++) {"""
                         $"        if (!{firstVar}) cout << \", \";"
                         $"        {firstVar} = false;"
-                        $"        cout << {bv}[__rk];"
+                        $"        cout << blade_rt::pv({bv}[__rk]);"
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -3471,7 +3471,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""        for (size_t __rj = 0; __rj < {{bv}}.lens[__ri]; __rj++) {"""
                         $"            if (!{firstVar}) cout << \", \";"
                         $"            {firstVar} = false;"
-                        $"            cout << {bv}[__ri][__rj];"
+                        $"            cout << blade_rt::pv({bv}[__ri][__rj]);"
                         "        }"
                         "        cout << \"]\";"
                         "    }"

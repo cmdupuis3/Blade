@@ -11,10 +11,10 @@
 // lists the freeze-recognition decision as applied.
 
 type It = Idx<30>
-let tol = 0.000000001
-function sq_err(x: Float) -> Float = x * x - 2.0
-function residual(x: Float) -> Float = abs(sq_err(x))
-let rec xs: Array<Float like It> =
+let tol: Float64 = 0.000000001
+function sq_err(x: Float64) -> Float64 = x * x - 2.0
+function residual(x: Float64) -> Float64 = abs(sq_err(x))
+let rec xs: Array<Float64 like It> =
     match xs with
     | zero -> zero
     | zero :: s -> zero :: 1.0
