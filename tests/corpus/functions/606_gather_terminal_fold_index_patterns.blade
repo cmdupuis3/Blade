@@ -1,0 +1,35 @@
+// TEST: Gather Terminal Fold Index Patterns
+// ============================================================================
+// PM28 (compute elision's gather-terminal arm, BLADE_GATHER_ELIDE): a gather
+// `method_for(idx) <@> lambda(i) -> A((i : I))` read only by the adjacent
+// fold is folded in place -- no gathered pool. Its one possibly failing
+// operation is the checked index cast (BL8006), so the stored and the fused
+// form fail identically (functions/607 pins the abort). Index patterns:
+// sorted, random, repeated and clustered; the values are powers of two, so
+// every sum is exact under any association.
+// ============================================================================
+type I = Idx<11>
+type K = Idx<13>
+function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute
+    reduce(g, (+))
+}
+function gsum_seeded(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> 2.0 * A((i : I)) + 1.0 |> compute
+    reduce(g, (+), 0.5)
+}
+let A = 2.0 ^ Float64(range<I>)
+let sorted: Array<Int64 like K> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10]
+let random: Array<Int64 like K> = [7, 2, 9, 0, 5, 10, 3, 8, 1, 6, 4, 2, 9]
+let repeated: Array<Int64 like K> = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+let clustered: Array<Int64 like K> = [3, 3, 4, 4, 4, 5, 9, 9, 10, 10, 0, 0, 1]
+let s_sorted = gsum(A, sorted)
+// EXPECT: s_sorted = 4095.0
+let s_random = gsum(A, random)
+// EXPECT: s_random = 2563.0
+let s_repeated = gsum(A, repeated)
+// EXPECT: s_repeated = 208.0
+let s_clustered = gsum(A, clustered)
+// EXPECT: s_clustered = 3172.0
+let t_random = gsum_seeded(A, random)
+// EXPECT: t_random = 5139.5

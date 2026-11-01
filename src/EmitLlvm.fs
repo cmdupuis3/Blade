@@ -1131,6 +1131,13 @@ and private Ctx =
       /// binding (gap G41): its accumulator keeps the serial association --
       /// no fold FMF -- exactly as the C++ lane's `licensedFold` declines.
       mutable FoldOperandWrites: bool
+      /// THE JOIN'S SHARED LEAVES (PM13): live only inside one iteration of a
+      /// fused reduction join's nest (`emitReduceComputeCore`). Each entry is
+      /// a shared deferred producer's AVirt closure (by reference), the
+      /// iteration's index registers, and the cell value evaluated ONCE at
+      /// the top of that iteration; `readCell` answers a read of the same
+      /// closure at the same registers from here. Empty everywhere else.
+      mutable CellShares: (obj * string list * Val) list
       /// The span of the declaration being emitted -- the top-level binding
       /// main is binding, or the function whose body is open. A runtime GUARD
       /// panic with no expression span of its own (non-exhaustive match,
@@ -1205,6 +1212,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       Facts = facts
       FoldFmf = false
       FoldOperandWrites = false
+      CellShares = []
       DeclSpan = Blade.Ast.noSpan
       DeclName = ""
       UsedAttrGroups = SortedSet()
@@ -2434,7 +2442,19 @@ let private allocPool (c: Ctx) (elem: Sc) (n: string) : string =
 let private readCell (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
     match a.Src with
     | APool p -> loadCell c a.Elem (gepCell c a.Elem p (storageOffset c a.Groups idxs))
-    | AVirt f -> f c idxs
+    | AVirt f ->
+        // A join's shared leaf, already evaluated at the top of this
+        // iteration (PM13): the same closure at the same index registers.
+        let shared =
+            match c.CellShares with
+            | [] -> None
+            | shares ->
+                let regs = idxs |> List.map (fun v -> v.Reg)
+                shares |> List.tryPick (fun (o, key, v) ->
+                    if obj.ReferenceEquals(o, box f) && key = regs then Some v else None)
+        match shared with
+        | Some v -> v
+        | None -> f c idxs
     | AVirtFlat f -> f c { Reg = storageOffset c a.Groups idxs; Ty = ScI64 }
 
 /// Read cell number `k` of the pool, ignoring shape entirely. The
@@ -9220,14 +9240,64 @@ and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
                 ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
         plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
     | None ->
+    // THE JOIN'S SHARED LEAVES (PM13; the C++ lane's shared-leaf rule,
+    // CodeGenBinding's `sharedIds`, restated over this lane's legs): a NAMED
+    // deferred producer that a leg folds as its whole leaf and the join
+    // spells again (`reduce(w, (+))` beside `prodsum(w, v)`), or that a leg's
+    // own apply reads as an operand slot, is evaluated ONCE per iteration,
+    // at the top, in first-use order -- the C++ lane's per-iteration `const`
+    // -- and every read of it at the iteration's coordinates answers that
+    // value. Joins whose maps write are refused upstream (BL4005, G43), so
+    // this is a per-iteration CSE of a pure map: the values are the same
+    // bits, and the evaluation order within an iteration is the C++ lane's.
+    // Only a producer of the nest's own shape is shared (its reads are at
+    // the iteration's coordinates); anything else keeps its per-leg read.
+    let shares : ArrVal list =
+        if plans.Length < 2 then []
+        else
+            let deferredArr (e: IRExpr) =
+                match e with
+                | IRVar (id, _) ->
+                    (match c.ArrSlots.TryGetValue id with
+                     | true, a when (match a.Src with AVirt _ -> true | _ -> false) && a.Groups = shape -> Some (id, a)
+                     | _ -> None)
+                | _ -> None
+            let leafSpells = legs |> List.choose deferredArr
+            let slotSpells =
+                legs |> List.collect (fun leg ->
+                    match leg with
+                    | IRApplyCombinator info -> info.Arrays |> List.choose deferredArr
+                    | _ -> [])
+            let spelled id = (leafSpells @ slotSpells) |> List.filter (fun (i, _) -> i = id) |> List.length
+            legs
+            |> List.collect (fun leg ->
+                match deferredArr leg with
+                | Some (id, a) when spelled id >= 2 -> [ (id, a) ]
+                | Some _ -> []
+                | None ->
+                    match leg with
+                    | IRApplyCombinator info -> info.Arrays |> List.choose deferredArr
+                    | _ -> [])
+            |> List.distinctBy fst
+            |> List.map snd
     emitNest c (axisExtents shape) (fun idxs ->
-        for (a, cl, ty, slot, licensed) in plans do
-            let cur = loadSlot c slot ty
-            let cell = readCell c a idxs
-            let next =
-                withFoldFmf c licensed (fun () ->
-                    coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
-            ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
+        let saved = c.CellShares
+        let key = idxs |> List.map (fun v -> v.Reg)
+        try
+            for a in shares do
+                match a.Src with
+                | AVirt f ->
+                    let v = f c idxs
+                    c.CellShares <- (box f, key, v) :: c.CellShares
+                | _ -> ()
+            for (a, cl, ty, slot, licensed) in plans do
+                let cur = loadSlot c slot ty
+                let cell = readCell c a idxs
+                let next =
+                    withFoldFmf c licensed (fun () ->
+                        coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
+                ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}")
+        finally c.CellShares <- saved)
     plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
 
 /// Flatten a pack expression into its components. `<&>` (independent) and

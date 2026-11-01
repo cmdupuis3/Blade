@@ -89,6 +89,52 @@
 #include <atomic>
 #endif
 
+// THE PER-WORKER WORKSPACE CENSUS (round 4 wave 3 A4, plan PM06), compiled
+// in only when the program defines BLADE_WS_CENSUS (the compiler writes it
+// under BLADE_WORKSPACE_CENSUS=1; the default build has no counter and no
+// cost). While a threaded site is OPEN (blade_rr::ws_site_begin/_end, around
+// the team), every pool this allocator hands out or takes back is counted
+// against the calling OpenMP thread: allocations, bytes, live bytes and the
+// thread's live high-water mark -- the scratch a worker holds at once. The
+// run record (blade_run_record.hpp, `workspace`) reports it per site.
+#if defined(BLADE_WS_CENSUS) && BLADE_WS_CENSUS
+#include <atomic>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+namespace blade_ws {
+    constexpr int kMaxWorkers = 256;
+    struct alignas(64) Worker { long long allocs; long long bytes; long long live; long long peak; };
+    inline Worker workers[kMaxWorkers] = {};
+    inline std::atomic<bool> open{false};
+    inline int worker_id() {
+#if defined(_OPENMP)
+        return omp_get_thread_num();
+#else
+        return 0;
+#endif
+    }
+    inline void on_alloc(size_t b) {
+        if (!open.load(std::memory_order_relaxed)) return;
+        const int w = worker_id();
+        if (w < 0 || w >= kMaxWorkers) return;
+        Worker& k = workers[w];
+        k.allocs++; k.bytes += (long long)b; k.live += (long long)b;
+        if (k.live > k.peak) k.peak = k.live;
+    }
+    inline void on_release(size_t b) {
+        if (!open.load(std::memory_order_relaxed)) return;
+        const int w = worker_id();
+        if (w < 0 || w >= kMaxWorkers) return;
+        workers[w].live -= (long long)b;
+    }
+}
+#define BLADE_WS_ALLOC(b) ::blade_ws::on_alloc(b)
+#define BLADE_WS_RELEASE(b) ::blade_ws::on_release(b)
+#else
+#define BLADE_WS_ALLOC(b) ((void)0)
+#define BLADE_WS_RELEASE(b) ((void)0)
+#endif
 namespace blade_pool {
 
     // Element types the cache may hold (see the CONTRACT above): arithmetic
@@ -166,6 +212,7 @@ namespace blade_pool {
 
 #if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
     template<class T> inline T* alloc(size_t cells) {
+        BLADE_WS_ALLOC(cells * sizeof(T));
 #if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
         capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
 #endif
@@ -179,6 +226,7 @@ namespace blade_pool {
 #endif
     }
     template<class T> inline void release(T* p, size_t cells) {
+        if (p) BLADE_WS_RELEASE(cells * sizeof(T));
 #if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
         capacity_detail::Operation operation(capacity_detail::OperationKind::release);
         capacity_detail::native_delete(p, cells);
@@ -235,6 +283,7 @@ namespace blade_pool {
     struct Reaper { ~Reaper() { flush(); tl_cache.dead = true; } };
 
     template<class T> inline T* alloc(size_t cells) {
+        BLADE_WS_ALLOC(cells * sizeof(T));
 #if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
         capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
 #endif
@@ -298,6 +347,7 @@ namespace blade_pool {
     }
 
     template<class T> inline void release(T* p, size_t cells) {
+        if (p) BLADE_WS_RELEASE(cells * sizeof(T));
 #if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
         capacity_detail::Operation operation(capacity_detail::OperationKind::release);
 #endif

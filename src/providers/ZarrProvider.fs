@@ -2108,7 +2108,15 @@ module CppZarr =
     /// allocated), and the intersection copied; a missing chunk fills, or
     /// fails loudly under a null fill_value. The window bounds are C++
     /// expressions so a run loop can drive them.
-    let private genStreamWindowCore (wholeReadTally: string option) (borrowedDecode: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
+    /// `io` names a `long long[4]` counter (fetches, fetched bytes, decoded
+    /// bytes, cache hits: the run record's provider_io census, D2 / PM42);
+    /// `cache` = (slot base, S) turns on the halo chunk cache (rank 1 only):
+    /// chunk c lives in slot c % S of `<base>_buf` (S x one padded chunk),
+    /// `<base>_ord[s]` the chunk it holds (SIZE_MAX = none), `<base>_st[s]`
+    /// present (1) or absent (0). A chunk not in its slot is fetched exactly
+    /// as the uncached reader fetches it (same open, same short-read and
+    /// null-fill failures); one in its slot is served without a fetch.
+    let private genStreamWindowCoreIo (io: string option) (cache: (string * int) option) (wholeReadTally: string option) (borrowedDecode: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
             match tryFindArray store varName with
@@ -2157,9 +2165,15 @@ module CppZarr =
         let cIdx =
             [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr.[d]}" ]
             |> String.concat " + "
+        let count (ind: string) (line: string) =
+            match io with
+            | Some c -> [ ind + line.Replace("@IO", c) ]
+            | None -> []
+        let fetched = $"@IO[0] += 1; @IO[1] += {chunkBytes}; @IO[2] += {chunkBytes};"
         let presentBranch =
             [ gInd + $"if ({src.Present}) {{" ]
             @ src.Read (gInd + "    ")
+            @ count (gInd + "    ") fetched
             @ (copyLoops $"({destBuf})[{dIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];")
         let missingBranch =
             match meta.FillValue with
@@ -2199,7 +2213,48 @@ module CppZarr =
                 Blade.ProviderRegistry.refuseScanCpp (missingRuleOfMeta meta) varName storePath
                     destBuf (wext |> List.map (fun e -> $"({e})") |> String.concat " * ")
                     [] [ for d in 0 .. rank - 1 -> $"{v}_wlo{d}" ] wext
-        scratch @ boundDecls @ gridLoops @ limDecls @ src.Locate gInd @ presentBranch @ missingBranch @ gridClose @ scan
+        match cache with
+        | None ->
+            scratch @ boundDecls @ gridLoops @ limDecls @ src.Locate gInd @ presentBranch @ missingBranch @ gridClose @ scan
+        | Some (cb, slots) ->
+            if rank <> 1 then failwith $"Zarr halo chunk cache of '{varName}': rank {rank} (rank 1 only)"
+            let i1 = gInd + "    "
+            let i2 = i1 + "    "
+            let absent =
+                match meta.FillValue with
+                | FillNone ->
+                    [ i2 + $"std::cerr << \"Zarr error: chunk '\" << {src.Ident} << \"' of '{varName}' is missing and fill_value is null\" << std::endl; std::exit(1);" ]
+                | _ -> [ i2 + $"{cb}_st[{v}_hs] = 0;" ]
+            let fillCopy =
+                match meta.FillValue with
+                | FillNone -> []
+                | _ ->
+                    [ gInd + "} else {" ]
+                    @ (copyLoops $"({destBuf})[{dIdx}] = {v}_fillv;" |> List.map (fun s -> "    " + s))
+            let lookup =
+                [ gInd + $"const size_t {v}_hs = {v}_c0 %% {slots}UL;"
+                  gInd + $"{diskCpp}* {v}_cbuf = {cb}_buf + {v}_hs * {chunkCount}UL;"
+                  gInd + $"if ({cb}_ord[{v}_hs] != (size_t){v}_c0) {{ // a miss: today's fetch, into the slot" ]
+                @ src.Locate i1
+                @ [ i1 + $"if ({src.Present}) {{" ]
+                @ src.Read i2
+                @ count i2 fetched
+                @ [ i2 + $"{cb}_st[{v}_hs] = 1;"
+                    i1 + "} else {" ]
+                @ absent
+                @ [ i1 + "}"
+                    i1 + $"{cb}_ord[{v}_hs] = (size_t){v}_c0;"
+                    gInd + "} else {" ]
+                @ count i1 "@IO[3] += 1;"
+                @ [ gInd + "}"
+                    gInd + $"if ({cb}_st[{v}_hs]) {{" ]
+                @ (copyLoops $"({destBuf})[{dIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];")
+                @ fillCopy
+                @ [ gInd + "}" ]
+            boundDecls @ gridLoops @ limDecls @ lookup @ gridClose @ scan
+
+    let private genStreamWindowCore (wholeReadTally: string option) (borrowedDecode: string option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (ranges: (string * string) list) (arrType: IRArrayType) : string list =
+        genStreamWindowCoreIo None None wholeReadTally borrowedDecode storePath varName cppVarName destBuf ranges arrType
 
     let genStreamWindow storePath varName cppVarName destBuf ranges arrType =
         genStreamWindowCore None None storePath varName cppVarName destBuf ranges arrType
@@ -2250,6 +2305,24 @@ module CppZarr =
     /// the intersection, fill (or a loud failure under a null fill_value) for
     /// a missing chunk. `lo`/`hi` are C++ expressions, so the group loop can
     /// drive them from the grouping's offsets.
+    /// The halo route's run read (halo-chunk-cache v1, D2 / PM42): the rank-1
+    /// window [lo, hi) with its chunk traffic counted into `io` and, when
+    /// `cache` is given, served from the direct-mapped chunk slots.
+    let genStreamRowsCounted (io: string) (cache: (string * int) option) (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (lo: string) (hi: string) (arrType: IRArrayType) : string list =
+        genStreamWindowCoreIo (Some io) cache None None storePath varName cppVarName destBuf [ lo, hi ] arrType
+
+    /// The halo chunk cache's slot geometry for a rank-1 local Zarr variable:
+    /// (one padded chunk's cells, its disk element C++ type, its bytes), or
+    /// the reason the cache does not apply.
+    let haloCacheGeometry (storePath: string) (varName: string) : Result<int64 * string * int64, string> =
+        let store = load storePath
+        match tryFindArray store varName with
+        | None -> Error $"variable '{varName}' not found"
+        | Some meta when meta.Shape.Length <> 1 || meta.Chunks.Length <> 1 -> Error "the variable is not rank 1"
+        | Some meta when meta.Codec <> CodecIdentity -> Error "the variable is compressed (the reader refuses it anyway)"
+        | Some meta when meta.Blade.IsSome -> Error "a packed variable"
+        | Some meta -> Ok (meta.Chunks.Head, diskCppOf meta.Dtype.Code, meta.Chunks.Head * int64 meta.Dtype.ByteSize)
+
     let genStreamRows (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (lo: string) (hi: string) (arrType: IRArrayType) : string list =
         let store = load storePath
         let meta =
@@ -2328,7 +2401,8 @@ module CppZarr =
     /// (one chunk = the whole array): flat "."-separated chunk keys, readable
     /// by every zarr-python/xarray. Multiple writes into one store root
     /// accumulate arrays (.zgroup is idempotent); re-writing overwrites. The caller provides `<cppVarName>_flat` (row-major).
-    let genWriteVar (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
+    let genWriteVarCore (blockFill: (int64 * string * (string -> string -> string -> string list)) option)
+                        (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
         let v = cppVarName
         // A packed (SymIdx/AntisymIdx) leading group writes as its POOL:
         // on-disk shape = [cardinality] @ trailing dense extents. The flat
@@ -2412,7 +2486,8 @@ module CppZarr =
             else List.replicate rank "0" |> String.concat "."
         let wCheck (stream: string) (context: string) =
             $"if (!{stream}.good()) {zExit context}"
-        [
+        let metaLines =
+          [
             $"// Write {varName} to zarr store {root} (v2, uncompressed, single chunk)"
             sprintf "{ std::error_code %s_ec; std::filesystem::create_directories(\"%s\", %s_ec); if (%s_ec) %s }"
                 v arrayDir v v (zExit $"cannot create store directory '{arrayDir}'")
@@ -2422,10 +2497,43 @@ module CppZarr =
                 v arrayDir v zarrayJson (wCheck $"{v}_za" $"cannot write '{arrayDir}/.zarray'")
             sprintf "{ std::ofstream %s_zt(\"%s/.zattrs\", std::ios::trunc); %s_zt << \"%s\"; %s }"
                 v arrayDir v zattrsJson (wCheck $"{v}_zt" $"cannot write '{arrayDir}/.zattrs'")
-            sprintf "{ std::ofstream %s_ch(\"%s/%s\", std::ios::binary | std::ios::trunc); %s_ch.write((const char*)%s_flat, sizeof(%s) * %d); %s }"
-                v arrayDir chunkKey0 v v elemCpp total
-                (wCheck $"{v}_ch" $"cannot write chunk '{arrayDir}/{chunkKey0}'")
-        ]
+          ]
+        let chunkCheck = wCheck $"{v}_ch" $"cannot write chunk '{arrayDir}/{chunkKey0}'"
+        match blockFill with
+        | None ->
+            metaLines
+            @ [ sprintf "{ std::ofstream %s_ch(\"%s/%s\", std::ios::binary | std::ios::trunc); %s_ch.write((const char*)%s_flat, sizeof(%s) * %d); %s }"
+                    v arrayDir chunkKey0 v v elemCpp total chunkCheck ]
+        | Some (block, buf, fill) ->
+            // provider-sink-stream v1 (round 4 wave 3, D1 / gap G91): the ONE
+            // chunk file of today's writer, its bytes produced and written in
+            // blocks of `block` cells through one bounded buffer -- the same
+            // byte sequence (cell i at offset i), the same metadata files
+            // first, the same `cannot write chunk` failure: a failed write
+            // stops at the first failing block (the chunk file then holds a
+            // prefix of its bytes, as a failed single write does) and exits
+            // with today's message. `buf` is the caller's bounded block buffer
+            // (`block` cells); `fill buf lo len` emits the lines filling
+            // buf[0 .. len) with cells lo .. lo + len.
+            metaLines
+            @ [ $"{{ std::ofstream {v}_ch(\"{arrayDir}/{chunkKey0}\", std::ios::binary | std::ios::trunc);"
+                $"  for (size_t {v}_slo = 0; {v}_slo < (size_t){total}; ) {{"
+                $"    const size_t {v}_slen = std::min((size_t){block}, (size_t){total} - {v}_slo);" ]
+            @ (fill buf $"{v}_slo" $"{v}_slen" |> List.map (fun s -> "    " + s))
+            @ [ $"    {v}_ch.write((const char*){buf}, sizeof({elemCpp}) * {v}_slen);"
+                $"    {chunkCheck}"
+                $"    {v}_slo += {v}_slen;"
+                "  }"
+                $"  {chunkCheck} }}" ]
+
+    let genWriteVar (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
+        genWriteVarCore None storePath varName cppVarName arrType dimNames
+
+    /// provider-sink-stream v1: the chunk produced block by block (see
+    /// genWriteVarCore). Dense rank-1 only (the planner admits nothing else).
+    let genWriteVarStreamed (block: int64) (buf: string) (fill: string -> string -> string -> string list)
+                            (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (dimNames: string list) : string list =
+        genWriteVarCore (Some (block, buf, fill)) storePath varName cppVarName arrType dimNames
 
     /// Required C++ includes for Zarr I/O (std only -- no link flags).
     let genIncludes () : string list =

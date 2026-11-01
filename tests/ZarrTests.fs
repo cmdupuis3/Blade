@@ -2797,6 +2797,260 @@ let w = z.write("%s", A)
      with ex -> check "write e2e" false ex.Message)
 
     // ---------------------------------------------------------------
+    // 11b. provider-sink-stream v1 (round 4 wave 3, D1 / gap G91): a map
+    // whose only consumer is a Zarr write is produced block by block at the
+    // write, never stored. No other gate observes a store (the interpreter
+    // skips writes; opt-diff compares printed output), so this block compares
+    // the STORE BYTES and the failure states gate on vs off.
+    // ---------------------------------------------------------------
+    printfn "\n--- provider-sink-stream v1: store bytes and failure states, on vs off ---"
+    (let sdir = Path.GetFullPath(Path.Combine(e2eDir, "sinkstream")) // absolute: the exe runs in its own directory
+     Directory.CreateDirectory sdir |> ignore
+     let storeOf (tag: string) = Path.Combine(sdir, tag).Replace("\\", "/")
+     let withEnv (pins: (string * string) list) (f: unit -> 'a) : 'a =
+         let prior = pins |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+         for (k, v) in pins do Environment.SetEnvironmentVariable(k, v)
+         try f () finally for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+     // lower + emit + compile + run; None = toolchain skip
+     let build (label: string) (src: string) : Result<string * (int * string) option, string> =
+         match lower src with
+         | Error e -> Error ("lowers: " + e)
+         | Ok ir ->
+             let (cpp: string, _) = CodeGen.genSelfContainedProgramFromIR ir label
+             CodeGen.deployRuntimeHeaders sdir
+             let file = Path.Combine(sdir, label + ".cpp")
+             File.WriteAllText(file, cpp)
+             match compileCpp file sdir with
+             | Error e when isSkipError e -> Ok (cpp, None)
+             | Error e -> Error ("compile: " + e)
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Ok r -> Ok (cpp, Some r)
+                 | Error e -> Error ("run: " + e)
+     let fresh (store: string) = (try Directory.Delete(store, true) with _ -> ())
+     let bytesOf (p: string) = if File.Exists p then Some (File.ReadAllBytes p) else None
+     // both arms of one program: the streamed one (BLADE_SINK_STREAM as given)
+     // and the whole-buffer one (0); each writes its own store.
+     let arms (label: string) (streamValue: string) (extra: (string * string) list) (mk: string -> string) =
+         let on =
+             withEnv ([ ("BLADE_SINK_STREAM", streamValue) ] @ extra) (fun () ->
+                 let st = storeOf (label + "_on") in fresh st; (st, build (label + "_on") (mk st)))
+         let off =
+             withEnv ([ ("BLADE_SINK_STREAM", "0") ] @ extra) (fun () ->
+                 let st = storeOf (label + "_off") in fresh st; (st, build (label + "_off") (mk st)))
+         (on, off)
+     try
+        let pinsOff = [ ("BLADE_PRINT", "x"); ("BLADE_FP_CONTRACT", "off") ]
+        // (1) Float64, 20001 cells (three blocks of <= 8192): identical bytes.
+        let floatSrc (st: string) =
+            "import zarr as z\nlet x = Float64(0..20001) * 0.5 |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_f64" "1" pinsOff floatSrc with
+         | (stOn, Ok (cppOn, Some (0, _))), (stOff, Ok (cppOff, Some (0, _))) ->
+             check "sink-stream f64: the on arm streams (y never allocated), the off arm stores y"
+                 (cppOn.Contains "provider-sink-stream v1" && not (cppOn.Contains "Array<double, 1> y =")
+                  && cppOff.Contains "Array<double, 1> y =") ""
+             let a, b = bytesOf (stOn + "/y/0"), bytesOf (stOff + "/y/0")
+             check "sink-stream f64: chunk bytes identical on / off (20001 cells, 3 blocks; BLADE_FP_CONTRACT=off)"
+                 (a.IsSome && a = b && a.Value.Length = 20001 * 8) (sprintf "%A vs %A bytes" (a |> Option.map Array.length) (b |> Option.map Array.length))
+             check "sink-stream f64: .zarray identical on / off" (bytesOf (stOn + "/y/.zarray") = bytesOf (stOff + "/y/.zarray")) ""
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream f64: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream f64: both arms run (exit 0)" false (sprintf "on %A / off %A" on off))
+        // (2) Int64: no validation pass, identical bytes.
+        let intSrc (st: string) =
+            "import zarr as z\nlet x = Int64(0..9001) |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> v * 3 - 7 |> compute\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_i64" "1" pinsOff intSrc with
+         | (stOn, Ok (cppOn, Some (0, _))), (stOff, Ok (_, Some (0, _))) ->
+             check "sink-stream i64: streamed with no validation pass" (cppOn.Contains "provider-sink-stream v1" && not (cppOn.Contains "missing_tally")) ""
+             let a, b = bytesOf (stOn + "/y/0"), bytesOf (stOff + "/y/0")
+             check "sink-stream i64: chunk bytes identical on / off" (a.IsSome && a = b && a.Value.Length = 9001 * 8) ""
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream i64: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream i64: both arms run (exit 0)" false (sprintf "on %A / off %A" on off))
+        // (2b) Float32: 4-byte cells (sizeof(float) blocks, dtype <f4, the
+        // (double) widening in both scans): identical bytes.
+        let f32Src (st: string) =
+            "import zarr as z\nlet x = Float32(0..12001) * 0.5 |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> v * v + v |> compute\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_f32" "1" pinsOff f32Src with
+         | (stOn, Ok (cppOn, Some (0, _))), (stOff, Ok (_, Some (0, _))) ->
+             check "sink-stream f32: streamed with a float block buffer" (cppOn.Contains "provider-sink-stream v1" && cppOn.Contains "std::vector<float>") ""
+             let a, b = bytesOf (stOn + "/y/0"), bytesOf (stOff + "/y/0")
+             check "sink-stream f32: chunk bytes identical on / off (12001 cells x 4 bytes, 2 blocks)" (a.IsSome && a = b && a.Value.Length = 12001 * 4) ""
+             check "sink-stream f32: .zarray says <f4" ((bytesOf (stOn + "/y/.zarray") |> Option.map System.Text.Encoding.ASCII.GetString |> Option.defaultValue "").Contains "<f4") ""
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream f32: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream f32: both arms run (exit 0)" false (sprintf "on %A / off %A" on off))
+        // (3) G104: the DEFERRED spelling; the off arm forces y (it used to
+        // reach the writer undeclared: a g++ error), the on arm streams it.
+        let deferredSrc (st: string) =
+            "import zarr as z\nlet x = Float64(0..20001) * 0.5 |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_deferred" "1" pinsOff deferredSrc with
+         | (stOn, Ok (cppOn, Some (0, _))), (stOff, Ok (_, Some (0, _))) ->
+             check "sink-stream deferred source: streamed on" (cppOn.Contains "provider-sink-stream v1") ""
+             let a, b = bytesOf (stOn + "/y/0"), bytesOf (stOff + "/y/0")
+             check "sink-stream deferred source (G104): the off arm compiles, forces y and writes the same bytes"
+                 (a.IsSome && a = b && a.Value.Length = 20001 * 8) ""
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream deferred: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream deferred source (G104): both arms run (exit 0)" false (sprintf "on %A / off %A" on off))
+        // (4) BL8015: the same refusal sentence (count, first flat cell), and
+        // NOTHING of the store exists, in both arms (`always`: the division
+        // prices the recompute above the traffic it saves).
+        let nanSrc (st: string) =
+            "import zarr as z\nlet x = Float64([1.0, 2.0, 3.0, 2.0, 5.0]) |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> 1.0 / (v - 2.0) |> compute\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_nan" "always" pinsOff nanSrc with
+         | (stOn, Ok (cppOn, Some (cOn, outOn))), (stOff, Ok (_, Some (cOff, outOff))) ->
+             let lOn, lOff = Blade.Tests.ProviderBoundaryTests.refusalLine outOn, Blade.Tests.ProviderBoundaryTests.refusalLine outOff
+             check "sink-stream BL8015: streamed on" (cppOn.Contains "provider-sink-stream v1") ""
+             check "sink-stream BL8015: both arms refuse with the same sentence (2 cells, first at flat cell 1)"
+                 (cOn <> 0 && cOff <> 0 && lOn.IsSome && lOff.IsSome && lOn.Value.Replace("ss_nan_on", "ss_nan") = lOff.Value.Replace("ss_nan_off", "ss_nan") && lOn.Value.Contains "2 cell(s) are NaN or infinite (first at flat cell 1)")
+                 (sprintf "on %A / off %A" lOn lOff)
+             check "sink-stream BL8015: no store directory in either arm" (not (Directory.Exists stOn) && not (Directory.Exists stOff)) ""
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream BL8015: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream BL8015: both arms build" false (sprintf "on %A / off %A" on off))
+        // (5) A failing chunk write: a DIRECTORY where the chunk file goes.
+        // Both arms: the metadata files, today's message, exit 1.
+        let failSrc (st: string) =
+            Directory.CreateDirectory(st + "/y/0") |> ignore
+            floatSrc st
+        (match arms "ss_wfail" "1" pinsOff failSrc with
+         | (stOn, Ok (cppOn, Some (cOn, outOn))), (stOff, Ok (_, Some (cOff, outOff))) ->
+             check "sink-stream write failure: streamed on" (cppOn.Contains "provider-sink-stream v1") ""
+             check "sink-stream write failure: both arms exit 1 with `cannot write chunk` and leave the metadata"
+                 (cOn = 1 && cOff = 1 && outOn.Contains "cannot write chunk" && outOff.Contains "cannot write chunk"
+                  && File.Exists (stOn + "/y/.zarray") && File.Exists (stOff + "/y/.zarray"))
+                 (sprintf "on %d / off %d" cOn cOff)
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream write failure: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream write failure: both arms build" false (sprintf "on %A / off %A" on off))
+        // (6) A panic BETWEEN the producer and the write (BL8013): the moved
+        // producer is total and write-free, so both arms print the same
+        // failure and publish nothing.
+        let panicSrc (st: string) =
+            "import zarr as z\nlet x = Float64(0..20001) * 0.5 |> compute\n"
+            + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\n"
+            + "let zs = Int64([0, 1]) |> compute\nlet bad = 7 / zs(0)\n"
+            + $"let w = z.write(\"{st}\", y)\n"
+        (match arms "ss_panic" "1" pinsOff panicSrc with
+         | (stOn, Ok (cppOn, Some (cOn, outOn))), (stOff, Ok (_, Some (cOff, outOff))) ->
+             check "sink-stream intervening panic: streamed on" (cppOn.Contains "provider-sink-stream v1") ""
+             check "sink-stream intervening panic: both arms fail BL8013 and publish no store"
+                 (cOn <> 0 && cOff <> 0 && outOn.Contains "BL8013" && outOff.Contains "BL8013"
+                  && not (Directory.Exists stOn) && not (Directory.Exists stOff)) (sprintf "on %d / off %d" cOn cOff)
+         | (_, Ok (_, None)), _ | _, (_, Ok (_, None)) -> printfn "  SKIP sink-stream panic: toolchain unavailable"
+         | (_, on), (_, off) -> check "sink-stream intervening panic: both arms build" false (sprintf "on %A / off %A" on off))
+     with ex -> check "sink-stream block: no unexpected exception" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 11c. halo-chunk-cache v1 (round 4 wave 3, D2 / PM42): the certified
+    // rank-1 halo stencil over a chunked streamed axis fetches each chunk
+    // ONCE (direct-mapped slots) instead of once per window it touches. The
+    // run record's provider_io census counts fetches / fetched / decoded
+    // bytes / hits in both arms; values and failures are compared on vs off.
+    // ---------------------------------------------------------------
+    printfn "\n--- halo-chunk-cache v1: fetch counts, values and failure order, on vs off ---"
+    (let hdir = Path.GetFullPath(Path.Combine(e2eDir, "halocache")) // absolute: the exe runs in its own directory
+     Directory.CreateDirectory hdir |> ignore
+     let withEnv (pins: (string * string) list) (f: unit -> 'a) : 'a =
+         let prior = pins |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+         for (k, v) in pins do Environment.SetEnvironmentVariable(k, v)
+         try f () finally for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+     // emit + compile under the gate value, run with a run record
+     let runArm (label: string) (gate: string) (src: string) : Result<string * (int * string * string) option, string> =
+         withEnv [ ("BLADE_HALO_CACHE", gate) ] (fun () ->
+             match lower src with
+             | Error e -> Error ("lowers: " + e)
+             | Ok ir ->
+                 let (cpp: string, _) = CodeGen.genSelfContainedProgramFromIR ir label
+                 CodeGen.deployRuntimeHeaders hdir
+                 let file = Path.Combine(hdir, label + ".cpp")
+                 File.WriteAllText(file, cpp)
+                 match compileCpp file hdir with
+                 | Error e when isSkipError e -> Ok (cpp, None)
+                 | Error e -> Error ("compile: " + e)
+                 | Ok exe ->
+                     let rr = Path.Combine(hdir, label + ".record.json")
+                     (try File.Delete rr with _ -> ())
+                     match withEnv [ ("BLADE_RUN_RECORD", rr) ] (fun () -> runExecutable exe) with
+                     | Ok (code, out) -> Ok (cpp, Some (code, out, (if File.Exists rr then File.ReadAllText rr else "")))
+                     | Error e -> Error ("run: " + e))
+     let strip (out: string) =
+         out.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> not (l.Contains "completed in")) |> String.concat "\n"
+     let stencil (store: string) =
+         "import zarr as z\n"
+         + $"let sample = z.load(\"{store}\")\n"
+         + "type CX = Chunked<sample.index.x, store>\n"
+         + "let A: Array<Float64 like CX> = sample.vars.A |> z.stream\n"
+         + "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute\n"
+     // both arms of one stencil: values (or failure) identical; the census
+     // needles each arm's record must hold
+     let pair (label: string) (store: string) (expectOk: string list) (onNeedles: string list) (offNeedles: string list) =
+         match runArm (label + "_on") "1" (stencil store), runArm (label + "_off") "0" (stencil store) with
+         | Ok (cppOn, Some (cOn, outOn, rrOn)), Ok (cppOff, Some (cOff, outOff, rrOff)) ->
+             check $"{label}: the on arm reads through the chunk slots, the off arm per window"
+                 (cppOn.Contains "_hs = " && cppOn.Contains "__hc0_buf" && not (cppOff.Contains "__hc0_buf") && cppOff.Contains "note_io(") ""
+             check $"{label}: same exit and output on / off" (cOn = cOff && strip outOn = strip outOff) (sprintf "on %d %s / off %d %s" cOn outOn cOff outOff)
+             for n in expectOk do check $"{label}: prints `{n}`" (outOn.Contains n) outOn
+             for n in onNeedles do check $"{label}: on-arm record holds {n}" (rrOn.Contains n) rrOn
+             for n in offNeedles do check $"{label}: off-arm record holds {n}" (rrOff.Contains n) rrOff
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP %s: toolchain unavailable" label
+         | on, off -> check $"{label}: both arms build and run" false (sprintf "on %A / off %A" on off)
+     try
+        // (1) the D03 control: N = 10, C = 4, radius 1 -- 7 fetches per window, 3 cached.
+        let seg = Path.GetFullPath("tests/fixtures/zarr_stores/zarr_segments").Replace("\\", "/")
+        pair "halo-cache N=10 C=4" seg [ "d = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]" ]
+            [ "\"form\":\"halo-chunk-cache\",\"fetches\":3,\"fetched_bytes\":96,\"decoded_bytes\":96,\"hits\":4,\"slots\":3,\"slot_bytes\":96" ]
+            [ "\"form\":\"per-window\",\"fetches\":7,\"fetched_bytes\":224,\"decoded_bytes\":224,\"hits\":0" ]
+        // (2) N = 11, C = 4, A(j) = (j + 1)^2: cross-chunk ghosts, an odd tail.
+        let wv (name: string) (data: float[]) (omit: int64 list list) : ZarrWrite.WriteVar =
+            { Name = name; DimNames = Some [ "x" ]; Shape = [ int64 data.Length ]; Chunks = [ 4L ]
+              FillValue = FillFloat -1.0; Data = ZarrWrite.WF64 data; OmitChunks = omit; Blade = None }
+        let mkStore (tag: string) (data: float[]) (omit: int64 list list) =
+            let st = Path.Combine(hdir, tag).Replace("\\", "/")
+            (try Directory.Delete(st, true) with _ -> ())
+            ZarrWrite.writeStoreV2 st [ wv "A" data omit ]
+            st
+        let sq = mkStore "sq11" [| for j in 0 .. 10 -> float ((j + 1) * (j + 1)) |] []
+        pair "halo-cache N=11 squares" sq [ "d = [8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0]" ]
+            [ "\"fetches\":3,"; "\"hits\":4," ] [ "\"fetches\":7," ]
+        // (3) a missing middle chunk with a FINITE fill (-1): the fill is a
+        // value, cached as an absent slot.
+        let gap = mkStore "gap10" [| for j in 0 .. 9 -> float (j + 1) |] [ [ 1L ] ]
+        pair "halo-cache finite-fill gap" gap [ "d = [2.0, 2.0, -4.0, -5.0, 0.0, 0.0, 10.0, 11.0]" ] [ "\"fetches\":2," ] [ "\"fetches\":4," ]
+        // (4) D03's paired failures: a NaN at index 0 and a SHORT chunk 2 --
+        // the first window reads chunks 0 and 1 only, so BL8015 at [0] wins in
+        // both arms (chunk 2 is never touched early) ...
+        let nanFirst = [| nan; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0; 10.0 |]
+        let short2 = mkStore "nan_short2" nanFirst []
+        File.WriteAllBytes(short2 + "/A/2", Array.zeroCreate 8)
+        pair "halo-cache NaN then a later short chunk" short2 [ "BL8015" ] [] []
+        // ... and with chunk 1 short, chunk 1 is IN the first window: its
+        // short read fails first, in both arms.
+        let short1 = mkStore "nan_short1" nanFirst []
+        File.WriteAllBytes(short1 + "/A/1", Array.zeroCreate 8)
+        pair "halo-cache NaN and a short chunk inside the first window" short1 [ "is short" ] [] []
+        // (5) PM37's baseline: TWO stencils over one streamed axis. Each binding
+        // keeps its own run loop and its own slots (no cross-binding reuse:
+        // that needs the two run loops fused, gap G106), so the census holds
+        // two sites, 3 fetches each cached, 7 each uncached.
+        let twoFir (store: string) =
+            stencil store + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) - 2.0 * A(w(0)) |> compute\n"
+        (match runArm "halo-cache two FIRs_on" "1" (twoFir seg), runArm "halo-cache two FIRs_off" "0" (twoFir seg) with
+         | Ok (_, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
+             let count (s: string) (needle: string) = (s.Length - s.Replace(needle, "").Length) / needle.Length
+             check "halo-cache two FIRs: same output on / off" (strip outOn = strip outOff && outOn.Contains "d2 = [0.0, 0.0") outOn
+             check "halo-cache two FIRs: two sites, 3 fetches each cached (6 of 3 distinct chunks), 7 each per window (14)"
+                 (count rrOn "\"fetches\":3," = 2 && count rrOff "\"fetches\":7," = 2) (rrOn + " / " + rrOff)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP halo-cache two FIRs: toolchain unavailable"
+         | on, off -> check "halo-cache two FIRs: both arms run" false (sprintf "on %A / off %A" on off))
+     with ex -> check "halo-cache block: no unexpected exception" false ex.Message)
+
+    // ---------------------------------------------------------------
     // 12. load_compound rejection at codegen (zarr has no compound reader)
     // ---------------------------------------------------------------
     printfn "\n--- load_compound: loud zarr rejection ---"

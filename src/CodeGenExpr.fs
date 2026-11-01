@@ -773,6 +773,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
             $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data))"
         | None ->
+        // Owned move (gap G92): free T's previous pool, then take R's.
+        match ownedMoveAssign target value with
+        | Some (_, rid) ->
+            ownedMoveRenderer targetStr (Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")) (ownedMoveStaticShape target)
+        | None ->
             $"{targetStr} = {(exprToCppCore subst names value)}"
     | IRForRange (vid, lo, hi, body) ->
         exprError "for-range loop in expression position"

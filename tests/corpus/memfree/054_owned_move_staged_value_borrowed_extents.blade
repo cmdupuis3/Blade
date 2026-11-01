@@ -1,0 +1,26 @@
+// TEST: Owned Move Of A Staged Pipeline Value Keeps Every Extents Table Live (G92)
+// The fable review of the owned move: a staged `>>@` pipeline's result
+// BORROWS its input's extents table (`r.extents = y.extents`), and at a
+// run-time shape that table is the lender's `new size_t[]`, freed at the
+// lender's own scope exit -- BEFORE the moved-into target, which was
+// registered first. The move now leaves the target's own table alone and,
+// for a run-time-shaped target, takes only a value that OWNS its table;
+// a static shape has static tables throughout. `blade test owned-move` runs
+// this under ASan (clean) with the values below.
+// f(x): y = x + 1 = [2..6], r = (y + 1) * 2 = [6, 8, 10, 12, 14] -> 50;
+// f(w): w = [0..6], r = [4, 6, ..., 16] -> 70.
+function f(x: T^1) -> T^0 = {
+    let mut a = x * 2.0 |> compute
+    let y = x + 1.0 |> compute
+    let p = object_for(lambda(v) -> v + 1.0) >>@ object_for(lambda(v) -> v * 2.0)
+    let r = p <@> y |> compute
+    a = r
+    reduce(a, (+))
+}
+
+let x: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let s = f(x)
+let w = Float64(0..(extents(x) + 2)) |> compute
+let s2 = f(w)
+// EXPECT: s = 50.0
+// EXPECT: s2 = 70.0

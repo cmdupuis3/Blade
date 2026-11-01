@@ -1,0 +1,19 @@
+// TEST: fold ring admits a fold kernel reading a STORED module map (twin of 064)
+// The twin of 064 with `d` computed: its cells are stored, so reading them
+// inside the sweep forces nothing and the ring applies (same value).
+type I = Idx<4>
+type Step = Idx<64>
+let w: Float64 = 0.5
+let d = method_for(range<I>) <@> lambda(i) -> Float64(i) * w |> compute
+function dsum() -> Float64 = reduce(method_for(range<I>) <@> lambda(i) -> d(i), (+))
+function fk(a: Float64, b: Float64) -> Float64 = a + b + dsum()
+function run() -> Float64 = {
+    let rec x: Array<Float64 like Step> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5
+    reduce(x, fk, 0.0)
+}
+let r = run()
+// EXPECT: r = 194.0

@@ -31,7 +31,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
     let ownedRoot = Path.Combine(directory, "owned")
     Directory.CreateDirectory ownedRoot |> ignore
     let policy : PrivateSpoolPolicy =
-        { Root=ownedRoot; TrackedWorkspaceBytes=1048576UL; LogicalDiskBytes=1048576UL; BlockCells=2UL }
+        { Root=ownedRoot; TrackedWorkspaceBytes=1048576UL; LogicalDiskBytes=1048576UL; BlockCells=2UL; ResidentBytes=0UL }
     let source (store: string) =
         String.concat "\n"
             [ "import zarr as z";
@@ -399,6 +399,114 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                     nativeCheck ("D08_quota_" + label) (emit limited ir)
                         (fun code output -> code<>0 && output.Contains "BL8016" && resultLine output=None
                                             && output.Contains "cleanup_attempted=0")
+
+                // ---- E2 (round 4 wave 3): the declared grant, the selection, the run record ----
+                let parse = Blade.CodeGenPrivateSpool.parseKnob
+                for raw in [ null; ""; "  "; "0"; "off"; "OFF"; "false" ] do
+                    check (sprintf "E2 knob %A grants nothing" raw) (parse raw = Ok None) (sprintf "%A" (parse raw))
+                let rootText = ownedRoot
+                (match parse (sprintf "root=%s,mem=1M,disk=2K" rootText) with
+                 | Ok (Some p) ->
+                    check "E2 knob parses root/mem/disk; block = the chunk edge (0); resident defaults to mem"
+                        (p.Root = rootText && p.TrackedWorkspaceBytes = 1048576UL && p.LogicalDiskBytes = 2048UL
+                         && p.BlockCells = 0UL && p.ResidentBytes = 1048576UL) (sprintf "%A" p)
+                 | other -> check "E2 knob parses a valid grant" false (sprintf "%A" other))
+                check "E2 knob resident=0 = never retain"
+                    (match parse (sprintf " root=%s , mem=4096 , disk=1g , resident=0 " rootText) with
+                     | Ok (Some p) -> p.ResidentBytes = 0UL && p.LogicalDiskBytes = 1073741824UL && p.TrackedWorkspaceBytes = 4096UL
+                     | _ -> false) ""
+                for bad in [ "on"; "1"; "root=relative,mem=1M,disk=1M"; sprintf "root=%s,mem=1M" rootText
+                             "mem=1M,disk=1M"; sprintf "root=%s,mem=1Q,disk=1M" rootText
+                             sprintf "root=%s,mem=0,disk=1M" rootText; sprintf "root=%s,mem=1M,disk=1M,bogus=1" rootText
+                             sprintf "root=%s,mem=1M,disk=1M,mem=2M" rootText; sprintf "root=%s,mem=-1,disk=1M" rootText
+                             sprintf "root=%s,mem=99999999999999999999G,disk=1M" rootText ] do
+                    check (sprintf "E2 malformed knob %A is an error, never a silent resident grant" bad)
+                        (Result.isError (parse bad)) (sprintf "%A" (parse bad))
+                // Every value the parser accepts passes the API's validity
+                // predicate (one predicate: nothing accepted can throw later).
+                (match parse (sprintf "root=%s,mem=1M,disk=1M" rootText) with
+                 | Ok (Some p) ->
+                    check "E2 an accepted grant never throws in validatePolicy"
+                        (try Blade.CodeGenPrivateSpool.validatePolicy p; true with _ -> false) ""
+                 | _ -> check "E2 an accepted grant never throws in validatePolicy" false "parse failed")
+                let savedKnob = Environment.GetEnvironmentVariable "BLADE_PRIVATE_SPOOL"
+                let savedRecord = Environment.GetEnvironmentVariable "BLADE_RUN_RECORD"
+                try
+                    Environment.SetEnvironmentVariable("BLADE_PRIVATE_SPOOL", null)
+                    check "E2 knob unset: knobPolicy grants nothing" (Blade.CodeGenPrivateSpool.knobPolicy () = Ok None) ""
+                    let decided (f: unit -> string) =
+                        Blade.Effects.Decisions.start ()
+                        let text = f ()
+                        let ds = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "private-statistic-spool")
+                        text, ds
+                    let ir = lower (source good)
+                    // RETAIN: the resident intermediate (40 bytes) is within the
+                    // resident allowance -> the resident two-pass emission, recorded.
+                    let retained, rds = decided (fun () -> emit { policy with BlockCells=0UL; ResidentBytes=1048576UL } ir)
+                    check "E2 selection: within the resident allowance the resident route runs (no spool, p stored)"
+                        (not (retained.Contains marker) && retained.Contains "Array<double, 1> p =") ""
+                    check "E2 selection: the retain decision is recorded with the three candidates"
+                        (rds |> List.exists (fun d ->
+                            match d.Outcome with
+                            | Blade.Effects.Declined why ->
+                                why.StartsWith "retain:"
+                                && d.Evidence |> List.exists (fun e -> e.StartsWith "replay: not proved")
+                                && d.Evidence |> List.exists (fun e -> e.StartsWith "spool: D06")
+                            | _ -> false)) (sprintf "%A" rds)
+                    // SPOOL through the knob: resident=0 forces the spool at N = 5.
+                    Environment.SetEnvironmentVariable("BLADE_PRIVATE_SPOOL", sprintf "root=%s,mem=1M,disk=1M,resident=0" ownedRoot)
+                    let knobOptions =
+                        match Blade.CodeGenPrivateSpool.knobPolicy () with
+                        | Ok (Some p) -> { defaultProgramEmissionOptions with PrivateSpool = Some p }
+                        | other -> failwith (sprintf "E2 knob did not parse: %A" other)
+                    let spooled, sds =
+                        decided (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions knobOptions ir "E2_knob" |> fst)
+                    check "E2 knob grant: the spool route is taken, block resolved to the chunk edge"
+                        (spooled.Contains marker && not (spooled.Contains "Array<double, 1> p =")
+                         && spooled.Contains "blade_rr::note_private_spool(") ""
+                    check "E2 knob grant: the applied record names the route and the candidates"
+                        (sds |> List.exists (fun d ->
+                            d.Outcome = Blade.Effects.Applied
+                            && d.Evidence |> List.exists (fun e -> e.StartsWith "route: spool")
+                            && d.Evidence |> List.exists (fun e -> e.StartsWith "replay: not proved"))) (sprintf "%A" sds)
+                    let recordPath = Path.Combine(directory, "E2_knob.run.json")
+                    Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", recordPath)
+                    nativeCheck "E2_knob_spool" spooled (fun code output -> code = 0 && resultLine output = Some "result = 382.0")
+                    Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", savedRecord)
+                    if OperatingSystem.IsWindows() && Blade.Build.capabilities.Value.HasGpp then
+                        let json = if File.Exists recordPath then File.ReadAllText recordPath else ""
+                        let expected =
+                            "\"private_spool\":[{\"site\":\"result\",\"route\":\"spool\",\"cells\":5,\"block_cells\":2,\"blocks\":3,"
+                            + "\"payload_written\":40,\"payload_read\":40,\"logical_disk_high_water\":496,\"reserved_disk\":496,"
+                            + "\"grant\":{\"root\":\"" + ownedRoot.Replace("\\", "\\\\") + "\",\"mem\":1048576,\"disk\":1048576}}]"
+                        check "E2 run record: the private_spool member carries the disk high water and the grant"
+                            (json.Contains expected && json.Contains "\"status\":{\"ok\":true}") json
+                    // A resident run writes no private_spool member (additive, optional).
+                    let residentRecord = Path.Combine(directory, "E2_resident.run.json")
+                    Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", residentRecord)
+                    nativeCheck "E2_retain_resident" retained (fun code output -> code = 0 && resultLine output = Some "result = 382.0")
+                    Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", savedRecord)
+                    if OperatingSystem.IsWindows() && Blade.Build.capabilities.Value.HasGpp then
+                        let json = if File.Exists residentRecord then File.ReadAllText residentRecord else ""
+                        check "E2 run record: a resident run carries no private_spool member"
+                            (json.Length > 0 && not (json.Contains "\"private_spool\":")) json  // the member key; the program NAME is D08_private_spool
+                    // --mpi on a non-MPI program would launch N spools under one grant.
+                    try
+                        Blade.CodeGen.setMpiEmitMode true
+                        let mpiCpp, mds = decided (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions knobOptions ir "E2_mpi" |> fst)
+                        check "E2 MPI emit mode declines the spool (recorded)"
+                            (not (mpiCpp.Contains marker)
+                             && mds |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w.Contains "MPI" | _ -> false)) (sprintf "%A" mds)
+                    finally Blade.CodeGen.setMpiEmitMode false
+                    // The default-options entry never sees the grant, even with the knob set.
+                    let plain = Blade.CodeGen.genSelfContainedProgramFromIR ir "D08_private_spool" |> fst  // the retained emission's own program name
+                    check "E2 the default-options entry ignores a set knob (only the CLI verbs thread it)"
+                        (not (plain.Contains marker) && plain.Contains "Array<double, 1> p =") ""
+                    check "E2 retain: the emission is byte-identical to the default (no-grant) emission"
+                        (retained = plain) ""
+                finally
+                    Environment.SetEnvironmentVariable("BLADE_PRIVATE_SPOOL", savedKnob)
+                    Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", savedRecord)
         with ex ->
             if failed = 0 then check "D08 focused gate completes" false (ex.ToString())
             else printfn "  D08 stopped: %s" (ex.ToString())

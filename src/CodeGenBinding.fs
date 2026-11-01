@@ -516,6 +516,34 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         genProviderReadBinding ctx binding builder
     | _ when Map.containsKey binding.Id ctx.ProviderWrites ->
         genProviderWriteBinding ctx binding builder
+    // provider-sink-stream v1 (Blade.Optimize.planProviderSinkStream, D1 / gap
+    // G91): a map whose only consumer is one Zarr write is never stored -- the
+    // write produces it block by block. Renderability is re-checked HERE (the
+    // write site streams only a plan taken at this site), so a decline keeps
+    // the ordinary emission of both bindings.
+    | IRCompute (IRApplyCombinator _) | IRApplyCombinator _
+        when (Blade.Optimize.SinkStreamTable.tryProducer binding.Id).IsSome ->
+        let p = (Blade.Optimize.SinkStreamTable.tryProducer binding.Id).Value
+        let operandNames = p.Apply.Arrays |> List.map (exprToCpp ctx.VarNames)
+        let renderable =
+            ctx.Indent = 0 && not (mpiProgramOn ())
+            && operandNames |> List.forall (fun s -> s <> "" && not (s.Contains "BLADE_CODEGEN_ERROR") && not (s.Contains "("))
+            && (resolveCallable p.Apply.Kernel |> Option.exists (fun c -> c.Id = p.Kernel.Id))
+            && p.Kernel.Captures |> List.forall (fun cp -> ctx.VarNames.ContainsKey cp.Id)
+            && (p.Apply.Arrays |> List.forall (fun a ->
+                    match a with
+                    | IRVar (oid, _) -> not (Map.containsKey oid ctx.DeferredComputations)
+                    | _ -> false))
+        if renderable then
+            p.Taken.Value <- true
+            ([ $"{ind}// {name}: never stored -- produced in blocks of {p.Block} cells straight into its store by the write (provider-sink-stream v1)" ],
+             addVarName binding.Id name ctx)
+        else
+            Blade.Optimize.recordSinkStream p.ProducerName
+                (Blade.Effects.Declined "c++ lane: an operand, a capture or the kernel does not render as a stored name at the producer's site; the whole-buffer write runs")
+                p.Evidence
+            Blade.Optimize.SinkStreamTable.remove binding.Id
+            genBindingDispatch ctx binding builder
     | _ when Map.containsKey binding.Id ctx.RandomInits ->
         match ctx.RandomInits.[binding.Id] with
         | RandGen _ -> genRandGenBinding ctx binding builder
@@ -2574,6 +2602,90 @@ and genProviderReadBindingRuled (ctx: CodeGenContext) (binding: IRBinding) (buil
     (readCode |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
 
 and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let spec = ctx.ProviderWrites.[binding.Id]
+    match Blade.Optimize.SinkStreamTable.tryWrite binding.Id with
+    | Some p when p.Taken.Value -> genSinkStreamWrite ctx binding spec p
+    | _ ->
+    // Gap G104 (round 4 wave 3, lane D): a DEFERRED source (`let y =
+    // method_for(x) <@> f`, no `|> compute`) reached the writer below as a
+    // name that was never declared (`pool_base(y.data)`: g++ refused it,
+    // BL9002). It is forced first, by the house helper every by-name consumer
+    // uses (under its own name at main's top level, so it joins the
+    // auto-print list like any forced deferred binding).
+    let (forceCode, ctxF, _) =
+        if Map.containsKey spec.SourceId ctx.DeferredComputations then
+            forceDeferredArrayInput ctx builder $"__wsrc{int binding.Id}" (IRVar (spec.SourceId, mkArrayLike spec.SourceType))
+        else ([], ctx, IRLit IRLitUnit)
+    let (code, ctx') = genProviderWriteBindingCore ctxF binding builder
+    (forceCode @ code, ctx')
+
+/// provider-sink-stream v1 (Blade.Optimize.planProviderSinkStream; D1 / gap
+/// G91): the write of a producer the plan never stored. A VALIDATION pass
+/// (Float elements) recomputes the cells block by block into a bounded buffer
+/// and tallies the non-finite ones -- the BL8015 report of the whole-buffer
+/// scan, same count, same first flat cell, before any file effect -- then the
+/// writer's metadata and its one chunk, produced block by block by the SAME
+/// fill loop into a bounded buffer and written. The write pass re-checks each
+/// block: a cell that is not finite there means the two passes disagreed (an
+/// internal invariant, BL9001), never a written non-finite cell.
+and genSinkStreamWrite (ctx: CodeGenContext) (binding: IRBinding) (spec: ProviderWriteSpec) (p: Blade.Optimize.SinkStreamPlan) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let srcCpp =
+        match Map.tryFind spec.SourceId ctx.VarNames with
+        | Some n -> n
+        | None -> sanitizeCppName spec.VarName
+    let b = $"{srcCpp}_wr{int binding.Id}"
+    let arrTy = spec.SourceType
+    let elemCpp = elemTypeToCpp arrTy.ElemType
+    let esc (t: string) = t.Replace("\\", "\\\\").Replace("\"", "\\\"")
+    let opNames = p.Apply.Arrays |> List.map (exprToCpp ctx.VarNames)
+    let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{b}__k" p.Kernel
+    let pools =
+        opNames |> List.mapi (fun i n ->
+            $"const auto* BLADE_RESTRICT {b}__x{i} = nested_array_utilities::pool_base({n}.data);")
+    let n = p.Extent
+    let blk = p.Block
+    // ONE fill body for both passes: a lambda compiled ONCE (BLADE_ONE_BODY:
+    // noinline, noclone), so g++'s per-context FP contraction cannot evaluate
+    // a cell differently in the validation pass and the write pass -- the same
+    // machine code on the same inputs; the write pass's BL9001 re-check is then
+    // the invariant it states. Both passes fill ONE block buffer.
+    let fillFn = $"{b}__fill"
+    let bufName = $"{b}__buf"
+    let fillDecl =
+        let args = opNames |> List.mapi (fun i _ -> $"{b}__x{i}[__lo + __q]") |> String.concat ", "
+        [ $"std::vector<{elemCpp}> {b}__bufv((size_t){p.Block}); {elemCpp}* {bufName} = {b}__bufv.data();"
+          $"auto {fillFn} = [&](size_t __lo, size_t __len, {elemCpp}* __out) BLADE_ONE_BODY {{ for (size_t __q = 0; __q < __len; __q++) __out[__q] = {wname}({args}); }};" ]
+    let fill (buf: string) (lo: string) (len: string) =
+        [ $"{fillFn}({lo}, {len}, {buf});" ]
+    let recheck (buf: string) (len: string) =
+        if p.Validate then
+            [ $"for (size_t {b}__r = 0; {b}__r < {len}; {b}__r++) if (!std::isfinite((double){buf}[{b}__r])) blade_rt::panic(\"BL9001\", \"provider-sink-stream: the one block filler returned a non-finite cell in the write pass although the validation pass found it finite (internal invariant)\", nullptr, 0);" ]
+        else []
+    let validation =
+        if not p.Validate then []
+        else
+            [ "{ // provider-sink-stream v1: the BL8015 validation over the recomputed cells, before any file effect"
+              "    blade_rt::missing_tally " + b + "__t;"
+              $"    {elemCpp}* {b}__vb = {bufName};"
+              $"    for (size_t {b}__vlo = 0; {b}__vlo < (size_t){n}; ) {{"
+              $"        const size_t {b}__vlen = std::min((size_t){blk}, (size_t){n} - {b}__vlo);" ]
+            @ (fill $"{b}__vb" $"{b}__vlo" $"{b}__vlen" |> List.map (fun s -> "        " + s))
+            @ [ $"        for (size_t {b}__r = 0; {b}__r < {b}__vlen; {b}__r++) if (!std::isfinite((double){b}__vb[{b}__r])) {b}__t.note({b}__vlo + {b}__r);"
+                $"        {b}__vlo += {b}__vlen;"
+                "    }"
+                $"    blade_rt::refuse_nonfinite_report({b}__t, \"{esc spec.VarName}\", \"{esc spec.FilePath}\");"
+                "}" ]
+    let writeCode =
+        Blade.ZarrProvider.CppZarr.genWriteVarStreamed blk bufName (fun buf lo len -> fill buf lo len @ recheck buf len)
+            spec.FilePath spec.VarName b arrTy spec.DimNames
+    Blade.Optimize.recordSinkStream p.ProducerName Blade.Effects.Applied p.Evidence
+    let lines =
+        [ $"// Write {spec.VarName} to {spec.FilePath} (provider-sink-stream v1: `{p.ProducerName}` produced in blocks of {blk} cells, never stored)" ]
+        @ pools @ wrapperCode @ fillDecl @ validation @ writeCode
+    (guardProviderWrite ind lines, ctx)
+
+and genProviderWriteBindingCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
     // Deferred provider write (`alias.write("path", A)`): flatten the source
     // array into `<base>_flat` (row-major Horner, the inverse of genReadVar's

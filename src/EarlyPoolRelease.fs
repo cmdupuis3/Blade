@@ -85,7 +85,9 @@ let private owns (id: IRId) : bool =
     (Blade.Optimize.CompactRowTable.tryProducer id).IsSome || (Blade.Optimize.CompactRowTable.tryConsumer id).IsSome ||
     not (Blade.Optimize.MemberHoistTable.plansOf id).IsEmpty ||
     // a sibling-map member, or an input an earlier sibling's moved sweep reads
-    Blade.Optimize.SiblingMapTable.isProtected id
+    Blade.Optimize.SiblingMapTable.isProtected id ||
+    // a streamed provider sink's producer (never stored) or its write
+    Blade.Optimize.SinkStreamTable.contains id
 
 /// Private worker: callers cannot substitute the older extent-only foreign
 /// census for A05's dependency-aware final whole-program roots.

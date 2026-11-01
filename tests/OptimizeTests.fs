@@ -913,7 +913,11 @@ let private recFoldCorpusTable : (string * Result<string, string> list) list =
       "060_fold_ring_declines_escaping_row_view.blade", [ Error "may write storage other than its own row stores" ]
       "061_fold_ring_declines_future_offset_past_extent.blade", [ Error "not `n - c`, `n + c` or `n`" ]
       "062_fold_ring_declines_read_in_range_extent.blade", [ Error "inside a type's extent" ]
-      "063_fold_ring_declines_mut_param_row_write.blade", [ Error "other than its own row stores" ] ]
+      "063_fold_ring_declines_mut_param_row_write.blade", [ Error "other than its own row stores" ]
+      // wave 3 B1, constructor-table review round 1: a moved kernel forcing a
+      // deferred module map declines; its stored twin rings
+      "064_fold_ring_declines_deferred_kernel_read.blade", [ Error "not a pure total capture-free scalar kernel" ]
+      "065_fold_ring_admits_stored_kernel_read.blade", [ Ok "ring of 2 rows" ] ]
 
 let private recFoldCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
@@ -1069,7 +1073,270 @@ let private recFoldEmission () : bool list =
         + "}\n"
         + "let v = run(1.0)\n"
     let deferred = declinesWith "rec_fold_ring_declines_deferred_producer_extent_effect: a forced deferred map whose kernel writes in a range bound" deferredEffect "a type carries"
-    [ on; off; llvm; team; strict; effect; deep; deferred ]
+    // Wave 3 B1, constructor-table review round 2: a projection of a
+    // wholly-deferred tuple is deferred in every lane (IRLift.
+    // computeDeferredIds); a moved fold kernel reading it by cell declines.
+    // Decision-only: the C++ lane cannot emit a function body reading a
+    // deferred tuple projection (pre-existing BL9002, gap G100).
+    let tupleProj =
+        "type I = Idx<4>\n"
+        + "type Step = Idx<64>\n"
+        + "let w: Float64 = 0.5\n"
+        + "let d1 = method_for(range<I>) <@> lambda(i) -> Float64(i) * w\n"
+        + "let d2 = method_for(range<I>) <@> lambda(i) -> Float64(i)\n"
+        + "let p = (d1, d2)\n"
+        + "let v = p[0]\n"
+        + "function dsum() -> Float64 = reduce(method_for(range<I>) <@> lambda(i) -> v(i), (+))\n"
+        + "function fk(a: Float64, b: Float64) -> Float64 = a + b + dsum()\n"
+        + "function run() -> Float64 = {\n"
+        + "    let rec x: Array<Float64 like Step> =\n"
+        + "        match x with\n"
+        + "        | zero -> zero\n"
+        + "        | zero :: s -> zero :: 1.0\n"
+        + "        | prefix :: n -> prefix :: prefix(n - 1) * 0.5\n"
+        + "    reduce(x, fk, 0.0)\n"
+        + "}\n"
+        + "let r = run()\n"
+    let tupleProjDecl = declinesWith "rec_fold_ring_declines_deferred_tuple_projection: a moved kernel reading a projection of a wholly-deferred tuple" tupleProj "not a pure total capture-free scalar kernel"
+    [ on; off; llvm; team; strict; effect; deep; deferred; tupleProjDecl ]
+// ---------------------------------------------------------------------------
+// PM35 THE CONSTRUCTOR TABLE (round 4 wave 3 B1, `b1-census-table`): every
+// member of every IR data type reachable from IRProgram that can carry an
+// IRExpr or an int (IRId) is a row of Optimize.recFoldConstructorTable --
+// closed by REFLECTION here, so a new constructor or field fails this test
+// until it is classified -- and each row's channel is checked against the
+// walker it names, on a value carrying a sentinel id at that member.
+
+let private rfSid : IRId = -97531
+let private rfSent = IRVar (rfSid, IRTUnit)
+let private rfFlags = System.Reflection.BindingFlags.Public ||| System.Reflection.BindingFlags.NonPublic
+
+let private rfOwnerName (t: System.Type) =
+    let n = t.Name
+    if n.Contains "`" then n.Substring(0, n.IndexOf '`') else n
+
+let private rfIsGen (t: System.Type) (def: System.Type) = t.IsGenericType && t.GetGenericTypeDefinition() = def
+
+let private rfAsm = typeof<IRModule>.Assembly
+
+let rec private rfCarries (stack: Set<string>) (t: System.Type) : bool =
+    if t = typeof<IRExpr> || t = typeof<int> then true
+    elif stack.Contains t.FullName then false
+    else
+    let st = stack.Add t.FullName
+    if t.IsArray then rfCarries st (t.GetElementType())
+    elif Microsoft.FSharp.Reflection.FSharpType.IsTuple t then
+        Microsoft.FSharp.Reflection.FSharpType.GetTupleElements t |> Array.exists (rfCarries st)
+    elif t.Assembly = rfAsm && Microsoft.FSharp.Reflection.FSharpType.IsUnion t then
+        Microsoft.FSharp.Reflection.FSharpType.GetUnionCases t |> Array.exists (fun c -> c.GetFields() |> Array.exists (fun f -> rfCarries st f.PropertyType))
+    elif t.Assembly = rfAsm && Microsoft.FSharp.Reflection.FSharpType.IsRecord t then
+        Microsoft.FSharp.Reflection.FSharpType.GetRecordFields t |> Array.exists (fun f -> rfCarries st f.PropertyType)
+    elif t.IsGenericType then t.GetGenericArguments() |> Array.exists (rfCarries st)
+    else false
+
+/// (key, owner, union case or None, field index, field type) of every member
+/// that can carry an IRExpr or an int, over every owner reachable from IRProgram.
+let private rfMembers () =
+    let owners = System.Collections.Generic.List<System.Type>()
+    let seen = System.Collections.Generic.HashSet<System.Type>()
+    let rec visit (t: System.Type) =
+        if t.IsArray then visit (t.GetElementType())
+        elif Microsoft.FSharp.Reflection.FSharpType.IsTuple t then
+            Microsoft.FSharp.Reflection.FSharpType.GetTupleElements t |> Array.iter visit
+        elif t.Assembly = rfAsm && (Microsoft.FSharp.Reflection.FSharpType.IsUnion t || Microsoft.FSharp.Reflection.FSharpType.IsRecord t) then
+            if seen.Add t then
+                owners.Add t
+                if Microsoft.FSharp.Reflection.FSharpType.IsUnion t then
+                    for c in Microsoft.FSharp.Reflection.FSharpType.GetUnionCases t do
+                        for f in c.GetFields() do visit f.PropertyType
+                else
+                    for f in Microsoft.FSharp.Reflection.FSharpType.GetRecordFields t do visit f.PropertyType
+        elif t.IsGenericType then t.GetGenericArguments() |> Array.iter visit
+    visit typeof<IRProgram>
+    [ for o in owners do
+        if Microsoft.FSharp.Reflection.FSharpType.IsUnion o then
+            for c in Microsoft.FSharp.Reflection.FSharpType.GetUnionCases o do
+                for (i, f) in c.GetFields() |> Array.indexed do
+                    if rfCarries Set.empty f.PropertyType then
+                        yield ($"{rfOwnerName o}.{c.Name}.{f.Name}", o, Some c, i, f.PropertyType)
+        else
+            for (i, f) in Microsoft.FSharp.Reflection.FSharpType.GetRecordFields o |> Array.indexed do
+                if rfCarries Set.empty f.PropertyType then
+                    yield ($"{rfOwnerName o}.{f.Name}", o, None, i, f.PropertyType) ]
+
+let rec private rfDefault (t: System.Type) : obj =
+    if t = typeof<IRExpr> then box (IRLit IRLitUnit)
+    elif t = typeof<SrcLoc> then box SrcLoc.Nowhere
+    elif t = typeof<int> then box 0
+    elif t = typeof<int64> then box 0L
+    elif t = typeof<bool> then box false
+    elif t = typeof<string> then box ""
+    elif t = typeof<float> then box 0.0
+    elif t = typeof<float32> then box 0.0f
+    elif rfIsGen t typedefof<list<int>> then t.GetProperty("Empty").GetValue(null)
+    elif rfIsGen t typedefof<option<int>> then null
+    elif rfIsGen t typedefof<Map<int, int>> || rfIsGen t typedefof<Set<int>> then
+        t.GetProperty("Empty", System.Reflection.BindingFlags.Static ||| rfFlags).GetValue(null)
+    elif Microsoft.FSharp.Reflection.FSharpType.IsTuple t then
+        Microsoft.FSharp.Reflection.FSharpValue.MakeTuple(Microsoft.FSharp.Reflection.FSharpType.GetTupleElements t |> Array.map rfDefault, t)
+    elif Microsoft.FSharp.Reflection.FSharpType.IsRecord(t, rfFlags) then
+        Microsoft.FSharp.Reflection.FSharpValue.MakeRecord(t, Microsoft.FSharp.Reflection.FSharpType.GetRecordFields(t, rfFlags) |> Array.map (fun f -> rfDefault f.PropertyType), rfFlags)
+    elif Microsoft.FSharp.Reflection.FSharpType.IsUnion(t, rfFlags) then
+        let c = Microsoft.FSharp.Reflection.FSharpType.GetUnionCases(t, rfFlags) |> Array.minBy (fun c -> c.GetFields().Length)
+        Microsoft.FSharp.Reflection.FSharpValue.MakeUnion(c, c.GetFields() |> Array.map (fun f -> rfDefault f.PropertyType), rfFlags)
+    // any other value type (BigInteger in a unit scale, decimals, enums ..):
+    // its default value
+    elif t.IsValueType then System.Activator.CreateInstance t
+    else failwith $"rfDefault: no default for {t.FullName}"
+
+let private rfSentIx () : IRIndexType = { (rfDefault typeof<IRIndexType> :?> IRIndexType) with Extent = rfSent }
+
+/// A value of type t carrying the sentinel (the IRVar in an expression slot,
+/// the id in an int slot, an extent in a type slot), or None for an OWNER
+/// type (its members are rows of their own).
+let rec private rfLeaf (t: System.Type) : obj option =
+    if t = typeof<IRExpr> then Some (box rfSent)
+    elif t = typeof<int> then Some (box rfSid)
+    elif t = typeof<IRType> then Some (box (IRTArrow ([ SIdx (rfSentIx ()) ], IRTUnit, None)))
+    elif t = typeof<IRIndexType> then Some (box (rfSentIx ()))
+    elif t = typeof<IRArrayType> then Some (box { (rfDefault typeof<IRArrayType> :?> IRArrayType) with IndexTypes = [ rfSentIx () ] })
+    elif rfIsGen t typedefof<list<int>> then
+        rfLeaf (t.GetGenericArguments().[0])
+        |> Option.map (fun v -> t.GetMethod("Cons").Invoke(null, [| v; t.GetProperty("Empty").GetValue(null) |]))
+    elif rfIsGen t typedefof<option<int>> then
+        rfLeaf (t.GetGenericArguments().[0]) |> Option.map (fun v -> t.GetMethod("Some").Invoke(null, [| v |]))
+    elif rfIsGen t typedefof<Set<int>> then
+        let et = t.GetGenericArguments().[0]
+        rfLeaf et |> Option.map (fun v ->
+            let arr = System.Array.CreateInstance(et, 1)
+            arr.SetValue(v, 0)
+            System.Activator.CreateInstance(t, [| box arr |]))
+    elif rfIsGen t typedefof<Map<int, int>> then
+        let ks = t.GetGenericArguments()
+        let k, v = rfLeaf ks.[0], rfLeaf ks.[1]
+        if k.IsNone && v.IsNone then None
+        else
+            let tt = Microsoft.FSharp.Reflection.FSharpType.MakeTupleType ks
+            let arr = System.Array.CreateInstance(tt, 1)
+            arr.SetValue(Microsoft.FSharp.Reflection.FSharpValue.MakeTuple([| defaultArg k (rfDefault ks.[0]); defaultArg v (rfDefault ks.[1]) |], tt), 0)
+            Some (System.Activator.CreateInstance(t, [| box arr |]))
+    elif Microsoft.FSharp.Reflection.FSharpType.IsTuple t then
+        let es = Microsoft.FSharp.Reflection.FSharpType.GetTupleElements t
+        let ls = es |> Array.map rfLeaf
+        if ls |> Array.forall Option.isNone then None
+        else Some (Microsoft.FSharp.Reflection.FSharpValue.MakeTuple(Array.map2 (fun (e: System.Type) l -> defaultArg l (rfDefault e)) es ls, t))
+    else None
+
+/// What sees the sentinel once the owner value is placed in its root:
+/// (the ExprShape walk, the type-carried walk, the foreign-naming census);
+/// None = the owner is plain data no walker roots (spans, units, domains).
+let private rfObserve (owner: System.Type) (v: obj) : (bool * bool * bool) option =
+    let unit = IRLit IRLitUnit
+    let ofExpr (e: IRExpr) = Some (Optimize.recFoldMentions rfSid e, Optimize.recFoldMentionsInTypes rfSid e, false)
+    let ofType (t: IRType) = ofExpr (IRVar (0, t))
+    let m0 = rfDefault typeof<IRModule> :?> IRModule
+    let c0 = rfDefault typeof<IRCallable> :?> IRCallable
+    let ofModule (m: IRModule) =
+        Some (false, false, (Optimize.recFoldForeignNaming m.Functions m (Some Set.empty) true -1 -1 rfSid).IsSome)
+    match rfOwnerName owner, v with
+    | "IRExpr", (:? IRExpr as e) -> ofExpr e
+    | "MethodForInfo", (:? MethodForInfo as i) -> ofExpr (IRMethodFor i)
+    | "ObjectForInfo", (:? ObjectForInfo as i) -> ofExpr (IRObjectFor i)
+    | "ApplyInfo", (:? ApplyInfo as i) -> ofExpr (IRApplyCombinator i)
+    | "ComposeApplyInfo", (:? ComposeApplyInfo as i) -> ofExpr (IRComposeApply i)
+    | "IRMatchCase", (:? IRMatchCase as c) -> ofExpr (IRMatch (unit, [ c ]))
+    | "IRPattern", (:? IRPattern as p) -> ofExpr (IRMatch (unit, [ { Pattern = p; Guard = None; Body = unit } ]))
+    | "AlignSpec", (:? AlignSpec as s) -> ofExpr (IRAlign ([], s))
+    | "BoundaryMode", (:? BoundaryMode as b) -> ofExpr (IRShift (unit, 0, unit, b))
+    | "SparseKeysSource", (:? SparseKeysSource as s) -> ofExpr (IRSparseKeys s)
+    | "IRTypeG", (:? IRType as t) -> ofType t
+    | "LoopTypeG", (:? LoopTypeG<IRExpr> as l) -> ofType (IRTLoop l)
+    | "IdxRefG", (:? IdxRefG<IRExpr> as r) -> ofType (IRTIdxTagged (IRTUnit, r))
+    | "IRArrowSlotG", (:? IRArrowSlotG<IRExpr> as s) -> ofType (IRTArrow ([ s ], IRTUnit, None))
+    | "IRIndexTypeG", (:? IRIndexType as ix) -> ofType (IRTArrow ([ SIdx ix ], IRTUnit, None))
+    | "IRArrayTypeG", (:? IRArrayType as at) -> ofExpr (IRArrayLit ([], at))
+    | "ArrayIdentity", (:? ArrayIdentity as a) -> ofType (IRTArrow ([], IRTUnit, Some a))
+    | "IRModule", (:? IRModule as m) -> ofModule m
+    | "IRTypeDef", (:? IRTypeDef as td) -> ofModule { m0 with Types = [ td ] }
+    | "IRCallable", (:? IRCallable as c) -> ofModule { m0 with Functions = [ c ] }
+    | "IRParam", (:? IRParam as p) -> ofModule { m0 with Functions = [ { c0 with Params = [ p ] } ] }
+    | "CaptureInfo", (:? CaptureInfo as ci) -> ofModule { m0 with Functions = [ { c0 with Captures = [ ci ] } ] }
+    | "IRBinding", (:? IRBinding as b) -> ofModule { m0 with Bindings = [ b ] }
+    | "ProviderReadSpec", (:? ProviderReadSpec as r) -> ofModule { m0 with ProviderReads = Map.ofList [ (1, r) ] }
+    | "ProviderWriteSpec", (:? ProviderWriteSpec as w) -> ofModule { m0 with ProviderWrites = Map.ofList [ (1, w) ] }
+    | "RandomFillSpec", (:? RandomFillSpec as r) ->
+        let b1 = { (rfDefault typeof<IRBinding> :?> IRBinding) with Id = 1 }
+        ofModule { m0 with Bindings = [ b1 ]; RandomInits = Map.ofList [ (1, r) ] }
+    | _ -> None
+
+let private recFoldConstructorTableCases () : bool list =
+    let members = rfMembers ()
+    let table = Optimize.recFoldConstructorTable
+    let reflected = members |> List.map (fun (k, _, _, _, _) -> k) |> Set.ofList
+    let keys = table |> List.map fst
+    let closed =
+        let name = "rec_fold_ring_constructor_table_closed: every IR member that can carry an IRExpr or an IRId has exactly one row"
+        let missing = Set.difference reflected (Set.ofList keys)
+        let stale = Set.difference (Set.ofList keys) reflected
+        let dups = keys |> List.countBy id |> List.filter (fun (_, n) -> n > 1) |> List.map fst
+        if missing.IsEmpty && stale.IsEmpty && dups.IsEmpty then
+            resultLine Pass name $"{keys.Length} rows, {reflected.Count} reflected members"; true
+        else
+            resultLine Fail name $"missing {Set.toList missing}; stale {Set.toList stale}; duplicated {dups}"; false
+    let walkers =
+        let name = "rec_fold_ring_constructor_table_walkers: each row's channel is the walker that reaches a sentinel at its member"
+        let channelOf = Map.ofList table
+        let bad = System.Collections.Generic.List<string>()
+        let mutable checkedN = 0
+        for (key, owner, case, i, ft) in members do
+            match Map.tryFind key channelOf with
+            | None -> ()
+            | Some Optimize.ChContainer -> ()
+            | Some ch ->
+            match rfLeaf ft with
+            | None ->
+                (match ch with
+                 | Optimize.ChInert | Optimize.ChBinder | Optimize.ChParam | Optimize.ChAdmitted -> ()
+                 | _ -> bad.Add $"{key}: {ch} but the member cannot carry the sentinel")
+            | Some leaf ->
+            let value =
+                match case with
+                | Some c ->
+                    let fs = c.GetFields() |> Array.map (fun f -> rfDefault f.PropertyType)
+                    fs.[i] <- leaf
+                    Microsoft.FSharp.Reflection.FSharpValue.MakeUnion(c, fs, rfFlags)
+                | None ->
+                    let fs = Microsoft.FSharp.Reflection.FSharpType.GetRecordFields(owner, rfFlags) |> Array.map (fun f -> rfDefault f.PropertyType)
+                    fs.[i] <- leaf
+                    Microsoft.FSharp.Reflection.FSharpValue.MakeRecord(owner, fs, rfFlags)
+            match rfObserve owner value with
+            | None ->
+                (match ch with
+                 | Optimize.ChInert -> ()
+                 | _ -> bad.Add $"{key}: {ch} on an owner no walker roots")
+            | Some (child, inType, foreign) ->
+                checkedN <- checkedN + 1
+                let ok =
+                    match ch with
+                    | Optimize.ChRef | Optimize.ChChild -> child
+                    | Optimize.ChType -> inType && not child
+                    | Optimize.ChCallable | Optimize.ChModule -> foreign
+                    | Optimize.ChBinder | Optimize.ChParam | Optimize.ChInert | Optimize.ChAdmitted -> not child && not inType && not foreign
+                    | Optimize.ChContainer -> true
+                if not ok then bad.Add $"{key}: {ch} but child={child} type={inType} foreign={foreign}"
+        if bad.Count = 0 then resultLine Pass name $"{checkedN} rows checked against their walker"; true
+        else resultLine Fail name (String.concat "; " bad); false
+    let foreign =
+        let name = "rec_fold_ring_constructor_table_foreign: another module naming the id declines; no census in a multi-module program fails closed"
+        let m0 = rfDefault typeof<IRModule> :?> IRModule
+        let named = (Optimize.recFoldForeignNaming [] m0 (Some (Set.singleton rfSid)) false -1 -1 rfSid).IsSome
+        let unnamed = (Optimize.recFoldForeignNaming [] m0 (Some (Set.singleton 1)) false -1 -1 rfSid).IsNone
+        let noCensus = (Optimize.recFoldForeignNaming [] m0 None false -1 -1 rfSid).IsSome
+        let single = (Optimize.recFoldForeignNaming [] m0 None true -1 -1 rfSid).IsNone
+        if named && unnamed && noCensus && single then resultLine Pass name "foreign census: named -> declined, unnamed -> admitted, absent (multi-module) -> declined, single module -> admitted"; true
+        else resultLine Fail name $"named={named} unnamed={unnamed} noCensus={noCensus} single={single}"; false
+    [ closed; walkers; foreign ]
+
 // ---------------------------------------------------------------------------
 // PM14 (round 4 wave 2): the leading-axis fold's state updated in place
 // (rule `fold-state-in-place`, Optimize.fuseSliceWritesModule's fold-state
@@ -1126,7 +1393,9 @@ let private foldStateEmission () : bool list =
         if i < 0 then "" else
         let j = cpp.IndexOf("\n}\n", i)
         if j < 0 then cpp.Substring i else cpp.Substring(i, j - i)
-    let moves (body: string) = System.Text.RegularExpressions.Regex.IsMatch(body, @"\n\s*__v\d+ = __v\d+;")
+    // the move is a plain pointer move, or (gap G92) the owned move`r
+    // `deallocate(..); __vT = __vR;` that frees the state's previous slice
+    let moves (body: string) = System.Text.RegularExpressions.Regex.IsMatch(body, @"(\n\s*|; )__v\d+ = __v\d+;")
     let on =
         let name = "fold_state_emission_in_place: the state's cells are stored in place, no per-step slice moved into it"
         match cppOfSource name src with
@@ -9653,7 +9922,22 @@ let private recomputeCases () : bool list =
                     && costIs "materialize (kept) work 18, traffic 12, peak 3; recompute (rejected) work 27, traffic 6, peak 0" d)
           "materialized -- recompute not dominant: work +9 > traffic -6 (both costs recorded)"
       decisionCase "decision_recompute_third_consumer_declined" (rcCorpus "583_recompute_third_consumer_declined.blade") "recompute"
-          (fun d -> rcSubject "stats.x" d && declinedMentioning "is read by 3 statements" d) "declined: a third consumer"
+          (fun d -> rcSubject "stats.x" d && declinedMentioning "materialized -- recompute not dominant: work +12 > traffic -6" d)
+          "materialized at fan-out 3 (PM05: priced, no longer refused): work +12 > traffic -6"
+      decisionCase "decision_recompute_three_folds_applied" (rcCorpus "650_recompute_three_folds_applied.blade") "recompute"
+          (fun d -> rcSubject "three.x" d && applied d && evidenceHas "3 consumers of `x`" d
+                    && evidenceHas "selection: work +6 <= traffic -6" d)
+          "PM05 fan-out 3, a 1-op producer: work +6 <= traffic -6, applied"
+      decisionCase "decision_recompute_four_folds_materialized" (rcCorpus "651_recompute_four_folds_materialized.blade") "recompute"
+          (fun d -> rcSubject "four.x" d && declinedMentioning "materialized -- recompute not dominant: work +9 > traffic -6" d)
+          "PM05 fan-out 4, the same producer: work +9 > traffic -6, materialized"
+      decisionCase "decision_recompute_eight_folds_range_producer" (rcCorpus "652_recompute_eight_folds_range_producer.blade") "recompute"
+          (fun d -> rcSubject "eight.x" d && applied d && evidenceHas "8 consumers of `x`" d
+                    && costIs "work 70 -> 105, traffic 45 -> 0, peak 5 -> 0" d)
+          "PM05 fan-out 8 over a range producer (no stored read): work +35 <= traffic -45, applied"
+      decisionCase "decision_recompute_nine_folds_declined" (rcCorpus "653_recompute_nine_folds_declined.blade") "recompute"
+          (fun d -> rcSubject "eight.x" d && declinedMentioning "is read by 9 statements" d)
+          "PM05: a ninth consumer keeps the pool (the family's cap is 8)"
       decisionCase "decision_recompute_write_between_declined" (rcCorpus "584_recompute_write_between_declined.blade") "recompute"
           (fun d -> rcSubject "snap.x" d && declinedMentioning "may write" d) "declined: a write between the consumers"
       decisionCase "decision_recompute_empty_unseeded_declined" (rcCorpus "585_recompute_empty_unseeded_aborts.blade") "recompute"
@@ -10174,6 +10458,202 @@ let private siblingMapCases () : bool list =
       withGate "BLADE_SIBLING_MAPS" "0" (fun () ->
           decisionCase "decision_sibling_maps_disabled" smFlatSrc "sibling-maps"
               (declinedMentioning "disabled by BLADE_SIBLING_MAPS") "declined: disabled by BLADE_SIBLING_MAPS") ]
+
+// ---- the gather terminal (round 4 wave 3, PM28; compute elision's
+// gather-terminal arm, BLADE_GATHER_ELIDE) --------------------------------
+let private gtHead =
+    "type I = Idx<11>\n"
+    + "type K = Idx<13>\n"
+let private gtTail =
+    "let A = method_for(range<I>) <@> lambda(k) -> Float64(k) + 0.5 |> compute\n"
+    + "let B = method_for(range<I>) <@> lambda(k) -> Float64(k) * 2.0 |> compute\n"
+    + "let N = method_for(range<I>) <@> lambda(k) -> Int64(k) * 3 |> compute\n"
+    + "let idx: Array<Int64 like K> = [7, 2, 9, 0, 5, 10, 3, 8, 1, 6, 4, 2, 9]\n"
+let private gtCastSrc =
+    gtHead
+    + "function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute\n"
+    + "    reduce(g, (+))\n"
+    + "}\n" + gtTail + "let s = gsum(A, idx)\n"
+let private gtPlainSrc =
+    gtHead
+    + "function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> 2.0 * A(i) + 1.0 |> compute\n"
+    + "    reduce(g, (+), 0.5)\n"
+    + "}\n" + gtTail + "let s = gsum(A, idx)\n"
+let private gtTwoSrc =
+    gtHead
+    + "function gsum(A: Array<Float64 like I>, B: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> A((i : I)) + B((i : I)) |> compute\n"
+    + "    reduce(g, (+))\n"
+    + "}\n" + gtTail + "let s = gsum(A, B, idx)\n"
+let private gtOverlapSrc =
+    gtHead
+    + "function gsum(idx: Array<Int64 like K>) -> Int64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> idx((i : K)) |> compute\n"
+    + "    reduce(g, (+))\n"
+    + "}\n" + gtTail + "let s = gsum(idx)\n"
+let private gtSpacedSrc =
+    gtHead
+    + "function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute\n"
+    + "    let c: Float64 = 3.0\n"
+    + "    let t = reduce(g, (+))\n"
+    + "    t * c\n"
+    + "}\n" + gtTail + "let s = gsum(A, idx)\n"
+let private gtIntDivSrc =
+    gtHead
+    + "function gsum(N: Array<Int64 like I>, idx: Array<Int64 like K>) -> Int64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> N((i : I)) |> compute\n"
+    + "    reduce(g, lambda(a, b) -> a / 2 + b, 0)\n"
+    + "}\n" + gtTail + "let s = gsum(N, idx)\n"
+let private gtSeedFailSrc =
+    gtHead
+    + "function gsum(N: Array<Int64 like I>, idx: Array<Int64 like K>, d: Int64) -> Int64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> N((i : I)) |> compute\n"
+    + "    reduce(g, (+), 100 / d)\n"
+    + "}\n" + gtTail + "let s = gsum(N, idx, Int64(4))\n"
+let private gtMapSrc =
+    gtHead
+    + "function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>, w: Array<Float64 like K>) -> Float64 = {\n"
+    + "    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute\n"
+    + "    let h = method_for(zip(g, w)) <@> lambda(a, b) -> a * b |> compute\n"
+    + "    reduce(h, (+))\n"
+    + "}\n" + gtTail
+    + "let w = method_for(range<K>) <@> lambda(k) -> Float64(k) |> compute\n"
+    + "let s = gsum(A, idx, w)\n"
+
+let private gatherTerminalCases () : bool list =
+    let cppAllocs name src =
+        match cppOfSource name src, withGate "BLADE_GATHER_ELIDE" "0" (fun () -> cppOfSource name src) with
+        | Ok on, Ok off ->
+            match ceCppBody on "gsum", ceCppBody off "gsum" with
+            | Some bOn, Some bOff ->
+                let aOn, aOff = ceAllocs bOn, ceAllocs bOff
+                if aOn = 0 && aOff >= 1 then
+                    resultLine Pass name ($"gsum: {aOn} allocation(s) with the gate on, {aOff} off; the gathered pool is gone")
+                    true
+                else
+                    resultLine Fail name ($"gsum: {aOn} allocation(s) on, {aOff} off; wanted 0 on, >= 1 off")
+                    false
+            | _ -> resultLine Fail name "no C++ body for `gsum`"; false
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+    let llvmAllocs name src =
+        match ceLlvmOf name src, withGate "BLADE_GATHER_ELIDE" "0" (fun () -> ceLlvmOf name src) with
+        | Ok on, Ok off ->
+            match ceLlvmBody on "gsum", ceLlvmBody off "gsum" with
+            | Some bOn, Some bOff ->
+                let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"blade_alloc_cells").Count
+                if count bOn = 0 && count bOff >= 1 then
+                    resultLine Pass name ($"llvm lane, gsum: 0 pool allocations with the gate on, {count bOff} off")
+                    true
+                else
+                    resultLine Fail name ($"llvm lane, gsum: {count bOn} allocation(s) on, {count bOff} off; wanted 0 on, >= 1 off")
+                    false
+            | _ -> resultLine Fail name "no LLVM body for `gsum`"; false
+        | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+    let gt (d: Blade.Effects.Decision) = d.Subject = "gsum.g"
+    let applies (d: Blade.Effects.Decision) =
+        gt d && applied d && d.Evidence |> List.exists (fun e -> e.StartsWith "gather-terminal v1")
+    [ cppAllocs "gather_terminal_cpp_cast_no_pool" gtCastSrc
+      cppAllocs "gather_terminal_cpp_plain_subscript_no_pool" gtPlainSrc
+      llvmAllocs "gather_terminal_llvm_cast_no_pool" gtCastSrc
+      decisionCase "decision_gather_terminal_cast_applied" gtCastSrc "compute-elision" applies
+          "applied to gsum.g under the gather-terminal certificate (a checked index cast)"
+      decisionCase "decision_gather_terminal_plain_seeded_applied" gtPlainSrc "compute-elision" applies
+          "applied to gsum.g (a checked subscript inside arithmetic, a seeded fold)"
+      decisionCase "decision_gather_terminal_two_sites_declined" gtTwoSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "no single checked subscript" d)
+          "declined: two failure points"
+      decisionCase "decision_gather_terminal_overlap_declined" gtOverlapSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "alias overlap" d)
+          "declined: the gathered array is the gather's operand"
+      decisionCase "decision_gather_terminal_spaced_declined" gtSpacedSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "between the gather and its fold" d)
+          "declined: a statement between the gather and its fold"
+      decisionCase "decision_gather_terminal_int_div_fold_declined" gtIntDivSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "the fold kernel is not proved total" d)
+          "declined: the fold kernel may fail first"
+      decisionCase "decision_gather_terminal_seed_declined" gtSeedFailSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "the fold seed is not proved total" d)
+          "declined: the seed may fail first"
+      decisionCase "decision_gather_terminal_map_consumer_declined" gtMapSrc "compute-elision"
+          (fun d -> gt d && declinedMentioning "is not proved total" d && not (declinedMentioning "gather terminal" d))
+          "declined: a map consumer keeps the totality rule (v1 admits folds only)"
+      withGate "BLADE_GATHER_ELIDE" "0" (fun () ->
+          decisionCase "decision_gather_terminal_disabled" gtCastSrc "compute-elision"
+              (fun d -> gt d && declinedMentioning "disabled by BLADE_GATHER_ELIDE" d)
+              "declined: disabled by BLADE_GATHER_ELIDE") ]
+
+// ---- the decompact row fold (round 4 wave 3, PM29; BLADE_DECOMPACT_FOLD) ----
+let private dcfHead =
+    "type I = Idx<9>\n"
+    + "let x = Float64(range<I>)\n"
+    + "let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1.0 |> compute\n"
+    + "let An = method_for(x, x) <@> lambda(a, b) where anticomm(a, b) -> a - b |> compute\n"
+let private dcfSymSrc = dcfHead + "let rows = reduce(decompact(S, 0), (+), 0.0)\n"
+let private dcfAntiSrc = dcfHead + "let rows = reduce(decompact(An, 1), (+))\n"
+let private dcfIntDivSrc =
+    "type I = Idx<9>\n"
+    + "let x = Int64(range<I>)\n"
+    + "let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1 |> compute\n"
+    + "let rows = reduce(decompact(S, 0), lambda(p, q) -> p / 2 + q, 0)\n"
+let private dcfTotalSrc =
+    dcfHead + "let rows = reduce(decompact(S, 0), lambda(p, q) -> p + lgamma(q), 0.0)\n"
+let private dcfNamedSeedSrc =
+    dcfHead + "let s0: Float64 = 0.5\n" + "let rows = reduce(decompact(S, 0), (+), s0)\n"
+
+let private decompactRowFoldCases () : bool list =
+    let dcf (d: Blade.Effects.Decision) = d.Subject = "rows"
+    let mainAllocs (cpp: string) = System.Text.RegularExpressions.Regex.Matches(cpp, @"(?<!de)allocate<").Count
+    let allocCase name src =
+        match cppOfSource name src, withGate "BLADE_DECOMPACT_FOLD" "0" (fun () -> cppOfSource name src) with
+        | Ok on, Ok off ->
+            let aOn, aOff = mainAllocs on, mainAllocs off
+            // gate off: x, S, An, the n x n decompaction buffer, rows; on: no buffer
+            if aOn = aOff - 1 && not (on.Contains "decompact: hard") then
+                resultLine Pass name ($"{aOn} allocation(s) with the gate on, {aOff} off: the n x n decompaction buffer is gone")
+                true
+            else
+                let emitted = on.Contains "decompact: hard"
+                resultLine Fail name ($"{aOn} allocation(s) on, {aOff} off (decompaction emitted on: {emitted}); wanted exactly the buffer removed")
+                false
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+    let llvmAllocCase name src =
+        match ceLlvmOf name src, withGate "BLADE_DECOMPACT_FOLD" "0" (fun () -> ceLlvmOf name src) with
+        | Ok on, Ok off ->
+            let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"call ptr @blade_alloc_cells").Count
+            if count on = count off - 1 then
+                resultLine Pass name ($"llvm lane: {count on} pool allocation(s) on, {count off} off: the decompaction buffer is gone")
+                true
+            else
+                resultLine Fail name ($"llvm lane: {count on} allocation(s) on, {count off} off; wanted exactly one fewer")
+                false
+        | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+    [ allocCase "decompact_row_fold_cpp_sym_no_buffer" dcfSymSrc
+      allocCase "decompact_row_fold_cpp_antisym_no_buffer" dcfAntiSrc
+      llvmAllocCase "decompact_row_fold_llvm_sym_no_buffer" dcfSymSrc
+      decisionCase "decision_decompact_row_fold_sym_applied" dcfSymSrc "decompact-row-fold"
+          (fun d -> dcf d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "SymIdx<2, 9> pool"))
+          "applied: the SymIdx row fold reads the pool"
+      decisionCase "decision_decompact_row_fold_antisym_unseeded_applied" dcfAntiSrc "decompact-row-fold"
+          (fun d -> dcf d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "AntisymIdx<2, 9> pool")
+                    && d.Evidence |> List.exists (fun e -> e.Contains "licensed route: base seed +0.0"))
+          "applied: the AntisymIdx row fold, unseeded, takes the route seed"
+      decisionCase "decision_decompact_row_fold_partial_kernel_declined" dcfIntDivSrc "decompact-row-fold"
+          (fun d -> dcf d && declinedMentioning "not a stored Float64 array" d)
+          "declined: an Int64 pool (v1 is Float64)"
+      decisionCase "decision_decompact_row_fold_untotal_kernel_declined" dcfTotalSrc "decompact-row-fold"
+          (fun d -> dcf d && declinedMentioning "the fold kernel is not proved total" d)
+          "declined: a kernel that may panic (lgamma) could fail at another cell first"
+      decisionCase "decision_decompact_row_fold_named_seed_declined" dcfNamedSeedSrc "decompact-row-fold"
+          (fun d -> dcf d && (declinedMentioning "the seed is not a Float64 literal" d
+                              || declinedMentioning "not the plain partial fold's row map" d))
+          "declined: a seed naming a value (the minted row walk embeds only a literal seed; the partial fold's row kernel captures it)"
+      withGate "BLADE_DECOMPACT_FOLD" "0" (fun () ->
+          decisionCase "decision_decompact_row_fold_disabled" dcfSymSrc "decompact-row-fold"
+              (fun d -> dcf d && declinedMentioning "disabled by BLADE_DECOMPACT_FOLD" d)
+              "declined: disabled by BLADE_DECOMPACT_FOLD") ]
 
 let private computeElisionCases () : bool list =
     [ ceCppAllocCase "compute_elision_fold_no_pool" ceFoldSrc "total" ((=) 0) (fun n -> n >= 1)
@@ -10841,6 +11321,11 @@ let private tnfHermDoubleSrc =
 let private tnfFoldSrc = tnfM + "let s2 = reduce(transpose(M, [0, 1]), (+), axes = 2)\n"
 let private tnfFoldOmpSrc = tnfM + "let s = reduce(transpose(M, [0, 1]), lambda(u, v) where omp -> u + v, 0.0, axes = 2)\n"
 let private tnfFoldUnlicensedSrc = tnfM + "let st = reduce(transpose(M, [0, 1]), lambda(a, b) -> (a + b) * 1.0, 0.0, axes = 2)\n"
+// PM25 (wave 3 B2): a strict fold whose kernel WRITES keeps the copy (it
+// shields the fold from a write to the base).
+let private tnfFoldWritingSrc =
+    tnfM + "let mut seen: Float64 = 0.0\n"
+    + "let sw = reduce(transpose(M, [0, 1]), lambda(a, b) -> { seen = seen + 1.0; a + b }, 0.0, axes = 2)\n"
 let private tnfPointPrefix =
     "type R = Idx<2>\n"
     + "type K = Idx<3>\n"
@@ -10942,20 +11427,33 @@ let private transposeNormalFormWave3Cases () =
       decisionCase "decision_transpose_fold_absorbed_omp" tnfFoldOmpSrc "transpose-normal-form"
           (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "absorbed into the fused fold"))
           "applied: absorbed into the fused terminal"
+      // PM25 (wave 3 B2): a STRICT fold keeps its exact chain -- the copy's
+      // order, X read strided in place -- instead of keeping the copy.
       withGate "BLADE_FP_REPRO" "1" (fun () ->
-          tnfEmission "transpose_fold_strict_build_keeps_copy" tnfFoldSrc (fun cpp ->
+          tnfEmission "transpose_fold_strict_build_exact_chain" tnfFoldSrc (fun cpp ->
               let h = hardCopies cpp
-              if h = 1 then Ok "BLADE_FP_REPRO=1: the fold keeps the transposed copy and its order" else Error ($"expected 1 transpose copy, got {h}")))
+              if h = 0 && cpp.Contains "M[" then Ok "BLADE_FP_REPRO=1: the nest keeps the copy's order and reads M in place: no transpose copy" else Error ($"expected no transpose copy, got {h}")))
       withGate "BLADE_FP_REPRO" "1" (fun () ->
-          decisionCase "decision_transpose_fold_strict_build_declined" tnfFoldSrc "transpose-normal-form"
-              (fun d -> d.Subject = "s2" && declinedMentioning "FOLD-ORDER RULE" d && declinedMentioning "BLADE_FP_REPRO=1" d)
-              "declined: the fold-order rule (strict build)")
-      tnfEmission "transpose_fold_unlicensed_keeps_copy" tnfFoldUnlicensedSrc (fun cpp ->
+          decisionCase "decision_transpose_fold_strict_build_exact_chain" tnfFoldSrc "transpose-normal-form"
+              (fun d -> d.Subject = "s2" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "strict exact chain") && d.Evidence |> List.exists (fun e -> e.Contains "BLADE_FP_REPRO=1"))
+              "applied: the strict exact chain (strict build)")
+      tnfEmission "transpose_fold_unlicensed_exact_chain" tnfFoldUnlicensedSrc (fun cpp ->
           let h = hardCopies cpp
-          if h = 1 then Ok "an unlicensed kernel keeps the transposed copy" else Error ($"expected 1 transpose copy, got {h}"))
-      decisionCase "decision_transpose_fold_unlicensed_declined" tnfFoldUnlicensedSrc "transpose-normal-form"
-          (fun d -> d.Subject = "st" && declinedMentioning "FOLD-ORDER RULE" d && declinedMentioning "no reorder licence" d)
-          "declined: the fold-order rule (unlicensed kernel)"
+          if h = 0 then Ok "an unlicensed kernel keeps its exact chain over M in place: no transpose copy" else Error ($"expected no transpose copy, got {h}"))
+      decisionCase "decision_transpose_fold_unlicensed_exact_chain" tnfFoldUnlicensedSrc "transpose-normal-form"
+          (fun d -> d.Subject = "st" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "no reorder licence"))
+          "applied: the strict exact chain (unlicensed kernel)"
+      tnfEmission "transpose_fold_writing_kernel_keeps_copy" tnfFoldWritingSrc (fun cpp ->
+          let h = hardCopies cpp
+          if h = 1 then Ok "a writing kernel keeps the transposed copy" else Error ($"expected 1 transpose copy, got {h}"))
+      decisionCase "decision_transpose_fold_writing_kernel_declined" tnfFoldWritingSrc "transpose-normal-form"
+          (fun d -> d.Subject = "sw" && declinedMentioning "FOLD-ORDER RULE" d && declinedMentioning "exact-chain walk declines too" d)
+          "declined: the fold-order rule, and the exact chain (a writing kernel)"
+      withGate "BLADE_TRANSPOSE_ELIDE" "0" (fun () ->
+          withGate "BLADE_FP_REPRO" "1" (fun () ->
+              tnfEmission "transpose_fold_strict_exact_chain_gate_off" tnfFoldSrc (fun cpp ->
+                  let h = hardCopies cpp
+                  if h = 1 then Ok "gate off: the strict fold keeps the copy" else Error ($"expected 1 transpose copy, got {h}"))))
       // rule 3b: pointwise absorption
       tnfEmission "transpose_pointwise_absorbed" tnfPointSrc (fun cpp ->
           let h = hardCopies cpp
@@ -11381,6 +11879,176 @@ let private providerSinkCases () : bool list =
           planCase "decision_provider_sink_declined_gate" packedSrc "provider-sink"
               (fun d -> d.Subject = "w" && declinedMentioning "disabled by BLADE_SINK_ALIAS" d) "declined: disabled by BLADE_SINK_ALIAS") ]
 
+/// The streamed provider sink (provider-sink-stream v1, BLADE_SINK_STREAM;
+/// round 4 wave 3, D1 / gap G91): a map whose only consumer is one Zarr write
+/// is produced block by block at the write and never stored. The runtime
+/// witnesses (store bytes on / off, the BL8015 / write-failure states) are
+/// in `blade test zarr`; these pin the route and every decline.
+let private sinkStreamCases () : bool list =
+    let head = "import zarr as z\nlet x = Float64(0..1001) * 0.5 |> compute\n"
+    let write = "let w = z.write(\"generated_cpp_tests/sink_stream_out\", y)\n"
+    let applySrc = head + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\n" + write
+    let deferredSrc = head + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0\n" + write
+    let expSrc = head + "let y = method_for(x) <@> lambda(v) -> exp(v) |> compute\n" + write
+    let observedSrc = head + "let y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\nlet s = reduce(y, (+))\n" + write
+    let intSrc =
+        "import zarr as z\nlet xi = Int64(0..1001) |> compute\n"
+        + "let y = method_for(xi) <@> lambda(v) -> v * 3 + 1 |> compute\n" + write
+    let zipSrc =
+        head + "let x2 = Float64(0..1001) * 0.25 |> compute\n"
+        + "let y = method_for(zip(x, x2)) <@> lambda(a, b) -> a - b |> compute\n" + write
+    let bumpSrc =
+        "import zarr as z\n"
+        + "function bump(a: mut Array<Float64 like Idx<3>>) -> Int64 = {\n    a(0) = 100.0\n    3\n}\n"
+        + "let mut x = Float64([1.0, 2.0, 3.0])\n"
+        + "let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+        + "let k = bump(x)\n" + write
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    let printX f = withGate "BLADE_PRINT" "x" f
+    [ printX (fun () ->
+          tnfEmission "sink_stream_never_stores_the_producer" applySrc (fun cpp ->
+              if has "provider-sink-stream v1" cpp && has "refuse_nonfinite_report(" cpp
+                 && not (has "Array<double, 1> y =" cpp) && has "y_wr" cpp && has "__fill(" cpp && has "BLADE_ONE_BODY" cpp
+              then Ok "y is never allocated; the write validates and writes block by block"
+              else Error "the streamed write was not emitted"))
+      printX (fun () ->
+          planCase "decision_sink_stream_applied" applySrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && applied d && evidenceMentioning "is never stored" d) "applied: y streamed into its store")
+      printX (fun () ->
+          planCase "decision_sink_stream_applied_deferred" deferredSrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && applied d) "applied: the deferred spelling")
+      withGate "BLADE_PRINT" "x,x2" (fun () ->
+          planCase "decision_sink_stream_applied_zip" zipSrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && applied d) "applied: a two-operand co-iteration (k = 2: 0 extra work <= 1 cell of traffic saved)")
+      withGate "BLADE_PRINT" "xi" (fun () ->
+          tnfEmission "sink_stream_integer_has_no_validation_pass" intSrc (fun cpp ->
+              if has "provider-sink-stream v1" cpp && not (has "missing_tally" cpp) && not (has "refuse_nonfinite" cpp)
+              then Ok "an Int64 element: no validation pass, one producing pass"
+              else Error "the integer stream emitted a validation pass (or did not stream)"))
+      planCase "decision_sink_stream_declined_printed" applySrc "provider-sink-stream"
+          (fun d -> d.Subject = "y" && declinedMentioning "`y` is printed" d) "declined: no print selection excludes y"
+      // gap G105: top-level compute elision counted a fold as the ONLY reader
+      // of a map a provider write also reads, elided the map and left the write
+      // naming an undeclared array; the write's source is a reader now.
+      printX (fun () ->
+          withGate "BLADE_SINK_STREAM" "0" (fun () ->
+              tnfEmission "compute_elision_keeps_a_written_map" observedSrc (fun cpp ->
+                  if has "Array<double, 1> y =" cpp && has "pool_base(y.data)" cpp then Ok "y is stored: the fold and the write both read it"
+                  else Error "y was elided although a provider write reads it")))
+      printX (fun () ->
+          planCase "decision_compute_elision_declined_write_source" applySrc "compute-elision"
+              (fun d -> d.Subject = "top level.y" && declinedMentioning "the source of a provider write" d) "declined: the write reads y's stored cells")
+      printX (fun () ->
+          planCase "decision_sink_stream_declined_observer" observedSrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && declinedMentioning "has another observer" d) "declined: a reduce also reads y")
+      printX (fun () ->
+          planCase "decision_sink_stream_declined_cost" expSrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && declinedMentioning "not dominant" d) "declined: exp's recompute costs more than the traffic it saves")
+      printX (fun () ->
+          withGate "BLADE_SINK_STREAM" "always" (fun () ->
+              planCase "decision_sink_stream_always_streams_exp" expSrc "provider-sink-stream"
+                  (fun d -> d.Subject = "y" && applied d && evidenceMentioning "streamed anyway" d) "applied: BLADE_SINK_STREAM=always"))
+      printX (fun () ->
+          planCase "decision_sink_stream_declined_intervening_write" bumpSrc "provider-sink-stream"
+              (fun d -> d.Subject = "y" && declinedMentioning "may write" d) "declined: bump writes x between y and the write")
+      printX (fun () ->
+          withGate "BLADE_SINK_STREAM" "0" (fun () ->
+              planCase "decision_sink_stream_declined_gate" applySrc "provider-sink-stream"
+                  (fun d -> d.Subject = "y" && declinedMentioning "disabled by BLADE_SINK_STREAM" d) "declined: disabled by BLADE_SINK_STREAM"))
+      printX (fun () ->
+          withGate "BLADE_SINK_STREAM" "0" (fun () ->
+              tnfEmission "sink_stream_gate_off_deferred_source_is_forced" deferredSrc (fun cpp ->
+                  // gap G104: the deferred source used to reach the writer undeclared
+                  if has "Array<double, 1> y =" cpp && has "pool_base(y.data)" cpp then Ok "gate off: the deferred y is forced under its own name, then written whole"
+                  else Error "the deferred write source is not forced"))) ]
+
+/// The decline CLASSES of provider-sink-stream v1 (fable review of the wave-3
+/// diff: one pin per representative first-failed condition), the C++
+/// renderability fallback (both bindings take their ordinary emission), and
+/// the halo chunk cache's gate, slot cap and off-route record.
+let private sinkStreamDeclineCases () : bool list =
+    let head = "import zarr as z\nlet x = Float64(0..1001) * 0.5 |> compute\n"
+    let write = "let w = z.write(\"generated_cpp_tests/sink_stream_out\", y)\n"
+    let src (body: string) = head + body + write
+    let decl (name: string) (sel: string) (source: string) (subject: string) (needle: string) =
+        withGate "BLADE_PRINT" sel (fun () ->
+            planCase name source "provider-sink-stream"
+                (fun d -> d.Subject = subject && declinedMentioning needle d) ("declined: " + needle))
+    [ decl "decline_sink_stream_csv_provider" "x"
+          ("import csv as c\nlet x = Float64(0..1001) * 0.5 |> compute\nlet y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\n"
+           + "let w = c.write(\"generated_cpp_tests/sink_stream_out.csv\", y)\n") "y" "has no streamed writer"
+      decl "decline_sink_stream_streamed_operand" "x"
+          ("import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_segments\")\nlet A = s.vars.A |> z.stream\n"
+           + "let y = method_for(A) <@> lambda(v) -> v * 2.0 |> compute\n" + write) "y" "is a streamed provider read"
+      decl "decline_sink_stream_deferred_operand" "x"
+          (src "let m = method_for(x) <@> lambda(v) -> v + 1.0\nlet y = method_for(m) <@> lambda(v) -> v * 2.0 |> compute\n") "y" "is a deferred computation"
+      // x itself is a map over an inline operand (`Float64(0..n) * 0.5`) written to a store
+      decl "decline_sink_stream_inline_operand" "x"
+          (src "let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\nlet v0 = z.write(\"generated_cpp_tests/sink_stream_out\", x)\n") "x" "an inline form"
+      decl "decline_sink_stream_cast_not_total" "x"
+          (src "let y = method_for(x) <@> lambda(v) -> Float64(Int64(floor(v))) |> compute\n") "y" "float -> int cast"
+      decl "decline_sink_stream_captured_subscript_not_total" "x,c"
+          (src "let c = Float64([1.0, 2.0, 3.0]) |> compute\nlet y = method_for(x) <@> lambda(v) -> v + c(0) |> compute\n") "y" "not proven in range"
+      decl "decline_sink_stream_parallel_request" "x"
+          (src "let y = method_for(x) <@> lambda(v) where omp(v: 1) -> v + 1.0 |> compute\n") "y" "requests a parallel strategy"
+      decl "decline_sink_stream_writing_producer" "x,acc"
+          (src "let mut acc = Float64([0.0, 0.0]) |> compute\nlet y = method_for(x) <@> lambda(v) -> {\n    acc(0) = v\n    v + 1.0\n} |> compute\n") "y" "IRAssign"
+      decl "decline_sink_stream_two_writes" "x"
+          (src "let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\nlet w0 = z.write(\"generated_cpp_tests/sink_stream_out0\", y)\n") "y" "written by 2 provider writes"
+      decl "decline_sink_stream_rank2" "m2"
+          ("import zarr as z\nlet m2 = Float64([[1.0, 2.0], [3.0, 4.0]]) |> compute\nlet y = method_for(m2) <@> lambda(v) -> v * 2.0 |> compute\n" + write) "y" "not a plain dense rank-1"
+      // (a run-time extent never reaches a write: the Zarr writer itself
+      // refuses it, BL7001 "requires literal extents", gate on or off)
+      decl "decline_sink_stream_bool_element" "x"
+          (src "let y = method_for(x) <@> lambda(v) -> v > 1.0 |> compute\n") "y" "element is not Float64"
+      decl "decline_sink_stream_same_store_between" "x"
+          (head + "let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\nlet v0 = z.write(\"generated_cpp_tests/sink_stream_out\", x)\n" + write) "y" "writes the same store"
+      // the C++ renderability decline (CodeGenBinding's dispatcher arm): a plan
+      // whose kernel no longer resolves to the planned callable is removed at
+      // the producer's site, and BOTH bindings take their ordinary emission
+      // (y stored, the whole-buffer write) -- never a stream over a missing y.
+      withGate "BLADE_PRINT" "x" (fun () ->
+          let name = "sink_stream_renderability_decline_falls_back"
+          let source = src "let y = method_for(x) <@> lambda(v) -> v * v + 1.0 |> compute\n"
+          try
+              match lower source with
+              | Error e -> resultLine Fail name ($"lower: {e}"); false
+              | Ok ir ->
+                  let y = ir.Modules.[0].Bindings |> List.find (fun b -> b.Name = "y")
+                  match Optimize.SinkStreamTable.tryProducer y.Id with
+                  | None -> resultLine Fail name "the plan did not admit y (no fallback to witness)"; false
+                  | Some plan ->
+                      Optimize.SinkStreamTable.record { plan with Kernel = { plan.Kernel with Id = plan.Kernel.Id + 1000000 }; Taken = ref false } Set.empty
+                      let cpp = fst (CodeGen.genSelfContainedProgramFromIR ir name)
+                      if cpp.Contains "Array<double, 1> y =" && cpp.Contains "pool_base(y.data)" && not (cpp.Contains "provider-sink-stream v1: `y`")
+                      then resultLine Pass name "both bindings took the ordinary emission"; true
+                      else resultLine Fail name "the renderability decline did not restore the stored producer and the whole-buffer write"; false
+          with ex -> resultLine Fail name ex.Message; false)
+      // halo-chunk-cache v1: the gate, the 256 MiB slot cap (a metadata-only
+      // store whose one chunk is 40,000,001 cells), and an applied control.
+      (let haloSrc (store: string) =
+          "import zarr as z\n" + $"let sample = z.load(\"{store}\")\n" + "type CX = Chunked<sample.index.x, store>\n"
+          + "let A: Array<Float64 like CX> = sample.vars.A |> z.stream\n"
+          + "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute\n"
+       planCase "decision_halo_cache_applied" (haloSrc "tests/fixtures/zarr_stores/zarr_segments") "halo-chunk-cache"
+           (fun d -> d.Subject = "d" && applied d && evidenceMentioning "3 chunk slot(s)" d) "applied: 3 slots over the D03 control")
+      withGate "BLADE_HALO_CACHE" "0" (fun () ->
+          planCase "decision_halo_cache_declined_gate"
+              ("import zarr as z\nlet sample = z.load(\"tests/fixtures/zarr_stores/zarr_segments\")\ntype CX = Chunked<sample.index.x, store>\n"
+               + "let A: Array<Float64 like CX> = sample.vars.A |> z.stream\n"
+               + "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute\n")
+              "halo-chunk-cache" (fun d -> d.Subject = "d" && declinedMentioning "disabled by BLADE_HALO_CACHE" d) "declined: the gate")
+      (let store = System.IO.Path.GetFullPath("generated_cpp_tests/halo_cap_store").Replace("\\", "/")
+       System.IO.Directory.CreateDirectory(store + "/A") |> ignore
+       System.IO.File.WriteAllText(store + "/.zgroup", "{\"zarr_format\": 2}")
+       System.IO.File.WriteAllText(store + "/A/.zarray", "{\"zarr_format\": 2, \"shape\": [40000001], \"chunks\": [40000001], \"dtype\": \"<f8\", \"compressor\": null, \"fill_value\": 0.0, \"order\": \"C\", \"filters\": null}")
+       System.IO.File.WriteAllText(store + "/A/.zattrs", "{\"_ARRAY_DIMENSIONS\": [\"x\"]}")
+       planCase "decision_halo_cache_declined_slot_cap"
+           ("import zarr as z\n" + $"let sample = z.load(\"{store}\")\n" + "type CX = Chunked<sample.index.x, store>\n"
+            + "let A: Array<Float64 like CX> = sample.vars.A |> z.stream\n"
+            + "let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute\n")
+           "halo-chunk-cache" (fun d -> d.Subject = "d" && declinedMentioning "cap 256 MiB" d) "declined: the slots of a 320 MB chunk exceed the cap") ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -11441,6 +12109,8 @@ let runOptimizeTests () =
           // BLADE_REC_FOLD=1; the default-build decline is pinned inside.)
           yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldCorpusCases ())
           yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldEmission ())
+          // PM35's constructor table: closed by reflection, each row's walker.
+          yield! recFoldConstructorTableCases ()
           // PM14: the leading-axis fold's state updated in place.
           yield! foldStateCorpusCases ()
           yield! foldStateEmission ()
@@ -11473,6 +12143,8 @@ let runOptimizeTests () =
           yield! groupViewCases ()
           // Provider sink destination passing (PM45, round 4 wave 2).
           yield! providerSinkCases ()
+          yield! sinkStreamCases ()
+          yield! sinkStreamDeclineCases ()
           // Hot-row fold scheduling (bench review M13).
           hotRowEmitted ()
           hotRowGateOff ()
@@ -11743,6 +12415,8 @@ let runOptimizeTests () =
           yield! recomputeCases ()
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases ()
+          yield! gatherTerminalCases ()
+          yield! decompactRowFoldCases ()
           yield! ceRemainderCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.
           yield! foldMapElisionCases ()

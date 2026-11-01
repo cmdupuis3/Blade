@@ -14,14 +14,97 @@ let record (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence:
     Blade.Effects.Decisions.record
         { Rule="private-statistic-spool"; Version=1; Span=decisionSpan (); Subject=subject; Outcome=outcome; Evidence=evidence }
 
-let validatePolicy (policy: PrivateSpoolPolicy) =
+/// THE one validity predicate: the API (`validatePolicy`) and the
+/// BLADE_PRIVATE_SPOOL parser both ask it, so nothing the parser accepts can
+/// throw later. BlockCells 0 = the source chunk edge (resolved after the
+/// certificate, and re-checked against 1..1048576 there).
+let policyProblem (policy: PrivateSpoolPolicy) : string option =
     let root = policy.Root
     if String.IsNullOrEmpty root || root.Length >= 240 || root.Length < 3
        || not (Char.IsAsciiLetter root.[0]) || root.[1] <> ':' || (root.[2] <> '\\' && root.[2] <> '/')
-       || (root |> Seq.exists (fun c -> c < ' ' || c > '~'))
-       || policy.BlockCells = 0UL || policy.BlockCells > 1048576UL
-       || policy.TrackedWorkspaceBytes = 0UL || policy.LogicalDiskBytes = 0UL then
-        invalidArg "options.PrivateSpool" "private-spool policy requires an absolute local ASCII drive root, positive tracked workspace/serialized disk allowances and 1..1048576 block cells"
+       || (root |> Seq.exists (fun c -> c < ' ' || c > '~')) then
+        Some "the root must be an absolute local-drive ASCII directory path shorter than 240 characters"
+    elif policy.BlockCells > 1048576UL then Some "block cells must be 0 (the source chunk edge) or 1..1048576"
+    elif policy.TrackedWorkspaceBytes = 0UL then Some "the tracked workspace allowance (mem) must be positive"
+    elif policy.LogicalDiskBytes = 0UL then Some "the serialized disk allowance (disk) must be positive"
+    else None
+
+let validatePolicy (policy: PrivateSpoolPolicy) =
+    match policyProblem policy with
+    | Some why ->
+        invalidArg "options.PrivateSpool" ("private-spool policy requires an absolute local ASCII drive root, positive tracked workspace/serialized disk allowances and 0 (the chunk edge) or 1..1048576 block cells: " + why)
+    | None -> ()
+
+/// BLADE_PRIVATE_SPOOL: the DECLARED grant, read per call and ONLY by the
+/// CLI verb dispatch (run / compile / emit / plan), never by a toolchain file,
+/// the REPL, a notebook, the IDE render lane or a test helper. Its VALUE is
+/// the policy -- `root=<abs dir>,mem=<size>,disk=<size>[,resident=<size>]`,
+/// size = bytes with an optional K / M / G (binary) suffix -- so setting it
+/// names the scratch root and the budgets; nothing is inferred. unset / empty /
+/// `0` / `off` / `false` = no grant (Ok None). Anything else that does not
+/// parse is an Error the verb reports as a hard failure: a typo'd root never
+/// silently runs resident.
+let parseKnob (raw: string) : Result<PrivateSpoolPolicy option, string> =
+    let v = if isNull raw then "" else raw.Trim()
+    match v.ToLowerInvariant() with
+    | "" | "0" | "off" | "false" -> Ok None
+    | _ ->
+    let size (key: string) (s: string) : Result<uint64, string> =
+        let s = s.Trim()
+        let mult, digits =
+            if s.EndsWith "K" || s.EndsWith "k" then 1024UL, s.Substring(0, s.Length - 1)
+            elif s.EndsWith "M" || s.EndsWith "m" then 1048576UL, s.Substring(0, s.Length - 1)
+            elif s.EndsWith "G" || s.EndsWith "g" then 1073741824UL, s.Substring(0, s.Length - 1)
+            else 1UL, s
+        match UInt64.TryParse(digits, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
+        | true, n when n <= UInt64.MaxValue / mult -> Ok (n * mult)
+        | _ -> Error $"`{key}={s}` is not a byte count (digits with an optional K, M or G suffix)"
+    let pairs = v.Split(',') |> Array.map (fun p -> p.Trim()) |> Array.filter (fun p -> p <> "")
+    let parsed =
+        pairs |> Array.fold (fun acc p ->
+            match acc with
+            | Error e -> Error e
+            | Ok (m: Map<string, string>) ->
+                match p.IndexOf '=' with
+                | i when i > 0 ->
+                    let k = p.Substring(0, i).Trim().ToLowerInvariant()
+                    let x = p.Substring(i + 1).Trim()
+                    if not (List.contains k [ "root"; "mem"; "disk"; "resident" ]) then Error $"unknown key `{k}` (root, mem, disk, resident)"
+                    elif m.ContainsKey k then Error $"key `{k}` given twice"
+                    else Ok (Map.add k x m)
+                | _ -> Error $"`{p}` is not key=value") (Ok Map.empty)
+    match parsed with
+    | Error e -> Error e
+    | Ok m ->
+    match Map.tryFind "root" m, Map.tryFind "mem" m, Map.tryFind "disk" m with
+    | None, _, _ -> Error "missing root=<absolute local-drive directory>"
+    | _, None, _ -> Error "missing mem=<tracked workspace allowance>"
+    | _, _, None -> Error "missing disk=<serialized disk allowance>"
+    | Some root, Some mem, Some disk ->
+    match size "mem" mem, size "disk" disk with
+    | Error e, _ | _, Error e -> Error e
+    | Ok memB, Ok diskB ->
+    let resident = match Map.tryFind "resident" m with Some r -> size "resident" r | None -> Ok memB
+    match resident with
+    | Error e -> Error e
+    | Ok residentB ->
+    let policy = { Root = root; TrackedWorkspaceBytes = memB; LogicalDiskBytes = diskB; BlockCells = 0UL; ResidentBytes = residentB }
+    match policyProblem policy with
+    | Some why -> Error why
+    | None -> Ok (Some policy)
+
+/// The CLI's grant, read per call (never cached).
+let knobPolicy () : Result<PrivateSpoolPolicy option, string> =
+    parseKnob (Environment.GetEnvironmentVariable "BLADE_PRIVATE_SPOOL")
+
+/// The selection's candidate lines, shared by the retain decline and the
+/// spool record: retain (the resident two-pass form), replay (never proved
+/// in v1), spool (D06). `chunk` = the resolved source chunk edge.
+let selectionEvidence (p: Plan) (chunk: int64) : string list =
+    let resident = 8UL * uint64 p.Cells
+    [ $"retain: the resident intermediate p is {resident} bytes (8 N, the logical pool; the resident route also holds its decode windows and run table -- a heuristic, not a bound) against the resident allowance {p.Policy.ResidentBytes} bytes"
+      "replay: not proved -- the source is a `.stream` provider read by path; its run-time identity is version (size + mtime), not content, so a second traversal is not proved to read the same values, and a second provider pass would add a failure site after the statistic that the two-pass program cannot have (no provider supplies a snapshot proof for `.stream` today)"
+      $"spool: D06 private sequential spool under root `{p.Policy.Root}`, tracked workspace {p.Policy.TrackedWorkspaceBytes} bytes, serialized disk {p.Policy.LogicalDiskBytes} bytes, block = the source chunk edge {chunk} cells" ]
 
 let fpSupported () =
     fpReproEnabled ()
@@ -152,6 +235,11 @@ let tryGenerate (ctx: CodeGenContext) (p: Plan) : Result<string list,string> =
             "    __ps.cleanup_attempted = true; __ps.cleanup = __ps_status;"
             "    if (__ps_status || ps::reserved_disk() == 0) __ps.owner = 0;"
             "    if (!__ps_status) __ps_fail(__ps_status, \"finish before publication\");"
+            // The run record's private_spool member (blade_run_record.hpp):
+            // noted only after finish succeeded (scratch retired), with the
+            // PLANNED reservation (reserved_disk() is 0 once idle) and the grant.
+            "    { const auto __ps_c = ps::counters();"
+            $"      blade_rr::note_private_spool({escapeStringLit p.Terminal.Name}, {p.Cells}ULL, {chunk}ULL, __ps_plan.blocks, __ps_c.payload_written, __ps_c.payload_read, __ps_c.logical_disk_high_water, __ps_plan.reserved_disk, {root}, {p.Policy.TrackedWorkspaceBytes}ULL, {p.Policy.LogicalDiskBytes}ULL); }}"
             "    return __ps.pending; // only publication, after replay/EOF/owned scratch retirement; normal print follows"
             "}();" ]
     Ok (lines |> List.map (fun line -> indentStr ctx + line))

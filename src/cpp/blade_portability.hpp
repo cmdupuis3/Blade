@@ -287,6 +287,21 @@
 // `__declspec(noinline)` (the MSVC lane exists for CUDA hosts; repro x cuda
 // is refused upstream). The emission site is genFuncDef/genForwardDecls; the
 // licence-side vetoes (fold reorder, BLAS routing) are the compiler's.
+// BLADE_ONE_BODY -- the attribute of a lambda that must be ONE compiled body
+// at every call site (provider-sink-stream v1: the validation pass and the
+// write pass call the same block filler, so -ffp-contract=fast cannot contract
+// the kernel differently per call context). noinline keeps it out of each
+// caller; noclone keeps GCC's IPA-CP from specializing a copy per site.
+#ifndef BLADE_ONE_BODY
+  #if defined(__clang__)
+    #define BLADE_ONE_BODY __attribute__((noinline))
+  #elif defined(__GNUC__)
+    #define BLADE_ONE_BODY __attribute__((noinline, noclone))
+  #else
+    #define BLADE_ONE_BODY
+  #endif
+#endif
+
 #ifndef BLADE_REPRO_FN
   #if defined(__clang__)
     #define BLADE_REPRO_FN __attribute__((noinline))

@@ -1957,37 +1957,132 @@ let internal mapOneArrayApply (builder: IRBuilder) (arr: IRExpr) (la: IRArrayTyp
           OutputType = outputType; IsCoIteration = false }
     IRApplyCombinator applyInfo
 
+/// HYGIENIC REBINDING THROUGH THE CLOSURE GRAPH (gap G93). Renaming a body's
+/// binders (`renames`: old id -> (fresh id, emitted name)) must also rename
+/// every CAPTURE of them: a lambda lifted out of that body names a captured
+/// binder in its Captures list and its own body, never in the body being
+/// renamed, so a rename of the body alone left the nested callable naming a
+/// binder that no longer exists (the interpreter: capture not resolvable;
+/// LLVM: unbound variable; C++: undeclared). ONE renaming environment is
+/// threaded through every callable reachable from the body (transitively,
+/// through the bodies of the callables it names): a callable that captures a
+/// renamed binder -- or names one that must be cloned -- is CLONED under a
+/// fresh id with its captures, parameters and lets renamed (its own binders
+/// join the environment, so a lambda nested in it that captures its
+/// parameters is cloned too), and the reference is redirected to the clone.
+/// A callable that needs no clone is shared. Returns the rewritten body and
+/// the clones, which the caller registers beside its other minted callables.
+let internal rebindThroughClosures
+        (builder: IRBuilder) (resolve: IRId -> IRCallable option)
+        (renames: Map<IRId, IRId * string>) (body: IRExpr) : IRExpr * IRCallable list =
+    let env = System.Collections.Generic.Dictionary<IRId, IRId * string>()
+    for KeyValue (k, v) in renames do env.[k] <- v
+    let cloneOf = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    let clones = System.Collections.Generic.List<IRCallable>()
+    let callablesIn (e: IRExpr) = collectVarRefsIR e |> Set.toList |> List.choose resolve
+    let rec needs (visiting: Set<IRId>) (c: IRCallable) : bool =
+        cloneOf.ContainsKey c.Id
+        || c.Captures |> List.exists (fun cap -> env.ContainsKey cap.Id)
+        || (not (visiting.Contains c.Id)
+            && callablesIn c.Body |> List.exists (fun d -> d.Id <> c.Id && needs (Set.add c.Id visiting) d))
+    let rec rewrite (e: IRExpr) : IRExpr =
+        mapIRExpr (fun n ->
+            match n with
+            | IRVar (id, t) ->
+                (match env.TryGetValue id with
+                 | true, (nid, _) -> IRVar (nid, t)
+                 | _ ->
+                     match resolve id with
+                     | Some c when needs Set.empty c -> IRVar ((cloneIt c).Id, t)
+                     | _ -> n)
+            | IRLet (id, v, b) ->
+                (match env.TryGetValue id with
+                 | true, (nid, _) -> IRLet (nid, v, b)
+                 | _ -> n)
+            | _ -> n) e
+    and cloneIt (c: IRCallable) : IRCallable =
+        match cloneOf.TryGetValue c.Id with
+        | true, k -> k
+        | _ ->
+            let cid = builder.FreshId()
+            let ps =
+                c.Params |> List.map (fun p ->
+                    let nid = builder.FreshId()
+                    env.[p.VarId] <- (nid, $"__fz{nid}")
+                    { p with VarId = nid; Name = $"__fz{nid}" })
+            iterIRExpr (fun x ->
+                match x with
+                | IRLet (id, _, _) when not (env.ContainsKey id) ->
+                    let nid = builder.FreshId()
+                    env.[id] <- (nid, $"__v{nid}")
+                | _ -> ()) c.Body
+            let caps =
+                c.Captures |> List.map (fun cap ->
+                    match env.TryGetValue cap.Id with
+                    | true, (nid, nm) -> { cap with Id = nid; Name = nm }
+                    | _ -> cap)
+            // registered BEFORE its body is rewritten, so a self-reference
+            // (or a cycle back to it) names the clone
+            let shell = { c with Id = cid; Name = $"__lambda_{cid}"; Params = ps; Captures = caps }
+            cloneOf.[c.Id] <- shell
+            let k = { shell with Body = rewrite c.Body }
+            cloneOf.[c.Id] <- k
+            clones.Add k
+            k
+    let body' = rewrite body
+    body', List.ofSeq clones
+
 /// Clone a callable's parameters with fresh ids (the same callable can be
 /// spliced or inlined at more than one site; ids must stay unique), renaming
 /// them `__fz<id>` for hygiene, and rewrite its body onto the fresh ids. The
 /// body's own `let` binders are freshened too: a kernel that was itself fused
 /// binds a repeated inner value once, and splicing that kernel twice must not
-/// mint one binder twice.
-let internal freshenCallable (builder: IRBuilder) (ik: IRCallable) : IRParam list * IRExpr =
+/// mint one binder twice. The renaming runs through the CLOSURE GRAPH
+/// (`rebindThroughClosures`, gap G93): a callable reachable from the body
+/// that captures a renamed binder is cloned onto the fresh ids, and the
+/// clones are returned for the caller to register beside its other mints.
+/// `resolve` names the program's callables.
+let internal freshenCallableWith (builder: IRBuilder) (resolve: IRId -> IRCallable option) (ik: IRCallable) : IRParam list * IRExpr * IRCallable list =
     let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
     let letBinders =
         let acc = System.Collections.Generic.List<IRId>()
         iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) ik.Body
         acc |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> List.ofSeq
-    let mapped = Map.ofList (mapping @ letBinders)
+    let renames =
+        Map.ofList (
+            (mapping |> List.map (fun (o, n) -> (o, (n, $"__fz{n}"))))
+            @ (letBinders |> List.map (fun (o, n) -> (o, (n, $"__v{n}")))))
     let params' =
         ik.Params |> List.map (fun p ->
-            let nid = mapped.[p.VarId]
-            { p with VarId = nid; Name = $"__fz{nid}" })
-    let body' =
-        mapIRExpr (fun e ->
-            match e with
-            | IRVar (id, t) ->
-                (match Map.tryFind id mapped with
-                 | Some nid -> IRVar (nid, t)
-                 | None -> e)
-            | IRLet (id, v, b) ->
-                (match Map.tryFind id mapped with
-                 | Some nid -> IRLet (nid, v, b)
-                 | None -> e)
-            | _ -> e) ik.Body
-    params', body'
+            let (nid, nm) = renames.[p.VarId]
+            { p with VarId = nid; Name = nm })
+    let (body', clones) = rebindThroughClosures builder resolve renames ik.Body
+    params', body', clones
 
+/// Does a callable reachable from `c`'s body (transitively) CAPTURE one of
+/// `c`'s own parameters or let binders? Such a body cannot be spliced by a
+/// rename or a substitution that stops at the body (gap G93): a pass that
+/// does not clone through `rebindThroughClosures` declines it.
+let internal nestedCapturesOwnBinder (resolve: IRId -> IRCallable option) (c: IRCallable) : bool =
+    let own = System.Collections.Generic.HashSet<IRId>()
+    for p in c.Params do own.Add p.VarId |> ignore
+    iterIRExpr (fun e -> match e with IRLet (id, _, _) -> own.Add id |> ignore | _ -> ()) c.Body
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec reach (x: IRExpr) =
+        collectVarRefsIR x |> Set.exists (fun id ->
+            match resolve id with
+            | Some d when d.Id <> c.Id && seen.Add d.Id ->
+                d.Captures |> List.exists (fun cap -> own.Contains cap.Id) || reach d.Body
+            | _ -> false)
+    reach c.Body
+/// `freshenCallableWith` with NO closure graph: the renaming stops at the
+/// body. Sound only for a callable whose body names no callable capturing
+/// one of its binders -- both remaining callers (Optimize's call elision and
+/// its kept one-level inline) refuse any capturing callable in the body
+/// before they freshen it (gap G93's class audit).
+let internal freshenCallable (builder: IRBuilder) (ik: IRCallable) : IRParam list * IRExpr =
+    let (ps, body, _) = freshenCallableWith builder (fun _ -> None) ik
+    ps, body
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
     // The function or binding being rewritten: an operator kernel minted here
@@ -2765,7 +2860,34 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
     // Clone an inner kernel's parameters with fresh ids (the same callable
     // can be spliced at more than one site; ids must stay unique), renaming
     // for hygiene, and rewrite its body onto the fresh ids (see freshenCallable).
-    let freshen (ik: IRCallable) : IRParam list * IRExpr = freshenCallable builder ik
+    // Gap G93: the renaming runs through the closure graph; the clones it
+    // mints (a nested callable that captured a renamed binder) are this
+    // pass's own mints, registered like the fused kernels (and swept with
+    // them when nothing references them).
+    let resolveId (id: IRId) : IRCallable option =
+        match resolver.TryGetValue id with
+        | true, c -> Some c
+        | _ -> None
+    let registerClones (clones: IRCallable list) =
+        for k in clones do
+            newLambdas.Add k
+            callables.[k.Id] <- k
+            resolver.[k.Id] <- k
+    let freshen (ik: IRCallable) : IRParam list * IRExpr =
+        let (ps, body, clones) = freshenCallableWith builder resolveId ik
+        registerClones clones
+        ps, body
+    // Does a callable reachable from `e` capture `vid`? (Its id would dangle
+    // once `vid` is substituted away.)
+    let capturedThrough (vid: IRId) (e: IRExpr) : bool =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let rec reach (x: IRExpr) =
+            collectVarRefsIR x |> Set.exists (fun id ->
+                match resolveId id with
+                | Some c when seen.Add c.Id ->
+                    c.Captures |> List.exists (fun cap -> cap.Id = vid) || reach c.Body
+                | _ -> false)
+        reach e
 
     // `Error why` is the DECLINE reason, recorded by `rewrite` when the host
     // had a fusable-looking operand (a `compute`d inner map) -- the shape a
@@ -2835,6 +2957,19 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                          // per cell instead; a bare variable or literal is
                          // free to repeat.
                          body <-
+                             // A callable nested in the host body that
+                             // CAPTURES the parameter (gap G93) cannot read a
+                             // substituted expression: bind the spliced value
+                             // once per cell and rebind the parameter to that
+                             // let through the closure graph (the capturing
+                             // callables are cloned onto it).
+                             if capturedThrough pid body then
+                                 let nid = builder.FreshId()
+                                 let (body', clones) =
+                                     rebindThroughClosures builder resolveId (Map.ofList [ (pid, (nid, $"__v{nid}")) ]) body
+                                 registerClones clones
+                                 IRLet (nid, innerBody, body')
+                             else
                              match innerBody with
                              | IRVar _ | IRLit _ -> substVar pid innerBody body
                              | _ when occurrences pid body > 1 ->
@@ -2980,7 +3115,17 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                     | _ -> ()) b
             newFunctions |> List.iter (fun f -> scan f.Body)
             newBindings |> List.iter (fun b -> scan b.Value)
-            newLambdas |> Seq.filter (fun l -> referenced.Contains l.Id) |> List.ofSeq
+            // a surviving mint's body may name another mint (a closure clone,
+            // gap G93): transitively
+            let kept = System.Collections.Generic.HashSet<IRId>()
+            let mutable grew = true
+            while grew do
+                grew <- false
+                for l in newLambdas do
+                    if referenced.Contains l.Id && kept.Add l.Id then
+                        scan l.Body
+                        grew <- true
+            newLambdas |> Seq.filter (fun l -> kept.Contains l.Id) |> List.ofSeq
     { modul with
         Functions = newFunctions @ survivingLambdas
         Bindings = newBindings }

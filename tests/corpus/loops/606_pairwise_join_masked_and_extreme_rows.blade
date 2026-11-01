@@ -1,0 +1,74 @@
+// TEST: Pairwise Join Masked And Extreme Rows
+// ============================================================================
+// PM13: the per-row reduction join over a NAMED deferred producer folds both
+// legs in one traversal of j with the producer evaluated once per cell (both
+// compiled lanes) and no M x N weight pool. Witnesses the edge rows:
+// - a MASK (a key validity vector zipped into the producer): masked keys
+//   weigh exactly 0.0;
+// - an ALL-MASKED row (a compact-support kernel whose query lies outside
+//   the support of every key): z = 0, u = 0, the value is 0/0 = NaN;
+// - EXTREME scores (scale 1e3): exp of a raw score overflows, the two-pass
+//   max-subtracted form stays finite and agrees with the materialized
+//   reference evaluated the same way.
+// The two-pass FP graph is the one written: no online rescaling.
+// ============================================================================
+type I = Idx<13>
+type J = Idx<19>
+
+let q = 0.37 * Float64(range<I>) - 1.5
+let ks = 0.21 * Float64(range<J>) - 2.0
+let vs = cos(0.4 * Float64(range<J>)) + 1.5
+let valid = method_for(range<J>) <@> lambda(j) -> j % 3 != 1 |> compute
+let r: Float64 = 0.5
+function wt(a: Float64, b: Float64, ok: Bool) -> Float64 = {
+    let d = (a - b) / r
+    if ok && abs(d) < 1.0 then 1.0 - d * d else 0.0
+}
+
+// Masked compact-support weights: row 12 (q = 2.94) lies outside the
+// support of every key (keys reach 1.78), so all of its weights are 0.0.
+let y = (method_for(range<I>) <@> lambda(i) -> {
+    let qi = q(i)
+    let w = method_for(zip(ks, valid)) <@> lambda(b, ok) -> wt(qi, b, ok)
+    let z, u = object_for(<&!>) <@> (reduce(w, (+)), prodsum(w, vs))
+    u / z
+}) |> compute
+
+// The materialized reference: the M x N weights, two folds, a division.
+let W = (method_for(range<I>, range<J>) <@> lambda(i, j) -> wt(q(i), ks(j), valid(j)) |> compute)
+let zr = reduce(W, (+))
+let ur = method_for(range<I>) <@> lambda(i) -> prodsum(W(i), vs) |> compute
+let yr = ur / zr
+
+let same = method_for(zip(y, yr)) <@> lambda(a, b) ->
+    if a != a then b != b else abs(a - b) <= 1.0e-12 * abs(b)
+let agrees_masked = reduce(same, lambda(a, b) -> a && b, true)
+// EXPECT: agrees_masked = true
+let y12 = y((12 : I))
+let all_masked_is_nan = y12 != y12
+// EXPECT: all_masked_is_nan = true
+let z12 = zr((12 : I))
+// EXPECT: z12 = 0.0
+
+// Extreme scores: s = 1e3 - 1e3 (a - b)^2, so the raw exp(s) overflows at
+// the row maximum; pass 1 takes the maximum, pass 2 exponentiates s - m.
+function score(a: Float64, b: Float64) -> Float64 = 1.0e3 - 1.0e3 * (a - b) * (a - b)
+let raw_overflows = exp(score(0.0, 0.0)) > 1.0e300
+// EXPECT: raw_overflows = true
+let s = (method_for(range<I>) <@> lambda(i) -> {
+    let qi = q(i)
+    let m = reduce(method_for(ks) <@> lambda(b) -> score(qi, b),
+                   lambda(a, b) -> if a > b then a else b, -1.0e300)
+    let e = method_for(ks) <@> lambda(b) -> exp(score(qi, b) - m)
+    let z, u = object_for(<&!>) <@> (reduce(e, (+)), prodsum(e, vs))
+    u / z
+}) |> compute
+let mr = (method_for(range<I>) <@> lambda(i) -> reduce(method_for(ks) <@> lambda(b) -> score(q(i), b),
+              lambda(a, b) -> if a > b then a else b, -1.0e300)) |> compute
+let E = (method_for(range<I>, ks) <@> lambda(i, b) -> exp(score(q(i), b) - mr(i)) |> compute)
+let sr = (method_for(range<I>) <@> lambda(i) -> prodsum(E(i), vs) / reduce(E(i), (+))) |> compute
+let same_s = method_for(zip(s, sr)) <@> lambda(a, b) -> abs(a - b) <= 1.0e-12 * abs(b)
+let agrees_extreme = reduce(same_s, lambda(a, b) -> a && b, true)
+// EXPECT: agrees_extreme = true
+let finite = reduce(method_for(s) <@> lambda(v) -> v == v && abs(v) < 1.0e300, lambda(a, b) -> a && b, true)
+// EXPECT: finite = true

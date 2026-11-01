@@ -346,6 +346,13 @@ let rec private genFuncBodyScoped
                 let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ($"__v{rid}")
                 [$"{indent}std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data));"]
             | None ->
+            // Owned move (gap G92): free T's previous pool, then take R's.
+            match ownedMoveAssign target v with
+            | Some (_, rid) ->
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ("__v" + string rid)
+                let staticShape = ownedMoveStaticShape target
+                [$"{indent}{(renderOwnedMove targetStr rhsStr staticShape)};"]
+            | None ->
                 [$"{indent}{targetStr} = {(exprToCpp currentNames v)};"]
         | IRConstraintCheck (cond, blCode, message, span) ->
             currentNames <- Map.add id varName currentNames
@@ -2248,9 +2255,12 @@ let private genModuleBinding
             match Blade.CodeGenPrivateSpool.tryGenerate atBinding region.Plan with
             | Ok lines ->
                 Blade.CodeGenPrivateSpool.record binding.Name Blade.Effects.Applied
-                    [ "private-statistic-spool-v1: exact stored F64 bits, serial/repro and contraction off"
-                      "retained normal-window decode/input capacity; append faults drain original source windows"
-                      "tracked workspace and serialized disk only; terminal publication follows replay/EOF/cleanup" ]
+                    ([ "private-statistic-spool-v1: exact stored F64 bits, serial/repro and contraction off"
+                       "retained normal-window decode/input capacity; append faults drain original source windows"
+                       "tracked workspace and serialized disk only; terminal publication follows replay/EOF/cleanup"
+                       "route: spool (the resident intermediate exceeds the resident allowance)" ]
+                     @ Blade.CodeGenPrivateSpool.selectionEvidence region.Plan (int64 region.Plan.Policy.BlockCells)
+                     @ [ "run record: private_spool member (cells, blocks, payload bytes written / read, logical disk high water, planned reservation, grant)" ])
                 lines, { atBinding with PrivateSpoolRegion = Some { region with Committed = true } }
             | Error why ->
                 Blade.CodeGenPrivateSpool.record binding.Name (Blade.Effects.Declined why) []
@@ -2475,6 +2485,11 @@ let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpoo
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
+    // G92 owned moves: after the write facts (callableMayWrite) and the
+    // fresh-return facts it reads.
+
+    freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
+    ownedMoveRenderer <- renderOwnedMove
 
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
@@ -2623,6 +2638,11 @@ let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivat
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
+    // G92 owned moves: after the write facts (callableMayWrite) and the
+    // fresh-return facts it reads.
+
+    freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
+    ownedMoveRenderer <- renderOwnedMove
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
@@ -4260,15 +4280,42 @@ let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (
             if splitTimingModeEnabled () then
                 Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "split timing placement is not admitted") []
                 None
+            elif mpiEmitModeEnabled () then
+                // `--mpi N` launches N copies of a non-MPI program: N spools
+                // under one root with N times the grant. Not admitted.
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "MPI emit mode (--mpi) is not admitted: every rank would spool under the one grant") []
+                None
             elif not (Blade.CodeGenPrivateSpool.fpSupported ()) then
                 Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "requires reproducible serial folds and explicit BLADE_FP_CONTRACT=off") []
                 None
             else
                 match Blade.OptimizePrivateSpool.tryPlan policy (printSelection ()) program with
-                | Ok plan -> Some plan
                 | Error why ->
                     Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined why) []
                     None
+                | Ok plan ->
+                // THE SELECTION (round 4 wave 3, E2): the certificate holds;
+                // resolve the block (0 = the source chunk edge), then retain
+                // when the resident intermediate fits the resident allowance,
+                // else spool. Replay is a recorded candidate, never proved.
+                match Blade.ZarrProvider.CppZarr.rank1TerminalChunk plan.SourceSpec with
+                | Error why ->
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name (Blade.Effects.Declined why) []
+                    None
+                | Ok (chunk, _) when chunk <= 0L || chunk > 1048576L ->
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name
+                        (Blade.Effects.Declined $"the source chunk edge {chunk} is outside the spool block range 1..1048576") []
+                    None
+                | Ok (chunk, _) ->
+                let plan =
+                    if policy.BlockCells = 0UL then { plan with Policy = { policy with BlockCells = uint64 chunk } }
+                    else plan
+                let evidence = Blade.CodeGenPrivateSpool.selectionEvidence plan chunk
+                if plan.Policy.ResidentBytes > 0UL && 8UL * uint64 plan.Cells <= plan.Policy.ResidentBytes then
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name
+                        (Blade.Effects.Declined $"retain: the resident intermediate p ({8UL * uint64 plan.Cells} bytes) is within the resident allowance ({plan.Policy.ResidentBytes} bytes); the resident two-pass route runs") evidence
+                    None
+                else Some plan
     let cell = exprWarningsCell ()
     let code =
         match program.Modules with

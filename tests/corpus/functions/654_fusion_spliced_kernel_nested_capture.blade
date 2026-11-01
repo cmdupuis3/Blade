@@ -1,0 +1,33 @@
+// TEST: Fusion Splices A Kernel Whose Nested Lambda Captures Its Parameter
+// ============================================================================
+// Gap G93: elementwise fusion freshens a spliced kernel's parameters and lets
+// (IRMono.freshenCallable). A lambda NESTED in that kernel that captures its
+// parameter (`lambda(t) -> a + Float64(t)` captures `a`) is a separate
+// callable: renaming the body alone left it naming a binder that no longer
+// exists (interpreter: capture not resolvable; LLVM: unbound variable; C++:
+// undeclared). The renaming now runs through the closure graph: the nested
+// callable is cloned onto the fresh parameter. `inner`: the producer's kernel
+// holds the capturing lambda (p is spliced into q by compute elision +
+// fusion); `outer`: the CONSUMER's kernel holds one capturing ITS parameter,
+// which the splice replaces by the producer's value (bound once per cell).
+// inner: p = a + (a + 0) + (a + 1) = 3a + 1, q = 2p, sum over 1..5 = 100.
+// outer: b = 3a, q = b + (0 + b) = 6a, sum over 1..5 = 90.
+type I = Idx<5>
+
+function inner(v: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(v) <@> lambda(a) -> a + reduce(method_for(0..2) <@> lambda(t) -> a + Float64(t), (+)) |> compute
+    let q = method_for(p) <@> lambda(b) -> b * 2.0 |> compute
+    reduce(q, (+))
+}
+
+function outer(v: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(v) <@> lambda(a) -> a * 3.0 |> compute
+    let q = method_for(p) <@> lambda(b) -> b + reduce(method_for(0..2) <@> lambda(t) -> b * Float64(t), (+)) |> compute
+    reduce(q, (+))
+}
+
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let s = inner(x)
+let r = outer(x)
+// EXPECT: s = 100.0
+// EXPECT: r = 90.0

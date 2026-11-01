@@ -610,6 +610,7 @@
     <!-- Round-2 cell epilogues: the licensed / threaded forms by raw bits
          (NEW vs BLADE_CELL_EPILOGUE=0), plus the LLVM lane's parity. g++. -->
     <Compile Include="tests/CellEpilogueTests.fs" />
+    <Compile Include="tests/OwnedMoveTests.fs" />
     <!-- Wave 3 (E-G5) threaded let-rec step: the threaded build vs the
          threads-off build by raw bits at fixed team sizes. g++. -->
     <Compile Include="tests/RecStepTests.fs" />

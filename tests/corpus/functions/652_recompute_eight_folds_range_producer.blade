@@ -1,0 +1,25 @@
+// TEST: Recompute Selection Eight Fold Consumers Of A Range Producer
+// ============================================================================
+// PM05 at fan-out 8: x = `Float64(i)` over range<I> reads NO stored cell, so
+// recomputing it per consumer costs only its own work, while materializing
+// writes x once and reads it eight times. The model (`recompute v1`) prices
+// both: work 70 -> 105 (+35), traffic 45 -> 0 (-45), peak 5 -> 0, so every
+// fold reads the map in place (`blade test optimize` pins it). Values are the
+// materialized form's over x = [0, 1, 2, 3, 4]: 10 + 0 + 30 + 5 + 20 - 10 + 15
+// + 6.125 = 76.125, plus base 1.0.
+type I = Idx<5>
+
+function eight(base: Float64) -> Float64 = {
+    let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+    let f1 = reduce(x, (+))
+    let f2 = reduce(x, (*))
+    let f3 = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    let f4 = reduce(x, lambda(p, r) -> p + r * 0.5, 0.0)
+    let f5 = reduce(x, lambda(p, r) -> p + r * 2.0, 0.0)
+    let f6 = reduce(x, lambda(p, r) -> p - r, 0.0)
+    let f7 = reduce(x, lambda(p, r) -> p + r + 1.0, 0.0)
+    let f8 = reduce(x, lambda(p, r) -> p * 0.5 + r, 0.0)
+    f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + base
+}
+let t = eight(1.0)
+// EXPECT: t = 77.125

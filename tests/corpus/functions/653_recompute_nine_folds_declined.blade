@@ -1,0 +1,22 @@
+// TEST: Recompute Selection Declines A Ninth Consumer
+// ============================================================================
+// PM05: the recompute family prices at most eight consumers; a ninth keeps
+// x's pool, recorded (`is read by 9 statements`). Values: 652's eight folds
+// plus reduce(x, p + 3r, 0) = 30: 76.125 + 30 + base 1.0 = 107.125.
+type I = Idx<5>
+
+function eight(base: Float64) -> Float64 = {
+    let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+    let f1 = reduce(x, (+))
+    let f2 = reduce(x, (*))
+    let f3 = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    let f4 = reduce(x, lambda(p, r) -> p + r * 0.5, 0.0)
+    let f5 = reduce(x, lambda(p, r) -> p + r * 2.0, 0.0)
+    let f6 = reduce(x, lambda(p, r) -> p - r, 0.0)
+    let f7 = reduce(x, lambda(p, r) -> p + r + 1.0, 0.0)
+    let f8 = reduce(x, lambda(p, r) -> p * 0.5 + r, 0.0)
+    let f9 = reduce(x, lambda(p, r) -> p + r * 3.0, 0.0)
+    f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + base
+}
+let t = eight(1.0)
+// EXPECT: t = 107.125

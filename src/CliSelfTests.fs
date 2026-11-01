@@ -93,7 +93,7 @@ let internal suiteClearedKnobs =
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
       "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
       "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS"
-      "BLADE_POOL_RETAIN" ]
+      "BLADE_POOL_RETAIN"; "BLADE_OWNED_MOVE"; "BLADE_WORKSPACE_CENSUS"; "BLADE_PRIVATE_SPOOL" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -5974,6 +5974,10 @@ and internal dispatchTestClean (rest: string list) : int =
         // The RNG mirror's Philox4x32-10 generator against Random123's
         // published known-answer vectors, and the `_at` address identities.
         let failed = (Blade.Tests.RandMirrorTests.runRandMirrorTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "owned-move" ] | [ "ownedmove" ] ->
+        // Gap G92: a reassigned array frees its previous pool (owned move).
+        let failed = (Blade.Tests.OwnedMoveTests.runOwnedMoveTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "cell-epilogue" ] | [ "cellepilogue" ] ->
         // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms

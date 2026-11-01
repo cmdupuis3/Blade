@@ -108,3 +108,29 @@ and required evidence fields; it cannot interpret assembly or authorize its own
 claims. Missing review is unmeasured; marker/source-only proof is insufficient.
 Root reviews native evidence. Even accepted diagnostic results stay
 `performance_eligible:false`. See the B07 handoff for the exact staged request.
+
+## Timed stage (round 4 wave 3, E3): PM52 is performance-eligible on the audited binaries
+
+`timed.py` measures the EIGHT EXACT executables root accepted (audits read from git
+`42f9e26b:bench/notes/round4/B07-native-audits/<arm>.json`; every one of the thirteen
+native gates must pass and the binary must hash to the audit's executable sha256 -- it is
+copied, never rebuilt). `--runs` (>= 5) fresh processes per arm, arms interleaved in a
+seeded per-round shuffle, private TEMP/TMP, single-threaded OMP/OpenBLAS, BLADE_* removed;
+EVERY report must pass this directory's validator (`numeric_errors`: all cells, both
+checksums against the independent R5 reference at 1e-12, every post-stop flag) or the
+arm is not eligible. The statistic is the median of `opaque_task_interval_s`; observer
+and cleanup intervals are reported, never subtracted. The validator's reference pin hashes
+raw bytes, which a `core.autocrlf` checkout turns CRLF; `timed.py` checks the same pin
+over the LF-normalized (index) bytes.
+
+Result 2026-11-01, 7 runs per arm, under the build lock (`python timed.py --out <new dir>
+--runs 7`): ALL EIGHT ARMS ELIGIBLE. Median / min / max task interval in microseconds:
+cpp licensed 39.9 / 35.9 / 50.9, cpp repro 41.6 / 38.9 / 49.5, llvm licensed 39.2 / 33.2 /
+48.3, llvm repro 43.6 / 34.7 / 47.4, natural Fortran licensed 33.6 / 32.5 / 47.5, repro
+35.0 / 33.8 / 43.4, expert Fortran licensed 37.3 / 30.2 / 48.0, repro 37.0 / 31.7 / 50.0
+(observer medians 2.07-2.22 ms, not part of the task). Eligible means the interval encloses
+the declared work (the audits' compiler ordering), not DRAM completion. Indicative only:
+the fixed 2053-cell task is ~35-45 us, the run-to-run spread (~30 %) exceeds the
+between-arm differences, and the interval includes the four allocations and the R5 input
+generation, so this shape cannot resolve the store-then-consume effect PM52 asks about;
+a larger, odd n needs a new adapted artifact and a new native audit.

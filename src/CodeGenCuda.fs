@@ -4365,11 +4365,92 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                             // a row-pointer table over the full leading extent; only the band's rows are live
                                             [ $"{ind}    for (size_t __r = __w_lo; __r < __w_hi; __r++) {rows}[__r] = {win} + (__r - __w_lo) * {trailing}UL;"
                                               $"{ind}    Array<{elemCpp}, 2> {vn} = {{ {rows}, {ext} }};" ]
+                                    // HALO CHUNK CACHE (halo-chunk-cache v1; round 4 wave 3,
+                                    // D2 / PM42): on the certified rank-1 uniform-cursor
+                                    // stencil route the chunk traffic is COUNTED in both
+                                    // arms (the run record's provider_io), and with
+                                    // BLADE_HALO_CACHE on the chunks live in S direct-mapped
+                                    // slots for the whole run loop: S = the most chunks a
+                                    // window of the certified capacity W can intersect,
+                                    // ceil((W - 1) / C) + 1, so (the cursor's windows have
+                                    // non-decreasing ends) two chunks of one window never
+                                    // share a slot and an evicted chunk is never requested
+                                    // again: each chunk is fetched exactly once, in
+                                    // ascending order, misses in today's order within a
+                                    // window. The read itself is serial (the kernel's omp
+                                    // request lives in the loop body after the read).
+                                    let haloRoute =
+                                        (match runShape with SegmentTable.UniformRuns _ -> true | _ -> false)
+                                        && rank1WindowPlan.IsSome && rank = 1 && spec.Provider = "zarr"
+                                        && sources.Length = 1 && kind = "stencil"
+                                    let io = $"{name}__io{k}"
+                                    let cb = $"{name}__hc{k}"
+                                    let cacheGeom =
+                                        if not haloRoute then
+                                            // a stencil off the certified route: named, so the
+                                            // knob's every decline is on record
+                                            if kind = "stencil" then
+                                                let why =
+                                                    if spec.Provider <> "zarr" then $"provider '{spec.Provider}' (the cache is Zarr's)"
+                                                    elif sources.Length <> 1 then $"{sources.Length} streamed sources (v1 caches a single-source stencil)"
+                                                    elif rank <> 1 then $"a rank-{rank} variable (v1 caches rank 1)"
+                                                    elif rank1WindowPlan.IsNone then "no rank-1 window certificate (the D04 route did not admit the kernel)"
+                                                    else "explicit (non-uniform) runs: the cursor route is the uniform segmentation"
+                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined why) []
+                                            None
+                                        else
+                                        match Blade.ZarrProvider.CppZarr.haloCacheGeometry spec.FilePath spec.VarName with
+                                        | Error why ->
+                                            recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined why) []
+                                            None
+                                        | Ok (c, disk, cbytes) ->
+                                            let w = max 1L maxWin
+                                            let slots = (w - 1L + c - 1L) / c + 1L
+                                            let slotBytes = slots * cbytes
+                                            let evidence =
+                                                [ $"`{spec.VarName}` streamed through {slots} chunk slot(s) of {c} cells ({slotBytes} bytes) for the whole run loop: S = ceil((W - 1) / C) + 1 with the certified window capacity W = {w}, chunk C = {c}"
+                                                  "exactness: the uniform cursor's windows have non-decreasing ends and width <= W, so chunk c's slot c % S is never shared within a window and an evicted chunk is never requested again: each chunk is fetched once per evaluation, ascending; within a window misses keep today's order (the first short read / null-fill chunk fails where it does today); the per-window BL8015 scan, the intersection clip and the fill are unchanged"
+                                                  "read session: the slots live inside this binding's run loop only (never across bindings or a provider write); neither arm defines behaviour for a store another process mutates during the run -- the cache observes each chunk once per evaluation"
+                                                  "lanes: the LLVM lane has no segments arm (such a program runs in the C++ lane)"
+                                                  $"memory: {slotBytes} bytes of slots + the window ({w} cells) + the required output, independent of the variable's size; the uncached arm holds one chunk per window" ]
+                                            if not (Blade.Optimize.haloCacheEnabled ()) then
+                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined "disabled by BLADE_HALO_CACHE") evidence
+                                                None
+                                            elif slotBytes > (256L <<< 20) then
+                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined $"the slots would hold {slotBytes} bytes (cap 256 MiB)") evidence
+                                                None
+                                            else
+                                                recordCodegenDecision "halo-chunk-cache" name Blade.Effects.Applied evidence
+                                                Some (int slots, c, disk, slotBytes)
+                                    let ioDecl =
+                                        if not haloRoute then []
+                                        else
+                                            [ $"{ind}long long {io}[4] = {{ 0, 0, 0, 0 }}; // provider_io census: fetches, fetched bytes, decoded bytes, cache hits" ]
+                                            @ (match cacheGeom with
+                                               | Some (slots, c, disk, _) ->
+                                                   [ $"{ind}{disk}* {cb}_buf = new {disk}[{int64 slots * c}UL];"
+                                                     $"{ind}size_t {cb}_ord[{slots}]; for (size_t __hs = 0; __hs < {slots}UL; __hs++) {cb}_ord[__hs] = SIZE_MAX;"
+                                                     $"{ind}unsigned char {cb}_st[{slots}] = {{ 0 }};" ]
+                                               | None -> [])
+                                    let ioClose =
+                                        if not haloRoute then []
+                                        else
+                                            let (form, slots, slotBytes) =
+                                                match cacheGeom with
+                                                | Some (s, _, _, b) -> ("halo-chunk-cache", int64 s, b)
+                                                | None -> ("per-window", 0L, 0L)
+                                            [ $"{ind}blade_rr::note_io(\"{name}\", \"{spec.VarName}\", \"{form}\", {io}[0], {io}[1], {io}[2], {io}[3], {slots}LL, {slotBytes}LL);" ]
+                                            @ (match cacheGeom with Some _ -> [ $"{ind}delete[] {cb}_buf;" ] | None -> [])
+                                    let rowsCode =
+                                        if haloRoute then
+                                            Blade.ZarrProvider.CppZarr.genStreamRowsCounted io
+                                                (cacheGeom |> Option.map (fun (s, _, _, _) -> (cb, s)))
+                                                spec.FilePath spec.VarName vn win "__w_lo" "__w_hi" spec.VarType
+                                        else genRows spec.FilePath spec.VarName vn win "__w_lo" "__w_hi" spec.VarType
                                     let read =
-                                        (genRows spec.FilePath spec.VarName vn win "__w_lo" "__w_hi" spec.VarType
-                                         |> List.map (fun s -> ind + "    " + s))
+                                        (rowsCode |> List.map (fun s -> ind + "    " + s))
                                         @ alias
-                                    (decl, read, [ $"{ind}delete[] {win};" ] @ (if rank = 2 && not directRows then [ $"{ind}delete[] {rows};" ] else [])))
+                                    (decl @ ioDecl, read, ioClose @ [ $"{ind}delete[] {win};" ] @ (if rank = 2 && not directRows then [ $"{ind}delete[] {rows};" ] else [])))
                             let what = sources |> List.map (fun (_, s) -> $"'{s.VarName}'") |> String.concat ", "
                             let lastN = sources |> List.map (fun (_, s) -> match s.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> runExtent) |> List.min
                             [ (if kind = "stencil"

@@ -614,5 +614,50 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
              check name ok text
          | r, p -> check name false ($"run {r}; parse {p}; {text}"))
 
+    // ---------------- 6. the per-worker workspace census (BLADE_WORKSPACE_CENSUS) ----------------
+    // Round 4 wave 3 A4 (plan PM06): a COMPILE-TIME instrument. Built with
+    // BLADE_WORKSPACE_CENSUS=1, a threaded map whose kernel deep-copies a
+    // 2-cell array per cell (corpus loops/517's `rp` shape) reports one
+    // `workspace` row for its site: one 16-byte allocation per cell, a
+    // per-worker high-water mark of ONE copy (16 bytes: each cell's copy is
+    // freed before the next), at most 3 workers on a team of 3. The default
+    // build writes no `workspace` member (section 4's member lists).
+    printfn "\n--- workspace census (BLADE_WORKSPACE_CENSUS) ---"
+    (let name = "record (parsed): rr_ws -- one workspace row: 301 allocs of 16 bytes, 16 bytes per worker, team of 3"
+     let src =
+         "type K = Idx<2>\ntype I = Idx<301>\n"
+         + "let G = method_for(range<K>) <@> lambda(k) -> Float64(k) |> compute\n"
+         + "let rp = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> {\n    let mut c = G\n    c((0 : K)) = Float64(i)\n    c((0 : K)) + G((0 : K))\n} |> compute\n"
+         + "let s = reduce(rp, (+))\n"
+     match withPins [ ("BLADE_WORKSPACE_CENSUS", "1"); ("BLADE_OMP_THREADS", null) ] (fun () -> buildExe "rr_ws" src) with
+     | Error e when isSkipError e -> skip name e
+     | Error e -> check name false ("build: " + e)
+     | Ok exe ->
+         let recPath = Path.GetFullPath(Path.Combine(e2eDir, "rr_ws.record.json"))
+         if File.Exists recPath then File.Delete recPath
+         let run = ref (Error "not run")
+         withPins [ ("OMP_NUM_THREADS", "3") ] (fun () -> withRecord (Some recPath) (fun () -> run.Value <- runExecutable exe))
+         let text = if File.Exists recPath then File.ReadAllText recPath else ""
+         match run.Value, (try Ok (System.Text.Json.JsonDocument.Parse text) with ex -> Error ex.Message) with
+         | Ok (0, out), Ok doc ->
+             use doc = doc
+             let root = doc.RootElement
+             let members = [ for p in root.EnumerateObject() -> p.Name ]
+             let ws = root.GetProperty "workspace"
+             let row = if ws.GetArrayLength() = 1 then Some ws.[0] else None
+             let ok =
+                 members = [ "blade_run_record"; "program"; "status"; "executable"; "policy"; "routes"; "rng"; "workspace"; "inputs" ]
+                 && out.Contains "s = 45150.0"
+                 && (match row with
+                     | Some r ->
+                         r.GetProperty("site").GetString() = "rp" && r.GetProperty("calls").GetInt64() = 1L
+                         && r.GetProperty("allocs").GetInt64() = 301L && r.GetProperty("bytes").GetInt64() = 4816L
+                         && r.GetProperty("bytes_per_worker").GetInt64() = 16L
+                         && r.GetProperty("workers_allocating").GetInt32() >= 1 && r.GetProperty("workers_allocating").GetInt32() <= 3
+                         && r.GetProperty("max_threads").GetInt32() = 3
+                         && r.GetProperty("workspace").GetInt64() = 16L * int64 (r.GetProperty("workers_allocating").GetInt32())
+                     | None -> false)
+             check name ok ($"{text} | {out}")
+         | r, p -> check name false ($"run {r}; parse {p}; {text}"))
     { Block = "Run Records"; Passed = passed; Failed = failed; Skipped = skipped
       FailedNames = List.ofSeq failedNames }

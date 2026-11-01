@@ -163,6 +163,111 @@ namespace blade_rr {
     else form_events_dropped++;
     form_lock.clear(std::memory_order_release);
   }
+
+  // THE PROVIDER I/O CENSUS (round 4 wave 3, D2 / PM42): a streamed provider
+  // site that counts its chunk traffic records, per evaluation, the chunk
+  // FETCHES (file reads), the FETCHED bytes (as stored on disk: the
+  // compressed size for a codec, the raw size for the identity codec), the
+  // DECODED bytes (produced into chunk buffers), the cache HITS (a chunk
+  // served without a fetch) and the cache's slots and slot bytes (0 when
+  // uncached). Written as `provider_io` ONLY when a site recorded (an
+  // additive, optional member of the version-1 record, like `forms`).
+  // Serial callers only (the halo run loop's read is serial).
+  struct IoEvent { const char* site; const char* var; const char* form;
+                   long long fetches; long long fetched_bytes; long long decoded_bytes;
+                   long long hits; long long slots; long long slot_bytes; };
+  constexpr int io_event_cap = 64;
+  inline IoEvent io_events[io_event_cap] = {};
+  inline int n_io_events = 0;
+  inline long long io_events_dropped = 0;
+  inline void note_io(const char* site, const char* var, const char* form,
+                      long long fetches, long long fetched_bytes, long long decoded_bytes,
+                      long long hits, long long slots, long long slot_bytes) {
+    if (n_io_events < io_event_cap)
+      io_events[n_io_events++] = IoEvent{ site, var, form, fetches, fetched_bytes, decoded_bytes, hits, slots, slot_bytes };
+    else io_events_dropped++;
+  }
+  // THE PER-WORKER WORKSPACE CENSUS (round 4 wave 3 A4, PM06; compiled in
+  // only under BLADE_WS_CENSUS, which the compiler writes for
+  // BLADE_WORKSPACE_CENSUS=1). A threaded site brackets its team with
+  // ws_site_begin / ws_site_end (called by the thread that runs the site,
+  // outside the team); nested_array_utilities.hpp's blade_pool counts every
+  // pool allocated or released meanwhile against the OpenMP thread doing it.
+  // One row per site: calls, the largest team that allocated, allocations and
+  // bytes summed over calls, the largest per-worker live high-water mark
+  // (`bytes_per_worker`: the scratch one worker held at once) and the largest
+  // sum of the workers' high-water marks over one call (`workspace`: P x the
+  // per-worker workspace when the team is uniform). Not thread-safe against a
+  // NESTED site (Blade opens no nested team).
+#if defined(BLADE_WS_CENSUS) && BLADE_WS_CENSUS
+  struct WsEvent { const char* site; long long calls; int max_threads; int workers; long long allocs; long long bytes; long long per_worker; long long workspace; };
+  constexpr int ws_event_cap = 64;
+  inline WsEvent ws_events[ws_event_cap] = {};
+  inline int n_ws_events = 0;
+  inline long long ws_events_dropped = 0;
+  // A site reached INSIDE another team (a kernel calling a function that holds
+  // its own threaded nest) is not bracketed: the outer site already counts it,
+  // and resetting the shared counters from every outer worker would race.
+  inline bool ws_nested() {
+#if defined(_OPENMP)
+    return omp_in_parallel() != 0;
+#else
+    return false;
+#endif
+  }
+  inline void ws_site_begin() {
+    if (ws_nested()) return;
+    for (int w = 0; w < ::blade_ws::kMaxWorkers; ++w) ::blade_ws::workers[w] = ::blade_ws::Worker{};
+    ::blade_ws::open.store(true, std::memory_order_release);
+  }
+  inline void ws_site_end(const char* site, int max_threads) {
+    if (ws_nested()) return;
+    ::blade_ws::open.store(false, std::memory_order_release);
+    int workers = 0; long long allocs = 0, bytes = 0, per_worker = 0, workspace = 0;
+    for (int w = 0; w < ::blade_ws::kMaxWorkers; ++w) {
+      const ::blade_ws::Worker& k = ::blade_ws::workers[w];
+      if (k.allocs > 0) workers++;
+      allocs += k.allocs; bytes += k.bytes; workspace += k.peak;
+      if (k.peak > per_worker) per_worker = k.peak;
+    }
+    int i = 0;
+    for (; i < n_ws_events; ++i) if (std::strcmp(ws_events[i].site, site) == 0) break;
+    if (i == n_ws_events) {
+      if (n_ws_events == ws_event_cap) { ws_events_dropped++; return; }
+      ws_events[n_ws_events++] = WsEvent{ site, 0, 0, 0, 0, 0, 0, 0 };
+    }
+    WsEvent& e = ws_events[i];
+    e.calls++;
+    if (max_threads > e.max_threads) e.max_threads = max_threads;
+    if (workers > e.workers) e.workers = workers;
+    e.allocs += allocs; e.bytes += bytes;
+    if (per_worker > e.per_worker) e.per_worker = per_worker;
+    if (workspace > e.workspace) e.workspace = workspace;
+  }
+#endif
+  // THE PRIVATE SPOOL (blade_private_spool.hpp; BLADE_PRIVATE_SPOOL): one row
+  // per completed spool region -- its terminal (a string literal), N, the
+  // block (the source chunk edge), the blocks written, the payload bytes
+  // written and read back, the logical disk high water and the PLANNED
+  // reservation, and the grant it ran under. Noted only after the region's
+  // reader finished and its scratch was retired; an ADDITIVE, OPTIONAL member
+  // (`private_spool`) written only when a row exists, so every other record
+  // is unchanged. Its own slot, not extra_members (membership hoisting owns
+  // that pointer), so a program holding both keeps both.
+  struct SpoolEvent {
+    const char* site; unsigned long long cells, block_cells, blocks, written, read, high_water, reserved;
+    const char* root; unsigned long long mem, disk;
+  };
+  constexpr int spool_event_cap = 8;
+  inline SpoolEvent spool_events[spool_event_cap] = {};
+  inline int n_spool_events = 0;
+  inline void note_private_spool(const char* site, unsigned long long cells, unsigned long long block_cells,
+                                 unsigned long long blocks, unsigned long long written, unsigned long long read,
+                                 unsigned long long high_water, unsigned long long reserved,
+                                 const char* root, unsigned long long mem, unsigned long long disk) {
+    if (n_spool_events < spool_event_cap)
+      spool_events[n_spool_events++] = SpoolEvent{ site, cells, block_cells, blocks, written, read, high_water, reserved, root, mem, disk };
+  }
   // EXTRA MEMBERS a runtime component appends after "inputs" (each writes
   // `,"key":value` text): null unless one registered -- membership
   // hoisting's builds (blade_member.h, "member_hoist") are the one today.
@@ -277,6 +382,40 @@ namespace blade_rr {
       std::fputc(']', f);
       if (form_events_dropped > 0) std::fprintf(f, ",\"forms_dropped\":%lld", form_events_dropped);
     }
+    if (n_io_events > 0 || io_events_dropped > 0) {
+      std::fputs(",\"provider_io\":[", f);
+      for (int i = 0; i < n_io_events; ++i) {
+        const IoEvent& e = io_events[i];
+        if (i) std::fputc(',', f);
+        std::fputs("{\"site\":", f); json_string(f, e.site);
+        std::fputs(",\"variable\":", f); json_string(f, e.var);
+        std::fputs(",\"form\":", f); json_string(f, e.form);
+        std::fprintf(f, ",\"fetches\":%lld,\"fetched_bytes\":%lld,\"decoded_bytes\":%lld,\"hits\":%lld,\"slots\":%lld,\"slot_bytes\":%lld}",
+                     e.fetches, e.fetched_bytes, e.decoded_bytes, e.hits, e.slots, e.slot_bytes);
+      }
+      std::fputc(']', f);
+      if (io_events_dropped > 0) std::fprintf(f, ",\"provider_io_dropped\":%lld", io_events_dropped);
+    }
+#if defined(BLADE_WS_CENSUS) && BLADE_WS_CENSUS
+    // the workspace census (see ws_site_end): every bracketed site, even one
+    // whose team allocated nothing (that is the census's answer for it)
+    std::fputs(",\"workspace\":[", f);
+    for (int i = 0; i < n_ws_events; ++i) {
+      const WsEvent& e = ws_events[i];
+      if (i) std::fputc(',', f);
+      std::fputs("{\"site\":", f); json_string(f, e.site);
+      std::fprintf(f, ",\"calls\":%lld,\"max_threads\":%d,\"workers_allocating\":%d,\"allocs\":%lld,\"bytes\":%lld,\"bytes_per_worker\":%lld,\"workspace\":%lld,\"retained\":\"%s\"}",
+                   e.calls, e.max_threads, e.workers, e.allocs, e.bytes, e.per_worker, e.workspace,
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+                   "none (pool cache off)"
+#else
+                   "per-thread blade_pool cache (16 KB .. max_block)"
+#endif
+                   );
+    }
+    std::fputc(']', f);
+    if (ws_events_dropped > 0) std::fprintf(f, ",\"workspace_dropped\":%lld", ws_events_dropped);
+#endif
     std::fputs(",\"inputs\":[", f);
     for (int i = 0; i < n_inputs; ++i) {
       const Input& in = inputs[i];
@@ -296,6 +435,19 @@ namespace blade_rr {
       std::fputc('}', f);
     }
     std::fputc(']', f);
+    if (n_spool_events > 0) {
+      std::fputs(",\"private_spool\":[", f);
+      for (int i = 0; i < n_spool_events; ++i) {
+        const SpoolEvent& e = spool_events[i];
+        if (i) std::fputc(',', f);
+        std::fputs("{\"site\":", f); json_string(f, e.site);
+        std::fprintf(f, ",\"route\":\"spool\",\"cells\":%llu,\"block_cells\":%llu,\"blocks\":%llu,\"payload_written\":%llu,\"payload_read\":%llu,\"logical_disk_high_water\":%llu,\"reserved_disk\":%llu",
+                     e.cells, e.block_cells, e.blocks, e.written, e.read, e.high_water, e.reserved);
+        std::fputs(",\"grant\":{\"root\":", f); json_string(f, e.root);
+        std::fprintf(f, ",\"mem\":%llu,\"disk\":%llu}}", e.mem, e.disk);
+      }
+      std::fputc(']', f);
+    }
     if (extra_members) extra_members(f);
     std::fputs("}\n", f);
     std::fclose(f);

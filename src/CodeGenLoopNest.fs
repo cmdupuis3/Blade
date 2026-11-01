@@ -2041,6 +2041,11 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
     let covMaxth = "__omp_maxth" + covSfx
     let covSeen = "__omp_seen" + covSfx
     let covTeam = "__omp_team" + covSfx
+    // BLADE_WORKSPACE_CENSUS (PM06): open the site before the team, so every
+    // pool a worker allocates inside it is counted against that worker.
+    let wsCensus = workspaceCensusEnabled () && outerIsParallel
+    if wsCensus then
+        lines <- lines @ [ ind depth + "blade_rr::ws_site_begin(); /* workspace census (BLADE_WORKSPACE_CENSUS) */" ]
     if ompInstrument && outerIsParallel then
         lines <- lines @ [
             ind depth + "// [omp-coverage] thread observation (test mode)"
@@ -2863,6 +2868,8 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
             ind depth + $"  std::cout << \"[omp-coverage] region={regionTag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << {covMaxth} << std::endl;"
             ind depth + $"  delete[] {covSeen}; delete[] {covTeam}; }}"
         ]
+    if wsCensus then
+        lines <- lines @ [ ind depth + $"blade_rr::ws_site_end(\"{regionTag}\", blade_omp_get_max_threads()); /* workspace census */" ]
 
     lines
 
@@ -3416,13 +3423,17 @@ let tryGenFlatElementwiseNest
     | None ->
     if fp.AllParallel then
         recordOmpConstruct codeGen.OutputName fp.Pragma "flat elementwise sweep over the whole pool"
+    // BLADE_WORKSPACE_CENSUS (PM06): a threaded flat sweep is a site too
+    let wsCensus = workspaceCensusEnabled () && fp.AllParallel && fp.ThreadsOn
     Some (
         fp.Head
+        @ (if wsCensus then [ ind (indent + 1) + "blade_rr::ws_site_begin(); /* workspace census (BLADE_WORKSPACE_CENSUS) */" ] else [])
         @ fp.PragmaMarker
         @ (if fp.Pragma = "" then [] else [ ind (indent + 1) + fp.Pragma ])
         @ [ ind (indent + 1) + "for (size_t __fk = 0; __fk < __fp_cells; __fk++)"
-            ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"
-            ind indent + "}" ])
+            ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};" ]
+        @ (if wsCensus then [ ind (indent + 1) + $"blade_rr::ws_site_end(\"{codeGen.OutputName}\", blade_omp_get_max_threads()); /* workspace census */" ] else [])
+        @ [ ind indent + "}" ])
 
 // --- Sibling maps (round 4 wave 2, PM04; Blade.Optimize.planSiblingMaps) -----
 // The C++ realization of a planned group: every member's site emits its own
@@ -4635,6 +4646,12 @@ let genIncludesExternal () : string list =
     // text. The default writes nothing: its emission is unchanged.
     let retention = Blade.Toolchain.poolRetention ()
     Blade.Toolchain.warnPoolRetention retention
+    // BLADE_WORKSPACE_CENSUS (PM06): blade_pool's per-worker census counters
+    (if workspaceCensusEnabled () then
+         [ "// BLADE_WORKSPACE_CENSUS=1: the per-worker workspace census (nested_array_utilities.hpp blade_ws; run record `workspace`)"
+           "#define BLADE_WS_CENSUS 1" ]
+     else [])
+    @
     (match Blade.Toolchain.poolRetentionDefines retention with
      | [] -> []
      | defines ->
@@ -5194,6 +5211,296 @@ let computeCopyInPlaceMuts (modul: IRModule) : Map<IRId, int> =
         else Some (mid, dims |> List.fold (*) 1))
     |> Map.ofList
 
+// Whole-array reassignment as an OWNED MOVE (gap G92).
+//
+// `T = R` on an array binding compiled to a raw wrapper move (`T = R;`): T's
+// previous pool was dropped on the floor, and because the move made T and R
+// share storage, computeScopeEscapes pinned BOTH -- so neither was freed at
+// the scope's exit either. A `let mut` reassigned in a function leaked every
+// pool it ever held; the leading-axis fold desugar (`acc = nxt` per step)
+// leaked one slice per step. Copy-into-place (above) covers only module-level
+// muts that are never even READ by a map.
+//
+// The owned move frees T's previous pool, THEN takes R's: `deallocate(T);
+// T = R;`. R's storage now belongs to T, so R is spared from its own scope's
+// frees and T is freed at ITS scope's exit like any owned pool (whatever it
+// then holds). Sound exactly when T's previous pool has no other holder and R's
+// pool has no other name -- an ALLOWLIST, every condition positive, fail
+// closed (a refused candidate keeps the pointer move and both pins):
+//   * T is a let / module binding in ONE home (main's top level, or one
+//     function / lambda body) whose value OWNS a dense `allocate<>` pool: a
+//     computed map (`IRCompute` of a combinator), an array literal, or a call
+//     whose callee's fresh-return fact is FreshPool (site 3's trust); dense,
+//     plain, no symmetry, not virtual. Never a parameter, never an alias.
+//   * T occurs nowhere outside its home (no capture by any lifted callable,
+//     whose closure value may copy T's wrapper), and inside it only (1) as a
+//     whole-array assign target whose value is an admitted R, (2) the base of a
+//     FULL scalar read or an element store, an `extents` read, a fold / prodsum
+//     operand, (3) anywhere inside the value of a let that is itself a
+//     materialized fresh pool (`isMaterializedFreshArray`: T is read into a new
+//     pool, never aliased), except as an assign value or an argument of a call
+//     that may write, (4) an argument of a write-free call whose result is a
+//     scalar or a FreshPool dense array, (5) a function body's bare return
+//     value. Every other position -- an alias `let b = T`, a row view `T(0)`,
+//     a deferred map, a tuple, a branch value -- refuses.
+//   * every R is a let of the SAME home whose value owns a dense `allocate<>`
+//     pool of T's element type and rank, referenced EXACTLY ONCE in the module
+//     (by the assign), and bound under the same enclosing loops as the assign
+//     (so R is fresh every time the assign runs).
+//   * neither is a scratch-reuse donor / reuser (PoolReuseTable) or a
+//     provider / random / compound / sparse constructor site.
+// The emitter re-verifies at the site (both registrations are dense
+// `deallocate<..., nullptr>` pools) and otherwise falls back to the pointer
+// move with T pinned again -- the pre-G92 emission. `blade plan` rule
+// `owned-move v1`; BLADE_OWNED_MOVE=0 restores the pointer move everywhere.
+
+/// The G92 analysis: admitted owned moves, `R -> T` (see above).
+let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
+    // Every whole-array assign anywhere, by home (0 = main's top level, k > 0
+    // the k-th function body), with the loops enclosing it. A specialized
+    // clone shares its origin's let ids, so every fact is keyed by HOME.
+    let homes : (int * string * IRExpr list) list =
+        (0, "main", modul.Bindings |> List.map (_.Value))
+        :: (modul.Functions |> List.mapi (fun k f -> (k + 1, f.SourceName, [ f.Body ])))
+    let assigns = System.Collections.Generic.List<int * IRId * IRExpr * IRId list>()
+    let lets = System.Collections.Generic.Dictionary<int * IRId, IRExpr * IRId list>()
+    let refHomes = System.Collections.Generic.Dictionary<IRId, Set<int>>()
+    let refCount = System.Collections.Generic.Dictionary<int * IRId, int>()
+    let letBodies = System.Collections.Generic.Dictionary<int * IRId, IRExpr>()
+    let rec walk (home: int) (loops: IRId list) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) ->
+            refCount.[(home, id)] <- (match refCount.TryGetValue((home, id)) with | true, n -> n + 1 | _ -> 1)
+            refHomes.[id] <- (match refHomes.TryGetValue id with | true, s -> Set.add home s | _ -> Set.singleton home)
+        | IRForRange (vid, lo, hi, body) ->
+            walk home loops lo; walk home loops hi; walk home (vid :: loops) body
+        | IRLet (id, v, body) ->
+            if not (lets.ContainsKey((home, id))) then
+                lets.[(home, id)] <- (v, loops)
+                letBodies.[(home, id)] <- body
+            walk home loops v; walk home loops body
+        | _ ->
+            (match e with
+             | IRAssign (LVVar tid, v) ->
+                 (match inferExprType v with
+                  | ArrayElem _ -> assigns.Add((home, tid, v, loops))
+                  | _ -> ())
+             | _ -> ())
+            let (ExprShape (kids, _)) = e
+            for k in kids do walk home loops k
+    for (home, _, es) in homes do
+        for e in es do walk home [] e
+    if assigns.Count = 0 then Map.empty
+    else
+    let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let homeName (h: int) = homes |> List.pick (fun (k, n, _) -> if k = h then Some n else None)
+    let nameOf (id: IRId) = match Map.tryFind id bindingById with Some b -> b.Name | None -> $"__v{id}"
+    // The definition of `id` in `home`: a module binding (main) or a let.
+    let defIn (home: int) (id: IRId) : (IRExpr * IRId list) option =
+        match Map.tryFind id bindingById with
+        | Some b when home = 0 -> Some (b.Value, [])
+        | _ ->
+            match lets.TryGetValue((home, id)) with
+            | true, d -> Some d
+            | _ -> None
+    let denseOwnedType (t: IRType) =
+        match t with
+        | ArrayElem at ->
+            isFreeableDenseArrayType at && not at.IsVirtual
+            && classifyOutputStorage t = AllocDense
+            && not (hasRealSymmetry (buildSymmVec t))
+        | _ -> false
+    // A value that OWNS a dense allocate<> pool (the forms the emitter
+    // registers as `deallocate<..., nullptr>` storage).
+    // (Through a block value's let prefix: `let acc = { let s = G(0); s <@> id
+    // |> compute }` -- the leading-axis fold's private copy -- owns its tail's
+    // pool; the prefix lets are scoped inside the value.)
+    let rec ownsDensePool (v: IRExpr) =
+        match v with
+        | IRLet (_, _, body) -> ownsDensePool body
+        | IRCompute (IRApplyCombinator _) | IRCompute (IRComposeApply _) | IRArrayLit _ -> true
+        | IRApp (f, _, _) | IRCompute (IRApp (f, _, _)) -> freshReturnOf f = FreshPool
+        | _ -> false
+    let reuse = Blade.Types.PoolReuseTable.donors () |> Map.toList
+    let reuseIds = Set.ofList ((reuse |> List.map fst) @ (reuse |> List.map snd))
+    let constructorSite (id: IRId) =
+        Map.containsKey id modul.RandomInits || Map.containsKey id modul.CompoundInits
+        || Map.containsKey id modul.SparseInits || Map.containsKey id modul.ProviderReads
+    let homeExprs (h: int) = homes |> List.pick (fun (k, _, es) -> if k = h then Some es else None)
+    // Is `tid = rid` an UNCONDITIONAL statement of rid's own let chain (no
+    // branch between the let and the move)? A move under an `if` would spare
+    // R on the path that never moves it.
+    let movedDirectly (home: int) (rid: IRId) (tid: IRId) =
+        let isMove (e: IRExpr) =
+            match e with
+            | IRAssign (LVVar t, IRVar (r, _)) -> t = tid && r = rid
+            | _ -> false
+        let rec chain (e: IRExpr) =
+            match e with
+            | IRLet (_, v, b) -> isMove v || chain b
+            | e -> isMove e
+        match letBodies.TryGetValue((home, rid)) with
+        | true, body -> chain body
+        | _ -> false
+    let callWriteFree (f: IRExpr) =
+        match resolveCallable f with
+        | Some c -> not (callableMayWrite c)
+        | None -> false
+    // The allowlist over `tid`'s occurrences in its home: Some why at the
+    // first occurrence that could alias its pool.
+    let aliasingUse (tid: IRId) (admittedR: Set<IRId>) (h: int) : string option =
+        let mutable why : string option = None
+        let flag (s: string) = if why.IsNone then why <- Some s
+        let mentions (e: IRExpr) = Set.contains tid (collectVarRefsIR e)
+        let isT (e: IRExpr) = match e with IRVar (id, _) -> id = tid | _ -> false
+        // (3) inside a materialized fresh value: a bare read is transient, but
+        // an assign VALUE or a writing call's argument could carry it out.
+        let rec insideFresh (e: IRExpr) =
+            (match e with
+             | IRAssign (_, v) when mentions v -> flag "it is the value of an assignment inside a computed map"
+             | IRApp (f, args, _) when args |> List.exists mentions && not (callWriteFree f) ->
+                 flag "it is an argument of a call that may write, inside a computed map"
+             | _ -> ())
+            let (ExprShape (kids, _)) = e
+            for k in kids do insideFresh k
+        let rec go (e: IRExpr) =
+            let blessed (c: IRExpr) = if not (isT c) then go c
+            match e with
+            | IRVar (id, _) when id = tid ->
+                flag "it is read where its pool could be aliased (an alias, a row view, a deferred map, a tuple or a branch value)"
+            // (1) the admitted reassignments themselves
+            | IRAssign (LVVar t', IRVar (r, _)) when t' = tid && admittedR.Contains r -> ()
+            | IRAssign (LVVar t', _) when t' = tid -> flag "a whole-array assignment whose value is not an admitted fresh array"
+            // (2) in-place positions
+            | IRAssign (LVIndex (b, idxs), v) -> blessed b; List.iter go idxs; go v
+            | IRIndex (b, idxs, _) ->
+                (if (inferExprType e).IsIRTScalar then blessed b else go b)
+                List.iter go idxs
+            | IRExtent (b, _) -> blessed b
+            | IRReduce (a, k, i) -> blessed a; go k; Option.iter go i
+            | IRReduceCompute (c, k, i) -> blessed c; go k; go i
+            | IRProdSum args -> List.iter blessed args
+            // (3)
+            | IRLet (_, v, body) when isMaterializedFreshArray v -> insideFresh v; go body
+            // (4) a write-free call whose result cannot alias its arguments
+            | IRApp (f, args, ty) when args |> List.exists isT ->
+                let resultOk =
+                    match ty with
+                    | IRTScalar _ -> true
+                    | _ -> freshReturnOf f = FreshPool && denseOwnedType (inferExprType e)
+                if not (callWriteFree f) then flag "it is an argument of a call that may write"
+                elif not resultOk then flag "it is an argument of a call whose result may alias it"
+                else
+                    go f
+                    List.iter blessed args
+            | _ ->
+                let (ExprShape (kids, _)) = e
+                for k in kids do go k
+        // (5) a function body's bare return value; a module binding whose
+        // whole value is a materialized fresh pool reads T transiently.
+        // At main, the TAIL of a block value that binds the target itself
+        // (`let s = { let mut acc = ..; for .. { acc = nxt }; acc }`, the
+        // leading-axis fold) hands the final pool to the binding: the block's
+        // names are dead after it and main frees nothing. A bare module-level
+        // alias `let b = a` is NOT such a tail (it binds nothing).
+        let rec goTail (bound: bool) (e: IRExpr) =
+            match e with
+            | IRLet (id, v, body) ->
+                go (IRLet (id, v, IRLit IRLitUnit))
+                goTail (bound || id = tid) body
+            | IRVar (id, _) when id = tid && (h > 0 || bound) -> ()
+            | e -> go e
+        for e in homeExprs h do
+            if h = 0 && isMaterializedFreshArray e then insideFresh e else goTail false e
+        why
+    assigns
+    |> Seq.groupBy (fun (_, tid, _, _) -> tid)
+    |> Seq.choose (fun (tid, sites) ->
+        let sites = List.ofSeq sites
+        let subject = nameOf tid
+        let decline (why: string) =
+            recordCodegenDecision "owned-move" subject (Blade.Effects.Declined why)
+                [ "the reassignment keeps the pointer move: the previous pool is not freed and both pools stay pinned (gap G92)" ]
+            None
+        // Every home that names the target must define it (a clone repeats
+        // its origin's lets); the target is checked in each such home.
+        let defHomes =
+            match refHomes.TryGetValue tid with
+            | true, hs -> hs |> Set.toList |> List.map (fun h -> (h, defIn h tid))
+            | _ -> []
+        if not (ownedMoveEnabled ()) then decline "disabled by BLADE_OWNED_MOVE"
+        elif defHomes.IsEmpty || defHomes |> List.exists (fun (_, d) -> d.IsNone) then
+            decline "the target is not a let of the body that names it (a parameter, or a capture: a closure value may copy its wrapper)"
+        else
+        let homeSet = defHomes |> List.map fst |> Set.ofList
+        let perHome =
+            defHomes |> List.map (fun (home, d) ->
+                let (tv, _) = d.Value
+                let tTy = inferExprType tv
+                // An assignable `let mut a = Z` over a dense Z deep-copies Z
+                // into a pool of its own (site 6; a block-level let through
+                // MutableArrayLets, a module binding through IsMutable) -- the
+                // leading-axis fold's private state copy is one.
+                let deepCopied =
+                    match tv with
+                    | IRVar _ ->
+                        Set.contains tid modul.MutableArrayLets
+                        || (match Map.tryFind tid bindingById with Some b -> b.IsMutable | None -> false)
+                    | _ -> false
+                if not (denseOwnedType tTy) then Error "the target is not a plain dense array"
+                elif not (ownsDensePool tv || deepCopied) then Error $"the target's value ({tv.GetType().Name}) does not own a fresh dense pool (only a computed map, an array literal, a FreshPool call or an assignable copy does)"
+                elif constructorSite tid || reuseIds.Contains tid then Error "the target is a constructor or scratch-reuse site"
+                else
+                let rCheck (value: IRExpr, sloops: IRId list) : Result<IRId, string> =
+                    match value with
+                    | IRVar (rid, _) when rid <> tid && Map.containsKey rid bindingById ->
+                        // main's printer and the provider / constructor side
+                        // tables read a module binding after every statement
+                        // (fable review): only a block-local let may be moved
+                        Error $"the value `{nameOf rid}` is a module binding (the printer and side tables read it after the move)"
+                    | IRVar (rid, _) when rid <> tid ->
+                        match defIn home rid with
+                        | Some (rv, rloops) ->
+                            let rn = nameOf rid
+                            if not (ownsDensePool rv) then Error $"the value `{rn}` does not own a fresh dense pool"
+                            elif not (denseOwnedType (inferExprType rv)) then Error $"the value `{rn}` is not a plain dense array"
+                            elif (match inferExprType rv, tTy with
+                                  | ArrayElem ra, ArrayElem ta -> ra.ElemType <> ta.ElemType || arrayRank ra <> arrayRank ta
+                                  | _ -> true) then Error $"the value `{rn}` has another element type or rank"
+                            elif (match refCount.TryGetValue((home, rid)) with | true, n -> n <> 1 | _ -> true)
+                                 || (match refHomes.TryGetValue rid with | true, hs -> not (Set.isSubset hs homeSet) | _ -> true) then
+                                Error $"the value `{rn}` is named again besides the assignment"
+                            elif rloops <> sloops then Error $"the value `{rn}` is bound outside the loop that reassigns"
+                            elif not (movedDirectly home rid tid) then Error $"the move of `{rn}` is not an unconditional statement of its own let chain"
+                            elif constructorSite rid || reuseIds.Contains rid then Error $"the value `{rn}` is a constructor or scratch-reuse site"
+                            else Ok rid
+                        | None -> Error "the value is not a let of the target's own body"
+                    | _ -> Error "the value is not a named fresh array"
+                let checks =
+                    sites |> List.filter (fun (h, _, _, _) -> h = home)
+                          |> List.map (fun (_, _, v, loops) -> rCheck (v, loops))
+                match checks |> List.tryPick (fun r -> match r with Error e -> Some e | Ok _ -> None) with
+                | Some why -> Error why
+                | None ->
+                    let rs = checks |> List.choose (fun r -> match r with Ok r -> Some r | Error _ -> None) |> Set.ofList
+                    match aliasingUse tid rs home with
+                    | Some why -> Error why
+                    | None -> Ok (home, rs))
+        match perHome |> List.tryPick (fun r -> match r with Error e -> Some e | Ok _ -> None) with
+        | Some why -> decline why
+        | None ->
+            let oks = perHome |> List.choose (fun r -> match r with Ok x -> Some x | Error _ -> None)
+
+            let rs = oks |> List.collect (fun (_, rs) -> Set.toList rs) |> List.distinct
+            let wheres = oks |> List.map (fst >> homeName) |> List.distinct |> String.concat ", "
+            recordCodegenDecision "owned-move" subject Blade.Effects.Applied
+                [ $"C++ lane: {rs.Length} whole-array reassignment(s) in {wheres}: each frees the previous pool, then the target takes the fresh value's pool (the LLVM lane frees a rebound function-body pool itself and refuses an in-loop rebinding)"
+                  "sole owner: the target is read only in place (cells, extents, folds, computed maps, write-free calls) and never captured; each value is single-use and fresh every time the assignment runs"
+                  "the C++ emitter re-verifies that both pools are dense allocate<> storage at the site, else it keeps the pointer move (target pinned)" ]
+            Some (rs |> List.map (fun r -> (r, tid))))
+    |> Seq.collect id
+    |> Map.ofSeq
+
 /// Which scope a frame is being computed for. A function scope may have a return
 /// expression whose reachable ids must be pinned; a loop body never returns.
 type ScopeKind =
@@ -5233,6 +5540,12 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
             // becomes ordinary scope-owned storage and is freed at scope exit;
             // the target keeps the single pool it has always had.
             | IRAssign (target, value) when (copyInPlaceAssign target value).IsSome -> []
+            // Owned move (gap G92): the target frees its previous pool and
+            // takes R's, so R's pool now belongs to the target -- R is spared
+            // from this scope's frees, the target is NOT pinned (it is freed
+            // at its own scope's exit, whatever it then holds).
+            | IRAssign (target, value) when (ownedMoveAssign target value).IsSome ->
+                [ snd (ownedMoveAssign target value).Value ]
             | IRAssign (target, value) ->
                 let targetIds = match target with LVVar tid -> [tid] | _ -> []
                 let valueIds =
@@ -5691,9 +6004,26 @@ let allocScopeStackCell () : AllocScope list ref =
         fresh
     else v
 
+/// MAIN'S LEDGER (gap G92): main's top level registers nothing for freeing
+/// (module bindings live for the whole program), but an owned move at main must
+/// still know how its target's pool was allocated before freeing it. Every
+/// registration made with NO live frame is recorded here by name; it frees
+/// nothing and is read only by `renderOwnedMove`.
+let internal mainAllocLedgerStorage =
+    System.Threading.AsyncLocal<Map<string, TrackedAlloc> ref>()
+
+let mainAllocLedgerCell () : Map<string, TrackedAlloc> ref =
+    let v = mainAllocLedgerStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        mainAllocLedgerStorage.Value <- fresh
+        fresh
+    else v
+
 /// Fresh refs, never a mutation of the one found (see CodeGenState.freshCell).
 let resetAllocScopeStack () : unit =
     freshCell allocScopeStackStorage []
+    freshCell mainAllocLedgerStorage Map.empty
 
 /// This file's per-program cells; called at every program-assembly entry.
 let resetLoopNestCells () : unit =
@@ -5743,7 +6073,10 @@ let popAllocScope () : AllocScope option =
 /// alive for auto-print / EXPECT pins without a per-site guard.
 let registerAlloc (t: TrackedAlloc) : unit =
     match currentAllocScope () with
-    | None -> ()
+    | None ->
+        // main's ledger (G92): recorded, never freed
+        let led = mainAllocLedgerCell ()
+        led.Value <- Map.add (trackedAllocName t) t led.Value
     | Some frame ->
         let stamped =
             match t with
@@ -5761,7 +6094,14 @@ let registerPoolAlloc
         (spec: AllocSpec) (elemType: string) (rank: int) (symmArg: string)
         (extentsName: string) (arrayName: string) (ownedExtents: string option) : unit =
     match currentAllocScope () with
-    | None -> ()   // main top level: nothing is scope-freed
+    | None ->
+        // main top level: nothing is scope-freed. Main's ledger (gap G92)
+        // records the dense spec only -- its free arguments hoist nothing, so
+        // the emission is unchanged.
+        (match spec with
+         | AllocDense ->
+             registerAlloc (PoolAlloc (arrayName, "deallocate", $"typename promote<{elemType}, {rank}>::type, {symmArg}", ownedExtents, None))
+         | _ -> ())
     | Some _ ->
         match deallocArgsFor spec elemType rank symmArg extentsName with
         | Ok (routine, args) -> registerAlloc (PoolAlloc (arrayName, routine, args, ownedExtents, None))
@@ -5774,9 +6114,11 @@ let registerPoolAlloc
 /// derivation from an AllocSpec. Statement-position consumers call this;
 /// expression / IIFE consumers discard their descriptor list.
 let registerMaterializedAllocs (ms: MaterializedAlloc list) : unit =
-    match currentAllocScope () with
-    | None -> ()   // main top level: nothing is scope-freed
-    | Some _ ->
+    // main top level: nothing is scope-freed; registerAlloc records main's
+    // ledger (gap G92), and a spec'd pool's free arguments are resolved only
+    // under a live frame or for the dense spec (they may hoist a mask).
+    let atMain = (currentAllocScope ()).IsNone
+    do
         for m in ms do
             match m with
             | MatPool (n, elem, rank, symm, strict, ownedExtents) ->
@@ -5788,6 +6130,7 @@ let registerMaterializedAllocs (ms: MaterializedAlloc list) : unit =
                     | None ->
                         ("deallocate", $"typename promote<{elem}, {rank}>::type, {symm}")
                 registerAlloc (PoolAlloc (n, routine, args, ownedExtents, None))
+            | MatPoolSpec (_, spec, _, _, _, _, _) when atMain && (match spec with AllocDense -> false | _ -> true) -> ()
             | MatPoolSpec (n, spec, elem, rank, symm, extentsName, ownedExtents) ->
                 match deallocArgsFor spec elem rank symm extentsName with
                 | Ok (routine, args) -> registerAlloc (PoolAlloc (n, routine, args, ownedExtents, None))
@@ -5820,9 +6163,8 @@ let registerShapedAlloc (wrapperName: string) (routine: string) (args: string) :
 let registerArrayAlloc
         (arrayName: string) (elem: string) (rank: int)
         (symm: string) (strict: string option) (ownedExtents: string option) : unit =
-    match currentAllocScope () with
-    | None -> ()   // main top level: nothing is scope-freed
-    | Some _ ->
+    // main top level: nothing is scope-freed (main's ledger only, gap G92)
+    do
         let (routine, args) =
             match strict with
             | Some strictArg ->
@@ -6048,6 +6390,48 @@ let freeAllocNow (ind: string) (n: string) (fallback: string) : string list =
                     lines
                 | None -> []
 
+/// THE OWNED MOVE at its statement (gap G92; the analysis is
+/// `computeOwnedMoveAssigns`): `T = R` -> `deallocate(T); T = R` -- T's
+/// previous pool freed, then T takes R's (R is spared from its own frees by
+/// computeScopeEscapes). Re-verified here, fail closed: both names must be
+/// registered (a live frame, or main's ledger) as dense `deallocate<...,
+/// nullptr>` pools with the same template arguments, and T not already
+/// spared from its frame's frees; T's own extents table is left alone, and R's
+/// table must outlive T (a static shape, or a table R's registration owns).
+/// Otherwise the plain
+/// pointer move, with T SUPPRESSED in its frame -- the pre-G92 emission (T's
+/// previous pool leaks, nothing is freed early). No trailing `;`.
+let renderOwnedMove (tName: string) (rName: string) (staticShape: bool) : string =
+    let frames = (allocScopeStackCell ()).Value
+    let find (n: string) : (AllocScope option * TrackedAlloc) option =
+        match frames |> List.tryPick (fun f ->
+                  f.Allocs |> List.tryFind (fun a -> trackedAllocName a = n) |> Option.map (fun a -> (Some f, a))) with
+        | Some hit -> Some hit
+        | None -> Map.tryFind n (mainAllocLedgerCell ()).Value |> Option.map (fun a -> (None, a))
+    let densePool (a: TrackedAlloc) =
+        match a with
+        | PoolAlloc (_, "deallocate", args, ex, _) when args.EndsWith ", nullptr" -> Some (args, ex)
+        | _ -> None
+    let plain () =
+        (match find tName with
+         | Some (Some frame, _) -> frame.SuppressNames <- Set.add tName frame.SuppressNames
+         | _ -> ())
+        $"{tName} = {rName}"
+    match find tName, find rName with
+    | Some (tFrame, ta), Some (_, ra) ->
+        let spared = match tFrame with Some f -> Set.contains tName f.SuppressNames | None -> false
+        match densePool ta, densePool ra with
+        // EXTENTS TABLES (fable review): T's own table is never touched here
+        // (a pool registered after T may BORROW it, `u.extents = t.extents`;
+        // T's scope-exit free deletes it, as before). After the move T reads
+        // R's table, which must outlive T: a static-shaped target's tables
+        // are static; otherwise R must OWN its table (`new size_t[]`), which
+        // its spared registration never deletes -- a borrowed `<input>.extents`
+        // dies at its lender's free, before T's, and keeps the pointer move.
+        | Some (targs, _), Some (rargs, rEx) when targs = rargs && not spared && (staticShape || rEx.IsSome) ->
+            $"deallocate<{targs}>({tName}.data, {tName}.extents); {tName} = {rName}"
+        | _ -> plain ()
+    | _ -> plain ()
 /// IRReleasePools is a statement, shared by the module, function and loop
 /// renderers. Reuse is excluded for lifetime regions by the planner. Missing
 /// pool names are a compiler error, never a silently retained allocation.

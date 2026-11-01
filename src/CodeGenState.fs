@@ -1397,6 +1397,15 @@ let splitTimingOnlyBinding () : string option =
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
 
+/// BLADE_WORKSPACE_CENSUS (round 4 wave 3 A4, PM06): COMPILE-TIME
+/// instrumentation, read by the compiler only. `1`/`on` writes `#define
+/// BLADE_WS_CENSUS 1` ahead of the includes (blade_pool then counts every pool
+/// a thread allocates while a site is open) and brackets each threaded loop
+/// nest's team with `blade_rr::ws_site_begin` / `ws_site_end`, so the C++ run
+/// record (BLADE_RUN_RECORD) carries a `workspace` row per site. Unset/`0` =
+/// no census code at all (the default emission). Read per call.
+let workspaceCensusEnabled () : bool = Blade.Toolchain.envFlag "BLADE_WORKSPACE_CENSUS" false
+
 /// Memcheck emission gate (BLADE_MEMCHECK=1): the generated program includes
 /// blade_memcheck.hpp, whose static Report object brackets main() with
 /// ASan-hook allocation accounting and prints one BLADE-MEMCHECK line on

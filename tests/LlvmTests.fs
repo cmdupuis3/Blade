@@ -1007,6 +1007,48 @@ let runLlvmFactTests () : BlockResult =
     check "a keyed read ranks through a per-row prefix table" [] domainBandKeyedSource
         [ "@.blade.roff"; "index out of bounds: a key outside the sparse key set" ] []
 
+    printSubHeader "reduction join shared leaves (PM13)"
+    // A NAMED deferred producer the join spells twice -- folded as a leg's
+    // whole leaf AND read as an operand of another leg's apply, or read by
+    // two legs' applies -- is evaluated ONCE per iteration, as the C++
+    // lane's per-iteration `const` share. The lane used to evaluate it once
+    // per spelling (two `exp` per cell for the pairwise normalization, four
+    // `cos` and two `sin` for loops/141). Counted on the instructions.
+    let countIn (ll: string) (needle: string) =
+        (instructionsOnly ll).Split('\n') |> Array.filter (fun l -> l.Contains needle) |> Array.length
+    let shareCount name source (needle: string) (want: int) =
+        match emitUnder [] "facts" source with
+        | Error e -> fail name e
+        | Ok ll ->
+            let n = countIn ll needle
+            if n = want then pass name ($"{n} x {needle}")
+            else fail name ($"expected {want} x {needle}, found {n}")
+    let pairwiseSource = """
+type I = Idx<5>
+type J = Idx<7>
+let x = 0.25 * Float64(range<I>) - 2.0
+let xs = 0.17 * Float64(range<J>) - 3.0
+let ys = 0.5 * Float64(range<J>) + 1.0
+let h: Float64 = 0.6
+let smoothed = (method_for(range<I>) <@> lambda(i) -> {
+    let xi = x(i)
+    let w = method_for(xs) <@> lambda(b) -> exp(-(xi - b) * (xi - b) / (2.0 * h * h))
+    let z, u = object_for(<&!>) <@> (reduce(w, (+)), prodsum(w, ys))
+    u / z
+}) |> compute
+"""
+    shareCount "a per-row join evaluates its named producer once per cell" pairwiseSource "call double @exp(" 1
+    let slotShareSource = """
+type I = Idx<6>
+let ph: Array<Float64 like I> = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let s: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let ct = cos <@> ph
+let st = sin <@> ph
+let a, b, c, d = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, st), prodsum(ct, ct), prodsum(ct, st))
+"""
+    shareCount "operand-slot shares: one cos per iteration" slotShareSource "call double @cos(" 1
+    shareCount "operand-slot shares: one sin per iteration" slotShareSource "call double @sin(" 1
+
     printSubHeader "function and parameter attributes"
     check "a non-recursive module claims termination" [] licensedFoldSource
         [ "define i32 @main() #0"

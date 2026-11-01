@@ -512,6 +512,18 @@ namespace blade_rt {
   }
   // The write side of the same rule: a floating cell that is NaN or infinite
   // is not written, since every reader of the store would refuse it.
+  // The report itself, shared with provider-sink-stream v1's validation pass
+  // (which tallies recomputed cells block by block, then reports here).
+  inline void refuse_nonfinite_report(const missing_tally& t, const char* var, const char* path) {
+    if (t.count == 0) return;
+    std::ostringstream os;
+    os << "provider write of '" << var << "' to '" << path << "': " << t.count
+       << " cell(s) are NaN or infinite (first at flat cell " << t.first
+       << ") -- a read of the store would refuse them; mask or replace them before writing";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
+  }
   template <class T>
   inline void refuse_nonfinite_write(const T* buf, size_t n, const char* var, const char* path) {
     missing_tally t;

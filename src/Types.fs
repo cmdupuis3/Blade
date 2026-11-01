@@ -630,11 +630,16 @@ module TypeOrigins =
 /// serialized disk allowances, NOT a whole-program memory or physical disk cap.
 /// A caller deliberately binding this policy to an artifact authorizes its
 /// persistent scratch behavior. None at existing entry points stays resident.
+/// BlockCells 0 = the certified source's chunk edge (resolved after the
+/// certificate); ResidentBytes = the RETAIN allowance: a certified region
+/// whose resident intermediate (8 N bytes, the logical pool) fits it keeps
+/// the resident two-pass emission (0 = never retain: always spool).
 type PrivateSpoolPolicy = {
     Root: string
     TrackedWorkspaceBytes: uint64
     LogicalDiskBytes: uint64
     BlockCells: uint64
+    ResidentBytes: uint64
 }
 
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2):

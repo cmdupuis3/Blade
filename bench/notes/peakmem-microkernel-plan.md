@@ -601,6 +601,17 @@ change of logical dimensional currying.
 Gate: explain each saved full-array copy in the emission and pass model; test immediate
 versus repeated consumers so the planner sees where packing pays for itself.
 
+Round 4 wave 3 (lane B) status. PM25: the strict fold of a transpose (rank-2 accumulator
+nest) now keeps its exact chain and reads the base in place (no copy; 1201 x 803: peak
+20 -> 13 MB, bits identical); contraction / gram operands, function-body pointwise maps and
+named transposes reused 2/8 times are still copies (not built). PM27: CLOSED BY CENSUS --
+no legal spelling replicates a coefficient: `A * s` across ranks is refused (BL3027); the
+range map `method_for(range<R, C>) <@> lambda(i, j) -> A(i, j) * s(j) + t(i)` and the row
+map `method_for(range<R>) <@> lambda(i) -> A(i) * s` read `s` / `t(i)` in place (the row
+map pays a per-row temporary and copy, bounded by one row; the LLVM lane refuses that apply
+and falls back); the zip spelling over unequal ranks is a correctness gap (G99), not a
+replication.
+
 ### 5.8 PM38 cotangent accumulation
 
 Start with one existing scatter/gather adjoint path and an already allocated destination.

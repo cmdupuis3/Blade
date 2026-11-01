@@ -137,17 +137,27 @@ let private dispatchInner (args: string[]) : int =
                     try Some (System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f))
                     with _ -> None
                 Blade.ProviderRegistry.SourceBase.within dir body
+            // The private-spool GRANT (BLADE_PRIVATE_SPOOL, env-only, read
+            // per call): parsed HERE, by the verbs that emit, and threaded as
+            // explicit options -- no other caller of the C++ back end sees it.
+            // A value that does not parse is a hard failure, never a silent
+            // resident run. `check` emits nothing and ignores it.
+            let withGrant (body: Blade.CodeGenState.ProgramEmissionOptions -> int) : int =
+                match Blade.CodeGenPrivateSpool.knobPolicy () with
+                | Error why -> reportFailure $"BLADE_PRIVATE_SPOOL: {why} (expected root=<absolute local-drive dir>,mem=<size>,disk=<size>[,resident=<size>]; unset or off = no grant)"
+                | Ok policy -> body { Blade.CodeGenState.defaultProgramEmissionOptions with PrivateSpool = policy }
             match verb, o.File with
             | _, None -> usageFailure $"{verb} needs a source file (e.g. {verb} prog.blade)"
-            | "run", Some f -> inSourceDir f (fun () -> runFile f o.Verbose o.Mpi strictPins)
+            | "run", Some f -> withGrant (fun opts -> inSourceDir f (fun () -> runFile opts f o.Verbose o.Mpi strictPins))
             | "compile", Some f ->
+                withGrant (fun opts ->
                 inSourceDir f (fun () ->
-                    match compileToExe f o.Output o.Verbose strictPins with
+                    match compileToExeWith opts f o.Output o.Verbose strictPins with
                     | Ok path -> printfn "%s" path; 0
-                    | Error e -> reportFailure e)
-            | "emit", Some f -> inSourceDir f (fun () -> emitFile f o.Output o.Verbose strictPins)
+                    | Error e -> reportFailure e))
+            | "emit", Some f -> withGrant (fun opts -> inSourceDir f (fun () -> emitFile opts f o.Output o.Verbose strictPins))
             | "check", Some f -> inSourceDir f (fun () -> checkFile f strictPins)
-            | _, Some f -> inSourceDir f (fun () -> planFile f o.Json)
+            | _, Some f -> withGrant (fun opts -> inSourceDir f (fun () -> planFile opts f o.Json))
 
     // Native-toolchain health report (docs/plans/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false

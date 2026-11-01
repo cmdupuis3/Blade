@@ -18,7 +18,7 @@ let internal usageTestBlockKeys =
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
-      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"
+      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"; "rec-step"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
       "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
@@ -308,11 +308,15 @@ let private printEmitterWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceM
 
 /// The C++ back half: IRProgram -> translation unit, plus the two
 /// refusal channels codegen reports through.
-let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
+let private cppBackendOfIR (options: Blade.CodeGenState.ProgramEmissionOptions)
+                           (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
                            (verbose: bool) (timing: bool) (swAll: System.Diagnostics.Stopwatch)
                            (mark: string -> unit) : Result<string * string list, string> =
     let useColor = not Console.IsErrorRedirected
-    let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+    // `options` carries the BLADE_PRIVATE_SPOOL grant ONLY from the verb
+    // dispatch (Cli.fs: run / compile / emit / plan); the REPL, notebook, IDE
+    // render lane and every test helper pass the default (no grant).
+    let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIRWithOptions options ir testName
     mark "codegen"
     // A shape that reached codegen with no arm for it. Refuse HERE,
     // as a coded Blade diagnostic spanned at the declaration --
@@ -383,7 +387,7 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         let (timing, swAll, mark) = phaseTimers ()
         match frontEndToIR filePath strictPins mark with
         | Error e -> Error e
-        | Ok (ir, sm) -> cppBackendOfIR ir testName sm verbose timing swAll mark
+        | Ok (ir, sm) -> cppBackendOfIR Blade.CodeGenState.defaultProgramEmissionOptions ir testName sm verbose timing swAll mark
 
 /// What a back end produced for one program: a C++ translation unit (with its
 /// codegen warnings) or the LLVM lane's textual `.ll`.
@@ -400,7 +404,7 @@ type BackendArtifact =
 /// program to the C++ lane unchanged. The lane can therefore only be
 /// all-correct or absent, which is what lets it grow against a byte-pinned
 /// corpus without ever half-compiling anything.
-let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
+let compileArtifactWith (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
     if not (File.Exists filePath) then
         Error $"File not found: {filePath}"
     else
@@ -410,7 +414,7 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
         | Error e -> Error e
         | Ok (ir, sm) ->
             let toCpp () =
-                cppBackendOfIR ir testName sm verbose timing swAll mark
+                cppBackendOfIR options ir testName sm verbose timing swAll mark
                 |> Result.map CppArtifact
             let fallback (reason: string) =
                 eprintfn "[blade] llvm lane refused: %s; falling back to C++" reason
@@ -434,6 +438,10 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                         | ks ->
                             eprintfn "[blade] llvm lane: %s (%s)" (EmitLlvm.ompCensusPhrase ()) (String.concat ", " ks)
                         Ok (LlvmArtifact ll)
+
+/// The default-options spelling: no private-spool grant.
+let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
+    compileArtifactWith Blade.CodeGenState.defaultProgramEmissionOptions filePath verbose strictPins
 
 // ---------------------------------------------------------------------------
 // Where a compile happens.
@@ -533,12 +541,12 @@ let internal reportBackendRejection (firstError: string) (rawLog: string) (srcFi
 /// Returns the executable's path in `buildDir`, or the failure text (a
 /// BL9002 diagnostic when the back end rejected generated code, see
 /// backendRejection). Nothing outside `buildDir` is written or deleted.
-let private compileInto (filePath: string) (buildDir: string) (verbose: bool) (strictPins: bool) : Result<string, string> =
+let private compileInto (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (buildDir: string) (verbose: bool) (strictPins: bool) : Result<string, string> =
     // The generated source keeps the SOURCE's base name: it is spliced into
     // the emitted text (program name, timing lines), so a build directory
     // must not change what is emitted.
     let baseName = Path.GetFileNameWithoutExtension(filePath)
-    match compileArtifact filePath verbose strictPins with
+    match compileArtifactWith options filePath verbose strictPins with
     | Error e -> Error e
     | Ok (LlvmArtifact ll) ->
         // The LLVM lane's whole back half: write the .ll where the .cpp would
@@ -604,12 +612,12 @@ let private isBackendRejection (failure: string) = failure.Contains "BL9002"
 /// directory is removed afterwards unless `verbose` (kept for inspection, and
 /// named) or the back end rejected the generated code (BL9002 names files in
 /// it).
-let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+let compileToExeWith (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
     if not (File.Exists filePath) then Error $"File not found: {filePath}"
     else
     let buildDir = freshBuildDir filePath
     let result =
-        match compileInto filePath buildDir verbose strictPins with
+        match compileInto options filePath buildDir verbose strictPins with
         | Error e -> Error e
         | Ok exePath ->
             let dest =
@@ -639,6 +647,11 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         else removeBuildDir buildDir
     result
 
+/// The default-options spelling (no private-spool grant): the REPL, the
+/// notebook / IDE render lanes and the test helpers come through here.
+let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+    compileToExeWith Blade.CodeGenState.defaultProgramEmissionOptions filePath outputPath verbose strictPins
+
 /// One stderr line naming an OS-level crash of the compiled program
 /// (Build.describeCrashExit); the exit code itself is passed through unchanged.
 let private reportCrash (exitCode: int) : unit =
@@ -654,7 +667,7 @@ let private reportCrash (exitCode: int) : unit =
 /// (compileInto) and nothing is written beside the source; the program's
 /// working directory is the SOURCE's directory, so relative data paths
 /// resolve exactly as they did when the executable was written there.
-let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
+let runFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
     if not (File.Exists filePath) then reportFailure $"File not found: {filePath}"
     else
     let srcDir = Path.GetDirectoryName(Path.GetFullPath filePath)
@@ -662,7 +675,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
     let mutable keep = verbose
     try
         let runIt () =
-            match compileInto filePath buildDir verbose strictPins with
+            match compileInto options filePath buildDir verbose strictPins with
             | Error e ->
                 if isBackendRejection e then keep <- true
                 reportFailure e
@@ -1166,7 +1179,7 @@ let internal mergeLlvmTileRecords (ds: Blade.Effects.Decision list) (own: Blade.
         |> List.ofSeq
     merged @ adopted
 
-let planFile (filePath: string) (json: bool) : int =
+let planFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (json: bool) : int =
     if not (File.Exists filePath) then
         reportFailure $"File not found: {filePath}"
     else
@@ -1196,7 +1209,7 @@ let planFile (filePath: string) (json: bool) : int =
                 match Blade.IRValidate.validateIR program with
                 | Ok ir ->
                     (try
-                        CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
+                        CodeGen.genSelfContainedProgramFromIRWithOptions options ir (Path.GetFileNameWithoutExtension filePath) |> ignore
                         CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
                      with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
                     Some ir
@@ -1354,8 +1367,8 @@ let checkFile (filePath: string) (strictPins: bool) : int =
 
 /// Emit back-end source to file or stdout: C++ normally, textual LLVM IR when
 /// the BLADE_LLVM lane took the program.
-let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
-    match compileArtifact filePath verbose strictPins with
+let emitFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
+    match compileArtifactWith options filePath verbose strictPins with
     | Error e -> reportFailure e
     | Ok artifact ->
         let text = match artifact with CppArtifact (src, _) -> src | LlvmArtifact ll -> ll

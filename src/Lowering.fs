@@ -4163,6 +4163,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.InlineEventSpans.reset ()
     Optimize.AliasElideTable.reset ()
     Optimize.GroupViewTable.reset ()
+    Optimize.SinkStreamTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -4476,6 +4477,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.
         Optimize.recordAliasIdentity programFuncs (foreignRefs) irModule
+        // The streamed provider sink (Blade.Optimize.planProviderSinkStream,
+        // round 4 wave 3, D1 / gap G91): a top-level map whose only consumer
+        // is one Zarr write is produced and written in bounded blocks at the
+        // write, never stored. After every plan whose claims it reads, before
+        // the sibling maps (which read its claim). Verdicts only; the C++
+        // emitter records the applied decision. Gate: BLADE_SINK_STREAM.
+        Optimize.planProviderSinkStream programFuncs foreignRefs (irModules.Length < 2) irModule
         // Sibling maps (Blade.Optimize.planSiblingMaps, round 4 wave 2, PM04):
         // two to eight stored maps of one spine over one input index space share
         // ONE traversal, fused at the last sibling; side table, both emitters;

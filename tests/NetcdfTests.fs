@@ -1388,11 +1388,13 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
                                         ($"expected {expected.Length} values, got {parsed.Length}")
                                 else
-                                    // Float32 data printed at precision 15 round-trips exactly and
-                                    // x+x is exact in fp, so the tolerance only guards the parse.
+                                    // x+x is exact in fp, but a Float32 PRINTS with 6 significant
+                                    // digits (FLT_DIG, since the 2026-10-31 numeric defaults), so
+                                    // the printed value is the truth rounded to 6 significant
+                                    // digits: at most half a unit in the 6th digit, 5e-6 relative.
                                     let mutable firstBad = -1
                                     for i in 0 .. expected.Length - 1 do
-                                        if firstBad < 0 && abs (parsed.[i] - expected.[i]) > 1e-6 * max 1.0 (abs expected.[i]) then
+                                        if firstBad < 0 && abs (parsed.[i] - expected.[i]) > 5e-6 * abs expected.[i] then
                                             firstBad <- i
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)"
                                         (firstBad < 0)

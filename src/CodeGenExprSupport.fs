@@ -693,6 +693,63 @@ let copyInPlaceAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId * int) opt
         | None -> None
     | _ -> None
 
+// Owned-move whole-array reassignment (gap G92; analysis in CodeGenLoopNest,
+// `computeOwnedMoveAssigns`, where the freshness helpers live).
+
+/// BLADE_OWNED_MOVE: unset/`1`/`on` = a whole-array reassignment `T = R` of
+/// an OWNED array binding frees T's previous pool before T takes R's (the
+/// analysis below); `0`/`off` = the plain wrapper move, which drops T's
+/// previous pool on the floor (the pre-G92 emission, for A/B). Read per call.
+let ownedMoveEnabled () : bool = Blade.Toolchain.envFlag "BLADE_OWNED_MOVE" true
+
+let internal ownedMoveAssignsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRId> ref>()
+
+/// The admitted owned moves, `R -> T`: the assignment `T = R` (R a single-use
+/// fresh pool, T an owned dense pool no other name can hold) frees T's
+/// previous pool and hands T R's. Filled by `computeOwnedMoveAssigns`; read
+/// by computeScopeEscapes (R is spared from its scope's frees, T is not
+/// pinned) and by the two statement-position IRAssign emitters.
+let ownedMoveAssignsCell () : Map<IRId, IRId> ref =
+    let v = ownedMoveAssignsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        ownedMoveAssignsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The single decision point for an owned move: Some (T, R) when THIS
+/// assign is an admitted one. A copy-into-place assign never is (that
+/// transform keeps T's one pool and takes precedence).
+let ownedMoveAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId) option =
+    match target, value with
+    | LVVar tid, IRVar (rid, _) when (copyInPlaceAssign target value).IsNone ->
+        match Map.tryFind rid (ownedMoveAssignsCell ()).Value with
+        | Some t when t = tid -> Some (tid, rid)
+        | _ -> None
+    | _ -> None
+
+/// The statement text of an admitted owned move, `T = R` -> `deallocate(T);
+/// T = R` (no trailing `;`), given T's and R's emitted names. Installed per
+/// program by CodeGen (it reads the allocation frames, which live in
+/// CodeGenLoopNest, compiled after this file): `CodeGenLoopNest.renderOwnedMove`.
+let mutable ownedMoveRenderer : string -> string -> bool -> string = fun t r _ -> $"{t} = {r}"
+
+/// Is an owned-move target's type (as THIS emission sees it: a shape clone's
+/// own) of LITERAL extents only? Then every extents table of its pools is a
+/// `static constexpr` (or another static pool's), so the move needs no table
+/// ownership at all; a run-time-shaped target moves only a value whose
+/// registration OWNS its table (fable review: a borrowed `<input>.extents`
+/// would die at its lender's free).
+let ownedMoveStaticShape (target: IRExpr) : bool =
+    match inferExprType target with
+    | ArrayElem at ->
+        not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix ->
+            ix.Rank = 1 && List.isEmpty ix.Dependencies
+            && (match ix.Extent with IRLit (IRLitInt n) -> n > 0L | _ -> false))
+    | _ -> false
+
 // cppArrayTypeStr is defined ABOVE, inside the irTypeToCpp/elemTypeToCpp
 // recursion group, so that arrowSlotTypeForFuncSig (which renders
 // std::function<> slots and lives in that group) reaches the SAME wrapper

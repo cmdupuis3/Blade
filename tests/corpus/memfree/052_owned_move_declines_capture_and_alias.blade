@@ -1,0 +1,28 @@
+// TEST: Owned Move Declines A Captured Or Aliased Target (G92)
+// The owned move (gap G92) frees the target's previous pool only when no
+// other name can hold it. A target a KERNEL captures (`lambda(i) -> a(i)`:
+// a closure value may copy its wrapper) and a target bound to a second name
+// (`let b = a`) keep the pointer move -- the previous pool is not freed, and
+// nothing is freed early: the values are the program's. `blade test
+// memfree-g92` pins the two declines' reasons.
+type I = Idx<7>
+
+function captured(x: Array<Float64 like I>) -> Float64 = {
+    let mut a = x * 2.0 |> compute
+    let s0 = reduce(method_for(range<I>) <@> lambda(i) -> a(i), (+))
+    a = x + a |> compute
+    s0 + reduce(a, (+))
+}
+
+function aliased(x: Array<Float64 like I>) -> Float64 = {
+    let mut a = x * 2.0 |> compute
+    let b = a
+    a = x + a |> compute
+    reduce(b, (+)) + reduce(a, (+))
+}
+
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let c = captured(x)
+let d = aliased(x)
+// EXPECT: c = 140.0
+// EXPECT: d = 140.0
