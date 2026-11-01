@@ -1,6 +1,6 @@
 # Cloud benchmark campaign
 
-Status: DRAFT 2026-10-31. Nothing run, nothing built. D2 DECIDED 2026-10-31: Windows VMs for B1, B2 and B4 (B3 on Windows where the fp64 GPU class has a Windows image, else B3 alone on Linux). D1, D3, D4 open (section 5).
+Status: DRAFT 2026-10-31. Nothing run, nothing built. D2 DECIDED 2026-10-31: Windows VMs for B1, B2 and B4 (B3 on Windows where the fp64 GPU class has a Windows image, else B3 alone on Linux). D1, D3, D4 open (section 5). 2026-11-01: a 4-core B2 subset ran on a cloud VM through the new Linux harness port (`bench/RESULTS.md` §18); the 32+-core B2 and B1/B3 remain.
 
 A plan for spending cloud credits on Blade. The question was "CUDA optimization or a
 generic benchmark run?"; the answer here is a TARGETED benchmark campaign with one
@@ -73,6 +73,9 @@ in `Build.fs` (`UseNvcc`, `PLinux`) but CI runs no `test cuda` lane anywhere and
 lanes are Windows-only, so the Linux cuda path has NEVER been exercised end to end.
 
 ### 2.2 The harness is Windows-bound
+
+UPDATE 2026-11-01: `run.py` now also runs on Linux (`bench/harness/README.md` "Linux"), first used for a
+4-vCPU licensed-native thread session (`bench/RESULTS.md` §18). The compiler-version confound below still holds.
 
 `bench/harness/run.py` pins serial arms by `kernel32.SetProcessAffinityMask`, reads peak
 working set / peak commit / page faults from Win32 process counters, builds gfortran

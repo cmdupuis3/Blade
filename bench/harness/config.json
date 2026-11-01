@@ -25,7 +25,9 @@
     "_why": "relative checksum tolerance vs the pin; kernel.json `tolerance` may override per kernel"
   },
   "verdict_delta": 0.1,
-  "threads": [8],
+  "threads": [
+    8
+  ],
   "_threads_why": "the thread counts N of the mt<N> regimes (plan-cloud-bench-campaign.md 4.1): positive integers and/or \"all\" (the physical core count). [8] = the box's matrix. Every kernel.json declares its threaded regimes by family (mt-<fp>-<blas>; the legacy mt8-... spelling reads as the family), so --regimes all and bench expand each family over this list. The campaign sets [1, 2, 4, 8, 16, 32, \"all\"] on the instance.",
   "serial_affinity_cpu": 2,
   "_serial_affinity_why": "review M20: serial arms pinned to logical CPU 2 (first SMT thread of physical core 1). mt<N> arms are unbound (no OMP_PLACES/OMP_PROC_BIND, KMP_AFFINITY=disabled).",
@@ -136,6 +138,80 @@
     "ifx": [
       "/fpp",
       "/DBENCH_INPUTONLY"
+    ]
+  },
+  "_fortran_flags_linux_why": "Linux (plan-cloud-bench-campaign.md 2.2): the same sets in Linux spellings. ifx: /X -> -X (/fp:precise -> -fp-model=precise, /Qopenmp -> -qopenmp). gfortran: -fno-external-blas64 dropped where the distro gfortran predates it (gcc < 15); no external BLAS is linked in native regimes either way.",
+  "fortran_flags_linux": {
+    "gfortran": {
+      "licensed": [
+        "-O3",
+        "-march=native",
+        "-ffp-contract=fast",
+        "-fno-external-blas",
+        "-cpp",
+        "-DBENCH_LICENSED"
+      ],
+      "repro": [
+        "-O3",
+        "-march=native",
+        "-ffp-contract=fast",
+        "-fno-external-blas",
+        "-cpp"
+      ],
+      "fastmath": [
+        "-O3",
+        "-march=native",
+        "-ffast-math",
+        "-fno-external-blas",
+        "-cpp"
+      ],
+      "serial_extra": [
+        "-fopenmp-simd"
+      ],
+      "mt_extra": [
+        "-fopenmp"
+      ]
+    },
+    "ifx": {
+      "licensed": [
+        "-O3",
+        "-xHost",
+        "-fp-model=precise",
+        "-mllvm",
+        "-fp-contract=fast",
+        "-fpp",
+        "-DBENCH_LICENSED"
+      ],
+      "repro": [
+        "-O3",
+        "-xHost",
+        "-fp-model=precise",
+        "-mllvm",
+        "-fp-contract=fast",
+        "-fpp"
+      ],
+      "fastmath": [
+        "-O3",
+        "-xHost",
+        "-fp-model=fast",
+        "-fpp"
+      ],
+      "serial_extra": [
+        "-qopenmp-simd"
+      ],
+      "mt_extra": [
+        "-qopenmp"
+      ]
+    }
+  },
+  "fortran_twin_flags_linux": {
+    "gfortran": [
+      "-cpp",
+      "-DBENCH_INPUTONLY"
+    ],
+    "ifx": [
+      "-fpp",
+      "-DBENCH_INPUTONLY"
     ]
   }
 }
