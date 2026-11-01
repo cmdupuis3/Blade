@@ -7,6 +7,8 @@
 > Every measured number they carried is a row of `bench/results/stats.csv` (`label` = the A/B mirror named in the text;
 > `python bench/harness/stats.py sql "..."` queries it). Nothing below was rewritten; read a cited path as a historical one.
 
+**Linux multithread snapshot (2026-11-01):** 13 kernels, blade-cpp / gfortran-expert / ifx-expert at 1-4 threads on a 4-vCPU cloud VM -- see **§18** (not a harness session; label `cloud-xeon4`).
+
 **Round 2 (2026-10-20):** two more waves of microkernels plus an effect-analysis hardening track -- see **§15** (what landed, the wave-1 A/B, the wave-2 A/B, the gap rows it opened). Integration branch `worktree-bench-fortran`, final tip f1910060.
 
 **Status (2026-10-19):** sessions **1a** (serial x licensed x native: gram, comoment3,
@@ -2978,6 +2980,128 @@ bench kernels is byte-identical to the base in both lanes by each item's sweep.
 
 Gates on the integration tip b457c029 (Blade.dll A130F8DC...E83D): default **8387 / 0 / 2 skipped**, opt-diff 2423 / 0 / 989 skipped, docs 133 / 0 / 79,
 llvm 998 / 0 / 747 skipped, interp 3311 / 0 / 4 skip-unsupported; examples 68 files, the same six pre-existing failures as the wave-3 gates (four zarr stores unresolvable at compile time, check_cod_shells BL4003, station_temps BL3999).
+
+## 18. Linux multithread snapshot (2026-11-01) -- 4-vCPU cloud VM, three toolchains, NOT a harness session
+
+Record: `bench/notes/linux-mt-snapshot-2026-11-01/` (drivers, raw `results.json`, `blade plan` per kernel);
+cells: `stats.csv` label `cloud-xeon4` (260 rows, bundles `2026-11-01-vm/snapshot-run1` and `-run2`, all
+`indicative`, ratio / CI / verdict empty). A quick snapshot of thread scaling asked for in place of the campaign's
+B2 (plan-cloud-bench-campaign.md), on the only machine the session had: a Claude Code cloud sandbox, Intel Xeon
+family 6 model 207 (Emerald Rapids per Intel's model table; AVX-512, AMX) at 2.1 GHz, 4 vCPU, no SMT, Ubuntu 24.04.
+Commit 5ed8af20, Blade.dll d041d86bd92e94d3 (Linux build). Toolchains differ from the box: g++ 13.3 and gfortran 13.3
+(box: gcc 16.2), ifx 2026.2.0 from conda-forge (box: 2026.1). No source changed; the Win32 timer of
+`bench_support.f90` is satisfied by a C shim over `CLOCK_MONOTONIC`.
+
+Protocol: licensed x native, full sizes, the 13 kernels with a thread form whose serial Blade time is under ~60 ms
+on the box (tensorop, pairaction, groupagg, groupagg_dyn, hashjoin, maskagg left out). Per toolchain two builds:
+`serial` = the harness's serial build (Blade `BLADE_OMP_THREADS=1`; Fortran `licensed` + `serial_extra`), pinned
+to one CPU; `mt<N>` = the threaded build (`mt_extra`) at `OMP_NUM_THREADS=N`, N = 1..4, unbound. Expert Fortran arms
+only (no natural, no LLVM lane, no repro / fastmath / blas). 9 rounds, the arm order rotated each round, one
+discarded warm-up per arm. Checksums agree across all 15 arms of every kernel to <= 1.5e-14 relative,
+input_checksum to <= 3.3e-15.
+
+NOISE: a shared VM, no drift controls. The same Blade binaries ran in both runs, and run2's medians are 0-25%
+higher than run1's, nearly all in one direction (last table), so treat ratios within 0.85-1.15 as parity. Within
+run2 the three toolchains share the machine state. Every arm also has single outliers up to ~1.5-3x its median
+(medians are unaffected). band (1-4 ms) is dominated by team entry and noise in every toolchain.
+
+Medians in ms, run2 (all three toolchains interleaved; 9 rounds per cell).
+
+| kernel | arm | serial | mt1 | mt2 | mt3 | mt4 | mt4 / serial speedup |
+|---|---|---|---|---|---|---|---|
+| antisym | blade-cpp | 54.77 | 52.64 | 27.17 | 21.29 | 15.52 | 3.53x |
+|  | gfortran-expert | 55.90 | 60.66 | 33.72 | 23.86 | 18.53 | 3.02x |
+|  | ifx-expert | 55.33 | 56.23 | 31.80 | 24.23 | 18.10 | 3.06x |
+| band | blade-cpp | 2.94 | 4.08 | 3.91 | 3.15 | 2.80 | 1.05x |
+|  | gfortran-expert | 0.92 | 1.94 | 1.78 | 1.63 | 1.95 | 0.47x |
+|  | ifx-expert | 1.53 | 2.57 | 2.08 | 1.95 | 1.71 | 0.90x |
+| comoment3 | blade-cpp | 15.45 | 15.39 | 8.78 | 7.09 | 5.49 | 2.82x |
+|  | gfortran-expert | 15.61 | 28.72 | 16.42 | 11.96 | 9.96 | 1.57x |
+|  | ifx-expert | 16.09 | 17.83 | 10.58 | 7.61 | 6.28 | 2.56x |
+| dot | blade-cpp | 51.44 | 46.88 | 27.77 | 20.46 | 16.21 | 3.17x |
+|  | gfortran-expert | 35.36 | 34.16 | 22.92 | 16.93 | 14.39 | 2.46x |
+|  | ifx-expert | 37.33 | 43.89 | 26.92 | 20.00 | 17.08 | 2.19x |
+| fusedchain | blade-cpp | 11.87 | 17.14 | 10.79 | 7.78 | 6.31 | 1.88x |
+|  | gfortran-expert | 12.76 | 13.68 | 8.51 | 7.40 | 6.81 | 1.87x |
+|  | ifx-expert | 13.67 | 15.73 | 9.00 | 8.02 | 6.93 | 1.97x |
+| gram | blade-cpp | 91.22 | 96.40 | 53.71 | 35.42 | 28.62 | 3.19x |
+|  | gfortran-expert | 125.40 | 151.01 | 72.81 | 51.02 | 39.59 | 3.17x |
+|  | ifx-expert | 113.53 | 115.80 | 67.64 | 46.58 | 33.53 | 3.39x |
+| haloadjoint | blade-cpp | 90.47 | 90.08 | 73.88 | 69.89 | 69.87 | 1.29x |
+|  | gfortran-expert | 21.02 | 22.44 | 12.37 | 10.79 | 10.32 | 2.04x |
+|  | ifx-expert | 29.35 | 30.93 | 19.06 | 15.03 | 11.88 | 2.47x |
+| onepass | blade-cpp | 28.41 | 40.50 | 23.89 | 17.07 | 13.45 | 2.11x |
+|  | gfortran-expert | 32.42 | 38.19 | 21.15 | 16.10 | 13.63 | 2.38x |
+|  | ifx-expert | 32.54 | 36.90 | 21.83 | 17.69 | 14.79 | 2.20x |
+| pairkernel | blade-cpp | 44.17 | 45.43 | 26.02 | 17.47 | 15.74 | 2.81x |
+|  | gfortran-expert | 19.69 | 20.26 | 11.97 | 9.04 | 7.29 | 2.70x |
+|  | ifx-expert | 32.03 | 31.63 | 17.57 | 12.29 | 10.04 | 3.19x |
+| recur | blade-cpp | 26.44 | 27.55 | 17.39 | 16.03 | 12.06 | 2.19x |
+|  | gfortran-expert | 25.61 | 27.34 | 15.47 | 12.01 | 9.87 | 2.60x |
+|  | ifx-expert | 26.52 | 26.03 | 15.16 | 11.33 | 9.19 | 2.89x |
+| saxpy | blade-cpp | 40.54 | 38.68 | 22.99 | 17.99 | 16.68 | 2.43x |
+|  | gfortran-expert | 28.99 | 28.98 | 20.97 | 14.45 | 12.54 | 2.31x |
+|  | ifx-expert | 34.54 | 38.22 | 23.19 | 17.59 | 14.01 | 2.47x |
+| stencil | blade-cpp | 30.98 | 36.44 | 23.50 | 16.91 | 14.29 | 2.17x |
+|  | gfortran-expert | 29.42 | 33.87 | 17.47 | 14.22 | 11.49 | 2.56x |
+|  | ifx-expert | 28.63 | 33.11 | 16.33 | 13.27 | 10.69 | 2.68x |
+| twofir | blade-cpp | 32.27 | 36.88 | 22.41 | 16.50 | 14.05 | 2.30x |
+|  | gfortran-expert | 27.39 | 27.92 | 15.74 | 12.06 | 10.35 | 2.65x |
+|  | ifx-expert | 33.19 | 34.11 | 21.02 | 14.79 | 12.57 | 2.64x |
+
+Fortran median / blade-cpp median at the same thread setting, run2 (> 1 = Blade faster; read 0.85-1.15 as parity, see the noise note).
+
+| kernel | gfortran serial | gfortran mt4 | ifx serial | ifx mt4 |
+|---|---|---|---|---|
+| antisym | 1.02 | 1.19 | 1.01 | 1.17 |
+| band | 0.31 | 0.70 | 0.52 | 0.61 |
+| comoment3 | 1.01 | 1.81 | 1.04 | 1.14 |
+| dot | 0.69 | 0.89 | 0.73 | 1.05 |
+| fusedchain | 1.08 | 1.08 | 1.15 | 1.10 |
+| gram | 1.37 | 1.38 | 1.24 | 1.17 |
+| haloadjoint | 0.23 | 0.15 | 0.32 | 0.17 |
+| onepass | 1.14 | 1.01 | 1.15 | 1.10 |
+| pairkernel | 0.45 | 0.46 | 0.73 | 0.64 |
+| recur | 0.97 | 0.82 | 1.00 | 0.76 |
+| saxpy | 0.72 | 0.75 | 0.85 | 0.84 |
+| stencil | 0.95 | 0.80 | 0.92 | 0.75 |
+| twofir | 0.85 | 0.74 | 1.03 | 0.89 |
+
+Run-to-run drift of the SAME Blade binaries, run1 vs run2 (median ms):
+
+| kernel | serial run1 / run2 | mt4 run1 / run2 |
+|---|---|---|
+| antisym | 46.59 / 54.77 | 13.31 / 15.52 |
+| band | 2.80 / 2.94 | 1.45 / 2.80 |
+| comoment3 | 14.22 / 15.45 | 4.37 / 5.49 |
+| dot | 41.11 / 51.44 | 14.62 / 16.21 |
+| fusedchain | 11.58 / 11.87 | 5.07 / 6.31 |
+| gram | 91.87 / 91.22 | 26.24 / 28.62 |
+| haloadjoint | 85.01 / 90.47 | 65.35 / 69.87 |
+| onepass | 30.71 / 28.41 | 12.90 / 13.45 |
+| pairkernel | 44.23 / 44.17 | 13.10 / 15.74 |
+| recur | 26.09 / 26.44 | 12.16 / 12.06 |
+| saxpy | 35.93 / 40.54 | 14.20 / 16.68 |
+| stencil | 31.08 / 30.98 | 13.60 / 14.29 |
+| twofir | 30.98 / 32.27 | 12.00 / 14.05 |
+
+Readout (no compiler change followed from it):
+
+- Blade is fastest at mt4 on antisym, comoment3, fusedchain, gram, onepass, and at parity with ifx on dot. The
+  tile / orbit-fold forms (antisym, gram, comoment3, pairkernel) scale 2.8-3.5x at 4 threads; the Fortran experts
+  2.6-3.4x, except gfortran comoment3 (1.57x, from its slow one-thread threaded build).
+- haloadjoint: blade-cpp is 4.3x behind gfortran serially (90 vs 21 ms) and scales 1.29x against Fortran's
+  2.0-2.5x; the threaded forms apply to its folds (plan), so most of the time is outside them. The box's rows
+  also had Blade behind here (~2.4x serial), less so.
+- pairkernel: gfortran-expert is 2.2x faster than blade-cpp at every thread count (ifx 1.4-1.6x). On the box's rows
+  Blade was at parity or ahead. Confounded by the gfortran version (13.3 vs 16.2) and the CPU; not diagnosed.
+- recur, stencil: parity serially, Fortran scales further (2.6-2.9x vs Blade's 2.2x at mt4).
+- dot, saxpy, twofir: gfortran takes 15-31% less time serially; under threads the gap narrows on dot (and vs ifx on twofir).
+- A threaded build at one thread is slower than the serial build in every toolchain on some kernels: blade
+  fusedchain 1.44, onepass 1.43, stencil 1.18 (run2); gfortran comoment3 1.84, gram 1.20. For saxpy the plan
+  records one cause in Blade: epilogue-legs declines under the producer's thread team.
+- Not answerable here (4 cores): the provisional gates `pull_min` / `rowslots_min` and the G32 pairkernel mt8
+  question.
 
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 

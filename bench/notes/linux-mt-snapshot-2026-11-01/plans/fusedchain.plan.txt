@@ -1,0 +1,10 @@
+plan: /home/user/Blade/bench/kernels/fusedchain/fusedchain.blade -- 7 optimization decision(s)
+build: pool retention: default (4 MB / 8 MB per thread)
+  [sibling-folds v1] _(checksum,input_checksum): applied [2 folds over {a} share one traversal (Ix: 2000003 cells); kernel(a) inlined (pure-total, scalar return); unseeded (+) legs seeded -0.0: bit-exact for every reachable value; signalling-NaN state is not preserved and is outside the arithmetic contract (formalism 2.4); the per-leg identity seed is exact, so the joined result equals the separate folds' under serial (repro) evaluation -- a licensed build may reassociate and lose the sign of an exact zero; leg 1: unseeded (+) -> seed -0.0 (identity; bit-exact); per-leg licences kept: licensed, licensed]
+  [same-cell-return-cpp v1] inputs @ 23:1: declined -- donor is not one direct fresh computed local map [function v13; the shared same-cell certificate (Blade.SameCellReturn, A04's admission), no generic return donor]
+  [omp v1] __ret1073741824 @ 23:1: applied [BLADE_OMP_PARALLEL_FOR; loop nest level 0 (__i0)]
+  [fold-form v1] __v42 @ 34:1: applied [fold form: threaded(Path B chunks, simd-reduction within each chunk); reduce over a deferred computation]
+  [omp v1] __v42 @ 34:1: applied [omp parallel num_threads(T) + fixed-order combine; comm-licensed parallel fold: outer level chunked per thread (Path B), omp simd reduction(+) within each chunk]
+  [fold-form v1] __v59: applied [fold form: threaded(Path B joined chunks, 2 builtin + legs, simd-reduction within each chunk); reduction join of 2 legs (one traversal, one team)]
+  [omp v1] __v59: applied [omp parallel num_threads(T) + fixed-order combine; threaded reduction join (Path B joined chunks, G7): one team over the shared traversal, one omp simd reduction(+) over the 2 private accumulators within each chunk; each leg's partials combined in ascending chunk order onto its own seed; requested by leg 0's fold kernel (`where omp`)]
+inputs: 0 (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)

@@ -167,7 +167,8 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("-fopenmp-simd", mt32)
         self.assertIn("-fopenmp-simd", serial)
         self.assertNotIn("-fopenmp", serial)
-        self.assertIn("/Qopenmp", harness.fortran_flags("ifx", harness.Regime.parse("mt2-repro-native"), cfg, twin=False))
+        self.assertIn("/Qopenmp" if harness.ON_WINDOWS else "-qopenmp",
+                      harness.fortran_flags("ifx", harness.Regime.parse("mt2-repro-native"), cfg, twin=False))
 
     def test_fingerprint_run_env_records_thread_counts(self):
         cfg = harness.load_config()

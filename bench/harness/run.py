@@ -36,8 +36,10 @@ import subprocess
 import sys
 import time
 import traceback
-import winreg
-from ctypes import wintypes
+ON_WINDOWS = sys.platform == "win32"
+if ON_WINDOWS:
+    import winreg
+    from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -60,17 +62,35 @@ BUILD_ROOT = BENCH_DIR / ".build"
 CONFIG_FILE = HARNESS_DIR / "config.json"
 SMOKE_EVIDENCE = BUILD_ROOT / "smoke-evidence.json"
 
-BLADE_EXE = REPO_DIR / "bin" / "Release" / "net10.0" / "Blade.exe"
-UCRT_BIN = Path(r"C:\msys64\ucrt64\bin")
-GFORTRAN = UCRT_BIN / "gfortran.exe"
-OBJDUMP = UCRT_BIN / "objdump.exe"
-CLANG = Path(r"C:\msys64\clang64\bin\clang.exe")
-IFX_WRAPPER = FORTRAN_DIR / "build_ifx.cmd"
-GFORTRAN_WRAPPER = FORTRAN_DIR / "build_gfortran.ps1"
 BENCH_SUPPORT = FORTRAN_DIR / "bench_support.f90"
-INTEL_BIN = Path(r"C:\Program Files (x86)\Intel\oneAPI\compiler\latest\bin")
-BLADE_TEMP_ROOT = Path(os.environ.get("TEMP", r"C:\Windows\Temp")) / "blade-build"
-SYSTEM32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+EXE_SUFFIX = ".exe" if ON_WINDOWS else ""
+if ON_WINDOWS:
+    BLADE_EXE = REPO_DIR / "bin" / "Release" / "net10.0" / "Blade.exe"
+    UCRT_BIN = Path(r"C:\msys64\ucrt64\bin")
+    GFORTRAN = UCRT_BIN / "gfortran.exe"
+    GPP = UCRT_BIN / "g++.exe"
+    OBJDUMP = UCRT_BIN / "objdump.exe"
+    CLANG = Path(r"C:\msys64\clang64\bin\clang.exe")
+    IFX_WRAPPER = FORTRAN_DIR / "build_ifx.cmd"
+    GFORTRAN_WRAPPER = FORTRAN_DIR / "build_gfortran.ps1"
+    INTEL_BIN = Path(r"C:\Program Files (x86)\Intel\oneAPI\compiler\latest\bin")
+    BLADE_TEMP_ROOT = Path(os.environ.get("TEMP", r"C:\Windows\Temp")) / "blade-build"
+    SYSTEM32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+else:
+    # Linux (plan-cloud-bench-campaign.md 2.2): tools from PATH; ifx from BENCH_INTEL_BIN.
+    def _which(name: str) -> Path:
+        return Path(shutil.which(name) or f"/usr/bin/{name}")
+    BLADE_EXE = REPO_DIR / "bin" / "Release" / "net10.0" / "Blade"
+    UCRT_BIN = None
+    GFORTRAN = _which("gfortran")
+    GPP = _which("g++")
+    OBJDUMP = _which("objdump")
+    CLANG = _which("clang")
+    IFX_WRAPPER = FORTRAN_DIR / "build_ifx.sh"
+    GFORTRAN_WRAPPER = FORTRAN_DIR / "build_gfortran.sh"
+    INTEL_BIN = Path(os.environ.get("BENCH_INTEL_BIN", "/opt/intel/oneapi/compiler/latest/bin"))
+    BLADE_TEMP_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / "blade-build"
+    SYSTEM32 = None
 
 BASE_ARMS = ["blade-llvm", "blade-cpp", "gfortran-natural", "gfortran-expert", "ifx-natural", "ifx-expert"]
 TWIN_ARMS = [a + "-inputonly" for a in BASE_ARMS]
@@ -155,63 +175,99 @@ class SessionAbort(Exception):
 # Win32 helpers: affinity, peak working set, power
 # ---------------------------------------------------------------------------
 
-_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_psapi = ctypes.WinDLL("psapi", use_last_error=True)
-_k32.GetCurrentProcess.restype = wintypes.HANDLE
-_k32.GetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
-_k32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+if ON_WINDOWS:
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    _k32.GetCurrentProcess.restype = wintypes.HANDLE
+    _k32.GetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    _k32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
 
 
-class _PMC(ctypes.Structure):
-    _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+    class _PMC(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
 
 
-_psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+    _psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
 
 
-def _affinity() -> tuple[int, int]:
-    proc, sysm = ctypes.c_size_t(), ctypes.c_size_t()
-    _k32.GetProcessAffinityMask(_k32.GetCurrentProcess(), ctypes.byref(proc), ctypes.byref(sysm))
-    return proc.value, sysm.value
+    def _affinity() -> tuple[int, int]:
+        proc, sysm = ctypes.c_size_t(), ctypes.c_size_t()
+        _k32.GetProcessAffinityMask(_k32.GetCurrentProcess(), ctypes.byref(proc), ctypes.byref(sysm))
+        return proc.value, sysm.value
 
 
-def _set_affinity(mask: int) -> bool:
-    return bool(_k32.SetProcessAffinityMask(_k32.GetCurrentProcess(), mask))
+    def _set_affinity(mask: int) -> bool:
+        return bool(_k32.SetProcessAffinityMask(_k32.GetCurrentProcess(), mask))
 
 
-def _memory_info(handle: int) -> dict[str, int] | None:
-    m = _PMC()
-    m.cb = ctypes.sizeof(_PMC)
-    if _psapi.GetProcessMemoryInfo(wintypes.HANDLE(handle), ctypes.byref(m), m.cb):
-        return {"peak_working_set": m.PeakWorkingSetSize, "page_faults": m.PageFaultCount,
-                "peak_pagefile": m.PeakPagefileUsage}
-    return None
+    def _memory_info(handle: int) -> dict[str, int] | None:
+        m = _PMC()
+        m.cb = ctypes.sizeof(_PMC)
+        if _psapi.GetProcessMemoryInfo(wintypes.HANDLE(handle), ctypes.byref(m), m.cb):
+            return {"peak_working_set": m.PeakWorkingSetSize, "page_faults": m.PageFaultCount,
+                    "peak_pagefile": m.PeakPagefileUsage}
+        return None
 
 
-class _SystemPowerStatus(ctypes.Structure):
-    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
-                ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
-                ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+    class _SystemPowerStatus(ctypes.Structure):
+        _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                    ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                    ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
 
 
-class _MemoryStatusEx(ctypes.Structure):
-    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
 
 
-def ac_line() -> str:
-    """'ac', 'battery' or 'unknown' (GetSystemPowerStatus)."""
-    st = _SystemPowerStatus()
-    if not _k32.GetSystemPowerStatus(ctypes.byref(st)):
+    def ac_line() -> str:
+        """'ac', 'battery' or 'unknown' (GetSystemPowerStatus)."""
+        st = _SystemPowerStatus()
+        if not _k32.GetSystemPowerStatus(ctypes.byref(st)):
+            return "unknown"
+        return {0: "battery", 1: "ac"}.get(st.ACLineStatus, "unknown")
+
+
+else:
+    def _affinity() -> tuple[int, int]:
+        to_mask = lambda cpus: sum(1 << c for c in cpus)
+        return to_mask(os.sched_getaffinity(0)), to_mask(range(os.cpu_count() or 1))
+
+    def _set_affinity(mask: int) -> bool:
+        try:
+            os.sched_setaffinity(0, {i for i in range(mask.bit_length()) if mask >> i & 1})
+            return True
+        except OSError:
+            return False
+
+    def ac_line() -> str:
+        """'ac', 'battery' or 'unknown' (/sys/class/power_supply; a VM has none -> unknown)."""
+        for d in Path("/sys/class/power_supply").glob("*"):
+            try:
+                if (d / "type").read_text().strip() == "Mains":
+                    return "ac" if (d / "online").read_text().strip() == "1" else "battery"
+            except OSError:
+                pass
         return "unknown"
-    return {0: "battery", 1: "ac"}.get(st.ACLineStatus, "unknown")
+
+    _RUSAGE_EXEC: Path | None = None
+
+    def _rusage_exec() -> Path:
+        """Build bench/harness/rusage_exec.c once per harness process (into the build root)."""
+        global _RUSAGE_EXEC
+        if _RUSAGE_EXEC is None:
+            exe = BUILD_ROOT / "_tools" / "rusage_exec"
+            exe.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["gcc", "-O2", "-o", str(exe), str(HARNESS_DIR / "rusage_exec.c")], check=True)
+            _RUSAGE_EXEC = exe
+        return _RUSAGE_EXEC
 
 
 # ---------------------------------------------------------------------------
@@ -249,23 +305,32 @@ def make_env(knobs: dict[str, str], *, intel: bool = False, blas: bool = False) 
     """
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith(STRIPPED_ENV_PREFIXES) and k.upper() not in STRIPPED_ENV_NAMES}
-    prepend = [str(UCRT_BIN)]
+    prepend = [str(UCRT_BIN)] if ON_WINDOWS else []
     if intel:
         prepend.append(str(INTEL_BIN))
+        if not ON_WINDOWS:  # libiomp5 / the Fortran runtime beside the compiler
+            lib = str(INTEL_BIN.parent / "lib")
+            env["LD_LIBRARY_PATH"] = os.pathsep.join([lib] + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else []))
     if blas and openblas_dir() is not None:
-        prepend.append(str(openblas_dir() / "bin"))
+        prepend.append(str(openblas_dir() / ("bin" if ON_WINDOWS else "lib")))
     path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
-    env[path_key] = ";".join(prepend + [env.get(path_key, "")])
+    env[path_key] = os.pathsep.join(prepend + [env.get(path_key, "")])
     env.update(knobs)
     return env
 
 
 def env_path(env: dict[str, str]) -> list[str]:
-    return next((v for k, v in env.items() if k.upper() == "PATH"), "").split(";")
+    return next((v for k, v in env.items() if k.upper() == "PATH"), "").split(os.pathsep)
 
 
 def kill_tree(pid: int) -> None:
     """Kill a process and all of its children (cmd /c wrappers spawn grandchildren)."""
+    if not ON_WINDOWS:
+        try:
+            os.killpg(pid, 9)  # children run in their own session (run_proc)
+        except OSError:
+            pass
+        return
     subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
@@ -288,9 +353,15 @@ def run_proc(argv: list[str], *, env: dict[str, str], cwd: Path, timeout: float,
     t0 = time.perf_counter()
     try:
         try:
-            p = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if ON_WINDOWS:
+                p = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            else:
+                ru_file = BUILD_ROOT / "_tools" / f"rusage-{os.getpid()}.txt"
+                p = subprocess.Popen([str(_rusage_exec()), str(ru_file), *argv], cwd=str(cwd), env=env,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     start_new_session=True)
         except OSError as ex:
             return ProcResult(argv, str(cwd), None, "", "", 0.0, False, launch_error=str(ex))
         timed_out = False
@@ -305,8 +376,17 @@ def run_proc(argv: list[str], *, env: dict[str, str], cwd: Path, timeout: float,
                 p.kill()
                 out, err = b"", b""
         wall = time.perf_counter() - t0
-        handle = getattr(p, "_handle", None)
-        mem = _memory_info(int(handle)) if handle is not None else None
+        if ON_WINDOWS:
+            handle = getattr(p, "_handle", None)
+            mem = _memory_info(int(handle)) if handle is not None else None
+        else:
+            mem = None  # ru_maxrss is KiB on Linux; there is no peak-commit analogue
+            try:
+                kb, minflt, majflt = (int(x) for x in ru_file.read_text().split())
+                ru_file.unlink()
+                mem = {"peak_working_set": kb * 1024, "page_faults": minflt + majflt, "peak_pagefile": None}
+            except (OSError, ValueError):
+                pass
         return ProcResult(argv, str(cwd), p.returncode, out.decode("utf-8", errors="replace"),
                           err.decode("utf-8", errors="replace"), wall, timed_out,
                           memory=mem, affinity_mask=affinity)
@@ -420,6 +500,13 @@ def _normalize_thread_keys(cfg: dict[str, Any]) -> None:
 
 def physical_core_count() -> int | None:
     """Physical cores (Win32_Processor NumberOfCores summed); None when the query fails."""
+    if not ON_WINDOWS:
+        try:
+            cores = {tuple(l.split(",")[:2]) for l in subprocess.run(["lscpu", "-p=Core,Socket"], capture_output=True,
+                     text=True, check=True).stdout.splitlines() if l and not l.startswith("#")}
+            return len(cores) or None
+        except (OSError, subprocess.CalledProcessError):
+            return None
     r = run_proc(["powershell", "-NoProfile", "-Command",
                   "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum"],
                  env=make_env({}), cwd=BENCH_DIR, timeout=60)
@@ -869,7 +956,7 @@ class Toolchain:
         return self.simple("clang", [str(CLANG), "--version"])
 
     def gpp(self) -> dict[str, Any]:
-        return self.simple("gpp", [str(UCRT_BIN / "g++.exe"), "--version"])
+        return self.simple("gpp", [str(GPP), "--version"])
 
     def gfortran(self) -> dict[str, Any]:
         return self.simple("gfortran", [str(GFORTRAN), "--version"])
@@ -878,7 +965,9 @@ class Toolchain:
         """ifx version via the Fortran agent's wrapper (`/QV` on a trivial source)."""
         if "ifx" not in self._cache:
             info: dict[str, Any] = {"wrapper": str(IFX_WRAPPER), "exists": IFX_WRAPPER.is_file()}
-            if IFX_WRAPPER.is_file():
+            if IFX_WRAPPER.is_file() and not ON_WINDOWS:
+                info["version"] = self._first_line([str(INTEL_BIN / "ifx"), "--version"]) or None
+            elif IFX_WRAPPER.is_file():
                 d = self.build_root / "_tools" / "ifxver"
                 d.mkdir(parents=True, exist_ok=True)
                 (d / "ver.f90").write_text("program ver\nend program ver\n", encoding="ascii")
@@ -899,6 +988,8 @@ def pe_info(exe: Path) -> dict[str, Any]:
     if not OBJDUMP.is_file():
         return {}
     r = run_proc([str(OBJDUMP), "-p", str(exe)], env=make_env({}), cwd=exe.parent, timeout=60)
+    if not ON_WINDOWS:  # ELF: the dynamic section's NEEDED entries
+        return {"imports": sorted({m.group(1) for m in re.finditer(r"NEEDED\s+(\S+)", r.stdout)})}
     info: dict[str, Any] = {"imports": sorted({m.group(1) for m in re.finditer(r"DLL Name:\s*(\S+)", r.stdout)}, key=str.lower)}
     for fld in ("SizeOfStackReserve", "SizeOfStackCommit", "SizeOfHeapReserve", "SizeOfHeapCommit"):
         m = re.search(rf"{fld}\s+([0-9a-fA-F]+)", r.stdout)
@@ -911,6 +1002,13 @@ def resolve_dlls(exe: Path, imports: list[str], env: dict[str, str]) -> dict[str
     """Resolve each imported DLL the way the loader would for this run environment (exe
     directory, System32, Windows, then PATH) and hash it by its resolved path (M25)."""
     out: dict[str, Any] = {}
+    if not ON_WINDOWS:  # the dynamic loader's own answer for this environment
+        r = run_proc(["ldd", str(exe)], env=env, cwd=exe.parent, timeout=60)
+        hits = {m.group(1): m.group(2) for m in re.finditer(r"^\s*(\S+)\s+=>\s+(\S+)", r.stdout, re.M)}
+        for name in imports:
+            hit = Path(hits[name]) if hits.get(name, "not").startswith("/") else None
+            out[name] = {"path": str(hit), "sha256": sha256_file(hit)} if hit and hit.is_file() else {"path": None}
+        return out
     dirs = [exe.parent, SYSTEM32, SYSTEM32.parent] + [Path(p) for p in env_path(env) if p]
     for name in imports:
         if name.lower().startswith(("api-ms-win-", "ext-ms-win-")):
@@ -923,6 +1021,21 @@ def resolve_dlls(exe: Path, imports: list[str], env: dict[str, str]) -> dict[str
 def processor_power_settings() -> dict[str, Any]:
     """AC state and the active scheme's processor settings: max/min state, boost (M19)."""
     out: dict[str, Any] = {}
+    if not ON_WINDOWS:
+        def rd(f: str) -> str | None:
+            try:
+                return Path(f).read_text().strip()
+            except OSError:
+                return None
+        out["scaling_governor"] = rd("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        out["intel_no_turbo"] = rd("/sys/devices/system/cpu/intel_pstate/no_turbo")
+        out["boost"] = rd("/sys/devices/system/cpu/cpufreq/boost")
+        for alias in ("PROCTHROTTLEMAX", "PROCTHROTTLEMIN", "PERFBOOSTMODE"):
+            out[alias] = {"ac": None, "dc": None}  # no powercfg analogue; the keys the session reads
+        out["active_scheme"] = f"linux: governor {out['scaling_governor']}, intel_pstate no_turbo {out['intel_no_turbo']}"
+        out["ac_line"] = ac_line()
+        out["when"] = dt.datetime.now().isoformat(timespec="seconds")
+        return out
     for alias in ("PROCTHROTTLEMAX", "PROCTHROTTLEMIN", "PERFBOOSTMODE"):
         r = run_proc(["powercfg", "/q", "SCHEME_CURRENT", "SUB_PROCESSOR", alias],
                      env=make_env({}), cwd=BENCH_DIR, timeout=30)
@@ -940,18 +1053,31 @@ def fingerprint() -> dict[str, Any]:
     """CPU, core counts, RAM, OS, Python, git SHA and the inherited thread env."""
     fp: dict[str, Any] = {"host": platform.node(), "os": platform.platform(),
                           "python": sys.version.split()[0], "logical_processors": os.cpu_count()}
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
-            fp["cpu"] = winreg.QueryValueEx(k, "ProcessorNameString")[0].strip()
-            fp["cpu_mhz_nominal"] = winreg.QueryValueEx(k, "~MHz")[0]
-    except OSError:
-        fp["cpu"] = platform.processor()
+    if ON_WINDOWS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                fp["cpu"] = winreg.QueryValueEx(k, "ProcessorNameString")[0].strip()
+                fp["cpu_mhz_nominal"] = winreg.QueryValueEx(k, "~MHz")[0]
+        except OSError:
+            fp["cpu"] = platform.processor()
+    else:
+        info = Path("/proc/cpuinfo").read_text()
+        g = lambda key: next((l.split(":", 1)[1].strip() for l in info.splitlines() if l.startswith(key)), None)
+        fp["cpu"] = g("model name")
+        fp["cpu_family_model"] = f"{g('cpu family')}/{g('model')}"
+        fp["smt"] = (Path("/sys/devices/system/cpu/smt/active").read_text().strip()
+                     if Path("/sys/devices/system/cpu/smt/active").is_file() else None)
     fp["physical_cores"] = physical_core_count()
-    ms = _MemoryStatusEx()
-    ms.dwLength = ctypes.sizeof(_MemoryStatusEx)
-    if _k32.GlobalMemoryStatusEx(ctypes.byref(ms)):
-        fp["ram_gb"] = round(ms.ullTotalPhys / 2**30, 2)
-        fp["ram_available_gb_at_start"] = round(ms.ullAvailPhys / 2**30, 2)
+    if ON_WINDOWS:
+        ms = _MemoryStatusEx()
+        ms.dwLength = ctypes.sizeof(_MemoryStatusEx)
+        if _k32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            fp["ram_gb"] = round(ms.ullTotalPhys / 2**30, 2)
+            fp["ram_available_gb_at_start"] = round(ms.ullAvailPhys / 2**30, 2)
+    else:
+        mi = {l.split(":")[0]: int(l.split()[1]) for l in Path("/proc/meminfo").read_text().splitlines() if l.split()[1:2] and l.split()[1].isdigit()}
+        fp["ram_gb"] = round(mi.get("MemTotal", 0) / 2**20, 2)
+        fp["ram_available_gb_at_start"] = round(mi.get("MemAvailable", 0) / 2**20, 2)
     g = run_proc(["git", "rev-parse", "HEAD"], env=make_env({}), cwd=REPO_DIR, timeout=30)
     fp["git_sha"] = g.stdout.strip() or None
     fp["inherited_env"] = {k: os.environ.get(k) for k in
@@ -1004,10 +1130,11 @@ def run_knobs(regime: Regime, config: dict[str, Any]) -> dict[str, str]:
 
 def fortran_flags(family: str, regime: Regime, config: dict[str, Any], twin: bool) -> list[str]:
     """The regime's flags for gfortran or ifx (never per kernel), plus the twin defines."""
-    t = config["fortran_flags"][family]
+    sfx = "" if ON_WINDOWS else "_linux"
+    t = config[f"fortran_flags{sfx}"][family]
     flags = list(t[regime.fp]) + list(t[f"{regime.thread_class}_extra"])
     if twin:
-        flags += list(config["fortran_twin_flags"][family])
+        flags += list(config[f"fortran_twin_flags{sfx}"][family])
     return flags
 
 
@@ -1209,7 +1336,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     if blade["toolchain_json_beside_exe"]:
         b.status, b.reason = "failed", "a blade.toolchain.json beside Blade.exe would flip unset gates; refusing"
         return
-    exe = armdir / f"{stem}.exe"
+    exe = armdir / f"{stem}{EXE_SUFFIX}"
     b.knobs = blade_knobs(regime, arm.lane or "cpp", config)
     b.flags = ["--verbose", "--print", "checksum,input_checksum"]
     b.command = [str(BLADE_EXE), "compile", str(src), "-o", str(exe), *b.flags]
@@ -1382,22 +1509,22 @@ def _blade_plan(b: Build, src: Path, armdir: Path, env: dict[str, str], timeout:
 
 def _build_fortran(b: Build, arm: ArmSpec, regime: Regime, src: Path, armdir: Path, tools: Toolchain,
                    config: dict[str, Any], timeout: float) -> None:
-    exe = armdir / f"{arm.name}.exe"
+    exe = armdir / f"{arm.name}{EXE_SUFFIX}"
     b.flags = fortran_flags(arm.family, regime, config, arm.twin)
     link = fortran_blas_link(arm.family) if regime.blas == "blas" else []
     if arm.family == "gfortran":
         if not GFORTRAN.is_file() or not GFORTRAN_WRAPPER.is_file():
-            b.status, b.reason = "unbuilt", "gfortran or bench/fortran/build_gfortran.ps1 missing"
+            b.status, b.reason = "unbuilt", f"gfortran or {GFORTRAN_WRAPPER} missing"
             return
-        b.command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GFORTRAN_WRAPPER),
-                     str(exe), *b.flags, "--", str(src), *link]
+        b.command = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GFORTRAN_WRAPPER)]
+                     if ON_WINDOWS else ["bash", str(GFORTRAN_WRAPPER)]) + [str(exe), *b.flags, "--", str(src), *link]
         b.compiler = {"gfortran": tools.gfortran(), "wrapper": str(GFORTRAN_WRAPPER),
                       "wrapper_sha256": sha256_file(GFORTRAN_WRAPPER)}
     else:
         if not IFX_WRAPPER.is_file():
             b.status, b.reason = "unbuilt", f"ifx wrapper {IFX_WRAPPER} not present"
             return
-        b.command = ["cmd", "/c", str(IFX_WRAPPER), str(exe), *b.flags, "--", str(src), *link]
+        b.command = (["cmd", "/c"] if ON_WINDOWS else ["bash"]) + [str(IFX_WRAPPER), str(exe), *b.flags, "--", str(src), *link]
         b.compiler = {"ifx": tools.ifx(), "wrapper": str(IFX_WRAPPER), "wrapper_sha256": sha256_file(IFX_WRAPPER)}
     r = run_proc(b.command, env=make_env({}), cwd=armdir, timeout=timeout)
     if arm.family == "ifx" and r.returncode == 4 and "ifx not on PATH" in r.stderr:
@@ -1417,7 +1544,7 @@ def _build_fortran(b: Build, arm: ArmSpec, regime: Regime, src: Path, armdir: Pa
         if regime.blas == "blas" and not b.evidence["blas_routed"] and not arm.twin:
             b.status, b.reason = "failed", "blas regime: the executable imports no libopenblas.dll (no dsyrk route)"
             return
-        omp_rt = any(d.startswith(("libgomp", "libiomp")) for d in imports)
+        omp_rt = any(d.startswith(("libgomp", "libiomp", "libomp.")) for d in imports)
         if regime.blas == "blas" and b.evidence["blas_routed"]:
             par = f"library threads (OPENBLAS_NUM_THREADS={b.run_knobs.get('OPENBLAS_NUM_THREADS')})"
             b.evidence["parallelism"] = par + (" + openmp runtime" if (omp_rt and regime.threaded) else "")
@@ -1426,7 +1553,7 @@ def _build_fortran(b: Build, arm: ArmSpec, regime: Regime, src: Path, armdir: Pa
         else:
             b.evidence["parallelism"] = "serial"
         b.status = "ok"
-        if arm.family == "ifx" and regime.threaded and not (Path(b.cwd) / "libiomp5md.dll").is_file():
+        if ON_WINDOWS and arm.family == "ifx" and regime.threaded and not (Path(b.cwd) / "libiomp5md.dll").is_file():
             b.warnings.append(f"{regime.threads} ifx build has no libiomp5md.dll beside the exe")
 
 
@@ -1586,7 +1713,7 @@ def describe(xs: list[float]) -> dict[str, Any]:
 
 
 MEMORY_COUNTERS = {
-    "process_peak_resident_bytes": ("peak_working_set", "bytes", "Win32 PeakWorkingSetSize"),
+    "process_peak_resident_bytes": ("peak_working_set", "bytes", "Win32 PeakWorkingSetSize" if ON_WINDOWS else "Linux wait4 ru_maxrss (rusage_exec.c)"),
     "process_peak_commit_bytes": ("peak_commit_bytes", "bytes", "Win32 PeakPagefileUsage"),
     "process_page_fault_count": ("page_faults", "count", "Win32 PageFaultCount (all faults)"),
 }
@@ -2447,7 +2574,7 @@ class Session:
         bench tree), hashed IN PLACE; the content itself is in git at machine.git_sha.  No
         copy of the tree is written."""
         roots = {"kernels": self.opt.kernels[0].dir.parent, "validation": self.opt.validation_dir}
-        skip_dirs, skip_ext = {"__pycache__"}, {".exe", ".obj", ".mod"}
+        skip_dirs, skip_ext = {"__pycache__"}, {".exe", ".obj", ".mod", ".o"}
         hashes: dict[str, str] = {}
         for rel in ("kernels", "fortran", "harness", "validation", "README.md", "notes/charter.md", ".gitignore"):
             src = roots.get(rel, BENCH_DIR / rel)
@@ -2712,6 +2839,10 @@ def print_check(sess: Session) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if not ON_WINDOWS:
+        # children inherit it: the Windows builds link a 256 MB main-thread stack (/F, --stack)
+        import resource
+        resource.setrlimit(resource.RLIMIT_STACK, (resource.getrlimit(resource.RLIMIT_STACK)[1],) * 2)
     raw_argv = list(sys.argv if argv is None else ["run.py", *argv])
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="verb", required=True)
@@ -2724,6 +2855,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--build-dir", type=Path, default=BUILD_ROOT, help="private build root (gitignored)")
         p.add_argument("--out-dir", type=Path, help="where the session bundle goes")
         p.add_argument("--config", type=Path, default=CONFIG_FILE)
+        p.add_argument("--threads", help="comma list overriding config.json `threads` for this session, e.g. 1,2,4 or all")
         p.add_argument("--validation-dir", type=Path, default=VALIDATION_DIR, help="where pins*.json live")
         p.add_argument("--run-timeout", type=float, default=RUN_TIMEOUT_CAP_S)
         p.add_argument("--build-timeout", type=float, default=600.0)
@@ -2764,6 +2896,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.verb == "list":
             return cmd_list(kernels)
         config = load_config(a.config)
+        if getattr(a, "threads", None):
+            config["threads"] = _resolve_thread_counts([x if x == "all" else int(x) for x in _csv(a.threads) or []], a.config)
         if a.verb == "check":
             kernels = [k for k in kernels if k.name == a.kernel]
             if not kernels:
