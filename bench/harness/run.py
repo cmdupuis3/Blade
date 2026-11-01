@@ -1895,6 +1895,7 @@ class Options:
     seed: int
     allow_battery: bool
     allow_unpinned: bool
+    drop_control_excursions: bool
     skip_smoke_check: bool
     strict_unbuilt: bool
     build_root: Path
@@ -2059,6 +2060,9 @@ class Session:
             self.flags.append("tainted: --skip-smoke-check")
         if self.opt.allow_unpinned:
             self.flags.append("tainted: --allow-unpinned (blade-cpp cross-check instead of the oracle)")
+        if self.opt.drop_control_excursions:
+            self.flags.append("--drop-control-excursions: an isolated control excursion is dropped and recorded per block "
+                              "(the arms' rule) instead of aborting the session")
         if problems:
             raise HarnessError("pre-session checks failed:\n  " + "\n  ".join(problems[:40])
                                + (f"\n  ... {len(problems) - 40} more" if len(problems) > 40 else ""))
@@ -2139,13 +2143,29 @@ class Session:
         s.round = rnd
         if ref is not None:
             validate(s, ref, tol=self.tol(k, regime), input_tol=k.input_tolerance, twin=False)
-        prev = [x["time_s"] for x in rec["samples"] if x["ok"] and x["time_s"] is not None]
+        prev = [x["time_s"] for x in rec["samples"] if x["ok"] and x["time_s"] is not None
+                and not x.get("excursion_dropped")]
+        what = f"control {rec['spec']['name']}"
+        ratio = self._excursion(s, prev)
+        if ratio is not None and self.opt.drop_control_excursions and block_key is not None:
+            seen = rec.setdefault("excursions", {}).setdefault(block_key, [])
+            if seen:
+                raise SessionAbort(f"second {what} excursion in block {block_key}: {s.time_s:.3f}s, {ratio:.1f}x its "
+                                   f"running median (first: round {seen[0]['round']}) -- stopping (charter 2.5)")
+            seen.append({"round": rnd, "time_s": s.time_s, "ratio": round(ratio, 2)})
+            s.excursion_dropped, s.excursion_ratio = True, round(ratio, 2)
+            self.warnings.append(f"control excursion dropped (isolated; recorded; --drop-control-excursions): "
+                                 f"{what} block {block_key} round {rnd}: {s.time_s:.3f}s = {ratio:.1f}x running median")
+            log(f"  CONTROL EXCURSION (dropped, recorded): {what} {block_key} round {rnd}: {ratio:.1f}x")
+            ratio = None
         d = dataclasses.asdict(s)
         d["block"] = block_key
         rec["samples"].append(d)
         if block_key is not None and rnd is not None:
-            rec["per_block"].setdefault(block_key, {})[str(rnd)] = s.time_s if s.ok else None
-        self._thermal(f"control {rec['spec']['name']}", s, prev)
+            rec["per_block"].setdefault(block_key, {})[str(rnd)] = s.time_s if s.ok and not s.excursion_dropped else None
+        if ratio is not None:
+            raise SessionAbort(f"{what}: run took {s.time_s:.3f}s, {ratio:.1f}x its running median -- "
+                               f"stopping (charter 2.5)")
         return s
 
     # -- one kernel x regime -------------------------------------------------------
@@ -2884,6 +2904,9 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument("--seed", type=int, default=20261017)
     pb.add_argument("--allow-battery", action="store_true", help="run on battery; taints the session")
     pb.add_argument("--allow-unpinned", action="store_true", help="measure kernels without pins; taints the session")
+    pb.add_argument("--drop-control-excursions", action="store_true",
+                    help="apply the arms' isolated-excursion rule to the drift controls (one dropped and recorded per "
+                         "control per block, a second aborts) instead of aborting on the first; for shared VMs; flags the session")
     pb.add_argument("--skip-smoke-check", action="store_true", help="skip the smoke-evidence check; taints the session")
     common(pb)
     a = ap.parse_args(argv)
@@ -2933,6 +2956,7 @@ def main(argv: list[str] | None = None) -> int:
                       resamples=getattr(a, "resamples", 10000), seed=getattr(a, "seed", 20261017),
                       allow_battery=getattr(a, "allow_battery", False),
                       allow_unpinned=getattr(a, "allow_unpinned", False),
+                      drop_control_excursions=getattr(a, "drop_control_excursions", False),
                       skip_smoke_check=getattr(a, "skip_smoke_check", False), strict_unbuilt=not getattr(a, "allow_unbuilt", False),
                       build_root=a.build_dir.resolve(), out_dir=a.out_dir, config=config, argv=raw_argv,
                       validation_dir=a.validation_dir)
