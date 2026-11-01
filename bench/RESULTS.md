@@ -7,7 +7,7 @@
 > Every measured number they carried is a row of `bench/results/stats.csv` (`label` = the A/B mirror named in the text;
 > `python bench/harness/stats.py sql "..."` queries it). Nothing below was rewritten; read a cited path as a historical one.
 
-**Linux multithread snapshot (2026-11-01):** 13 kernels, blade-cpp / gfortran-expert / ifx-expert at 1-4 threads on a 4-vCPU cloud VM -- see **§18** (not a harness session; label `cloud-xeon4`).
+**Linux multithread session (2026-11-01):** 13 kernels, blade-cpp / gfortran-expert / ifx-expert at serial, mt1, mt2, mt4 on a 4-vCPU cloud VM, through the first Linux port of the harness -- see **§18** (label `cloud-xeon4`, 258 rows, 33 live).
 
 **Round 2 (2026-10-20):** two more waves of microkernels plus an effect-analysis hardening track -- see **§15** (what landed, the wave-1 A/B, the wave-2 A/B, the gap rows it opened). Integration branch `worktree-bench-fortran`, final tip f1910060.
 
@@ -2981,127 +2981,161 @@ bench kernels is byte-identical to the base in both lanes by each item's sweep.
 Gates on the integration tip b457c029 (Blade.dll A130F8DC...E83D): default **8387 / 0 / 2 skipped**, opt-diff 2423 / 0 / 989 skipped, docs 133 / 0 / 79,
 llvm 998 / 0 / 747 skipped, interp 3311 / 0 / 4 skip-unsupported; examples 68 files, the same six pre-existing failures as the wave-3 gates (four zarr stores unresolvable at compile time, check_cod_shells BL4003, station_temps BL3999).
 
-## 18. Linux multithread snapshot (2026-11-01) -- 4-vCPU cloud VM, three toolchains, NOT a harness session
+## 18. Linux multithread session (2026-11-01) -- 4-vCPU cloud VM, licensed x native, serial / mt1 / mt2 / mt4
 
-Record: `bench/notes/linux-mt-snapshot-2026-11-01/` (drivers, raw `results.json`, `blade plan` per kernel);
-cells: `stats.csv` label `cloud-xeon4` (260 rows, bundles `2026-11-01-vm/snapshot-run1` and `-run2`, all
-`indicative`, ratio / CI / verdict empty). A quick snapshot of thread scaling asked for in place of the campaign's
-B2 (plan-cloud-bench-campaign.md), on the only machine the session had: a Claude Code cloud sandbox, Intel Xeon
-family 6 model 207 (Emerald Rapids per Intel's model table; AVX-512, AMX) at 2.1 GHz, 4 vCPU, no SMT, Ubuntu 24.04.
-Commit 5ed8af20, Blade.dll d041d86bd92e94d3 (Linux build). Toolchains differ from the box: g++ 13.3 and gfortran 13.3
-(box: gcc 16.2), ifx 2026.2.0 from conda-forge (box: 2026.1). No source changed; the Win32 timer of
-`bench_support.f90` is satisfied by a C shim over `CLOCK_MONOTONIC`.
+Cells: `stats.csv` label `cloud-xeon4` (258 rows; bundles `2026-11-01-vm/session-011637` and `session-021029`, local
+like every bundle). Measured with `run.py bench` on the first LINUX PORT of the harness (this commit; Windows paths
+unchanged): `sched_setaffinity` for the serial pin, peak memory = the child's `wait4` ru_maxrss through
+`harness/rusage_exec.c` (a Python-forked child inherits the interpreter's high-water mark), no peak-commit counter,
+`fortran/build_gfortran.sh` / `build_ifx.sh` + `qpc_linux.c` (the Win32 timer `bench_support.f90` binds), Linux flag
+spellings in `config.json` `fortran_flags_linux`, a `--threads` session override.
 
-Protocol: licensed x native, full sizes, the 13 kernels with a thread form whose serial Blade time is under ~60 ms
-on the box (tensorop, pairaction, groupagg, groupagg_dyn, hashjoin, maskagg left out). Per toolchain two builds:
-`serial` = the harness's serial build (Blade `BLADE_OMP_THREADS=1`; Fortran `licensed` + `serial_extra`), pinned
-to one CPU; `mt<N>` = the threaded build (`mt_extra`) at `OMP_NUM_THREADS=N`, N = 1..4, unbound. Expert Fortran arms
-only (no natural, no LLVM lane, no repro / fastmath / blas). 9 rounds, the arm order rotated each round, one
-discarded warm-up per arm. Checksums agree across all 15 arms of every kernel to <= 1.5e-14 relative,
-input_checksum to <= 3.3e-15.
+Machine: a Claude Code cloud sandbox, Intel Xeon family 6 model 207 (Emerald Rapids per Intel's model table; AVX-512,
+AMX) at 2.1 GHz, 4 vCPU, no SMT, 15.7 GB, Ubuntu 24.04; AC state unknown, no governor exposed. Compiler: master
+5ed8af20 (Blade.dll d041d86bd92e94d3, Linux build); session 011637 records HEAD f526705 but ran the harness of d7e0bbd
+(committed 11 s after its start; only `--drop-control-excursions` differs), 021029 records d7e0bbd. Toolchains differ
+from the box: g++ 13.3 / gfortran 13.3 (box gcc 16.2; `-fno-external-blas64` dropped, gcc 13 lacks it), ifx 2026.2.0
+from conda-forge (box 2026.1).
 
-NOISE: a shared VM, no drift controls. The same Blade binaries ran in both runs, and run2's medians are 0-25%
-higher than run1's, nearly all in one direction (last table), so treat ratios within 0.85-1.15 as parity. Within
-run2 the three toolchains share the machine state. Every arm also has single outliers up to ~1.5-3x its median
-(medians are unaffected). band (1-4 ms) is dominated by team entry and noise in every toolchain.
+Scope: the 13 kernels with a thread form and a short full-size run (tensorop, pairaction, groupagg, groupagg_dyn,
+hashjoin, maskagg left out); arms blade-cpp, gfortran-expert, ifx-expert and their input-only twins (no LLVM lane,
+no natural arms, no repro / fastmath / blas); regimes serial, mt1, mt2, mt4 licensed native; harness minimum rounds,
+cooldowns, both drift controls, 10000-resample round-block bootstrap. The reference is blade-cpp in every regime
+(blade-llvm was not run), so serial ratios are against the C++ lane, unlike the box's serial tables.
 
-Medians in ms, run2 (all three toolchains interleaved; 9 rounds per cell).
+Protocol deviation: `--drop-control-excursions` (both sessions; flagged in each). On this VM isolated 3x spikes are
+routine: the first attempt aborted on one control run at 3.6x its median (session 010839, 24 partial rows removed);
+the flag applies the arms' isolated-excursion rule to the controls (one dropped and recorded per control per block, a
+second aborts); no control excursion occurred in either session. Session 011637 then aborted on a SECOND ARM
+excursion in stencil/mt4 (ifx-expert, the unchanged arm rule); that block's six rows were removed and the block re-run
+first in 021029, which completed (0 failures, 16 flags). Isolated arm excursions dropped and recorded in the kept
+rows: haloadjoint mt4 gfortran-expert, twofir mt4 ifx-expert-inputonly.
 
-| kernel | arm | serial | mt1 | mt2 | mt3 | mt4 | mt4 / serial speedup |
-|---|---|---|---|---|---|---|---|
-| antisym | blade-cpp | 54.77 | 52.64 | 27.17 | 21.29 | 15.52 | 3.53x |
-|  | gfortran-expert | 55.90 | 60.66 | 33.72 | 23.86 | 18.53 | 3.02x |
-|  | ifx-expert | 55.33 | 56.23 | 31.80 | 24.23 | 18.10 | 3.06x |
-| band | blade-cpp | 2.94 | 4.08 | 3.91 | 3.15 | 2.80 | 1.05x |
-|  | gfortran-expert | 0.92 | 1.94 | 1.78 | 1.63 | 1.95 | 0.47x |
-|  | ifx-expert | 1.53 | 2.57 | 2.08 | 1.95 | 1.71 | 0.90x |
-| comoment3 | blade-cpp | 15.45 | 15.39 | 8.78 | 7.09 | 5.49 | 2.82x |
-|  | gfortran-expert | 15.61 | 28.72 | 16.42 | 11.96 | 9.96 | 1.57x |
-|  | ifx-expert | 16.09 | 17.83 | 10.58 | 7.61 | 6.28 | 2.56x |
-| dot | blade-cpp | 51.44 | 46.88 | 27.77 | 20.46 | 16.21 | 3.17x |
-|  | gfortran-expert | 35.36 | 34.16 | 22.92 | 16.93 | 14.39 | 2.46x |
-|  | ifx-expert | 37.33 | 43.89 | 26.92 | 20.00 | 17.08 | 2.19x |
-| fusedchain | blade-cpp | 11.87 | 17.14 | 10.79 | 7.78 | 6.31 | 1.88x |
-|  | gfortran-expert | 12.76 | 13.68 | 8.51 | 7.40 | 6.81 | 1.87x |
-|  | ifx-expert | 13.67 | 15.73 | 9.00 | 8.02 | 6.93 | 1.97x |
-| gram | blade-cpp | 91.22 | 96.40 | 53.71 | 35.42 | 28.62 | 3.19x |
-|  | gfortran-expert | 125.40 | 151.01 | 72.81 | 51.02 | 39.59 | 3.17x |
-|  | ifx-expert | 113.53 | 115.80 | 67.64 | 46.58 | 33.53 | 3.39x |
-| haloadjoint | blade-cpp | 90.47 | 90.08 | 73.88 | 69.89 | 69.87 | 1.29x |
-|  | gfortran-expert | 21.02 | 22.44 | 12.37 | 10.79 | 10.32 | 2.04x |
-|  | ifx-expert | 29.35 | 30.93 | 19.06 | 15.03 | 11.88 | 2.47x |
-| onepass | blade-cpp | 28.41 | 40.50 | 23.89 | 17.07 | 13.45 | 2.11x |
-|  | gfortran-expert | 32.42 | 38.19 | 21.15 | 16.10 | 13.63 | 2.38x |
-|  | ifx-expert | 32.54 | 36.90 | 21.83 | 17.69 | 14.79 | 2.20x |
-| pairkernel | blade-cpp | 44.17 | 45.43 | 26.02 | 17.47 | 15.74 | 2.81x |
-|  | gfortran-expert | 19.69 | 20.26 | 11.97 | 9.04 | 7.29 | 2.70x |
-|  | ifx-expert | 32.03 | 31.63 | 17.57 | 12.29 | 10.04 | 3.19x |
-| recur | blade-cpp | 26.44 | 27.55 | 17.39 | 16.03 | 12.06 | 2.19x |
-|  | gfortran-expert | 25.61 | 27.34 | 15.47 | 12.01 | 9.87 | 2.60x |
-|  | ifx-expert | 26.52 | 26.03 | 15.16 | 11.33 | 9.19 | 2.89x |
-| saxpy | blade-cpp | 40.54 | 38.68 | 22.99 | 17.99 | 16.68 | 2.43x |
-|  | gfortran-expert | 28.99 | 28.98 | 20.97 | 14.45 | 12.54 | 2.31x |
-|  | ifx-expert | 34.54 | 38.22 | 23.19 | 17.59 | 14.01 | 2.47x |
-| stencil | blade-cpp | 30.98 | 36.44 | 23.50 | 16.91 | 14.29 | 2.17x |
-|  | gfortran-expert | 29.42 | 33.87 | 17.47 | 14.22 | 11.49 | 2.56x |
-|  | ifx-expert | 28.63 | 33.11 | 16.33 | 13.27 | 10.69 | 2.68x |
-| twofir | blade-cpp | 32.27 | 36.88 | 22.41 | 16.50 | 14.05 | 2.30x |
-|  | gfortran-expert | 27.39 | 27.92 | 15.74 | 12.06 | 10.35 | 2.65x |
-|  | ifx-expert | 33.19 | 34.11 | 21.02 | 14.79 | 12.57 | 2.64x |
+Drift: 33 of 258 rows are `live`; the rest are `indicative` (within-block trends of 5-42% and control moves on the
+shared VM). Indicative ratios are reported as measured, with their CI, and carry no verdict.
 
-Fortran median / blade-cpp median at the same thread setting, run2 (> 1 = Blade faster; read 0.85-1.15 as parity, see the noise note).
+Medians (ms) and the speedup of each arm's mt4 over its own serial build; `*` = block indicative (the harness suppressed inference: trend or control drift).
 
-| kernel | gfortran serial | gfortran mt4 | ifx serial | ifx mt4 |
-|---|---|---|---|---|
-| antisym | 1.02 | 1.19 | 1.01 | 1.17 |
-| band | 0.31 | 0.70 | 0.52 | 0.61 |
-| comoment3 | 1.01 | 1.81 | 1.04 | 1.14 |
-| dot | 0.69 | 0.89 | 0.73 | 1.05 |
-| fusedchain | 1.08 | 1.08 | 1.15 | 1.10 |
-| gram | 1.37 | 1.38 | 1.24 | 1.17 |
-| haloadjoint | 0.23 | 0.15 | 0.32 | 0.17 |
-| onepass | 1.14 | 1.01 | 1.15 | 1.10 |
-| pairkernel | 0.45 | 0.46 | 0.73 | 0.64 |
-| recur | 0.97 | 0.82 | 1.00 | 0.76 |
-| saxpy | 0.72 | 0.75 | 0.85 | 0.84 |
-| stencil | 0.95 | 0.80 | 0.92 | 0.75 |
-| twofir | 0.85 | 0.74 | 1.03 | 0.89 |
+| kernel | arm | serial | mt1 | mt2 | mt4 | mt4 / serial |
+|---|---|---|---|---|---|---|
+| antisym | blade-cpp | 55.06* | 46.99* | 25.78* | 14.02* | 3.93x |
+|  | gfortran-expert | 70.12* | 61.64* | 34.88* | 17.68* | 3.97x |
+|  | ifx-expert | 53.99* | 57.59* | 32.29* | 17.88* | 3.02x |
+| comoment3 | blade-cpp | 14.55 | 14.28* | 8.05* | 4.78 | 3.04x |
+|  | gfortran-expert | 15.80 | 27.58* | 15.32* | 8.81 | 1.79x |
+|  | ifx-expert | 15.70 | 17.79* | 9.97* | 6.12 | 2.57x |
+| gram | blade-cpp | 86.79* | 91.87* | 48.39* | 25.84* | 3.36x |
+|  | gfortran-expert | 115.10* | 125.67* | 61.24* | 35.59* | 3.23x |
+|  | ifx-expert | 107.64* | 112.79* | 61.81* | 33.08* | 3.25x |
+| pairkernel | blade-cpp | 42.39 | 43.69 | 23.75* | 12.52* | 3.39x |
+|  | gfortran-expert | 18.85 | 19.20 | 11.14* | 5.97* | 3.16x |
+|  | ifx-expert | 32.50 | 30.84 | 17.20* | 9.80* | 3.32x |
+| band | blade-cpp | 2.78* | 2.85* | 1.69* | 1.13* | 2.47x |
+|  | gfortran-expert | 0.91* | 0.92* | 0.66* | 0.51* | 1.79x |
+|  | ifx-expert | 1.44* | 2.50* | 2.04* | 1.77* | 0.81x |
+| recur | blade-cpp | 26.12 | 27.65* | 16.91* | 11.92* | 2.19x |
+|  | gfortran-expert | 24.62 | 25.06* | 14.90* | 8.62* | 2.86x |
+|  | ifx-expert | 25.41 | 28.15* | 17.33* | 9.89* | 2.57x |
+| stencil | blade-cpp | 30.08* | 37.06* | 20.16* | 13.24* | 2.27x |
+|  | gfortran-expert | 29.06* | 30.83* | 16.75* | 10.39* | 2.80x |
+|  | ifx-expert | 27.86* | 30.50* | 16.88* | 10.89* | 2.56x |
+| fusedchain | blade-cpp | 11.55* | 15.55* | 8.29* | 5.37* | 2.15x |
+|  | gfortran-expert | 12.04* | 12.76* | 7.22* | 5.25* | 2.29x |
+|  | ifx-expert | 13.03* | 15.36* | 10.29* | 6.76* | 1.93x |
+| onepass | blade-cpp | 30.72* | 40.23* | 22.27* | 12.28* | 2.50x |
+|  | gfortran-expert | 33.17* | 37.14* | 19.71* | 14.40* | 2.30x |
+|  | ifx-expert | 34.01* | 37.93* | 23.90* | 15.30* | 2.22x |
+| haloadjoint | blade-cpp | 83.89* | 93.44 | 77.93* | 69.21* | 1.21x |
+|  | gfortran-expert | 20.91* | 21.58 | 11.09* | 7.68* | 2.72x |
+|  | ifx-expert | 28.68* | 31.86 | 18.49* | 11.53* | 2.49x |
+| twofir | blade-cpp | 31.23* | 36.21* | 21.49* | 12.74* | 2.45x |
+|  | gfortran-expert | 27.03* | 28.16* | 14.69* | 8.78* | 3.08x |
+|  | ifx-expert | 33.60* | 35.56* | 20.18* | 11.54* | 2.91x |
+| dot | blade-cpp | 44.52* | 42.18* | 22.70* | 14.51* | 3.07x |
+|  | gfortran-expert | 35.52* | 34.07* | 20.43* | 14.33* | 2.48x |
+|  | ifx-expert | 37.55* | 43.29* | 25.70* | 16.27* | 2.31x |
+| saxpy | blade-cpp | 39.19 | 39.05 | 22.42* | 14.75* | 2.66x |
+|  | gfortran-expert | 29.07 | 28.82 | 17.59* | 10.33* | 2.81x |
+|  | ifx-expert | 34.38 | 38.68 | 22.94* | 13.10* | 2.62x |
 
-Run-to-run drift of the SAME Blade binaries, run1 vs run2 (median ms):
+Ratio = median(Fortran arm) / median(blade-cpp), round-block bootstrap 95% CI, harness verdict (delta 0.1); > 1 = Blade faster. Verdicts read `suppressed` where the block is indicative.
 
-| kernel | serial run1 / run2 | mt4 run1 / run2 |
-|---|---|---|
-| antisym | 46.59 / 54.77 | 13.31 / 15.52 |
-| band | 2.80 / 2.94 | 1.45 / 2.80 |
-| comoment3 | 14.22 / 15.45 | 4.37 / 5.49 |
-| dot | 41.11 / 51.44 | 14.62 / 16.21 |
-| fusedchain | 11.58 / 11.87 | 5.07 / 6.31 |
-| gram | 91.87 / 91.22 | 26.24 / 28.62 |
-| haloadjoint | 85.01 / 90.47 | 65.35 / 69.87 |
-| onepass | 30.71 / 28.41 | 12.90 / 13.45 |
-| pairkernel | 44.23 / 44.17 | 13.10 / 15.74 |
-| recur | 26.09 / 26.44 | 12.16 / 12.06 |
-| saxpy | 35.93 / 40.54 | 14.20 / 16.68 |
-| stencil | 31.08 / 30.98 | 13.60 / 14.29 |
-| twofir | 30.98 / 32.27 | 12.00 / 14.05 |
+| kernel | regime | gfortran-expert | ifx-expert |
+|---|---|---|---|
+| antisym | serial | 1.27 [0.96, 1.65] suppressed | 0.98 [0.87, 1.16] suppressed |
+|  | mt1 | 1.31 [1.14, 1.54] suppressed | 1.23 [1.10, 1.31] suppressed |
+|  | mt2 | 1.35 [1.19, 1.48] suppressed | 1.25 [1.15, 1.36] suppressed |
+|  | mt4 | 1.26 [1.15, 1.35] suppressed | 1.28 [1.10, 1.36] suppressed |
+| comoment3 | serial | 1.09 [0.96, 1.15] inconclusive | 1.08 [0.96, 1.15] inconclusive |
+|  | mt1 | 1.93 [1.77, 2.05] suppressed | 1.25 [1.15, 1.40] suppressed |
+|  | mt2 | 1.90 [1.80, 2.28] suppressed | 1.24 [1.18, 1.35] suppressed |
+|  | mt4 | 1.84 [1.69, 2.03] win | 1.28 [1.20, 1.41] win |
+| gram | serial | 1.33 [1.19, 1.38] suppressed | 1.24 [1.12, 1.44] suppressed |
+|  | mt1 | 1.37 [1.23, 1.45] suppressed | 1.23 [1.12, 1.35] suppressed |
+|  | mt2 | 1.27 [1.17, 1.36] suppressed | 1.28 [1.16, 1.59] suppressed |
+|  | mt4 | 1.38 [1.26, 1.53] suppressed | 1.28 [1.13, 1.42] suppressed |
+| pairkernel | serial | 0.44 [0.42, 0.47] loss | 0.77 [0.71, 0.79] loss |
+|  | mt1 | 0.44 [0.41, 0.46] loss | 0.71 [0.68, 0.76] loss |
+|  | mt2 | 0.47 [0.43, 0.50] suppressed | 0.72 [0.69, 0.77] suppressed |
+|  | mt4 | 0.48 [0.43, 0.50] suppressed | 0.78 [0.71, 0.85] suppressed |
+| band | serial | 0.33 [0.30, 0.37] suppressed | 0.52 [0.49, 0.56] suppressed |
+|  | mt1 | 0.32 [0.27, 0.35] suppressed | 0.88 [0.78, 0.92] suppressed |
+|  | mt2 | 0.39 [0.33, 0.44] suppressed | 1.21 [1.03, 1.35] suppressed |
+|  | mt4 | 0.45 [0.32, 0.57] suppressed | 1.57 [1.15, 1.88] suppressed |
+| recur | serial | 0.94 [0.91, 0.99] detectable-loss | 0.97 [0.95, 1.05] equivalent |
+|  | mt1 | 0.91 [0.80, 1.00] suppressed | 1.02 [0.89, 1.10] suppressed |
+|  | mt2 | 0.88 [0.79, 0.95] suppressed | 1.02 [0.91, 1.12] suppressed |
+|  | mt4 | 0.72 [0.65, 0.79] suppressed | 0.83 [0.78, 0.92] suppressed |
+| stencil | serial | 0.97 [0.87, 1.00] suppressed | 0.93 [0.82, 0.97] suppressed |
+|  | mt1 | 0.83 [0.74, 0.97] suppressed | 0.82 [0.77, 0.94] suppressed |
+|  | mt2 | 0.83 [0.71, 0.88] suppressed | 0.84 [0.72, 0.90] suppressed |
+|  | mt4 | 0.78 [0.72, 0.85] suppressed | 0.82 [0.73, 0.88] suppressed |
+| fusedchain | serial | 1.04 [1.00, 1.12] suppressed | 1.13 [1.08, 1.24] suppressed |
+|  | mt1 | 0.82 [0.78, 0.92] suppressed | 0.99 [0.97, 1.04] suppressed |
+|  | mt2 | 0.87 [0.81, 0.96] suppressed | 1.24 [1.06, 1.36] suppressed |
+|  | mt4 | 0.98 [0.91, 1.13] suppressed | 1.26 [1.11, 1.44] suppressed |
+| onepass | serial | 1.08 [1.03, 1.14] suppressed | 1.11 [1.07, 1.17] suppressed |
+|  | mt1 | 0.92 [0.81, 0.95] suppressed | 0.94 [0.90, 0.97] suppressed |
+|  | mt2 | 0.89 [0.81, 0.99] suppressed | 1.07 [0.94, 1.20] suppressed |
+|  | mt4 | 1.17 [0.93, 1.33] suppressed | 1.25 [1.15, 1.42] suppressed |
+| haloadjoint | serial | 0.25 [0.24, 0.31] suppressed | 0.34 [0.33, 0.35] suppressed |
+|  | mt1 | 0.23 [0.21, 0.27] loss | 0.34 [0.32, 0.39] loss |
+|  | mt2 | 0.14 [0.13, 0.16] suppressed | 0.24 [0.21, 0.28] suppressed |
+|  | mt4 | 0.11 [0.10, 0.12] suppressed | 0.17 [0.14, 0.18] suppressed |
+| twofir | serial | 0.87 [0.82, 0.93] suppressed | 1.08 [1.02, 1.13] suppressed |
+|  | mt1 | 0.78 [0.73, 0.82] suppressed | 0.98 [0.92, 1.06] suppressed |
+|  | mt2 | 0.68 [0.63, 0.77] suppressed | 0.94 [0.89, 1.04] suppressed |
+|  | mt4 | 0.69 [0.61, 0.82] suppressed | 0.91 [0.78, 1.05] suppressed |
+| dot | serial | 0.80 [0.75, 0.86] suppressed | 0.84 [0.80, 0.91] suppressed |
+|  | mt1 | 0.81 [0.78, 0.93] suppressed | 1.03 [0.98, 1.06] suppressed |
+|  | mt2 | 0.90 [0.79, 1.00] suppressed | 1.13 [1.03, 1.15] suppressed |
+|  | mt4 | 0.99 [0.89, 1.21] suppressed | 1.12 [1.06, 1.32] suppressed |
+| saxpy | serial | 0.74 [0.72, 0.78] loss | 0.88 [0.84, 0.90] loss |
+|  | mt1 | 0.74 [0.71, 0.81] loss | 0.99 [0.95, 1.03] equivalent |
+|  | mt2 | 0.78 [0.72, 0.89] suppressed | 1.02 [0.97, 1.13] suppressed |
+|  | mt4 | 0.70 [0.63, 0.76] suppressed | 0.89 [0.82, 1.06] suppressed |
+
+258 rows: 33 live, 225 indicative.
 
 Readout (no compiler change followed from it):
 
-- Blade is fastest at mt4 on antisym, comoment3, fusedchain, gram, onepass, and at parity with ifx on dot. The
-  tile / orbit-fold forms (antisym, gram, comoment3, pairkernel) scale 2.8-3.5x at 4 threads; the Fortran experts
-  2.6-3.4x, except gfortran comoment3 (1.57x, from its slow one-thread threaded build).
-- haloadjoint: blade-cpp is 4.3x behind gfortran serially (90 vs 21 ms) and scales 1.29x against Fortran's
-  2.0-2.5x; the threaded forms apply to its folds (plan), so most of the time is outside them. The box's rows
-  also had Blade behind here (~2.4x serial), less so.
-- pairkernel: gfortran-expert is 2.2x faster than blade-cpp at every thread count (ifx 1.4-1.6x). On the box's rows
-  Blade was at parity or ahead. Confounded by the gfortran version (13.3 vs 16.2) and the CPU; not diagnosed.
-- recur, stencil: parity serially, Fortran scales further (2.6-2.9x vs Blade's 2.2x at mt4).
-- dot, saxpy, twofir: gfortran takes 15-31% less time serially; under threads the gap narrows on dot (and vs ifx on twofir).
-- A threaded build at one thread is slower than the serial build in every toolchain on some kernels: blade
-  fusedchain 1.44, onepass 1.43, stencil 1.18 (run2); gfortran comoment3 1.84, gram 1.20. For saxpy the plan
-  records one cause in Blade: epilogue-legs declines under the producer's thread team.
-- Not answerable here (4 cores): the provisional gates `pull_min` / `rowslots_min` and the G32 pairkernel mt8
-  question.
+- Live verdicts: comoment3 mt4 is a WIN against both experts (1.84 [1.69, 2.03] gfortran, 1.28 [1.20, 1.41] ifx;
+  gfortran's threaded build is 1.75x slower than its serial build at one thread). pairkernel serial and mt1 are
+  LOSSES (gfortran 0.44, ifx 0.71-0.77); haloadjoint mt1 a LOSS (0.23 / 0.34); saxpy serial a LOSS (0.74 / 0.88)
+  and mt1 a loss against gfortran (0.74), equivalent against ifx; recur serial a detectable-loss against gfortran
+  (0.94), equivalent against ifx; comoment3 serial inconclusive (1.09 / 1.08).
+- Indicative, large and consistent across regimes: gram 1.23-1.38 for Blade against both experts in every regime;
+  antisym 1.23-1.35 under threads; haloadjoint 0.11-0.34 (blade-cpp scales 1.21x serial to mt4, the experts 2.5-2.7x);
+  band 0.32-0.45 against gfortran (a 1-3 ms kernel).
+- Scaling to mt4: the tile / orbit-fold forms 3.0-3.9x (antisym, gram, pairkernel, comoment3); the experts 2.6-4.0x
+  on the same kernels except gfortran comoment3 (1.79x). Fortran scales further on recur, stencil and twofir
+  (2.6-3.1x vs Blade's 2.2-2.5x): twofir goes from 0.87 / 1.08 (gfortran / ifx) serially to 0.69 / 0.91 at mt4,
+  stencil from 0.97 / 0.93 to 0.78 / 0.82.
+- Threaded build at one thread vs the serial build: blade-cpp fusedchain 1.35x, onepass 1.31x, stencil 1.23x slower;
+  gfortran comoment3 1.75x, ifx band 1.74x.
+- pairkernel is a change from the box (Blade at parity or ahead there; 0.44 here against gfortran 13.3); confounded by
+  the gfortran version and the CPU, not diagnosed.
+- Not answerable on 4 cores: the provisional gates `pull_min` / `rowslots_min` and the G32 mt8 question.
 
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 

@@ -436,6 +436,29 @@ diagnostic correctness check.
 `bench/.build/stub-validation/` and `bench/.build/stub-config.json`:
 `run.py smoke --kernels-dir bench\.build\stub-kernels --validation-dir bench\.build\stub-validation --config bench\.build\stub-config.json`.
 
+## Linux (2026-11-01)
+
+`run.py` runs on Linux (first used for `RESULTS.md` §18). Same protocol; the platform layer differs:
+
+- serial pin: `os.sched_setaffinity`; process tree killed by process group.
+- memory: the child's `wait4` ru_maxrss and fault counts through `rusage_exec.c` (built into
+  `.build/_tools/` on first use; a child forked straight from Python inherits the interpreter's
+  high-water mark). No peak-commit counter (`peak_commit_bytes` is null).
+- fingerprint and power from `/proc` and `/sys` (governor, `intel_pstate/no_turbo`); a VM reports
+  the AC line as unknown, which flags the session.
+- toolchains from PATH (`g++`, `gfortran`, `clang`, `objdump`), ifx from `BENCH_INTEL_BIN`
+  (default `/opt/intel/oneapi/compiler/latest/bin`); Fortran arms build through
+  `fortran/build_gfortran.sh` / `build_ifx.sh`, which link `fortran/qpc_linux.c` (the two Win32
+  timer calls `bench_support.f90` binds, over `CLOCK_MONOTONIC`). Flags: `config.json`
+  `fortran_flags_linux` / `fortran_twin_flags_linux` (the Windows sets in Linux spellings).
+- the Windows 256 MB main-thread stack is the harness's raised stack rlimit, inherited by children.
+- shared links are recorded from `objdump -p` NEEDED entries and resolved with `ldd`.
+
+Session options added with the port (both platforms): `--threads 1,2,4` overrides config.json
+`threads`; `--drop-control-excursions` (bench) applies the arms' isolated-excursion rule to the drift
+controls (one dropped and recorded per control per block, a second aborts) and flags the session --
+for shared machines where isolated 3x spikes are routine.
+
 ## Limits: hygiene, not safety (2026-10-18)
 
 The protocol's measurement-hygiene rules (formerly `bench/README.md` §7, D46; the same text
