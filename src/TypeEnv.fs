@@ -455,6 +455,11 @@ type TypeEnv = {
     /// group_keys name), by that slot's id: what Zonk's group-read guard
     /// (G1) reads the group count, each group's length and the key type off.
     GroupOuters: System.Collections.Generic.Dictionary<IRId, TypedExpr>
+    /// G90 (group-rowmap v1): the OUTER slot of a length-preserving per-group
+    /// row map over a group_by result, by its id -> the operand's outer slot id
+    /// (deduceOutputType refreshes ids, so this is the handle `ungroup` and the
+    /// read guards follow; SegmentedOuters / GroupOuters are copied alongside).
+    GroupRowMapOuters: System.Collections.Generic.Dictionary<IRId, IRId>
     /// The `Chunked` aliases named by a value binding's ANNOTATION, per slot
     /// (None for a slot that is not a Chunked alias), by binding name: what
     /// `segments(a)` over a VALUE reads. An array whose slots are all
@@ -874,6 +879,7 @@ let emptyEnv () = {
     Segmentations = Map.empty
     SegmentedOuters = System.Collections.Generic.Dictionary<IRId, string>()
     GroupOuters = System.Collections.Generic.Dictionary<IRId, TypedExpr>()
+    GroupRowMapOuters = System.Collections.Generic.Dictionary<IRId, IRId>()
     SlotAliases = System.Collections.Generic.Dictionary<string, string option list>()
     VariantTags = Map.empty
     Subst = Subst()

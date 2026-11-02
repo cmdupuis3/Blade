@@ -646,6 +646,33 @@ let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
             Some (nestedFromFlat "o" rows cols))
     mkFunc name [ ("x", tyFloatTensor dims) ] (tyFloatMat rows cols) body
 
+/// BLADE_MODE_PRODUCT_DEST (rule `mode-product-dest v1`, PM31), an OPT-IN arm:
+/// `1`/`on` = the mode product fills its rank-N result in place; unset/`0`/`off` = the
+/// flat work array plus its rank-N reshape copy (the default). Measured on bench
+/// tensorop (full, 89 x 97 x 101; 11 interleaved runs): peak 39.5 -> 32.9 MB but wall
+/// 172 -> 189 ms (the nested-pointer cell store is slower than the flat one), so the
+/// flat form stays the default. Read per call.
+let modeProductDestEnabled () = Blade.Toolchain.envFlag "BLADE_MODE_PRODUCT_DEST" false
+
+/// The decision record (one per generated mode-product instance).
+let recordModeProductDest (name: string) (applied: bool) (dims: int list) (mode: int) (jOut: int) =
+    let shape = dims |> List.map string |> String.concat " x "
+    let cells = dims |> List.mapi (fun k d -> if k = mode then jOut else d) |> List.fold (*) 1
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "mode-product-dest"; Version = 1
+          Span = noSpan; Subject = name
+          Outcome = (if applied then Blade.Effects.Applied else Blade.Effects.Declined "opt-in (BLADE_MODE_PRODUCT_DEST=1): the in-place fill measured slower than the flat work array on bench tensorop (wall 172 -> 189 ms) while saving one tensor of peak (39.5 -> 32.9 MB)")
+          Evidence =
+            [ sprintf "mode-%d product of a %s tensor: the rank-%d result (%d cells) is filled in place, each cell one ascending chain from +0.0 over the mode index" mode shape dims.Length cells
+              sprintf "cost: peak -%d cells (no flat work array beside the result) and one copy pass fewer; the contraction order is unchanged" cells ] }
+
+/// A rank-N zero tensor: `method_for(range<Idx<d0>>, .., range<Idx<dk>>) <@> lambda(..) -> 0.0 |> compute`.
+let zerosN (dims: int list) : Expr =
+    let names = dims |> List.mapi (fun k _ -> sprintf "__zn%d" k)
+    let ops = dims |> List.map (fun d -> syn (ExprRange [ TyIdx (iLit d) ]))
+    let ps : LambdaParam list = names |> List.map (fun nm -> { Name = nm; Type = None; Default = None; NameSpan = noSpan })
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply, syn (ExprMethodFor ops), syn (ExprLambda (ps, None, fLit 0.0))))))
+
 /// Mode-n product for a fixed shape: Y = X x_mode U with U: jOut x I_mode -- Y(..., r, ...) = Sum_t U(r,t)*X(..., t, ...).
 /// Output shape = dims with dims[mode] := jOut. The nest runs over the OUTPUT multi-index; `acc` is hoisted.
 let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : FunctionDecl =
@@ -659,16 +686,25 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
         |> List.reduce add
     let readX =
         syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ]))
+    // DESTINATION FORM (PM31, round 4 wave 4 lane F item F3; BLADE_MODE_PRODUCT_DEST,
+    // rule `mode-product-dest v1`): the product used to fill a FLAT work array and
+    // return its rank-N reshape -- a second tensor-sized pool and a copy pass. It now
+    // fills the rank-N result in place (`o(o0, .., oN) = acc`) and returns it: the
+    // same cells, each the same ascending chain from the same +0.0 seed, one pool.
+    // OPT-IN (`1`): measured slower, see modeProductDestEnabled.
+    let dest = modeProductDestEnabled ()
+    recordModeProductDest name dest dims mode jOut
     let inner =
         [ sAssign (v "acc") (fLit 0.0)
           sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "u" (v ovars.[mode]) (v "t")) readX) ]
-          sAssign (idx "o" flatOut) (v "acc") ]
+          (if dest then sAssign (syn (ExprApp (v "o", ovars |> List.map v))) (v "acc")
+           else sAssign (idx "o" flatOut) (v "acc")) ]
     let body =
         blockE (
-            sLetMut "o" (zerosLit (prodInts outDims))
+            sLetMut "o" (if dest then zerosN outDims else zerosLit (prodInts outDims))
             :: sLetMut "acc" (fLit 0.0)
             :: loopNest ovars outDims inner,
-            Some (nestedFromFlatN "o" outDims 0))
+            Some (if dest then v "o" else nestedFromFlatN "o" outDims 0))
     mkFunc name [ ("x", tyFloatTensor dims); ("u", tyFloatMat jOut iMode) ]
         (tyFloatTensor outDims) body
 

@@ -1,5 +1,25 @@
 # Plan: windowed (partially-materialized) recursive arrays
 
+> **Status (2026-11-01): P3 BUILT (module scope + print replay), round 4 wave 4 lane B (B1), DEFAULT ON**
+> (`BLADE_REC_REPLAY`, an optimizer gate; rules `rec-window` -- its module arm -- and `rec-print-replay v1`).
+> Not the side-channel recipe section 7 sketches: a module-level `let rec x` STAYS a binding (its full
+> desugar, which the interpreter and the LLVM lane keep and print), and the typechecker
+> (`TypeCheckInfer.recArrayModuleDecision`, the module decl loop now a work list like `inferBlock`'s) adds
+> `let __replay_<x> = { ring sweep + a row marker per completed row }` and `let __snap_<p>_<x> = x(p)`
+> per later fixed-row read (those reads rewritten). The marker lowers to the effectful `IRReplayRow`. The
+> C++ lane (`CodeGenBinding.planRecPrintReplays`, fail closed) then never stores x: the sweep is ONE lambda
+> run through `blade_rt::replay_sweep` (noipa: one machine-code body) at its slot -- filling the snapshots
+> and failing where the step fails, before any print -- and again at x's print, printing each row. Section
+> 7's "print is the sole consumer => one sweep" is NOT taken: the replay always runs twice (the first run
+> keeps the failure site without a totality proof, and both runs are one compiled body, so the printed
+> bits are the first run's whatever `-ffp-contract` does). Admission (each a recorded decline): plain
+> dense numeric trajectory; x read only by its snapshot bindings; the sweep reads only stored,
+> never-assigned, non-deferred, non-provider module values; the sweep and every later binding write
+> nothing (`scheduleMayWriteIn`); no omp/cuda/mpi callable or `display.emit` reachable; not an MPI program.
+> Witnesses `recursive-arrays/067-074`, decisions pinned by `blade test optimize` (`rec_replay_corpus`).
+> LLVM lane: the replay binding is dropped and recorded (`llvm lane: print replay is built in the C++ lane
+> only`) -- a gap row.
+
 > **Status (2026-10-26): P2 v2a (fold fusion) BUILT at IR level, round 4 wave 2 (PM35), OPT-IN** (`BLADE_REC_FOLD=1`;
 > default-on waits for one more converged use-census audit, gap G94: five review rounds each found
 > a member of the trajectory use census). Not the

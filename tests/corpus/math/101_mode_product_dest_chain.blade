@@ -1,0 +1,24 @@
+// TEST: Math mode_product chain fills each result in place
+// mode-product-dest v1 (BLADE_MODE_PRODUCT_DEST=1, PM31, opt-in): each generated mode
+// product fills its rank-3 result in place instead of a flat work array plus a
+// rank-3 reshape copy -- one tensor-sized pool fewer per product, the same
+// cells (each one ascending chain from +0.0 over the mode index). The three
+// ordered mode products of tensorop (I, then J, then K) over odd extents and
+// integer-valued data, so the pins are exact (python reference).
+import math as m
+type I = Idx<3>
+type J = Idx<5>
+type K = Idx<7>
+let X: Array<Float64 like I, J, K> = method_for(range<I, J, K>) <@> lambda(i, j, k) -> Float64((Int64(i) * 7 + Int64(j) * 3 + Int64(k)) % 5) + 1.0 |> compute
+let A: Array<Float64 like I, I> = method_for(range<I, I>) <@> lambda(a, i) -> Float64((Int64(a) + 2 * Int64(i)) % 3) - 1.0 |> compute
+let B: Array<Float64 like J, J> = method_for(range<J, J>) <@> lambda(b, j) -> Float64((2 * Int64(b) + Int64(j)) % 4) - 1.0 |> compute
+let C: Array<Float64 like K, K> = method_for(range<K, K>) <@> lambda(c, k) -> Float64((Int64(c) + 3 * Int64(k)) % 5) - 2.0 |> compute
+let T1: Array<Float64 like I, J, K> = m.mode_product(X, A, 0)
+let T2: Array<Float64 like I, J, K> = m.mode_product(T1, B, 1)
+let Y: Array<Float64 like I, J, K> = m.mode_product(T2, C, 2)
+let s = reduce(Y * Y, (+), axes = 3)
+// EXPECT: s = 102728.0
+let y1 = Y(2, 4, 6)
+// EXPECT: y1 = -64.0
+let y2 = Y(0, 1, 2)
+// EXPECT: y2 = 38.0

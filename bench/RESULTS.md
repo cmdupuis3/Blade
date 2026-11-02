@@ -3137,6 +3137,37 @@ Readout (no compiler change followed from it):
   the gfortran version and the CPU, not diagnosed.
 - Not answerable on 4 cores: the provisional gates `pull_min` / `rowslots_min` and the G32 mt8 question.
 
+## 19. Round 4 wave 4, lane F (2026-11-01) -- the G90 pipeline, assembly fills, mode products, composed layout experiments
+
+Method (every row): `blade compile` of the program under each arm (BLADE_EXE_CACHE=0, a print selection so only
+the checksum prints), then 5 interleaved runs (11 for tensorop) of the exe pair or triple; peak working set =
+GetProcessMemoryInfo `PeakWorkingSetSize` read on the process handle after exit (`peak.ps1`, the wave-2/3
+method); wall = the process wall-clock median, INDICATIVE (process start included, one box, other lanes idle
+under the shared lock). Peaks were identical within 0.2 MB across runs. Compiler: lane F branch at c0aeb92b /
+3043ee5b. Values identical across arms (the printed checksum per row).
+
+| experiment | program (odd extents) | arm | peak MB | wall ms |
+|---|---|---|---|---|
+| F1 / G90 group row map -> ungroup | 3,000,001 doubles, runs of 1001; `h = method_for(g) <@> lambda(r) -> r - mean(r)`; `b = ungroup(h, CI)`; `s = reduce(b * b)` | group-rowmap on (b shares h's pool) | 52.2 | 26 |
+| | | BLADE_GROUP_ROWMAP=0 (the ungroup copy) | 75.1 | 32 |
+| | | also BLADE_GROUP_VIEW=0 (the CSR pool copy of a too) | 98.0 | 37 |
+| F2 / PM26 transpose of a map | 1201 x 1203 doubles; `T = transpose(A * 2.0, [0, 1])`; `s = reduce(T, (+), axes = 2)` | assembly-dest on (no map temporary, 32 x 32 tiles) | 27.5 | 22 |
+| | | BLADE_ASSEMBLY_DEST=0 | 38.5 | 26 |
+| ST12 layout change -> contraction | the same T, then `y = method_for(T) <@> lambda(row) -> prodsum(row, w)` | assembly-dest on | 27.5 | 22 |
+| | | BLADE_ASSEMBLY_DEST=0 | 38.5 | 24 |
+| ST16 producer -> layout -> provider sink | the same T written by `z.write("st16_store", T)` | assembly-dest on | 27.9 | 26 |
+| | | BLADE_ASSEMBLY_DEST=0 | 38.9 | 30 |
+| ST13 / PM31 mode-product chain -> required Y | bench `tensorop` full (89 x 97 x 101), three ordered `m.mode_product` | BLADE_MODE_PRODUCT_DEST=1 (in place) | 32.9 | 189 |
+| | | default (flat work array + reshape copy) | 39.5 | 172 |
+
+Readings (no claim beyond the rows): F1 removes exactly the reassembled array's copy (24 MB of 3M doubles) and,
+with the wave-2 group view, the grouped pool too: the pipeline `a -> g -> h -> b` holds a and h's pool. F2 removes
+one 11.6 MB array (the map temporary) for a transpose, and so for each composed experiment built on it (ST12, ST16).
+What still materializes (gap G140): ST12's T itself (a row contraction over a transposed operand is not absorbed;
+only a FULL fold is), ST16's T (the streamed sink takes rank-1 map producers), ST13's T1 and T2 (no slab fusion
+over the leading mode). F3's in-place mode product saves one tensor (6.6 MB) but measured ~10% slower in wall time
+(nested-pointer cell stores), so it ships OPT-IN (`BLADE_MODE_PRODUCT_DEST=1`), the flat form staying the default.
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input

@@ -133,6 +133,10 @@ struct Control {
   bool owns_directory = false, owns_data = false, owns_manifest = false;
   bool root_retired = false;
   bool directory_retiring = false;
+  // Random-access replay (the external sort's merge, read_block): every
+  // block read once, in any order; count / index sum / square sum backstop.
+  bool random = false;
+  std::uint64_t random_count = 0, random_sum = 0, random_sq = 0;
 #if defined(_WIN32)
   HANDLE root_handle = INVALID_HANDLE_VALUE, directory_handle = INVALID_HANDLE_VALUE;
   HANDLE file = INVALID_HANDLE_VALUE, lock = INVALID_HANDLE_VALUE, auxiliary = INVALID_HANDLE_VALUE;
@@ -625,6 +629,7 @@ inline Status next(std::uint64_t generation, double* values, std::uint64_t capac
   count = 0;
   if (!matches(generation) || active.phase != Phase::reading) return {Code::state};
   auto& c = active;
+  if (c.random) return fail(c, Code::state); // one replay mode per generation
   if (c.origin == c.n) {
     unsigned char f[footer_bytes] = {};
     auto s = transfer(c, c.file, f, footer_bytes, false, true);
@@ -654,6 +659,69 @@ inline Status next(std::uint64_t generation, double* values, std::uint64_t capac
   }
   c.rolling = crc(c.buffer, static_cast<std::size_t>(length * 8), c.rolling);
   c.origin += length; ++c.sequence; c.counters.payload_read += length * 8; count = length; return {};
+}
+// RANDOM-ACCESS REPLAY (round 4 wave 4 D1, the external sort's bounded-fan-in
+// merge): block k of the sealed file, read at its arithmetic offset (fixed-width
+// regular blocks: header + k * (block header + 8 b)), its header validated
+// against (k, k * b, length, nonce, header CRC) and its payload against the
+// block CRC. Only before any sequential next(); the two modes never mix.
+inline Status read_block(std::uint64_t generation, std::uint64_t k, double* values,
+                         std::uint64_t capacity, std::uint64_t& count) noexcept {
+  count = 0;
+  if (!matches(generation) || active.phase != Phase::reading) return {Code::state};
+  auto& c = active;
+  if (c.origin != 0 || c.sequence != 0 || k >= c.plan.blocks) return fail(c, Code::state);
+  const auto origin = k * c.b;
+  const auto length = c.n - origin < c.b ? c.n - origin : c.b;
+  if (!values || capacity < length) return fail(c, Code::state);
+  std::uint64_t at = 0, stride = 0;
+  if (!add(block_header_bytes, c.b * 8, stride) || !mul(k, stride, at) || !add(at, header_bytes, at)
+      || at > std::uint64_t(INT64_MAX)) return fail(c, Code::overflow);
+  LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
+  if (!SetFilePointerEx(c.file, position, nullptr, FILE_BEGIN)) return fail(c, Code::read, GetLastError());
+  unsigned char h[block_header_bytes] = {};
+  auto s = transfer(c, c.file, h, block_header_bytes, false, true);
+  if (!s) return fail(c, s.code, s.os_error);
+  if (get(h) != k || get(h + 8) != origin || get(h + 16) != length
+      || get(h + 24) != length * 8 || get(h + 32) != c.nonce[0] || get(h + 40) != c.nonce[1]
+      || get(h + 56) != crc(h, 56)) return fail(c, Code::integrity);
+  s = transfer(c, c.file, c.buffer, length * 8, false, true);
+  if (!s) return fail(c, s.code, s.os_error);
+  if (get(h + 48) != crc(c.buffer, static_cast<std::size_t>(length * 8))) return fail(c, Code::integrity);
+  for (std::uint64_t i = 0; i < length; ++i) {
+    const auto bits = get(c.buffer + i * 8); std::memcpy(values + i, &bits, 8);
+  }
+  c.random = true; ++c.random_count; c.random_sum += k; c.random_sq += k * k;
+  c.counters.payload_read += length * 8; count = length; return {};
+}
+// The random replay's close: every block read exactly once (count, index sum
+// and square sum -- a backstop; the merge reads each run's blocks in order by
+// construction), then the footer (all fields but the ORDER-DEPENDENT rolling
+// CRC, which only a sequential replay can recompute; every block's own CRC was
+// checked) and EOF. Leaves the phase `checked`, so finish() retires the scratch.
+inline Status finish_random(std::uint64_t generation) noexcept {
+  if (!matches(generation) || active.phase != Phase::reading) return {Code::state};
+  auto& c = active;
+  if (!c.random && c.plan.blocks != 0) return fail(c, Code::state);
+  std::uint64_t es = 0, eq = 0;
+  for (std::uint64_t k = 0; k < c.plan.blocks; ++k) { es += k; eq += k * k; }
+  if (c.random_count != c.plan.blocks || c.random_sum != es || c.random_sq != eq) return fail(c, Code::integrity);
+  std::uint64_t at = 0, headers = 0, payload = 0;
+  if (!mul(c.plan.blocks, block_header_bytes, headers) || !mul(c.n, 8, payload)
+      || !add(header_bytes, headers, at) || !add(at, payload, at) || at > std::uint64_t(INT64_MAX)) return fail(c, Code::overflow);
+  LARGE_INTEGER position{}; position.QuadPart = static_cast<LONGLONG>(at);
+  if (!SetFilePointerEx(c.file, position, nullptr, FILE_BEGIN)) return fail(c, Code::read, GetLastError());
+  unsigned char f[footer_bytes] = {};
+  auto s = transfer(c, c.file, f, footer_bytes, false, true);
+  if (!s) return fail(c, s.code, s.os_error);
+  if (std::memcmp(f, "BLEND001", 8) || get(f + 8) != c.n || get(f + 16) != c.plan.blocks
+      || get(f + 24) != c.n * 8 || get(f + 40) != c.nonce[0]
+      || get(f + 48) != c.nonce[1] || get(f + 56) != crc(f, 56) || !exact_size(c.file, c.plan.file_bytes))
+    return fail(c, Code::integrity);
+  unsigned char byte = 0; DWORD got = 0;
+  if (!ReadFile(c.file, &byte, 1, &got, nullptr)) return fail(c, Code::read, GetLastError());
+  if (got) return fail(c, Code::integrity);
+  c.phase = Phase::checked; return {};
 }
 inline Status owner_dead(Control& c) noexcept {
 #ifdef BLADE_PRIVATE_SPOOL_TESTING
@@ -750,6 +818,8 @@ inline Status append(std::uint64_t, const double*, std::uint64_t) noexcept { ret
 inline Status seal(std::uint64_t) noexcept { return {Code::unsupported}; }
 inline Status open_reader(std::uint64_t) noexcept { return {Code::unsupported}; }
 inline Status next(std::uint64_t, double*, std::uint64_t, std::uint64_t& n) noexcept { n = 0; return {Code::unsupported}; }
+inline Status read_block(std::uint64_t, std::uint64_t, double*, std::uint64_t, std::uint64_t& n) noexcept { n = 0; return {Code::unsupported}; }
+inline Status finish_random(std::uint64_t) noexcept { return {Code::unsupported}; }
 inline Status recover(const Grant&, const char*) noexcept { return {Code::unsupported}; }
 #endif
 inline void abandon(std::uint64_t generation) noexcept {
@@ -771,6 +841,15 @@ public:
   Status next(double* dst, std::uint64_t capacity, std::uint64_t& count) noexcept {
     detail::Guard guard; if (!guard) { count = 0; return {Code::busy}; }
     return detail::next(generation_, dst, capacity, count);
+  }
+  // Random-access replay (the external sort's merge): see detail::read_block.
+  Status read_block(std::uint64_t k, double* dst, std::uint64_t capacity, std::uint64_t& count) noexcept {
+    detail::Guard guard; if (!guard) { count = 0; return {Code::busy}; }
+    return detail::read_block(generation_, k, dst, capacity, count);
+  }
+  Status finish_random() noexcept {
+    detail::Guard guard; if (!guard) return {Code::busy};
+    return detail::finish_random(generation_);
   }
   Status finish() noexcept {
     detail::Guard guard; if (!guard) return {Code::busy};

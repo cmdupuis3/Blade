@@ -3592,12 +3592,34 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // iteration would run.
         let rec containsBreakIf e =
             match e with
-            | IRBreakIf _ -> true
+            | IRBreakIf _ | IRReplayRow _ -> true
             | ExprShape (children, _) -> children |> List.exists containsBreakIf
+        // G95 (round 4 wave 4 lane A; G93's class): the unroll substitutes the
+        // loop variable by a literal in the BODY only. A callable reachable
+        // from the body (transitively) that CAPTURES the loop variable keeps
+        // naming it -- its call sites forward the capture by name, and no
+        // copy binds it any more (a `let rec` step in an arity-poly body with
+        // a lambda reading the step index `n` emitted `__lambda(k, n)` with
+        // `n` undeclared). Such a loop is not unrolled: it stays the ordinary
+        // loop the fixed-arity body runs. The same for a callable capturing one
+        // of the body's own `let` binders (copied unfreshened into every
+        // unrolled copy; Codex review round 1).
+        let loopVarCaptured (vid: IRId) (body: IRExpr) =
+            let own = System.Collections.Generic.HashSet<IRId>()
+            own.Add vid |> ignore
+            iterIRExpr (fun e -> match e with IRLet (id, _, _) -> own.Add id |> ignore | _ -> ()) body
+            let seen = System.Collections.Generic.HashSet<IRId>()
+            let rec reach (x: IRExpr) =
+                collectVarRefsIR x |> Set.exists (fun id ->
+                    match Map.tryFind id funcMap with
+                    | Some d when seen.Add d.Id ->
+                        d.Captures |> List.exists (fun cap -> own.Contains cap.Id) || reach d.Body
+                    | _ -> false)
+            reach body
         let rec unrollForRanges expr =
             match expr with
             | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest)
-                    when not (containsBreakIf body) ->
+                    when not (containsBreakIf body) && not (loopVarCaptured vid body) ->
                 let restUnrolled = unrollForRanges rest
                 let indices = [ int lo .. int hi - 1 ] |> List.rev
                 indices |> List.fold (fun acc k ->
@@ -3673,13 +3695,43 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                   IndexTypes = [ { idxRec with Extent = IRLit (IRLitInt (int64 n)) } ]
                                   IsVirtual = false
                                   Identity = None }
+                            // G95 (round 4 wave 4 lane A; G93's class): each
+                            // element is a COPY of the kernel body, so its
+                            // `let` binders are freshened per element (the
+                            // copies used to share one id: three `auto __v4`
+                            // in one C++ scope). A callable reachable from the
+                            // body that CAPTURES the ordinal or one of those
+                            // lets would keep naming a binder no copy declares
+                            // (the substitution stops at the body); cloning it
+                            // per element is not built, so it is refused here
+                            // with a diagnostic instead of an undeclared name.
+                            let bodyLets =
+                                let acc = System.Collections.Generic.List<IRId>()
+                                iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) lam.Body
+                                acc |> Seq.distinct |> List.ofSeq
+                            let ownBinders = Set.ofList (ordinalParam.VarId :: bodyLets)
+                            let capturedOwn =
+                                let seen = System.Collections.Generic.HashSet<IRId>()
+                                let rec reach (x: IRExpr) =
+                                    collectVarRefsIR x |> Set.exists (fun id ->
+                                        match Map.tryFind id funcMap with
+                                        | Some d when d.Id <> lam.Id && seen.Add d.Id ->
+                                            d.Captures |> List.exists (fun cap -> ownBinders.Contains cap.Id) || reach d.Body
+                                        | _ -> false)
+                                reach lam.Body
+                            if capturedOwn then
+                                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                    $"'{func.SourceName}': a pack former's kernel holds a lambda that captures the kernel's own ordinal or one of its lets; the former is unrolled into one copy of the kernel per pack element, and a capturing lambda is not copied with it (gap G95). Compute the value inline instead of through the nested lambda.")))
                             let elems =
                                 [ for k in 0 .. n - 1 ->
+                                    let fresh = bodyLets |> List.map (fun id -> id, builder.FreshId()) |> Map.ofList
                                     let substituted =
                                         mapIRExpr (fun e ->
                                             match e with
                                             | IRVar (vid, _) when vid = ordinalParam.VarId ->
                                                 IRLit (IRLitInt (int64 k))
+                                            | IRVar (vid, t) when fresh.ContainsKey vid -> IRVar (fresh.[vid], t)
+                                            | IRLet (id, v, b) when fresh.ContainsKey id -> IRLet (fresh.[id], v, b)
                                             | _ -> e) lam.Body
                                     mapIRExpr rewrite substituted ]
                             Some (IRArrayLit (elems, arrTy))
@@ -3808,6 +3860,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           // So does the effect summary: specialization changes arity, not
           // what the body does.
           Effects = func.Effects
+          HoistFrame = func.HoistFrame
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
           Captures = func.Captures

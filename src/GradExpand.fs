@@ -1177,7 +1177,14 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
         let bufName = name
         let bufVar = syn (ExprVar bufName)
         let sAt (idxE: Expr) = syn (ExprApp (bufVar, [idxE]))
-        let zeros = syn (ExprArrayLit (List.replicate n (f64Lit 0.0)))
+        // The buffer zero start (gap G118). Past 4096 cells it is the
+        // constant fill ConstFill (`zeroFill`), not an n-cell ARRAY LITERAL
+        // typed cell by cell (`blade check` 114 s at n = 20,001); `toStmts`
+        // emits it as the zero former. Same values: +0.0 in every cell, each
+        // overwritten before it is read. The small case keeps the literal.
+        let zeros =
+            if n > 4096 then zeroFill (iLit (int64 n))
+            else syn (ExprArrayLit (List.replicate n (f64Lit 0.0)))
         let bufLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar bufName); Type = None; Value = zeros }
         let stepVar = def.StepVar
         let prefixVar = def.PrefixVar

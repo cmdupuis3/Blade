@@ -442,6 +442,8 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         $"check[{code}]({pp c}, \"{msg}\")"
     | IRBreakIf c ->
         $"break_if({pp c})"
+    | IRReplayRow (t, r) ->
+        $"replay_row(#{t}, {pp r})"
     | IRAssign (target, v) ->
         let targetStr =
             match target with

@@ -1,0 +1,16 @@
+// TEST: a function body's kernel reads a projection of a wholly-deferred module tuple
+// Gap G100 (round 4 wave 4 lane A): `v = p[0]` projects the wholly-deferred
+// tuple `p = (d1, d2)`; it stays deferred. A map kernel in a function body
+// (`dsum`) that reads it cell by cell forces it first, block-scoped, as a
+// direct read of `d1` would. The C++ lane used to name the never-declared
+// `v` (BL9002 at g++). (A read at main's TOP level is not covered: its print
+// class -- the interpreter prints the projected root as well -- is gap G111.)
+type I = Idx<4>
+let w: Float64 = 0.5
+let d1 = method_for(range<I>) <@> lambda(i) -> Float64(i) * w
+let d2 = method_for(range<I>) <@> lambda(i) -> Float64(i)
+let p = (d1, d2)
+let v = p[0]
+function dsum() -> Float64 = reduce(method_for(range<I>) <@> lambda(i) -> v(i), (+))
+let a = dsum()
+// EXPECT: a = 3.0

@@ -917,7 +917,10 @@ let private recFoldCorpusTable : (string * Result<string, string> list) list =
       // wave 3 B1, constructor-table review round 1: a moved kernel forcing a
       // deferred module map declines; its stored twin rings
       "064_fold_ring_declines_deferred_kernel_read.blade", [ Error "not a pure total capture-free scalar kernel" ]
-      "065_fold_ring_admits_stored_kernel_read.blade", [ Ok "ring of 2 rows" ] ]
+      "065_fold_ring_admits_stored_kernel_read.blade", [ Ok "ring of 2 rows" ]
+      // review round 2's member (a wholly-deferred tuple's projection); its
+      // value pin restored once the C++ lane compiled it (gap G100)
+      "066_fold_ring_declines_deferred_tuple_projection.blade", [ Error "not a pure total capture-free scalar kernel" ] ]
 
 let private recFoldCorpusCases () : bool list =
     let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
@@ -1076,8 +1079,8 @@ let private recFoldEmission () : bool list =
     // Wave 3 B1, constructor-table review round 2: a projection of a
     // wholly-deferred tuple is deferred in every lane (IRLift.
     // computeDeferredIds); a moved fold kernel reading it by cell declines.
-    // Decision-only: the C++ lane cannot emit a function body reading a
-    // deferred tuple projection (pre-existing BL9002, gap G100).
+    // Its corpus twin recursive-arrays/066 pins the value since gap G100's
+    // fix (the C++ lane failed to compile the body's read, BL9002).
     let tupleProj =
         "type I = Idx<4>\n"
         + "type Step = Idx<64>\n"
@@ -1526,6 +1529,119 @@ let private cepDecisionsOf (src: string) : Result<Blade.Effects.Decision list, s
         with ex -> Error ($"codegen raised: {ex.Message}")
     Blade.Effects.Decisions.drain () |> ignore
     r
+
+// ---------------------------------------------------------------------------
+// MODULE-scope ring + PRINT REPLAY (round 4 wave 4 B1; rules `rec-window`
+// module arm and `rec-print-replay v1`). recursive-arrays/067-074 pin the
+// values (each the full buffer's: the interpreter keeps it); these pin each
+// file's two decisions, and the flagship emission both ways.
+
+/// (file, the rec-window outcome, the rec-print-replay outcome; `None` = no
+/// replay decision, the typechecker made no replay binding).
+let private recReplayCorpusTable : (string * Result<string, string> list * Result<string, string> list) list =
+    [ "067_replay_module_rank1_print_only.blade", [ Ok "module scope: a ring of 2 rows" ], [ Ok "is never stored" ]
+      "068_replay_module_rank2_snapshots.blade", [ Ok "snapshots of rows 2, 7" ], [ Ok "filling the snapshots of rows 2, 7" ]
+      "069_replay_module_rank3_lag2_zero_history.blade", [ Ok "a ring of 3 rows (max lag K = 2)" ], [ Ok "is never stored" ]
+      "070_replay_module_float32_scalar_snapshot.blade", [ Ok "snapshots of rows 6" ], [ Ok "filling the snapshots of rows 6" ]
+      "071_replay_module_failing_step_aborts.blade", [ Ok "module scope: a ring of 2 rows" ], [ Ok "a failing step fails in the first run" ]
+      "072_replay_declines_whole_use.blade", [ Error "module scope: `x` is used whole" ], []
+      "073_replay_declines_assigned_input.blade", [ Ok "module scope: a ring of 2 rows" ], [ Error "a module binding the program assigns" ]
+      "074_replay_declines_deferred_input.blade", [ Ok "module scope: a ring of 2 rows" ], [ Error "a deferred module value" ]
+      "075_replay_two_trajectories_reserved_name.blade", [ Ok "snapshots of rows 3"; Ok "snapshots of rows 5" ],
+        [ Ok "filling the snapshots of rows 3"; Ok "filling the snapshots of rows 5" ] ]
+
+let private recReplayCorpusCases () : bool list =
+    let dir = System.IO.Path.Combine("tests", "corpus", "recursive-arrays")
+    let matches (w: Result<string, string>) (d: Blade.Effects.Decision) =
+        match w, d.Outcome with
+        | Ok ev, Blade.Effects.Applied -> d.Evidence |> List.exists (fun e -> e.Contains ev)
+        | Error why, Blade.Effects.Declined r -> r.Contains why
+        | _ -> false
+    [ for (file, wantWindow, wantReplay) in recReplayCorpusTable do
+        let name = $"rec_replay_corpus: {file}"
+        let path = System.IO.Path.Combine(dir, file)
+        if not (System.IO.File.Exists path) then
+            resultLine Fail name $"missing {path} (run from the repo root)"; yield false
+        else
+        match cepDecisionsOf (System.IO.File.ReadAllText path) with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok ds ->
+            let window = ds |> List.filter (fun d -> d.Rule = "rec-window")
+            let replay = ds |> List.filter (fun d -> d.Rule = "rec-print-replay")
+            let okWindow = window.Length = wantWindow.Length && List.forall2 matches wantWindow window
+            let okReplay = replay.Length = wantReplay.Length && List.forall2 matches wantReplay replay
+            let seen = (window @ replay) |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if okWindow && okReplay then resultLine Pass name $"rec-window + rec-print-replay as pinned"
+            else resultLine Fail name $"wanted {wantWindow} / {wantReplay}; saw: {seen}"
+            yield okWindow && okReplay ]
+
+/// The flagship emission both ways: replayed, the 6-row trajectory has no
+/// allocation of its own and the sweep runs twice through replay_sweep;
+/// BLADE_REC_REPLAY=0 stores the 6-row buffer and makes no replay binding.
+let private recReplayEmission () : bool list =
+    let path = System.IO.Path.Combine("tests", "corpus", "recursive-arrays", "067_replay_module_rank1_print_only.blade")
+    if not (System.IO.File.Exists path) then
+        resultLine Fail "rec_replay_emission" $"missing {path}"; [ false ]
+    else
+    let src = System.IO.File.ReadAllText path
+    let count (cpp: string) (s: string) = System.Text.RegularExpressions.Regex.Matches(cpp, System.Text.RegularExpressions.Regex.Escape s).Count
+    let on =
+        let name = "rec_replay_emission: a 2-row ring, the sweep run twice, no 6-row trajectory"
+        match cppOfSource name src with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let ring = cpp.Contains "_extents[1] = { 2 }"
+            let full = cpp.Contains "_extents[1] = { 6 }"
+            let runs = count cpp "blade_rt::replay_sweep("
+            if ring && not full && runs = 2 then resultLine Pass name "ring extents { 2 }, no { 6 } allocation, replay_sweep at the slot and at the print"; true
+            else resultLine Fail name $"ring={ring} full6={full} replay_sweep calls={runs}"; false
+    let off =
+        let name = "rec_replay_emission_gate_off: BLADE_REC_REPLAY=0 stores the 6-row trajectory"
+        match withGate "BLADE_REC_REPLAY" "0" (fun () -> cppOfSource name src) with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            let full = cpp.Contains "_extents[1] = { 6 }"
+            let runs = count cpp "blade_rt::replay_sweep("
+            if full && runs = 0 then resultLine Pass name "the { 6 } buffer is back, no replay"; true
+            else resultLine Fail name $"full6={full} replay_sweep calls={runs}"; false
+    [ on; off ]
+
+/// PM47 (B6): rand/034's three bodies. The addressed draw's block floats onto
+/// the spine (`block-float`) and compute elision fuses the parameterless
+/// families' maps into their folds; the gamma family's map is not proved total
+/// and stays stored. BLADE_BLOCK_FLOAT=0 leaves the block (no elision record).
+let private atDrawFoldCases () : bool list =
+    let path = System.IO.Path.Combine("tests", "corpus", "rand", "034_at_draw_fused_into_fold.blade")
+    if not (System.IO.File.Exists path) then
+        resultLine Fail "at_draw_fold" $"missing {path}"; [ false ]
+    else
+    let src = System.IO.File.ReadAllText path
+    let elision (ds: Blade.Effects.Decision list) (subject: string) =
+        ds |> List.tryFind (fun d -> d.Rule = "compute-elision" && d.Subject = subject)
+    let on =
+        let name = "at_draw_fold: uniform_at / normal_at maps fused into their folds, gamma_at stored"
+        match decisionsOf src with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let isApplied (o: Blade.Effects.Decision option) = match o with Some d -> d.Outcome = Blade.Effects.Applied | None -> false
+            let isDeclined (o: Blade.Effects.Decision option) = match o with Some d -> d.Outcome <> Blade.Effects.Applied | None -> false
+            let ok =
+                isApplied (elision ds "chunk_sum.u") && isApplied (elision ds "normal_sum.z")
+                && isDeclined (elision ds "gamma_sum.g")
+                && ds |> List.exists (fun d -> d.Rule = "block-float")
+            let seen = ds |> List.filter (fun d -> d.Rule = "compute-elision" || d.Rule = "block-float") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            if ok then resultLine Pass name "two fused, one declined, block-float applied" else resultLine Fail name seen
+            ok
+    let off =
+        let name = "at_draw_fold_gate_off: BLADE_BLOCK_FLOAT=0 keeps the block (no elision of the draw)"
+        match withGate "BLADE_BLOCK_FLOAT" "0" (fun () -> decisionsOf src) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let ok = (elision ds "chunk_sum.u").IsNone && not (ds |> List.exists (fun d -> d.Rule = "block-float"))
+            if ok then resultLine Pass name "no block-float, no elision record for the draw" else resultLine Fail name "a record survived the gate"
+            ok
+    [ on; off ]
+
 
 /// A `cell-epilogue` decision over lowering + codegen.
 let private cepDecisionCase (name: string) (src: string) (want: Blade.Effects.Decision -> bool) (describe: string) =
@@ -6025,6 +6141,31 @@ let private pm60RuntimeShapeReuse () =
 /// row. The call is bound once, before the nest, and the nest subtracts a
 /// name. tests/corpus/functions/192 proves the VALUES (and opt-diff compares
 /// them off against on); only an emission pin can tell O(T) from O(T^2).
+// G97 (round 4 wave 4): functions/568's `up` -- a loop-invariant array call
+// inside a threaded kernel.
+let private hoistArrayCallSrc =
+    "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }\n"
+    + "type K = Idx<3>\n"
+    + "type W = Idx<2>\n"
+    + "function up(a: Array<Float64 like K>, ws: Array<Float64 like W>) -> Array<Float64 like W> = {\n"
+    + "    method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(a), (+), w) |> compute\n"
+    + "}\n"
+    + "let A: Array<Float64 like K> = [1.0, 2.0, 3.0]\n"
+    + "let ws: Array<Float64 like W> = [10.0, 20.0]\n"
+    + "let u = up(A, ws)\n"
+let private hoistArrayCallTopSrc =
+    "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }\n"
+    + "let A = Float64([1.0, 2.0, 3.0])\n"
+    + "let ws = Float64([10.0, 20.0])\n"
+    + "let up = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute\n"
+// The call's argument reads the element: nothing to hoist.
+let private hoistArrayCallCellSrc =
+    "function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }\n"
+    + "type R = Idx<2>\n"
+    + "type C = Idx<3>\n"
+    + "let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+    + "let up = method_for(M) <@> lambda(row) where omp(row: 1) -> reduce(prep(row), (+), 1.0) |> compute\n"
+
 let private hoistSrc =
     "function avg(row: T^1) -> Float64 = Float64(reduce(row, (+))) / Float64(extents(row))\n"
     + "function center(x: T^1) -> T^1 = x - avg(x)\n"
@@ -6163,6 +6304,36 @@ let private lateBroadcastEmbedsScalarInKernel () =
             resultLine Fail name ($"expected the scalar in the kernel (>= 1 per-cell call, 0 lets), got {inNest} and {bound}")
             false
 
+/// G151: a hoisted value fails with the frames its per-cell evaluation had.
+/// An expression-shaped kernel is INLINED per cell (no frame of its own), so
+/// the helper holding its failing invariant pushes none; a kernel whose body
+/// holds a computed map is CALLED per cell (its frame pushed), so the helper
+/// keeps that frame. Pinned on the helper's own definition: a nullary
+/// `__lambda_<n>(Array<int64_t, 1>& v)` reading the capture `v`.
+let private hoistFrameInlinedSrc =
+    "type C = Idx<3>\n"
+    + "let v: Array<Int64 like C> = [1, -1, 0]\n"
+    + "let h = method_for(v) <@> lambda(e) -> e * (6 / reduce(v, (+))) |> compute\n"
+let private hoistFrameCalledSrc =
+    "type C = Idx<3>\n"
+    + "let v: Array<Int64 like C> = [1, -1, 0]\n"
+    + "let w: Array<Int64 like C> = [4, 5, 6]\n"
+    + "let h = method_for(v) <@> lambda(e) -> e * (6 / reduce(v, (+))) + reduce(method_for(w) <@> lambda(x) -> x * e |> compute, (+)) |> compute\n"
+let private hoistHelperFramed (cpp: string) : bool option =
+    let m = System.Text.RegularExpressions.Regex.Match(cpp, @"int64_t __lambda_\d+\(Array<int64_t, 1>& v\) \{\r?\n([^\n]*)")
+    if not m.Success then None else Some (m.Groups.[1].Value.Contains "BLADE_FRAME(")
+let private hoistHelperFrameCase (name: string) (src: string) (expectFramed: bool) =
+    match cppOfSource name src with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        match hoistHelperFramed cpp with
+        | None -> resultLine Fail name "no hoist helper `__lambda_<n>(Array<int64_t, 1>& v)` in the emission"; false
+        | Some framed when framed = expectFramed ->
+            resultLine Pass name (if framed then "the helper of a CALLED kernel keeps the kernel's frame" else "the helper of an INLINED kernel pushes no frame")
+            true
+        | Some framed ->
+            resultLine Fail name ($"helper framed = {framed}, expected {expectFramed} (G151: the per-cell frame)")
+            false
 /// No `rule` decision may be APPLIED for this source (the barrier cases).
 let private notAppliedCase (name: string) (src: string) (rule: string) (why: string) =
     match decisionsOf src with
@@ -8036,7 +8207,10 @@ let private siblingThreadGateUnlicensed () =
     match withGates pins (fun () -> planDecisionsOf siblingThreadGateUnlicensedSrc) with
     | Error e -> resultLine Fail name e; false
     | Ok ds ->
-        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && declinedMentioning "not every leg carries its own reorder licence" d)
+        // since G107 (2) the mixed-licence group is split first: the requesting
+        // licensed leg is alone in its part and keeps its own team either way
+        let gate = ds |> List.exists (fun d -> d.Rule = "sibling-folds" && (declinedMentioning "not every leg carries its own reorder licence" d || declinedMentioning "split by reorder licence (G107), it keeps its own pass" d))
+                   && ds |> List.exists (fun d -> d.Rule = "omp" && applied d)
         if gate then
             resultLine Pass name "declined: a requesting leg beside an unlicensed leg (no licence is borrowed)"
             true
@@ -8061,6 +8235,38 @@ let private siblingUnseededMaxSrc =
     + "    let x: Array<Float64 like R> = [1.0, 7.0, 3.0, 4.0, 5.0]\n"
     + "    (reduce(x, (+)), reduce(x, lambda(a, b) -> if a > b then a else b))\n"
     + "}\n"
+
+/// G107: four statistics, two licensed (+) legs and two unseeded select
+/// legs, at top level.
+let private siblingStatsSplitSrc =
+    "type R = Idx<7>\n"
+    + "let x: Array<Float64 like R> = [1.0, 7.0, -3.0, 4.0, 5.0, 0.5, -2.0]\n"
+    + "let stats = (reduce(x, (+)), reduce(method_for(x) <@> lambda(v) -> v * v, (+)), reduce(x, lambda(a, b) -> if a > b then a else b), reduce(x, lambda(a, b) -> if a < b then a else b))\n"
+
+/// G107: the select written the other way round has no exact left identity.
+let private siblingUnseededSwappedSrc =
+    "type R = Idx<5>\n"
+    + "let (s, m) = {\n"
+    + "    let x: Array<Float64 like R> = [1.0, 7.0, 3.0, 4.0, 5.0]\n"
+    + "    (reduce(x, (+)), reduce(x, lambda(a, b) -> if a > b then b else a))\n"
+    + "}\n"
+
+/// G107 (3): separate top-level lets.
+let private siblingTopLevelSrc =
+    "type R = Idx<7>\n"
+    + "let x: Array<Float64 like R> = [1.0, 7.0, -3.0, 4.0, 5.0, 0.5, -2.0]\n"
+    + "let s = reduce(x, (+))\n"
+    + "let ss = reduce(method_for(x) <@> lambda(v) -> v * v, (+))\n"
+    + "let p = reduce(x, (*))\n"
+
+/// G107 (3): a top-level assignment between the folds is a barrier.
+let private siblingTopLevelBarrierSrc =
+    "type R = Idx<7>\n"
+    + "let mut x: Array<Float64 like R> = [1.0, 7.0, -3.0, 4.0, 5.0, 0.5, -2.0]\n"
+    + "let s = reduce(x, (+))\n"
+    + "x((2 : R)) = 9.0\n"
+    + "let ss = reduce(method_for(x) <@> lambda(v) -> v * v, (+))\n"
+    + "let p = reduce(x, (+), 0.0)\n"
 
 /// A `where repro` callee is not inlined (its per-function veto would be lost).
 let private siblingReproCalleeSrc =
@@ -8278,10 +8484,41 @@ let private siblingCases () =
           (declinedMentioning "disabled by BLADE_SIBLING_FOLDS") "declined: disabled by BLADE_SIBLING_FOLDS"
       siblingConvergence "repro" siblingSerialPins 0 ()
       siblingConvergence "licensed" serialLicensed 3 ()
+      // G107 (2): a mixed group is SPLIT by licence; a lone leg of either
+      // licence keeps its own pass (named), and the strict arm joins all.
       siblingPlanCase "decision_sibling_folds_declined_licence" serialLicensed siblingLicenceMismatchSrc
-          (declinedMentioning "legs disagree on the reorder licence") "declined: legs disagree on the reorder licence"
-      siblingPlanCase "decision_sibling_folds_declined_unseeded_max" siblingSerialPins siblingUnseededMaxSrc
-          (declinedMentioning "unseeded with a non-builtin kernel (no identity)") "declined: an unseeded max leg has no identity"
+          (declinedMentioning "split by reorder licence (G107), it keeps its own pass") "declined: one licensed and one strict leg, split by licence, each its own pass"
+      siblingPlanCase "decision_sibling_folds_licence_strict_arm" (serialLicensed @ [ ("BLADE_SIBLING_FOLDS", "strict") ]) siblingLicenceMismatchSrc
+          (fun d -> applied d && evidenceMentioning "BLADE_SIBLING_FOLDS=strict: every leg in ONE strict traversal" d)
+          "applied under the strict arm: one strict traversal for both legs"
+      siblingPlanCase "decision_sibling_folds_licence_split" serialLicensed siblingStatsSplitSrc
+          (fun d -> applied d && evidenceMentioning "split by reorder licence (G107): the strict legs share this traversal" d
+                    && evidenceMentioning "leg 0: unseeded max-select -> seed -inf (left identity; bit-exact)" d
+                    && evidenceMentioning "leg 1: unseeded min-select -> seed +inf (left identity; bit-exact)" d)
+          "applied: the two strict select legs share one traversal beside the licensed group"
+      siblingPlanCase "decision_sibling_folds_licence_split_licensed" serialLicensed siblingStatsSplitSrc
+          (fun d -> applied d && evidenceMentioning "split by reorder licence (G107): the licensed legs share this traversal" d)
+          "applied: the two licensed legs share their own traversal"
+      // G107 (1): an unseeded running max is seeded with its left identity.
+      siblingPlanCase "decision_sibling_folds_unseeded_max" siblingSerialPins siblingUnseededMaxSrc
+          (fun d -> applied d && evidenceMentioning "leg 1: unseeded max-select -> seed -inf (left identity; bit-exact)" d)
+          "applied: the unseeded max leg seeded -inf (an exact left identity)"
+      siblingPlanCase "decision_sibling_folds_declined_unseeded_swapped_select" siblingSerialPins siblingUnseededSwappedSrc
+          (declinedMentioning "not a running max / min select") "declined: `if a > b then b else a` has no exact left identity"
+      // G107 (3): separate top-level lets are siblings.
+      (let name = "decision_sibling_folds_top_level_default_off"
+       match withGates siblingSerialPins (fun () -> planDecisionsOf siblingTopLevelSrc) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if ds |> List.exists (fun d -> d.Rule = "sibling-folds" && d.Subject = "top level") then
+               resultLine Fail name "a top-level sibling-folds record without BLADE_SIBLING_FOLDS=top"; false
+           else resultLine Pass name "the top-level region is opt-in: no top-level record by default"; true)
+      siblingPlanCase "decision_sibling_folds_top_level" (siblingSerialPins @ [ ("BLADE_SIBLING_FOLDS", "top") ]) siblingTopLevelSrc
+          (fun d -> applied d && d.Subject = "top level" && evidenceMentioning "3 folds over {x} share one traversal" d)
+          "applied: three separate top-level lets share one traversal"
+      siblingPlanCase "decision_sibling_folds_top_level_barrier" (siblingSerialPins @ [ ("BLADE_SIBLING_FOLDS", "top") ]) siblingTopLevelBarrierSrc
+          (fun d -> d.Subject = "top level" && evidenceMentioning "may write (a call or an assignment), so it cannot move to one join point" d)
+          "the fold after a top-level assignment stays out of the join"
       siblingPlanCase "decision_sibling_folds_declined_repro_callee" siblingSerialPins siblingReproCalleeSrc
           (declinedMentioning "not inlined: a `where repro` callee") "declined: a `where repro` callee is not inlined"
       siblingPlanCase "decision_sibling_folds_declined_mutation" siblingSerialPins siblingMutationSrc
@@ -9784,7 +10021,7 @@ let private costIs (prefix: string) (d: Blade.Effects.Decision) =
 
 let private recordSuffixCases () : bool list =
     [ decisionCase "record_cost_compute_elision_fold" ceFoldSrcForCost "compute-elision"
-          (fun d -> d.Subject = "total.x" && applied d && costIs "work 9 -> 9, traffic 9 -> 3, peak 3 -> 0 (model v1: 3 cells; producer 2 ops/cell, fold 1 op/cell" d)
+          (fun d -> d.Subject = "total.x" && applied d && costIs "work 9 -> 9, traffic 9 -> 3, peak 3 -> 0 (model v2: 3 cells; producer 2 ops/cell, fold 1 op/cell" d)
           "applied with `cost: work 9 -> 9, traffic 9 -> 3, peak 3 -> 0` and a legality clause"
       decisionCase "record_cost_compute_elision_map" ceMapSrcForCost "compute-elision"
           (fun d -> d.Subject = "scale_add.x" && applied d && costIs "work 6 -> 6, traffic 15 -> 9, peak 6 -> 3" d)
@@ -9905,6 +10142,38 @@ let private rcLlvmNoPool () =
                 false
         | _ -> resultLine Fail name "no LLVM body for `stats`"; false
     | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false
+
+// G96 (round 4 wave 4): cost model v2's bandwidth weight. The PM05 fan-out
+// arm at a size whose pool exceeds the cache budget: k = 4 fold consumers of
+// a cheap affine producer are now recomputed (measured faster), and the
+// three-cell corpus pins (functions/651) keep v1's 1:1 rate.
+let private rcFanSrc (k: int) =
+    let folds =
+        [ "reduce(x, (+))"; "reduce(x, lambda(p, r) -> p + r * r, 0.0)"; "reduce(x, lambda(p, r) -> p + r * 0.5, 0.0)"
+          "reduce(x, lambda(p, r) -> p + r * 2.0, 0.0)"; "reduce(x, lambda(p, r) -> p + r * 3.0, 0.0)"
+          "reduce(x, lambda(p, r) -> p + r * 4.0, 0.0)"; "reduce(x, lambda(p, r) -> p + r * 5.0, 0.0)"
+          "reduce(x, lambda(p, r) -> p + r * 6.0, 0.0)" ] |> List.take k
+    "type N = Idx<200003>\n"
+    + "function fan(a: Array<Float64 like N>) -> Float64 = {\n"
+    + "    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute\n"
+    + (folds |> List.mapi (fun i f -> $"    let s{i} = {f}\n") |> String.concat "")
+    + "    " + (List.init k (fun i -> $"s{i}") |> String.concat " + ") + "\n}\n"
+    + "let a = method_for(range<N>) <@> lambda(i) -> Float64(i) * 0.000001 |> compute\n"
+    + "let t = fan(a)\n"
+
+let private recomputeV2Cases () : bool list =
+    let evidenceHas (needle: string) (d: Blade.Effects.Decision) = d.Evidence |> List.exists (fun e -> e.Contains needle)
+    [ decisionCase "decision_recompute_v2_fan4_bandwidth_weighted" (rcFanSrc 4) "recompute"
+          (fun d -> d.Subject = "fan.x" && applied d && d.Version = 2
+                    && evidenceHas "bandwidth weight 8: the pool is 200003 cells x 8 bytes" d)
+          "applied at fan-out 4 over a 1.6 MB pool: work +6n <= 8 x traffic -2n"
+      decisionCase "decision_recompute_v2_fan8_bandwidth_weighted" (rcFanSrc 8) "recompute"
+          (fun d -> d.Subject = "fan.x" && applied d && evidenceHas "bandwidth weight 8" d)
+          "applied at fan-out 8 (work +14n <= 8 x traffic -2n)"
+      decisionCase "decision_recompute_v2_small_pool_keeps_v1_rate" (rcCorpus "651_recompute_four_folds_materialized.blade") "recompute"
+          (fun d -> d.Subject = "four.x" && declinedMentioning "materialized -- recompute not dominant: work +9 > traffic -6" d
+                    && d.Evidence |> List.exists (fun e -> e.Contains "bandwidth weight 1: the pool is 3 cells x 8 bytes"))
+          "a cache-resident pool keeps the 1:1 rate: materialized as in v1" ]
 
 let private recomputeCases () : bool list =
     let rcSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
@@ -10143,6 +10412,64 @@ let private ceLlvmFoldNoPool () =
 
 let private ceSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
 
+// G108 (round 4 wave 4): chain-to-fold intermediates.
+let private chainCases () : bool list =
+    let src656 = rcCorpus "656_chain_consumer_names_parameter_twice.blade"
+    let src657 = rcCorpus "657_top_level_deferred_chain_fold.blade"
+    let extentSrc =
+        "let mut x = Int64([1, 2, 3])\n"
+        + "let p = method_for(x) <@> lambda(v) -> v * 2\n"
+        + "let t = 0..p(0) |> compute\n"
+        + "x(0) = 10\n"
+        + "let q = method_for(p) <@> lambda(v) -> v * v\n"
+        + "let r = reduce(q, (+), 0)\n"
+    let deeperSrc =
+        "type N = Idx<1003>\n"
+        + "let x: Array<Float64 like N> = method_for(range<N>) <@> lambda(i) -> Float64(i % 13) |> compute\n"
+        + "let p4 = method_for(x) <@> lambda(v) -> v * 2.0 + 1.0\n"
+        + "let q4 = method_for(p4) <@> lambda(v) -> v * v\n"
+        + "let o4 = method_for(q4) <@> lambda(v) -> v - 1.0\n"
+        + "let r4 = reduce(o4, (+), 3.0)\n"
+    let chain f = withGate "BLADE_COMPUTE_ELIDE" "chain" f
+    let chainCase name src rule want desc = chain (fun () -> decisionCase name src rule want desc)
+    [ decisionCase "decision_compute_elision_twice_named_map_consumer" src656 "compute-elision"
+          (fun d -> ceSubject "chain.p" d && applied d) "applied: chain.p (the consumer names its parameter twice, reads the cell once)"
+      decisionCase "decision_compute_elision_thrice_named_declined" src656 "compute-elision"
+          (fun d -> ceSubject "chain3.p" d && declinedMentioning "reads `p`'s cell 3 times (once or twice is required" d)
+          "declined: chain3.p's consumer names it three times"
+      decisionCase "decision_deferred_chain_fold_default_opt_in" src657 "compute-elision"
+          (fun d -> ceSubject "top level.q3" d && declinedMentioning "opt-in (BLADE_COMPUTE_ELIDE=chain)" d)
+          "declined by default: the deferred chain is an opt-in arm"
+      chainCase "decision_deferred_chain_fold_applied" src657 "compute-elision"
+          (fun d -> ceSubject "top level.q3" d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "deferred chain to fold: `p3` -> `q3` -> the fold"))
+          "applied: r3 reads p3 in place (deferred chain to fold)"
+      chainCase "decision_deferred_chain_fold_forced_inner_declined" src657 "compute-elision"
+          (fun d -> ceSubject "top level.q5" d && declinedMentioning "`p5` is named outside the chain" d)
+          "declined: p5 is read (forced) before the fold, so it is a snapshot"
+      chainCase "decision_deferred_chain_fold_extent_read_declined" extentSrc "compute-elision"
+          (fun d -> ceSubject "top level.q" d && declinedMentioning "`p` is named outside the chain" d)
+          "declined: p is read in a type-carried extent (0..p(0)) before the fold"
+      chainCase "decision_deferred_chain_fold_deeper_declined" deeperSrc "compute-elision"
+          (fun d -> ceSubject "top level.o4" d && declinedMentioning "a deeper chain declines" d)
+          "declined: r4's chain is three deferred levels"
+      chainCase "decision_deferred_chain_fold_partial_kernel_declined" src657 "compute-elision"
+          (fun d -> ceSubject "top level.qk" d && declinedMentioning "the fold kernel is not proved total" d)
+          "declined: s3's fold kernel divides (may fail)"
+      withGate "BLADE_COMPUTE_ELIDE" "0" (fun () ->
+          decisionCase "decision_deferred_chain_fold_disabled" src657 "compute-elision"
+              (fun d -> ceSubject "top level.q3" d && declinedMentioning "deferred chain to fold: disabled by BLADE_COMPUTE_ELIDE" d)
+              "declined: disabled by BLADE_COMPUTE_ELIDE")
+      ceCppAllocCase "compute_elision_twice_named_chain_no_pool" src656 "chain" ((=) 0) (fun n -> n >= 1)
+          "chain reads a in one nest (no pool for p or q); the gate restores the pools"
+      (let name = "deferred_chain_fold_no_inner_pool"
+       match chain (fun () -> cppOfSource name src657), withGate "BLADE_COMPUTE_ELIDE" "0" (fun () -> cppOfSource name src657) with
+       | Ok on, Ok off ->
+           if not (on.Contains "r3__in") && off.Contains "r3__in" && on.Contains "s3__in" then
+               resultLine Pass name "r3 forces no pool for p3 with the gate on (r3__in* only off); s3 (a partial fold kernel) keeps its forced pool"
+               true
+           else resultLine Fail name (sprintf "r3 pool on: %b, off: %b; s3 pool on: %b" (on.Contains "r3__in") (off.Contains "r3__in") (on.Contains "s3__in")); false
+       | Error e, _ | _, Error e -> resultLine Fail name e; false) ]
+
 // P3 remainder: one level deeper (x0 -> x1 -> fold), and the top level under a
 // print selection.
 let private ceChainSrc =
@@ -10194,6 +10521,73 @@ let private ceNoRecordFor (name: string) (src: string) (subject: string) =
         else
             resultLine Pass name ($"no `{subject}` record: a printed top-level binding keeps today's form silently")
             true
+
+// ---------------------------------------------------------------------------
+// G98 (round 4 wave 4 lane A): an admission that MOVES a kernel passes the
+// program's deferred-value predicate (Optimize.programDeferredId /
+// widenDeferred over IRLift.deferredValuePredicate) to IRTotality, so a
+// kernel reading a deferred value -- through an alias, a wholly-deferred
+// tuple's projection, a let chain -- is not certified total. Compute elision
+// (functions/656: the alias read used to be admitted and its failure moved
+// behind `bad`) and its stored twin (657); the epilogue legs (sibling-folds
+// /049: the leg declines); the partial-row and sparse-wildcard folds, whose
+// closed-graph rule refused the read already, now name the deferred read.
+let private g98DeferredValueCases () : bool list =
+    let read (cat: string) (f: string) = System.IO.File.ReadAllText (System.IO.Path.Combine("tests", "corpus", cat, f))
+    let deferredPrefix =
+        "type K = Idx<3>\nlet dk = method_for(range<K>) <@> lambda(k) -> Float64(k)\n"
+        + "function dsum() -> Float64 = reduce(method_for(range<K>) <@> lambda(k) -> dk(k), (+))\n"
+    let partial =
+        withPartialRows (fun () ->
+            decisionCase "g98_partial_rows_declines_deferred_kernel_read"
+                (deferredPrefix + partialRowsSrc.Replace("v * v + 1.0", "v * v + dsum()")) "partial-row-fold"
+                (declinedMentioning "reads a deferred computation") "declined: the producer kernel reads a deferred module map")
+    let sparse =
+        let name = "g98_sparse_wildcard_declines_deferred_fold_read"
+        withTransposeRows (fun () ->
+            let src = deferredPrefix + sparseWildcardSrc.Replace("a * 10.0 + b, 7.0", "a * 10.0 + b + dsum(), 7.0")
+            match lower src with
+            | Error e -> resultLine Fail name e; false
+            | Ok ir ->
+                match sparseWildcardProof ir.Modules.Head with
+                | Error why when why.Contains "reads a deferred computation" -> resultLine Pass name why; true
+                | other -> resultLine Fail name (sprintf "wanted the deferred-read refusal; got %A" other); false)
+    [ decisionCase "g98_compute_elision_declines_deferred_alias_read"
+          (read "functions" "656_compute_elision_declines_deferred_alias_read.blade") "compute-elision"
+          (fun d -> ceSubject "r.x" d && declinedMentioning "reads a deferred computation" d)
+          "declined: x's producer reads an alias of a deferred map"
+      decisionCase "g98_compute_elision_stored_twin_applies"
+          (read "functions" "657_compute_elision_stored_alias_twin_applies.blade") "compute-elision"
+          (fun d -> ceSubject "r.x" d && applied d) "applied: the stored twin's producer is total"
+      decisionCase "g98_epilogue_legs_deferred_kernel_read_declines"
+          (read "sibling-folds" "049_input_legs_decline_deferred_kernel_read.blade") "sibling-folds"
+          (fun d ->
+              (match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
+              && d.Evidence |> List.exists (fun e -> e.Contains "reduce(a, ..): the fold kernel may fail or has effects"))
+          "the leg reading the deferred map is refused (its rejection in the evidence)"
+      partial
+      sparse
+      // the fable review member: ANOTHER module's deferred map read by a moved
+      // producer kernel (proved subscripts through the shared named index).
+      // The base binary APPLIED compute elision here (d's BL8013 would run
+      // behind `bad`); the fail-closed predicate declines it.
+      (let name = "g98_compute_elision_declines_imported_deferred_map"
+       let sources =
+           [ ("Helpers",
+              "module Helpers\n\ntype I = Idx<9>\nlet z: Array<Int64 like I> = [3, 1, 2, 5, 0, 4, 7, 8, 9]\n"
+              + "let d = method_for(range<I>) <@> lambda(i) -> Float64(100 / z(i))\n")
+             ("Main",
+              "module Main\nimport Helpers\nfrom Helpers import I, d, z\n\nlet r = {\n"
+              + "    let x = method_for(range<I>) <@> lambda(i) -> d(i) * 2.0 |> compute\n"
+              + "    let z0 = z((4 : I))\n    let bad = 7 / z0\n    let s = reduce(x, (+))\n    s + Float64(bad)\n}\n") ]
+       match decisionsOfMulti sources with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           let mine = ds |> List.filter (fun d -> d.Rule = "compute-elision")
+           if mine |> List.exists (fun d -> ceSubject "r.x" d && declinedMentioning "reads a deferred computation" d) then
+               resultLine Pass name "declined: r.x reads Helpers.d, a deferred map of another module"; true
+           else
+               resultLine Fail name (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "); false) ]
 
 let private ceRemainderCases () : bool list =
     [ ceCppAllocCase "compute_elision_chain_no_pool" ceChainSrc "chain" ((=) 0) (fun n -> n >= 2)
@@ -10459,6 +10853,80 @@ let private siblingMapCases () : bool list =
           decisionCase "decision_sibling_maps_disabled" smFlatSrc "sibling-maps"
               (declinedMentioning "disabled by BLADE_SIBLING_MAPS") "declined: disabled by BLADE_SIBLING_MAPS") ]
 
+// Join producer (BLADE_JOIN_PRODUCER, rule `join-producer`; round 4 wave 4,
+// E2 / ST04). The VALUES are corpus sibling-folds/049-052; these read the
+// emission (p's pool gone in both lanes, the join's shared leaf) and the
+// region record and its declines.
+let private jpSrc =
+    "type I = Idx<1003>\n"
+    + "function stats(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let p = method_for(a) <@> lambda(v) -> exp(sin(v)) * log(1.0 + v * v) |> compute\n"
+    + "    let s1 = reduce(p, (+))\n"
+    + "    let s2 = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))\n"
+    + "    let s3 = reduce(method_for(p) <@> lambda(v) -> v * v, (+))\n"
+    + "    s1 + s2 + s3\n"
+    + "}\n"
+    + "let x = 0.001 * Float64(range<Idx<1003>>) |> compute\n"
+    + "let r = stats(x)\n"
+
+let private jpKeyedSrc = jpSrc.Replace("    s1 + s2 + s3\n", "    s1 + s2 + s3 + p(7)\n")
+let private jpDivSrc =
+    jpSrc.Replace("Array<Float64 like I>) -> Float64", "Array<Int64 like I>) -> Int64")
+         .Replace("lambda(v) -> exp(sin(v)) * log(1.0 + v * v)", "lambda(v) -> 100 / (v + 1)")
+         .Replace("v * 3.0", "v * 3")
+         .Replace("let x = 0.001 * Float64(range<Idx<1003>>) |> compute", "let x = method_for(range<I>) <@> lambda(i) -> Int64(i) |> compute")
+
+let private jpWholeSrc =
+    "type I = Idx<11>\n"
+    + "function prep(whole: T^1, v: Float64) -> Float64 = v * 2.0 + 1.0\n"
+    + "function stats(a: Array<Float64 like I>) -> Float64 = {\n"
+    + "    let p = method_for(a, a) <@> prep |> compute\n"
+    + "    let s = reduce(p, (+))\n"
+    + "    let t = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))\n"
+    + "    s + t\n"
+    + "}\n"
+    + "let x = Float64(range<Idx<11>>) |> compute\n"
+    + "let r = stats(x)\n"
+
+let private joinProducerCases () : bool list =
+    [ (match cppOfSource "jp_cpp" jpSrc, withGate "BLADE_JOIN_PRODUCER" "0" (fun () -> cppOfSource "jp_cpp_off" jpSrc) with
+       | Ok on, Ok off ->
+           (match ceCppBody on "stats", ceCppBody off "stats" with
+            | Some bOn, Some bOff ->
+                let ok = not (bOn.Contains "allocate<") && bOn.Contains "sharing __v" && bOff.Contains "allocate<"
+                resultLine (if ok then Pass else Fail) "join_producer_cpp_no_pool"
+                    (if ok then "C++: the producer is the join's shared leaf (no pool); BLADE_JOIN_PRODUCER=0 keeps the pool" else bOn)
+                ok
+            | _ -> resultLine Fail "join_producer_cpp_no_pool" "no C++ body for `stats`"; false)
+       | Error e, _ | _, Error e -> resultLine Fail "join_producer_cpp_no_pool" e; false)
+      (match ceLlvmOf "jp_llvm" jpSrc, withGate "BLADE_JOIN_PRODUCER" "0" (fun () -> ceLlvmOf "jp_llvm_off" jpSrc) with
+       | Ok on, Ok off ->
+           (match ceLlvmBody on "stats", ceLlvmBody off "stats" with
+            | Some bOn, Some bOff ->
+                let loops (b: string) = smCount @"\nloop\.cond\d+:" b
+                let ok = loops bOn = 1 && loops bOff = 2
+                resultLine (if ok then Pass else Fail) "join_producer_llvm_one_loop"
+                    $"llvm lane, stats: {loops bOn} loop(s) on (the join with its shared producer), {loops bOff} off (fill + join)"
+                ok
+            | _ -> resultLine Fail "join_producer_llvm_one_loop" "no LLVM body for `stats`"; false)
+       | Error e, _ | _, Error e -> resultLine Fail "join_producer_llvm_one_loop" ($"the llvm lane refused: {e}"); false)
+      decisionCase "decision_join_producer_applied" jpSrc "join-producer"
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "region plan: producer" && e.Contains "3 fold legs")
+                    && d.Evidence |> List.exists (fun e -> e.StartsWith "legality: "))
+          "applied: the region record (producer, 3 synchronized legs, one-cell block) with a legality line"
+      decisionCase "decision_join_producer_unbounded_lag" jpKeyedSrc "join-producer"
+          (declinedMentioning "unbounded-lag branch")
+          "declined: a keyed read of p beside the join keeps the stored strategy"
+      decisionCase "decision_join_producer_whole_array_argument" jpWholeSrc "join-producer"
+          (declinedMentioning "not a pointwise co-iteration")
+          "declined (Codex review E2-1): a producer whose first argument is consumed whole would leave a leg with no loop level"
+      decisionCase "decision_join_producer_not_total" jpDivSrc "join-producer"
+          (declinedMentioning "not proved total")
+          "declined: an integer division in the producer could fail (its first failing cell would move)"
+      withGate "BLADE_JOIN_PRODUCER" "0" (fun () ->
+          decisionCase "decision_join_producer_disabled" jpSrc "join-producer"
+              (declinedMentioning "disabled by BLADE_JOIN_PRODUCER") "declined: disabled by BLADE_JOIN_PRODUCER") ]
+
 // ---- the gather terminal (round 4 wave 3, PM28; compute elision's
 // gather-terminal arm, BLADE_GATHER_ELIDE) --------------------------------
 let private gtHead =
@@ -10603,6 +11071,20 @@ let private dcfTotalSrc =
 let private dcfNamedSeedSrc =
     dcfHead + "let s0: Float64 = 0.5\n" + "let rows = reduce(decompact(S, 0), (+), s0)\n"
 
+// G102 (round 4 wave 4): the mat-vec arm.
+let private dcfMatVecSrc =
+    dcfHead
+    + "let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute\n"
+    + "let y = method_for(decompact(S, 0)) <@> lambda(row) -> prodsum(row, v) |> compute\n"
+let private dcfMatVecAntiSrc =
+    dcfHead
+    + "let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute\n"
+    + "let y = method_for(decompact(An, 1)) <@> lambda(row) -> prodsum(v, row) |> compute\n"
+let private dcfMatVecDeferredSrc =
+    dcfHead
+    + "let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0\n"
+    + "let y = method_for(decompact(S, 0)) <@> lambda(row) -> prodsum(row, v) |> compute\n"
+
 let private decompactRowFoldCases () : bool list =
     let dcf (d: Blade.Effects.Decision) = d.Subject = "rows"
     let mainAllocs (cpp: string) = System.Text.RegularExpressions.Regex.Matches(cpp, @"(?<!de)allocate<").Count
@@ -10633,6 +11115,15 @@ let private decompactRowFoldCases () : bool list =
     [ allocCase "decompact_row_fold_cpp_sym_no_buffer" dcfSymSrc
       allocCase "decompact_row_fold_cpp_antisym_no_buffer" dcfAntiSrc
       llvmAllocCase "decompact_row_fold_llvm_sym_no_buffer" dcfSymSrc
+      allocCase "decompact_matvec_cpp_sym_no_buffer" dcfMatVecSrc
+      allocCase "decompact_matvec_cpp_antisym_no_buffer" dcfMatVecAntiSrc
+      llvmAllocCase "decompact_matvec_llvm_sym_no_buffer" dcfMatVecSrc
+      decisionCase "decision_decompact_matvec_applied" dcfMatVecSrc "decompact-row-fold"
+          (fun d -> d.Subject = "y" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "prodsum(row, v) -> the row walk over the pool weighted by v(j)"))
+          "applied: the mat-vec reads the pool weighted by v"
+      decisionCase "decision_decompact_matvec_deferred_vector_declined" dcfMatVecDeferredSrc "decompact-row-fold"
+          (fun d -> d.Subject = "y" && declinedMentioning "the vector is not proved stored" d)
+          "declined: a deferred vector is not proved stored"
       decisionCase "decision_decompact_row_fold_sym_applied" dcfSymSrc "decompact-row-fold"
           (fun d -> dcf d && applied d && d.Evidence |> List.exists (fun e -> e.Contains "SymIdx<2, 9> pool"))
           "applied: the SymIdx row fold reads the pool"
@@ -11109,7 +11600,14 @@ let private p4Cases () : bool list =
            let ok =
                mine |> List.exists (fun d -> clSubject "s: reduce(prep(A))" d && applied d
                                              && d.Evidence |> List.exists (fun e -> e.Contains "defined in ANOTHER module"))
-               && mine |> List.exists (fun d -> clSubject "z: reduce(scaled(A))" d && declinedMentioning "captures a value the callee does not bind" d)
+               // `scaled` reads Helpers' module value `scale`: since gap G98's
+               // fail-closed deferred predicate, a binding of another module is
+               // unaudited and the totality audit declines it first (it was the
+               // capture rule's decline before); declined either way
+               && mine |> List.exists (fun d ->
+                      clSubject "z: reduce(scaled(A))" d
+                      && (declinedMentioning "captures a value the callee does not bind" d
+                          || declinedMentioning "reads a deferred computation" d))
                && mine |> List.exists (fun d -> clSubject "q: reduce(squared(A))" d && declinedMentioning "names another callable (`sq`)" d)
            if ok then resultLine Pass "decision_call_elision_foreign_callee" "applied to s (foreign prep); declined: scaled reads a module value, squared calls another Helpers function"
            else resultLine Fail "decision_call_elision_foreign_callee" (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")
@@ -11570,8 +12068,12 @@ let private hashJoinDecisionCases () =
           (hjDeclined "the payload kernel captures a value") "declined: the payload kernel captures"
       decisionCase "decision_hash_join_declined_predicate" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r" "lambda(e) -> !e" + hjTail) hjRule
           (hjDeclined "a non-identity mask predicate") "declined: a non-identity predicate (the anti-join spelling)"
-      decisionCase "decision_hash_join_declined_conjunctive" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r && l == r" "lambda(e) -> e" + hjTail) hjRule
-          (hjDeclined "a conjunctive key kernel") "declined: a conjunctive key kernel (v1.1)"
+      // round 4 wave 4 D3 (ST15): a conjunctive key kernel whose residual is a
+      // pure total scalar of the keys is ADMITTED (it was the v1.1 decline)
+      decisionCase "decision_hash_join_applied_conjunctive" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r && l == r" "lambda(e) -> e" + hjTail) hjRule
+          (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.StartsWith "residual (D3, ST15)")) "applied: a conjunctive key kernel with a total residual (D3)"
+      decisionCase "decision_hash_join_declined_conjunctive_not_total" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l == r && 10 / l > 1" "lambda(e) -> e" + hjTail) hjRule
+          (hjDeclined "a residual conjunct of the key kernel is not a pure, total scalar") "declined: a non-total residual conjunct (D3)"
       decisionCase "decision_hash_join_declined_not_equality" (hjHead + hjJoin "lambda(l, r) -> l * r" "lambda(l, r) -> l < r" "lambda(e) -> e" + hjTail) hjRule
           (hjDeclined "the key kernel is not the equality") "declined: a band / inequality kernel"
       decisionCase "decision_hash_join_declined_float_keys"
@@ -11703,7 +12205,16 @@ let private hashJoinCorpusRoutes () =
           ("016_equijoin_failing_payload_cast_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
           ("017_equijoin_failing_payload_call_declines.blade", Error [ (m, "the payload kernel is not a pure, total scalar") ])
           ("018_equijoin_failing_key_kernel_mod_declines.blade", Error [ (m, "the key kernel is not the equality `l == r` of its two parameters") ])
-          ("019_equijoin_failing_payload_unresolved_call_declines.blade", Error [ (m, "the payload kernel pk may write") ]) ]
+          ("019_equijoin_failing_payload_unresolved_call_declines.blade", Error [ (m, "the payload kernel pk may write") ])
+          // round 4 wave 4 D3 (ST15): a conjunctive key kernel with a total residual
+          ("020_equijoin_residual_predicate_fanout.blade", admitted [ (m, "residual (D3, ST15): the conjunctive key kernel is re-evaluated", "if (!__wrap_") ])
+          ("021_equijoin_residual_first_conjunct.blade", admitted [ (m, "residual (D3, ST15): the conjunctive key kernel is re-evaluated", "if (!__wrap_") ])
+          ("022_equijoin_residual_not_total_declines.blade", Error [ (m, "a residual conjunct of the key kernel is not a pure, total scalar") ])
+          ("023_equijoin_residual_rejects_every_match.blade", admitted [ (m, "residual (D3, ST15): the conjunctive key kernel is re-evaluated", "if (!__wrap_") ])
+          // round 4 wave 4 H1 (G128, ST15): a payload mask over J and the compound over it
+          ("024_equijoin_payload_mask_then_compound.blade", Error [ (m, "`matched` as an operand of IRMask") ])
+          ("025_equijoin_payload_mask_inline.blade", Error [ (m, "a use of `matched` the census does not certify") ])
+          ("026_equijoin_payload_mask_keyed_read_declines.blade", Error [ (m, "`matched` as an operand of IRMask") ]) ]
     if not (System.IO.Directory.Exists dir) then
         resultLine Fail "hash_join_corpus_route_census" $"missing {dir} (run from the repo root)"
         [ false ]
@@ -11764,6 +12275,221 @@ let private hashJoinCorpusRoutes () =
                         yield false ]
     coverage :: perFile
 
+// ---------------------------------------------------------------------------
+// The sort form (round 4 wave 4 D1, rule `sort-form v1`, BLADE_SORT_FORM):
+// the identity range source, the key cache and the ungated scratch release.
+// Values are pinned by corpus sql-sort/006-010; these pin the DECISION and
+// the emitted form in both gate states.
+let private sortFormSrc = """
+type R = Idx<7>
+let k: Array<Float64 like R> = [3.0, 1.0, 2.0, 1.0, 0.5, 3.0, 2.0]
+let perm = sort(range<R>, lambda(i) -> k(i))
+let ids = method_for(range<R>) <@> lambda(i) -> i |> compute
+let q = sort(ids, lambda(i) -> k(i))
+let w = sort(k, lambda(x) -> -x)
+let zs: Array<Int64 like R> = [1, 2, 3, 4, 5, 6, 7]
+let d = sort(range<R>, lambda(i) -> 10 / zs(i))
+"""
+
+let private sortFormCases () : bool list =
+    let rule = "sort-form"
+    let check (name: string) (f: unit -> string list) =
+        try
+            match f () with
+            | [] -> resultLine Pass name "as pinned"; true
+            | ps -> resultLine Fail name (String.concat "; " ps); false
+        with ex -> resultLine Fail name ex.Message; false
+    [ check "sort_form_applied_identity_and_key_cache" (fun () ->
+        match decisionsOf sortFormSrc, cppOfSource "sort_form_on" sortFormSrc with
+        | Error e, _ | _, Error e -> [ e ]
+        | Ok ds, Ok cpp ->
+            let mine = ds |> List.filter (fun d -> d.Rule = rule)
+            let has s pred = mine |> List.exists (fun d -> d.Subject = s && pred d)
+            [ if not (has "perm" (fun d -> applied d && evidenceHas "identity source: the operand is the plain range" d && evidenceHas "key cache: the key is closed-total" d)) then
+                  yield "perm: no applied identity + key-cache record"
+              if not (has "q" (declinedMentioning "general form (declined -- the key is not proved total")) then
+                  yield "q: the value-subscript key is not declined as unproved"
+              if not (has "w" (fun d -> applied d && evidenceHas "key cache: the key is closed-total" d)) then
+                  yield "w: the total element key is not cached"
+              if not (has "d" (fun d -> applied d && evidenceHas "key cache: declined -- the key is not proved total" d)) then
+                  yield "d: the integer-division key is cached or the identity form is not applied"
+              if not (cpp.Contains "perm__buf") || cpp.Contains "perm__perm" then yield "perm: not sorted in place"
+              if not (cpp.Contains "blade_rt::sort_key_less(perm__keys[") then yield "perm: cached keys not compared"
+              if not (cpp.Contains "delete[] q__perm;") then yield "q: the scratch is not freed after the gather"
+              if not (cpp.Contains "blade_rt::sort_key_less(w__keys[__a], w__keys[__b])") then yield "w: cached keys not compared"
+              if cpp.Contains "d__keys" then yield "d: a non-total key is cached" ])
+      check "sort_form_gate_off_general_form" (fun () ->
+        withGate "BLADE_SORT_FORM" "0" (fun () ->
+            match decisionsOf sortFormSrc, cppOfSource "sort_form_off" sortFormSrc with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                let mine = ds |> List.filter (fun d -> d.Rule = rule)
+                [ if not (mine |> List.exists (fun d -> d.Subject = "perm" && declinedMentioning "disabled by BLADE_SORT_FORM" d)) then
+                      yield "perm: no gate-off decline"
+                  if not (cpp.Contains "perm__src") then yield "perm: the range is not materialized into a scratch source"
+                  if not (cpp.Contains "delete[] perm__src.data;") then yield "perm: the scratch source is not freed"
+                  if not (cpp.Contains "delete[] perm__perm;") then yield "perm: the scratch permutation is not freed"
+                  if cpp.Contains "__keys" then yield "a key is cached with the gate off"
+                  if not (cpp.Contains "blade_rt::sort_key_less(") then yield "the total-preorder comparator is not used" ])) ]
+
+// ---------------------------------------------------------------------------
+// Join to aggregate (round 4 wave 4 D2, rule `join-aggregate v1`,
+// BLADE_JOIN_AGG): an unprinted equijoin read only by strict folds and
+// extents is never stored; each fold walks the probe at its own site.
+let private joinAggSrc = """
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let fp = reduce(matched, lambda(a, b) -> a * 31 + b)
+"""
+
+let private joinAggFloatSrc = """
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Float64 like LeftRow> = [2.0, 3.0, 7.0]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Float64 like RightRow> = [10.0, 10.0, 20.0, 10.0]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let total = reduce(matched, (+), 0.0)
+"""
+
+let private joinAggCases () : bool list =
+    let rule = "join-aggregate"
+    let check (name: string) (f: unit -> string list) =
+        try
+            match f () with
+            | [] -> resultLine Pass name "as pinned"; true
+            | ps -> resultLine Fail name (String.concat "; " ps); false
+        with ex -> resultLine Fail name ex.Message; false
+    let mine (ds: Blade.Effects.Decision list) = ds |> List.filter (fun d -> d.Rule = rule && d.Subject = "matched")
+    [ check "join_aggregate_applied_under_a_print_selection" (fun () ->
+        withGates [ ("BLADE_PRINT", "match_count,total,fp"); ("BLADE_JOIN_AGG", "1") ] (fun () ->
+            match decisionsOf joinAggSrc, cppOfSource "join_agg_on" joinAggSrc with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                [ if not (mine ds |> List.exists (fun d -> applied d && evidenceHas "folds fed straight from the probe" d)) then yield "no applied plan for matched"
+                  if cpp.Contains "matched_compact" then yield "the relation buffer is still built"
+                  if not (cpp.Contains "// join-aggregate v1: `total` folds the unstored equijoin") then yield "total does not walk the probe"
+                  if not (cpp.Contains "// join-aggregate v1: `fp` folds the unstored equijoin") then yield "fp does not walk the probe"
+                  if not (cpp.Contains "blade_join_free_i64(&matched__csr); // join-aggregate v1: the last fold") then yield "the CSR is not freed after the last fold"
+                  if not (cpp.Contains "if (matched__card == 0) { blade_rt::panic(\"BL8003\"") then yield "the unseeded fold has no empty guard" ]))
+      check "join_aggregate_with_a_residual_predicate" (fun () ->
+        // D3 (ST15): join -> predicate -> strict aggregate, the predicate a total
+        // residual conjunct of the key kernel, tested in the count AND each fold's probe
+        let src = joinAggSrc.Replace("lambda(l, r) -> l == r,", "lambda(l, r) -> l == r && l > 1,")
+        withGates [ ("BLADE_PRINT", "match_count,total,fp"); ("BLADE_JOIN_AGG", "1") ] (fun () ->
+            match decisionsOf src, cppOfSource "join_agg_residual" src with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                let tests = System.Text.RegularExpressions.Regex.Matches(cpp, @"if \(!__wrap_\d+_matched__key\(").Count
+                [ if not (mine ds |> List.exists applied) then yield "no applied plan with the residual"
+                  if cpp.Contains "matched_compact" then yield "the relation buffer is still built"
+                  if tests <> 3 then yield $"the residual is tested {tests} times (the count and two folds: 3)" ]))
+      check "join_aggregate_declines_a_type_extent_reader_and_an_interval_write" (fun () ->
+        // Codex round 1: J inside a range bound; a callee writing a source through `mut`
+        let ext = joinAggSrc + "let xs = 0..(reduce(matched, (+), 0))\n"
+        let wr = joinAggSrc.Replace("let left_amount:", "let mut left_amount:")
+                           .Replace("let match_count = extents(matched)", "function change(a: mut Array<Int64 like LeftRow>) -> Int64 = {\n    a((0 : LeftRow)) = 99\n    0\n}\nlet changed = change(left_amount)\nlet match_count = extents(matched)")
+        withGates [ ("BLADE_PRINT", "match_count,total,fp"); ("BLADE_JOIN_AGG", "1") ] (fun () ->
+            match decisionsOf ext, decisionsOf wr with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok d1, Ok d2 ->
+                [ if not (mine d1 |> List.exists (declinedMentioning "J is named inside a type extent")) then yield "the range-bound reader is not declined"
+                  if mine d2 |> List.exists applied then yield "the interval write is not declined (an applied plan)" ]))
+      check "join_aggregate_declines_a_float_fold_under_contraction" (fun () ->
+        withGates [ ("BLADE_PRINT", "total"); ("BLADE_FP_REPRO", "1"); ("BLADE_JOIN_AGG", "1") ] (fun () ->
+            match decisionsOf joinAggFloatSrc with
+            | Error e -> [ e ]
+            | Ok ds -> [ if not (mine ds |> List.exists (declinedMentioning "a float fold under contraction")) then yield "a float fold under contraction was admitted" ]))
+      check "join_aggregate_is_opt_in" (fun () ->
+        withGate "BLADE_PRINT" "match_count,total,fp" (fun () ->
+            match decisionsOf joinAggSrc with
+            | Error e -> [ e ]
+            | Ok ds -> [ if not (mine ds |> List.exists (declinedMentioning "disabled by BLADE_JOIN_AGG")) then yield "the default build plans it" ]))
+      check "join_aggregate_declines_a_printed_join" (fun () ->
+        withGate "BLADE_JOIN_AGG" "1" (fun () ->
+            match decisionsOf joinAggSrc, cppOfSource "join_agg_printed" joinAggSrc with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                [ if not (mine ds |> List.exists (declinedMentioning "J is printed")) then yield "no printed-J decline"
+                  if not (cpp.Contains "matched_compact") then yield "a printed J lost its buffer" ]))
+      check "join_aggregate_gate_off_keeps_the_relation" (fun () ->
+        withGates [ ("BLADE_PRINT", "match_count,total,fp"); ("BLADE_JOIN_AGG", "0") ] (fun () ->
+            match decisionsOf joinAggSrc, cppOfSource "join_agg_off" joinAggSrc with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                [ if not (mine ds |> List.exists (declinedMentioning "disabled by BLADE_JOIN_AGG")) then yield "no gate-off decline"
+                  if not (cpp.Contains "matched_compact") then yield "gate off: the relation buffer is gone" ]))
+      check "join_aggregate_declines_a_licensed_float_fold" (fun () ->
+        withGates [ ("BLADE_PRINT", "total"); ("BLADE_JOIN_AGG", "1"); ("BLADE_FP_CONTRACT", "off") ] (fun () ->
+            match decisionsOf joinAggFloatSrc with
+            | Error e -> [ e ]
+            | Ok ds -> [ if not (mine ds |> List.exists (declinedMentioning "LICENSED in this build")) then yield "a licensed float fold was admitted" ]))
+      // H1 / G128: the hash join's census of a SELECTION over J (opt-in,
+      // BLADE_JOIN_SELECTION): the corpus witnesses' routes under the gate,
+      // the block-local mask (Codex round 2) and the default decline
+      check "hash_join_selection_census_opt_in" (fun () ->
+        let read (f: string) = System.IO.File.ReadAllText(System.IO.Path.Combine("tests/corpus/sql-joins", f))
+        let hj (ds: Blade.Effects.Decision list) = ds |> List.filter (fun d -> d.Rule = "hash-join" && d.Subject = "matched")
+        let on src = withGate "BLADE_JOIN_SELECTION" "1" (fun () -> decisionsOf src, cppOfSource "hj_sel" src)
+        let blockLocal = joinAggSrc + "let keep = {\n    let bits = mask(matched, lambda(v) -> v > 25)\n    bits\n}\nlet first_pair = keep(0, 0)\n"
+        match on (read "024_equijoin_payload_mask_then_compound.blade"), on (read "025_equijoin_payload_mask_inline.blade"),
+              on (read "026_equijoin_payload_mask_keyed_read_declines.blade"), on blockLocal, decisionsOf (read "024_equijoin_payload_mask_then_compound.blade") with
+        | (Error e, _), _, _, _, _ | (_, Error e), _, _, _, _ | _, (Error e, _), _, _, _ | _, (_, Error e), _, _, _
+        | _, _, (Error e, _), _, _ | _, _, _, (Error e, _), _ | _, _, _, _, Error e -> [ e ]
+        | (Ok d24, Ok c24), (Ok d25, Ok c25), (Ok d26, _), (Ok dbl, _), Ok dOff ->
+            let cardOnly (c: string) = c.Contains "compound_index_t<2>::cardinality_only" && not (c.Contains "matched_idx_maskvec")
+            [ if not (hj d24 |> List.exists (fun d -> applied d && evidenceHas "a mask over the compact buffer" d)) || not (cardOnly c24) then yield "024: the selection census did not apply"
+              if not (c24.Contains "nested_array_utilities::Compound<bool, 2> keep { new bool[matched.size()], matched.idx, matched.trailing_stride };") then yield "024: the mask is not a Compound<bool, 2> over J's index"
+              if not (hj d25 |> List.exists applied) || not (cardOnly c25) then yield "025: the inline selection census did not apply"
+              if not (hj d26 |> List.exists (declinedMentioning "the mask `keep` over `matched` as an operand")) then yield "026: the keyed read through the mask is not declined"
+              if hj dbl |> List.exists applied then yield "a block-local mask over J was certified"
+              if not (hj dOff |> List.exists (declinedMentioning "`matched` as an operand of IRMask")) then yield "the default build certifies a selection" ])
+      // H1 / ST15: join -> payload predicate (a mask over J, the compound over
+      // it) -> strict aggregate: the selection is never stored either
+      check "join_aggregate_st15_selection_applied" (fun () ->
+        let src = joinAggSrc + "let keep = mask(matched, lambda(v) -> v > 25)\nlet big = compound(matched, keep)\nlet stotal = reduce(big, (+), 0)\nlet sfp = reduce(big, lambda(a, b) -> a * 3 + b)\n"
+        withGates [ ("BLADE_PRINT", "match_count,total,stotal,sfp"); ("BLADE_JOIN_AGG", "1"); ("BLADE_JOIN_SELECTION", "1") ] (fun () ->
+            match decisionsOf src, cppOfSource "join_agg_st15" src with
+            | Error e, _ | _, Error e -> [ e ]
+            | Ok ds, Ok cpp ->
+                [ if not (mine ds |> List.exists (fun d -> applied d && evidenceHas "payload predicate (H1, ST15)" d)) then yield "no applied ST15 plan"
+                  if cpp.Contains "big_compact" || cpp.Contains "matched_compact" then yield "a relation or selection buffer is still built"
+                  if cpp.Contains "Compound<bool, 2> keep" then yield "the mask over J is still built"
+                  if not (cpp.Contains "// join-aggregate v1: `sfp` folds the unstored equijoin") then yield "sfp does not walk the probe"
+                  if not (cpp.Contains "if (!__wrap_") then yield "no payload predicate on the probe" ]))
+      check "join_aggregate_st15_declines" (fun () ->
+        let baseSel = joinAggSrc + "let keep = mask(matched, lambda(v) -> v > 25)\nlet big = compound(matched, keep)\nlet stotal = reduce(big, (+), 0)\n"
+        let printedKeep = baseSel
+        let reread = baseSel + "let nk = reduce(keep, lambda(a, b) -> a || b, false)\n"
+        let partial = joinAggSrc + "let keep = mask(matched, lambda(v) -> v / 2 > 12)\nlet big = compound(matched, keep)\nlet stotal = reduce(big, (+), 0)\n"
+        let counted = baseSel + "let nb = extents(big)\n"
+        // Codex round 1: a mask no selection reads is elided too, so its predicate is audited
+        let unusedFailing = joinAggSrc + "let ignored = mask(matched, lambda(v) -> 1 / (v - v) > 0)\n"
+        let dec sel src = withGates [ ("BLADE_PRINT", sel); ("BLADE_JOIN_AGG", "1"); ("BLADE_JOIN_SELECTION", "1") ] (fun () -> decisionsOf src)
+        match dec "total,stotal,keep" printedKeep, dec "total,stotal,nk" reread, dec "total,stotal" partial, dec "total,stotal,nb" counted with
+        | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> [ e ]
+        | Ok d1, Ok d2, Ok d3, Ok d4 ->
+            [ if not (mine d1 |> List.exists (declinedMentioning "is printed: its cells are an output")) then yield "a printed mask is not declined"
+              if not (mine d2 |> List.exists (declinedMentioning "the mask `keep` over J is read by `nk`")) then yield "a second mask reader is not declined"
+              if not (mine d3 |> List.exists (declinedMentioning "is not a resolved, capture-free, pure total scalar")) then yield "a partial predicate is not declined"
+              if not (mine d4 |> List.exists (declinedMentioning "`nb` reads J (or a selection over it) other than")) then yield "a count of the selection is not declined"
+              match dec "total,fp" unusedFailing with
+              | Error e -> yield e
+              | Ok d5 -> if not (mine d5 |> List.exists (declinedMentioning "the payload predicate of `ignored`")) then yield "an unread failing mask is elided" ])
+      check "join_aggregate_admits_a_float_fold_under_repro" (fun () ->
+        withGates [ ("BLADE_PRINT", "total"); ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_JOIN_AGG", "1") ] (fun () ->
+            match decisionsOf joinAggFloatSrc with
+            | Error e -> [ e ]
+            | Ok ds -> [ if not (mine ds |> List.exists applied) then yield "the repro float fold was not admitted" ])) ]
+
 let private hashJoinCodegenCases () =
     [ codegenDecisionCase "decision_hash_join_compound_representation" hjSrc "compound"
           (fun d -> applied d && d.Subject = "matched" && evidenceHas "the equijoin relation (hash-join v1)" d)
@@ -11791,6 +12517,94 @@ let private hashJoinCodegenCases () =
            else
                resultLine Fail name ($"refusal: {why}; recorded: {rec'}")
                false) ]
+
+/// The mode-product destination form (mode-product-dest v1, BLADE_MODE_PRODUCT_DEST, PM31).
+let private modeProductDestCases () : bool list =
+    let src = try System.IO.File.ReadAllText "tests/corpus/math/101_mode_product_dest_chain.blade" with _ -> ""
+    [ withGate "BLADE_MODE_PRODUCT_DEST" "1" (fun () ->
+          planCase "decision_mode_product_dest_applied_opt_in" src "mode-product-dest"
+              (fun d -> applied d && evidenceMentioning "filled in place" d) "applied under BLADE_MODE_PRODUCT_DEST=1: each mode product fills its result in place")
+      planCase "decision_mode_product_dest_declined_default" src "mode-product-dest"
+          (fun d -> declinedMentioning "opt-in (BLADE_MODE_PRODUCT_DEST=1)" d) "declined by default: the opt-in arm measured slower" ]
+
+/// The assembly destination fill (assembly-dest v1, BLADE_ASSEMBLY_DEST, PM26):
+/// the corpus witnesses' emission and decisions.
+let private assemblyDestCases () : bool list =
+    let corpus (file: string) =
+        try System.IO.File.ReadAllText ("tests/corpus/index-types/" + file) with _ -> ""
+    let tSrc = corpus "569_assembly_dest_transpose_of_map.blade"
+    let sjSrc = corpus "570_assembly_dest_stack_join_of_maps.blade"
+    let dSrc = corpus "571_assembly_dest_rank3_and_declines.blade"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    let count (needle: string) (cpp: string) =
+        let mutable n = 0
+        let mutable i = cpp.IndexOf needle
+        while i >= 0 do
+            n <- n + 1
+            i <- cpp.IndexOf (needle, i + needle.Length)
+        n
+    [ tnfEmission "assembly_dest_transpose_fills_destination_in_tiles" tSrc (fun cpp ->
+          if count "never stored -- computed cell by cell into" cpp = 2
+             && has "for (size_t __ib = 0; __ib < 37UL; __ib += 32) for (size_t __jb = 0; __jb < 41UL; __jb += 32)" cpp
+             && has "T1__d[__j * 37UL + __i] = " cpp
+          then Ok "both map temporaries are never stored; the transposes fill in 32 x 32 tiles"
+          else Error "the fused tiled fill (or the omitted temporary) is missing")
+      tnfEmission "assembly_dest_stack_join_fill_slices" sjSrc (fun cpp ->
+          if count "never stored -- computed cell by cell into" cpp = 3
+             && has "S__d[7UL + __q] = " cpp && has "S__d[14UL + __q] = S__s2[__q];" cpp
+          then Ok "the stack's and the join's map operands fill their slices; the stored `a` is a flat copy"
+          else Error "the stack / join fill is missing")
+      withGate "BLADE_ASSEMBLY_DEST" "0" (fun () ->
+          tnfEmission "assembly_dest_gate_off_keeps_temporary" tSrc (fun cpp ->
+              if not (has "never stored -- computed cell by cell" cpp) && has "transpose: hard" cpp
+              then Ok "gate off: the temporary is stored and copied"
+              else Error "gate off did not restore the stored temporary"))
+      planCase "decision_assembly_dest_applied" tSrc "assembly-dest"
+          (fun d -> applied d && evidenceMentioning "is computed cell by cell into `T1`" d) "applied: T1's operand is never stored"
+      planCase "decision_assembly_dest_declined_not_total" dSrc "assembly-dest"
+          (fun d -> declinedMentioning "is not total" d) "declined: an integer division can fail"
+      planCase "decision_assembly_dest_declined_empty_axis" (corpus "572_assembly_dest_empty_axis_declines.blade") "assembly-dest"
+          (fun d -> declinedMentioning "non-zero extents" d) "declined: an empty axis has no pool base"
+      planCase "decision_assembly_dest_declined_named_printed" dSrc "assembly-dest"
+          (fun d -> d.Subject = "M" && declinedMentioning "`M` is printed" d) "declined: a named map prints"
+      withGate "BLADE_ASSEMBLY_DEST" "0" (fun () ->
+          planCase "decision_assembly_dest_declined_gate" tSrc "assembly-dest"
+              (fun d -> declinedMentioning "disabled by BLADE_ASSEMBLY_DEST" d) "declined: disabled by BLADE_ASSEMBLY_DEST") ]
+
+/// The per-group map storage plan (group-rowmap v1, BLADE_GROUP_ROWMAP, G90):
+/// the corpus witnesses' emission and decisions.
+let private groupRowMapCases () : bool list =
+    let corpus (file: string) =
+        try System.IO.File.ReadAllText ("tests/corpus/segments/" + file) with _ -> ""
+    let mapSrc = corpus "027_group_rowmap_elementwise_ungroup.blade"
+    let normSrc = corpus "028_group_rowmap_normalize.blade"
+    let has (needle: string) (cpp: string) = cpp.Contains needle
+    [ tnfEmission "group_rowmap_pool_and_shared_ungroup" mapSrc (fun cpp ->
+          if has "double* h__pool = new double[seg__offsets[seg__ngroups]];" cpp
+             && has "Array<double, 1> b = { h__pool, b_extents };" cpp
+             && has "Array<double, 1> b2 = { h__pool, b2_extents };" cpp
+             && not (has "b = { allocate<" cpp) && not (has "b2 = { allocate<" cpp)
+          then Ok "h is one pool in group order; both ungroups share it (no copy)"
+          else Error "the row map's pool or the shared ungroup is missing")
+      tnfEmission "group_rowmap_row_kernel_into_group_slice" normSrc (fun cpp ->
+          if has "double* h__pool = new double[seg__offsets[seg__ngroups]];" cpp
+             && has "Array<double, 1> b = { h__pool, b_extents };" cpp
+          then Ok "the row kernel writes each group's slice; b shares the pool"
+          else Error "the row kernel's grouped pool or the share is missing")
+      withGate "BLADE_GROUP_ROWMAP" "0" (fun () ->
+          tnfEmission "group_rowmap_gate_off_keeps_copy" mapSrc (fun cpp ->
+              if has "Array<double, 1> b = { allocate<promote<double, 1>::type>(b_extents), b_extents };" cpp
+                 && not (has "= { h__pool, b_extents }" cpp) then Ok "gate off: the ungroup copies"
+              else Error "gate off did not restore the ungroup copy"))
+      planCase "decision_group_rowmap_applied" mapSrc "group-rowmap"
+          (fun d -> d.Subject = "b" && applied d && evidenceMentioning "shares `h__pool`" d) "applied: b shares h's pool"
+      planCase "decision_group_rowmap_declined_reassembled_written" (corpus "029_group_rowmap_reassembled_written_keeps_copy.blade") "group-rowmap"
+          (fun d -> d.Subject = "b" && declinedMentioning "`b` is assigned" d) "declined: b is assigned"
+      planCase "decision_group_rowmap_declined_map_of_map" (corpus "030_group_rowmap_map_of_map.blade") "group-rowmap"
+          (fun d -> d.Subject = "b" && declinedMentioning "a map of a map is v1.1" d) "declined: a map of a map"
+      withGate "BLADE_GROUP_ROWMAP" "0" (fun () ->
+          planCase "decision_group_rowmap_declined_gate" mapSrc "group-rowmap"
+              (fun d -> d.Subject = "b" && declinedMentioning "disabled by BLADE_GROUP_ROWMAP" d) "declined: disabled by BLADE_GROUP_ROWMAP") ]
 
 /// The structural group view (structural-group-view v1, BLADE_GROUP_VIEW,
 /// PM57): the corpus witnesses' emission and decisions.
@@ -12104,6 +12918,9 @@ let runOptimizeTests () =
           // decision, and the ring's emission both ways.
           yield! recWindowCorpusCases ()
           yield! recWindowEmission ()
+          yield! recReplayCorpusCases ()
+          yield! recReplayEmission ()
+          yield! atDrawFoldCases ()
           // PM35: folds riding a windowed recurrence.
           // (OPT-IN this wave: every APPLIED assertion runs with an explicit
           // BLADE_REC_FOLD=1; the default-build decline is pinned inside.)
@@ -12141,6 +12958,9 @@ let runOptimizeTests () =
           yield! transposeNormalFormWave3Cases ()
           // The structural group view (PM57, round 4 wave 2).
           yield! groupViewCases ()
+          yield! groupRowMapCases ()
+          yield! assemblyDestCases ()
+          yield! modeProductDestCases ()
           // Provider sink destination passing (PM45, round 4 wave 2).
           yield! providerSinkCases ()
           yield! sinkStreamCases ()
@@ -12396,6 +13216,8 @@ let runOptimizeTests () =
           notAppliedCase "hoist_declines_conditional_may_abort" hoistConditionalSrc "invariant-hoist"
               "the may-abort call is read only under the kernel's branch"
           hoistGateOffKeepsPerCellCall ()
+          hoistHelperFrameCase "hoist_helper_of_inlined_kernel_pushes_no_frame" hoistFrameInlinedSrc false
+          hoistHelperFrameCase "hoist_helper_of_called_kernel_keeps_its_frame" hoistFrameCalledSrc true
           // The late (post-monomorphization) array/scalar broadcast takes the
           // same road: scalar in the kernel, hoisted under the guard.
           lateBroadcastGuardedOnNonEmptyNest ()
@@ -12415,19 +13237,34 @@ let runOptimizeTests () =
           yield! recomputeCases ()
           // Compute elision (BLADE_COMPUTE_ELIDE): single-consumer body computes.
           yield! computeElisionCases ()
+          // G108: chain-to-fold intermediates; G96: cost model v2.
+          yield! chainCases ()
+          yield! recomputeV2Cases ()
+          // G97: an invariant array call in a threaded kernel is hoisted.
+          decisionCase "decision_hoist_invariant_array_call_threaded" hoistArrayCallSrc "invariant-hoist"
+              (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "`prep(a)` does not read the element: bound once"))
+              "applied: prep(a) bound once before the threaded nest in a function body"
+          notAppliedCase "hoist_array_call_top_level_stays" hoistArrayCallTopSrc "invariant-hoist" "a top-level host keeps the call (the pool would live to program end)"
+          notAppliedCase "hoist_array_call_reading_the_cell_stays" hoistArrayCallCellSrc "invariant-hoist" "prep(row) reads the element: it stays in the kernel"
           yield! gatherTerminalCases ()
           yield! decompactRowFoldCases ()
           yield! ceRemainderCases ()
+          yield! g98DeferredValueCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.
           yield! foldMapElisionCases ()
           // Sibling maps (BLADE_SIBLING_MAPS): sibling stored maps share one sweep.
           yield! siblingMapCases ()
+          yield! joinProducerCases ()
           // Call elision (BLADE_CALL_ELIDE): a supported call read in place.
           yield! callElisionCases ()
           // A nested fold of an array-returning call evaluates it once.
           yield! nestedFoldCallCases ()
           // The P4 remainder: let-bound, foreign-module and kernel callers.
-          yield! p4Cases () ]
+          yield! p4Cases ()
+          // The sort form (round 4 wave 4 D1, BLADE_SORT_FORM).
+          yield! sortFormCases ()
+          // Join to aggregate (round 4 wave 4 D2, BLADE_JOIN_AGG).
+          yield! joinAggCases () ]
         @ planCases ()
         @ coIterIdentityPins ()
         @ siblingCases ()

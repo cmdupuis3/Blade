@@ -1652,6 +1652,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRSequence es -> List.iter walk es
         | IRConstraintCheck (c, _, _, _) -> walk c
         | IRBreakIf c -> walk c
+        | IRReplayRow (_, r) -> walk r
         | IRReplicate (count, body) -> walk count; walk body
         | IRGuard (c, b) -> walk c; walk b
         // Scalar / compound-expression forms.

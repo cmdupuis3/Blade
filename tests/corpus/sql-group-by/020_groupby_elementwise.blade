@@ -1,0 +1,15 @@
+// TEST: GroupBy Elementwise
+// An elementwise map over a group_by result keeps the group-member axis: the
+// result is a grouped value over the SAME grouping (G90, group-rowmap v1),
+// so it prints, peels and folds per group like the group_by result itself.
+// Before G90 the C++ emitter refused it (BL7004, "elementwise map over a
+// group_by result is not yet supported" -- this file pinned that refusal);
+// mapping BEFORE grouping is still the equivalent spelling.
+let region = Int64([0, 1, 0])
+let temps = Float64([10.0, 20.0, 30.0])
+let gk = group_keys(region)
+let grouped = group_by(temps, gk)
+let d = method_for(grouped) <@> lambda(e) -> e * 2.0 |> compute
+// EXPECT: d = [[20.0, 60.0], [40.0]]
+let sums = method_for(d) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [80.0, 40.0]

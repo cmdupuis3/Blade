@@ -1,0 +1,19 @@
+// TEST: A map whose kernel takes its first operand WHOLE inside a function body
+// ============================================================================
+// Gap G141 (round 4 wave 4, lane G item G2): `method_for(a, a) <@> prep` with
+// `prep(whole: T^1, v)` peels only the second operand; the first parameter had
+// no name in the loop nest and the kernel call rendered it as an undeclared
+// `__v<id>` (a g++ rejection, BL9002) with every optimizer gate off. An operand
+// no level peels is now passed whole.
+// ============================================================================
+type I = Idx<11>
+function prep(whole: T^1, v: Float64) -> Float64 = v * 2.0 + reduce(whole, (+)) / 55.0
+function stats(a: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(a, a) <@> prep |> compute
+    let s = reduce(p, (+))
+    let t = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))
+    s + t
+}
+let x = Float64(range<Idx<11>>) |> compute
+let r = stats(x)
+// EXPECT: r = 484.0

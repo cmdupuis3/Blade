@@ -87,7 +87,9 @@ let private owns (id: IRId) : bool =
     // a sibling-map member, or an input an earlier sibling's moved sweep reads
     Blade.Optimize.SiblingMapTable.isProtected id ||
     // a streamed provider sink's producer (never stored) or its write
-    Blade.Optimize.SinkStreamTable.contains id
+    Blade.Optimize.SinkStreamTable.contains id ||
+    // a never-stored assembly operand (assembly-dest v1) or its inputs
+    Blade.Optimize.AssemblyDestTable.contains id
 
 /// Private worker: callers cannot substitute the older extent-only foreign
 /// census for A05's dependency-aware final whole-program roots.

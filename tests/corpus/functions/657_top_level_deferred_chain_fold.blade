@@ -1,0 +1,32 @@
+// TEST: A fold over a deferred map of a deferred map reads the inner map in place
+// ============================================================================
+// Gap G108 (2): `let p3 = method_for(x) <@> f; let q3 = method_for(p3) <@> g;
+// let r3 = reduce(q3, (+), 3.0)` (both deferred) forced p3 into a full N-cell
+// pool at r3 ("reduce over a deferred computation (one level)") whatever g
+// is. A deferred value is evaluated where it is read, so the fold now reads
+// p3's cell in its own nest (compute-elision `deferred chain to fold`,
+// realized by elementwise fusion): one nest, no pool. Declines keep the pool:
+// a fold kernel that may fail (`s3`, integer `/`), and an inner map NAMED
+// outside the chain (`r5`: `p5(0)` reads -- and forces -- it first, so it is a
+// snapshot when the fold runs; the write to `x5` between must not reach r5).
+// (A third deferred level declines too: `blade test optimize`.)
+// ============================================================================
+type N = Idx<1003>
+let x: Array<Float64 like N> = method_for(range<N>) <@> lambda(i) -> Float64(i % 13) |> compute
+let p3 = method_for(x) <@> lambda(v) -> v * 2.0 + 1.0
+let q3 = method_for(p3) <@> lambda(v) -> v * v
+let r3 = reduce(q3, (+), 3.0)
+let k: Array<Int64 like N> = method_for(range<N>) <@> lambda(i) -> Int64(i % 5) |> compute
+let pk = method_for(k) <@> lambda(v) -> v + 1
+let qk = method_for(pk) <@> lambda(v) -> v * v
+let s3 = reduce(qk, lambda(a, b) -> a + b / 1, 7)
+let mut x5 = Float64([1.0, 2.0, 3.0])
+let p5 = method_for(x5) <@> lambda(v) -> v * 2.0
+let first5 = p5(0)
+x5(0) = 10.0
+let q5 = method_for(p5) <@> lambda(v) -> v * v
+let r5 = reduce(q5, lambda(a, b) -> a + b, 0.0)
+// EXPECT: r3 = 225238.0
+// EXPECT: s3 = 11021
+// EXPECT: first5 = 2.0
+// EXPECT: r5 = 56.0

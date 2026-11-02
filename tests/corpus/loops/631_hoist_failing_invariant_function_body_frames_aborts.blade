@@ -1,0 +1,12 @@
+// TEST: Hoisted Failing Invariant In A Function Body Reports The Function Frame (aborts)
+// ABORT: BL8013
+// ABORT: at f
+// ============================================================================
+// G151: inside `f` the map's kernel is inlined per cell, so the division's
+// frames are `f`'s alone. The hoisted `6 / reduce(a, (+))` (a sums to 0) runs
+// once, before the nest, and reports exactly those frames -- no extra
+// `lambda in f` frame from the helper that holds it.
+type C = Idx<3>
+function f(a: Array<Int64 like C>) -> Array<Int64 like C> = method_for(a) <@> lambda(e) -> e * (6 / reduce(a, (+))) |> compute
+let v: Array<Int64 like C> = [1, -1, 0]
+let h = f(v)

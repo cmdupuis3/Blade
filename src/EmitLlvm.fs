@@ -1530,6 +1530,7 @@ let private collectPositionalReadsLl (isDeferred: IRId -> bool) (isWrapper: IREx
         | IRSequence es -> List.iter walk es
         | IRConstraintCheck (cnd, _, _, _) -> walk cnd
         | IRBreakIf cnd -> walk cnd
+        | IRReplayRow (_, r) -> walk r
         | IRReplicate (count, body) -> walk count; walk body
         | IRGuard (cnd, b) -> walk cnd; walk b
         | IRBinOp (_, _, l, r, _) -> walk l; walk r
@@ -1741,6 +1742,17 @@ let private framePopMark = ";__BLADE_FRAME_POP__"
 
 /// Open a frame named `name` (an IRCallable.SourceName) at the body position.
 let private framePush (c: Ctx) (name: string) = c.Body.Add(framePushMark + name)
+
+/// The name a NO-FRAME push carries: resolveFrames never emits it (nor its
+/// pop). Not a Blade name (it starts with a NUL).
+let private noFrameName = "\u0000noframe"
+
+/// Open the frame of callable `cl`'s body. A kernel-invariant hoist helper
+/// whose kernel the compiled lanes INLINE per cell (IRCallable.HoistFrame =
+/// Some false) is inline code moved out of the nest: it opens a frame that is
+/// never emitted, so the push / pop pairing stays one shape (gap G151).
+let private framePushFor (c: Ctx) (cl: IRCallable) =
+    if cl.HoistFrame = Some false then framePush c noFrameName else framePush c cl.SourceName
 
 /// Close the innermost open frame. Every push is matched by exactly one pop
 /// on the body's fall-through path; a panic leaves through `exit` and never
@@ -3219,6 +3231,9 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // trip-entry resets dominate the break), so freeing it is exact. The
     // budget abort that rides with the guard is an ordinary
     // IRConstraintCheck after the loop.
+    // A print-replay row: its binding is dropped at entry (tryEmitProgramNamed),
+    // so reaching one here is a lane error, refused rather than emitted.
+    | IRReplayRow _ -> refuse "a print-replay row outside its (skipped) replay binding"
     | IRBreakIf cond ->
         if c.BreakTargets.Count = 0 then
             refuse "a `while` guard outside the recursive array's loop"
@@ -3850,6 +3865,11 @@ and private declLocArgs (c: Ctx) : (Sc * string) list =
 /// NOT routed here: the C++ lane locates a lambda's guard at its enclosing
 /// declaration, which is what `DeclSpan` already holds.
 and private withCalleeDecl<'T> (c: Ctx) (cl: IRCallable) (body: unit -> 'T) : 'T =
+    // A kernel-invariant hoist helper (IRCallable.HoistFrame) is part of a
+    // map kernel, which this lane inlines under the lambda rule -- it keeps
+    // its ENCLOSING declaration -- so the helper keeps the one at its call,
+    // the nest's (gap G151).
+    if cl.HoistFrame.IsSome then body () else
     let savedSpan = c.DeclSpan
     let savedName = c.DeclName
     c.DeclSpan <-
@@ -5094,6 +5114,12 @@ and private bindLetIn (c: Ctx) (id: IRId) (value: IRExpr) (scope: IRExpr) : unit
 /// computation the program never forced.
 and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value: IRExpr) : unit =
     let rec peelCompute (e: IRExpr) = match e with IRCompute i -> peelCompute i | e -> e
+    // assembly-dest v1 (F2 / PM26) is a C++-lane fill: this lane stores the
+    // planned temporary as written (its transpose reads the stored pool; it
+    // has no stack / join arm). Recorded, never silent.
+    (match Blade.Optimize.AssemblyDestTable.tryProducer id with
+     | Some p -> Blade.Optimize.recordAssemblyDest p.ProducerName (Blade.Effects.Declined "llvm lane: the assembly-dest fill is not built in this lane (v1); the temporary is stored and copied") p.Evidence
+     | None -> ())
     match value with
     // Sibling maps (Optimize.planSiblingMaps, round 4 wave 2, PM04): a planned
     // member allocates and binds its pool; the last member fills every pool
@@ -5299,6 +5325,10 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
 /// its own pass); a member whose producer is not the planned dense shape
 /// fills the stashed pools first, in member order, then takes its own path.
 and private siblingLlvmPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
+    match g.Kind with
+    | Blade.Optimize.SibHaloStream _ ->
+        Error "the LLVM lane has no segments arm: a streamed halo program runs in the C++ lane, whose segment run loop realizes the group"
+    | _ ->
     match g.Members |> List.tryFindIndex (fun m -> (Blade.Optimize.HotRowTable.tryProducer m).IsSome) with
     | Some j -> Error $"the cell epilogue takes {List.item j g.Names} in this lane (one pass that stores it and folds its consumer)"
     | None -> Ok ()
@@ -5333,7 +5363,8 @@ and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: Appl
                 isDenseShape a.Groups
                 && (match g.Kind with
                     | Blade.Optimize.SibFlat cells -> shapeCells a.Groups = cells
-                    | Blade.Optimize.SibHalo _ -> a.Extents = [ ext ])
+                    | Blade.Optimize.SibHalo _ -> a.Extents = [ ext ]
+                    | Blade.Optimize.SibHaloStream _ -> false)
             | APool _ -> false
         if not shapeOk then
             // fallback: the stashed pools are filled here, in member order
@@ -5370,6 +5401,7 @@ and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: Appl
                                     let v = coerce c sa.Elem (readCell c sa [ { Reg = idx; Ty = ScI64 } ])
                                     storeCell c sa.Elem (gepCell c sa.Elem sp idx) v)
                 record Blade.Effects.Applied [ $"llvm lane: one serial halo walk writes {stash'.Length} outputs, peeled by member domain (this lane has no thread form)" ]
+            | Blade.Optimize.SibHaloStream _ -> invalidOp "sibling-maps: a streamed halo group never commits in the LLVM lane (its preflight declines)"
         true
     | _ -> false
 
@@ -7351,7 +7383,7 @@ and private applyKernelFramed (c: Ctx) (framed: bool) (cl: IRCallable) (args: KA
     List.iter2 (bindKernelParam c) cl.Params args
     // The inlined body is the callable the C++ lane would have called, so it
     // gets that callable's frame (see Shadow frames).
-    if framed then framePush c cl.SourceName
+    if framed then framePushFor c cl
     // A NAMED FUNCTION in kernel position (a fold's `reduce(w, gsel, s)`,
     // a repro twin of one): the C++ lane CALLS it, so its guards are located
     // at its own declaration -- here too (gap G76, W4B-D: this lane used to
@@ -7957,6 +7989,13 @@ and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal
                 match Blade.IR.stripUnits info.OutputType with
                 | ArrayElem arr -> requireScalar "a ragged combinator's element" arr.ElemType
                 | t -> requireScalar "a ragged combinator's result" t
+        // G90 (group-rowmap v1): a per-group ROW map -- the kernel takes the
+        // group's ROW and returns a row of the same length -- also keeps the
+        // ragged (group-member) inner axis, but this cell-congruent arm binds
+        // ONE CELL to the parameter. Not built in this lane: refuse, and the
+        // program falls back to the C++ lane (recorded as the lane's decline).
+        if outputRagged && info.KernelInputRanks = [ 1 ] then
+            refuse "a per-group ROW map over a group_by result (G90, group-rowmap v1): the LLVM lane builds the element form only" 
         if outputRagged then
             if not (hasFlatRead a) then
                 refuse "an elementwise ragged map over a coordinate-bearing producer"
@@ -9128,7 +9167,86 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
     try emitReduceComputeCore c compExpr kernelExpr initExpr
     finally c.FoldOperandWrites <- saved
 
+/// THE TUPLE-STATE FOLD (gap G103, round 4 wave 4): `reduce(method_for(zip(
+/// xs, ys)) <@> lambda(b, y) -> (s, 1.0, y), merge, (seed0, seed1, seed2))`
+/// -- ONE leaf whose kernel answers a k-tuple per cell, ONE fold kernel over
+/// (state, cell) tuples, a k-tuple seed (examples/10's online softmax). It is
+/// NOT a `<&!>` join (one leaf, one kernel, a tuple seed): the state is k
+/// scalar slots, seeded from the seed's components left to right; per cell,
+/// ascending, the operand cells are read, the map kernel's tuple is formed
+/// (its body emitted as a pack) and the fold kernel runs with its two tuple
+/// parameters bound to the state pack and the cell pack, its pack stored
+/// back -- the C++ lane's and the interpreter's serial chain, in their order.
+/// No fold fast-math (the kernel is not a builtin reorderable operator).
+/// v1 shape: plain dense rank-1 operands of one static extent, scalar map
+/// kernel parameters, scalar state components; anything else refuses (the
+/// program falls back to the C++ lane, as before).
+and private tryTupleStateFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list option =
+    match kernelExpr, initExpr, compExpr with
+    | IRTuple _, _, _ -> None
+    | _, IRTuple seeds, IRApplyCombinator info when seeds.Length >= 2 ->
+        let fold =
+            match resolveCallable kernelExpr with
+            | Some cl when cl.Params.Length = 2 -> cl
+            | _ -> refuse "a tuple-state fold whose kernel does not resolve to a two-parameter callable"
+        let mapK =
+            match resolveCallable info.Kernel with
+            | Some cl -> cl
+            | None -> refuse "a tuple-state fold whose map kernel does not resolve to a callable"
+        if fold.IsCudaKernel || fold.IsMpiParallel || mapK.IsCudaKernel || mapK.IsMpiParallel then
+            refuse "a tuple-state fold whose kernel carries a cuda/mpi strategy"
+        if info.HasReynolds || info.KernelOutputRank <> 0 || mapK.Params.Length <> info.Arrays.Length
+           || (info.Arrays.Length > 1 && not info.IsCoIteration)
+           || (info.KernelInputRanks |> List.exists (fun r -> r <> 0)) then
+            refuse "a tuple-state fold over a map that is not one scalar-cell map or co-iteration (an outer product walks every pair, not one shared index)"
+        let arrs = info.Arrays |> List.map (emitArr c)
+        let n =
+            match arrs |> List.map (fun a -> a.Groups) |> List.distinct with
+            | [ [ GDense n ] ] -> n
+            | _ -> refuse "a tuple-state fold over operands that are not plain dense rank-1 arrays of one extent"
+        // a coordinate-bearing producer operand is materialized once (the
+        // C++ lane forces a deferred operand before the nest the same way)
+        let arrs = arrs |> List.map (fun a -> if hasFlatRead a then a else materialize c a)
+        // the state: one slot per seed component, the seed evaluated left to right
+        let seedVals = seeds |> List.map (emitExpr c)
+        let slots = seedVals |> List.map (fun v -> (v.Ty, (allocSlot c v.Ty).Value))
+        List.iter2 (fun (ty, slot) (v: Val) -> storeSlot c (Some slot) ty v) slots seedVals
+        let k = seeds.Length
+        let scalarsOf (what: string) (parts: ValKind list) : Val list =
+            if parts.Length <> k then refuse ($"a tuple-state fold whose {what} has {parts.Length} components for a {k}-component state")
+            parts |> List.map (function
+                | VScalar v -> v
+                | _ -> refuse ($"a tuple-state fold whose {what} has a non-scalar component"))
+        // a kernel's body as a PACK, under the frame and declaration applyKernel
+        // gives the same callable (shadow frames; a named function's guards
+        // located at its own declaration, gap G76)
+        let bodyParts (cl: IRCallable) =
+            framePush c cl.SourceName
+            let named =
+                not (cl.Name.StartsWith "__lambda")
+                && ((Blade.IR.declSpanOf cl.Name).StartLine > 0 || (Blade.IR.declSpanOf cl.SourceName).StartLine > 0)
+            let parts = if named then withCalleeDecl c cl (fun () -> emitTupleParts c cl.Body) else emitTupleParts c cl.Body
+            framePop c
+            parts
+        emitCountedLoopTo c (string n) (fun i ->
+            let iv = { Reg = i; Ty = ScI64 }
+            // the cell's operands, then the map kernel's tuple
+            let cells = arrs |> List.map (fun a -> readFlat c a iv)
+            List.iter2 (fun (p: IRParam) (v: Val) -> bindKernelParam c p (KScalar v)) mapK.Params cells
+            let cell = bodyParts mapK |> scalarsOf "map kernel's cell"
+            let state = slots |> List.map (fun (ty, slot) -> loadSlot c slot ty)
+            let pa, pb = fold.Params.[0], fold.Params.[1]
+            c.TupleSlots.[pa.VarId] <- state |> List.map VScalar
+            c.TupleSlots.[pb.VarId] <- cell |> List.map VScalar
+            let next = withFoldFmf c false (fun () -> bodyParts fold) |> scalarsOf "fold kernel's result"
+            List.iter2 (fun (ty, slot) (v: Val) -> storeSlot c (Some slot) ty (coerce c ty v)) slots next)
+        Some (slots |> List.map (fun (ty, slot) -> loadSlot c slot ty))
+    | _ -> None
+
 and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
+    match tryTupleStateFold c compExpr kernelExpr initExpr with
+    | Some vs -> vs
+    | None ->
     match tryOrbitFold c compExpr kernelExpr initExpr with
     | Some v -> [ v ]
     | None ->
@@ -9474,7 +9592,7 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
             // withCalleeDecl). The arguments above are the CALLER's and keep
             // its span.
             withCalleeDecl c cl (fun () ->
-                framePush c cl.SourceName
+                framePushFor c cl
                 let parts = emitTupleParts c cl.Body
                 framePop c
                 parts)
@@ -9751,7 +9869,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     // pool can outlive the frame. The per-cell call was the arena model's
     // worst edge -- every temp a kernel-position callee materialized leaked
     // once per output cell.
-    framePush c cl.SourceName
+    framePushFor c cl
     pushPoolScope c
     // DEFERRED MODULE MAPS this body reads (gap G75, formalism 10.2): each is
     // evaluated PRIVATELY, inside each call -- bound here, in declaration
@@ -10883,7 +11001,7 @@ let private resolveFrames (c: Ctx) (bodies: string list list) : string list list
                 if lines.[k].StartsWith framePushMark then opened.Push k
                 elif lines.[k] = framePopMark then
                     let i = opened.Pop()
-                    if prefix.[k] - prefix.[i + 1] > 0 then
+                    if prefix.[k] - prefix.[i + 1] > 0 && lines.[i] <> framePushMark + noFrameName then
                         keep.[i] <- true
                         keep.[k] <- true
             if opened.Count > 0 then failwith "EmitLlvm.resolveFrames: an unmatched frame push"
@@ -10962,6 +11080,19 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
         | [] -> Error "an empty program"
         | modules ->
             let m = mergeModules modules
+            // PRINT REPLAY (rec-print-replay v1) is built in the C++ lane only:
+            // this lane drops the replay binding and keeps x's full trajectory
+            // (and the snapshot bindings read it), exactly the program as written.
+            let m =
+                let replays = m.Bindings |> List.filter Blade.IR.isRecReplayBinding
+                for b in replays do
+                    Blade.Effects.Decisions.record
+                        { Blade.Effects.Rule = "rec-print-replay"; Version = 1; Span = Blade.Ast.noSpan
+                          Subject = b.Name.Substring Blade.IR.recReplayBindingPrefix.Length
+                          Outcome = Blade.Effects.Declined "llvm lane: print replay is built in the C++ lane only; this lane stores the trajectory in full"
+                          Evidence = [] }
+                if replays.IsEmpty then m
+                else { m with Bindings = m.Bindings |> List.filter (fun b -> not (Blade.IR.isRecReplayBinding b)) }
             checkModuleScope m
             let callables = Blade.IRPrint.buildCallablesTableForModule m
             // INSTALL the callables table for the whole emission, and restore

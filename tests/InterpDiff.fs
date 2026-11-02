@@ -67,7 +67,13 @@ let interpExpectedUnsupported : (string * string) list =
       // The same missing store, met by a contains() target that writes its
       // compound set (sql-unique-contains/024, the compound twin of 023,
       // which runs in all three lanes over a dense set).
-      "Contains Target Mutates A Compound Set", "IRAssign to non-array index target" ]
+      "Contains Target Mutates A Compound Set", "IRAssign to non-array index target"
+      // G141 (lane G item G2): the interpreter binds a WHOLE-operand kernel
+      // parameter (`prep(whole: T^1, v)` under `method_for(a, a)`) to a cell, so
+      // a reduce over it is unsupported there; the C++ lane passes it whole (the
+      // LLVM lane refuses the program and falls back to C++).
+      "A map whose kernel takes its first operand WHOLE inside a function body", "reduce over a non-array value"
+      "A top-level map whose kernel takes one operand WHOLE, in either position", "reduce over a non-array value" ]
 
 /// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
 /// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus

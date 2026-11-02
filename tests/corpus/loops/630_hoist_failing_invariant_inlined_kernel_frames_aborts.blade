@@ -1,0 +1,16 @@
+// TEST: Hoisted Failing Invariant Of An Inlined Kernel Keeps Its Frames (aborts)
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ============================================================================
+// G151: `r * (6 / reduce(r, (+)))` is an elementwise map over the row whose
+// kernel, `(*)`, every lane INLINES per cell; `6 / reduce(r, (+))` does not
+// read the element, so the kernel-invariant hoist (BLADE_HOIST) binds it once
+// per row, before the inner nest. Row 1 sums to 0: the division panics there.
+// The hoisted value used to run in a helper that pushed its own `(*) in
+// lambda in h` frame, a frame the per-cell evaluation never had; the helper of
+// an inlined kernel now pushes none, in every lane, so the report is the
+// per-cell one with the hoist on or off (`blade test opt-diff`).
+type R = Idx<3>
+type C = Idx<3>
+let M: Array<Int64 like R, C> = [[1, 2, 3], [-1, 0, 1], [5, 5, 5]]
+let h = method_for(M) <@> lambda(r: Array<Int64 like C>) -> r * (6 / reduce(r, (+))) |> compute

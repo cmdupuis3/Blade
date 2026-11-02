@@ -38,7 +38,7 @@ let isInlineForm (e: IRExpr) : bool =
     | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth
     | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
-    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> false
 
 /// Nodes whose ONLY emitter is `genBinding` -- they declare an extents table,
 /// call `allocate<>`, and run a fill nest, which is a STATEMENT SEQUENCE.
@@ -100,7 +100,7 @@ let isStatementShaped (e: IRExpr) : bool =
     | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
-    | IRBreakIf _ -> false
+    | IRBreakIf _ | IRReplayRow _ -> false
 
 /// The four forms whose emission `genBinding` DEFERS: it records the value in
 /// `DeferredComputations` and emits only a `// <deferred ...>` comment, leaving
@@ -148,7 +148,7 @@ let isDeferringForm (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> false
 
 let forceDeferringForm (e: IRExpr) : IRExpr =
     if isDeferringForm e then IRCompute e else e
@@ -183,7 +183,7 @@ let isGroupTableForm (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> false
 
 /// `isStatementShaped` through an explicit `|> compute`. The user's own force
 /// is the SAME routing problem, not a different one: `sequence(a, b) |> compute`
@@ -226,7 +226,7 @@ let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _
     | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
     | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _
-    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> false
 
 /// The `Arrays`-slot half of `isStatementShaped`: statement-shaped, NOT already
 /// auto-materialized there, and genuinely ARRAY-TYPED.
@@ -320,7 +320,7 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
-    | IRBreakIf _ -> false
+    | IRBreakIf _ | IRReplayRow _ -> false
 
 /// An INLINE array literal sitting directly in a loop form's `Arrays` list --
 /// e.g. the right operand of `yr - [2.0, -14.0]`. Same gap as
@@ -376,7 +376,7 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
-    | IRBreakIf _ -> false
+    | IRBreakIf _ | IRReplayRow _ -> false
 
 /// A LOOP FORM sitting directly in another loop form's `Arrays` list -- the
 /// fourth instance of the same gap as `isArrayValuedSelect`. A CHAINED MAP
@@ -415,7 +415,7 @@ let internal isNestedLoopFormArg (e: IRExpr) : bool =
     | IRJoin _ | IRSubset _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
     | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
-    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> false
 
 /// Peel any IRLet chain that descendant lifts produced.
 /// When a sub-expression's lift wraps it in `IRLet(id, v, IRLet(...,inner))`,
@@ -466,7 +466,7 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
     | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRRank _ | IRPolyIndex _ | IRPolyTail _
     | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _
-    | IRBreakIf _ -> false
+    | IRBreakIf _ | IRReplayRow _ -> false
 
 /// Lift a single child if it's an inline form. Returns either ([], child)
 /// for the no-rewrite case, or ([(id, ty, child)], IRVar(id, ty)) for the
@@ -1226,6 +1226,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     | IRReleasePools (scope, pools, call) -> IRReleasePools (scope, pools, call)
     | IRConstraintCheck (c, code, msg, sp) -> IRConstraintCheck (liftExpr builder c, code, msg, sp)
     | IRBreakIf c -> IRBreakIf (liftExpr builder c)
+    | IRReplayRow (t, r) -> IRReplayRow (t, liftExpr builder r)
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
 
@@ -1493,6 +1494,59 @@ let deferredAliasClasses (bindings: IRBinding list) (deferredIds: Set<int>) : Ma
     |> List.collect (fun cls -> cls |> List.map (fun m -> (m, cls)))
     |> Map.ofList
 
+/// A DEFERRED FORM: a value bound to it has no storage of its own -- its
+/// producer runs where the binder is read (the C++ lane's deferred
+/// registration, the LLVM lane's virtual producers). The node test of the
+/// deferred-value predicate below.
+let isDeferredValueForm (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ | IRFusion _ | IRParallel _
+    | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRFunctorMap _ | IRZip _
+    | IRMethodFor _ | IRObjectFor _
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    // an object_for application is a VIRTUAL array in the LLVM lane
+    | IRApp (IRObjectFor _, _, _) -> true
+    | _ -> false
+
+/// THE DEFERRED-VALUE PREDICATE (round 4 wave 4, gap G98; PM35's rule made
+/// shared): is `id` bound to a value with no storage of its own, so a READ of
+/// it runs (and may fail in) its producer? At least as wide as
+/// `computeDeferredIds` for the module bindings, and the same let rules for
+/// EVERY let of `roots` (the lets inside the module bindings' values and in
+/// every expression the caller passes -- callable bodies, side-table
+/// payloads): a deferred form, an alias of a deferred binder (any chain of
+/// `let b = a`), a tuple whose members are all deferred, a projection of
+/// such a tuple, and a let chain whose final value is deferred. An id this
+/// table never saw answers false unless `opaque` says otherwise (a caller that
+/// must fail closed on another module's binders, or on a streamed provider
+/// read, says so there -- Optimize.programDeferredId); `opaque` is consulted
+/// at every link of an alias chain.
+let deferredValuePredicate (bindings: IRBinding list) (roots: IRExpr seq) (opaque: IRId -> bool) : IRId -> bool =
+    let moduleDeferred = computeDeferredIds bindings
+    let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for b in bindings do letValues.[b.Id] <- b.Value
+    let noteLets (e: IRExpr) =
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> letValues.[id] <- v | _ -> ()) e
+    for b in bindings do noteLets b.Value
+    for r in roots do noteLets r
+    let rec go (seen: Set<IRId>) (id: IRId) =
+        opaque id
+        || moduleDeferred.Contains id
+        || (match letValues.TryGetValue id with
+            | true, v when not (seen.Contains id) -> valueDeferred (seen.Add id) v
+            | _ -> false)
+    and valueDeferred (seen: Set<IRId>) (v: IRExpr) =
+        isDeferredValueForm v
+        || (match v with
+            | IRVar (a, _) -> go seen a
+            | IRTuple (_ :: _ as es) -> es |> List.forall (valueDeferred seen)
+            | IRTupleProj (p, _, _) -> valueDeferred seen p
+            | IRLet _ ->
+                let rec final (e: IRExpr) = match e with IRLet (_, _, b) -> final b | _ -> e
+                valueDeferred seen (final v)
+            | _ -> false)
+    go Set.empty
+
 /// What a member-order judgment needs to know about deferred binders: whether
 /// a binder is a still-deferred computation, its deferred value (to see a
 /// deferred TUPLE through aliases), and an expression's type. The C++ emitter
@@ -1652,3 +1706,25 @@ let ifNeedsOrderedArms (dv: DeferredView) (value: IRExpr) : bool =
     match value with
     | IRIf (_, t, f) -> armNeeds t || armNeeds f
     | _ -> false
+
+/// True iff `e` is a node the C++ lane's `exprToCppCore` refuses outright in
+/// expression position. Deliberately narrow: a false "not expression-shaped"
+/// costs one non-inlined call per output cell, a false "expression-shaped"
+/// a sentinel (CodeGenExprSupport's routing note). Lives here, ahead of the
+/// optimizer, because kernel-invariant hoisting (Optimize, gap G151) needs the
+/// SAME answer the C++ lane's `routeKernelBodyThroughCall` gets: whether a map
+/// kernel is called per cell (its shadow frame pushed) or inlined.
+let isNonExpressionNode (e: IRExpr) : bool =
+    match e with
+    | IRApplyCombinator _ | IRComposeApply _ -> true     // exprToCppCore: "unevaluated computation used as value"
+    | IRMethodFor _ | IRObjectFor _ -> true              // exprToCppCore: "loop object used as value"
+    | IRReduceCompute _ -> true                          // exprToCppCore: "reduce over a deferred computation ..."
+    | IRCompute (IRApplyCombinator _) -> true            // genApplyCombinatorExpr: unconditional refusal
+    | _ -> false
+
+/// Does the kernel body render as a single C++ expression? False when a
+/// materializing node appears anywhere in it (including as an `IRLet` RHS, which
+/// is the shape stage S2's Lowering half now produces for a kernel-local array).
+let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
+    if isNonExpressionNode body then false
+    else childrenOf body |> List.forall kernelBodyIsExpressionShaped

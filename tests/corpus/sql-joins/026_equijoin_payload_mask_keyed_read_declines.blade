@@ -1,0 +1,25 @@
+// TEST: Equijoin Payload Mask Keyed Read Declines
+// ----------------------------------------------------------------------------
+// G128 / ST15: the mask over the equijoin compound J SHARES J's index, so a
+// keyed read through the mask (`keep(i, j)`) needs J's tuple table. The
+// hash join's demand census sees it and declines (the as-written passes
+// build the hashed index); the keyed read answers the bit of that pair.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let keep = mask(matched, lambda(v) -> v > 25)
+let first_pair = keep(0, 0)
+let last_pair = keep(1, 3)
+let big = compound(matched, keep)
+let total = reduce(big, (+), 0)
+// EXPECT: matched = [20, 40, 30, 30]
+// EXPECT: keep = [false, true, true, true]
+// EXPECT: first_pair = false
+// EXPECT: last_pair = true
+// EXPECT: big = [40, 30, 30]
+// EXPECT: total = 100

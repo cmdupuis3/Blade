@@ -55,8 +55,14 @@ values are copied and no compaction happens here. Compaction is deferred to
   (`mask(A, lambda(x) -> p(x) && q(x))`).
 - Rank-1 sources, and rank-k PLAIN DENSE sources: the mask keeps the whole
   index space and `compound(A, m)` then compacts every dimension (the masked
-  provider read of §2a is built this way). A rank-k packed, ragged, compound
-  or sparse source is refused (BL7004).
+  provider read of §2a is built this way). A rank-k packed, ragged or sparse
+  source, and a compound with trailing dimensions, is refused (BL7004).
+- An ALL-DIMS COMPOUND source -- a filtered set, or the rank-2 relation of an
+  equijoin (§6a) -- is masked over its PRESENT cells in storage (lex) order:
+  the mask keeps the compound's index (`keep(i, j)` reads the bit of a
+  present tuple), and `compound(J, keep)` selects those cells in that order,
+  over a fresh rank-1 index of their positions (join -> payload predicate ->
+  aggregate, ST15; sql-joins/024-026, sql-masks/019-021).
 
 v7: `TypeCheck.fs inferMask`, IR `IRMask`, codegen `materializeMaskForm`.
 Tests: `sql-masks` ("Mask Basic", "SQL WHERE", "Mask Composition").
@@ -682,10 +688,20 @@ flat fold -- the alias IS the axis, nothing is reassociated, no license is asked
 A per-segment fold is what `group_by(a, segments(A))` and an explicit combine
 spell; nothing implicit exists to refuse.
 
-Storage: over a never-written plain source, a top-level structural `group_by` reads its rows in the source's own storage and its `ungroup` shares it (no pool, no copy; `BLADE_GROUP_VIEW`). A per-group ROW map `h = method_for(g) <@> lambda(r) -> <row>` followed by `ungroup(h, A)` typechecks but is refused by the emitter (BL7004; gap G90: a language feature, not built).
+Storage: over a never-written plain source, a top-level structural `group_by` reads its rows in the source's own storage and its `ungroup` shares it (no pool, no copy; `BLADE_GROUP_VIEW`). A per-group map `h = method_for(g) <@> f` whose result keeps the member axis is a grouped value over the same grouping (G90, `group-rowmap v1`): `f` takes one ELEMENT, or takes the ROW and returns an elementwise expression of that row and scalars after scalar lets -- the type checker proves the length that way and refuses any other row-returning kernel (BL3027); `ungroup(h)` / `ungroup(h, A)` restore the axis, and over a never-written structural grouping the reassembled array SHARES h's one pool, whose runs are already in axis order (`BLADE_GROUP_ROWMAP`). `ungroup` of a KEY grouping is refused (BL3029: a scatter by the grouping's permutation, G90 v2).
 
-Not yet: an elementwise map over a grouped array (the ragged-map emitter's
-standing refusal; stream the source instead, or `ungroup` then map); streaming
+```blade
+type I  = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(r) -> r - reduce(r, (+)) / Float64(extents(r)) |> compute
+let b = ungroup(h, CI)
+// EXPECT: b = [-1.0, 0.0, 1.0, -10.0, 0.0, 10.0, 0.0]
+```
+
+Not yet: the scatter `ungroup` of a key grouping (G90 v2); streaming
 of rank >= 3 variables, of a rank-2 stencil, and of netcdf/icechunk stores (zarr
 today); a stencil streaming MORE than one source; a two-dimensional mosaic of
 stores; string-label indexing of the `files` outer axis; static `segments` for
@@ -822,13 +838,33 @@ sort : Array<T like I> × (T -> K) -> Array<T>   // fresh anonymous rank-1 index
 ```
 
 Takes a **key extractor**, not a comparator; ascending by key
-(`lambda(t) -> -t` for descending). Stable. On a compound operand, sorts the
+(`lambda(t) -> -t` for descending). Stable. The key order is a **total
+preorder**, the same in every lane: every NaN key orders before every other
+key and all NaNs tie (they keep their input order), `-0.0` and `+0.0` tie,
+other keys compare by `<`. A descending key `-x` therefore still puts NaN
+keys first (a negated NaN is a NaN). The result is unique -- the order by
+(key, input position) -- so how often or in what order the key is evaluated
+is unspecified; the compiler evaluates a total, write-free key once per
+element (`sort-form v1`, `BLADE_SORT_FORM`). A range operand sorts its own
+values -- `sort(range<I>, lambda(i) -> k(i))` is the argsort, written with no
+materialized iota:
+
+```blade
+type R = Idx<5>
+let k: Array<Float64 like R> = [3.0, 1.0, 2.0, 1.0, 0.5]
+let perm = sort(range<R>, lambda(i) -> k(i))
+let sk = method_for(perm) <@> lambda(i) -> k(i) |> compute
+// EXPECT: perm = [4, 1, 3, 2, 0]
+// EXPECT: sk = [0.5, 1.0, 1.0, 2.0, 3.0]
+```
+
+On a compound operand, sorts the
 compact buffer; the result is honestly **dense** — sorting discards coordinate
 meaning, so the output gets a fresh anonymous index of the same extent. Sort
 order is not tracked in the type system (lazy key-map chains — sort-skip, merge
 joins — are a documented future direction).
 
-Tests: `sql-sort` (2) + type-recovery probe.
+Tests: `sql-sort` (001-010: ties, NaN keys, range operands, the key cache) + type-recovery probe.
 
 ## 10. `reduce(A[, kernel[, init]][, axes = n])` — aggregation
 

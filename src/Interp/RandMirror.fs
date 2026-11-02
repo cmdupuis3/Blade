@@ -462,6 +462,20 @@ let drawsAt (kind: string) (key: int64) (stream: int64) (offset: int64) (pars: f
     | other, _ ->
         failwith $"RandMirror.drawsAt: unknown indexed rand kind '{other}' with {List.length pars} parameter(s)"
 
+/// ONE sample of a PARAMETERLESS addressed family exactly as the compiled
+/// lane's `blade_rand::uniform_at_one` / `normal_at_one` (fill_at at n = 1):
+/// no checks -- the draw's range guards ran before its map -- the stream key
+/// truncated to its counter word and the sample index taken unsigned, the
+/// fill's own address arithmetic. (The checked path above panicked on an
+/// index past Int64.MaxValue, `offset + i` wrapping negative, where the
+/// compiled lane drew the sample: round 4 wave 4 B6, Codex review.)
+let drawAtOneUnchecked (kind: string) (key: int64) (stream: int64) (index: int64) : float option =
+    let g () = PhiloxStream(key, uint32 stream, uint64 index) :> IRaw64
+    match kind with
+    | "uniform_at" -> Some (nextUniform (g ()))
+    | "normal_at" -> Some (nextNormal (g ()))
+    | _ -> None
+
 /// `drawsCategorical` for `categorical_at`: the scan once, one uniform per
 /// sample from that sample's own stream.
 let drawsCategoricalAt (kind: string) (key: int64) (stream: int64) (offset: int64) (weights: float[]) (n: int) : int64[] =

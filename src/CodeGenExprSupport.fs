@@ -1025,6 +1025,39 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
         walkBody bind.Value
     for f in modul.Functions do
         walkBody f.Body
+    // G90: a per-group map over a grouped value (its result keeps the member
+    // axis) is a grouped value over the SAME grouping, so a callable capturing
+    // it needs that grouping's sidecar too. Transitive (a map of a map).
+    // A COPY of a grouped value (`let h2 = h`, the grouped-copy arm) carries
+    // its grouping too. Iterated to convergence (a chain of maps and copies).
+    let changed = ref true
+    let rec spineTail (e: IRExpr) = match e with IRLet (_, _, rest) -> spineTail rest | t -> t
+    let derived (id: IRId) (v: IRExpr) =
+        if not (acc.ContainsKey id) then
+            // a BLOCK whose value is a grouped let (`let h = { let t = <map>; t }`)
+            // carries that grouping too
+            match strip (spineTail v) with
+            | IRApplyCombinator info ->
+                (match info.Arrays, info.OutputType with
+                 | [ IRVar (src, _) ], ArrayElem oa
+                     when acc.ContainsKey src
+                          && oa.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember) ->
+                     acc.[id] <- acc.[src]
+                     changed.Value <- true
+                 | _ -> ())
+            | IRVar (src, ArrayElem at)
+                when acc.ContainsKey src
+                     && at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember) ->
+                acc.[id] <- acc.[src]
+                changed.Value <- true
+            | _ -> ()
+    while changed.Value do
+        changed.Value <- false
+        for bind in modul.Bindings do
+            derived bind.Id bind.Value
+            iterIRExpr (fun e -> match e with IRLet (id, v, _) -> derived id v | _ -> ()) bind.Value
+        for f in modul.Functions do
+            iterIRExpr (fun e -> match e with IRLet (id, v, _) -> derived id v | _ -> ()) f.Body
     acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
 /// EXTENTS-ONLY GROUP_BY: which group_by bindings never have their VALUES read.
@@ -1155,6 +1188,36 @@ let groupedBindingsCell () : Map<IRId, string * string> ref =
 let noteGroupedBinding (id: IRId) (cppName: string) (gkName: string) : unit =
     let cell = groupedBindingsCell ()
     cell.Value <- Map.add id (cppName, gkName) cell.Value
+
+/// G90 (group-rowmap v1): the per-group ROW MAPS the ragged peel emitted as a
+/// grouped value (C++ name -> the grouping's C++ name). tryRaggedPeel returns
+/// code only, so the binding sites that own the codegen context read this to
+/// register the result in ctx.GroupedArrays (and noteGroupedBinding) exactly as
+/// a group_by binding registers itself: a peel, a print, an ungroup of the map
+/// then resolve its row lengths through the SAME grouping. Reset per assembly.
+let internal groupRowMapsStorage =
+    System.Threading.AsyncLocal<Map<string, string> ref>()
+
+let groupRowMapsCell () : Map<string, string> ref =
+    let v = groupRowMapsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupRowMapsStorage.Value <- fresh
+        fresh
+    else v
+
+let noteGroupRowMap (cppName: string) (gkName: string) : unit =
+    let cell = groupRowMapsCell ()
+    cell.Value <- Map.add cppName gkName cell.Value
+
+/// The grouping a just-emitted row map named `cppName` reads its lengths from,
+/// CONSUMED (a later binding of the same C++ name in another scope must not
+/// inherit it).
+let tryGroupRowMap (cppName: string) : string option =
+    let cell = groupRowMapsCell ()
+    match Map.tryFind cppName cell.Value with
+    | Some gk -> cell.Value <- Map.remove cppName cell.Value; Some gk
+    | None -> None
 
 // CLOSURE VALUES CAPTURE BY VALUE.
 //
@@ -1323,6 +1386,7 @@ let resetExprSupportCells () : unit =
     freshCell groupedCaptureFactsStorage Map.empty
     freshCell extentsOnlyGroupBysStorage Set.empty
     freshCell groupedBindingsStorage Map.empty
+    freshCell groupRowMapsStorage Map.empty
     freshCell freshReturnFactsStorage Map.empty
 
 /// The fresh-return fact for whatever callable an expression in callee position
@@ -1362,21 +1426,16 @@ let freshReturnOf (calleeExpr: IRExpr) : FreshReturn =
 // work inline today.
 
 /// True iff `e` is a node `exprToCppCore` refuses outright in expression
-/// position. Deliberately narrow -- see the conservatism note above.
-let internal isNonExpressionNode (e: IRExpr) : bool =
-    match e with
-    | IRApplyCombinator _ | IRComposeApply _ -> true     // exprToCppCore: "unevaluated computation used as value"
-    | IRMethodFor _ | IRObjectFor _ -> true              // exprToCppCore: "loop object used as value"
-    | IRReduceCompute _ -> true                          // exprToCppCore: "reduce over a deferred computation ..."
-    | IRCompute (IRApplyCombinator _) -> true            // genApplyCombinatorExpr: unconditional refusal
-    | _ -> false
+/// position. Deliberately narrow -- see the conservatism note above. Defined
+/// in IRLift (the optimizer's kernel-invariant hoist asks the same question,
+/// gap G151); restated here under its old name.
+let internal isNonExpressionNode (e: IRExpr) : bool = Blade.IRLift.isNonExpressionNode e
 
 /// Does the kernel body render as a single C++ expression? False when a
 /// materializing node appears anywhere in it (including as an `IRLet` RHS, which
 /// is the shape stage S2's Lowering half now produces for a kernel-local array).
-let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
-    if isNonExpressionNode body then false
-    else childrenOf body |> List.forall kernelBodyIsExpressionShaped
+/// Defined in IRLift beside `isNonExpressionNode`.
+let kernelBodyIsExpressionShaped (body: IRExpr) : bool = Blade.IRLift.kernelBodyIsExpressionShaped body
 
 /// True iff a RETURN expression branches (`if`/`match`) and at least one of the
 /// leaves it can return is a materializing form. Follows only the return spine

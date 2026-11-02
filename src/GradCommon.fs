@@ -311,6 +311,19 @@ let internal haloGatherEnabled () : bool =
     | Blade.Toolchain.SwitchOther t when t.ToLowerInvariant() = "no" -> false
     | _ -> true
 
+/// DESTINATION ACCUMULATION in one pass (PM38, round 4 wave 4 B4; rule
+/// `ad-gather-fuse v1`). The halo gather above runs ONE loop per (array,
+/// offset), each a full read-modify-write pass over the caller's gradient
+/// buffer. ON (the default): the taps of one stencil are ONE loop over the
+/// input ordinal, each cell taking its taps in the same descending-offset
+/// order -- the same parenthesized sum per cell, `((g + a_K1) + a_K0) + ...`,
+/// incoming gradient first, so the value is unchanged; one pass instead of K.
+/// OFF: the K passes. Read per call; an optimizer gate (opt-diff compares).
+let internal adGatherFuseEnabled () : bool =
+    match Blade.Toolchain.envSwitch "BLADE_AD_GATHER_FUSE" with
+    | Blade.Toolchain.SwitchOff -> false
+    | _ -> true
+
 // Kernel-shape refusal wording, spoken by more than one site.
 //
 // `asKernelLambda` (further down) decides what counts as a kernel and
@@ -723,6 +736,31 @@ let internal (|ConstFill|_|) (e: Expr) =
 let internal zeroFill (cnt: Expr) : Expr =
     let re k = inheritSpan cnt k
     re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (f64Lit 0.0))))))
+
+/// The constant zero fill the pipeline synthesizes (`zeroFill`, or the tape
+/// start of a recursive array, gap G118), spelled as the zero FORMER
+/// `method_for(range<Idx<n>>) <@> lambda(_) -> 0.0 |> compute` when it is
+/// emitted as a let past 4096 cells. Inside the pipeline the fill stays a
+/// ConstFill (admitted wherever an array literal is; its cotangent and
+/// tangent are `zeroFill` of the same count), but `replicate(n, pure(c))`
+/// LOWERS to an n-element IR array literal, typed and lowered cell by cell:
+/// a 100,001-step recurrence tape and cotangent took minutes to `check`.
+/// The former is O(1) AST, lowered as a dense fill loop -- the spelling
+/// TypeCheckInfer `zerosOver` and `zeroFillOfDims` (G68) already use.
+/// Same values: +0.0 in every cell. Only the pipeline Float64 zero
+/// (`f64Lit 0.0`, an ascribed literal) is matched; a user fill is untouched.
+let internal (|LargeZeroFill|_|) (e: Expr) : int64 option =
+    match e with
+    | { Kind = ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate ({ Kind = ExprKind.ExprLit (LitInt n) },
+                                                                       { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit (LitFloat z) }, TyFloat64) } }) } }
+        when n > 4096L && z = 0.0 && not (System.Double.IsNegative z) -> Some n
+    | _ -> None
+
+let internal zeroFormerOfCount (n: int64) : Expr =
+    let ps : LambdaParam list = [ { Name = "__zfill"; Type = None; Default = None; NameSpan = noSpan } ]
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [ syn (ExprRange [ TyIdx (syn (ExprLit (LitInt n))) ]) ]),
+                                      syn (ExprLambda (ps, None, syn (ExprTyped (syn (ExprLit (LitFloat 0.0)), TyFloat64))))))))
 
 /// The C1 LINEAR CLOSURE: combinator forms that only REINDEX or WRAP, so
 /// their tangent is the same form applied to the tangents of their

@@ -110,6 +110,15 @@ Definition compose (a b : cost) : cost :=
   mkCost (work a + work b) (traffic a + traffic b)
          (Nat.max (peak a) (peak b)).
 
+(* The implementation's cost model (src/CostModel.fs) mirrors this record
+   and compose field for field. Its model v2 (gap G96, round 4 wave 4) keeps
+   both and changes only how the recompute selection RANKS two costs: it
+   compares work + w * traffic, w the materialized pool's bandwidth weight
+   (its element bytes when the pool provably exceeds the cache budget, else
+   1), alongside peak. That objective is monotone in cost_le for every
+   w >= 0, so it is an instance of the objective the frontier theorem
+   below quantifies over; nothing proved here changes. *)
+
 Lemma cost_le_refl : forall c, cost_le c c.
 Proof. intros; unfold cost_le; auto. Qed.
 

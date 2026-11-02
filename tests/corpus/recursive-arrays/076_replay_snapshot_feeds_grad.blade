@@ -1,0 +1,33 @@
+// TEST: Replay Snapshot Feeds Grad
+import ad as ad
+// ============================================================================
+// ST17 composed (round 4 wave 4 B7): a module-level recursion replayed at its
+// print (its storage a 2-row ring in the C++ lane), one SNAPSHOT of it (row 7,
+// rewritten from `x(7)`) feeding a reverse-mode derivative of a second,
+// function-local recursion whose seed is that value. The derivative's own
+// trajectory is the reverse sweep's tape (rank-1, full: gap G118).
+// x_n = 0.5 x_{n-1} + 1 from 1, so x(7) = 2 - 2^-7 = 1.9921875;
+// loss(a, r) = a r^3 at r = 2: 15.9375, d/da = 8, d/dr = 3 a r^2 = 23.90625.
+// ============================================================================
+type T = Idx<8>
+
+let rec x: Array<Float64 like T> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+
+function loss(a: Float64, r: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<4>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: a
+        | prefix :: n -> prefix :: r * prefix(n - 1)
+    s(3)
+}
+
+let (lv, ga, gr) = ad.grad(loss)(x(7), 2.0)
+// EXPECT: x = [1.0, 1.5, 1.75, 1.875, 1.9375, 1.96875, 1.984375, 1.9921875]
+// EXPECT: lv = 15.9375
+// EXPECT: ga = 8.0
+// EXPECT: gr = 23.90625

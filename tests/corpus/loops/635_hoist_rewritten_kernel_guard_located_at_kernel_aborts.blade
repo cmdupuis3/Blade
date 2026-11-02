@@ -1,0 +1,16 @@
+// TEST: A Hoist's Rewritten Kernel Fails Where The Kernel Did (aborts)
+// ABORT: BL8003
+// ABORT: reduce: empty array, no reduction possible
+// ============================================================================
+// G151, the rewritten kernel: `6 / reduce(v, (+))` (v sums to 6) is hoisted
+// out of the map's kernel, and the kernel the nest then CALLS per cell (its
+// body holds a computed map) is a fresh callable. Its own fold over the empty
+// `z` (a user kernel: no identity, so BL8003) fails at cell 0 with the frames
+// and the location the original kernel had: the fresh callable is located
+// as the kernel it replaces (Lowering.copyHoistDeclSpans), with the hoist on
+// as with it off.
+type C = Idx<3>
+let v: Array<Int64 like C> = [1, 2, 3]
+let z = intersect(Int64([1, 2]), Int64([3]))
+let kern = lambda(e: Int64) -> e * (6 / reduce(v, (+))) + reduce(method_for(z) <@> lambda(x) -> x * e |> compute, lambda(a, b) -> a + b)
+let h = method_for(v) <@> kern |> compute

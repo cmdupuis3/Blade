@@ -1630,6 +1630,49 @@ let materializeGenericLoopOperand (env: TypeEnv) (tArg: TypedExpr) (opName: stri
         requireArrayArgMinRank env tArg opName 1 |> ignore
     | _ -> ()
 
+/// A NAMED LOOP OPERAND the former cannot iterate as written (gap G125, round
+/// 4 wave 4 lane K). Two members of one class -- the former's operand read
+/// through `getArrayType`'s rank-1 fallback, which is never linked back to the
+/// operand's own type:
+///
+///   * an UNANNOTATED KERNEL PARAMETER (`method_for(M) <@> lambda(row) ->
+///     reduce(method_for(row) <@> lambda(v) -> v + 1.0, (+))`, M rank 2). The
+///     inner former assumed a rank-1 `row` but left the var unresolved, so the
+///     OUTER apply saw no array use of its parameter (`kernelInputRanks`' dense
+///     arm), bound `row` to one ELEMENT, typed the result elementwise (rank 2)
+///     and both lanes then iterated a double (`row.extents` on a `double`:
+///     BL9002 in g++, with or without BLADE_HOIST). The former iterates its
+///     operand, so it IS an array of rank >= 1 -- the very rank the fallback
+///     assumed: give the var that shape exactly as `reduce(row, (+))` does
+///     (`requireArrayArg`), and the outer apply sees the row consumer it is.
+///     Only a monomorphic, uncarted var inside a lambda body (the kernel
+///     parameter; `buildApplyInfo` unifies it with the iterated row moments
+///     later) -- a signature var is materializeGenericLoopOperand's, a caret
+///     var materializeArityVar's. Errors are swallowed as there: a failed
+///     synthesis leaves the var to the existing path and its diagnostic.
+///   * a SCALAR (`let x: Float64 = 2.0; method_for(x) <@> k`): nothing to
+///     iterate. It typechecked as a rank-1 loop over an invented `x_n` extent
+///     and reached g++ as `x.extents` (BL9002); refused here, BL3007.
+let demandNamedLoopOperand (env: TypeEnv) (tArg: TypedExpr) (opName: string) : TypeResult<unit> =
+    match tArg.Kind with
+    | TExprVar (name, _, _) ->
+        (match env.Subst.Resolve tArg.Type with
+         // A PARAMETER only (no bound value): a let-bound intermediate whose
+         // type is still open (`let wt = (w * t) |> compute` over caret
+         // operands, loops/130) is resolved later by its own producer, and
+         // minting its shape here broke that specialization.
+         | IRTInfer vid when env.InLambdaBody && not (env.Subst.IsPolymorphicId vid)
+                             && (env.Subst.GetArityConstraint vid).IsNone
+                             && (match lookupVar name env with Some info -> info.TypedValue.IsNone | None -> false) ->
+             requireArrayArgMinRank env tArg opName 1 |> ignore
+             Ok ()
+         | resolved ->
+             match IR.stripUnits resolved with
+             | IRTScalar et ->
+                 Error (BuiltinArgErr (sprintf "%s: operand `%s` is a scalar (%s), not an array -- a loop former iterates the cells of an array; there is nothing to iterate. Apply the kernel to the value directly, or iterate an array or a range (`0..n`, `range<I>`)" opName name (ppIRType (IRTScalar et))))
+             | _ -> Ok ())
+    | _ -> Ok ()
+
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
 /// with "__" are internal synthetic markers and skipped. Untagged ints into

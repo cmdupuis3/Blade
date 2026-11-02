@@ -1,0 +1,22 @@
+// TEST: compute elision declines a producer that reads an alias of a deferred module map (aborts)
+// Gap G98 (round 4 wave 4 lane A): `w` aliases the DEFERRED map `d`, so a
+// read of `w(i)` runs d's kernel -- and its BL8013 at cell 4. Compute
+// elision used to judge x's producer total by the node test alone (an
+// alias is not a deferred FORM) and fused x into the fold after `bad`,
+// so `bad`'s division failed first. The program classifier now sees the
+// alias; x stays stored and d's kernel fails first, as written (line 10
+// once the harness drops the TEST line).
+type I = Idx<9>
+let z: Array<Int64 like I> = [3, 1, 2, 5, 0, 4, 7, 8, 9]
+let d = method_for(range<I>) <@> lambda(i) -> Float64(100 / z(i))
+let w = d
+let r = {
+    let x = method_for(range<I>) <@> lambda(i) -> w(i) * 2.0 |> compute
+    let z0 = z((4 : I))
+    let bad = 7 / z0
+    let s = reduce(x, (+))
+    s + Float64(bad)
+}
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:10

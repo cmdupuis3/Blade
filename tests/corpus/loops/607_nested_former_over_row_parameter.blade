@@ -1,0 +1,26 @@
+// TEST: Nested Former Over Row Parameter
+// ============================================================================
+// Gap G125 (round 4 wave 4, lane K). An unannotated kernel parameter that a
+// nested loop former iterates (`method_for(row)`, `method_for(zip(row, row))`)
+// is a ROW of the outer operand, exactly as when the body folds it
+// (`reduce(row, (+))`). The inner former used to read `row` through a
+// rank-1 fallback never linked to the parameter, so the outer apply bound
+// `row` to one ELEMENT, typed the map elementwise (rank 2) and both lanes
+// iterated a double (BL9002 in g++, with or without BLADE_HOIST). `nest`
+// is the original find: the kernel-invariant hoist binds `reduce(prep(A),
+// (+))` once per row, guarded by the row's non-emptiness.
+// Values: row sums 6 / 15; prep(A) sums to 12; |row|^2 = 14 / 77.
+// ============================================================================
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+type R = Idx<2>
+type C = Idx<3>
+let A: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let plus = method_for(M) <@> lambda(row) -> reduce(method_for(row) <@> lambda(v) -> v + 1.0, (+)) |> compute
+let sq = method_for(M) <@> lambda(row) -> reduce(method_for(zip(row, row)) <@> lambda(a, b) -> a * b, (+)) |> compute
+let dbl = method_for(M) <@> lambda(row) -> method_for(row) <@> lambda(v) -> v * 2.0 |> compute
+let nest = method_for(M) <@> lambda(row) -> reduce(method_for(row) <@> lambda(v) -> v + reduce(prep(A), (+)), (+)) |> compute
+// EXPECT: plus = [9.0, 18.0]
+// EXPECT: sq = [14.0, 77.0]
+// EXPECT: dbl = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+// EXPECT: nest = [42.0, 51.0]

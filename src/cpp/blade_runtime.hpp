@@ -338,6 +338,17 @@ namespace blade_arith {
   template <int64_t... K> struct key_table { static constexpr int64_t tab[sizeof...(K)] = { K... }; };
 }
 namespace blade_rt {
+  // sort(A, key)'s key order (docs/features/sql.md section 9; the
+  // interpreter's F# `compare`): ascending under a TOTAL preorder -- every NaN
+  // key before every other key and all NaNs tie, -0.0 and +0.0 tie, other keys
+  // by `<`. A strict weak order, so std::stable_sort's result is unique (the
+  // plain `<` with a NaN key was not one: its result was unspecified).
+  template <class K> inline bool sort_key_less(const K& a, const K& b) {
+    if constexpr (std::is_floating_point<K>::value) return a < b || (a != a && b == b);
+    else return a < b;
+  }
+}
+namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };
   // 65 slots, not 64: slots 0..63 are the trace, slot 64 is a write-only
   // scratch sink for overflow frames (see Scope below). panic never reads it.
@@ -671,6 +682,28 @@ namespace blade_rt {
   template <class T> inline const T& pv(const T& x) { return x; }
   inline f32_out pv(float x) { return f32_out{x}; }
   inline c64_out pv(const std::complex<float>& x) { return c64_out{x}; }
+
+  // PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1): a module-level
+  // recursion's ring sweep is ONE lambda run twice -- at its slot with
+  // emit = false (filling the snapshots; a failing step fails there, before
+  // any print) and at the trajectory's print with emit = true (printing each
+  // row). Both runs go through this one call, never inlined into either site
+  // nor cloned per constant argument, so they execute the same machine code:
+  // the printed rows are the bits the first run computed, whatever
+  // -ffp-contract decides for the sweep body.
+  template <class F>
+#if defined(__GNUC__) && !defined(__clang__)
+  __attribute__((noipa))
+#elif defined(__clang__)
+  __attribute__((noinline))
+#elif defined(_MSC_VER)
+  __declspec(noinline)
+#endif
+  void replay_sweep(F& f, bool emit) {
+    // An opaque flag: no compiler may specialize the sweep body per run.
+    volatile bool e = emit;
+    f(e);
+  }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
   // "Arithmetic semantics"). Each is transcribed into the interpreter

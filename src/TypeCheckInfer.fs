@@ -5751,6 +5751,18 @@ and inferUngroup (env: TypeEnv) (grouped: Expr) (aliasOpt: string option) : Type
                              let resultType = mkArrayArrow (sources @ rest) arrTy.ElemType None
                              Ok (mkTyped (TExprUngroupGrid (tG, sources, bounds)) resultType))
                 else
+                // A KEY grouping's rows (`group_by(v, group_keys(k))`) are in
+                // PERMUTED order: putting them back is a scatter by the
+                // grouping's permutation (rows a negative key dropped have no
+                // cell at all), which is v2 of G90 (plan section 5.4) -- and
+                // the lanes did not agree on it (the C++ lane scattered, the
+                // interpreter concatenated). Only a structural grouping's
+                // outer slot (or a row map's derived from one) is restored.
+                if outer.IxKind = IxKGroupOuter && member_.IxKind = IxKGroupMember
+                   && not (env.SegmentedOuters.ContainsKey outer.Id) then
+                    let what = if env.GroupRowMapOuters.ContainsKey outer.Id then "a per-group row map over a KEY grouping" else "a KEY grouping (group_keys)"
+                    Error (SegmentedDomainErr $"ungroup(_, {a}): the grouped array is {what}, whose rows are in the grouping's permuted order; restoring the axis is a scatter by its permutation, not built (G90 v2). ungroup restores the axis of a structural grouping (`group_by(_, segments(A))`) and of row maps over one")
+                else
                 match Map.tryFind a env.Segmentations with
                 | None -> Error (SegmentedDomainErr $"ungroup(_, {a}): '{a}' is not a `Chunked<..>` index alias in scope")
                 | Some seg ->
@@ -6674,6 +6686,18 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                               | ArrayElem at when at.IndexTypes.Length = 1 ->
                                   (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
                                    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed n) -> rTag n
+                                   // G110 (round 4 wave 4 lane A; formalism
+                                   // 2.4's partner rule): a NARROW numeric
+                                   // cell seeds its parameter too, so a
+                                   // literal partner in the body takes the
+                                   // operand's width (`lambda(v) -> v * v +
+                                   // 1.0` over Float32 is Float32). Left open,
+                                   // the literal typed at its class's wide
+                                   // width and fixed the kernel's result
+                                   // there. The wide widths are what an open
+                                   // partner already gives, so they are not
+                                   // seeded (no change for them).
+                                   | IRTScalar (ETFloat32 | ETInt32 | ETComplex64) -> Some (env.Subst.Resolve at.ElemType)
                                    | _ -> None)
                               | _ -> None)
                          | None -> None)
@@ -12817,6 +12841,128 @@ and buildApplyInfo (env: TypeEnv)
                 | _ -> "has a compact index group"
             Error (RowMapCompactCell cell)
         | None ->
+        // G90 (rule group-rowmap v1, docs/plans/plan-group-rowmap-ungroup.md
+        // section 3): a map over ONE group_by result whose OUTPUT keeps the
+        // group-member axis is a per-group ROW MAP, and its rows must be
+        // exactly as long as the group's. That is a TYPE fact, but not one the
+        // index records carry: every group_by mints a structurally identical
+        // member record (Tag "__group_member", Extent "__groupsz"), unify never
+        // compares their ids or extents, and deduceOutputType refreshes every
+        // output id -- so an `if` arm, a captured row of the same or another
+        // grouping (`g(0)`), or a callee whose abstract return is positional
+        // would all LOOK length-preserving. The proof is therefore the
+        // kernel's SHAPE, a closed grammar (fail closed):
+        //   * an ELEMENT parameter (kernel input rank 0): cell for cell;
+        //   * a ROW parameter (rank 1): a spine of SCALAR lets ending in an
+        //     elementwise expression whose every array operand is the row
+        //     parameter itself (arithmetic / comparisons / unary ops, scalar
+        //     partners broadcast) -- `r - reduce(r, (+)) / Float64(extents(r))`.
+        // Anything else that keeps the member axis is refused here (before G90
+        // every such map died in the C++ emitter with BL7004). A preserved map
+        // registers its output OUTER slot as derived from the operand's, so
+        // `ungroup(h)` and the group read guards follow it (transitively).
+        let groupRowMapErr : TypeError option =
+            let isGroupedOperand (at: IRArrayType) =
+                match at.IndexTypes with
+                | outer :: rest -> outer.IxKind = IxKGroupOuter && rest |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+                | [] -> false
+            let groupShapedOut =
+                match IR.stripUnits outputType with
+                | ArrayElem oa ->
+                    (match oa.IndexTypes with
+                     | outer :: rest when rest |> List.exists (fun ix -> ix.IxKind = IxKGroupMember) -> Some outer
+                     | _ -> None)
+                | _ -> None
+            match arrayTypes, groupShapedOut with
+            | [ at ], Some outOuter when isGroupedOperand at && not isCoIter && resolvedLambdaInfo.Params.Length = 1 ->
+                let pid = resolvedLambdaInfo.Params.[0].VarId
+                // A SCALAR operand, judged STRUCTURALLY: a literal's type is
+                // unified with its partner's (the literal-width rule), so beside
+                // the row a literal -- and arithmetic over one -- can carry the
+                // row's ARRAY type at this seam. Scalars by construction: a
+                // literal; a fold, prodsum or extents of a rank-1 operand; a
+                // numeric cast, arithmetic or unary op of scalars; a captured name
+                // or any other node whose resolved type is a concrete scalar.
+                let concreteScalar (t: IRType) =
+                    match IR.stripUnits (env.Subst.Resolve t) with
+                    | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> true
+                    | _ -> false
+                let rankOne (a: TypedExpr) =
+                    match a.Kind with
+                    | TExprVar (_, vid, _) when vid = pid -> true
+                    | _ ->
+                        match IR.stripUnits (env.Subst.Resolve a.Type) with
+                        | ArrayElem at -> at.IndexTypes.Length = 1
+                        | _ -> false
+                let rec holdsScalarExpr (e: TypedExpr) : bool =
+                    match e.Kind with
+                    | TExprLit _ -> true
+                    | TExprReduce (a, _, _) | TExprExtents a -> rankOne a
+                    | TExprProdSum args -> args |> List.forall rankOne
+                    | TExprBinOp (Elementwise, _, l, r) -> holdsScalarExpr l && holdsScalarExpr r
+                    | TExprUnaryOp (_, x) -> holdsScalarExpr x
+                    | TExprApp ({ Kind = TExprVar (n, _, _) }, [ x ])
+                        when (match n with
+                              | "Float64" | "Float32" | "Int64" | "Int32" -> true
+                              | _ -> false) -> holdsScalarExpr x
+                    | TExprVar (_, vid, _) when vid = pid -> false
+                    | _ -> concreteScalar e.Type
+                let rec rowExpr (e: TypedExpr) : bool =
+                    match e.Kind with
+                    | TExprVar (_, vid, _) -> vid = pid
+                    | TExprBinOp (Elementwise, _, l, r) ->
+                        (rowExpr l && (rowExpr r || holdsScalarExpr r)) || (holdsScalarExpr l && rowExpr r)
+                    | TExprUnaryOp (_, x) -> rowExpr x
+                    // The checker has already lifted `r - s` / `r * r` into an
+                    // apply over the row (`object_for(k) <@> r`), and an explicit
+                    // `method_for(r) <@> lambda(x) -> ..` is the same node: a
+                    // CELLWISE map (every kernel input rank 0, a scalar kernel)
+                    // whose every operand is itself row-shaped and whose result is
+                    // rank 1 (co-iteration, never an outer product) is as long as
+                    // the row.
+                    | TExprApply info ->
+                        not info.Arrays.IsEmpty
+                        && info.Arrays |> List.forall rowExpr
+                        && info.KernelInputRanks |> List.forall ((=) 0)
+                        && info.KernelOutputRank = 0
+                        && (match IR.stripUnits (env.Subst.Resolve e.Type) with
+                            | ArrayElem a -> a.IndexTypes.Length = 1
+                            | _ -> false)
+                    // `lambda(r) -> r * 2.0 |> compute`: the pipe binds INTO the
+                    // lambda, and forcing a row expression is the same row.
+                    | TExprCompute x -> rowExpr x
+                    | _ -> false
+                let rec spine (e: TypedExpr) : bool =
+                    match e.Kind with
+                    | TExprLet (_, _, v, b) -> holdsScalarExpr v && spine b
+                    | TExprBlock (stmts, Some fe) ->
+                        stmts |> List.forall (fun s ->
+                            match s with
+                            | TStmtLet b -> b.SubBindings.IsEmpty && holdsScalarExpr b.Value
+                            | _ -> false)
+                        && spine fe
+                    | TExprCompute x -> spine x
+                    | _ -> rowExpr e
+                let rank = kernelInputRanks |> List.tryHead |> Option.defaultValue (-1)
+                // An ELEMENT kernel must return a scalar: one that returns a row
+                // (`lambda(e) -> g(0) * 2.0`, the element unused) adds axes.
+                let admitted = (rank = 0 && List.isEmpty kernelTDims) || (rank = 1 && spine resolvedLambdaInfo.Body)
+                if not admitted then
+                    Some (IndexSpaceErr "a per-group row map over a group_by result must return a row exactly as long as its group (G90, group-rowmap v1): its kernel takes one ELEMENT, or takes the ROW and returns an elementwise expression of that row and scalars, after scalar lets (`lambda(r) -> r - reduce(r, (+)) / Float64(extents(r))`). This kernel's result keeps the group-member axis without that proof (an `if` choosing a row, a row of a captured grouped array, a call or a nested map returning a row); reduce the row to a scalar, or map the values before grouping")
+                else
+                    let srcOuter = at.IndexTypes.Head.Id
+                    env.GroupRowMapOuters.[outOuter.Id] <- srcOuter
+                    (match env.SegmentedOuters.TryGetValue srcOuter with
+                     | true, a -> env.SegmentedOuters.[outOuter.Id] <- a
+                     | _ -> ())
+                    (match env.GroupOuters.TryGetValue srcOuter with
+                     | true, gk -> env.GroupOuters.[outOuter.Id] <- gk
+                     | _ -> ())
+                    None
+            | _ -> None
+        match groupRowMapErr with
+        | Some e -> Error e
+        | None ->
         let info : TypedApplyInfo = {
             Loop = tLoop; Kernel = resolvedKernel
             Arrays = arrays; Identities = identities
@@ -14487,6 +14633,91 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
 /// channels -- warnings, the warning log, pin suggestions, deduced facts, the
 /// editor's deductions, the spans -- are restored before the re-check, and a
 /// re-check that fails restores the first attempt's and reports ITS refusal.
+/// A restore point for the WARNING side channels (both warning logs, pin
+/// suggestions, deduced facts, IDE deductions): call the returned function to
+/// drop everything appended since. The module ring's replay sweep re-checks
+/// its recursion's step; what that re-check reports, x's own check already did.
+and warningChannelsRestorePoint (env: TypeEnv) : unit -> unit =
+    let ws = List.ofSeq env.Warnings
+    let log = Blade.TypeEnv.WarningLog.get ()
+    let pins = Blade.TypeCheckIde.PinSuggestions.get ()
+    let facts = Blade.TypeEnv.DeducedFacts.get ()
+    let pairs, packs, kernels = IdeDeductions.pairs.Value, IdeDeductions.packs.Value, IdeDeductions.kernels.Value
+    fun () ->
+        env.Warnings.Clear()
+        env.Warnings.AddRange(ws)
+        Blade.TypeEnv.WarningLog.reset ()
+        for d in log do Blade.TypeEnv.WarningLog.add d
+        Blade.TypeCheckIde.PinSuggestions.reset ()
+        for (m, sp) in pins do Blade.TypeCheckIde.PinSuggestions.add m sp
+        Blade.TypeEnv.DeducedFacts.reset ()
+        for (f, sp) in facts do Blade.TypeEnv.DeducedFacts.add f sp
+        IdeDeductions.pairs.Value <- pairs
+        IdeDeductions.packs.Value <- packs
+        IdeDeductions.kernels.Value <- kernels
+
+/// A TRIAL check whose every trace is rolled back (checkUnderDeclaredLayout's
+/// discipline: side channels, plan records, the substitution, instances and
+/// pending applications): does `expr` check in `env`?
+and trialChecks (env: TypeEnv) (expr: Expr) : bool =
+    let restoreWarnings = warningChannelsRestorePoint env
+    let stmtSp, exprSp = currentStmtSpan (), currentExprSpan ()
+    let pending0 = env.PendingArrowApps.Count
+    let obligations0 = env.CurrentGenericObligations |> Option.map (fun o -> o.Count)
+    let decisions0 = Blade.Effects.Decisions.mark ()
+    let subst0 = env.Subst.Snapshot()
+    let arrowKeys0 = System.Collections.Generic.HashSet<string>(env.ArrowVariants.Keys)
+    let shareKeys0 = System.Collections.Generic.HashSet<string>(env.SharingVariants.Keys)
+    let variantDecls0 = env.ArrowVariantDecls.Count
+    // Every other table a check appends to: id- or node-keyed entries the
+    // trial minted are removed; the string-keyed ones are restored whole.
+    let keysOf (d: System.Collections.Generic.Dictionary<'k, 'v>) = System.Collections.Generic.HashSet<'k>(d.Keys)
+    let trimDict (d: System.Collections.Generic.Dictionary<'k, 'v>) (k0: System.Collections.Generic.HashSet<'k>) =
+        for k in List.ofSeq d.Keys do
+            if not (k0.Contains k) then d.Remove k |> ignore
+    let trimSet (s: System.Collections.Generic.HashSet<'k>) (k0: System.Collections.Generic.HashSet<'k>) =
+        for k in List.ofSeq s do
+            if not (k0.Contains k) then s.Remove k |> ignore
+    let declared0 = System.Collections.Generic.HashSet<IRId>(env.DeclaredFuncIds)
+    let effects0 = keysOf env.FuncEffects
+    let witness0 = keysOf env.FuncWitnessBodies
+    let retargets0 = keysOf env.ArrowRetargets
+    let openArgs0 = System.Collections.Generic.HashSet<TypedExpr>(env.OpenCallArgs, HashIdentity.Reference)
+    let parallel0 = keysOf env.FuncParallel
+    let foldBuiltin0 = keysOf env.FuncFoldBuiltin
+    let mutualRet0 = List.ofSeq env.MutualReturnFuncs
+    let joinLegs0 = List.ofSeq env.JoinLegLists
+    let ok = try inferExpr env expr |> Result.isOk with _ -> false
+    trimSet env.DeclaredFuncIds declared0
+    trimDict env.FuncEffects effects0
+    trimDict env.FuncWitnessBodies witness0
+    trimDict env.ArrowRetargets retargets0
+    for a in List.ofSeq env.OpenCallArgs do
+        if not (openArgs0.Contains a) then env.OpenCallArgs.Remove a |> ignore
+    trimDict env.FuncParallel parallel0
+    trimDict env.FuncFoldBuiltin foldBuiltin0
+    env.MutualReturnFuncs.Clear()
+    for kv in mutualRet0 do env.MutualReturnFuncs.[kv.Key] <- kv.Value
+    env.JoinLegLists.Clear()
+    for kv in joinLegs0 do env.JoinLegLists.[kv.Key] <- kv.Value
+    restoreWarnings ()
+    setCurrentStmtSpan stmtSp
+    setCurrentExprSpan exprSp
+    Blade.Effects.Decisions.rollback decisions0
+    env.Subst.Restore subst0
+    for k in List.ofSeq env.ArrowVariants.Keys do
+        if not (arrowKeys0.Contains k) then env.ArrowVariants.Remove k |> ignore
+    for k in List.ofSeq env.SharingVariants.Keys do
+        if not (shareKeys0.Contains k) then env.SharingVariants.Remove k |> ignore
+    if env.ArrowVariantDecls.Count > variantDecls0 then
+        env.ArrowVariantDecls.RemoveRange(variantDecls0, env.ArrowVariantDecls.Count - variantDecls0)
+    if env.PendingArrowApps.Count > pending0 then
+        env.PendingArrowApps.RemoveRange(pending0, env.PendingArrowApps.Count - pending0)
+    (match env.CurrentGenericObligations, obligations0 with
+     | Some o, Some n when o.Count > n -> o.RemoveRange(n, o.Count - n)
+     | _ -> ())
+    ok
+
 and checkUnderDeclaredLayout (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<TypedExpr> =
     // A dense array, or a tuple holding one (the rule applies at each annotated
     // array boundary; the whole value is re-checked).
@@ -14615,7 +14846,7 @@ and recArrayWindowDecision (env: TypeEnv) (binding: Binding) (tail: Stmt list) (
                     match recArrayWindowVerdict k snaps n with
                     | Error why -> decline why
                     | Ok () ->
-                    match recArrayLower env annot annotTy def span (Some (k, snaps)) with
+                    match recArrayLower env annot annotTy def span (Some (k, snaps)) false with
                     | Ok (RecWindowStmts stmts) ->
                         let rw = recSnapRewriter name
                         let tail' = tail |> List.map (Blade.Unfold.mapStmtPre rw)
@@ -14636,10 +14867,122 @@ and recArrayWindowDecision (env: TypeEnv) (binding: Binding) (tail: Stmt list) (
         | _ -> decline "the annotation is not a literal `Array<...>` (the ring's head slot is rebuilt from its slots)"
     | _ -> None
 
+/// The MODULE-scope arm of the ring (plan-rec-array-windowing.md section 7,
+/// P3; round 4 wave 4 B1). A module-level `let rec x` is auto-printed, so its
+/// whole history is observable; P1 declines it. Here x STAYS a binding (its
+/// full desugar, which the interpreter and the LLVM lane keep), and the
+/// declarations after it gain:
+///   * `let __replay_<x> = { ring sweep with a row marker after each row }`
+///     -- the C++ lane's schedule for x (CodeGenBinding.planRecPrintReplays:
+///     run once at its slot, again at x's print; x never stored);
+///   * `let __snap_<p>_<x> = x(p)` for every fixed row the later
+///     declarations read, those reads rewritten to the snapshot (the C++ lane
+///     fills them from the sweep; the other lanes read x).
+/// Admitted only when every later use of x is a fixed-row read (functions'
+/// bodies included), no other module of the program imports this one, and
+/// the ring is smaller than the trajectory (the P1 coverage gate). Returns
+/// the declarations that follow x (the inserted ones first), or None.
+and recArrayModuleDecision (env: TypeEnv) (importedElsewhere: string option) (binding: Binding) (later: Located<Decl> list)
+                           : Located<Decl> list option =
+    match binding.Pattern.Kind, binding.Value.Kind, binding.Type with
+    | PatternKind.PatVar name, ExprKind.ExprRecArray def, Some annot ->
+        let span = binding.Value.Span
+        let record outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "rec-window"; Version = 1; Span = span
+                  Subject = name; Outcome = outcome; Evidence = evidence }
+        let decline (why: string) = record (Blade.Effects.Declined ("module scope: " + why)) []; None
+        let mentions (o: obj) = (sprintf "%A" o).Contains ("\"" + name + "\"")
+        if not (Blade.Optimize.recWindowEnabled ()) then decline "disabled by BLADE_REC_WINDOW"
+        elif not (Blade.Optimize.recReplayEnabled ()) then decline "disabled by BLADE_REC_REPLAY"
+        elif importedElsewhere.IsSome then decline importedElsewhere.Value
+        elif def.Guard.IsSome then decline "a `while` guard: its freeze epilogue repeats the last written row over the rest of the extent"
+        elif (Blade.Optimize.recognizeFreezeIdiom (fun _ -> None) def).IsSome then
+            decline "the freeze-idiom shape (`if G then STEP else prefix(n - 1)`) takes the guarded form"
+        else
+        match annot with
+        | TyArray (_, _ :: _) ->
+            match recArrayMaxLag def with
+            | Error why -> decline why
+            | Ok k ->
+            // The later declarations as a block tail: a `let` is a statement,
+            // a function body an expression (its parameters must not rebind
+            // x, and nothing else in it may name x); any other declaration
+            // naming x is a use this scan cannot classify.
+            let tailOrErr =
+                later |> List.fold (fun acc d ->
+                    match acc with
+                    | Error _ -> acc
+                    | Ok stmts ->
+                        match d.Value with
+                        | DeclLet b -> Ok (stmts @ [ StmtLet b ])
+                        | DeclFunction f ->
+                            if f.Name = name || f.Params |> List.exists (fun p -> p.Name = name) then
+                                Error $"function `{f.Name}` rebinds `{name}`"
+                            elif mentions (box { f with Body = mkExpr f.Body.Span (ExprKind.ExprLit LitUnit) }) then
+                                Error $"function `{f.Name}`'s signature mentions `{name}`"
+                            else Ok (stmts @ [ StmtExpr f.Body ])
+                        | other when mentions (box other) -> Error $"a later declaration other than a `let` or a function mentions `{name}`"
+                        | _ -> Ok stmts) (Ok [])
+            match tailOrErr with
+            | Error why -> decline why
+            | Ok tail ->
+            match recArrayTailReads name tail None with
+            | Error why -> decline why
+            | Ok snaps ->
+            let annotTy = lowerTypeExpr env annot
+            match annotTy with
+            | ArrayElem at when not at.IndexTypes.IsEmpty ->
+                let lit (ix: IRIndexType) = match ix.Extent with IRLit (IRLitInt v) -> Some v | _ -> None
+                match lit at.IndexTypes.Head, at.IndexTypes.Tail |> List.map lit with
+                | Some n, trailingOpt when trailingOpt |> List.forall Option.isSome ->
+                    match recArrayWindowVerdict k snaps n with
+                    | Error why -> decline why
+                    | Ok () ->
+                    match recArrayLower env annot annotTy def span (Some (k, [])) true with
+                    | Ok (RecWindowStmts stmts) when
+                            // TRIAL CHECK of the sweep, every trace rolled back: a ring the
+                            // checker refuses declines here instead of refusing a program
+                            // the full buffer accepts.
+                            not (trialChecks env (mkExpr span (ExprBlock (stmts, None)))) ->
+                        decline "the ring sweep does not check (the full buffer reports its own diagnostics)"
+                    | Ok (RecWindowStmts stmts) ->
+                        let at' (v: Decl) : Located<Decl> = { Value = v; Span = span }
+                        let mkLet (n: string) (value: Expr) : Decl =
+                            DeclLet { Mutability = BindLet; Pattern = mkPat span (PatVar n); Type = None; Value = value }
+                        let replayDecl =
+                            at' (mkLet (Blade.IR.recReplayBindingPrefix + name) (mkExpr span (ExprBlock (stmts, None))))
+                        let snapDecls =
+                            snaps |> List.map (fun p ->
+                                at' (mkLet (recSnapName name p)
+                                        (mkExpr span (ExprApp (mkExpr span (ExprVar name), [ mkExpr span (ExprLit (LitInt p)) ])))))
+                        let rw = recSnapRewriter name
+                        let later' =
+                            later |> List.map (fun d ->
+                                match d.Value with
+                                | DeclLet b -> { d with Value = DeclLet { b with Value = Blade.Unfold.mapExprPre rw b.Value } }
+                                | DeclFunction f -> { d with Value = DeclFunction { f with Body = Blade.Unfold.mapExprPre rw f.Body } }
+                                | _ -> d)
+                        let cells = trailingOpt |> List.fold (fun a o -> a * Option.get o) 1L
+                        let resident = k + 1L + int64 snaps.Length
+                        record Blade.Effects.Applied
+                            [ $"module scope: a ring of {k + 1L} rows (max lag K = {k}) replays the {n}-row trajectory, {cells} cells a row"
+                              (if snaps.IsEmpty then "no later row reads"
+                               else "snapshots of rows " + (snaps |> List.map string |> String.concat ", ") + " for the reads after it")
+                              $"resident rows {n} -> {resident} ({n * cells} -> {resident * cells} cells) in the C++ lane, which runs the sweep at `{name}`'s slot and again at its print (rule rec-print-replay); the interpreter and the LLVM lane keep the full buffer"
+                              $"every later use of `{name}` is a fixed-row read, rewritten to its snapshot" ]
+                        Some ([ replayDecl ] @ snapDecls @ later')
+                    | Ok (RecFullTyped _) -> decline "internal: the windowed desugar returned a full value"
+                    | Error e -> decline $"the windowed desugar failed ({e}); the full buffer reports its own diagnostics"
+                | _ -> decline "a non-static extent (the full desugar reports it)"
+            | _ -> decline "the annotation is not an array type"
+        | _ -> decline "the annotation is not a literal `Array<...>` (the ring's head slot is rebuilt from its slots)"
+    | _ -> None
+
 /// Full materialization: the recursion as a block expression bound to its
 /// name, exactly as it has always been emitted.
 and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecArrayDef) (span: Span) : TypeResult<TypedExpr> =
-    recArrayLower env annot annotTy def span None
+    recArrayLower env annot annotTy def span None false
     |> Result.bind (function
         | RecFullTyped tv -> Ok tv
         | RecWindowStmts _ -> Error (InternalErr $"recursive array '{def.Name}': internal error -- a full desugar returned windowed statements"))
@@ -14653,7 +14996,7 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
 /// out-of-prefix reads never reach the buffer, and the guard clamp keeps the
 /// discarded branch's ring index in bounds.
 and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecArrayDef) (span: Span)
-                  (window: (int64 * int64 list) option) : TypeResult<RecLowered> =
+                  (window: (int64 * int64 list) option) (replayRows: bool) : TypeResult<RecLowered> =
     // Freeze-idiom recognition (Blade.Optimize, plan-match-statements.md
     // section 5 R7/B): an unguarded inductive arm whose slice is
     // `if G then STEP else prefix(n - 1)` with a lag-1-only guard is
@@ -15076,8 +15419,17 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                     when not (tag.StartsWith "__") ->
                 synAt (ExprTyped (iLit v, slot0))
             | _ -> iLit v
+        // PRINT REPLAY (module scope, recArrayModuleDecision): after each
+        // completed row, a marker `let __replay_row_<x> = ring(slot)` that
+        // Lowering turns into the effectful IRReplayRow naming x.
+        let rowMarker (slot: Expr) : Stmt list =
+            if not replayRows then []
+            else
+                [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar (Blade.IR.recReplayRowPrefix + def.Name))
+                            Type = None; Value = synAt (ExprApp (bufVar, [ slot ])) } ]
         let loopBody =
             lagStmts @ guardStmts @ sliceCopyStmts (ringIdx (synAt (ExprVar def.StepVar))) $"__slice_{def.Name}" slice'
+            @ rowMarker (ringIdx (synAt (ExprVar def.StepVar)))
         let stepRange = synAt (ExprKind.ExprDotDot (stepBound loopStart, iLit n))
         let loop = StmtForIn (def.StepVar, stepRange, loopBody)
         // SNAPSHOTS (windowed). One per row the rest of the block reads, typed
@@ -15182,7 +15534,8 @@ and recArrayLower (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
             // the freeze-idiom shape (its epilogue repeats the last row).
             Error (InternalErr $"recursive array '{def.Name}': internal error -- a guarded recursion reached the windowed desugar")
         | Some _ ->
-            Ok (RecWindowStmts ((bufLet :: zeroSliceStmts) @ snapStmts @ seedStmts @ sweepStmts))
+            let seedMarker = if loopStart > 0L then rowMarker (iLit 0L) else []
+            Ok (RecWindowStmts ((bufLet :: zeroSliceStmts) @ snapStmts @ seedStmts @ seedMarker @ sweepStmts))
         | None ->
         let block = synAt (ExprBlock ((bufLet :: zeroSliceStmts) @ seedStmts @ guardPre @ [loop] @ guardPost, Some bufVar))
         // Post-check injection for the `while` guard: the break (TExprBreakIf,
@@ -16489,6 +16842,8 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             // Resolved shape, defaulted element -- see loopOperandArrayType. This
             // is the arm a compound zip operand reaches (`(A - m) * (B - m)`).
             tZipArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
+            tZipArrays |> List.map (fun ta -> demandNamedLoopOperand env ta "method_for") |> sequenceResults
+            |> Result.bind (fun _ ->
             let arrayTypes = tZipArrays |> List.mapi (fun i ta ->
                 loopOperandArrayType env (fun () -> getArrayType env zipExprs.[i]) ta.Type)
             // Shared iteration records. Single-record operands (dense rank-1 or
@@ -16521,7 +16876,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                 Kind = LKMethod; Arity = Some zipExprs.Length
                 ArrayTypes = arrayTypes |> List.map mkArrayLike; KernelType = None
             }
-            Ok (mkTyped (TExprMethodFor info) loopTy))
+            Ok (mkTyped (TExprMethodFor info) loopTy)))
     | _ ->
     arrays |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArrays ->
         // Also detect method_for(Z) where Z was bound to a zip.
@@ -16543,6 +16898,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                     match te.Kind with
                     | TExprVar (name, vid, _) -> loopOperandIdentity env name vid
                     | _ -> AIDLiteral (env.Builder.FreshId()))
+                match zipExprs |> List.map (fun te -> demandNamedLoopOperand env te "method_for") |> sequenceResults with
+                | Error e -> Error e
+                | Ok _ ->
                 // Same stale-IRTInfer hazard as the zip arm above.
                 let arrayTypes = zipExprs |> List.map (fun te ->
                     loopOperandArrayType env
@@ -16612,6 +16970,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             // tuple VALUE), so the defaulted-shape thunk stands in -- the same
             // one the let-bound-zip arm above uses for exactly this reason.
             leafArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
+            match leafArrays |> List.map (fun ta -> demandNamedLoopOperand env ta "method_for") |> sequenceResults with
+            | Error e -> Error e
+            | Ok _ ->
             let arrayTypes = leafArrays |> List.map (fun ta ->
                 loopOperandArrayType env
                     (fun () -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
@@ -16642,6 +17003,11 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
         // ...and a generic declaration's UNANNOTATED parameter (no caret to
         // read): see materializeGenericLoopOperand.
         tArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
+        // ...and a named operand the fallback would read wrongly (G125): see
+        // demandNamedLoopOperand.
+        match tArrays |> List.map (fun ta -> demandNamedLoopOperand env ta "method_for") |> sequenceResults with
+        | Error e -> Error e
+        | Ok _ ->
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
@@ -17253,6 +17619,9 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
             // generic declaration's unannotated parameter has no caret to
             // read: see materializeGenericLoopOperand.
             tArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "for")
+            match tArrays |> List.map (fun ta -> demandNamedLoopOperand env ta "for") |> sequenceResults with
+            | Error e -> Error e
+            | Ok _ ->
             let arrayTypes = tArrays |> List.mapi (fun i ta ->
                 loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
             // Real per-array S-dim counts (see the zip arms: the IRTInfer

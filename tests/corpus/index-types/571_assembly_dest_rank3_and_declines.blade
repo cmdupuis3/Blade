@@ -1,0 +1,22 @@
+// TEST: Assembly Destination Fill Rank 3 And Its Declines
+// assembly-dest v1 (PM26): a rank-3 axis swap of a map fills in source order,
+// each cell landing at its swapped address (no tiles above rank 2). Declines,
+// each keeping the stored temporary and the copy, same values: a kernel that
+// is not total (integer division can panic: the failure would move to the
+// transpose and the fill order is not the map's), and a NAMED map, which
+// prints (a binding the user wrote is a required output unless a print
+// selection excludes it).
+type I = Idx<3>
+type J = Idx<4>
+type K = Idx<5>
+let X: Array<Float64 like I, J, K> = method_for(range<I, J, K>) <@> lambda(i, j, k) -> Float64(i) * 100.0 + Float64(j) * 10.0 + Float64(k) |> compute
+let T3 = transpose(X + 0.5, [0, 2])
+let t3 = T3(4, 3, 2)
+// EXPECT: t3 = 234.5
+let N: Array<Int64 like I, J> = method_for(range<I, J>) <@> lambda(i, j) -> Int64(i) * 10 + Int64(j) |> compute
+let Q = transpose(method_for(N) <@> lambda(v) -> v / 3 |> compute, [0, 1])
+// EXPECT: Q = [[0, 3, 6], [0, 3, 7], [0, 4, 7], [1, 4, 7]]
+let M = X * 2.0 |> compute
+let TM = transpose(M, [1, 2])
+let tm = TM(2, 4, 3)
+// EXPECT: tm = 468.0

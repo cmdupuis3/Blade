@@ -827,7 +827,18 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
 and private forceInputArray (st: InterpState) (env: Env) (arrExpr: IRExpr) : BladeArray =
     match resolveArraySource st env arrExpr with
     | SReal a -> a
-    | SVirtual -> raise (InterpUnsupported "eager op over a bare virtual source (materialize first)")
+    | SVirtual ->
+        // A BARE single-slot plain range fed to an eager op (`sort(range<I>,
+        // key)`, `sort(lo..hi, key)`, round 4 wave 4 D1): its iota, offset +
+        // i, through the same force arm `let xs = 0..n` takes -- the twin of
+        // the C++ lane's materialized / identity range source. Every other
+        // virtual source still gates.
+        match arrExpr with
+        | IRRange _ ->
+            (match forceExpr st env arrExpr with
+             | VArray a -> a
+             | _ -> raise (InterpUnsupported "eager op over a bare virtual source (materialize first)"))
+        | _ -> raise (InterpUnsupported "eager op over a bare virtual source (materialize first)")
 
 /// Resolve a sort key / mask predicate / compose-apply stage expr to a unary
 /// Value->Value closure via resolveKernel (peels Reynolds, resolves through the
@@ -1262,6 +1273,9 @@ and private materializeCompoundRangeMap
     let maskArr =
         match force st env (Core.evalExpr st env maskExpr) with
         | VArray a -> a
+        // a mask over a compound (G128): its bits over the compound's
+        // present cells, the flat view the C++ lane's range driver reads
+        | VCompound cv -> A.compoundToDense cv
         | _ -> raise (InterpUnsupported "range<CompoundIdx>: mask is not an array")
     let leadExtents = maskArr.Extents
     let maskBits = A.maskToBits maskArr
@@ -1532,7 +1546,55 @@ and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo)
         not outputIsRaggedShaped &&
         outIdxTys.Length >= 2 &&
         (outIdxTys |> List.skip 1 |> List.forall (fun ix -> ix.IxKind = IxKPlain))
-    if outputIsRaggedShaped then
+    let outputIsGroupShaped =
+        outIdxTys.Length >= 2 && (outIdxTys |> List.skip 1 |> List.exists (fun ix -> ix.IxKind = IxKGroupMember))
+    if outputIsGroupShaped then
+        // PER-GROUP MAP over a group_by result (G90, group-rowmap v1; the C++
+        // twin is tryRaggedPeel's group-shaped arm). The type checker admitted
+        // it only as length-preserving, so the result is a grouped value over
+        // the SAME grouping: the operand's row lengths, and its offsets array
+        // BY REFERENCE -- the interpreter identifies a grouping by that
+        // reference (the grouped co-iteration's same-keys test), and the C++
+        // lane registers the map under the operand's grouping. Groups run
+        // ascending; the kernel binds one ELEMENT (input rank 0) or the ROW
+        // (rank 1), dispatched on the kernel input rank as the emitter is.
+        let (rowStores, lens, offsets) =
+            match grouped.Data with
+            | SRagged (rows, lens, offs) -> (rows, lens, offs)
+            | _ -> raise (InterpUnsupported "per-group map: input is not a CSR grouped store")
+        let isElement =
+            match info.KernelInputRanks with
+            | [ 0 ] -> true
+            | [ 1 ] -> false
+            | _ -> raise (InterpUnsupported "per-group map: the kernel binds neither one element nor one row")
+        st.Cells <- st.Cells + (lens |> Array.fold (+) 0L)
+        let outRows =
+            rowStores
+            |> Array.mapi (fun g rowStore ->
+                let rlen = if g < lens.Length then lens.[g] else 0L
+                let vals =
+                    if isElement then
+                        let rowArr =
+                            { ElemType = grouped.ElemType
+                              IndexTypes = (match grouped.IndexTypes with _ :: t -> t | [] -> [])
+                              Extents = [| rlen |]
+                              Data = rowStore }
+                        Array.init (int rlen) (fun k ->
+                            cell.V <- A.readCell rowArr [ int64 k ]
+                            force st kenv (Core.evalExpr st kenv cg.KernelExpr))
+                    else
+                        cell.V <- A.peelDim grouped (int64 g)
+                        match force st kenv (Core.evalExpr st kenv cg.KernelExpr) with
+                        | VArray row when row.Extents.Length = 1 && row.Extents.[0] = rlen ->
+                            Array.init (int rlen) (fun k -> A.readCell row [ int64 k ])
+                        | VArray _ -> raise (InterpUnsupported "per-group map: a row kernel returned a row of another length (the type checker's grammar should have refused it)")
+                        | _ -> raise (InterpUnsupported "per-group map: a row kernel returned a non-array")
+                A.storeOfValues elemTy vals)
+        VArray { ElemType = elemTy
+                 IndexTypes = outIdxTys
+                 Extents = Array.copy grouped.Extents
+                 Data = SRagged (outRows, lens, offsets) }
+    elif outputIsRaggedShaped then
         // ELEMENTWISE over a ragged array: shape-preserving. The param binds
         // each ELEMENT (not the row), and the result keeps the input's row
         // lengths -- the value-space twin of the emitter's fresh pool over
@@ -1804,6 +1866,10 @@ and materializeCompoundBinding
     let forceArr (e: IRExpr) (what: string) : BladeArray =
         match force st env (Core.evalExpr st env e) with
         | VArray a -> a
+        // A compound operand (`compound(J, mask(J, p))`, G128): its present
+        // cells in lex order, the flat view the mask over it was built on --
+        // the C++ lane's gather by position over J's compact buffer.
+        | VCompound cv -> A.compoundToDense cv
         | _ -> raise (InterpUnsupported $"compound() {what} operand is not an array")
     match binding.Type with
     | ArrayElem arrTy ->
@@ -2273,10 +2339,12 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ -> ()
             acc <- fold acc (force st kenv (Core.evalExpr st kenv cg.KernelExpr))
         acc
-    let accVals =
-        infos |> List.mapi (fun li info ->
+    // One leg's fold over its own nest. `started` marks the end of the leg's
+    // pre-traversal work (input gates and forcing) for the join's failure
+    // order below.
+    let runLegFrom (seed0: Value) (info: ApplyInfo) (fold: Value -> Value -> Value) (started: unit -> unit) : Value =
             match domainLeaf info with
-            | Some plan -> foldDomainLeaf info plan legFolds.[li] legSeeds.[li]
+            | Some plan -> started (); foldDomainLeaf info plan fold seed0
             | None ->
             gateInputs info
             let names = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
@@ -2295,9 +2363,108 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
                     match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
-            let acc = { V = legSeeds.[li] }
-            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, legFolds.[li]))
-            acc.V)
+            let acc = { V = seed0 }
+            started ()
+            interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
+            acc.V
+    let runLeg (li: int) (info: ApplyInfo) (fold: Value -> Value -> Value) (started: unit -> unit) : Value =
+        runLegFrom legSeeds.[li] info fold started
+    // THE JOIN'S FAILURE ORDER (gap G101; formalism 10.2): the legs share ONE
+    // traversal, cell by cell in ascending order; within a cell the SHARED
+    // named producers run first (a leaf several legs spell, and every leg's
+    // deferred operand -- the compiled lanes' per-iteration share locals, in
+    // first-use order), then the legs in leg order. So the first failure is the
+    // EARLIEST failing cell's, a share's ahead of a leg's, leg order breaking a
+    // tie -- what both compiled lanes' joint nest does. The interpreter still
+    // runs each leg as its own nest (the legs write nothing, BL4005, so the
+    // extra evaluation is unobservable), counting each leg's completed cells;
+    // when a leg panics, each share is probed the same way, and the panic
+    // raised is the one with the least (cell, share-before-leg, order) -- a
+    // failure before the traversal (an input's own forcing) at cell -1.
+    // THE SAME share rule as CodeGenBinding's join emitter (`sharedIds`): a
+    // name bound to an unforced apply (an ALIAS of one counts under its own
+    // name: the C++ registration copies the apply into the alias entry, the
+    // interpreter keeps `VDeferred (IRVar ..)`, so the chain is followed);
+    // per leg in order, its own leaf when the join spells that name at least
+    // twice (as a leaf or an operand slot), then its operand slots (a slot
+    // operand is always a share); distinct, in first-use order. ONLY the
+    // reduction-join encoding (tuple kernel) has shares (CodeGenBinding's
+    // per-leg join); a fused tree `reduce(p <&!> q, op)` runs its leaves in
+    // order (Codex review round 2).
+    let isJoinEncoding = match kernel with IRTuple _ -> true | _ -> false
+    let directApply (id: IRId) =
+        match envTryFind env id with
+        | Some cell ->
+            (match cell.V with
+             | VDeferred _ ->
+                 (match resolveDeferred (IRVar (id, IRTUnit)) with
+                  | IRApplyCombinator di -> Some di
+                  | _ -> None)
+             | _ -> None)
+        | None -> None
+    let slotShareIds (info: ApplyInfo) =
+        if not isJoinEncoding then []
+        else info.Arrays |> List.choose (function IRVar (id, _) when (directApply id).IsSome -> Some id | _ -> None)
+    let shareOrder () : ApplyInfo list =
+        if not isJoinEncoding then [] else
+        let rec collectIds e =
+            match resolveDeferred e with
+            | IRFusion (l, r) -> collectIds l @ collectIds r
+            | _ -> [ (match e with IRVar (id, _) -> Some id | _ -> None) ]
+        let leafIds =
+            let ids = collectIds comp
+            if ids.Length = infos.Length then ids else List.replicate infos.Length None
+        let leafShares = leafIds |> List.choose (fun v -> v |> Option.filter (fun id -> (directApply id).IsSome))
+        let slotShares = infos |> List.collect slotShareIds
+        let spelled (id: IRId) =
+            (leafShares |> List.filter ((=) id) |> List.length) + (slotShares |> List.filter ((=) id) |> List.length)
+        List.zip leafIds infos
+        |> List.collect (fun (lv, info) ->
+            (match lv with Some id when (directApply id).IsSome && spelled id >= 2 -> [ id ] | _ -> [])
+            @ slotShareIds info)
+        |> List.distinct
+        |> List.choose directApply
+    let accVals =
+        match infos with
+        | [ info ] -> [ runLeg 0 info legFolds.[0] ignore ]
+        | _ ->
+            let outcomes =
+                infos |> List.mapi (fun li info ->
+                    let cells = ref -1L
+                    let fold (a: Value) (v: Value) =
+                        let r = legFolds.[li] a v
+                        cells.Value <- cells.Value + 1L
+                        r
+                    try Ok (runLeg li info fold (fun () -> cells.Value <- 0L))
+                    with InterpPanic _ as ex -> Error (cells.Value, li, ex))
+            match outcomes |> List.choose (function Error f -> Some f | Ok _ -> None) with
+            | [] -> outcomes |> List.map (function Ok v -> v | Error _ -> VUnit)
+            | fails ->
+                // A leg whose deferred operand slot was forced WHOLE before its
+                // traversal (resolveFusedArraySource) and failed there carries
+                // no cell of its own: the compiled lanes evaluate that operand
+                // as a share, cell by cell -- its probe below has the true
+                // cell -- so the leg's pre-traversal failure is not a
+                // candidate. (Its own kernel failing at a cell before the
+                // operand fails is not seen then: gap G115.)
+                let legFails =
+                    fails
+                    |> List.filter (fun (c, l, _) -> not (c < 0L && not (slotShareIds infos.[l]).IsEmpty))
+                    |> List.map (fun (c, l, ex) -> (c, 1, l, ex))
+                let shareFails =
+                    shareOrder () |> List.mapi (fun si di ->
+                        let cells = ref -1L
+                        let count (a: Value) (_: Value) =
+                            cells.Value <- cells.Value + 1L
+                            a
+                        try runLegFrom VUnit di count (fun () -> cells.Value <- 0L) |> ignore; None
+                        with InterpPanic _ as ex -> Some (cells.Value, 0, si, ex))
+                    |> List.choose id
+                match shareFails @ legFails with
+                | [] -> let (_, _, ex) = fails.Head in raise ex
+                | cands ->
+                    let (_, _, _, ex) = cands |> List.minBy (fun (c, r, o, _) -> (c, r, o))
+                    raise ex
     match accVals with
     | [ single ] -> single
     // JOIN: a FLAT Tuple<k>, matching typeOf's shape for the join encoding and
@@ -2572,6 +2739,29 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //              first-occurrence order; transpose = hard swap of two
     //              arity-1 axes into a fresh pool.
     | IRMask (arrExpr, predExpr) ->
+        // A mask over an ALL-DIMS compound (`mask(J, p)`, G128) keeps J's
+        // compound index: a Bool compound over J's present cells in lex
+        // order, the C++ lane's `Compound<bool, R>` sharing J's index.
+        let compoundSrc =
+            match arrExpr with
+            | IRVar (id, _) ->
+                (match envTryFind env id with
+                 | Some cell ->
+                     (match cell.V with
+                      | VDeferred _ as d ->
+                          let fv = force st env d
+                          cell.V <- fv   // memoize, as resolveArraySource does
+                          (match fv with VCompound cv -> Some cv | _ -> None)
+                      | VCompound cv -> Some cv
+                      | _ -> None)
+                 | None -> None)
+            | _ -> None
+        match compoundSrc with
+        | Some cv when cv.TrailingStride = 1L ->
+            let bits = A.maskPresence (A.compoundToDense cv) (resolveUnaryKernel st env predExpr)
+            let ixs = match typeOf expr with ArrayElem t -> t.IndexTypes | _ -> cv.IndexTypes
+            VCompound { cv with ElemType = IRTScalar ETBool; IndexTypes = ixs; Data = bits.Data }
+        | _ ->
         let a = forceInputArray st env arrExpr
         VArray (A.maskPresence a (resolveUnaryKernel st env predExpr))
     | IRSort (arrExpr, keyExpr) ->

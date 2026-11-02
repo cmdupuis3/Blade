@@ -1,7 +1,9 @@
 # Plan: the per-group row map between `group_by` and `ungroup` (G90, PM57 full target)
 
-Status: **SPEC ONLY** (round 4 wave 3, lane D item D4). Nothing here is built. The user
-decides whether wave 4 builds it. Gap row: G90 (`bench/notes/gap-register.md`).
+Status: **v1 BUILT** (round 4 wave 4, lane F item F1) with the user's answers to section 10:
+(1) length preservation is a TYPE fact, (2) v1 = structural groupings for the storage plan,
+key groupings v2, (3) the group-ordinal form later. Section 11 says what v1 built and where it
+departs from this spec. Gap rows: G90 (built), G136-G139 (`bench/notes/gap-register.md`).
 
 ## 1. What exists today
 
@@ -158,3 +160,21 @@ level). Five-party write audit through `scheduleMayWriteIn` + `aliasWriteClosure
    rule you want, or a run-time length check (BL8001) for kernels the type cannot prove?
 2. v1 structural groupings only, key groupings (scatter) in v2 -- agreed?
 3. The group-ordinal form `lambda(r, k)`: in v1 or later?
+
+## 11. What v1 built (round 4 wave 4)
+
+- THE TYPING RULE is a CLOSED KERNEL GRAMMAR, not the index-record identity of section 3: every
+  grouping's member record is structurally identical, unify never compares their ids or extents,
+  and deduceOutputType refreshes every output id, so an identity test admitted `g(0)`, an `if`
+  choosing a row, and a positional abstract callee return (the fable design review, findings
+  1a-c). Admitted: an ELEMENT kernel, or the ROW returned as an elementwise expression of itself
+  and scalars after scalar lets (`|> compute` inside the lambda is transparent). Anything else
+  that keeps the member axis is BL3027 at the type checker. Section 5.2's WORKSPACE form is
+  therefore not built (G137): the row form calls the kernel on the group's row view and copies
+  its row value into the group's slice (one run live at a time).
+- `ungroup` of a KEY grouping, mapped or not, is refused by name (BL3029; G136: the lanes
+  disagreed before -- C++ scattered, the interpreter concatenated). The scatter is G138 (v2).
+- The storage plan (`group-rowmap v1`, BLADE_GROUP_ROWMAP): a top-level `ungroup(h[, A])` of a
+  computed per-group map over a top-level structural rank-1 `group_by` shares h's pool when the
+  never-written closure holds over h and the reassembled array. Declines: G139.
+- LLVM: the element form runs; the ROW form refuses (the program falls back to C++).

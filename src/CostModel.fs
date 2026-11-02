@@ -43,8 +43,11 @@ module Blade.CostModel
 open Blade.Types
 open Blade.IR
 
-/// The model's version, printed in every cost line (`model v1`).
-let version = 1
+/// The model's version, printed in every cost line (`model v2`). v2 (gap
+/// G96, round 4 wave 4) keeps v1's accounting -- the same {work, traffic,
+/// peak} record, the same `compose` -- and changes ONE thing, the recompute
+/// SELECTION's exchange rate between work and traffic (`bandwidthWeight`).
+let version = 2
 
 /// Declared weights, in scalar operations (model v1).
 let divisionOps = 4L
@@ -559,6 +562,38 @@ let aliasCopyLine (nameOf: IRId -> string) (aliasTy: IRType) (src: string) (alia
 // map in place, `out` its result pool).
 // ---------------------------------------------------------------------------
 
+/// Model v2's BANDWIDTH WEIGHT (gap G96). v1 priced one scalar operation and
+/// one cell of traffic equally, so a cheap streaming producer read by k
+/// consumers stayed materialized at k = 4 / 8 although recomputing it
+/// measured FASTER (PM05, wave 3: n = 2,000,003, `v * 2.0 + 1.0`, k = 4:
+/// 11.8 -> 8.3 ms, k = 8: 20.7 -> 16.4 ms, peak 35.5 -> 20.6 MB). A cell of
+/// a pool that does not stay in cache is a memory transaction, not an
+/// operation: v2 prices each such cell of traffic at its element's BYTES in
+/// scalar operations (8 for a Float64 / Int64, 4 for a Float32 / Int32) when
+/// the materialized pool PROVABLY exceeds `cacheBudgetBytes` (a literal
+/// extent), and keeps v1's 1:1 otherwise -- a pool that may fit in cache, a
+/// named extent the model cannot size, an element of no plain width. The
+/// weighted objective `work + w * traffic` is monotone in `cost_le`, so it is
+/// an instance of the `objective` the Rocq frontier theorem quantifies over
+/// (proofs/BladeCompositionalOptimization.v); optimality is still claimed
+/// only for the enumerated family under this model.
+let cacheBudgetBytes = 262144L
+
+/// The weight (and its one-line basis) for a pool of `n` cells of `elem`.
+let bandwidthWeight (n: Poly) (elem: IRType) : int64 * string =
+    let bytes =
+        match stripUnits elem with
+        | IRTScalar (ETFloat64 | ETInt64) -> Some 8L
+        | IRTScalar (ETFloat32 | ETInt32) -> Some 4L
+        | _ -> None
+    match Poly.tryConst n, bytes with
+    | Some cells, Some b when Checked.(*) cells b > cacheBudgetBytes ->
+        (b, $"bandwidth weight {b}: the pool is {cells} cells x {b} bytes > the {cacheBudgetBytes / 1024L} KiB cache budget, so one cell of traffic is priced as {b} operations")
+    | Some cells, Some b ->
+        (1L, $"bandwidth weight 1: the pool is {cells} cells x {b} bytes <= the {cacheBudgetBytes / 1024L} KiB cache budget (cache-resident traffic priced 1:1)")
+    | None, _ -> (1L, "bandwidth weight 1: the pool's size is not a literal (traffic priced 1:1)")
+    | _, None -> (1L, "bandwidth weight 1: the element has no plain width (traffic priced 1:1)")
+
 type RecomputeConsumer =
     | RcFold of fold: IRCallable option
     | RcMap of h: ApplyInfo * h': ApplyInfo * out: string
@@ -574,14 +609,14 @@ type RecomputeVerdict = {
     Reason: string
 }
 
-/// The exact rule (model v1 prices one scalar operation and one cell of
-/// traffic equally): RECOMPUTE iff
-///     work(recompute) - work(materialize) <= traffic(materialize) - traffic(recompute)
+/// The exact rule (model v2: w = `bandwidthWeight` of the materialized pool,
+/// 1 for a cache-resident or unsized pool -- exactly v1's rule): RECOMPUTE iff
+///     work(recompute) - work(materialize) <= w * (traffic(materialize) - traffic(recompute))
 ///  and peak(recompute) <= peak(materialize),
 /// both PROVED (coefficient-wise); a tie in both (equal sums, equal peaks)
 /// keeps MATERIALIZE, as does anything the model cannot decide.
 let recomputeRule =
-    "recompute iff work(recompute) - work(materialize) <= traffic(materialize) - traffic(recompute) and peak(recompute) <= peak(materialize), both proved; a tie in both keeps materialize (model v1 prices one scalar operation and one cell of traffic equally)"
+    "recompute iff work(recompute) - work(materialize) <= w x (traffic(materialize) - traffic(recompute)) and peak(recompute) <= peak(materialize), both proved; a tie in both keeps materialize (model v2: w = the pool's bandwidth weight, 1 when it may stay in cache)"
 
 let recomputeSelection (resolve: IRExpr -> IRCallable option) (nameOf: IRId -> string) (stored: IRExpr -> string option)
                        (x: string) (p: ApplyInfo) (consumers: RecomputeConsumer list) : Result<RecomputeVerdict, string> =
@@ -606,20 +641,29 @@ let recomputeSelection (resolve: IRExpr -> IRCallable option) (nameOf: IRId -> s
         bindR priced (fun (ms, rs, txt, _) ->
             let m, r = seqSteps ms, seqSteps rs
             let cm, cr = costOf m, costOf r
+            let (w, weightTxt) =
+                let elem = match stripUnits p.OutputType with ArrayElem at -> at.ElemType | IRTArrow (_, e, _) -> e | t -> t
+                bandwidthWeight n elem
             let d = Poly.sub cr.Work cm.Work
-            let t = Poly.sub cm.Traffic cr.Traffic
+            let t = Poly.scale w (Poly.sub cm.Traffic cr.Traffic)
             let signed (prefix: string) (q: Poly) =
                 match Poly.tryConst q with
                 | Some v when v < 0L -> (if prefix = "+" then "-" else "+") + string (-v)
                 | _ -> prefix + Poly.render q
-            let workTxt, trafficTxt = signed "+" d, signed "-" t
+            let workTxt = signed "+" d
+            let trafficTxt =
+                if w = 1L then signed "-" t
+                else
+                    let raw = signed "-" (Poly.sub cm.Traffic cr.Traffic)
+                    let weighted = signed "-" t
+                    $"{w} x {raw} = {weighted}"
             let workOk = Poly.leq d t
             let peakOk = Peak.leq cr.Peak cm.Peak
             let tie = d = t && cr.Peak = cm.Peak
             let recompute = workOk && peakOk && not tie
             let consumersTxt = String.concat ", " txt
             let basis =
-                $"{cellsText n}; producer {opsText pc.CellOps}, reading {readsPerCell pc} stored cell(s) per cell; {consumers.Length} consumers ({consumersTxt}); baseline: `{x}` written once, read by each consumer"
+                $"{cellsText n}; producer {opsText pc.CellOps}, reading {readsPerCell pc} stored cell(s) per cell; {consumers.Length} consumers ({consumersTxt}); baseline: `{x}` written once, read by each consumer; {weightTxt}"
             let costLine =
                 if recompute then renderTransition m r basis
                 else

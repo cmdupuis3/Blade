@@ -1,0 +1,27 @@
+// TEST: A map consumer that names its parameter twice still elides its producer
+// ============================================================================
+// Gap G108 (1): `let p = .. |> compute; let q = method_for(p) <@> lambda(v) ->
+// v * v |> compute; reduce(q, ..)` -- compute elision took `q` but declined
+// `p` ("the consumer kernel reads `p`'s cell 2 times (exactly once is
+// required)"). The kernel reads the CELL once per evaluation and names its
+// parameter twice; elementwise fusion binds a twice-named spliced operand once
+// per cell, so the whole chain reads `a` in one nest (no pool for p or q).
+// A kernel naming it three times still declines (`chain3`). Integer-valued
+// data: association-invariant.
+// ============================================================================
+type N = Idx<1003>
+function chain(a: T^1) -> T^0 = {
+    let p = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    let q = method_for(p) <@> lambda(v) -> v * v |> compute
+    reduce(q, lambda(s, t) -> s + t, 3.0)
+}
+function chain3(a: T^1) -> T^0 = {
+    let p = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    let q = method_for(p) <@> lambda(v) -> v * v - v |> compute
+    reduce(q, lambda(s, t) -> s + t, 3.0)
+}
+let x: Array<Float64 like N> = method_for(range<N>) <@> lambda(i) -> Float64(i % 13) |> compute
+let result = chain(x)
+let result3 = chain3(x)
+// EXPECT: result = 225238.0
+// EXPECT: result3 = 212221.0

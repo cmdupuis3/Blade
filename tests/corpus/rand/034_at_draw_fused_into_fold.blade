@@ -1,0 +1,39 @@
+// TEST: Rand Indexed: an addressed draw folded in a body takes no tape
+// ============================================================================
+// PM47 (round 4 wave 4 B6): inside a function an `_at` draw is a block --
+// operand lets, range guards, then the sample map. `block-float v1` puts the
+// map on the body's spine (prelude first, same order), so compute elision
+// fuses it into its one fold: each sample is drawn inside the fold, no n-cell
+// random pool (an IRRandAt of a parameterless family is total). The samples
+// are the same addresses, so the sum equals the top-level fill's.
+// A parameterized family (gamma_at) floats too, but its draw is not proved
+// total, so its map stays stored: same values.
+// ============================================================================
+import rand as r
+
+function chunk_sum(k: Int64, o: Int64) -> Float64 = {
+    let u = r.uniform_at(k, 7, o, 3)
+    let s = reduce(u, (+))
+    s
+}
+let ref_fill = r.uniform_at(12345, 7, 9, 3)
+let ds = chunk_sum(12345, 9) - reduce(ref_fill, (+))
+// EXPECT: ds = 0.0
+
+function normal_sum(k: Int64, o: Int64) -> Float64 = {
+    let z = r.normal_at(k, 2, o, 5)
+    let s = reduce(z, (+))
+    s
+}
+let ref_norm = r.normal_at(77, 2, 4, 5)
+let dn = normal_sum(77, 4) - reduce(ref_norm, (+))
+// EXPECT: dn = 0.0
+
+function gamma_sum(k: Int64, o: Int64) -> Float64 = {
+    let g = r.gamma_at(k, 3, o, 2.5, 1.0, 4)
+    let s = reduce(g, (+))
+    s
+}
+let ref_gamma = r.gamma_at(99, 3, 6, 2.5, 1.0, 4)
+let dg = gamma_sum(99, 6) - reduce(ref_gamma, (+))
+// EXPECT: dg = 0.0

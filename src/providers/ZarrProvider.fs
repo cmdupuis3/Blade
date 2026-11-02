@@ -1450,6 +1450,13 @@ module CppZarr =
         /// The caller owns this correctly typed backing and its eventual cleanup.
         /// Setup runs AFTER the metadata probe, at the old flat-allocation site.
         | CallerDestination of buffer: string * setup: string list
+        /// PM44 (lane G item G6, rule `keyed-cell-projection v1`): no
+        /// destination array -- every chunk still lands in the chunk buffer in
+        /// the same order with the same short / missing checks, every in-bounds
+        /// cell is still converted and tallied (the whole-variable BL8015 rule,
+        /// reported after the sweep), and only the demanded flat cells are kept,
+        /// each in its own scalar (flat index, C++ name).
+        | RetainCells of cells: (int64 * string) list
 
     let private genAssembleFlatCore (destination: AssemblyDestination) (check: string option) (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string)
                                     (mask: (string * string * string) option) (phase: int) : string list =
@@ -1480,6 +1487,9 @@ module CppZarr =
             | CallerDestination (buf, setup) ->
                 if mask.IsSome || phase <> 1 then failwith "caller-owned Zarr assembly requires an ordinary whole read"
                 buf, setup
+            | RetainCells cells ->
+                if mask.IsSome || phase <> 1 then failwith "a keyed-cell projection requires an ordinary whole read"
+                "", (cells |> List.map (fun (_, nm) -> $"{elemCpp} {nm} = ({elemCpp})0;"))
 
         let fillDecl =
             match meta.FillValue with
@@ -1528,6 +1538,16 @@ module CppZarr =
         // The boundary rule's per-cell note and its report (both empty when
         // the variable has no rule).
         let note = Blade.ProviderRegistry.tallyNoteCpp rule v $"{dest}[{gIdx}]" gIdx
+        // The one store of a landed cell (its converted value): into the
+        // destination, or (PM44) into the demanded cell's scalar -- the tally
+        // sees the same converted value at the same flat index either way.
+        let storeCell (value: string) =
+            match destination with
+            | RetainCells cells ->
+                let picks = cells |> List.map (fun (k, nm) -> $" if (__gi == {k}UL) {nm} = __cv;") |> String.concat ""
+                let noteCv = Blade.ProviderRegistry.tallyNoteCpp rule v "__cv" "__gi"
+                $"{{ const {elemCpp} __cv = {value}; const size_t __gi = {gIdx};{picks}{noteCv} }}"
+            | _ -> $"{dest}[{gIdx}] = {value};{note}"
         let report = Blade.ProviderRegistry.tallyReportCpp rule v varName messagePath (shape |> List.map string)
 
         // Under a mask, a satisfied chunk (read or filled) is recorded and
@@ -1544,7 +1564,7 @@ module CppZarr =
             [ gInd + $"if ({src.Present}) {{" ]
             @ src.Read (gInd + "    ")
             @ satisfied
-            @ (copyLoops $"{dest}[{gIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];{note}")
+            @ (copyLoops (storeCell $"({elemCpp}){v}_cbuf[{cIdx}]"))
         let missingBranch =
             match meta.FillValue with
             | FillNone ->
@@ -1554,7 +1574,7 @@ module CppZarr =
             | _ ->
                 [ gInd + "} else {" ]
                 @ filledMark
-                @ (copyLoops $"{dest}[{gIdx}] = {v}_fillv;{note}" |> List.map (fun s -> "    " + s))
+                @ (copyLoops (storeCell $"{v}_fillv") |> List.map (fun s -> "    " + s))
                 @ [ gInd + "}" ]
 
         let chunkBody =
@@ -1694,6 +1714,27 @@ module CppZarr =
                 // the original final Array; no new[] buffer is adopted.
                 Some (assembly @ [ $"Array<{elemCpp}, 1> {v} = {{ {pending}, {v}_extents }};" ])
             | _ -> None
+        | _ -> None
+
+    /// PM44 (lane G item G6, rule `keyed-cell-projection v1`): a module-level
+    /// ordinary dense rank-1 `.read` whose only uses are constant keyed reads.
+    /// The whole-variable sweep is kept (every chunk fetched in order, the
+    /// short / missing checks where they fire today, every in-bounds cell
+    /// tallied, BL8015 reported after the sweep); only the demanded cells are
+    /// retained, one scalar each (`cells`: flat index, C++ name). None when the
+    /// read is not of that shape (the caller keeps the resident read).
+    let tryGenReadVarRetainCells (spec: ProviderReadSpec) (cppVarName: string) (cells: (int64 * string) list) : string list option =
+        if spec.Provider <> "zarr" || spec.Streamed || spec.AllowMissing
+           || spec.MaskName.IsSome || spec.MaskType.IsSome || spec.Window.IsSome || spec.VarType.IsVirtual then None
+        else
+        let store = load spec.FilePath
+        match tryFindArray store spec.VarName, spec.VarType.IndexTypes with
+        | Some meta, [ ix ] when meta.Blade.IsNone && meta.Shape.Length = 1 && ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
+                               && spec.VarType.ElemType = IRTScalar meta.Dtype.Elem
+                               && cells |> List.forall (fun (k, _) -> k >= 0L && k < meta.Shape.Head) ->
+            let elemCpp = elemCppOf spec.VarType.ElemType
+            Some ([ $"// keyed-cell projection (PM44): `{spec.VarName}` is swept whole (every chunk, every check, the BL8015 tally) but only {cells.Length} demanded cell(s) are kept -- no destination array" ]
+                  @ genAssembleFlatCore (RetainCells cells) (Some spec.FilePath) (zarrChunkFetch spec.FilePath store meta) meta cppVarName elemCpp None 1)
         | _ -> None
 
     /// Blocks-layout pool assembly with PER-BLOCK chunk I/O: for each block
@@ -2321,6 +2362,11 @@ module CppZarr =
         | Some meta when meta.Shape.Length <> 1 || meta.Chunks.Length <> 1 -> Error "the variable is not rank 1"
         | Some meta when meta.Codec <> CodecIdentity -> Error "the variable is compressed (the reader refuses it anyway)"
         | Some meta when meta.Blade.IsSome -> Error "a packed variable"
+        // wide arithmetic (Codex review E6-2): a chunk extent whose byte size
+        // overflows, or that exceeds the cache cap on its own, never reaches
+        // the slot arithmetic
+        | Some meta when meta.Chunks.Head <= 0L || bigint meta.Chunks.Head * bigint meta.Dtype.ByteSize > bigint (256L <<< 20) ->
+            Error $"one chunk ({meta.Chunks.Head} cells of {meta.Dtype.ByteSize} bytes) exceeds the slot budget on its own (cap 256 MiB)"
         | Some meta -> Ok (meta.Chunks.Head, diskCppOf meta.Dtype.Code, meta.Chunks.Head * int64 meta.Dtype.ByteSize)
 
     let genStreamRows (storePath: string) (varName: string) (cppVarName: string) (destBuf: string) (lo: string) (hi: string) (arrType: IRArrayType) : string list =

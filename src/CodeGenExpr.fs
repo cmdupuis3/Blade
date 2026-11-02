@@ -303,6 +303,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let fieldInits = fields |> List.map (fun (fname, e) -> 
             $".{fname} = {(exprToCppCore subst names e)}") |> String.concat ", "
         $$"""{{(Blade.Types.TypeOrigins.cppName typeName)}} { {{fieldInits}} }"""
+    // PM44 (keyed-cell projection): a literal keyed read of a projected
+    // `.read` renders as the cell its sweep retained.
+    | IRIndex (IRVar (aid, _), [ IRLit (IRLitInt k) ], _) when (Blade.Optimize.KeyedProjectionTable.tryCell aid k).IsSome ->
+        (Blade.Optimize.KeyedProjectionTable.tryCell aid k).Value
     | IRIndex (arr, indices, _) ->
         // Carousel substitution (reference equality, see SubstMap): a dense
         // halo window read hoisted to a rotating local renders as that local.
@@ -739,6 +743,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // Expression-position fallback: a portable IIFE so the guard still
         // fires if it lands somewhere other than a statement slot.
         $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
+    | IRReplayRow _ ->
+        // Statement position only (CodeGenBinding.genReplayRowStmt, inside the
+        // replay sweep's let chain).
+        exprError "print-replay row in expression position"
     | IRBreakIf _ ->
         // A C++ `break` cannot live inside an expression (the IIFE fallback
         // would bind it to no loop) -- statement position only, by refusal.
@@ -1914,6 +1922,8 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // which is the rec-array recursion loop that synthesized it. No
         // alloc-scope frees here: this flat-text path never pushes one.
         $"if ({(exprToCppCore subst names cond)}) {{ break; }}"
+    | IRReplayRow _ ->
+        exprError "print-replay row in a flat statement render (only the replay sweep's let chain emits it)"
     | IRForRange (vid, lo, hi, body) ->
         // Same loop-var naming (__k<id>) and int64_t convention as
         // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel
@@ -2276,18 +2286,47 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
         | _ -> 1
     // A RaggedRow-typed source (mask over a peeled row param) carries its
     // length inline as .len; everything else reads .extents[0].
+    // An ALL-DIMS compound source (`mask(J, p)` over a stored relation J,
+    // G128): the mask is over J's present cells, so it walks the compact
+    // buffer in J's lex order -- `size()` cells of `.data` -- and its bits
+    // are the flat Bool array the compound index of `compound(J, keep)`
+    // compacts by position (the interpreter's compoundToDense view).
+    let compoundSrc =
+        match inferExprType arrExpr with
+        | ArrayElem a -> isCompoundArrayType a && a.IndexTypes.Length = 1
+        | _ -> false
     let srcBoundDim =
         match inferExprType arrExpr with
+        | _ when compoundSrc -> ($"{arrName}.size()", false)
         | ArrayElem a when isRaggedRowType a -> ($"{arrName}.len", false)
         | ArrayElem a -> extentDimOfArray a arrName 0
         | _ -> ($"{arrName}.extents[0]", false)
     let srcBound = fst srcBoundDim
+    // The cell read `{arrCell}[i]`: the compact buffer for a compound source.
+    let arrCell = if compoundSrc then $"{arrName}.data" else arrName
+    // The mask over a compound IS a compound-typed Bool array (its type keeps
+    // the source's CompoundIdx): `Compound<bool, R>` over a fresh bit buffer
+    // that SHARES the source's index (data-only free, MatRawData), so every
+    // compound consumer -- the print pass, folds, extents -- reads it as one.
+    let varCell = if compoundSrc then $"{varName}.data" else varName
+    let compoundRank =
+        match inferExprType arrExpr with
+        | ArrayElem a when compoundSrc ->
+            a.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound) |> Option.map (_.Rank) |> Option.defaultValue 1
+        | _ -> 1
+    let declareMask () =
+        if compoundSrc then
+            $$"""nested_array_utilities::Compound<bool, {{compoundRank}}> {{varName}} { new bool[{{srcBound}}], {{arrName}}.idx, {{arrName}}.trailing_stride };"""
+        else
+            $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
     // Companion extents table under the shared rule (emitExtentsTable): heap
     // when the bound is a runtime read, static constexpr when the source's
     // index record pinned it. NOT a frame-local `size_t[1]` -- this mask can be
-    // returned out of the function body that built it.
+    // returned out of the function body that built it. A compound mask has
+    // none (its extent is its shared index's cardinality).
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
+        if compoundSrc then ([], None)
+        else emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
     // RANK-k over a plain dense source (the masked read's presence mask over
     // a rank-k stored variable, `mask(A, p)` over a matrix): the Bool array
     // keeps A's whole index space, allocated like any dense array, and the
@@ -2340,17 +2379,17 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
         // the count is exactly the kept cells.
         let countedLoop (ind: string) (c: string) =
             [ $$"""{{ind}}for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
-              $"{ind}    {srcElemStr} {predParamName} = {arrName}[__mi];"
+              $"{ind}    {srcElemStr} {predParamName} = {arrCell}[__mi];"
               $"{ind}    const bool __{varName}_k = {wname}({predParamName});"
-              $"{ind}    {varName}[__mi] = __{varName}_k;"
+              $"{ind}    {varCell}[__mi] = __{varName}_k;"
               $"{ind}    {c} += (size_t)__{varName}_k;"
               $"{ind}}}" ]
         let (loop, gathered) =
             match countVar, gather with
             | None, _ ->
                 ([ $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
-                   $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                   $"    {varName}[__mi] = {wname}({predParamName});"
+                   $"    {srcElemStr} {predParamName} = {arrCell}[__mi];"
+                   $"    {varCell}[__mi] = {wname}({predParamName});"
                    "}" ], None)
             | Some c, None ->
                 ([ $"size_t {c} = 0;" ] @ countedLoop "" c, None)
@@ -2395,13 +2434,13 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
                     feeds |> List.collect (fun (_, acc, wcode, _, _) -> wcode @ [ $"double {acc} = double(0);" ])
                 let block (body: string) (lo: string) (hi: string) =
                     [ $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
-                      $"{body}    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                      $"{body}    {varName}[__mi] = {wname}({predParamName});"
+                      $"{body}    {srcElemStr} {predParamName} = {arrCell}[__mi];"
+                      $"{body}    {varCell}[__mi] = {wname}({predParamName});"
                       $"{body}}}"
                       $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{" ]
                     @ (bufs |> List.map (fun (_, src, _, buf) -> $"{body}    {buf}[{c}] = {src}[__mi];"))
                     @ (gp |> Option.map (fun p -> [ $"{body}    {p}[{c}][0] = __mi;" ]) |> Option.defaultValue [])
-                    @ [ $"{body}    {c} += (size_t){varName}[__mi];"
+                    @ [ $"{body}    {c} += (size_t){varCell}[__mi];"
                         $"{body}}}" ]
                 let alloc (ind: string) (declare: bool) =
                     (bufs |> List.map (fun (_, _, e, buf) ->
@@ -2469,13 +2508,13 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
                 // L1-resident -- x is swept from memory once.
                 let block (body: string) (lo: string) (hi: string) =
                     [ $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
-                      $"{body}    {srcElemStr} {predParamName} = {arrName}[__mi];"
-                      $"{body}    {varName}[__mi] = {wname}({predParamName});"
+                      $"{body}    {srcElemStr} {predParamName} = {arrCell}[__mi];"
+                      $"{body}    {varCell}[__mi] = {wname}({predParamName});"
                       $"{body}}}"
                       $"{body}for (size_t __mi = {lo}; __mi < {hi}; __mi++) {{"
-                      $"{body}    {gv}[{c}] = {arrName}[__mi];" ]
+                      $"{body}    {gv}[{c}] = {arrCell}[__mi];" ]
                     @ (gp |> Option.map (fun p -> [ $"{body}    {p}[{c}][0] = __mi;" ]) |> Option.defaultValue [])
-                    @ [ $"{body}    {c} += (size_t){varName}[__mi];"
+                    @ [ $"{body}    {c} += (size_t){varCell}[__mi];"
                         $"{body}}}" ]
                 let alloc (ind: string) (declare: bool) =
                     let vt = if declare then srcElemStr + "* " else ""
@@ -2511,7 +2550,7 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
                                Blade.Optimize.CompactionGatherCpp.Feeds = feeds |> List.map (fun (_, acc, _, wn) -> (acc, wn)) })
         Some (
             wrapperCode @ extentsDecl @ [
-                $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };""" ]
+                declareMask () ]
             @ loop,
             // Raw `new bool[n]` backing plus whatever `<varName>_extents` turned
             // out to own. A downstream compound() copies the bits into a
@@ -2525,8 +2564,8 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
         // Degenerate (unresolved predicate): all-true mask; #error would be
         // kinder but this mirrors the prior fallback's shape.
         uncounted (Some (extentsDecl @ [
-            $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
-            $"for (size_t __mi = 0; __mi < {srcBound}; __mi++) {varName}[__mi] = true;"
+            declareMask ()
+            $"for (size_t __mi = 0; __mi < {srcBound}; __mi++) {varCell}[__mi] = true;"
         ], [MatRawData (varName, ownedExtents)]))
 
 
@@ -2646,61 +2685,139 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
 
 
 and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (arrExpr: IRExpr) (keyExpr: IRExpr) : (string list * MaterializedAlloc list) option =
-    // Key-callable resolution via `resolveCallable`. The key
-    // function emits as a local wrapper closure
-    // (`__wrap_<id>_<varName>`) that forwards to the lifted
-    // function with captures pulled by reference. The wrapper
-    // takes the element value as its single arg and returns
-    // the orderable key; the stable_sort's comparator invokes
-    // the wrapper on each element under comparison.
+    // sort(A, key): STABLE ascending by key under the TOTAL preorder
+    // `blade_rt::sort_key_less` (NaN keys first, all NaNs tie; -0.0 and +0.0
+    // tie; docs/features/sql.md section 9) -- the interpreter's F# `compare`.
+    // Under a strict weak order the stable result is unique, so every form
+    // below yields the same permutation (Blade.OptimizeSort, `sort-form v1`).
     //
-    // Fallback for unresolved keyExpr (shouldn't happen for
-    // well-typed sort calls): emit a sort that's a no-op on
-    // key (returns literal 0 -- all elements compare equal,
-    // preserving input order under stable_sort).
-    let arrName = exprToCppCore subst names arrExpr
-    // A rank-1 compound operand (compound(A, mask(A, p)) -- the filtered
-    // set) sorts its compact buffer: bound = cardinality, elements via
-    // .data[i]. Sorting discards coordinate meaning by construction, so
-    // the DENSE output shape is the semantically honest one. Dense
-    // operands keep .extents/operator[].
-    let isR1Compound =
-        match inferExprType arrExpr with
-        | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
-        | _ -> false
-    let srcBoundDim =
-        if isR1Compound then ($"{arrName}.idx->cardinality", false)
-        else
+    // The key callable emits as a local wrapper closure (`__wrap_<id>_<var>`)
+    // forwarding to the lifted function with captures by reference.
+    // Fallback for an unresolved key (shouldn't happen for well-typed sort
+    // calls): a constant key -- every element ties, input order kept.
+    let (wrapperCode, keyCall, keyParamCpp) =
+        match resolveCallable keyExpr with
+        | Some callable when callable.Params.Length = 1 ->
+            let (code, wname) = genCallableWrapper names varName callable
+            let p = callable.Params.Head
+            let pcpp = match p.Type with ArrayElem arr -> cppArrayTypeStr arr | _ -> irTypeToCpp p.Type
+            (code, wname, Some (callable.Id, pcpp))
+        | _ -> ([], "[](auto) { return 0; }", None)
+    let plan = keyParamCpp |> Option.bind (fun (id, _) -> Blade.OptimizeSort.SortFormTable.tryKey id)
+    let keyCache = plan |> Option.exists (fun p -> p.KeyCache)
+    // The cached key buffer, in the key's OWN type (never widened), filled in
+    // ascending input order; `cellAt i` renders input cell i.
+    let keyBufLines (cellAt: string -> string) (bound: string) =
+        let kiVar = "__ki"
+        match keyParamCpp with
+        | Some (_, pcpp) ->
+            [ $"using {varName}__K = std::decay_t<std::invoke_result_t<decltype({keyCall})&, {pcpp}>>;"
+              $"{varName}__K* {varName}__keys = new {varName}__K[{bound}];"
+              $"for (size_t __ki = 0; __ki < {bound}; __ki++) {varName}__keys[__ki] = {keyCall}({cellAt kiVar});" ]
+        | None -> []
+    match Blade.OptimizeSort.identityRangeIx arrExpr, arrExpr with
+    | Some ix, IRRange (_, offset) when plan |> Option.exists (fun p -> p.Identity) ->
+        // IDENTITY SOURCE (`sort(range<I>, key)` / `sort(lo..hi, key)`): the
+        // output buffer starts as the iota lo + i and is stable-sorted IN
+        // PLACE -- no index source, no permutation scratch, no gather.
+        let boundDim =
+            match tryEvalIntIR ix.Extent with
+            | Some n -> (string n, true)
+            | None -> ($"(size_t)({exprToCppCore subst names ix.Extent})", false)
+        let bound = fst boundDim
+        let offStr = match offset with Some o -> $"(int64_t)({exprToCppCore subst names o})" | None -> "(int64_t)0"
+        let (extentsDecl, ownedExtents) = emitExtentsTable "" ($"{varName}_extents") 1 [boundDim]
+        let buf = $"{varName}__buf"
+        let sortLines =
+            if keyCache then
+                keyBufLines (fun i -> $"({elemTypeStr})((int64_t)({i}) + {varName}__off)") bound
+                @ [ $$"""std::stable_sort({{buf}}, {{buf}} + {{bound}}, [&]({{elemTypeStr}} __a, {{elemTypeStr}} __b) {"""
+                    $"""    return blade_rt::sort_key_less({varName}__keys[(size_t)((int64_t)__a - {varName}__off)], {varName}__keys[(size_t)((int64_t)__b - {varName}__off)]);"""
+                    "});"
+                    $"delete[] {varName}__keys;" ]
+            else
+                [ $$"""std::stable_sort({{buf}}, {{buf}} + {{bound}}, [&]({{elemTypeStr}} __a, {{elemTypeStr}} __b) {"""
+                  $"""    const auto __ka = {keyCall}(__a); const auto __kb = {keyCall}(__b); return blade_rt::sort_key_less(__ka, __kb);"""
+                  "});" ]
+        Some (
+            wrapperCode @ [
+                $"const int64_t {varName}__off = {offStr};"
+                $"{elemTypeStr}* {buf} = new {elemTypeStr}[{bound}];"
+                $"for (size_t __si = 0; __si < {bound}; __si++) {buf}[__si] = ({elemTypeStr})((int64_t)__si + {varName}__off);"
+            ] @ sortLines @ extentsDecl @ [
+                $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { {{buf}}, {{varName}}_extents };"""
+            ],
+            [MatRawData (varName, ownedExtents)])
+    | _ ->
+    // GENERAL FORM. A range operand without the identity plan (gate off, or a
+    // key shared with a non-range site) is first materialized into a scratch
+    // source `<var>__src` (its iota), freed right after the gather.
+    let (srcCode, srcAllocs, arrName, isR1Compound, srcBoundDim) =
+        match arrExpr with
+        | IRRange (ixs, offset) ->
+            (match materializeRangeForm subst names ($"{varName}__src") ixs offset with
+             | Some (code, allocs) ->
+                 let bd =
+                     match tryEvalIntIR ixs.Head.Extent with
+                     | Some n -> (string n, true)
+                     | None -> ($"{varName}__src.extents[0]", false)
+                 (code, allocs, $"{varName}__src", false, bd)
+             | None -> ([], [], exprToCppCore subst names arrExpr, false, ($"{varName}__src.extents[0]", false)))
+        | _ ->
+        let arrName = exprToCppCore subst names arrExpr
+        // A rank-1 compound operand (compound(A, mask(A, p)) -- the filtered
+        // set) sorts its compact buffer: bound = cardinality, elements via
+        // .data[i]. Sorting discards coordinate meaning by construction, so
+        // the DENSE output shape is the semantically honest one. Dense
+        // operands keep .extents/operator[].
+        let isR1Compound =
             match inferExprType arrExpr with
-            | ArrayElem at -> extentDimOfArray at arrName 0
-            | _ -> ($"{arrName}.extents[0]", false)
+            | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
+            | _ -> false
+        let srcBoundDim =
+            if isR1Compound then ($"{arrName}.idx->cardinality", false)
+            else
+                match inferExprType arrExpr with
+                | ArrayElem at -> extentDimOfArray at arrName 0
+                | _ -> ($"{arrName}.extents[0]", false)
+        ([], [], arrName, isR1Compound, srcBoundDim)
     let srcBound = fst srcBoundDim
     // Shared companion-extents rule: a sorted result is a value like any other
     // and may be returned, so the table must outlive this frame.
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
     let srcAt (i: string) = if isR1Compound then $"{arrName}.data[{i}]" else $"{arrName}[{i}]"
-    let (wrapperCode, keyCall) =
-        match resolveCallable keyExpr with
-        | Some callable when callable.Params.Length = 1 ->
-            let (code, wname) = genCallableWrapper names varName callable
-            (code, wname)
-        | _ -> ([], "[](auto) { return 0; }")  // degenerate fallback
+    let compare =
+        if keyCache then $"""    return blade_rt::sort_key_less({varName}__keys[__a], {varName}__keys[__b]);"""
+        // the two keys SEQUENCED, left first (function arguments are unsequenced:
+        // a key that can fail must keep its failure order -- Codex review round 1)
+        else $"""    const auto __ka = {keyCall}({(srcAt "__a")}); const auto __kb = {keyCall}({(srcAt "__b")}); return blade_rt::sort_key_less(__ka, __kb);"""
+    // The scratch source's own pool (a gate-off range operand) is freed after
+    // the gather with everything else of this form; its descriptor is not
+    // registered (one free, never at scope exit as well).
+    let srcFree =
+        srcAllocs |> List.collect (fun a ->
+            match a with
+            | MatRawData (n, owned) -> [ $"delete[] {n}.data;" ] @ (match owned with Some ex -> [ $"delete[] {ex};" ] | None -> [])
+            | _ -> [])
     Some (
-        wrapperCode @ [
+        wrapperCode @ srcCode
+        @ (if keyCache then keyBufLines srcAt srcBound else []) @ [
             $"size_t* {varName}__perm = new size_t[{srcBound}];"
             $"for (size_t __pi = 0; __pi < {srcBound}; __pi++) {varName}__perm[__pi] = __pi;"
             $$"""std::stable_sort({{varName}}__perm, {{varName}}__perm + {{srcBound}}, [&](size_t __a, size_t __b) {"""
-            $"""    return {keyCall}({(srcAt "__a")}) < {keyCall}({(srcAt "__b")});"""
+            compare
             "});"
-        ] @ extentsDecl @ [
+        ] @ (if keyCache then [ $"delete[] {varName}__keys;" ] else []) @ extentsDecl @ [
             $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{srcBound}}], {{varName}}_extents };"""
             $"""for (size_t __si = 0; __si < {srcBound}; __si++) {varName}[__si] = {(srcAt (sprintf "%s__perm[__si]" varName))};"""
-        ],
-        // Two raw buffers: the permutation scratch (`size_t*`, dead after the
-        // gather) and the output backing behind the Array<T,1> wrapper, the
-        // latter carrying the extents table it owns.
-        [MatRawBuf (varName + "__perm"); MatRawData (varName, ownedExtents)]
+            // The permutation scratch dies with the gather: freed HERE, not
+            // registered for a scope-exit free (which never runs at main's top
+            // level, skips an escaping owner, and is dropped in expression
+            // position -- three ways it used to outlive the sort).
+            $"delete[] {varName}__perm;"
+        ] @ srcFree,
+        [MatRawData (varName, ownedExtents)]
     )
 
 

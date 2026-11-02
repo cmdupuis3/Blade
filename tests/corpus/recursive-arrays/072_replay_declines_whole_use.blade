@@ -1,0 +1,17 @@
+// TEST: Replay Declines Whole Use
+// ============================================================================
+// The module arm of the ring DECLINES a trajectory a later binding uses WHOLE
+// (`reduce(x, (+))` reads every row): `rec-window` records "module scope:
+// `x` is used whole". x is stored in full in every lane, as written.
+// ============================================================================
+type Step = Idx<6>
+
+let rec x: Array<Float64 like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+
+let total = reduce(x, (+))
+// EXPECT: x = [1.0, 1.5, 1.75, 1.875, 1.9375, 1.96875]
+// EXPECT: total = 10.03125

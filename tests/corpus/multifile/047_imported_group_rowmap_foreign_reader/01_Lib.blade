@@ -1,0 +1,16 @@
+// TEST: An imported per-group map and its reassembled axis read from another module
+// MODULE: Lib
+// G90: Lib maps each run of a structural grouping to its deviation from the
+// run's mean and reassembles the axis. Main names `Lib.b`, so b is named by
+// another module: group-rowmap v1 declines (the never-written closure is
+// fail closed across modules) and the ungroup copies. Same values.
+module Lib
+type I = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(r) -> r - reduce(r, (+)) / Float64(extents(r)) |> compute
+let b = ungroup(h, CI)
+// EXPECT: Lib.h = [[-1.0, 0.0, 1.0], [-10.0, 0.0, 10.0], [0.0]]
+// EXPECT: Lib.b = [-1.0, 0.0, 1.0, -10.0, 0.0, 10.0, 0.0]

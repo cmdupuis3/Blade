@@ -1,0 +1,13 @@
+// TEST: Hoisted Failing Invariant Of A Called Kernel Keeps Its Frame (aborts)
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ============================================================================
+// G151, the other side: this kernel's body holds a computed map, so the
+// compiled lanes CALL it per cell (its frame pushed) instead of inlining it.
+// The hoisted `6 / reduce(v, (+))` (v sums to 0) keeps that frame in the
+// compiled lanes; the interpreter, which inlines every kernel, pushes none
+// either way. Same report with the hoist on or off.
+type C = Idx<3>
+let v: Array<Int64 like C> = [1, -1, 0]
+let w: Array<Int64 like C> = [4, 5, 6]
+let h = method_for(v) <@> lambda(e) -> e * (6 / reduce(v, (+))) + reduce(method_for(w) <@> lambda(x) -> x * e |> compute, (+)) |> compute

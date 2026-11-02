@@ -1,0 +1,20 @@
+// TEST: Group Row Map Elementwise Then Ungroup
+// G90 (group-rowmap v1): a per-group map over a STRUCTURAL grouping keeps the
+// member axis, so its result is a grouped value over the SAME grouping, and
+// `ungroup` puts its runs back over the axis -- both spellings, `ungroup(h)`
+// (the map keeps the grouping registration) and `ungroup(h, CI)`. Nothing
+// writes h or the reassembled arrays, so each shares h's one pool (its rows
+// are already in axis order): no ungroup copy. Odd tail run [9, 11).
+type I = Idx<11>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = Float64(0..11) * 3.0 - 1.0 |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(r) -> r * 2.0 |> compute
+let b = ungroup(h)
+let b2: Array<Float64 like CI> = ungroup(h, CI)
+// EXPECT: h = [[-2.0, 4.0, 10.0], [16.0, 22.0, 28.0], [34.0, 40.0, 46.0], [52.0, 58.0]]
+// EXPECT: b = [-2.0, 4.0, 10.0, 16.0, 22.0, 28.0, 34.0, 40.0, 46.0, 52.0, 58.0]
+// EXPECT: b2 = [-2.0, 4.0, 10.0, 16.0, 22.0, 28.0, 34.0, 40.0, 46.0, 52.0, 58.0]
+let s = reduce(b2, (+))
+// EXPECT: s = 308.0

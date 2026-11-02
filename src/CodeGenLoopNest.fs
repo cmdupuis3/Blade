@@ -1932,11 +1932,21 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
     // runs to register their names. This occurs after a fused pipeline's
     // partial fold specializes to a rank-one input (its row is the whole
     // array). Bind those parameters directly to the already-evaluated inputs.
+    // The same holds per OPERAND in a nest that does have levels (G141, lane G
+    // item G2): `method_for(a, a) <@> prep` with `prep(whole: T^1, v)` peels
+    // only the second operand, so the first parameter had no name and the
+    // kernel call rendered it as `__v<id>` (undeclared, BL9002 at g++) with
+    // every optimizer gate off. An operand position no level peels is passed
+    // WHOLE (the kernel's parameter takes its full rank); the peel arms below
+    // bind only the positions they peel.
     let mutable paramFinalNames : Map<int, string> =
-        if codeGen.Bindings.IsEmpty
-           && codeGen.KernelParams.Length = codeGen.InputArrayNames.Length then
+        if codeGen.KernelParams.Length = codeGen.InputArrayNames.Length then
+            let peeled =
+                codeGen.Bindings |> List.collect (fun b -> b.Elements |> List.map (fun e -> e.ArrayPosition)) |> Set.ofList
             List.zip codeGen.KernelParams codeGen.InputArrayNames
-            |> List.map (fun (p, name) -> p.VarId, name)
+            |> List.indexed
+            |> List.filter (fun (k, _) -> not (peeled.Contains k))
+            |> List.map (fun (_, (p, name)) -> p.VarId, name)
             |> Map.ofList
         else Map.empty
 
@@ -3453,10 +3463,17 @@ type internal SibStash =
     { SName: string; SCodeGen: LoopNestCodeGen; SNames: Map<int, string>
       SOperandTypes: IRArrayType list; SIndent: int }
 
+/// A STREAMED halo member's run loop (E1 / G106, kind SibHaloStream): its
+/// geometry key, its per-run body (slab bounds + kernel loop, scoped), its
+/// window name, and its ordinary render (the fallback flush).
+type internal SegStash =
+    { GName: string; GKey: string; GBody: string list; GWin: string; GNormal: unit -> string list }
+
 type internal SibEmission =
     { Group: Blade.Optimize.SiblingMapGroup
       mutable Committed: bool
       mutable Stash: SibStash list
+      mutable SegStash: SegStash list
       mutable Completed: bool }
 
 let internal siblingEmissionStorage =
@@ -3517,6 +3534,9 @@ let internal siblingMemberGate (g: Blade.Optimize.SiblingMapGroup) (j: int) (ope
         match siblingHaloLevel cg (List.item j g.Starts) (List.item j g.Extents) with
         | Some _ -> Ok ()
         | None -> Error "the member's nest is not the planned single-level halo walk"
+    | Blade.Optimize.SibHaloStream _ ->
+        // realized at the segment run loop (siblingSegHook), never at the nest slot
+        Ok ()
 
 /// One member's own loop, rendered as it would have been without the group
 /// (the fallback flush): the flat sweep, else the nest.
@@ -3593,6 +3613,8 @@ let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibS
                 @ (active |> List.collect (fun (_, _, _, render) -> render (indent + 1)))
                 @ [ ind indent + "}" ]))
         |> fun ls -> ignore b0; ls
+    | Blade.Optimize.SibHaloStream _ ->
+        invalidOp "sibling-maps: a streamed halo group is realized at the segment run loop, not the nest slot"
 
 /// The hook at genApplyCombinator's loop slot.
 type internal SiblingLoopDecision =
@@ -3606,6 +3628,10 @@ let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<str
     | false, _ -> SibNormal
     | true, (gid, j) ->
     match (siblingEmissionCell ()).TryGetValue gid with
+    | true, st when (match st.Group.Kind with Blade.Optimize.SibHaloStream _ -> true | _ -> false) ->
+        // a streamed halo group is realized at the SEGMENT run loop
+        // (siblingSegHook): the nest slot is the member's ordinary per-run loop
+        SibNormal
     | true, st when st.Committed && not st.Completed ->
         let g = st.Group
         let subject = siblingSubject g
@@ -3630,7 +3656,8 @@ let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<str
             Blade.Optimize.recordSiblingMaps subject Blade.Effects.Applied
                 [ (match g.Kind with
                    | Blade.Optimize.SibFlat _ -> $"C++ lane: one flat sweep writes {g.Members.Length} outputs"
-                   | Blade.Optimize.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain")
+                   | Blade.Optimize.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain"
+                   | Blade.Optimize.SibHaloStream _ -> "C++ lane: (unreachable: a streamed group is realized at the segment run loop)")
                   "each member's prechecks, allocation and registrations stayed at its own site" ]
             SibReplace lines
     | _ -> SibNormal
@@ -3651,7 +3678,7 @@ let internal siblingArmBegin (id: IRId) (name: string) (preflight: Blade.Optimiz
                     Blade.Optimize.recordSiblingMaps (siblingSubject g)
                         (Blade.Effects.Declined $"C++ lane: preflight -- {why}; every member keeps its own loop") []
                     false
-            cell.[g.GroupId] <- { Group = g; Committed = ok; Stash = []; Completed = false }
+            cell.[g.GroupId] <- { Group = g; Committed = ok; Stash = []; SegStash = []; Completed = false }
         match cell.TryGetValue g.GroupId with
         | true, st when st.Committed && not st.Completed -> (siblingPendingCell ()).[name] <- (g.GroupId, j)
         | _ -> ()
@@ -3668,9 +3695,52 @@ let internal siblingArmEnd (id: IRId) (name: string) : string list =
             st.Completed <- true
             Blade.Optimize.recordSiblingMaps (siblingSubject g)
                 (Blade.Effects.Declined $"C++ lane: the last member ({name}) never reached the shared sweep; the earlier members' loops run right after it, individually") []
-            st.Stash |> List.collect siblingSingleLoop
+            (st.Stash |> List.collect siblingSingleLoop) @ (st.SegStash |> List.collect (fun s -> s.GNormal ()))
         | _ -> []
     | _ -> []
+
+/// E1 (G106): the hook at the SEGMENT run loop of a streamed halo member.
+type internal SegSiblingDecision =
+    | SegNormal
+    /// an earlier member: its run loop is stashed; these lines stand in its place
+    | SegStashed of string list
+    /// the last member: ONE run loop, the stashed members' bodies per run ahead of its own
+    | SegFuse of SegStash list
+    /// a decline at this member: the stashed loops run here, individually, before its own
+    | SegFlush of string list
+
+/// `certified`: Ok geometry key when the member's run loop is the certified
+/// uniform rank-1 Zarr single-source halo route, else Error why.
+let internal siblingSegHook (name: string) (certified: Result<string, string>) (body: string list) (win: string)
+                            (normal: unit -> string list) (indent: string) : SegSiblingDecision =
+    match (siblingPendingCell ()).TryGetValue name with
+    | false, _ -> SegNormal
+    | true, (gid, j) ->
+    match (siblingEmissionCell ()).TryGetValue gid with
+    | true, st when st.Committed && not st.Completed && (match st.Group.Kind with Blade.Optimize.SibHaloStream _ -> true | _ -> false) ->
+        let g = st.Group
+        let subject = siblingSubject g
+        let flush why =
+            st.Completed <- true
+            Blade.Optimize.recordSiblingMaps subject
+                (Blade.Effects.Declined $"C++ lane: {why} at member {j + 1} ({name}); the earlier members' run loops run here, individually, before its own (they only move down)") []
+            SegFlush (st.SegStash |> List.collect (fun s -> s.GNormal ()))
+        match certified with
+        | Error why -> flush why
+        | Ok key when st.SegStash |> List.exists (fun s -> s.GKey <> key) ->
+            flush "the member's run geometry (runs, centres, reach, window capacity, source) differs from the stashed members'"
+        | Ok key when j < g.Members.Length - 1 ->
+            st.SegStash <- st.SegStash @ [ { GName = name; GKey = key; GBody = body; GWin = win; GNormal = normal } ]
+            SegStashed [ indent + $"// sibling maps: {name}'s run loop is the shared streamed run loop at {List.last g.Names} (one window, one chunk cache, one read per run)" ]
+        | Ok _ ->
+            st.Completed <- true
+            let site = String.concat "+" g.Names
+            Blade.Optimize.recordSiblingMaps subject Blade.Effects.Applied
+                [ $"C++ lane: ONE segment run loop writes {g.Members.Length} outputs: one window ({win}), one chunk cache and one read + BL8015 scan per run serve every member; per run each member's kernel in member order (its own scoped block)"
+                  "each member's extents, allocation and registrations stayed at its own site; the stream prologue is the source's own"
+                  $"run record: one provider_io site `{site}`" ]
+            SegFuse st.SegStash
+    | _ -> SegNormal
 
 /// THE PREFLIGHT at the group's first member: every member's nest record
 /// rebuilt from its planned apply (a throwaway builder, placeholder operand
@@ -3679,6 +3749,9 @@ let internal siblingArmEnd (id: IRId) (name: string) : string list =
 let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
     if ompTestModeEnabled () then Error "omp test mode instruments the single nests"
     else
+    match g.Kind with
+    | Blade.Optimize.SibHaloStream _ -> Ok () // certified per member at the segment run loop
+    | _ ->
     let built =
         g.Applies |> List.mapi (fun j info ->
             let names = info.Arrays |> List.mapi (fun i _ -> $"__sibpf{j}_{i}")
@@ -3703,6 +3776,7 @@ let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit,
         let pragmas = built |> List.map (fun (_, _, cg) -> genNestPragma cg.Bindings "")
         if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' halo walks take different pragmas"
         else Ok ()
+    | Blade.Optimize.SibHaloStream _ -> Ok ()
 
 /// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
 /// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it
@@ -4509,6 +4583,8 @@ let runtimeHeaderNames : string list =
       // deployment/cache/cleanup on the shared registry like other runtimes;
       // deploying its bytes alone grants no disk or compiler admission.
       "blade_private_spool.hpp"
+      // The external stable sort (ST14): included only by a grant-bound sort site.
+      "blade_external_sort.hpp"
       // The run record (BLADE_RUN_RECORD): the baked input manifest paired
       // at exit with what the run observed and how it ended. Header-only,
       // host-only; deployed unconditionally and included by every program.

@@ -1,0 +1,8 @@
+// TEST: a float literal beside an integer kernel parameter is still refused (rejects)
+// Gap G110 (round 4 wave 4 lane A): the literal follows the parameter's WIDTH
+// within its class, never across classes -- `v * 2.0` over an Int64 operand
+// is the implicit conversion BL3020 refuses, as before.
+// ERROR: BL3020
+type I = Idx<4>
+let n: Array<Int64 like I> = [1, 2, 3, 4]
+let b = method_for(n) <@> lambda(v) -> v * 2.0 |> compute

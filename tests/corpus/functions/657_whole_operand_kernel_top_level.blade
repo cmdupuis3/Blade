@@ -1,0 +1,17 @@
+// TEST: A top-level map whose kernel takes one operand WHOLE, in either position
+// ============================================================================
+// Gap G141 (round 4 wave 4, lane G item G2): the operand no loop level peels
+// is passed whole to its parameter (it used to render as an undeclared
+// `__v<id>`, BL9002 at g++). Both parameter positions, distinct operands.
+// ============================================================================
+type I = Idx<11>
+function first_whole(whole: T^1, v: Float64) -> Float64 = v + reduce(whole, (+))
+function second_whole(v: Float64, whole: T^1) -> Float64 = v * Float64(extents(whole))
+let x = Float64(range<Idx<11>>) |> compute
+let y = Float64(range<Idx<11>>) * 2.0 |> compute
+let p = method_for(y, x) <@> first_whole |> compute
+let q = method_for(x, y) <@> second_whole |> compute
+let r = reduce(p, (+))
+let u = reduce(q, (+))
+// EXPECT: r = 1265.0
+// EXPECT: u = 605.0

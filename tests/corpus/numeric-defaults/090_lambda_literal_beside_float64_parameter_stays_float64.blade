@@ -1,0 +1,11 @@
+// TEST: a literal beside a Float64 kernel parameter stays Float64; a literal-only body keeps the default
+// Gap G110 (round 4 wave 4 lane A): the partner rule follows the operand's
+// width both ways -- a Float64 operand keeps its literal partners Float64 --
+// and a kernel body that is ONLY literals has no partner, so it keeps the
+// literal default (Float32, formalism 2.4).
+type I = Idx<4>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let y: Array<Float64 like I> = method_for(x) <@> lambda(v) -> v * v + 0.1 |> compute
+let k: Array<Float32 like I> = method_for(x) <@> lambda(v) -> 1.5 |> compute
+// EXPECT: y = [1.1, 4.1, 9.1, 16.1]
+// EXPECT: k = [1.5, 1.5, 1.5, 1.5]

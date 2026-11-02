@@ -246,6 +246,28 @@ let currentDeclIdCell () : IRId ref =
 /// `#include "blade_member.h"` and the plans' file-scope structures.
 let internal memberUsedStorage = System.Threading.AsyncLocal<bool ref>()
 
+/// The external stable sort (round 4 wave 4 D1, ST14, rule `external-sort
+/// v1`): the private-spool GRANT this assembly may use for a sort site (the
+/// CLI's BLADE_PRIVATE_SPOOL, threaded as ProgramEmissionOptions; None = no
+/// grant, every sort resident), and whether a site emitted the external form
+/// (the include of blade_external_sort.hpp is appended after generation).
+let internal externalSortGrantStorage = System.Threading.AsyncLocal<PrivateSpoolPolicy option ref>()
+let externalSortGrantCell () : PrivateSpoolPolicy option ref =
+    let v = externalSortGrantStorage.Value
+    if isNull (box v) then
+        let fresh = ref None
+        externalSortGrantStorage.Value <- fresh
+        fresh
+    else v
+let internal externalSortUsedStorage = System.Threading.AsyncLocal<bool ref>()
+let externalSortUsedCell () : bool ref =
+    let v = externalSortUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        externalSortUsedStorage.Value <- fresh
+        fresh
+    else v
+
 let memberUsedCell () : bool ref =
     let v = memberUsedStorage.Value
     if isNull (box v) then
@@ -1701,12 +1723,37 @@ let private streamedBindingsCell () = asyncCell streamedBindingsStorage Map.empt
 let private streamedMaskCell () = asyncCell streamedMaskStorage Set.empty
 let private streamedLeaksCell () = asyncCell streamedLeaksStorage []
 
+/// PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1). An ADMITTED plan
+/// (CodeGenBinding.planRecPrintReplays): x is never stored; its ring sweep
+/// (the `__replay_<x>` binding) is one C++ lambda `Sweep` run through
+/// `blade_rt::replay_sweep` -- once at the replay binding's slot (filling the
+/// snapshots), once at x's print slot (printing each row).
+type RecReplayPlan =
+    { TargetId: int
+      TargetName: string
+      ReplayId: int
+      Sweep: string
+      /// The trajectory's rank (rows have rank - 1), element C++ type and
+      /// static extents (leading = the recursion axis).
+      Rank: int
+      ElemCpp: string
+      Extents: int64 list
+      /// (row p, snapshot binding id, its C++ name) -- `__snap_<p>_<x> = x(p)`.
+      Snapshots: (int64 * int * string) list }
+let internal recReplayPlansStorage = System.Threading.AsyncLocal<RecReplayPlan list ref>()
+/// The plan whose sweep body is being emitted (the IRReplayRow arm reads it).
+let internal recReplayActiveStorage = System.Threading.AsyncLocal<(RecReplayPlan * Map<int64, string>) option ref>()
+let recReplayPlansCell () = asyncCell recReplayPlansStorage []
+let recReplayActiveCell () = asyncCell recReplayActiveStorage None
+
 /// Per-program reset, beside the other codegen channels (fresh refs: see
 /// `freshCell`).
 let resetStreamedValueState () : unit =
     freshCell streamedBindingsStorage Map.empty
     freshCell streamedMaskStorage Set.empty
     freshCell streamedLeaksStorage []
+    freshCell recReplayPlansStorage []
+    freshCell recReplayActiveStorage None
 
 /// Every per-PROGRAM cell this file owns, reset for a new assembly by
 /// installing fresh state in the current flow (`freshCell`) -- never by
@@ -1721,6 +1768,8 @@ let resetProgramStateCells () : unit =
     freshCell currentDeclStorage ""
     freshCell currentDeclIdStorage -1
     freshCell memberUsedStorage false
+    freshCell externalSortGrantStorage None
+    freshCell externalSortUsedStorage false
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
     freshCell moduleTupleChildrenStorage Map.empty

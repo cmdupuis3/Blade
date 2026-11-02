@@ -121,6 +121,14 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
              | _ when operands.Length = ps.Length ->
                  List.iter2 (fun (p: TypedParam) a -> if isRange a then fed.Add p.VarId |> ignore) ps operands
              | _ -> ()
+         // `sort(range<I>, lambda(i) -> ..)` / `sort(lo..hi, ..)` (round 4
+         // wave 4 D1): the key sees the range's own positions, exactly as a
+         // map kernel over that range does -- a single-slot range only (a
+         // `lo..hi` from a literal 0: an offset range's values are not
+         // positions of its own axis).
+         | TExprSort ({ Kind = TExprRange [ _ ] }, { Kind = TExprLambda li })
+         | TExprSort ({ Kind = TExprDotDot ({ Kind = TExprLit (Blade.Ast.LitInt 0L) }, _) }, { Kind = TExprLambda li }) ->
+             for p in li.Params do fed.Add p.VarId |> ignore
          | _ -> ())
         for c in typedExprChildren e do walk c
     for d in modul.Decls do
@@ -451,6 +459,23 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | Some m -> Some $"""module `{String.concat "." m.Name}` imports this module (its writes are not judged here)"""
             | None -> None
      env.StoredAliasNeverWritten.Value <- storedAliasWriteProof modul.Decls modul.Imports importedElsewhere)
+    // MODULE-scope ring (rec-window, P3 print replay): a module-level `let
+    // rec` read by another module is observed beyond this module's tail scan.
+    let ringImportedElsewhere =
+        match env.ProgramModules with
+        | [] -> Some "the program's other modules are not known to this check (fail closed)"
+        | mods ->
+            let me = modul.Name
+            let related (qn: string list) =
+                let n = min qn.Length me.Length
+                n > 0 && List.truncate n qn = List.truncate n me
+            let importsMe (m: ModuleDecl) =
+                m.Name <> me
+                && ((m.Imports |> List.exists (fun i -> related i.Module))
+                    || (m.Decls |> List.exists (fun d -> match d.Value with DeclImport (qn, _) -> related qn | _ -> false)))
+            match mods |> List.tryFind importsMe with
+            | Some m -> Some ("module `" + String.concat "." m.Name + "` imports this module (its reads of the trajectory are not scanned)")
+            | None -> None
     // Binder ids restart per compile: a block-local id from an earlier module
     // or program must not stop this module's reduce alias chase (G60).
     Blade.TypeCheckInfer.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
@@ -539,7 +564,28 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable declaredTypes : Map<string, Span> = Map.empty
     let mutable declaredUnits : Map<string, Span> = Map.empty
 
-    for d in modul.Decls do
+    // A WORK LIST rather than a plain `for`: a module-level `let rec` the ring
+    // admits (TypeCheckInfer.recArrayModuleDecision) inserts its replay sweep
+    // and snapshot declarations after itself and rewrites the later fixed-row
+    // reads, before any of them is checked.
+    let pendingDecls = ResizeArray<Located<Decl>>(modul.Decls)
+    let replayDecls = System.Collections.Generic.HashSet<string>()
+    let mutable declPos = 0
+    while declPos < pendingDecls.Count do
+        let d = pendingDecls.[declPos]
+        declPos <- declPos + 1
+        (match d.Value with
+         | DeclLet b when (match b.Value.Kind with ExprKind.ExprRecArray _ -> true | _ -> false) ->
+             (match Blade.TypeCheckInfer.recArrayModuleDecision currentEnv ringImportedElsewhere b
+                        (pendingDecls |> Seq.skip declPos |> List.ofSeq) with
+              | Some rest ->
+                  (match b.Pattern.Kind with
+                   | PatternKind.PatVar n -> replayDecls.Add (Blade.IR.recReplayBindingPrefix + n) |> ignore
+                   | _ -> ())
+                  pendingDecls.RemoveRange (declPos, pendingDecls.Count - declPos)
+                  pendingDecls.AddRange rest
+              | None -> ())
+         | _ -> ())
         // BL2009 -- duplicate top-level `function` name. Without this the
         // later declaration silently rebinds the name (checkFunctionDecl's
         // bindVarSimple), and a call matching the FIRST signature dies with a
@@ -630,11 +676,25 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
+        // A module ring's replay sweep re-checks its recursion's step: the
+        // warnings it raises are x's own, already reported (rollback).
+        let isReplayDecl =
+            match d.Value with
+            | DeclLet { Pattern = { Kind = PatternKind.PatVar n } } ->
+                n.StartsWith Blade.IR.recReplayBindingPrefix && replayDecls.Contains n
+            | _ -> false
+        let restoreWarnings =
+            if isReplayDecl then
+                let w = Blade.TypeCheckInfer.warningChannelsRestorePoint currentEnv
+                let d0 = Blade.Effects.Decisions.mark ()
+                (fun () -> w (); Blade.Effects.Decisions.rollback d0)
+            else ignore
         // A user error the type lowering found where it has no error channel
         // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
         let declResult, raisedCode =
             try checkDecl envWithCtx d.Value, None
             with TypeErrorRaised (te, code) -> Error te, code
+        restoreWarnings ()
         match declResult with
         | Ok (td, env') ->
             decls <- td :: decls

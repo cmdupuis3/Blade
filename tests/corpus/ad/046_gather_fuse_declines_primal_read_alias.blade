@@ -1,0 +1,24 @@
+// TEST: AD Gather Fuse Declines Primal Read Alias
+import ad as ad
+// ============================================================================
+// `ad-gather-fuse` DECLINES a stencil whose taps read the PRIMAL (a product of
+// neighbours): a caller may pass the primal and its gradient buffer as ONE
+// array (`identity(a)` and `a`), and interleaving the taps per cell would let
+// a tap read a cell an earlier tap already updated (Codex review round 1: the
+// fused form left [3, 8, 15, 19]). Declined, the per-tap passes run, as
+// written: tap +1 over every cell, then tap 0, each reading what the earlier
+// pass left.
+// ============================================================================
+type H = Idx<4>
+
+function f(x: Array<Float64 like H>) -> Float64 = {
+    let d = method_for(halo<H, [0, 1]>) <@> lambda(w) -> x(w(0)) * x(w(1)) |> compute
+    reduce(d, (+))
+}
+
+function identity(x: Array<Float64 like H>) -> Array<Float64 like H> = x
+
+let mut a: Array<Float64 like H> = [1.0, 2.0, 3.0, 4.0]
+let z = ad.grad(f)(identity(a), a)
+// EXPECT: z = 20.0
+// EXPECT: a = [4.0, 9.0, 16.0, 10.0]

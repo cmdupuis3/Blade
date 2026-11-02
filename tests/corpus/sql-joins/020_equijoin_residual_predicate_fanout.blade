@@ -1,0 +1,27 @@
+// TEST: Equijoin Residual Predicate Fanout
+// ----------------------------------------------------------------------------
+// Join -> predicate (round 4 wave 4 D3, ST15): a CONJUNCTIVE key kernel
+// `l == r && l > 1` -- the equality plus a residual predicate over the key
+// cells. The hash join (`hash-join v1`) now admits it when every residual
+// conjunct is a pure total scalar of the two keys: the counting pass and the
+// probe re-evaluate the key kernel on each MATCHED pair only (the as-written
+// mask pass evaluates it on all N x M pairs; skipping a total pure conjunct
+// on a non-matching pair has no effect). Duplicate fanout on both sides (key
+// 2: two left rows x three right rows) and the residual dropping key 1;
+// the relation keeps J's lex order (left-major / right-minor), checked by an
+// ORDER-SENSITIVE fold. The interpreter runs the as-written six passes.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<6>
+type RightRow = Idx<7>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 2, 7, 1, 3]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4, 5, 6]
+let right_key: Array<Int64 like RightRow> = [2, 1, 2, 2, 3, 1, 9]
+let right_amount: Array<Int64 like RightRow> = [10, 20, 30, 40, 50, 60, 70]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r && l > 1, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let fp = reduce(matched, lambda(a, b) -> a * 3 + b)
+// EXPECT: matched = [20, 60, 80, 30, 90, 120, 300]
+// EXPECT: match_count = 7
+// EXPECT: total = 700
+// EXPECT: fp = 37920

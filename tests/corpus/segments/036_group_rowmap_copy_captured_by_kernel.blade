@@ -1,0 +1,17 @@
+// TEST: Kernel Body Captures A Copy Of A Per-Group Map
+// G90: `let h2 = h` copies a grouped value (the grouped-copy arm) and keeps
+// its grouping, so a kernel body capturing the COPY is handed the grouping's
+// group count and offsets too (the capture facts follow copies as well as
+// maps, to convergence).
+type X = Chunked<Idx<10>, 4>
+type K = Idx<3>
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+let seg = segments(X)
+let g = group_by(A, seg)
+let h = method_for(g) <@> lambda(e) -> e * 2.0 |> compute
+let h2 = h
+let totals = method_for(range<K>) <@> lambda(k) -> {
+    let s = method_for(h2) <@> lambda(r) -> reduce(r, (+)) |> compute
+    reduce(s, (+)) + Float64(k)
+} |> compute
+// EXPECT: totals = [110.0, 111.0, 112.0]

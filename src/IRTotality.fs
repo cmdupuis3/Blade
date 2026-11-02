@@ -163,6 +163,13 @@ let rec walk (resolve: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr 
          | _ -> refuseOp ())
     | IRIf (c, a, b) -> all [ c; a; b ]
     | IRFma (a, b, c) -> all [ a; b; c ]
+    // ONE addressed sample of a parameterless family (round 4 wave 4 B6):
+    // blade_rand::uniform_at_one / normal_at_one (and the interpreter mirror)
+    // compute a pure function of (key, stream, index) and never fail -- the
+    // stream key is truncated to its counter word, the range checks are
+    // separate statements before the map. Families with parameters (a NaN
+    // poisson rate loops) and categorical (a weights scan) stay refused.
+    | IRRandAt (("uniform_at" | "normal_at"), args, None) -> all args
     | IRLet (id, v, body) ->
         (match go v with
          | Error why -> Error why
@@ -170,6 +177,7 @@ let rec walk (resolve: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr 
              match walk resolve deferredOf isDeferred levels levelNames (bound.Add id) boundNames visiting body with
              | Ok m -> Ok (addSat n m)
              | Error why -> Error why)
+    | IRIndex (IRVar (g, _), _, _) when isDeferred g -> Error "the body reads a deferred computation (its evaluation is not audited)"
     | IRIndex (IRVar (g, gty), idxs, _) when not (isDeferred g) ->
         let proven =
             match gty with

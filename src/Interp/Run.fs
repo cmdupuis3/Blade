@@ -528,7 +528,9 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // frames before any binding evaluates.
     state.Global <- Some root
     for m in program.Modules do
-        for b in m.Bindings do
+        // A print-replay binding (rec-print-replay v1) is the C++ lane's
+        // schedule for x's print; the interpreter keeps x's full buffer.
+        for b in m.Bindings |> List.filter (fun b -> not (Blade.IR.isRecReplayBinding b)) do
           // A memo hit adopts the cached value and SKIPS the initializer --
           // the whole point of the cache. The type guard is load-bearing:
           // Blade infers across the whole session, so a later cell can pin an

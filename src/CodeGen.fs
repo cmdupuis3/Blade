@@ -463,6 +463,15 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                     (hotRowPendingCell ()).Remove varName |> ignore
                     (compactRowPendingCell ()).Remove varName |> ignore
             currentNames <- Map.add id varName currentNames
+            // G90: a per-group row map emitted as a grouped value reads its
+            // row lengths through its operand's grouping (see genBindingDispatch).
+            (match tryGroupRowMap varName with
+             | Some gkName when (match info.OutputType with
+                                 | ArrayElem a -> a.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+                                 | _ -> false) ->
+                 noteGroupedBinding id varName gkName
+                 currentGrouped <- Map.add varName gkName currentGrouped
+             | _ -> ())
             code
         | IRCompute (IRComposeApply _) ->
             // The IRComposeApply half of the arm above. `(o1 >>@ o2) <@> A` as a
@@ -1583,9 +1592,17 @@ let private shadowFrameOpen (funcDef: IRFuncDef) (bodyInd: string) : string list
     // it against call sites); the FRAME says the name the program wrote --
     // a specialization or an array instance prints as its declaration
     // (IRCallable.SourceName), exactly as the interpreter's frame does.
-    [ sprintf "%s%s %s %d BLADE_FRAME(\"%s\", nullptr, 0);"
+    // A kernel-invariant hoist helper whose kernel this lane INLINES per cell
+    // (IRCallable.HoistFrame = Some false) is inline code moved out of the
+    // nest, so it never pushes a frame (flag `N`: the body is still scanned,
+    // the statement always dropped; gap G151).
+    let flag =
+        if funcDef.HoistFrame = Some false then "N"
+        elif forced then "1"
+        else "0"
+    [ sprintf "%s%s %s %s BLADE_FRAME(\"%s\", nullptr, 0);"
         bodyInd frameMarkBegin (sanitizeCppName funcDef.Name)
-        (if forced then 1 else 0) (cppStrEscape funcDef.SourceName) ]
+        flag (cppStrEscape funcDef.SourceName) ]
 
 /// Close a marked body. Delimiting the body explicitly keeps the scan exact:
 /// without it a body would run to the next marker and pick up the following
@@ -1661,7 +1678,7 @@ let private resolveShadowFrames (buckets: string list list) : string list list =
             let t = line.TrimStart()
             if t.StartsWith frameMarkBegin then
                 let parts = t.Split([|' '|], 4)
-                if parts.Length = 4 && needs.Contains parts.[1] then
+                if parts.Length = 4 && parts.[2] <> "N" && needs.Contains parts.[1] then
                     Some (line.Substring(0, line.Length - t.Length) + parts.[3])
                 else None
             elif t.StartsWith frameMarkEnd then None
@@ -2490,6 +2507,8 @@ let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpoo
 
     freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
     ownedMoveRenderer <- renderOwnedMove
+    // PRINT REPLAY admission (after the write facts and callables table).
+    planRecPrintReplays modul
 
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
@@ -2643,6 +2662,8 @@ let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivat
 
     freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
     ownedMoveRenderer <- renderOwnedMove
+    // PRINT REPLAY admission (after the write facts and callables table).
+    planRecPrintReplays modul
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
@@ -3472,7 +3493,15 @@ let genPrintStatements (modul: IRModule) : string list =
             | Some names -> Set.contains b.Name names
             | None -> not (isInternalBindingName b.Name)
 
-        if isPrintable && wanted then
+        let replayPlan = (recReplayPlansCell ()).Value |> List.tryFind (fun p -> p.TargetId = b.Id)
+        if isPrintable && wanted && replayPlan.IsSome then
+            // PRINT REPLAY (rec-print-replay v1): the trajectory was never
+            // stored; its sweep runs again, printing each row in the regime
+            // below (rank 2 nested, every other rank flat).
+            [ $"    cout << \"{b.Name} = [\";"
+              $"    blade_rt::replay_sweep({replayPlan.Value.Sweep}, true);"
+              "    cout << \"]\" << endl;" ]
+        elif isPrintable && wanted then
             match IR.stripUnits b.Type with
             | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETComplex64 | ETComplex128 | ETString) ->
                 genPrintScalar b.Name
@@ -4208,6 +4237,12 @@ let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan opti
     let memberPlans = Blade.Optimize.MemberHoistTable.all ()
     if not memberPlans.IsEmpty then (memberUsedCell ()).Value <- true
     let includes = if (memberUsedCell ()).Value then includes @ ["#include \"blade_member.h\""] else includes
+    // blade_external_sort.hpp (and through it the private spool protocol) only
+    // when a sort site emitted the grant-bound external form (ST14).
+    let includes =
+        if (externalSortUsedCell ()).Value then
+            includes @ ["#include \"blade_external_sort.hpp\""]
+        else includes
     let memberDecls =
         memberPlans |> List.map (fun p ->
             $"static blade_member_i64 {memberHoistGlobalName p.HostId p.SetId}; // member-hoist v1: the search structure over `{p.SetName}` for `{p.HostName}` (all-zero = BLADE_MEMBER_NONE, not built)")
@@ -4272,6 +4307,16 @@ let beginProgramAssembly () : unit =
 /// assembler (CLI, REPL, notebook and every test lane go through here).
 let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (program: IRProgram) (testName: string) : string * string list =
     beginProgramAssembly ()
+    // The external stable sort's grant (round 4 wave 4 D1, ST14, rule
+    // `external-sort v1`): the SAME explicit BLADE_PRIVATE_SPOOL policy, its
+    // own site admission (CodeGenBinding.genSortBinding). A sort is exact in
+    // every build, so no FP requirement; split timing and --mpi decline as for
+    // the statistic spool (N ranks would share one grant).
+    (match options.PrivateSpool with
+     | Some policy when not (splitTimingModeEnabled ()) && not (mpiEmitModeEnabled ()) ->
+         Blade.CodeGenPrivateSpool.validatePolicy policy
+         (externalSortGrantCell ()).Value <- Some policy
+     | _ -> ())
     let spool =
         match options.PrivateSpool with
         | None -> None

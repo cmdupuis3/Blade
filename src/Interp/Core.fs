@@ -620,7 +620,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                     | _ -> raise (InterpUnsupported "rand.categorical_at weights did not evaluate to an array")
                 VInt (RandMirror.drawsCategoricalAt kind key stream index w 1).[0]
             | None ->
-                VFloat (RandMirror.drawsAt kind key stream index (pars |> List.map toF64) 1).[0]
+                match (if pars.IsEmpty then RandMirror.drawAtOneUnchecked kind key stream index else None) with
+                | Some v -> VFloat v
+                | None -> VFloat (RandMirror.drawsAt kind key stream index (pars |> List.map toF64) 1).[0]
         | _ -> raise (InterpUnsupported "malformed IRRandAt")
 
     // `&&` / `||` short-circuit exactly like the emitted C++ (CodeGen.fs:782):
@@ -819,6 +821,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRBreakIf cond ->
         if toBoolV (evalExpr st env cond) then raise InterpBreak
         else VUnit
+
+    | IRReplayRow _ ->
+        // Run.fs skips every print-replay binding (IR.isRecReplayBinding):
+        // the interpreter keeps the trajectory whole and prints it as written.
+        failwith "internal: a print-replay row reached the interpreter (its binding is skipped)"
 
     | IRConstraintCheck (cond, code, message, span) ->
         // `if (!(cond)) blade_rt::panic(code, message, file, line)`
@@ -1272,7 +1279,12 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     // blade_rt::panic reading the stack before exit.
     // The name the program wrote (IRCallable.SourceName): a specialization or
     // an array instance prints as its declaration, as CodeGen's frame does.
-    pushFrame st callable.SourceName
+    // A kernel-invariant hoist helper (IRCallable.HoistFrame) is code the
+    // per-cell evaluation ran INLINE here -- this interpreter's nests push no
+    // kernel frame -- so it pushes none either, and is located as inline code
+    // is (the anonymous rule below; gap G151).
+    let inlineHoist = callable.HoistFrame.IsSome
+    if not inlineHoist then pushFrame st callable.SourceName
     // Chain the frame to the module-global scope: function bodies may read
     // module-level bindings directly (main-local capturing lambdas in C++).
     // Globally-unique IRIds make this exact -- no accidental shadowing.
@@ -1306,7 +1318,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
         // the exact anonymous names Lowering writes (`unboundLambdaWhat`: `lambda`, an operator's
         // `(+)`, `.. in <scope>`), never a prefix test -- `lambda_guard` is a legal user name
         // (the second Codex look of W4-3, NEW 4)
-        System.String.IsNullOrEmpty n || n = "lambda" || n.StartsWith "(" || n.Contains " in "
+        inlineHoist || System.String.IsNullOrEmpty n || n = "lambda" || n.StartsWith "(" || n.Contains " in "
     let result =
         try evalExpr st frame callable.Body
         with
@@ -1316,7 +1328,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
             if s.StartLine > 0 && s.File.IsSome then raise (InterpPanic (code, msg, s.File, s.StartLine))
             else raise (InterpPanic (code, msg, None, -1))
     if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
-    popFrame st
+    if not inlineHoist then popFrame st
     st.Depth <- st.Depth - 1
     // A NAMED function converts at `return` to its declared type's width, as
     // its C++ declaration does; a lifted lambda (`__lambda_<id>`, a C++

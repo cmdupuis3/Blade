@@ -1,0 +1,18 @@
+// TEST: A producer that may fail is not moved into the join
+// ============================================================================
+// Round 4 wave 4, E2 / ST04: an integer division in the producer could panic
+// (BL8013), so moving its evaluation into the join could move the first
+// failing cell; the plan declines ("not proved total") and `p` stays stored.
+// The divisor here is never zero: the values are the as-written program's.
+// ============================================================================
+type I = Idx<11>
+function stats(a: Array<Int64 like I>) -> Int64 = {
+    let p = method_for(a) <@> lambda(v) -> 100 / (v + 1) |> compute
+    let s1 = reduce(p, (+))
+    let s2 = reduce(method_for(p) <@> lambda(v) -> v * 3, (+))
+    let s3 = reduce(method_for(p) <@> lambda(v) -> v * v, (+))
+    s1 + s2 + s3
+}
+let x = method_for(range<I>) <@> lambda(i) -> Int64(i) |> compute
+let r = stats(x)
+// EXPECT: r = 16712

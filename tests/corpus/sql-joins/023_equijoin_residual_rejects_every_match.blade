@@ -1,0 +1,16 @@
+// TEST: Equijoin Residual Rejects Every Match
+// ----------------------------------------------------------------------------
+// Every key matches, the residual rejects every match: an EMPTY relation
+// (round 4 wave 4 D3). The seeded fold answers its seed; the cardinality is 0.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<2>
+type RightRow = Idx<3>
+let left_key: Array<Int64 like LeftRow> = [4, 4]
+let left_amount: Array<Int64 like LeftRow> = [1, 2]
+let right_key: Array<Int64 like RightRow> = [4, 4, 4]
+let right_amount: Array<Int64 like RightRow> = [1, 2, 3]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r && l < 0, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 7)
+// EXPECT: match_count = 0
+// EXPECT: total = 7

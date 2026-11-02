@@ -1,0 +1,32 @@
+// TEST: Decompact Mat-Vec Reads The Pool
+// ============================================================================
+// G102 (round 4 wave 4, `decompact-row-fold`, BLADE_DECOMPACT_FOLD): the
+// mat-vec over a decompacted rank-2 pool, `method_for(decompact(S, d)) <@>
+// lambda(row) -> prodsum(row, v)`, reads the packed pool cell by cell, each
+// logical cell S(i, j) times v(j) (its sign applied for an AntisymIdx pool,
+// 0.0 on the antisymmetric diagonal), instead of building the n x n dense
+// buffer. prodsum's strict chain (ascending, from +0.0) is each row walk's.
+// The pins are the hand values and the differential against the stored
+// decompaction (`DS` / `DA`, printed, so they keep their buffers).
+// ============================================================================
+type I = Idx<5>
+let x = Float64(range<I>)
+// S(i, j) = i j + 1 (SymIdx<2, 5>); A(i, j) = i - j (AntisymIdx<2, 5>)
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1.0 |> compute
+let An = method_for(x, x) <@> lambda(a, b) where anticomm(a, b) -> a - b |> compute
+let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
+
+// sum(v) = 15, sum(j v_j) = 40: S -> 40 i + 15, A -> 15 i - 40
+let ys = method_for(decompact(S, 0)) <@> lambda(row) -> prodsum(row, v) |> compute
+// EXPECT: ys = [15.0, 55.0, 95.0, 135.0, 175.0]
+let ya = method_for(decompact(An, 1)) <@> lambda(row) -> prodsum(v, row) |> compute
+// EXPECT: ya = [-40.0, -25.0, -10.0, 5.0, 20.0]
+
+let DS = decompact(S, 0)
+let DA = decompact(An, 0)
+let ys_ref = method_for(DS) <@> lambda(row) -> prodsum(row, v) |> compute
+let ya_ref = method_for(DA) <@> lambda(row) -> prodsum(v, row) |> compute
+let s_same = reduce(method_for(zip(ys, ys_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: s_same = true
+let a_same = reduce(method_for(zip(ya, ya_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: a_same = true

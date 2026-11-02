@@ -53,6 +53,8 @@ let ownerConflict (ids: Set<IRId>) =
         || (CompactionTable.tryFoldMap id).IsSome || not (CompactionTable.foldsOf id).IsEmpty
         || (CompactRowTable.tryProducer id).IsSome || (CompactRowTable.tryConsumer id).IsSome
         || (PoolReuseTable.tryReturnDonor id).IsSome
+        // a sibling-map member's loop may move (round 4 wave 4, E1): fail closed
+        || (SiblingMapTable.tryMember id).IsSome
         || (ids |> Set.exists (fun source -> (OrbitPullTable.tryAudit id source).IsSome))))
     || (PoolReuseTable.donors () |> Map.exists (fun k v -> ids.Contains k || ids.Contains v))
     || (PoolReuseTable.returnDonors () |> Map.exists (fun k v -> ids.Contains k || ids.Contains v))

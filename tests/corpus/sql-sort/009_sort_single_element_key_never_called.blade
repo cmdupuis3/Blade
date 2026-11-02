@@ -1,0 +1,11 @@
+// TEST: Sort Single Element Key Never Called
+// A one-element sort never compares, so a key that would fail (integer
+// division by zero, BL8013) is never evaluated -- in either lane. Rule
+// `sort-form v1` caches only a key the closed totality whitelist admits, so
+// this key (integer `/`) keeps the per-comparison form and stays unevaluated.
+type One = Idx<1>
+let zs: Array<Int64 like One> = [0]
+let s = sort(range<One>, lambda(i) -> 10 / zs(i))
+let t = sort(zs, lambda(v) -> 10 / v)
+// EXPECT: s = [0]
+// EXPECT: t = [0]

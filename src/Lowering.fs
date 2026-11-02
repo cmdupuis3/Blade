@@ -1436,6 +1436,16 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
     | [], None -> IRLit IRLitUnit
     | stmt :: rest, _ ->
         match stmt with
+        // PRINT REPLAY (rec-print-replay v1): the ring sweep's row marker
+        // `let __replay_row_<x> = ring(slot)` (TypeCheckInfer.recArrayLower,
+        // replayRows) becomes the effectful row node naming x.
+        | TStmtLet binding when binding.Name.StartsWith Blade.IR.recReplayRowPrefix
+                                && binding.SubBindings.IsEmpty && binding.PostChecks.IsEmpty
+                                && env.Variables.ContainsKey (binding.Name.Substring Blade.IR.recReplayRowPrefix.Length) ->
+            let target = env.Variables.[binding.Name.Substring Blade.IR.recReplayRowPrefix.Length]
+            let row = lowerTypedExpr env binding.Value
+            let env' = bindTypedVar binding.Name binding.VarId env
+            IRLet (binding.VarId, IRReplayRow (target, row), lowerTypedBlock env' rest finalExpr)
         | TStmtLet binding ->
             let value =
                 match binding.Type with
@@ -3094,6 +3104,33 @@ let copyTwinDeclSpans (program: IRProgram) (pairs: (IRId * IRId) list) : unit =
                 IR.recordDeclSpan t.Name s
             | _ -> ()
 
+/// The kernel-invariant hoist's minted callables (gap G151): each takes the
+/// span of the declaration its code stood in per cell -- the kernel, or the
+/// function / binding the nest stands in (Optimize.HoistDeclSource) -- keyed by
+/// its FINAL name, after module qualification, as `copyTwinDeclSpans` does.
+/// Mint order: a source is never a callable minted later.
+let copyHoistDeclSpans (program: IRProgram) (pairs: (IRId * Optimize.HoistDeclSource) list) : unit =
+    if not pairs.IsEmpty then
+        let fns = program.Modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+        let bs = program.Modules |> List.collect (fun m -> m.Bindings) |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+        for (mid, src) in pairs do
+            match Map.tryFind mid fns with
+            | Some m ->
+                let s =
+                    match src with
+                    | Optimize.LocatedAsCallable oid ->
+                        (match Map.tryFind oid fns with
+                         | Some o ->
+                            let s = IR.declSpanOf o.Name
+                            if s.StartLine > 0 then s else IR.declSpanOf o.SourceName
+                         | None -> Blade.Ast.noSpan)
+                    | Optimize.LocatedAsBinding bid ->
+                        (match Map.tryFind bid bs with
+                         | Some b -> IR.declSpanOf b.Name
+                         | None -> Blade.Ast.noSpan)
+                IR.recordDeclSpan m.Name s
+            | None -> ()
+
 /// Every EXECUTABLE expression of a module: function bodies, binding values
 /// and the side-table payloads each back end and the interpreter run at a
 /// binding's site -- random fills (the modulus; a generator's key,
@@ -3643,7 +3680,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             | IRArrayNegate _ | IRArrayConjugate _ | IRRange _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _
             | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRRank _ | IRExtent _
             | IRRaggedLookup _ | IRCompoundMask _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
-            | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ ->
+            | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ ->
                 Some Set.empty
             // (EXHAUSTIVE over IRExpr, no wildcard: a form added later is an
             // incomplete-match warning here until it is classified, never
@@ -3955,6 +3992,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             | IRForRange (_, lo, hi, _) -> seq [ lo; hi ] barrier
             | IRConstraintCheck (c, _, _, _) -> seq [ c ] barrier
             | IRBreakIf c -> seq [ c ] barrier
+            | IRReplayRow (_, r) -> seq [ r ] barrier
         match first cond with
         | Some (Some id) -> Some id
         | _ -> None
@@ -4152,6 +4190,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.RecStepTable.reset ()
     Optimize.CompactionTable.reset ()
     Optimize.EquiJoinTable.reset ()
+    OptimizeSort.SortFormTable.reset ()
+    OptimizeJoinAgg.JoinAggTable.reset ()
+    Optimize.HoistDeclTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
     Optimize.OrbitActionTable.reset ()
@@ -4163,7 +4204,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.InlineEventSpans.reset ()
     Optimize.AliasElideTable.reset ()
     Optimize.GroupViewTable.reset ()
+    Optimize.GroupRowMapTable.reset ()
+    Optimize.StreamGroupFoldTable.reset ()
+    Optimize.KeyedProjectionTable.reset ()
     Optimize.SinkStreamTable.reset ()
+    Optimize.AssemblyDestTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
@@ -4438,6 +4483,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // C++ lane; side table, the interpreter runs the as-written tree.
         // Gate: BLADE_HASH_JOIN.
         Optimize.planEquiJoin programFuncs foreignRefs irModule
+        // Join to aggregate (Blade.OptimizeJoinAgg.planJoinAggregate, round
+        // 4 wave 4 D2): an unprinted equijoin read only by strict folds and
+        // extents is never stored -- each fold walks the probe at its own
+        // site. Side table, the C++ emitter. Gate: BLADE_JOIN_AGG.
+        OptimizeJoinAgg.planJoinAggregate programFuncs foreignRefs irModule
+        // The sort form (Blade.OptimizeSort.planSortForms, round 4 wave 4
+        // D1): a range operand sorted as its iota in place, a total pure
+        // key cached once per element; side table, the C++ emitter reads
+        // it, the interpreter runs the as-written sort. Gate: BLADE_SORT_FORM.
+        OptimizeSort.planSortForms programFuncs irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:
@@ -4473,6 +4528,21 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // in the source's storage (and its ungroup shares it). Verdicts only;
         // the C++ emitter records the decision. Gate: BLADE_GROUP_VIEW.
         Optimize.planStructuralGroupView programFuncs (foreignRefs) irModule
+        // The group row map share (Blade.Optimize.planGroupRowMap, G90): a
+        // top-level `ungroup` of a per-group map over a structural grouping
+        // shares the map's pool (its rows are already in axis order). Verdicts
+        // only; the C++ emitter records the decision. Gate: BLADE_GROUP_ROWMAP.
+        Optimize.planGroupRowMap programFuncs (foreignRefs) irModule
+        // The stream group fold (Blade.Optimize.planStreamGroupFold, lane G
+        // item G4 / G133): a group_by over a streamed variable whose one
+        // reader is the next binding's fold peel streams each run into one
+        // window and folds it there; no pool. Gate: BLADE_STREAM_GROUP_FOLD.
+        Optimize.planStreamGroupFold programFuncs (foreignRefs) (irModules.Length < 2) irModule
+        // The keyed-cell projection (Blade.Optimize.planKeyedCellProjection,
+        // lane G item G6 / PM44): a `.read` used only by literal keyed reads
+        // keeps its whole validating sweep but no array. Gate:
+        // BLADE_KEYED_PROJECTION.
+        Optimize.planKeyedCellProjection (foreignRefs) (irModules.Length < 2) irModule
         // The checker's stored-alias identity verdicts (plan 2.1 second step,
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.
@@ -4484,6 +4554,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // the sibling maps (which read its claim). Verdicts only; the C++
         // emitter records the applied decision. Gate: BLADE_SINK_STREAM.
         Optimize.planProviderSinkStream programFuncs foreignRefs (irModules.Length < 2) irModule
+        // The assembly destination fill (Blade.Optimize.planAssemblyDest, round 4
+        // wave 4, F2 / PM26): a private cellwise map whose only observer is a
+        // transpose / stack / join is never stored; the assembly computes each
+        // cell into its destination. After the sink stream (whose claims it
+        // reads), before the sibling maps (which read its claim). Verdicts only;
+        // the C++ emitter records the applied decision. Gate: BLADE_ASSEMBLY_DEST.
+        Optimize.planAssemblyDest programFuncs foreignRefs (irModules.Length < 2) irModule
         // Sibling maps (Blade.Optimize.planSiblingMaps, round 4 wave 2, PM04):
         // two to eight stored maps of one spine over one input index space share
         // ONE traversal, fused at the last sibling; side table, both emitters;
@@ -4515,6 +4592,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     let program = program |> qualifyModuleNames
     // a repro twin is located at its origin's declaration (gap G80)
     copyTwinDeclSpans program reproTwins
+    // a kernel-invariant hoist's minted callables are located as the per-cell
+    // evaluation was (gap G151)
+    copyHoistDeclSpans program (Optimize.HoistDeclTable.all ())
     { program with DeclSpans = (IR.declSpansCell ()).Value }
 
 // Typecheck warning surfacing (shared by every CLI lane)

@@ -1,0 +1,11 @@
+// TEST: Leading-axis pairing of a row and a cell through range<I>
+// Gap G99 (round 4 wave 4 lane A): `zip(A, t)` of a rank-2 A and a rank-1 t is
+// refused (diagnostics/104-109: no shared index space). The supported spelling
+// iterates the shared leading axis and reads both: each output row is A's row
+// plus t's cell.
+type R = Idx<3>
+type C = Idx<4>
+let A: Array<Float64 like R, C> = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let t: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let Z = method_for(range<R>) <@> lambda(i) -> A(i) + t(i) |> compute
+// EXPECT: Z = [[1.0, 2.0, 3.0, 4.0], [3.0, 4.0, 5.0, 6.0], [5.0, 6.0, 7.0, 8.0]]

@@ -1,0 +1,25 @@
+// TEST: Producer-input legs decline a leg kernel that forces a deferred module map
+// Gap G98 (round 4 wave 4 lane A): the leg `reduce(a, addk, 0.0)` would ride
+// z's producer loop (epilogue-legs), but its kernel calls `dsum`, which reads
+// the DEFERRED module map `d` cell by cell -- riding the producer would run
+// d's kernel there instead of at the leg's own statement. The leg's kernel is
+// not certified total (the deferred-value predicate; the sibling pass's own
+// whitelist refuses the call first), so the legs keep their own passes. The
+// values are the as-written program's.
+type Ix = Idx<1003>
+type K = Idx<3>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+let d = method_for(range<K>) <@> lambda(k) -> Float64(k) * 0.5
+function dsum() -> Float64 = reduce(method_for(range<K>) <@> lambda(k) -> d(k), (+))
+function addk(p: Float64, q: Float64) -> Float64 = p + q + dsum()
+let (s2, t2) = {
+    let a = inputs(11)
+    let b = inputs(3)
+    let z = method_for(zip(a, b)) <@> lambda(u, v) -> u - v |> compute
+    let s = reduce(method_for(z) <@> lambda(w) -> w, lambda(p, q) -> p + q, 0.0)
+    (s, 10.0 * reduce(a, addk, 0.0) + reduce(b, (+)))
+}
+// EXPECT: s2 = 4004.0
+// EXPECT: t2 = 66107.0

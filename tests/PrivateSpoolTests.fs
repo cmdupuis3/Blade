@@ -518,3 +518,242 @@ let runPrivateSpoolTests (workDirectory: string) : int =
         for key, value in saved do Environment.SetEnvironmentVariable(key,value)
     printFooter "Private statistical-barrier spool" [$"{passed} passed";$"{failed} failed";$"{skipped} skipped"]
     if failed=0 then 0 else 1
+
+/// THE EXTERNAL STABLE SORT (round 4 wave 4 D1, ST14, rule `external-sort
+/// v1`; src/cpp/blade_external_sort.hpp): a grant-bound sort site spills runs
+/// to the D06 spool and merges them with bounded fan-in. Pinned here: the
+/// route is TAKEN (emission + record + run record), the output is the resident
+/// sort's byte for byte (NaN keys, signed zeros, ties), the resident selection
+/// under the resident allowance, and the fault paths (write / read error, a
+/// corrupted block, the disk quota, the fan-in refusal) end in BL8016 with the
+/// owned scratch retired.
+let runExternalSortTests (workDirectory: string) : int =
+    printHeader "External stable sort (ST14)"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let check (label: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            printfn "  PASS: %s" label
+        else
+            failed <- failed + 1
+            printfn "  FAIL: %s -- %s" label detail
+    let keys = ["BLADE_PRINT";"BLADE_LLVM";"BLADE_SORT_FORM";"BLADE_RUN_RECORD"]
+    let saved = keys |> List.map (fun k -> k, Environment.GetEnvironmentVariable k)
+    let directory = Path.GetFullPath workDirectory
+    if Directory.Exists directory || File.Exists directory then invalidArg "workDirectory" "ST14 requires a new private directory"
+    Directory.CreateDirectory directory |> ignore
+    let ownedRoot = Path.Combine(directory, "owned")
+    Directory.CreateDirectory ownedRoot |> ignore
+    let policy : PrivateSpoolPolicy =
+        { Root=ownedRoot; TrackedWorkspaceBytes=16384UL; LogicalDiskBytes=4194304UL; BlockCells=0UL; ResidentBytes=0UL }
+    let source (n: int) =
+        String.concat "\n"
+            [ sprintf "type N = Idx<%d>" n
+              "let z: Float64 = 0.0"
+              "let k = method_for(range<N>) <@> lambda(i) -> if i % 97 == 0 then z / z else (if i % 89 == 0 then -0.0 else Float64((i * 7919) % 1013) - 500.0) |> compute"
+              "let perm = sort(range<N>, lambda(i) -> k(i))"
+              "let vals = method_for(range<N>) <@> lambda(i) -> Float64((i * 31) % 211) |> compute"
+              "let byval = sort(vals, lambda(x) -> -x)"
+              "let fp = reduce(method_for(perm) <@> lambda(i) -> Int64(i), lambda(a, b) -> a * 31 + b, 7)" ]
+    let lower (text: string) =
+        match Blade.Lowering.lower text with
+        | Ok ir -> ir
+        | Error e -> failwith ("ST14 fixture did not lower: " + e)
+    let decided (f: unit -> string) =
+        Blade.Effects.Decisions.start ()
+        let text = f ()
+        let ds = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "external-sort")
+        text, ds
+    let emit (p: PrivateSpoolPolicy) (ir: IRProgram) =
+        decided (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions {PrivateSpool=Some p} ir "ST14_external_sort" |> fst)
+    let marker = "// external-sort v1 (ST14): `perm`"
+    let rootEmpty () = Directory.GetFileSystemEntries(ownedRoot).Length = 0
+    let native = OperatingSystem.IsWindows() && Blade.Build.capabilities.Value.HasGpp
+    let run (label: string) (cpp: string) =
+        let file = Path.Combine(directory, label + ".cpp")
+        Blade.CodeGen.deployRuntimeHeaders directory
+        File.WriteAllText(file, cpp)
+        match Blade.Build.compileCpp file directory with
+        | Error e -> Error e
+        | Ok exe -> Blade.Build.runExecutable exe
+    let nativeCheck (label: string) (cpp: string) (judge: int -> string -> bool) =
+        if not native then
+            skipped <- skipped + 1
+            printfn "  SKIP: %s -- requires native Windows and g++" label
+            None
+        else
+            match run label cpp with
+            | Error e -> check (label + ": compile/run") false e; None
+            | Ok (code, output) ->
+                check label (judge code output) output
+                check (label + ": owned scratch retired") (rootEmpty ()) ownedRoot
+                Some output
+    let inject (setup: string) (cpp: string) =
+        "#define BLADE_PRIVATE_SPOOL_TESTING\n" + cpp.Replace(marker, setup + "\n" + marker)
+    let failedWith8016 (code: int) (output: string) = code <> 0 && output.Contains "BL8016"
+    // the program's own wall-time line differs run to run
+    let values (output: string) =
+        output.Split('\n') |> Array.filter (fun l -> not (l.Contains " completed in ")) |> String.concat "\n"
+    try
+        try
+            Environment.SetEnvironmentVariable("BLADE_PRINT", null)
+            Environment.SetEnvironmentVariable("BLADE_LLVM", "off")
+            Environment.SetEnvironmentVariable("BLADE_SORT_FORM", null)
+            Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", null)
+            let ir = lower (source 5001)
+            let resident = Blade.CodeGen.genSelfContainedProgramFromIR ir "ST14_external_sort" |> fst
+            let cpp, ds = emit policy ir
+            check "ST14 route: both sites take the grant-bound form"
+                (cpp.Contains marker && cpp.Contains "// external-sort v1 (ST14): `byval`" && cpp.Contains "es::sort("
+                 && cpp.Contains "#include \"blade_external_sort.hpp\"" && not (resident.Contains "es::sort(")) ""
+            check "ST14 record: applied for perm and byval"
+                (["perm"; "byval"] |> List.forall (fun s -> ds |> List.exists (fun d -> d.Subject = s && d.Outcome = Blade.Effects.Applied))) (sprintf "%A" ds)
+            // the reference: the ordinary resident emission (no grant)
+            let reference = nativeCheck "ST14_resident_reference" resident (fun code _ -> code = 0)
+            let recordPath = Path.Combine(directory, "ST14.run.json")
+            Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", recordPath)
+            let external = nativeCheck "ST14_external_runs" cpp (fun code _ -> code = 0)
+            Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", null)
+            match reference, external with
+            | Some r, Some e ->
+                check "ST14 the external output equals the resident output byte for byte (NaN keys, signed zeros, ties)" (values r = values e) ""
+                let json = if File.Exists recordPath then File.ReadAllText recordPath else ""
+                check "ST14 run record: both sites spooled (route taken), status ok"
+                    (json.Contains "\"site\":\"perm\"" && json.Contains "\"site\":\"byval\"" && json.Contains "\"status\":{\"ok\":true}") json
+            | _ -> ()
+            // the resident selection: within the resident allowance, no spool
+            let residentPolicy = { policy with ResidentBytes = 1048576UL }
+            let retained, _ = emit residentPolicy ir
+            let retainedRecord = Path.Combine(directory, "ST14_retained.run.json")
+            Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", retainedRecord)
+            let kept = nativeCheck "ST14_resident_selection" retained (fun code _ -> code = 0)
+            Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", null)
+            (match reference, kept with
+             | Some r, Some k ->
+                check "ST14 the resident selection prints the same values" (values r = values k) ""
+                let json = if File.Exists retainedRecord then File.ReadAllText retainedRecord else ""
+                check "ST14 the resident selection writes no private_spool member" (json.Length > 0 && not (json.Contains "\"private_spool\":")) json
+             | _ -> ())
+            // fault paths: every one is BL8016 with the scratch retired
+            for label, setup in
+                [ "write_error", "blade_private_spool::testing::faults.write_error_at = 700;"
+                  "read_error", "blade_private_spool::testing::faults.read_error_at = 900;"
+                  "corrupt_block", "blade_external_sort::testing::corrupt_block = 2;"
+                  "short_transfers", "blade_private_spool::testing::faults.max_transfer = 7;" ] do
+                let faulted = inject (sprintf "static const bool __st14_fault = (%s true);" (setup.TrimEnd(';') + ",")) cpp
+                if label = "short_transfers" then
+                    nativeCheck ("ST14_" + label + "_still_exact") faulted (fun code output -> code = 0 && (match reference with Some r -> values r = values output | None -> true)) |> ignore
+                else
+                    nativeCheck ("ST14_" + label + "_is_BL8016") faulted failedWith8016 |> ignore
+            let quota, _ = emit { policy with LogicalDiskBytes = 1024UL } ir
+            nativeCheck "ST14_disk_quota_is_BL8016" quota failedWith8016 |> ignore
+            let wide, _ = emit policy (lower (source 200001))
+            nativeCheck "ST14_fan_in_beyond_the_allowance_is_BL8016" wide failedWith8016 |> ignore
+            // sort-form off: the key is not cached, so no external form (recorded)
+            Environment.SetEnvironmentVariable("BLADE_SORT_FORM", "0")
+            let offIr = lower (source 5001)
+            let offCpp, offDs = emit policy offIr
+            Environment.SetEnvironmentVariable("BLADE_SORT_FORM", null)
+            check "ST14 BLADE_SORT_FORM=0: the key is not cached, the external form declines (recorded)"
+                (not (offCpp.Contains "es::sort(")
+                 && offDs |> List.exists (fun d -> d.Subject = "perm" && (match d.Outcome with Blade.Effects.Declined w -> w.Contains "not cached" | _ -> false))) (sprintf "%A" offDs)
+            // the default-options entry never sees a grant
+            check "ST14 no grant: the emission is the ordinary sort" (not (resident.Contains "external-sort v1")) ""
+        with ex -> check "ST14 focused gate completes" false (ex.ToString())
+    finally
+        for key, value in saved do Environment.SetEnvironmentVariable(key, value)
+    printFooter "External stable sort" [$"{passed} passed";$"{failed} failed";$"{skipped} skipped"]
+    if failed = 0 then 0 else 1
+
+/// JOIN TO AGGREGATE, EXECUTED (round 4 wave 4 D2/D3, rule `join-aggregate
+/// v1`): the plan fires only under a print selection, which the corpus
+/// harness never sets, so this gate compiles and runs each fixture with the
+/// gate on and off under `BLADE_PRINT` and compares the printed values (raw
+/// float bits under BLADE_PRINT_BITS for the reproducible float fixture).
+let runJoinAggregateNativeTests (workDirectory: string) : int =
+    printHeader "Join to aggregate, executed (D2/D3)"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let check (label: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            printfn "  PASS: %s" label
+        else
+            failed <- failed + 1
+            printfn "  FAIL: %s -- %s" label detail
+    let keys = ["BLADE_PRINT";"BLADE_JOIN_AGG";"BLADE_JOIN_SELECTION";"BLADE_FP_REPRO";"BLADE_FP_CONTRACT";"BLADE_PRINT_BITS";"BLADE_LLVM"]
+    let saved = keys |> List.map (fun k -> k, Environment.GetEnvironmentVariable k)
+    let directory = Path.GetFullPath workDirectory
+    Directory.CreateDirectory directory |> ignore
+    let native = OperatingSystem.IsWindows() && Blade.Build.capabilities.Value.HasGpp
+    let sources n (keyKernel: string) (elem: string) (amounts: string * string) (seed: string) =
+        String.concat "\n"
+            [ sprintf "type LeftRow = Idx<%d>" (fst n)
+              sprintf "type RightRow = Idx<%d>" (snd n)
+              sprintf "let left_key: Array<Int64 like LeftRow> = [%s]" (String.concat ", " [ for i in 0 .. fst n - 1 -> string ((i * 7) % 5) ])
+              sprintf "let left_amount: Array<%s like LeftRow> = [%s]" elem (fst amounts)
+              sprintf "let right_key: Array<Int64 like RightRow> = [%s]" (String.concat ", " [ for j in 0 .. snd n - 1 -> string ((j * 3) % 5) ])
+              sprintf "let right_amount: Array<%s like RightRow> = [%s]" elem (snd amounts)
+              sprintf "let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> %s, lambda(e) -> e))" keyKernel
+              "let match_count = extents(matched)"
+              sprintf "let total = reduce(matched, (+), %s)" seed
+              sprintf "let fp = reduce(matched, lambda(a, b) -> a * %s + b)" (if elem = "Int64" then "3" else "3.0") ]
+    let ints n = String.concat ", " [ for i in 1 .. n -> string (i * 11 % 17 - 8) ]
+    let floats n = String.concat ", " [ for i in 1 .. n -> sprintf "%d.25" (i * 13 % 19 - 9) ]
+    let cases =
+        [ "int_plain", sources (9, 11) "l == r" "Int64" (ints 9, ints 11) "0", [], "match_count,total,fp"
+          "int_residual", sources (9, 11) "l == r && l > 1" "Int64" (ints 9, ints 11) "0", [], "match_count,total,fp"
+          "int_residual_empty", sources (4, 3) "l == r && l > 100" "Int64" (ints 4, ints 3) "7", [], "match_count,total"
+          "float_repro", sources (9, 11) "l == r" "Float64" (floats 9, floats 11) "0.0",
+              [ ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_PRINT_BITS", "1") ], "match_count,total"
+          // H1 / ST15: join -> payload predicate -> strict aggregate; the
+          // selection (mask over J, compound over it) is never stored either
+          "st15_named", sources (9, 11) "l == r" "Int64" (ints 9, ints 11) "0" + "\nlet keep = mask(matched, lambda(v) -> v > 2)\nlet big = compound(matched, keep)\nlet stotal = reduce(big, (+), 0)\nlet sfp = reduce(big, lambda(a, b) -> a * 3 + b)", [], "match_count,total,stotal,sfp"
+          "st15_inline_residual", sources (9, 11) "l == r && l > 1" "Int64" (ints 9, ints 11) "0" + "\nlet big = compound(matched, mask(matched, lambda(v) -> v < 0))\nlet stotal = reduce(big, lambda(a, b) -> a * 2 - b, 5)", [], "total,stotal"
+          "st15_rejects_all", sources (9, 11) "l == r" "Int64" (ints 9, ints 11) "0" + "\nlet keep = mask(matched, lambda(v) -> v > 100000)\nlet big = compound(matched, keep)\nlet sfp = reduce(big, lambda(a, b) -> a * 3 + b)", [], "match_count,sfp"
+          "st15_float_repro", sources (9, 11) "l == r" "Float64" (floats 9, floats 11) "0.0" + "\nlet keep = mask(matched, lambda(v) -> v > 0.0)\nlet big = compound(matched, keep)\nlet stotal = reduce(big, (+), 0.0)",
+              [ ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_PRINT_BITS", "1") ], "total,stotal" ]
+    let run (label: string) (cpp: string) =
+        let file = Path.Combine(directory, label + ".cpp")
+        Blade.CodeGen.deployRuntimeHeaders directory
+        File.WriteAllText(file, cpp)
+        match Blade.Build.compileCpp file directory with
+        | Error e -> Error e
+        | Ok exe -> Blade.Build.runExecutable exe
+    try
+        try
+            Environment.SetEnvironmentVariable("BLADE_LLVM", "off")
+            // the selection census (H1, opt-in) for the st15 cases; no other case has a mask over J
+            Environment.SetEnvironmentVariable("BLADE_JOIN_SELECTION", "1")
+            for (label, src, env, selection) in cases do
+                for (k, v) in env do Environment.SetEnvironmentVariable(k, v)
+                Environment.SetEnvironmentVariable("BLADE_PRINT", selection)
+                let emitWith (gate: string) =
+                    Environment.SetEnvironmentVariable("BLADE_JOIN_AGG", gate)
+                    match Blade.Lowering.lower src with
+                    | Error e -> failwith ($"{label} did not lower: {e}")
+                    | Ok ir -> Blade.CodeGen.genSelfContainedProgramFromIR ir ("JA_" + label) |> fst
+                let on = emitWith "1"
+                let off = emitWith "0"
+                check $"JA {label}: gate on stores no relation, gate off does"
+                    (not (on.Contains "matched_compact") && on.Contains "join-aggregate v1" && off.Contains "matched_compact"
+                     && (not (label.StartsWith "st15") || (not (on.Contains "big_compact") && off.Contains "big_compact"))) ""
+                if not native then
+                    skipped <- skipped + 1
+                    printfn "  SKIP: JA %s native run -- requires native Windows and g++" label
+                else
+                    match run ("JA_" + label + "_on") on, run ("JA_" + label + "_off") off with
+                    | Ok (c1, o1), Ok (c2, o2) ->
+                        // the empty relation: the unseeded fp raises the SAME BL8003 (text, site) in both arms
+                        let values (o: string) = o.Split('\n') |> Array.filter (fun l -> not (l.Contains " completed in ")) |> String.concat "\n"
+                        check $"JA {label}: the same printed values gate on and off" (c1 = c2 && values o1 = values o2 && ((c1 = 0 && (values o1).Contains "total = ") || (c1 <> 0 && (values o1).Contains "BL8003"))) (o1 + "\n---\n" + o2)
+                    | Error e, _ | _, Error e -> check $"JA {label}: compile/run" false e
+                for (k, _) in env do Environment.SetEnvironmentVariable(k, null)
+        with ex -> check "JA gate completes" false (ex.ToString())
+    finally
+        for key, value in saved do Environment.SetEnvironmentVariable(key, value)
+    printFooter "Join to aggregate, executed" [$"{passed} passed";$"{failed} failed";$"{skipped} skipped"]
+    if failed = 0 then 0 else 1

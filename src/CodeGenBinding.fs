@@ -347,7 +347,7 @@ let private tryGenRank1StreamJoin (ctx: CodeGenContext) (binding: IRBinding)
                        && (cl.Params |> List.forall (fun p -> scalar64 p.Type)) ->
             arithmetic (cl.Params |> List.map (_.VarId) |> Set.ofList)
                        (cl.Params |> List.map (_.Name) |> Set.ofList) (Set.singleton cl.Id) cl.Body
-            && (Blade.IRTotality.auditApply resolveCallable (fun _ -> None) (fun _ -> false) info = Ok ())
+            && (Blade.IRTotality.auditApply resolveCallable (fun id -> Map.tryFind id ctx.DeferredComputations) (fun id -> Map.containsKey id ctx.DeferredComputations) info = Ok ())
         | _ -> false
     if streams.Length <> 1 || infos.Length <> 2 || folds.Length <> 2 || sharedIds.Length <> 1 then
         refuse "requires one rank-1 source, one named shared producer and two seeded Float64 legs"
@@ -357,7 +357,7 @@ let private tryGenRank1StreamJoin (ctx: CodeGenContext) (binding: IRBinding)
                                         || foldKernelBuiltinOp cl <> Some IRAdd) then
         refuse "requires two independently seeded Float64 addition chains"
     elif fpReassocEnabled () && (folds |> List.exists foldReorderLicensed) then
-        refuse "a licensed fold requires BLADE_FP_REPRO=1 for the scalar block route"
+        refuse "a licensed fold requires BLADE_FP_REPRO=1 for the scalar block route: each block feeds ONE ascending chain per leg, while a licensed build folds the resident join with its simd / lane tree -- a different association; v1 does not trade the licensed tree for the bounded window (gap G108 (3): the build-independent arm is unmeasured)"
     elif seeds |> List.exists (function IRLit (IRLitFloat _) | IRUnaryOp (IRNeg, IRLit (IRLitFloat _)) -> false | _ -> true) then
         refuse "requires literal Float64 seeds (no moved seed effects or failures)"
     elif (infos @ (sharedIds |> List.map snd)) |> List.exists (fun i -> not (closedKernel i) || classifyLeafBackend i <> BkSerial) then
@@ -431,7 +431,7 @@ let private tryGenRank1StreamJoin (ctx: CodeGenContext) (binding: IRBinding)
             && (match resolveCallable b.Value with
                 | Some cl when cl.Captures.IsEmpty -> false
                 | _ ->
-                    match Blade.IRTotality.walk resolveCallable (fun _ -> None) (fun _ -> false)
+                    match Blade.IRTotality.walk resolveCallable (fun id -> Map.tryFind id ctx.DeferredComputations) (fun id -> Map.containsKey id ctx.DeferredComputations)
                               Map.empty Map.empty Set.empty Set.empty Set.empty b.Value with
                     | Ok _ -> false | Error _ -> true))
     if not dominates || not ctx.ParamIds.IsEmpty then
@@ -487,6 +487,171 @@ let private tryGenRank1StreamJoin (ctx: CodeGenContext) (binding: IRBinding)
            |> List.map (fun s -> ind + s))
         @ [ $"{outerInd}}}" ]))
 
+/// PRINT REPLAY admission (rec-print-replay v1, round 4 wave 4 B1; C++ lane).
+/// The typechecker placed `__replay_<x>` (x's ring sweep, one IRReplayRow per
+/// completed row) and `__snap_<p>_<x> = x(p)` bindings beside a module-level
+/// `let rec x`. ADMITTED, x is never stored: the sweep is one lambda, run at
+/// its slot (filling the snapshots; a failing step fails there, before any
+/// print) and again at x's print slot (printing each row) -- the same machine
+/// code both times (blade_rt::replay_sweep). Fail closed: any failed
+/// condition keeps x and its snapshots as written (x stored in full) and the
+/// replay binding emits nothing. The interpreter and the LLVM lane always run
+/// the program as written (IR.isRecReplayBinding).
+let planRecPrintReplays (modul: IRModule) : unit =
+    let cell = recReplayPlansCell ()
+    cell.Value <- []
+    let replays = modul.Bindings |> List.filter IR.isRecReplayBinding
+    if not replays.IsEmpty then
+        let deferred = IRLift.computeDeferredIds modul.Bindings
+        let bindingIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+        let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+        let mayWrite = Blade.Optimize.scheduleMayWriteIn [] modul
+        let stripRows (e: IRExpr) =
+            IR.mapIRExpr (function IRReplayRow _ -> IRLit IRLitUnit | x -> x) e
+        let refsOf (e: IRExpr) =
+            Set.union (collectVarRefsIR e)
+                (Blade.Optimize.embeddedExtentExprs e |> List.map collectVarRefsIR |> Set.unionMany)
+        // Assigned anywhere: the root of every IRAssign target in the program.
+        let assigned =
+            let acc = System.Collections.Generic.HashSet<int>()
+            let rec root (t: IRExpr) =
+                match t with
+                | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRTupleProj (b, _, _) -> root b
+                | IRVar (id, _) -> acc.Add id |> ignore
+                | _ -> ()
+            let note e = iterIRExpr (function IRAssign (t, _) -> root t | _ -> ()) e
+            for b in modul.Bindings do note b.Value
+            for f in modul.Functions do note f.Body
+            Set.ofSeq acc
+        for rb in replays do
+            let subject = rb.Name.Substring IR.recReplayBindingPrefix.Length
+            let decline (why: string) =
+                recordCodegenDecision "rec-print-replay" subject (Blade.Effects.Declined why) []
+            let targets =
+                let acc = System.Collections.Generic.HashSet<int>()
+                iterIRExpr (function IRReplayRow (t, _) -> acc.Add t |> ignore | _ -> ()) rb.Value
+                List.ofSeq acc
+            let xb =
+                match targets with
+                | [ t ] -> modul.Bindings |> List.tryFind (fun b -> b.Id = t)
+                | _ -> None
+            if not (Blade.Optimize.recReplayEnabled ()) then decline "disabled by BLADE_REC_REPLAY"
+            elif mpiProgramOn () || moduleUsesMpi modul then decline "an MPI program prints on rank 0 only (the replay would run the sweep on one rank)"
+            else
+            match xb with
+            | None -> decline "the replay rows do not name exactly one module binding"
+            | Some xb ->
+            let shape =
+                match IR.stripUnits xb.Type with
+                | ArrayElem at ->
+                    let elemOk =
+                        match IR.stripUnits at.ElemType with
+                        | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) -> true
+                        | _ -> false
+                    let lits =
+                        at.IndexTypes |> List.map (fun ix ->
+                            match ix.Extent with
+                            | IRLit (IRLitInt n) when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+                                                      && ix.Dependencies.IsEmpty && n > 0L -> Some n
+                            | _ -> None)
+                    if elemOk && not lits.IsEmpty && lits |> List.forall Option.isSome && not at.IsVirtual then
+                        Some (elemTypeToCpp at.ElemType, lits |> List.map Option.get)
+                    else None
+                | _ -> None
+            match shape with
+            | None -> decline $"`{xb.Name}` is not a dense array of a plain numeric element over plain static axes"
+            | Some (elemCpp, extents) ->
+            let rank = extents.Length
+            // Every other reader of x must be a snapshot binding `x(p)`.
+            let snapOf (b: IRBinding) =
+                match b.Value with
+                | IRIndex (IRVar (v, _), [ IRLit (IRLitInt p) ], _) when v = xb.Id && p >= 0L && p < extents.Head -> Some p
+                | _ -> None
+            let others =
+                modul.Bindings |> List.filter (fun b -> b.Id <> xb.Id && b.Id <> rb.Id)
+            let snaps = others |> List.choose (fun b -> snapOf b |> Option.map (fun p -> (p, b)))
+            let snapIds = snaps |> List.map (fun (_, b) -> b.Id) |> Set.ofList
+            let strayBinding =
+                others |> List.tryFind (fun b ->
+                    not (snapIds.Contains b.Id)
+                    && (refsOf (Blade.Optimize.bindingPayloadExpr modul b)).Contains xb.Id)
+            let strayFunction = modul.Functions |> List.tryFind (fun f -> (refsOf f.Body).Contains xb.Id)
+            let posOf (id: int) = modul.Bindings |> List.findIndex (fun b -> b.Id = id)
+            let xPos = posOf xb.Id
+            let rPos = posOf rb.Id
+            let snapBefore = snaps |> List.exists (fun (_, b) -> posOf b.Id < rPos)
+            let sweep = stripRows rb.Value
+            let reads = refsOf sweep
+            let moduleReads = reads |> Set.filter (fun id -> bindingIds.Contains id && id <> rb.Id)
+            // Every other free name: the sweep's own binders and the callables
+            // are known; anything else (a value of another module this one
+            // does not carry) is not judged by the checks below -- fail closed.
+            let localBinders =
+                let acc = System.Collections.Generic.HashSet<int>()
+                iterIRExpr (function
+                    | IRLet (id, _, _) -> acc.Add id |> ignore
+                    | IRForRange (id, _, _, _) -> acc.Add id |> ignore
+                    | _ -> ()) sweep
+                acc
+            let unjudged =
+                reads |> Set.filter (fun id ->
+                    not (bindingIds.Contains id) && not (funcs.ContainsKey id) && not (localBinders.Contains id))
+            // Callables the sweep can run, transitively.
+            let reach =
+                let seen = System.Collections.Generic.HashSet<int>()
+                let rec go (e: IRExpr) =
+                    for id in collectVarRefsIR e do
+                        match Map.tryFind id funcs with
+                        | Some f when seen.Add f.Id -> go f.Body
+                        | _ -> ()
+                go sweep
+                seen |> Seq.choose (fun id -> Map.tryFind id funcs) |> List.ofSeq
+            let display =
+                let mutable hit = false
+                let look e = iterIRExpr (function IRDisplayEmit _ -> hit <- true | _ -> ()) e
+                look sweep
+                for f in reach do look f.Body
+                hit
+            let parallelFn =
+                reach |> List.tryFind (fun f ->
+                    f.IsOmpParallel || not f.Parallelism.IsEmpty || f.IsCudaKernel || f.IsMpiParallel)
+            let laterWriter =
+                modul.Bindings |> List.skip (rPos + 1)
+                |> List.tryFind (fun b -> mayWrite (Blade.Optimize.bindingPayloadExpr modul b))
+            if rPos <> xPos + 1 then decline "the replay sweep is not the binding right after its trajectory (its first run must take the trajectory's slot)"
+            elif snapBefore then decline "a snapshot binding precedes the replay sweep"
+            elif strayBinding.IsSome then decline $"`{strayBinding.Value.Name}` reads `{xb.Name}` other than as a fixed-row snapshot"
+            elif strayFunction.IsSome then decline $"function `{strayFunction.Value.Name}` reads `{xb.Name}`"
+            elif moduleReads.Contains xb.Id then decline $"the sweep reads `{xb.Name}` itself"
+            elif not unjudged.IsEmpty then decline "the sweep reads a value this module's bindings do not carry (another module's: not judged)"
+            elif moduleReads |> Set.exists deferred.Contains then
+                decline "the sweep reads a deferred module value (its forcing would run again at the print)"
+            elif moduleReads |> Set.exists modul.ProviderReads.ContainsKey then
+                decline "the sweep reads a provider value (a replay would read the store again)"
+            elif moduleReads |> Set.exists assigned.Contains then
+                decline "the sweep reads a module binding the program assigns (the print-time replay could see a later value)"
+            elif display then decline "the sweep reaches display.emit (an effect a replay would repeat)"
+            elif parallelFn.IsSome then decline $"the sweep runs `{parallelFn.Value.Name}`, which requests a thread team / device / ranks (a replay's team may differ)"
+            elif mayWrite sweep then decline "the sweep may write storage outside its own ring (the shared write analysis)"
+            elif laterWriter.IsSome then decline $"a later binding (`{laterWriter.Value.Name}`) may write storage (the print-time replay must read the inputs the first run read)"
+            else
+                let plan =
+                    { TargetId = xb.Id; TargetName = xb.Name; ReplayId = rb.Id
+                      Sweep = $"{sanitizeCppName rb.Name}__sweep"
+                      Rank = rank; ElemCpp = elemCpp; Extents = extents
+                      Snapshots = snaps |> List.map (fun (p, b) -> (p, b.Id, bindingCppName b)) }
+                cell.Value <- cell.Value @ [ plan ]
+                let n = extents.Head
+                let rowCells = extents.Tail |> List.fold (*) 1L
+                let snapText =
+                    if snaps.IsEmpty then ""
+                    else " (filling the snapshots of rows " + (snaps |> List.map (fst >> string) |> String.concat ", ") + ")"
+                recordCodegenDecision "rec-print-replay" subject Blade.Effects.Applied
+                    [ $"`{xb.Name}` ({n} rows of {rowCells} cells) is never stored: its ring sweep runs at its slot{snapText} and again at its print, printing each row"
+                      "one compiled sweep body run twice (blade_rt::replay_sweep, never inlined or cloned): the printed rows are the bits the first run computed; a failing step fails in the first run, before any print"
+                      "inputs: stored, never-assigned, non-deferred, non-provider module values; the sweep and every later binding write nothing (scheduleMayWriteIn); no thread team, device, ranks or display effect is reachable"
+                      "the print-time sweep runs after the `completed in` timing line" ]
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let (code, ctx') = genBindingDispatch ctx binding builder
     // Gap G42: a binding whose own C++ name gained TupleChildren holds a FLAT
@@ -507,7 +672,24 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let ind = indentStr ctx
     let name = bindingCppName binding
 
+    let replayPlans = (recReplayPlansCell ()).Value
     match binding.Value with
+    // PRINT REPLAY (rec-print-replay v1, planRecPrintReplays): an admitted
+    // trajectory and its snapshot bindings emit nothing here -- the sweep at
+    // the replay binding's slot fills the snapshots, x prints by replaying it.
+    | _ when replayPlans |> List.exists (fun p -> p.TargetId = binding.Id) ->
+        ([ $"{ind}// {name}: never stored -- its ring sweep replays it at its print (rec-print-replay v1)" ],
+         addVarName binding.Id name ctx)
+    | _ when replayPlans |> List.exists (fun p -> p.Snapshots |> List.exists (fun (_, s, _) -> s = binding.Id)) ->
+        ([ $"{ind}// {name}: filled by its trajectory's ring sweep (rec-print-replay v1)" ],
+         addVarName binding.Id name ctx)
+    | _ when replayPlans |> List.exists (fun p -> p.ReplayId = binding.Id) ->
+        genRecReplaySweep ctx binding builder (replayPlans |> List.find (fun p -> p.ReplayId = binding.Id))
+    | _ when IR.isRecReplayBinding binding ->
+        ([ $"{ind}// {name}: print replay declined -- the trajectory is stored in full (blade plan: rec-print-replay)" ],
+         addVarName binding.Id name ctx)
+    | IRReplayRow (_, row) ->
+        (genReplayRowStmt ctx row, addVarName binding.Id name ctx)
     | IRBeginPoolScope call ->
         ([ $"{ind}// A01: begin inline pool scope: {call}" ], addVarName binding.Id name ctx)
     | IRReleasePools (_, pools, call) ->
@@ -544,6 +726,53 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 p.Evidence
             Blade.Optimize.SinkStreamTable.remove binding.Id
             genBindingDispatch ctx binding builder
+    // join-aggregate v1 (Blade.OptimizeJoinAgg, round 4 wave 4 D2): a fold of
+    // an unstored equijoin walks its probe here.
+    // (a fold over a SELECTION -- `compound(J, mask(J, p))`, H1 / ST15 -- is
+    // planned on J too: its operand is the selection, its join is the plan's)
+    | IRReduce (IRVar _, kernel, seed)
+        when (match Blade.OptimizeJoinAgg.JoinAggTable.tryFold binding.Id with
+              | Some p -> Blade.Optimize.EquiJoinTable.tryCompound p.JoinId |> Option.exists (fun jp -> jp.EmittedCpp.Value)
+              | None -> false) ->
+        let p = (Blade.OptimizeJoinAgg.JoinAggTable.tryFold binding.Id).Value
+        genJoinAggFold ctx binding p p.JoinId kernel seed
+    // ... and the selection's mask and compound are never built
+    | _ when (match Blade.OptimizeJoinAgg.JoinAggTable.elidedBy binding.Id with
+              | Some p -> Blade.Optimize.EquiJoinTable.tryCompound p.JoinId |> Option.exists (fun jp -> jp.EmittedCpp.Value)
+              | None -> false) ->
+        let p = (Blade.OptimizeJoinAgg.JoinAggTable.elidedBy binding.Id).Value
+        let name = bindingCppName binding
+        recordCodegenDecision "join-aggregate" name Blade.Effects.Applied
+            [ $"c++ lane: `{name}` (a mask over `{p.JoinName}` or the compound over it) is never built; the folds over it walk the probe" ]
+        ([ $"{indentStr ctx}// join-aggregate v1 (ST15): `{name}` is not built -- the folds over the selection walk `{p.JoinName}`'s probe" ],
+         addVarName binding.Id name ctx)
+    // assembly-dest v1 (Blade.Optimize.planAssemblyDest, F2 / PM26): a
+    // private cellwise map whose only observer is a transpose / stack / join is
+    // never stored -- the assembly computes each cell into its destination.
+    // Renderability is re-checked HERE (the assembly fuses only a plan taken at
+    // this site), so a decline keeps the ordinary emission of both bindings.
+    | IRCompute (IRApplyCombinator _) | IRApplyCombinator _
+        when (Blade.Optimize.AssemblyDestTable.tryProducer binding.Id).IsSome ->
+        let p = (Blade.Optimize.AssemblyDestTable.tryProducer binding.Id).Value
+        let operandNames = p.Operands |> List.map (exprToCpp ctx.VarNames)
+        let renderable =
+            ctx.Indent = 0 && not (mpiProgramOn ())
+            && operandNames |> List.forall (fun s -> s <> "" && not (s.Contains "BLADE_CODEGEN_ERROR") && not (s.Contains "("))
+            && p.Kernel.Captures |> List.forall (fun cp -> ctx.VarNames.ContainsKey cp.Id)
+            && (p.Operands |> List.forall (fun a ->
+                    match a with
+                    | IRVar (oid, _) -> not (Map.containsKey oid ctx.DeferredComputations)
+                    | _ -> false))
+        if renderable then
+            p.Taken.Value <- true
+            ([ $"{ind}// {name}: never stored -- computed cell by cell into `{p.AssemblyName}`'s destination (assembly-dest v1)" ],
+             addVarName binding.Id name ctx)
+        else
+            Blade.Optimize.recordAssemblyDest p.ProducerName
+                (Blade.Effects.Declined "c++ lane: an operand or a capture does not render as a stored name at the producer's site; the temporary is stored")
+                p.Evidence
+            Blade.Optimize.AssemblyDestTable.remove binding.Id
+            genBindingDispatch ctx binding builder
     | _ when Map.containsKey binding.Id ctx.RandomInits ->
         match ctx.RandomInits.[binding.Id] with
         | RandGen _ -> genRandGenBinding ctx binding builder
@@ -578,7 +807,7 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     | IRUngroupGrid (g, srcs, bounds) ->
         genUngroupGridBinding ctx binding g srcs bounds
     | IRUngroup (g, src) ->
-        genUngroupBinding ctx binding g src
+        genUngroupBinding ctx binding builder g src
     | IRUngroupRows (rows, offsets, src) ->
         genUngroupRowsBinding ctx binding rows offsets src
     | IRGroupBy (vals, gk) ->
@@ -866,7 +1095,19 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         isStatementShaped eager && not (isDeferringForm eager) && not (isGroupTableForm eager) ->
         genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
-        genComputeBinding ctx binding builder inner
+        let (code, ctx') = genComputeBinding ctx binding builder inner
+        // G90: a per-group row map the ragged peel emitted as a grouped value
+        // reads its row lengths through its operand's grouping; register it
+        // exactly as a group_by binding registers itself.
+        (match tryGroupRowMap name with
+         | Some gkName when not (Map.containsKey name ctx'.GroupedArrays)
+                            && (match binding.Type with
+                                | ArrayElem a -> a.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+                                | _ -> false) ->
+             noteGroupedBinding binding.Id name gkName
+             Blade.Optimize.GroupRowMapTable.noteEmitted binding.Id name
+             (code, { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays })
+         | _ -> (code, ctx'))
     | IRMethodFor _ ->
         // method_for creates a loop object - no runtime code needed
         // Just track the variable name for later use
@@ -2580,6 +2821,31 @@ and genProviderReadBindingRuled (ctx: CodeGenContext) (binding: IRBinding) (buil
         let lines = (if first.ReadId = binding.Id then tileProbeLines plan else []) @ ip.Phase1
         (lines |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
     | None ->
+    // PM44 (Blade.Optimize.planKeyedCellProjection, lane G item G6): a read
+    // whose only uses are literal keyed reads keeps its whole validating
+    // sweep and retains only the demanded cells (each `A(k)` renders as its
+    // scalar, published through the table).
+    let projected =
+        match Blade.Optimize.KeyedProjectionTable.tryRead binding.Id with
+        | Some plan ->
+            let cells = plan.Cells |> List.map (fun k -> (k, $"{name}__cell{k}"))
+            let lines =
+                if ctx.TopLevelProviderRead = Some binding.Id && not (mpiProgramOn ()) then
+                    Blade.ZarrProvider.CppZarr.tryGenReadVarRetainCells spec name cells
+                else None
+            match lines with
+            | Some ls ->
+                plan.Emitted.Value <- Map.ofList cells
+                Blade.Optimize.recordKeyedProjection binding.Name Blade.Effects.Applied plan.Evidence
+                Some ls
+            | None ->
+                Blade.Optimize.recordKeyedProjection binding.Name
+                    (Blade.Effects.Declined "C++ lane: not a module-level ordinary dense rank-1 Zarr read of the declared element type (or an MPI program); the resident read stays") plan.Evidence
+                None
+        | None -> None
+    match projected with
+    | Some ls -> (ls |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
+    | None ->
     let readCode =
         (match spec.MaskName, spec.MaskType with
          | Some maskName, Some maskType ->
@@ -3116,6 +3382,14 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     // does (forceDeferredArrayInput: a no-op for a plain array).
     let (maskPre, maskName, ctx) =
         match maskExpr with
+        | IRMask (srcExpr, predExpr) when (streamedRank1Of ctx srcExpr).IsSome ->
+            // G132 / ST06: an inline mask over a STREAMED source sweeps the
+            // store into the Bool temp (not registered, as below)
+            let (vn, spec, n, block) = (streamedRank1Of ctx srcExpr).Value
+            let tmpName = $"{name}__masksrc"
+            (match genStreamedMask ctx ind tmpName vn spec n block predExpr None with
+             | Some (stmts, _) -> (stmts, tmpName, ctx)
+             | None -> ([ refusalErrorLine ind "mask: predicate must resolve to a single-parameter callable" ], tmpName, ctx))
         | IRMask (srcExpr, predExpr) ->
             let tmpName = $"{name}__masksrc"
             let (forceCode, ctxF, srcExpr') = forceDeferredArrayInput ctx builder ($"{tmpName}__arr") srcExpr
@@ -3133,6 +3407,18 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // build reads the mask BY NAME, so each is materialized first
         // (materializeCompoundOperand: a no-op for a stored mask).
         | _ -> materializeCompoundOperand ctx builder ($"{name}__masksrc") maskExpr
+    // A mask over a COMPOUND (`compound(J, mask(J, p))`, G128) is itself a
+    // `Compound<bool, R>` sharing J's index: the index builders below read a
+    // mask as a flat Bool pool with `.extents[0]`, so they get a non-owning
+    // rank-1 view of its bits (J's present cells in lex order); the dense
+    // operand J is read by position through its compact buffer (`.data`).
+    let (maskView, maskName) =
+        match inferExprType maskExpr with
+        | ArrayElem a when isCompoundArrayType a && a.IndexTypes.Length = 1 ->
+            let v = $"{name}__maskv"
+            ([ $"{ind}size_t {v}_ext[1] = {{ {maskName}.size() }};"
+               $"{ind}Array<bool, 1> {v} = {{ {maskName}.data, {v}_ext }};" ], v)
+        | _ -> ([], maskName)
     (match binding.Type with
      | ArrayElem arrTy when isCompoundArrayType arrTy ->
          let leadRank =
@@ -3164,6 +3450,58 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              match Blade.Optimize.CompactionTable.tryCompound binding.Id, maskExpr with
              | Some p, IRVar (mId, _) when mId = p.MaskId && rank1 && trailingDimCount = 0 && maskPre.IsEmpty -> Some p
              | _ -> None
+         // G132 / ST06 (lane G item G3): the DENSE operand is a STREAMED
+         // rank-1 variable. The mask is stored (its own sweep, above or at its
+         // binding); the value gather is one more storage-order sweep of the
+         // store, branchless at the cursor exactly as the stored gather: the
+         // kept cells land in source order, and no array of the source's
+         // values exists. A rank-k mask or trailing dims keep the refusal.
+         match streamedRank1Of ctx denseExpr with
+         | Some (vn, spec, n, block) ->
+             if not (rank1 && trailingDimCount = 0) then
+                 ([ refusalErrorLine ind $"compound() over the streamed variable '{spec.VarName}' streams a rank-1 compaction with no trailing dims only -- bind it with .read" ], addVarName binding.Id name ctx)
+             else
+             for f in folds do f.EmittedCpp.Value <- None
+             let fused = planHere |> Option.bind (fun p -> p.CountCpp.Value)
+             let positions = planHere |> Option.forall (fun p -> p.PositionsNeeded)
+             let pos = if fused.IsSome && positions then Some $"{name}_pos" else None
+             let cardExpr = match fused with Some c -> c | None -> $"{idxName}->cardinality"
+             let gather (v: string) (i: string) =
+                 [ $"const {elemCpp} {name}_v = {v};"
+                   $"{name}_compact[{name}_q] = {name}_v;" ]
+                 @ (pos |> Option.map (fun p -> [ $"{p}[{name}_q][0] = {i};" ]) |> Option.defaultValue [])
+                 @ [ $"{name}_q += (size_t){name}__mp[{i}];" ]
+             let head =
+                 match fused with
+                 | Some _ -> [ $"{ind}size_t {idxName}_grid = {maskName}.extents[0];" ]
+                 | None -> maskPre @ (idxLines |> List.map (fun l -> ind + l))
+             let (representation, idxDecl) =
+                 match fused, pos with
+                 | Some c, Some p ->
+                     ("rank-1 compaction (counted in the mask's sweep; kept positions filled in the gather sweep -- compaction fusion; keyed reads by binary search over the kept positions)",
+                      [ $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {c}, {p}); // rank-1 compaction over a stream" ])
+                 | Some c, None ->
+                     ("rank-1 compaction (counted in the mask's sweep, gathered in one sweep -- compaction fusion; positions elided: the demand census found no consumer that reads them)",
+                      [ $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {c}, compound_index_t<1>::positions_elided); // rank-1 compaction over a stream, positions elided" ])
+                 | None, _ -> ("rank-1 compaction (the index built from the stored mask; the values gathered in one sweep of the store)", [])
+             recordCodegenDecision "compound" name Blade.Effects.Applied
+                 [ $"representation: {representation}"
+                   $"the dense operand is the STREAMED variable '{spec.VarName}': the gather is one storage-order sweep of the store ({block} cells per block), branchless at the cursor; the mask is stored (1 byte per cell); no array of the source's values exists" ]
+             let lines =
+                 densePre
+                 @ [ $"{ind}// compound over the STREAMED variable '{spec.VarName}' (G132 / ST06): the kept cells gathered in one storage-order sweep of the store; the source's values never exist as an array" ]
+                 @ head
+                 @ [ $"{ind}size_t {name}_trail = 1;"
+                     $"{ind}const bool* {name}__mp = nested_array_utilities::pool_base({maskName}.data);" ]
+                 @ (pos |> Option.map (fun p -> [ $"{ind}compound_index_t<1>::IDX* {p} = new compound_index_t<1>::IDX[{cardExpr} + 1];" ]) |> Option.defaultValue [])
+                 @ [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{cardExpr} + 1];"
+                     $"{ind}size_t {name}_q = 0;" ]
+                 @ genStreamedSweep ind name vn spec n block gather
+                 @ idxDecl
+                 @ [ $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
+             registerShapedAlloc name "deallocate_compound" name
+             (lines, addVarName binding.Id name ctx)
+         | None ->
          // T4c: a companion of a shared selection -- the first one runs the
          // selection's one joint pass and builds the shared index, the others
          // adopt it (their chains were fed there: no reset here).
@@ -3172,7 +3510,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              | Some p when p.Shared.IsSome -> genSharedCompanion ctx ind binding name elemCpp denseName maskName p p.Shared.Value
              | _ -> None
          match sharedLines with
-         | Some lines -> (densePre @ lines, addVarName binding.Id name ctx)
+         | Some lines -> (densePre @ maskView @ lines, addVarName binding.Id name ctx)
          | None ->
          // T4a: the mask's pass already gathered (and fed the folds it
          // published); otherwise the folds' handshakes start clean here.
@@ -3185,12 +3523,12 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              let positions = planHere |> Option.forall (fun p -> p.PositionsNeeded)
              let lines = genFusedCompaction ctx ind name elemCpp denseName maskName cnt folds positions gathered
              registerShapedAlloc name "deallocate_compound" name
-             (densePre @ lines, addVarName binding.Id name ctx)
+             (densePre @ maskView @ lines, addVarName binding.Id name ctx)
          | None ->
          recordCompoundRepresentation name leadRank trailingDimCount
          let lines =
              densePre
-             @ maskPre
+             @ maskPre @ maskView
              @ (idxLines |> List.map (fun l -> ind + l))
              @ [ $"{ind}size_t {name}_trail = {trailExpr};"
                  $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
@@ -3251,6 +3589,13 @@ and genEquiJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (jp: Blade.Opt
         else
         let elemCpp = elemTypeToCpp arrTy.ElemType
         let (wrapperCode, wname) = genCallableWrapper ctx.VarNames $"{name}__pk" pk
+        // D3 (ST15): a conjunctive key kernel is re-evaluated on each matched pair.
+        let (keyCode, keyTest) =
+            match jp.Residual |> Option.bind resolveCallable with
+            | Some kc ->
+                let (code, kw) = genCallableWrapper ctx.VarNames $"{name}__key" kc
+                (code, Some kw)
+            | None -> ([], None)
         let positional = match jp.KeyRegime with Blade.Optimize.JoinPositional _ -> 1 | Blade.Optimize.JoinDynamic -> 0
         let regime =
             match jp.KeyRegime with
@@ -3268,6 +3613,52 @@ and genEquiJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (jp: Blade.Opt
         // (the membership builds' run-time switch) is not read here.
         // Emission-only (the exe cache keys on the text); the suite clears it.
         let verbose = Blade.Optimize.joinReportEnabled ()
+        // D3 (ST15): the counting pass counts the matched pairs the residual
+        // key kernel keeps (a plain `l == r` adds each bucket's length).
+        let countLines =
+            match keyTest with
+            | None ->
+                [ $"{i1}const size_t {name}__len = (size_t)({name}__csr.off[{name}__b + 1] - {name}__csr.off[{name}__b]);"
+                  $"{i1}if ({name}__len > {name}__cap - {name}__card) throw std::length_error(\"hash join `{name}`: the relation's cardinality exceeds the largest allocatable buffer\");"
+                  $"{i1}{name}__card += {name}__len;" ]
+            | Some kw ->
+                [ $"{i1}for (int64_t {name}__t = {name}__csr.off[{name}__b]; {name}__t < {name}__csr.off[{name}__b + 1]; {name}__t++) {{"
+                  $"{i1}    if (!{kw}({name}__lk[{name}__i], {name}__rk[{name}__csr.perm[{name}__t]])) continue;"
+                  $"{i1}    if ({name}__card == {name}__cap) throw std::length_error(\"hash join `{name}`: the relation's cardinality exceeds the largest allocatable buffer\");"
+                  $"{i1}    {name}__card++;"
+                  $"{i1}}}" ]
+        let storeTest =
+            match keyTest with
+            | Some kw -> [ $"{i3}if (!{kw}({name}__lk[{name}__i], {name}__rk[{name}__csr.perm[{name}__t]])) continue;" ]
+            | None -> []
+        let relationLines =
+            if (Blade.OptimizeJoinAgg.JoinAggTable.tryJoin binding.Id).IsSome then
+                // join-aggregate v1 (Blade.OptimizeJoinAgg, round 4 wave 4 D2): J is
+                // never stored -- its folds walk the probe at their own sites, so the
+                // CSR stays alive (freed after the last fold) and J is the
+                // cardinality-only index over NO buffer (extents(J) reads it).
+                [ $"{ind}// join-aggregate v1: `{name}` is never stored -- each fold walks the probe at its own site (the CSR lives to the last fold)"
+                  $$"""{{ind}}std::array<size_t, 2> {{name}}_idx_extents = { {{name}}__n, {{name}}__m };"""
+                  $"{ind}compound_index_t<2>* {name}_idx = new compound_index_t<2>(\"{name}_idx\", {name}_idx_extents, {name}__card, compound_index_t<2>::cardinality_only); // join-aggregate v1: no relation buffer"
+                  $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 2> {{name}} { nullptr, {{name}}_idx, 1 };""" ]
+            else
+                [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{name}__card + 1];"
+                  $"{ind}{{"
+                  $"{i1}size_t {name}__q = 0;"
+                  $"{i1}for (size_t {name}__i = 0; {name}__i < {name}__n; {name}__i++) {{"
+                  $"{i2}const int64_t {name}__b = blade_join_lookup_i64(&{name}__csr, {name}__lk[{name}__i]);"
+                  $"{i2}if ({name}__b < 0) continue;"
+                  $"{i2}const int64_t {name}__hi = {name}__csr.off[{name}__b + 1];"
+                  $"{i2}for (int64_t {name}__t = {name}__csr.off[{name}__b]; {name}__t < {name}__hi; {name}__t++) {{" ]
+                @ storeTest
+                @ [ $"{i3}{name}_compact[{name}__q++] = {wname}({name}__la[{name}__i], {name}__ra[{name}__csr.perm[{name}__t]]);"
+                    $"{i2}}}"
+                    $"{i1}}}"
+                    $"{ind}}}"
+                    $"{ind}blade_join_free_i64(&{name}__csr);"
+                    $$"""{{ind}}std::array<size_t, 2> {{name}}_idx_extents = { {{name}}__n, {{name}}__m };"""
+                    $"{ind}compound_index_t<2>* {name}_idx = new compound_index_t<2>(\"{name}_idx\", {name}_idx_extents, {name}__card, compound_index_t<2>::cardinality_only); // hash-join v1: cardinality-only (no tuple table, reverse hash or mask)"
+                    $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 2> {{name}} { {{name}}_compact, {{name}}_idx, 1 };""" ]
         let lines =
             [ $"{ind}// hash-join v1 (Blade.Optimize.planEquiJoin): `{name}` = the equijoin of `{jp.LeftKeyName}` and `{jp.RightKeyName}` -- a stable CSR over the right keys ({regime}), a counting pass sizing the relation, then the left-major / right-minor probe (the compound's lex order); no N x M pool is built"
               $"{ind}const size_t {name}__n = {lk}.extents[0];"
@@ -3277,6 +3668,7 @@ and genEquiJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (jp: Blade.Opt
               $"{ind}const auto* {name}__la = nested_array_utilities::pool_base({la}.data);"
               $"{ind}const auto* {name}__ra = nested_array_utilities::pool_base({ra}.data);" ]
             @ (wrapperCode |> List.map (fun l -> ind + l))
+            @ (keyCode |> List.map (fun l -> ind + l))
             // The dense extents product N x M the index retains is checked
             // FIRST, ahead of the CSR build (it depends on nothing else).
             @ [ $"{ind}if ({name}__m != 0 && {name}__n > SIZE_MAX / {name}__m) throw std::length_error(\"hash join `{name}`: the dense extents N x M overflow size_t\");"
@@ -3295,36 +3687,105 @@ and genEquiJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (jp: Blade.Opt
                 $"{ind}size_t {name}__card = 0;"
                 $"{ind}for (size_t {name}__i = 0; {name}__i < {name}__n; {name}__i++) {{"
                 $"{i1}const int64_t {name}__b = blade_join_lookup_i64(&{name}__csr, {name}__lk[{name}__i]);"
-                $"{i1}if ({name}__b < 0) continue;"
-                $"{i1}const size_t {name}__len = (size_t)({name}__csr.off[{name}__b + 1] - {name}__csr.off[{name}__b]);"
-                $"{i1}if ({name}__len > {name}__cap - {name}__card) throw std::length_error(\"hash join `{name}`: the relation's cardinality exceeds the largest allocatable buffer\");"
-                $"{i1}{name}__card += {name}__len;"
-                $"{ind}}}" ]
+                $"{i1}if ({name}__b < 0) continue;" ]
+            @ countLines
+            @ [ $"{ind}}}" ]
             @ (if verbose then [ $"{ind}blade_join_note_i64(&{name}__csr, \"{name}\", \"{jp.RightKeyName}\", (int64_t){name}__n, (int64_t){name}__card);" ] else [])
-            @ [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{name}__card + 1];"
-                $"{ind}{{"
-                $"{i1}size_t {name}__q = 0;"
-                $"{i1}for (size_t {name}__i = 0; {name}__i < {name}__n; {name}__i++) {{"
-                $"{i2}const int64_t {name}__b = blade_join_lookup_i64(&{name}__csr, {name}__lk[{name}__i]);"
-                $"{i2}if ({name}__b < 0) continue;"
-                $"{i2}const int64_t {name}__hi = {name}__csr.off[{name}__b + 1];"
-                $"{i2}for (int64_t {name}__t = {name}__csr.off[{name}__b]; {name}__t < {name}__hi; {name}__t++) {{"
-                $"{i3}{name}_compact[{name}__q++] = {wname}({name}__la[{name}__i], {name}__ra[{name}__csr.perm[{name}__t]]);"
-                $"{i2}}}"
-                $"{i1}}}"
-                $"{ind}}}"
-                $"{ind}blade_join_free_i64(&{name}__csr);"
-                $$"""{{ind}}std::array<size_t, 2> {{name}}_idx_extents = { {{name}}__n, {{name}}__m };"""
-                $"{ind}compound_index_t<2>* {name}_idx = new compound_index_t<2>(\"{name}_idx\", {name}_idx_extents, {name}__card, compound_index_t<2>::cardinality_only); // hash-join v1: cardinality-only (no tuple table, reverse hash or mask)"
-                $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 2> {{name}} { {{name}}_compact, {{name}}_idx, 1 };""" ]
+            @ relationLines
         (memberUsedCell ()).Value <- true
         jp.EmittedCpp.Value <- true
+        if (Blade.OptimizeJoinAgg.JoinAggTable.tryJoin binding.Id).IsSome then
+            recordCodegenDecision "join-aggregate" name Blade.Effects.Applied
+                [ "c++ lane: CSR + counting pass at J's site, no relation buffer; each fold walks the probe at its own site" ]
+            Some (lines, addVarName binding.Id name ctx)
+        else
         recordCodegenDecision "compound" name Blade.Effects.Applied
             [ "representation: the equijoin relation (hash-join v1) -- the compact buffer in lex order over a cardinality-only compound_index_t<2>; no tuple table, no reverse hash, no mask"
               "rank-2 relation over (left row, right row); no trailing dims" ]
         registerShapedAlloc name "deallocate_compound" name
         Some (lines, addVarName binding.Id name ctx)
     | _ -> None
+
+/// A FOLD OF AN UNSTORED EQUIJOIN (join-aggregate v1, Blade.OptimizeJoinAgg,
+/// round 4 wave 4 D2): `let s = reduce(J, k[, seed])` walks J's probe at its
+/// own site -- i ascending, every row of the left key's bucket ascending
+/// (J's lex order) -- feeding `pk(a1[i], b1[j])` into k's chain exactly as the
+/// stored J's serial fold did: seeded, from the seed; unseeded, from the first
+/// pair's value, BL8003 here when |J| = 0. The planner admitted only folds that
+/// keep the serial chain in this build. The last fold frees the CSR.
+and genJoinAggFold (ctx: CodeGenContext) (binding: IRBinding) (plan: Blade.OptimizeJoinAgg.JoinAggPlan) (jid: IRId) (kernel: IRExpr) (seed: IRExpr option) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    match Blade.Optimize.EquiJoinTable.tryCompound jid, Map.tryFind jid ctx.VarNames, resolveCallable kernel with
+    | Some jp, Some j, Some kc ->
+        (match resolveCallable jp.PayloadKernel with
+         | None -> [ refusalErrorLine ind $"join-aggregate: the payload kernel of `{j}` does not resolve" ], addVarName binding.Id name ctx
+         | Some pk ->
+             let (_, pkw) = genCallableWrapper ctx.VarNames $"{j}__pk" pk
+             let (kCode, kw) = genCallableWrapper ctx.VarNames name kc
+             let t = irTypeToCpp binding.Type
+             let i1 = ind + "    "
+             let i2 = i1 + "    "
+             let i3 = i2 + "    "
+             let isLast = List.last plan.Folds = binding.Id
+             let pair = $"{pkw}({j}__la[{j}__i], {j}__ra[{j}__csr.perm[{j}__t]])"
+             let residual =
+                 match jp.Residual |> Option.bind resolveCallable with
+                 | Some kc ->
+                     let (_, kw) = genCallableWrapper ctx.VarNames $"{j}__key" kc
+                     [ $"{i3}if (!{kw}({j}__lk[{j}__i], {j}__rk[{j}__csr.perm[{j}__t]])) continue;" ]
+                 | None -> []
+             // H1 / ST15: a fold over a SELECTION of J feeds only the pairs
+             // whose payload the selection's predicate keeps (the stored
+             // selection's cells, in J's lex order); its empty test is the
+             // selection's, after the walk.
+             let filter =
+                 match Map.tryFind binding.Id plan.Filtered |> Option.bind resolveCallable with
+                 | Some pc ->
+                     let (pCode, pw) = genCallableWrapper ctx.VarNames $"{name}__sel" pc
+                     Some (pCode, pw)
+                 | None -> None
+             let (pair, filterLines) =
+                 match filter with
+                 | Some (_, pw) -> ("__pv", [ $"{i3}const auto __pv = {pair};"; $"{i3}if (!{pw}(__pv)) continue;" ])
+                 | None -> (pair, [])
+             let (start, step, finish) =
+                 match seed with
+                 | Some s ->
+                     ([ $"{i1}{t} __acc = {exprToCpp ctx.VarNames s};" ], [ $"{i3}__acc = {kw}(__acc, {pair});" ], [])
+                 | None when filter.IsSome ->
+                     ([ $"{i1}{t} __acc{{}}; bool __first = true;" ],
+                      [ $"{i3}if (__first) {{ __acc = {pair}; __first = false; }} else __acc = {kw}(__acc, {pair});" ],
+                      [ $"{i1}if (__first) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {declPanicArgs ()}); }}" ])
+                 | None ->
+                     ([ $"{i1}if ({j}__card == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {declPanicArgs ()}); }}"
+                        $"{i1}{t} __acc{{}}; bool __first = true;" ],
+                      [ $"{i3}if (__first) {{ __acc = {pair}; __first = false; }} else __acc = {kw}(__acc, {pair});" ], [])
+             let lines =
+                 [ $"{ind}// join-aggregate v1: `{name}` folds the unstored equijoin `{j}` straight from its probe (J's lex order, the serial chain)" ]
+                 @ (kCode |> List.map (fun l -> ind + l))
+                 @ (match filter with Some (pCode, _) -> pCode |> List.map (fun l -> ind + l) | None -> [])
+                 @ [ $"{ind}{t} {name} = [&]() -> {t} {{" ]
+                 @ start
+                 @ [ $"{i1}for (size_t {j}__i = 0; {j}__i < {j}__n; {j}__i++) {{"
+                     $"{i2}const int64_t {j}__b = blade_join_lookup_i64(&{j}__csr, {j}__lk[{j}__i]);"
+                     $"{i2}if ({j}__b < 0) continue;"
+                     $"{i2}const int64_t {j}__hi = {j}__csr.off[{j}__b + 1];"
+                     $"{i2}for (int64_t {j}__t = {j}__csr.off[{j}__b]; {j}__t < {j}__hi; {j}__t++) {{" ]
+                 @ residual
+                 @ filterLines
+                 @ step
+                 @ [ $"{i2}}}"
+                     $"{i1}}}" ]
+                 @ finish
+                 @ [ $"{i1}return __acc;"
+                     $"{ind}}}();" ]
+                 @ (if isLast then [ $"{ind}blade_join_free_i64(&{j}__csr); // join-aggregate v1: the last fold of `{j}`" ] else [])
+             recordCodegenDecision "join-aggregate" name Blade.Effects.Applied
+                 [ $"c++ lane: the fold walks `{j}`'s probe at its own site" + (if isLast then "; the CSR is freed after it" else "") ]
+             (lines, addVarName binding.Id name ctx))
+    | _ ->
+        ([ refusalErrorLine ind $"join-aggregate: the fold `{name}` lost its join plan (internal)" ], addVarName binding.Id name ctx)
 
 /// The FUSED rank-1 compaction (Blade.Optimize.planCompactionFusion, B4b/c):
 /// `cnt` (the mask pass's count) sizes both buffers at m + 1 -- the last cell
@@ -3751,6 +4212,69 @@ and forceDeferredBindingIds (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
     ) ([], ctx)
 
 
+/// The STREAMED rank-1 provider read an expression names (`A` bound with
+/// `.stream`), with its C++ key, when its provider can stream blocks of its
+/// leading axis and the extent is static. By the binding's NAME (a streamed
+/// operand RENDERS as the refusal sentinel).
+and streamedRank1Of (ctx: CodeGenContext) (e: IRExpr) : (string * ProviderReadSpec * int64 * int64) option =
+    if Map.isEmpty ctx.StreamedArrays then None else
+    match e with
+    | IRVar (vid, _) ->
+        (match Map.tryFind vid ctx.VarNames |> Option.bind (fun vn -> Map.tryFind vn ctx.StreamedArrays |> Option.map (fun s -> (vn, s))) with
+         | Some (vn, spec) when spec.VarType.IndexTypes.Length = 1 && spec.VarType.IndexTypes.Head.Rank = 1 ->
+             (match (Blade.ProviderRegistry.tryFind spec.Provider) |> Option.map (fun p -> p.GenStreamRows, p.StreamRowsBlock), spec.VarType.IndexTypes.Head.Extent with
+              | Some (Some _, Some blockOf), IRLit (IRLitInt n) when n >= 0L ->
+                  Some (vn, spec, n, max 1L (blockOf spec.FilePath spec.VarName))
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// One STORAGE-ORDER sweep of a streamed rank-1 variable, one block of its
+/// chunk edge at a time (the streamed fold's walk, genReduceBinding): `blk`
+/// holds cells [__lo, __hi) and `cell` renders the per-cell body for the
+/// cell `blk[__q]` at ordinal `__lo + __q`. Each sweep re-reads the store
+/// (the per-consumer read contract of every streamed consumer).
+and genStreamedSweep (ind: string) (tag: string) (vn: string) (spec: ProviderReadSpec) (n: int64) (block: int64) (cell: string -> string -> string list) : string list =
+    let genRows = ((Blade.ProviderRegistry.tryFind spec.Provider).Value).GenStreamRows.Value
+    let elemStr = elemTypeToCpp spec.VarType.ElemType
+    let blk = $"{tag}__blk"
+    [ $"{ind}{{"
+      $"{ind}    {elemStr}* {blk} = new {elemStr}[{block}];"
+      $$"""{{ind}}    for (size_t __lo = 0; __lo < {{n}}UL; __lo += {{block}}UL) {"""
+      $"{ind}        size_t __hi = __lo + {block}UL; if (__hi > {n}UL) __hi = {n}UL;" ]
+    @ (genRows spec.FilePath spec.VarName vn blk "__lo" "__hi" spec.VarType |> List.map (fun s -> ind + "        " + s))
+    @ [ $"{ind}        for (size_t __q = 0; __q < __hi - __lo; __q++) {{" ]
+    @ (cell $"{blk}[__q]" "(__lo + __q)" |> List.map (fun s -> ind + "            " + s))
+    @ [ $"{ind}        }}"
+        $"{ind}    }}"
+        $"{ind}    delete[] {blk};"
+        $"{ind}}}" ]
+
+/// mask(A, p) over a STREAMED rank-1 A (G132 / ST06, lane G item G3): the
+/// Bool presence array (the mask's ordinary storage, 1 byte per cell) filled
+/// by ONE storage-order sweep of the store -- p on each cell in cell order,
+/// exactly the stored mask's predicate order -- with the compaction's count
+/// taken in the same sweep when a plan asked for it. The source's values
+/// never exist as an array. Returns the lines, the allocation and whether it
+/// counted.
+and genStreamedMask (ctx: CodeGenContext) (ind: string) (varName: string) (vn: string) (spec: ProviderReadSpec) (n: int64) (block: int64) (predExpr: IRExpr) (countVar: string option) : (string list * MaterializedAlloc list) option =
+    match resolveCallable predExpr with
+    | Some callable when callable.Params.Length = 1 ->
+        let (wrapperCode, wname) = genCallableWrapper ctx.VarNames varName callable
+        let (extentsDecl, owned) = emitExtentsTable "" ($"{varName}_extents") 1 [ ($"{n}", true) ]
+        let body (v: string) (i: string) =
+            [ $"const bool __{varName}_k = {wname}({v});"
+              $"{varName}[{i}] = __{varName}_k;" ]
+            @ (match countVar with Some c -> [ $"{c} += (size_t)__{varName}_k;" ] | None -> [])
+        let lines =
+            (wrapperCode @ extentsDecl |> List.map (fun s -> ind + s))
+            @ [ $$"""{{ind}}Array<bool, 1> {{varName}} = { new bool[{{n}}UL], {{varName}}_extents };"""
+                $"{ind}// mask over the STREAMED variable '{spec.VarName}': one storage-order sweep of the store, {block} cells per block; the predicate runs in cell order (the stored mask's order); no array of the source's values exists" ]
+            @ (match countVar with Some c -> [ $"{ind}size_t {c} = 0;" ] | None -> [])
+            @ genStreamedSweep ind varName vn spec n block body
+        Some (lines, [ MatRawData (varName, owned) ])
+    | _ -> None
+
 and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (predExpr: IRExpr) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
@@ -3797,7 +4321,21 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
             && (match p.Shared with
                 | Some s -> not (s.Members |> List.exists (fun (_, _, src) -> ctx.DeferredComputations.ContainsKey src))
                 | None -> true))
+    let streamedSrc = streamedRank1Of ctx arrExpr
     let matStmts =
+        match streamedSrc with
+        | Some (vn, spec, n, block) ->
+            // G132 / ST06: a streamed source sweeps the store (the planner
+            // never plans a mask-site gather or a shared selection over one)
+            (match genStreamedMask ctx "" name vn spec n block predExpr countVar with
+             | Some (s, allocs) ->
+                 registerMaterializedAllocs allocs
+                 (match plan, countVar with
+                  | Some p, Some c -> p.CountCpp.Value <- Some c
+                  | _ -> ())
+                 s
+             | None -> [])
+        | None ->
         match materializeMaskFormCounted emptySubst ctx.VarNames name elemStr arrExpr predExpr countVar gatherPlan with
         | Some (s, allocs, counted, gathered) ->
             registerMaterializedAllocs allocs
@@ -4181,6 +4719,18 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         | None ->
             let ctx' = addVarName binding.Id name ctx
             (codegenError ctx ind $"provider '{spec.Provider}' does not support per-segment streamed reads ('{spec.VarName}' -- bind with .read)", ctx')
+        | Some _ when (Blade.Optimize.StreamGroupFoldTable.tryGroup binding.Id).IsSome ->
+            // stream-group-fold v1 (Blade.Optimize.planStreamGroupFold, G133 /
+            // ST07): the grouped value's ONE reader is the next binding's fold
+            // peel, which streams each run into one window and folds it there
+            // -- no pool, no row table. The name and the grouping are
+            // registered so the peel resolves its rows' lengths.
+            let plan = (Blade.Optimize.StreamGroupFoldTable.tryGroup binding.Id).Value
+            plan.Emitted.Value <- true
+            let code = [ $"{ind}// group_by `{name}` over the STREAMED '{spec.VarName}': never built (stream-group-fold v1) -- its one fold peel streams each run into a window of {plan.MaxRun} cell(s)" ]
+            let ctx' = addVarName binding.Id name ctx
+            let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
+            (code, ctx')
         | Some genRows ->
             let elemStr = elemTypeToCpp spec.VarType.ElemType
             let extentsDecl =
@@ -4473,9 +5023,13 @@ and genUngroupGridBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr)
 /// same registration the grouped peel uses), so the offsets are the
 /// grouping's own; the destination is one dense buffer of the source
 /// extent, and each row lands at its run.
-and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (src: IRIndexType) : string list * CodeGenContext =
+and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (g: IRExpr) (src: IRIndexType) : string list * CodeGenContext =
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // A DEFERRED or inline operand (`ungroup(h |> compute, CI)`, a deferred
+    // per-group map `h`) is forced first, through the binding path that
+    // registers a per-group map's grouping (G90), so its rows resolve below.
+    let (ungroupForce, ctx, g) = forceDeferredArrayInput ctx builder ($"{name}__src") g
     let gName = exprToCppCtx ctx g
     let elemStr =
         match binding.Type with
@@ -4484,7 +5038,7 @@ and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (sr
     match Map.tryFind gName ctx.GroupedArrays with
     | None ->
         let ctx' = addVarName binding.Id name ctx
-        (codegenError ctx ind $"ungroup: '{gName}' is not a group_by result this emitter can trace to its grouping (bind `let G = group_by(A, segments(X))` and ungroup that name)", ctx')
+        (ungroupForce @ codegenError ctx ind $"ungroup: '{gName}' is not a group_by result this emitter can trace to its grouping (bind `let G = group_by(A, segments(X))` and ungroup that name)", ctx')
     | Some gkName ->
         let total =
             match src.Extent with
@@ -4514,6 +5068,36 @@ and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (sr
                 Blade.Optimize.recordGroupView binding.Name (Blade.Effects.Declined why) []
                 None
             | None -> None
+        // GROUP ROW MAP (Blade.Optimize.planGroupRowMap, rule `group-rowmap v1`,
+        // G90): G is a per-group map over a structural grouping, emitted as ONE
+        // pool in group order -- the reassembled axis's order -- and the plan's
+        // closure holds over G and this binding: share G's pool.
+        let rowMapShared =
+            match Blade.Optimize.GroupRowMapTable.tryUngroup binding.Id with
+            | Some (hid, Ok ev) ->
+                (match Blade.Optimize.GroupRowMapTable.tryEmitted hid with
+                 | Some hCpp when (currentAllocScope ()).IsNone && hCpp = gName ->
+                     Blade.Optimize.recordGroupRowMap binding.Name Blade.Effects.Applied (ev @ [ $"C++ lane: `{name}` shares `{hCpp}__pool` -- no pool, no copy" ])
+                     Some hCpp
+                 | Some _ ->
+                     Blade.Optimize.recordGroupRowMap binding.Name (Blade.Effects.Declined "C++ lane: not at main's top level") ev
+                     None
+                 | None ->
+                     Blade.Optimize.recordGroupRowMap binding.Name (Blade.Effects.Declined ($"C++ lane: `{gName}` was not emitted as a per-group map's grouped pool")) ev
+                     None)
+            | Some (_, Error why) ->
+                Blade.Optimize.recordGroupRowMap binding.Name (Blade.Effects.Declined why) []
+                None
+            | None -> None
+        match rowMapShared with
+        | Some hCpp ->
+            let code =
+                [ $"{ind}// ungroup: the runs of per-group map {hCpp} already sit in axis order (group-rowmap v1): {name} shares its pool -- no pool, no copy" ]
+                @ extentsDecl
+                @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { {{hCpp}}__pool, {{name}}_extents };""" ]
+            let ctx' = addVarName binding.Id name ctx
+            (ungroupForce @ code, ctx')
+        | None ->
         match shared with
         | Some srcCpp ->
             let code =
@@ -4521,7 +5105,7 @@ and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (sr
                 @ extentsDecl
                 @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { {{srcCpp}}.data, {{name}}_extents };""" ]
             let ctx' = addVarName binding.Id name ctx
-            (code, ctx')
+            (ungroupForce @ code, ctx')
         | None ->
         let code =
             [ $"{ind}// ungroup: rows of {gName} written back over the source axis ({total} cells)" ]
@@ -4534,7 +5118,7 @@ and genUngroupBinding (ctx: CodeGenContext) (binding: IRBinding) (g: IRExpr) (sr
                 $"{ind}}}" ]
         registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        (ungroupForce @ code, ctx')
 
 /// ungroup([r1, .., rF], A): per-file arrays copied at their file offsets
 /// into one buffer over the tiled axis (§2.7). Rows are bare names by
@@ -4647,7 +5231,12 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // implemented. Materialization caching would sit downstream of that
     // analysis, not as a substitute for it.
     let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
-    let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "sort"
+    // The RESULT's element type when the binding carries one (a range operand
+    // has no array type of its own to infer from: `sort(range<I>, key)`).
+    let (elemET, elemErrCode) =
+        match stripUnits binding.Type with
+        | ArrayElem at -> (at.ElemType, [])
+        | _ -> inferElemTypeStrict ctx ind arrExpr "sort"
     let elemStr = elemTypeToCpp elemET
     // Validate single-param key callable. Helper falls back to a 0L key
     // (preserving input order); the #error here surfaces the IR bug
@@ -4656,17 +5245,139 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match resolveCallable keyExpr with
         | Some callable when callable.Params.Length = 1 -> []
         | _ -> codegenError ctx ind "sort: key must resolve to a single-parameter callable; got something else (typechecker or IR bug)"
+    // The grant-bound external form (ST14, `external-sort v1`) when a grant
+    // is present and the site is admitted; every admission failure under a
+    // grant is recorded, and the ordinary resident form runs.
+    let recordExternal (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+        Blade.Effects.Decisions.record
+            { Blade.Effects.Rule = "external-sort"; Version = 1; Span = decisionSpan (); Subject = name
+              Outcome = outcome; Evidence = evidence }
+    let external =
+        if not keyErrCode.IsEmpty || not elemErrCode.IsEmpty then None
+        else
+        match tryGenExternalSortBinding ctx binding arrExpr keyExpr elemStr with
+        | Ok r ->
+            recordExternal Blade.Effects.Applied
+                [ "selection at run time: the resident cached-key stable sort when n x (key + 16) bytes is within the grant's resident allowance, else spool runs + one bounded-fan-in merge (a heuristic over the logical buffers, not a bound)"
+                  "order: records (order-preserving key code, input ordinal), a total order equal to the resident stable order; every key evaluated once, ascending input order, in either branch"
+                  "spool: D06 protocol (private run directory, ownership manifest, quotas, per-block CRCs, random-access replay with every block read once, cleanup); any failure is BL8016 after the owned scratch is cancelled"
+                  "v1 limits: one merge pass (refused with memory_quota beyond the fan-in the allowance buys); the sorted output stays resident (its ABI); main's top level only"
+                  "llvm lane: no sort arm (the program falls back to the C++ lane)" ]
+            Some r
+        | Error "no grant" -> None
+        | Error why -> recordExternal (Blade.Effects.Declined why) []; None
+    match external with
+    | Some (lines, ctx') -> (forceCode @ lines, ctx')
+    | None ->
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRSort (arrExpr, keyExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ keyErrCode @ [$"{ind}// sort: stable_sort on permutation, eager materialization"] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ keyErrCode @ [$"{ind}// sort: stable_sort under blade_rt::sort_key_less, eager materialization (sort-form v1)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
 
+/// THE EXTERNAL STABLE SORT (round 4 wave 4, lane D item D1 / ST14; plan rule
+/// `external-sort v1`; runtime src/cpp/blade_external_sort.hpp). Under the
+/// explicit private-spool grant (BLADE_PRIVATE_SPOOL, threaded as
+/// ProgramEmissionOptions -- never inferred), a main-top-level sort whose key
+/// `sort-form v1` caches (closed-total, write-free, a real / integer / Bool
+/// result) over a range operand or a stored dense rank-1 array is emitted with
+/// a RUN-TIME selection: when the resident workspace (n x (key + ordinal +
+/// merge-temp) bytes, a heuristic over the logical buffers, not a bound) is
+/// within the grant's resident allowance, the resident cached-key stable sort;
+/// otherwise run generation to the spool and one bounded-fan-in merge, each key
+/// evaluated once in ascending input order either way, the output written in
+/// the resident form's exact order (the total order (key code, ordinal) IS the
+/// stable order). Any spool failure -- quota, I/O, integrity, cleanup -- is the
+/// BL8016 runtime failure after the owned scratch is cancelled; never a silent
+/// resident fallback. None = not admitted (the caller records why and emits
+/// the ordinary form).
+and tryGenExternalSortBinding (ctx: CodeGenContext) (binding: IRBinding) (arrExpr: IRExpr) (keyExpr: IRExpr) (elemStr: string) : Result<string list * CodeGenContext, string> =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    match (externalSortGrantCell ()).Value with
+    | None -> Error "no grant"
+    | Some policy ->
+    match resolveCallable keyExpr with
+    | Some cl when cl.Params.Length = 1 ->
+        let plan = Blade.OptimizeSort.SortFormTable.tryKey cl.Id
+        if ctx.Indent <> 0 then Error "not at main's top level (the spool protocol admits one serial owner per region)"
+        elif not (plan |> Option.exists (fun p -> p.KeyCache)) then
+            Error "the key is not cached by sort-form v1 (a key that is not proved total and write-free keeps the resident per-comparison sort)"
+        else
+        let source : Result<(string -> string) * (string * bool) * string list * int, string> =
+            match Blade.OptimizeSort.identityRangeIx arrExpr, arrExpr with
+            | Some ix, IRRange (_, offset) when plan |> Option.exists (fun p -> p.Identity) ->
+                let boundDim =
+                    match tryEvalIntIR ix.Extent with
+                    | Some n -> (string n, true)
+                    | None -> ($"(size_t)({exprToCpp ctx.VarNames ix.Extent})", false)
+                let offStr = match offset with Some o -> $"(int64_t)({exprToCpp ctx.VarNames o})" | None -> "(int64_t)0"
+                Ok ((fun i -> $"({elemStr})((int64_t)({i}) + {name}__off)"), boundDim,
+                    [ $"const int64_t {name}__off = {offStr};" ], ix.Id)
+            | _, IRVar _ ->
+                (match inferExprType arrExpr with
+                 | ArrayElem at when at.IndexTypes.Length = 1 && not (isCompoundArrayType at || isSparseArrayType at) ->
+                     let arrName = exprToCpp ctx.VarNames arrExpr
+                     Ok ((fun i -> $"{arrName}[{i}]"), extentDimOfArray at arrName 0, [], at.IndexTypes.Head.Id)
+                 | _ -> Error "the operand is not a stored dense rank-1 array (a compound / sparse operand keeps the resident sort)")
+            | _ -> Error "the operand is neither a plain range nor a stored dense rank-1 array"
+        match source with
+        | Error why -> Error why
+        | Ok (cellAt, boundDim, prelude, axis) ->
+        let (wrapperCode, w) = genCallableWrapper ctx.VarNames name cl
+        let p = cl.Params.Head
+        let pcpp = match p.Type with ArrayElem arr -> cppArrayTypeStr arr | _ -> irTypeToCpp p.Type
+        let (extentsDecl, ownedExtents) = emitExtentsTable "" ($"{name}_extents") 1 [boundDim]
+        let root = escapeStringLit policy.Root
+        let i1 = ind + "    "
+        let cKi = cellAt "__ki"
+        let cPerm = cellAt (name + "__perm[__si]")
+        let cI = cellAt "__i"
+        let cO = cellAt "__o"
+        let lines =
+            [ $"{ind}// external-sort v1 (ST14): `{name}` -- the grant-bound stable sort; resident cached-key form when n x (key + 16) bytes fits the resident allowance {policy.ResidentBytes}, else spool runs (mem {policy.TrackedWorkspaceBytes}, disk {policy.LogicalDiskBytes}) and one bounded-fan-in merge" ]
+            @ (wrapperCode |> List.map (fun l -> ind + l))
+            @ (prelude |> List.map (fun l -> ind + l))
+            @ [ $"{ind}using {name}__K = std::decay_t<std::invoke_result_t<decltype({w})&, {pcpp}>>;"
+                $"{ind}const uint64_t {name}__n = (uint64_t)({fst boundDim});"
+                $"{ind}{elemStr}* {name}__buf = new {elemStr}[{name}__n];"
+                $"{ind}if ({name}__n == 0 || {name}__n <= {policy.ResidentBytes}ULL / (sizeof({name}__K) + 16)) {{"
+                $"{i1}{name}__K* {name}__keys = new {name}__K[{name}__n];"
+                $"{i1}for (uint64_t __ki = 0; __ki < {name}__n; __ki++) {name}__keys[__ki] = {w}({cKi});"
+                $"{i1}uint64_t* {name}__perm = new uint64_t[{name}__n];"
+                $"{i1}for (uint64_t __pi = 0; __pi < {name}__n; __pi++) {name}__perm[__pi] = __pi;"
+                $"{i1}std::stable_sort({name}__perm, {name}__perm + {name}__n, [&](uint64_t __a, uint64_t __b) {{ return blade_rt::sort_key_less({name}__keys[__a], {name}__keys[__b]); }});"
+                $"{i1}for (uint64_t __si = 0; __si < {name}__n; __si++) {name}__buf[__si] = {cPerm};"
+                $"{i1}delete[] {name}__perm;"
+                $"{i1}delete[] {name}__keys;"
+                $"{ind}}} else {{"
+                $"{i1}namespace es = blade_external_sort;"
+                $"{i1}es::Stats {name}__st; blade_private_spool::Status {name}__clean;"
+                $"{i1}const auto {name}__s = es::sort({root}, {policy.TrackedWorkspaceBytes}ULL, {policy.LogicalDiskBytes}ULL, {axis}ULL, {name}__n,"
+                $"{i1}    [&](uint64_t __i) {{ return es::key_code({w}({cI})); }},"
+                $"{i1}    [&](uint64_t __p, uint64_t __o) {{ {name}__buf[__p] = {cO}; }}, {name}__st, {name}__clean);"
+                $"{i1}if (!{name}__s) {{"
+                $"{i1}    std::cerr << \"external sort `{name}` code=\" << int({name}__s.code) << \" os=\" << {name}__s.os_error << \" cleanup=\" << int({name}__clean.code) << std::endl;"
+                $"{i1}    blade_rt::panic(\"BL8016\", \"private intermediate resource or protocol failure\", {declPanicArgs ()});"
+                $"{i1}}}"
+                $"{i1}blade_rr::note_private_spool(\"{name}\", 2ULL * {name}__n, 2ULL * {name}__st.shape.block, {name}__st.plan.blocks, {name}__st.counters.payload_written, {name}__st.counters.payload_read, {name}__st.counters.logical_disk_high_water, {name}__st.plan.reserved_disk, {root}, {policy.TrackedWorkspaceBytes}ULL, {policy.LogicalDiskBytes}ULL);"
+                $"{ind}}}" ]
+            @ (extentsDecl |> List.map (fun l -> ind + l))
+            @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { {{name}}__buf, {{name}}_extents };""" ]
+        registerMaterializedAllocs [ MatRawData (name, ownedExtents) ]
+        (externalSortUsedCell ()).Value <- true
+        Ok (lines, addVarName binding.Id name ctx)
+    | _ -> Error "the key does not resolve to a one-parameter callable"
+
+
 
 and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (d1: int) (d2: int) : string list * CodeGenContext =
+    match genAssemblyDestFill ctx binding builder with
+    | Some r -> r
+    | None ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // transpose(array, [d1, d2]): hard transpose -- allocate a fresh pool at
@@ -4688,6 +5399,9 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
 
 
 and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrs: IRExpr list) (joinDim: int option) : string list * CodeGenContext =
+    match genAssemblyDestFill ctx binding builder with
+    | Some r -> r
+    | None ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     let opName = match joinDim with Some _ -> "join" | None -> "stack"
@@ -4714,6 +5428,135 @@ and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
+
+/// ASSEMBLY DESTINATION FILL (Blade.Optimize.planAssemblyDest, rule
+/// `assembly-dest v1`, F2 / PM26): a transpose / stack / join some of whose
+/// operands are taken never-stored producers. Each producer cell is its
+/// kernel on its operands' cells (`<name>__k<i>(x0[q], ..)`), evaluated where
+/// the copy would have READ it; every other operand is a stored dense pool
+/// copied flat. The destination is written once. A rank-2 axis swap runs in
+/// 32 x 32 tiles. None when no operand's plan was taken here (the ordinary
+/// emission then runs).
+and genAssemblyDestFill (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : (string list * CodeGenContext) option =
+    let plans = Blade.Optimize.AssemblyDestTable.forAssembly binding.Id |> Map.filter (fun _ p -> p.Taken.Value)
+    if plans.IsEmpty then None else
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let operands, swap, joinDim =
+        match binding.Value with
+        | IRTranspose (x, d1, d2) -> [ x ], Some (d1, d2), None
+        | IRStack xs -> xs, None, None
+        | IRJoin (xs, d) -> xs, None, Some d
+        | _ -> [], None, None
+    let litExts (t: IRType) : int64 list option =
+        match t with
+        | ArrayElem at ->
+            let es = at.IndexTypes |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+            if es |> List.forall Option.isSome then Some (es |> List.map Option.get) else None
+        | _ -> None
+    let elemStr =
+        match binding.Type with
+        | ArrayElem at -> elemTypeToCpp at.ElemType
+        | _ -> "double"
+    // Each operand: (prelude lines, per-flat-index cell expression, its extents).
+    let folder (accCode, accCtx: CodeGenContext, accOps) (k: int, x: IRExpr) =
+        match x with
+        | IRVar (yid, yty) when plans.ContainsKey yid ->
+            let p = plans.[yid]
+            let (wrapperCode, wname) = genCallableWrapper accCtx.VarNames $"{name}__k{k}" p.Kernel
+            let pools =
+                p.Operands |> List.mapi (fun i o ->
+                    $"const auto* BLADE_RESTRICT {name}__x{k}_{i} = nested_array_utilities::pool_base({exprToCppCtx accCtx o}.data);")
+            let cell (q: string) =
+                let args = p.Operands |> List.mapi (fun i _ -> $"{name}__x{k}_{i}[{q}]") |> String.concat ", "
+                $"{wname}({args})"
+            Blade.Optimize.recordAssemblyDest p.ProducerName Blade.Effects.Applied
+                (p.Evidence @ [ $"C++ lane: `{p.ProducerName}` is computed cell by cell into `{name}`'s destination" ])
+            (accCode @ pools @ wrapperCode, accCtx, accOps @ [ (cell, litExts yty) ])
+        | _ ->
+            let (forceCode, ctx1, x') = forceDeferredArrayInput accCtx builder ($"{name}__src{k}") x
+            let src = exprToCppCtx ctx1 x'
+            let pool = [ $"const auto* BLADE_RESTRICT {name}__s{k} = nested_array_utilities::pool_base({src}.data);" ]
+            let cell (q: string) = $"{name}__s{k}[{q}]"
+            (accCode @ forceCode @ pool, ctx1, accOps @ [ (cell, litExts (inferExprType x')) ])
+    let (pre, ctx, ops) = operands |> List.indexed |> List.fold folder ([], ctx, [])
+    if ops |> List.exists (fun (_, e) -> e.IsNone) then
+        Some ([ refusalErrorLine ind $"assembly-dest: an operand of `{name}` lost its literal extents at emission (internal)" ], addVarName binding.Id name ctx)
+    else
+    let ops = ops |> List.map (fun (c, e) -> (c, Option.get e))
+    let srcExts = snd ops.Head
+    let rank = srcExts.Length
+    let outExts =
+        match swap, joinDim with
+        | Some (d1, d2), _ -> srcExts |> List.mapi (fun d _ -> if d = d1 then srcExts.[d2] elif d = d2 then srcExts.[d1] else srcExts.[d])
+        | None, Some jd -> srcExts |> List.mapi (fun d e -> if d = jd then ops |> List.sumBy (fun (_, es) -> es.[jd]) else e)
+        | None, None -> int64 ops.Length :: srcExts
+    let outRank = outExts.Length
+    let extentsName = $"{name}_extents"
+    let (extentDecl, ownedExtents) =
+        emitExtentsTable "" extentsName outRank [ for e in outExts -> ($"{e}UL", true) ]
+    let allocDecl =
+        arrayAlloc { Ind = ""; Elem = elemStr; Rank = outRank; Name = name
+                     Symm = "nullptr"; Strict = None; Extents = extentsName }
+    registerMaterializedAllocs [ MatPool (name, elemStr, outRank, "nullptr", None, ownedExtents) ]
+    let dst = $"{name}__d"
+    let dstDecl = [ $"{elemStr}* BLADE_RESTRICT {dst} = nested_array_utilities::pool_base({name}.data);" ]
+    let strides (es: int64 list) = [ for d in 0 .. es.Length - 1 -> List.skip (d + 1) es |> List.fold (*) 1L ]
+    let body =
+        match swap, joinDim with
+        | Some (d1, d2), _ when rank = 2 ->
+            let (cell, _) = ops.Head
+            let n0, n1 = srcExts.[0], srcExts.[1]
+            let srcAt = sprintf "__i * %dUL + __j" n1
+            let cellAt = cell srcAt
+            [ $"for (size_t __ib = 0; __ib < {n0}UL; __ib += 32) for (size_t __jb = 0; __jb < {n1}UL; __jb += 32) {{"
+              $"    const size_t __ie = std::min(__ib + 32, (size_t){n0}UL), __je = std::min(__jb + 32, (size_t){n1}UL);"
+              $"    for (size_t __i = __ib; __i < __ie; __i++) for (size_t __j = __jb; __j < __je; __j++) {dst}[__j * {n0}UL + __i] = {cellAt};"
+              "}" ]
+        | Some (d1, d2), _ ->
+            // General rank: the source-ordered nest; each source cell lands at
+            // its axis-swapped destination address.
+            let (cell, _) = ops.Head
+            let ss = strides srcExts
+            let ds = strides outExts
+            let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
+            let v d = $"__t{d}"
+            let opens = [ for d in 0 .. rank - 1 -> $"""{(String.replicate d "    ")}for (size_t {v d} = 0; {v d} < {srcExts.[d]}UL; {v d}++) {{""" ]
+            let sIdx = [ for d in 0 .. rank - 1 -> $"{v d} * {ss.[d]}UL" ] |> String.concat " + "
+            let dIdx = [ for d in 0 .. rank - 1 -> $"{v d} * {ds.[swapDim d]}UL" ] |> String.concat " + "
+            let closes = [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
+            opens @ [ $"""{(String.replicate rank "    ")}{dst}[{dIdx}] = {cell sIdx};""" ] @ closes
+        | None, Some jd ->
+            // join along jd: per source, for each outer index (axes < jd), one
+            // contiguous block of its own extent along jd times the inner cells.
+            let outer = srcExts |> List.take jd |> List.fold (*) 1L
+            let inner = srcExts |> List.skip (jd + 1) |> List.fold (*) 1L
+            let total = outExts.[jd]
+            let _, lines =
+                ops |> List.fold (fun (off, acc) (cell, es) ->
+                    let blk = es.[jd] * inner
+                    let cellAt = cell (sprintf "__o * %dUL + __q" blk)
+                    let rowStride = total * inner
+                    let offBase = off * inner
+                    (off + es.[jd],
+                     acc @ [ $"for (size_t __o = 0; __o < {outer}UL; __o++) for (size_t __q = 0; __q < {blk}UL; __q++) {dst}[__o * {rowStride}UL + {offBase}UL + __q] = {cellAt};" ])) (0L, [])
+            lines
+        | None, None ->
+            let cells = srcExts |> List.fold (*) 1L
+            ops |> List.mapi (fun k (cell, _) ->
+                let cellAt = cell "__q"
+                let offBase = int64 k * cells
+                $"for (size_t __q = 0; __q < {cells}UL; __q++) {dst}[{offBase}UL + __q] = {cellAt};")
+    let label =
+        match swap, joinDim with
+        | Some _, _ -> "transpose"
+        | None, Some _ -> "join"
+        | None, None -> "stack"
+    let code =
+        (pre |> List.map (fun s -> ind + s))
+        @ [ $"{ind}// {label}: never-stored operand(s) computed straight into the destination (assembly-dest v1)" ]
+        @ ((extentDecl @ [ allocDecl ] @ dstDecl @ body) |> List.map (fun s -> ind + s))
+    Some (code, addVarName binding.Id name ctx)
 
 and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (d: int) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -5469,6 +6312,96 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             peelCompLets nextCtx (accLines @ code) body
         | _ -> (accCtx, accLines, e)
     let (ctx, prelude, compExpr) = peelCompLets ctx [] compExpr
+    // STREAMED OPERANDS (G135 item 2, lane G item G1). A leaf map whose
+    // operand is a variable bound with `.stream` -- `reduce(method_for(A) <@>
+    // f, (+))`, `reduce(method_for(zip(A, B)) <@> k, (+))` over
+    // `A = s.vars.A |> z.stream` -- reached the fused fold nest (and the L1
+    // dot dispatch), which read every operand BY NAME as `A.data`: no array
+    // named `A` exists (STREAMED VALUES NEVER REACH C++, CodeGenState), so
+    // g++ refused the program (BL9002). The contract for a map over a stream
+    // is the STORED spelling, whose segment route reads the store one run at
+    // a time: materialize the ONE rank-1 leaf map into a temporary through
+    // that route (genBinding of `IRCompute leaf`, exactly what `let p = .. |>
+    // compute` emits) and fold the temporary with the same kernel and seed --
+    // the fused terminal's left fold from its seed, so the value is the
+    // written program's (under BLADE_FP_REPRO=1 bitwise; a licensed fold
+    // keeps its licence over the pool). Every other shape over a stream (a
+    // fusion tree, a rank >= 2 map: the fused terminal folds every cell, a
+    // stored fold of a rank-2 array peels one axis) is REFUSED here, BL7004,
+    // instead of reaching g++.
+    let streamedOperandOf (info: ApplyInfo) : string option =
+        if Map.isEmpty ctx.StreamedArrays then None else
+        info.Arrays |> List.tryPick (function
+            | IRVar (vid, _) ->
+                (match Map.tryFind vid ctx.VarNames with
+                 | Some vn when Map.containsKey vn ctx.StreamedArrays -> Some ctx.StreamedArrays.[vn].VarName
+                 | _ -> None)
+            | _ -> None)
+    let streamedLeaf =
+        if Map.isEmpty ctx.StreamedArrays then None else
+        // a REDUCTION JOIN (tuple kernel + tuple seed) has its own streamed
+        // route and refusals (genReduceJoinCore's tryGenRank1StreamJoin,
+        // rank1-zarr-joined-scalars): never intercepted here
+        match kernelExpr, seedExpr with
+        | IRTuple _, IRTuple _ -> None
+        | _ ->
+        let rec resolve e =
+            match e with
+            | IRVar (id, _) ->
+                (match Map.tryFind id ctx.DeferredComputations with
+                 | Some d -> resolve d
+                 | None -> e)
+            | _ -> e
+        let rec leaves e =
+            match resolve e with
+            | IRFusion (l, r) -> leaves l @ leaves r
+            | other -> [ other ]
+        let ls = leaves compExpr
+        match ls |> List.tryPick (function IRApplyCombinator info -> streamedOperandOf info | _ -> None) with
+        | None -> None
+        | Some var ->
+            // STAGING keeps the failure order only when one side cannot fail
+            // (Codex review lane G round 1, finding 3): the written fold
+            // interleaves map cell i and fold step i, the staged form runs
+            // every map cell first. Either the map kernel is closed-total
+            // (nothing to fail before a fold step) or the fold kernel and its
+            // seed are (the map's failures then come in cell order either
+            // way); otherwise refused, never staged.
+            let isDeferredId (id: IRId) = ctx.DeferredComputations.ContainsKey id
+            let totalSeed =
+                match seedExpr with
+                | IRLit _ | IRUnseededSeed _ | IRUnaryOp (IRCast _, IRLit _) -> true
+                | _ -> false
+            let foldTotal =
+                totalSeed
+                && (match resolveCallable kernelExpr with
+                    | Some kc when kc.Params.Length = 2 ->
+                        (match Blade.IRTotality.auditCallable resolveCallable (fun _ -> None) isDeferredId kc [] with Ok () -> true | Error _ -> false)
+                    | _ -> false)
+            let mapTotal (info: ApplyInfo) =
+                match Blade.IRTotality.auditApply resolveCallable (fun _ -> None) isDeferredId info with Ok () -> true | Error _ -> false
+            match ls, kernelExpr, seedExpr with
+            | [ IRApplyCombinator info as leaf ], k, s when (match k, s with IRTuple _, IRTuple _ -> false | _ -> true) ->
+                (match stripUnits (inferExprType leaf) with
+                 | ArrayElem at when at.IndexTypes.Length = 1 && at.IndexTypes.Head.Rank = 1 ->
+                     // the map's own reads can fail (a short chunk) even under a total
+                     // kernel, so only a total fold + seed admits staging (Codex
+                     // review lane G round 2, finding 1)
+                     ignore (mapTotal info)
+                     if foldTotal then Some (Ok (leaf, inferExprType leaf))
+                     else Some (Error $"reduce over a map of the streamed variable '{var}' whose map kernel and fold (kernel or seed) may both fail is not streamed (staging the map would reorder their failures) -- bind the map with |> compute and reduce the array")
+                 | _ -> Some (Error $"reduce over a rank >= 2 computation of the streamed variable '{var}' is not streamed (the fused terminal folds every cell) -- bind the map with |> compute and reduce the array"))
+            | _ -> Some (Error $"reduce over a fused tree or join reading the streamed variable '{var}' is not streamed -- bind each map with |> compute and reduce the arrays")
+    match streamedLeaf with
+    | Some (Error why) -> (prelude @ codegenError ctx (indentStr ctx) why, addVarName binding.Id (bindingCppName binding) ctx)
+    | Some (Ok (leaf, leafTy)) ->
+        let tmpId = builder.FreshId()
+        let tmp = $"{bindingCppName binding}__strm"
+        let matBinding = { Id = tmpId; Name = tmp; Type = leafTy; Value = IRCompute leaf; IsConst = true; IsMutable = false }
+        let (matCode, c1) = genBinding ctx matBinding builder
+        let (foldCode, c2) = genReduceBinding c1 binding builder (IRVar (tmpId, leafTy)) kernelExpr (Some seedExpr)
+        (prelude @ [ $"{indentStr ctx}// reduce over a map of a streamed variable: the map is materialized through its segment route (the stored `|> compute` contract), then folded (G135 item 2)" ] @ matCode @ foldCode, c2)
+    | None ->
     // DEFERRED OPERANDS (G12, bench llvm-acceptance-B F5). A leaf map whose
     // OPERAND is itself a still-deferred map -- `let r = method_for(x) <@>
     // half` then `reduce(method_for(r) <@> sq, (+))`, at top level or in a
@@ -5568,9 +6501,20 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         |> List.filter (fun id ->
             not (List.contains id deferredOperandIds)
             && not (onSpine id compExpr)
-            && (match Map.tryFind id ctx.DeferredComputations with
-                | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
-                | _ -> false))
+            // a map -- or, in a FUNCTION BODY (a nested scope: the force
+            // there is block-scoped and never prints), a name bound to one
+            // through a chain of deferred references: a projection of a
+            // wholly-deferred module tuple registers its member (`IRVar d1`),
+            // gap G100, and the kernel reads `v` by name, so it is forced
+            // under its own name like a direct map. Main's top level keeps
+            // its old rule (a forced projection's print class is not settled
+            // there: the interpreter prints the projected root too).
+            && (let rec isMap (seen: Set<IRId>) (id: IRId) =
+                    match Map.tryFind id ctx.DeferredComputations with
+                    | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
+                    | Some (IRVar (r, _)) when ctx.Indent > 0 && not (seen.Contains r) -> isMap (seen.Add r) r
+                    | _ -> false
+                isMap (Set.singleton id) id))
     let (capForceLines, ctx) = deferredCaptureIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__cap")
     let prelude = prelude @ capForceLines
     let (ctxForced, forceLines) =
@@ -8581,6 +9525,124 @@ and genBindChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
         (code, ctx')
 
 
+
+/// PRINT REPLAY: the replay binding's emission (an admitted plan). Snapshot
+/// storage is declared at main's scope, then the sweep -- the binding's let
+/// chain, statement for statement -- is ONE lambda run here with emit = false
+/// (filling the snapshots, failing where the step fails) and again by x's
+/// print with emit = true (genPrintStatements), both through
+/// blade_rt::replay_sweep.
+and genRecReplaySweep (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (plan: RecReplayPlan) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    let trailing = plan.Extents.Tail
+    // The snapshot bindings' own C++ names (bindingCppName at plan time):
+    // the later readers render exactly these.
+    let snapNames = plan.Snapshots |> List.map (fun (p, _, cpp) -> (p, cpp)) |> Map.ofList
+    let snapDecls =
+        snapNames |> Map.toList |> List.collect (fun (_, cpp) ->
+            match trailing with
+            | [] -> [ $"{ind}{plan.ElemCpp} {cpp} = {plan.ElemCpp}();" ]
+            | _ ->
+                let k = trailing.Length
+                let exts = trailing |> List.map string |> String.concat ", "
+                [ $"{ind}static constexpr const size_t {cpp}_extents[{k}] = {{ {exts} }};"
+                  $"{ind}Array<{plan.ElemCpp}, {k}> {cpp} = {{ allocate<typename promote<{plan.ElemCpp}, {k}>::type, nullptr>({cpp}_extents), {cpp}_extents }};" ])
+    let active = recReplayActiveCell ()
+    let saved = active.Value
+    active.Value <- Some (plan, snapNames)
+    let inner = { ctx with Indent = ctx.Indent + 1 }
+    let (lets, _) = unrollLetChain binding.Value
+    // The sweep's own pools (the ring, row temporaries) are freed when each
+    // run ends: nothing it allocates escapes (snapshots are filled cell by
+    // cell into storage declared outside the lambda).
+    let allocDepth = allocScopeDepth ()
+    pushAllocScope SLoop Set.empty
+    let bodyCode =
+        try
+            let (code, _) =
+                lets |> List.fold (fun (accCode, accCtx) (id, value) ->
+                    setAllocOwner (Some id)
+                    let tempBinding =
+                        { Id = id; Name = $"__v{id}"; Type = inferExprType value
+                          Value = value; IsConst = true; IsMutable = false }
+                    let (code, ctx') = genBinding accCtx tempBinding builder
+                    (accCode @ code, ctx')) ([], inner)
+            setAllocOwner None
+            code @ popAllocScopeFrees (ind + "    ")
+        finally
+            active.Value <- saved
+            truncateAllocScopeStack allocDepth
+    let code =
+        [ $"{ind}// {name}: `{plan.TargetName}`'s ring sweep (rec-print-replay v1): run here to fill its snapshots, again at its print" ]
+        @ snapDecls
+        @ [ $"{ind}auto {plan.Sweep} = [&](bool __rp_emit) {{"
+            $"{ind}    bool __rp_first = true; size_t __rp_k = 0;"
+            $"{ind}    (void)__rp_emit; (void)__rp_first; (void)__rp_k;" ]
+        @ bodyCode
+        @ [ $"{ind}}};"
+            $"{ind}blade_rt::replay_sweep({plan.Sweep}, false);" ]
+    (code, addVarName binding.Id name ctx)
+
+/// One completed row of a replayed trajectory (IRReplayRow inside the sweep
+/// genRecReplaySweep emits): printed in the trajectory's print regime when the
+/// sweep runs for the print (rank 1: one value per row; rank 2: `[a, b]` per
+/// row; rank >= 3: every cell in one flat run), else copied to the snapshot
+/// of its row, if any. Rows complete in order 0, 1, ..., so `__rp_k` is the
+/// row's ordinal.
+and genReplayRowStmt (ctx: CodeGenContext) (row: IRExpr) : string list =
+    let ind = indentStr ctx
+    match (recReplayActiveCell ()).Value with
+    | None ->
+        let err = exprError "print-replay row outside its sweep"
+        [ $"{ind}{err};" ]
+    | Some (plan, snapNames) ->
+        let trailing = plan.Extents.Tail
+        let i1 = ind + "    "
+        let ivar d = $"__rp_i{d}"
+        let subs = trailing |> List.mapi (fun d _ -> $"[{ivar d}]") |> String.concat ""
+        // nested loops over the row's cells (row-major), `body` innermost
+        let overCells (baseInd: string) (body: string -> string list) =
+            let pad (k: int) = String.replicate k "    "
+            let opens = trailing |> List.mapi (fun d e -> baseInd + pad d + $"for (size_t {ivar d} = 0; {ivar d} < {e}; {ivar d}++) {{")
+            let inner = body (baseInd + pad trailing.Length)
+            let closes = trailing |> List.mapi (fun d _ -> baseInd + pad (trailing.Length - 1 - d) + "}")
+            opens @ inner @ closes
+        let printRow =
+            match trailing with
+            | [] ->
+                [ $"{i1}    if (!__rp_first) cout << \", \";"
+                  $"{i1}    __rp_first = false;"
+                  $"{i1}    cout << blade_rt::pv(__rp_row);" ]
+            | [ e ] when plan.Rank = 2 ->
+                [ $"{i1}    if (!__rp_first) cout << \", \";"
+                  $"{i1}    __rp_first = false;"
+                  $"{i1}    cout << \"[\";"
+                  $"{i1}    for (size_t __rp_i0 = 0; __rp_i0 < {e}; __rp_i0++) {{"
+                  $"{i1}        if (__rp_i0) cout << \", \";"
+                  $"{i1}        cout << blade_rt::pv(__rp_row[__rp_i0]);"
+                  $"{i1}    }}"
+                  $"{i1}    cout << \"]\";" ]
+            | _ ->
+                overCells (i1 + "    ") (fun ci ->
+                    [ $"{ci}if (!__rp_first) cout << \", \";"
+                      $"{ci}__rp_first = false;"
+                      $"{ci}cout << blade_rt::pv(__rp_row{subs});" ])
+        let copies =
+            snapNames |> Map.toList |> List.collect (fun (p, snap) ->
+                let assign =
+                    match trailing with
+                    | [] -> [ $"{i1}        {snap} = __rp_row;" ]
+                    | _ -> overCells (i1 + "        ") (fun ci -> [ $"{ci}{snap}{subs} = __rp_row{subs};" ])
+                [ $"{i1}    if (__rp_k == {p}) {{" ] @ assign @ [ $"{i1}    }}" ])
+        [ $"{ind}{{"
+          $"{i1}auto&& __rp_row = {exprToCppCtx ctx row};"
+          $"{i1}if (__rp_emit) {{" ]
+        @ printRow
+        @ (if copies.IsEmpty then [ $"{i1}}}" ]
+           else [ $"{i1}}} else {{" ] @ copies @ [ $"{i1}}}" ])
+        @ [ $"{i1}++__rp_k;"
+            $"{ind}}}" ]
 
 and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx

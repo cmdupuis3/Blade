@@ -1,0 +1,34 @@
+// TEST: Unseeded running max / min legs join, seeded with their exact left identity
+// ============================================================================
+// Gap G107 (1): an UNSEEDED fold whose kernel is a running max
+// (`if a > b then a else b`) or min (`if a < b then a else b`) used to be no
+// candidate at all ("unseeded with a non-builtin kernel (no identity)"). Its
+// seed -inf / +inf (the integer MIN / MAX) is a LEFT IDENTITY bit for bit:
+// f(e, x) = x for every x (the comparison is true only at x = e, which returns
+// the same bits), so the seeded chain is the unseeded first-cell chain
+// exactly. The select legs carry no reorder licence: in a reordering build
+// they share their own strict traversal (the licensed (+) legs another, G107
+// (2)); under BLADE_FP_REPRO=1 all four join. Values are the as-written ones.
+// ============================================================================
+type R = Idx<7>
+
+function stats(x: Array<Float64 like R>) -> Float64 = {
+    let s = reduce(x, (+))
+    let ss = reduce(method_for(x) <@> lambda(v) -> v * v, (+))
+    let hi = reduce(x, lambda(a, b) -> if a > b then a else b)
+    let lo = reduce(x, lambda(a, b) -> if b < a then b else a)
+    s + 1000.0 * ss + 10.0 * hi - 100.0 * lo
+}
+
+let x: Array<Float64 like R> = [1.0, 7.0, -3.0, 4.0, 5.0, 0.5, -2.0]
+let combined = stats(x)
+
+let k: Array<Int64 like R> = [3, -9, 12, 0, 12, -9, 5]
+let kstats = (reduce(k, (+)), reduce(k, lambda(a, b) -> if a >= b then a else b), reduce(k, lambda(a, b) -> if a <= b then a else b))
+
+let f: Array<Float32 like R> = [1.5, -0.0, 2.5, -4.0, 0.0, 3.0, -1.0]
+let fstats = (reduce(f, lambda(a, b) -> if a > b then a else b), reduce(f, lambda(a, b) -> if a < b then a else b))
+
+// EXPECT: combined = 104632.5
+// EXPECT: kstats = (14, 12, -9)
+// EXPECT: fstats = (3.0, -4.0)

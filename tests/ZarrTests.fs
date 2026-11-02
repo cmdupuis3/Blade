@@ -2557,6 +2557,14 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
         (Blade.Tests.PrivateSpoolTests.runPrivateSpoolTests
             (Path.Combine(e2eDir, "D08_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
 
+    check "external stable sort focused gate (ST14)"
+        (Blade.Tests.PrivateSpoolTests.runExternalSortTests
+            (Path.Combine(e2eDir, "ST14_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
+
+    check "join to aggregate, executed (D2/D3)"
+        (Blade.Tests.PrivateSpoolTests.runJoinAggregateNativeTests
+            (Path.Combine(e2eDir, "JA_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
+
     check "rank-two streamed value boundary focused gate"
         (runRank2StreamedValueBoundaryTests
             (Path.Combine(e2eDir, "D09_I1_" + Guid.NewGuid().ToString("N"))) = 0) "see focused gate above"
@@ -3034,20 +3042,282 @@ let w = z.write("%s", A)
         let short1 = mkStore "nan_short1" nanFirst []
         File.WriteAllBytes(short1 + "/A/1", Array.zeroCreate 8)
         pair "halo-cache NaN and a short chunk inside the first window" short1 [ "is short" ] [] []
-        // (5) PM37's baseline: TWO stencils over one streamed axis. Each binding
-        // keeps its own run loop and its own slots (no cross-binding reuse:
-        // that needs the two run loops fused, gap G106), so the census holds
-        // two sites, 3 fetches each cached, 7 each uncached.
+        // (5) PM37: TWO stencils over one streamed axis. With the run loops
+        // fused (sibling-maps v1, kind SibHaloStream; round 4 wave 4, E1 /
+        // gap G106) the census holds ONE site `d+d2`: 3 fetches cached, 7
+        // per window uncached. With BLADE_SIBLING_MAPS=0 each binding keeps
+        // its own run loop and slots: two sites, 3 / 7 fetches each.
         let twoFir (store: string) =
             stencil store + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) - 2.0 * A(w(0)) |> compute\n"
-        (match runArm "halo-cache two FIRs_on" "1" (twoFir seg), runArm "halo-cache two FIRs_off" "0" (twoFir seg) with
-         | Ok (_, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
-             let count (s: string) (needle: string) = (s.Length - s.Replace(needle, "").Length) / needle.Length
-             check "halo-cache two FIRs: same output on / off" (strip outOn = strip outOff && outOn.Contains "d2 = [0.0, 0.0") outOn
-             check "halo-cache two FIRs: two sites, 3 fetches each cached (6 of 3 distinct chunks), 7 each per window (14)"
-                 (count rrOn "\"fetches\":3," = 2 && count rrOff "\"fetches\":7," = 2) (rrOn + " / " + rrOff)
-         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP halo-cache two FIRs: toolchain unavailable"
-         | on, off -> check "halo-cache two FIRs: both arms run" false (sprintf "on %A / off %A" on off))
+        let count (s: string) (needle: string) = (s.Length - s.Replace(needle, "").Length) / needle.Length
+        // the streamed kind is OPT-IN (BLADE_SIBLING_MAPS=streamed; the default
+        // keeps one run loop per binding, like =0)
+        let runSib (label: string) (sib: string) (cache: string) (src: string) =
+            withEnv [ ("BLADE_SIBLING_MAPS", sib) ] (fun () -> runArm label cache src)
+        (match runSib "halo-cache two FIRs_on" "streamed" "1" (twoFir seg), runSib "halo-cache two FIRs_off" "streamed" "0" (twoFir seg),
+               runSib "halo-cache two FIRs_unfused_on" "0" "1" (twoFir seg), runSib "halo-cache two FIRs_unfused_off" "0" "0" (twoFir seg) with
+         | Ok (cppOn, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)), Ok (cppU, Some (0, outU, rrU)), Ok (_, Some (0, outUOff, rrUOff)) ->
+             check "halo-cache two FIRs: same output fused / unfused, cache on / off"
+                 (strip outOn = strip outOff && strip outOn = strip outU && strip outOn = strip outUOff && outOn.Contains "d2 = [0.0, 0.0") outOn
+             check "two FIRs fused (G106): one run loop, one window (d2's), d reads it through an alias"
+                 (cppOn.Contains "ONE run loop for d, d2" && cppOn.Contains "double* d__win0 = d2__win0;" && not (cppOn.Contains "new double[3003UL];\n    size_t d__hc0_ord")
+                  && count cppOn "__run_next = 0;" = 1 && count cppU "__run_next = 0;" = 2) ""
+             check "two FIRs fused (G106): ONE census site d+d2, 3 fetches cached, 7 per window"
+                 (count rrOn "\"fetches\":3," = 1 && rrOn.Contains "\"d+d2\"" && count rrOff "\"fetches\":7," = 1 && rrOff.Contains "\"d+d2\"") (rrOn + " / " + rrOff)
+             check "two FIRs unfused (BLADE_SIBLING_MAPS=0): two sites, 3 fetches each cached (6 of 3 distinct chunks), 7 each per window (14)"
+                 (count rrU "\"fetches\":3," = 2 && count rrUOff "\"fetches\":7," = 2) (rrU + " / " + rrUOff)
+         | Ok (_, None), _, _, _ | _, Ok (_, None), _, _ | _, _, Ok (_, None), _ | _, _, _, Ok (_, None) -> printfn "  SKIP halo-cache two FIRs: toolchain unavailable"
+         | a, b, c, d -> check "halo-cache two FIRs: every arm runs" false (sprintf "%A / %A / %A / %A" a b c d))
+        // (6) G106's failure order: the fused loop reads the same window
+        // sequence, so a NaN at index 0 beside a short later chunk still fails
+        // BL8015 first, and a short chunk inside the first window fails the
+        // short read first -- fused and unfused alike.
+        for (lbl, st, needle) in [ ("NaN then a later short chunk", short2, "BL8015"); ("a short chunk inside the first window", short1, "is short") ] do
+            match runSib $"two FIRs fused {lbl}" "streamed" "1" (twoFir st), runSib $"two FIRs unfused {lbl}" "0" "1" (twoFir st) with
+            | Ok (cppF, Some (cF, outF, _)), Ok (_, Some (cU, outU, _)) ->
+                check $"two FIRs, {lbl}: fused, same exit and output as unfused ({needle})"
+                    (cppF.Contains "ONE run loop for d, d2" && cF = cU && cF <> 0 && strip outF = strip outU && outF.Contains needle) (sprintf "fused %d %s / unfused %d %s" cF outF cU outU)
+            | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP two FIRs %s: toolchain unavailable" lbl
+            | a, b -> check $"two FIRs, {lbl}: both arms build" false (sprintf "%A / %A" a b)
+        // (7) the plan's admission and its declines (blade plan records),
+        // read through the decision log of a lowering
+        let planOf (src: string) =
+          withEnv [ ("BLADE_SIBLING_MAPS", "streamed") ] (fun () ->
+            Blade.Effects.Decisions.start ()
+            (match lower src with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
+            Blade.Effects.Decisions.drain ()
+            |> List.filter (fun d -> d.Rule = "sibling-maps")
+            |> List.map Blade.Effects.Decisions.render)
+        let has (recs: string list) (needle: string) = recs |> List.exists (fun r -> r.Contains needle)
+        let fir2Applied = planOf (twoFir seg)
+        check "G106 plan: the streamed group is applied with the interval rule on record"
+            (has fir2Applied "top level: d, d2: applied" && has fir2Applied "ONE segment run loop over the streamed" && has fir2Applied "closed-total") (String.concat "\n" fir2Applied)
+        // an intervening PROVIDER READ (it can exit at its site) closes the group
+        let withRead = stencil seg + "let B = sample.vars.A |> z.read\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n" + "let t = B(0) + 1.0\n"
+        let recRead = planOf withRead
+        check "G106 plan: an intervening provider read keeps two run loops" (not (has recRead "d, d2: applied")) (String.concat "\n" recRead)
+        // an intervening statement that may FAIL (integer division) closes the group
+        let withDiv = stencil seg + "let q: Int64 = 7\nlet z: Int64 = 0\nlet r = q / z\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n"
+        let recDiv = planOf withDiv
+        check "G106 plan: an intervening possibly failing statement keeps two run loops" (not (has recDiv "d, d2: applied")) (String.concat "\n" recDiv)
+        // an intervening TOTAL statement keeps the group
+        let withTotal = stencil seg + "let k: Float64 = 2.5 * 3.0\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> k * A(w(1)) + A(w(-1)) |> compute\n"
+        let recTotal = planOf withTotal
+        check "G106 plan: an intervening total statement keeps the group" (has recTotal "d, d2: applied") (String.concat "\n" recTotal)
+        // a different halo reach: one window cannot serve both
+        let wide = stencil seg + "let d2 = method_for(halo<CX, [-2, -1, 0, 1, 2]>) <@> lambda(w) -> A(w(2)) - A(w(-2)) |> compute\n"
+        let recWide = planOf wide
+        check "G106 plan: a different halo geometry is declined by name"
+            (not (has recWide "d, d2: applied") && has recWide "halo geometry differs") (String.concat "\n" recWide)
+        // the knob
+        // an intervening statement that may ALLOCATE (a string) closes the group
+        let withString = stencil seg + "let msg = \"a long message\"\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n"
+        let recString = planOf withString
+        check "G106 plan: an intervening allocating statement (a string) keeps two run loops (Codex review E1-1)" (not (has recString "d, d2: applied")) (String.concat "\n" recString)
+        // the default build: the streamed kind is opt-in
+        let recDefault =
+            withEnv [ ("BLADE_SIBLING_MAPS", null) ] (fun () ->
+                Blade.Effects.Decisions.start ()
+                (match lower (twoFir seg) with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
+                Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "sibling-maps") |> List.map Blade.Effects.Decisions.render)
+        check "G106 plan: the default build keeps one run loop per binding (the streamed kind is opt-in)" (not (has recDefault "d, d2: applied")) (String.concat "\n" recDefault)
+        // (8) E6 / ST03 (round 4 wave 4; the OPT-IN arm BLADE_HALO_CACHE=elementwise
+        // against the default =1, whose elementwise route is unchanged): a zip of two DIFFERENTLY chunked
+        // streams (A chunk 4, B chunk 6, N = 13) runs one block of A's chunk
+        // edge at a time; B's chunk spans two runs. With the cache each B
+        // chunk is decoded once (3 fetches), per window it is fetched per run
+        // it spans (5); A's fetches are 4 either way. Values identical.
+        let wv2 (name: string) (data: float[]) (chunk: int64) : ZarrWrite.WriteVar =
+            { Name = name; DimNames = Some [ "x" ]; Shape = [ int64 data.Length ]; Chunks = [ chunk ]
+              FillValue = FillFloat -1.0; Data = ZarrWrite.WF64 data; OmitChunks = []; Blade = None }
+        let mkStore2 (tag: string) (v: ZarrWrite.WriteVar) =
+            let st = Path.Combine(hdir, tag).Replace("\\", "/")
+            (try Directory.Delete(st, true) with _ -> ())
+            ZarrWrite.writeStoreV2 st [ v ]
+            st
+        let za = mkStore2 "zip_a13" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 4L)
+        let zb = mkStore2 "zip_b13" (wv2 "B" [| for j in 0 .. 12 -> float (2 * j) |] 6L)
+        let zipSrc (sa: string) (sb: string) =
+            "import zarr as z\n"
+            + $"let sa = z.load(\"{sa}\")\n"
+            + $"let sb = z.load(\"{sb}\")\n"
+            + "let A = sa.vars.A |> z.stream\n"
+            + "let B = sb.vars.B |> z.stream\n"
+            + "let p = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute\n"
+        (match runArm "zip two chunkings_on" "elementwise" (zipSrc za zb), runArm "zip two chunkings_off" "1" (zipSrc za zb) with
+         | Ok (cppOn, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
+             check "E6 zip of two chunkings: same output cached / per window"
+                 (strip outOn = strip outOff && outOn.Contains "p = [0.0, 4.0, 12.0, 24.0, 40.0") outOn
+             check "E6 zip of two chunkings (BLADE_HALO_CACHE=elementwise, opt-in): each source its own slots (B decoded once per chunk: 3 fetches; A 4); the default (=1) keeps the uncounted per-run reader"
+                 (cppOn.Contains "p__hc1_buf" && rrOn.Contains "\"variable\":\"B\",\"form\":\"halo-chunk-cache\",\"fetches\":3,"
+                  && rrOn.Contains "\"variable\":\"A\",\"form\":\"halo-chunk-cache\",\"fetches\":4,"
+                  && not (rrOff.Contains "\"provider_io\"")) (rrOn + " / " + rrOff)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP E6 zip of two chunkings: toolchain unavailable"
+         | on, off -> check "E6 zip of two chunkings: both arms run" false (sprintf "on %A / off %A" on off))
+        // a large run over tiny chunks (Codex review E6-1): A one chunk of 13,
+        // B chunks of 1 -- 13 slots for B, whose tables live on the heap
+        let za13 = mkStore2 "zip_a13_one" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 13L)
+        let zb1 = mkStore2 "zip_b13_c1" (wv2 "B" [| for j in 0 .. 12 -> float (2 * j) |] 1L)
+        (match runArm "zip tiny B chunks_on" "elementwise" (zipSrc za13 zb1), runArm "zip tiny B chunks_off" "1" (zipSrc za13 zb1) with
+         | Ok (cppOn, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
+             check "E6 zip, one long run over 13 one-cell chunks (opt-in arm): same output as the default, 13 slots on the heap, 13 fetches"
+                 (strip outOn = strip outOff && outOn.Contains "p = [0.0, 4.0, 12.0" && cppOn.Contains "std::vector<size_t> p__hc1_ord(13UL, SIZE_MAX);"
+                  && rrOn.Contains "\"variable\":\"B\",\"form\":\"halo-chunk-cache\",\"fetches\":13," && not (rrOff.Contains "\"provider_io\"")) (rrOn + " / " + rrOff)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP E6 zip tiny B chunks: toolchain unavailable"
+         | on, off -> check "E6 zip, tiny B chunks: both arms run" false (sprintf "on %A / off %A" on off))
+        // a SHORT B chunk 1 (cells 6-11): its first window is A's run [4, 8),
+        // which also needs B chunk 0 -- both arms fail at the same run with
+        // the same message
+        let zbShort = mkStore2 "zip_b13_short" (wv2 "B" [| for j in 0 .. 12 -> float (2 * j) |] 6L)
+        File.WriteAllBytes(zbShort + "/B/1", Array.zeroCreate 8)
+        (match runArm "zip short B_on" "elementwise" (zipSrc za zbShort), runArm "zip short B_off" "1" (zipSrc za zbShort) with
+         | Ok (_, Some (cOn, outOn, _)), Ok (_, Some (cOff, outOff, _)) ->
+             check "E6 zip, a short chunk of B: same exit and message cached / per window"
+                 (cOn = cOff && cOn <> 0 && strip outOn = strip outOff && outOn.Contains "is short") (sprintf "on %d %s / off %d %s" cOn outOn cOff outOff)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP E6 zip short B: toolchain unavailable"
+         | on, off -> check "E6 zip, a short chunk of B: both arms build" false (sprintf "on %A / off %A" on off))
+        // ---- lane G (round 4 wave 4) ----------------------------------------
+        // the `.read` twin of a streamed program: the same values by contract
+        let twin (label: string) (pins: (string * string) list) (src: string) (needles: string list) (expect: string list) =
+            match withEnv pins (fun () -> runArm (label + "_stream") "1" src),
+                  withEnv pins (fun () -> runArm (label + "_read") "1" (src.Replace("|> z.stream", "|> z.read"))) with
+            | Ok (cppS, Some (cS, outS, _)), Ok (_, Some (cR, outR, _)) ->
+                // the `.read` twin also prints its resident source (a streamed
+                // variable is never printed): compare everything else
+                let noSrc (o: string) =
+                    (strip o).Split('\n') |> Array.filter (fun l -> not (l.StartsWith "A = " || l.StartsWith "B = ")) |> String.concat "\n"
+                check $"{label}: same exit and output streamed / .read" (cS = cR && noSrc outS = noSrc outR) (sprintf "stream %d %s / read %d %s" cS outS cR outR)
+                for n in needles do check $"{label}: the streamed C++ holds `{n}`" (cppS.Contains n) ""
+                check $"{label}: no streamed value reaches C++ by name" (not (cppS.Contains "A.data") && not (cppS.Contains "B.data") && not (cppS.Contains "BLADE_CODEGEN_ERROR")) ""
+                for e in expect do check $"{label}: prints `{e}`" (outS.Contains e) outS
+            | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP %s: toolchain unavailable" label
+            | s, r -> check $"{label}: both arms build and run" false (sprintf "stream %A / read %A" s r)
+        // G1 (G135 item 2): a FOLD over a map of streamed variables used to
+        // render `A.data` for an undeclared A (BL9002): the map now goes
+        // through its segment route (the stored `|> compute` contract), and
+        // compute elision declines a streamed operand
+        let foldSrc (body: string) = zipSrc za zb + body
+        let zipHead = (zipSrc za zb).Replace("let p = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute\n", "")
+        twin "G1 fold over a zip of two streams" [] (zipHead + "let t = reduce(method_for(zip(A, B)) <@> lambda(a, b) -> a * b, (+))\n")
+            [ "materialized through its segment route"; "elementwise over segments" ] [ "t = 1456.0" ]
+        twin "G1 fold over a map of one stream" [] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")
+            [ "materialized through its segment route" ] [ "t = 819.0" ]
+        twin "G1 compute-elision spelling under --print t" [ ("BLADE_PRINT", "t") ] (foldSrc "let t = reduce(p, (+))\n")
+            [ "elementwise over segments" ] [ "t = 1456.0" ]
+        (let recs =
+            withEnv [ ("BLADE_PRINT", "t") ] (fun () ->
+                Blade.Effects.Decisions.start ()
+                (match lower (foldSrc "let t = reduce(p, (+))\n") with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
+                Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "compute-elision") |> List.map Blade.Effects.Decisions.render)
+         check "G1 plan: compute elision declines a streamed operand by name"
+             (recs |> List.exists (fun r -> r.Contains "declined" && r.Contains "streamed provider read")) (String.concat "\n" recs))
+        // G3 (G132 / ST06): mask and compound over a streamed source -- the
+        // mask sweeps the store into the stored Bool mask (counted there),
+        // the compound's gather is one more sweep; values identical to the
+        // `.read` twin, which holds the whole variable
+        let one = "import zarr as z\n" + $"let sa = z.load(\"{za}\")\n" + "let A = sa.vars.A |> z.stream\n"
+        let maskBody = "let keep = mask(A, lambda(v) -> v > 5.0)\nlet y = compound(A, keep)\nlet y2 = method_for(y) <@> lambda(v) -> v * 2.0 |> compute\nlet t = reduce(y2, (+))\nlet n = extents(y)\n"
+        twin "G3 streamed mask + compound (positions elided)" [] (one + maskBody)
+            [ "mask over the STREAMED variable 'A'"; "compound over the STREAMED variable 'A'"; "positions_elided" ] [ "t = 152.0"; "n = 8" ]
+        twin "G3 streamed mask + compound, a keyed read demands positions" [] (one + maskBody + "let r = y(7)\n")
+            [ "compound over the STREAMED variable 'A'"; "y_pos" ] [ "r = 8.0" ]
+        twin "G3 streamed compound over an inline mask" [] (one + "let y = compound(A, mask(A, lambda(v) -> v > 5.0))\nlet t = reduce(y, (+))\n")
+            [ "y__masksrc"; "compound over the STREAMED variable 'A'" ] [ "t = 76.0" ]
+        twin "G3 streamed mask + compound, compaction fusion off" [ ("BLADE_COMPACTION_FUSION", "0") ] (one + maskBody + "let r = y(7)\n")
+            [ "compound over the STREAMED variable 'A'" ] [ "r = 8.0"; "t = 152.0" ]
+        (let recs =
+            Blade.Effects.Decisions.start ()
+            (match lower (one + maskBody) with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
+            Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "compaction-fusion") |> List.map Blade.Effects.Decisions.render
+         check "G3 plan: compaction fusion records the streamed sweeps honestly"
+             (recs |> List.exists (fun r -> r.Contains "applied" && r.Contains "STREAMED" && r.Contains "the source `A` is STREAMED")) (String.concat "\n" recs))
+        // a short chunk of A fails in the mask's sweep with the provider's message
+        let zaShort = mkStore2 "zip_a13_short" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 4L)
+        File.WriteAllBytes(zaShort + "/A/1", Array.zeroCreate 8)
+        let oneShort = "import zarr as z\n" + $"let sa = z.load(\"{zaShort}\")\n" + "let A = sa.vars.A |> z.stream\n"
+        (match runArm "G3 short A" "1" (oneShort + maskBody) with
+         | Ok (_, Some (c, out, _)) -> check "G3 streamed mask over a short chunk: fails loudly with the provider's message" (c <> 0 && out.Contains "is short") (sprintf "%d %s" c out)
+         | Ok (_, None) -> printfn "  SKIP G3 short A: toolchain unavailable"
+         | Error e -> check "G3 short A: builds" false e)
+        // G4 (G133 / ST07): a group over a stream whose one reader is the next
+        // binding's fold peel never builds the pool: each run read into one
+        // window (the largest run, 4 cells), folded there
+        let grp = "import zarr as z\n" + $"let sa = z.load(\"{za}\")\n" + "type CX = Chunked<sa.index.x, store>\n"
+                  + "let A: Array<Float64 like CX> = sa.vars.A |> z.stream\nlet seg = segments(CX)\nlet g = group_by(A, seg)\nlet rs = reduce(g, (+))\nlet t = reduce(rs, (+))\n"
+        twin "G4 stream group fold" [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] grp
+            [ "stream-group-fold v1"; "rs__win" ] [ "rs = [10.0, 26.0, 42.0, 13.0]"; "t = 91.0" ]
+        (match withEnv [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] (fun () -> runArm "G4 stream group fold_cpp" "1" grp) with
+         | Ok (cpp, _) -> check "G4: no grouped pool is built" (not (cpp.Contains "g__pool")) ""
+         | Error e -> check "G4: builds" false e)
+        let groupRecs (pins: (string * string) list) (src: string) =
+            withEnv pins (fun () ->
+                Blade.Effects.Decisions.start ()
+                (match lower src with
+                 | Ok ir -> (try CodeGen.genSelfContainedProgramFromIR ir "g4rec" |> ignore with _ -> ())
+                 | Error e -> failwithf "lowers: %s" e)
+                Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-fold") |> List.map Blade.Effects.Decisions.render)
+        let hasRec (rs: string list) (needle: string) = rs |> List.exists (fun r -> r.Contains needle)
+        (let r = groupRecs [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] grp
+         check "G4 plan: applied, the window bound named" (hasRec r "applied" && hasRec r "ONE window of 4 cell(s)") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", null) ] grp
+         check "G4 plan: a printed group keeps its pool" (hasRec r "declined -- `g` is printed") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", "rs,t,r0") ] (grp + "let r0 = reduce(method_for(g) <@> lambda(row) -> extents(row), (+))\n")
+         check "G4 plan: a second reader (the escaped group) keeps its pool" (hasRec r "time(s), not once") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", "t") ] (grp.Replace("let rs = reduce(g, (+))", "let rs = method_for(g) <@> lambda(row) -> reduce(row, (+))"))
+         check "G4 plan: a DEFERRED consumer keeps the pool (Codex round 1)" (hasRec r "not an eager row peel") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", "rs,t,xs") ] (grp + "let xs = 0..extents(g(0)) |> compute\n")
+         check "G4 plan: a type-carried reference keeps the pool (Codex round 1)" (hasRec r "declined") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", null) ] grp
+         check "G4 plan: the default (opt-in arm unset) keeps the pool" (hasRec r "opt-in (BLADE_STREAM_GROUP_FOLD=1)") (String.concat "\n" r))
+        // one huge group bounds the window by that group (the false bound)
+        let zaBig = mkStore2 "zip_a13_one_chunk" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 13L)
+        let grpBig = grp.Replace(za, zaBig)
+        twin "G4 stream group fold, one huge group" [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] grpBig
+            [ "window of 13 cell(s)" ] [ "rs = [91.0]"; "t = 91.0" ]
+        // G6 / PM44: a `.read` used only by literal keyed reads keeps its
+        // whole validating sweep and retains two cells
+        let keyedSrc (store: string) = "import zarr as z\n" + $"let sa = z.load(\"{store}\")\n" + "let A = sa.vars.A |> z.read\nlet v = A(5) + A(12)\n"
+        let pmPair (label: string) (store: string) (check2: int -> string -> string -> string -> unit) =
+            match withEnv [ ("BLADE_PRINT", "v") ] (fun () -> runArm (label + "_on") "1" (keyedSrc store)),
+                  withEnv [ ("BLADE_PRINT", "v"); ("BLADE_KEYED_PROJECTION", "0") ] (fun () -> runArm (label + "_off") "1" (keyedSrc store)) with
+            | Ok (cppOn, Some (cOn, outOn, _)), Ok (_, Some (cOff, outOff, _)) ->
+                check $"{label}: same exit and output projected / resident" (cOn = cOff && strip outOn = strip outOff) (sprintf "on %d %s / off %d %s" cOn outOn cOff outOff)
+                check $"{label}: the projected read keeps no destination array" (cppOn.Contains "keyed-cell projection (PM44)" && cppOn.Contains "A__cell5" && not (cppOn.Contains "A_flat")) ""
+                check2 cOn outOn cppOn outOff
+            | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP %s: toolchain unavailable" label
+            | a, b -> check $"{label}: both arms build and run" false (sprintf "on %A / off %A" a b)
+        pmPair "PM44 keyed cells" za (fun c out _ _ -> check "PM44 keyed cells: prints `v = 19.0`" (c = 0 && out.Contains "v = 19.0") out)
+        let zaNan = mkStore2 "zip_a13_nan" (wv2 "A" [| for j in 0 .. 12 -> (if j = 9 then nan else float (j + 1)) |] 4L)
+        pmPair "PM44 a NaN in an UNREAD chunk still fails the read" zaNan (fun c out _ _ -> check "PM44 NaN unread: BL8015" (c <> 0 && out.Contains "BL8015") out)
+        let zaShort2 = mkStore2 "zip_a13_short2" (wv2 "A" [| for j in 0 .. 12 -> (if j = 1 then nan else float (j + 1)) |] 4L)
+        File.WriteAllBytes(zaShort2 + "/A/2", Array.zeroCreate 8)
+        pmPair "PM44 a short later chunk beats an earlier NaN" zaShort2 (fun c out _ _ -> check "PM44 short beats NaN: the plain Zarr error" (c <> 0 && out.Contains "is short" && not (out.Contains "BL8015")) out)
+        (let recs (pins: (string * string) list) (src: string) =
+            withEnv pins (fun () ->
+                Blade.Effects.Decisions.start ()
+                (match lower src with
+                 | Ok ir -> (try CodeGen.genSelfContainedProgramFromIR ir "pm44rec" |> ignore with _ -> ())
+                 | Error e -> failwithf "lowers: %s" e)
+                Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "keyed-cell-projection") |> List.map Blade.Effects.Decisions.render)
+         let has (rs: string list) (n: string) = rs |> List.exists (fun r -> r.Contains n)
+         check "PM44 plan: a printed read declines" (has (recs [ ("BLADE_PRINT", null) ] (keyedSrc za)) "declined -- `A` is printed") ""
+         check "PM44 plan: extents(A) declines" (has (recs [ ("BLADE_PRINT", "v,n") ] (keyedSrc za + "let n = extents(A)\n")) "not a keyed read at an integer literal") ""
+         check "PM44 plan: a function reading A declines" (has (recs [ ("BLADE_PRINT", "v,w") ] (keyedSrc za + "function f(i: Int64) -> Float64 = A(i)\nlet w = f(3)\n")) "declined") ""
+         check "PM44 plan: a type-carried reference declines (Codex round 1)"
+             (has (recs [ ("BLADE_PRINT", "v,xs") ] (keyedSrc za + "let xs = 0..Int64(floor(A(0))) |> compute\n")) "declined") "")
+        // G1 staging (Codex round 1, finding 3): a map kernel and a fold
+        // kernel that may both fail are refused, never staged
+        (let src =
+            zipHead
+            + "function project(a: Float64) -> Int64 = if a == 1.0 then Int64(0) else Int64(floor(1.0 / (a - 2.0)))\n"
+            + "function step(acc: Int64, v: Int64) -> Int64 = acc / v\n"
+            + "let t = reduce(method_for(A) <@> project, step, Int64(1))\n"
+         let text =
+             withEnv [ ("BLADE_PRINT", "t") ] (fun () ->
+                 match lower src with
+                 | Ok ir -> (try fst (CodeGen.genSelfContainedProgramFromIR ir "g1stage") with ex -> ex.Message)
+                 | Error e -> e)
+         check "G1: a fallible map under a fallible fold is refused, not staged" (text.Contains "staging the map would reorder") text)
      with ex -> check "halo-cache block: no unexpected exception" false ex.Message)
 
     // ---------------------------------------------------------------

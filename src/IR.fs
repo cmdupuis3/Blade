@@ -381,6 +381,15 @@ type IRExpr =
     /// (genForRangeBinding's alloc scope) or each guarded loop leaks its
     /// breaking iteration's slice materializations.
     | IRBreakIf of cond: IRExpr
+    /// PRINT REPLAY of a module-level recursive array (rec-print-replay v1,
+    /// round 4 wave 4 B1): one row of `target`'s trajectory, completed by
+    /// the ring sweep of the hidden `__replay_<x>` binding that holds it.
+    /// Statement-positioned and unit-valued. Only the C++ lane executes it
+    /// (the sweep runs once at x's slot filling the snapshots, again at x's
+    /// print slot printing each row); the interpreter and the LLVM lane skip
+    /// the whole replay binding (IR.isRecReplayBinding) and keep x's full
+    /// buffer. Counted as an effect (never moved, merged or dropped).
+    | IRReplayRow of target: IRId * row: IRExpr
 
 /// Abstract callable in IR: the merged form of source-level functions and
 /// lambdas. Lives in the IRExpr mutual-recursion group because
@@ -470,6 +479,19 @@ and IRCallable = {
     // unmarked callables), which each consumer reads as "run your own
     // analysis or decline" -- never as pure.
     Effects: Blade.Effects.EffectSummary
+    // `Some compiledLanesCall` marks a KERNEL-INVARIANT HOIST HELPER
+    // (Optimize.hoistKernelInvariantsModule): the part of a map kernel that
+    // does not read the element, evaluated once before the nest. Its shadow
+    // frame must be the one the PER-CELL evaluation had (gap G151: same
+    // failure site, same frames). The compiled lanes CALL a kernel per cell
+    // exactly when its body is not expression-shaped
+    // (`IRLift.kernelBodyIsExpressionShaped`, the C++ lane's
+    // `routeKernelBodyThroughCall`) and inline it otherwise, so the C++ and
+    // LLVM lanes push this helper's frame iff `compiledLanesCall`; the
+    // interpreter evaluates every such kernel inline (its nests push no
+    // kernel frame) and never pushes it. `None` = an ordinary callable,
+    // whose frame every lane pushes as always.
+    HoistFrame: bool option
 }
 
 /// Semantic-marker alias for IRCallable naming "top-level function in
@@ -1853,6 +1875,9 @@ type IRModule = {
     /// synthesized copies; populated by `shapeMonomorphizeModules`, which
     /// records a copy in the module that DEFINES its origin even when the call
     /// site that earned it lives in another module.
+    /// (Also holds BINDING ids since round 4 wave 4: the sibling-fold pass keys a
+    /// synthesized top-level binding on the original binding it precedes, as an
+    /// emission-order key only -- a key is not necessarily in Functions.)
     DerivedFuncOrigins: Map<IRId, IRId>
     /// NAMES of top-level bindings removed because they only aliased a
     /// generic function (`let g = total`, IRMono.eliminateGenericAliases).
@@ -2004,6 +2029,8 @@ let mkCallable
         // Grafted by Lowering.lowerTypedFuncDecl from the typed declaration;
         // unknown everywhere else (see the field's comment).
         Effects = Blade.Effects.unknown
+        // Set by the one site that mints a hoist helper (see the field).
+        HoistFrame = None
     }
 
 /// Build a fresh IRCallable for an anonymous inline lambda: synthesized
@@ -2365,6 +2392,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
     | IRConstraintCheck (c, code, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', code, msg, sp) | _ -> badChildren "IRConstraintCheck")
     | IRBreakIf c -> [c], (function [c'] -> IRBreakIf c' | _ -> badChildren "IRBreakIf")
+    | IRReplayRow (t, r) -> [r], (function [r'] -> IRReplayRow (t, r') | _ -> badChildren "IRReplayRow")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRGramApply (l, r, x) -> [l; r; x], (function [l'; r'; x'] -> IRGramApply (l', r', x') | _ -> badChildren "IRGramApply")
@@ -2600,7 +2628,7 @@ let irNodeMayAbort (e: IRExpr) : bool =
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IRSegments _ | IRSegmentsGrid _ -> false
     | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> false
-    | IRAssign _ | IRForRange _ | IRBreakIf _ | IRBeginPoolScope _ | IRReleasePools _ -> false
+    | IRAssign _ | IRForRange _ | IRBreakIf _ | IRReplayRow _ | IRBeginPoolScope _ | IRReleasePools _ -> false
     | IRArrayLit _ | IRArrayNegate _ | IRArrayConjugate _ | IRContains _ -> false
     // -- may abort (checked reads, folds, factorizations, refusals) ---------
     | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRPolyIndex _ | IRPolyTail _
@@ -2650,6 +2678,11 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     // An unfilled fresh pool, registered for freeing exactly like a
     // materialized map (MatPool in the C++ lane, a tracked allocPool in LLVM).
     | IRUninit _ -> true
+    // A mask over a COMPOUND (G128) is `Compound<bool, R>` over fresh bits that
+    // BORROWS its source's index: not fresh, so escape propagation reaches the
+    // source (Codex review round 2: a returned mask kept an index its scope
+    // freed). Leaks, never frees early.
+    | IRMask (IRVar (_, ArrayElem a), _) when a.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKCompound) -> false
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
     | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
     // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
@@ -2675,7 +2708,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
     | IRPolyIndex _ | IRPolyTail _ | IRHaloUnhash _ | IRRank _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
-    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ | IRBeginPoolScope _ | IRReleasePools _ -> false
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ | IRBeginPoolScope _ | IRReleasePools _ -> false
 
 // Expression Mapping (bottom-up rewriter)
 
@@ -2710,6 +2743,23 @@ let containsPoolLifetimeEvent (expr: IRExpr) : bool =
     let mutable found = false
     iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> found <- true | _ -> ()) expr
     found
+
+/// PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1). The module binding
+/// `__replay_<x>` the typechecker adds beside a module-level `let rec x`
+/// holds x's ring sweep with one IRReplayRow per completed row. Only the C++
+/// lane runs it (CodeGenBinding's replay arm: once at its slot, filling x's
+/// snapshots, once at x's print); the interpreter and the LLVM lane SKIP the
+/// binding and keep x's full buffer, so they run exactly the program as
+/// written. Structural: a binding whose value holds an IRReplayRow.
+let recReplayBindingPrefix = "__replay_"
+/// The row marker let the typechecker places in the sweep (`__replay_row_<x>`).
+let recReplayRowPrefix = "__replay_row_"
+let containsReplayRow (expr: IRExpr) : bool =
+    let mutable found = false
+    iterIRExpr (function IRReplayRow _ -> found <- true | _ -> ()) expr
+    found
+let isRecReplayBinding (b: IRBinding) : bool =
+    b.Name.StartsWith recReplayBindingPrefix && containsReplayRow b.Value
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
 /// The one var-ref collector (audit section 3.2): capture computation and
@@ -3300,7 +3350,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     | IRAssign _ -> IRTUnit
     | IRForRange _ -> IRTUnit
     | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ -> IRTUnit
-    | IRBreakIf _ -> IRTUnit
+    | IRBreakIf _ | IRReplayRow _ -> IRTUnit
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
         // above), populated both at liftInlineFormsModule entry and at

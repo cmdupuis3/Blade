@@ -413,7 +413,7 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Combinator | Signature sketch | Semantics | Status |
 |-----------|------------------|-----------|--------|
-| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
+| `zip(A₁..Aₙ)` | → Tuple elements over the operands' ONE shared index space | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; plain dense operands of different ranks share no index space and are refused (BL3027, gap G99: pair a row with a cell by iterating the leading axis, `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`); output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
 | `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments | **(planned)** |
 | `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s | **(planned)** — neighbor access today is `halo<I, [offsets]>` (§7.3) |
 | `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k | Implemented |
@@ -2366,7 +2366,13 @@ nest, and the legs accumulate side by side — so a join is the shared-fold
 terminal generalized to a fold PER leg. Unlike the map form, the legs need not
 come from the same MethodLoop: they must only agree on the joint index space
 (equal rank, and equal extents where statically known), because a reduction
-writes no cells and so has no output shape to reconcile.
+writes no cells and so has no output shape to reconcile. FAILURE ORDER: the joint
+traversal visits the cells in ascending order and, within a cell, first
+evaluates the SHARED named producers (a deferred map several legs spell,
+and every leg's deferred operand) in first-use order, then runs the legs in
+leg order, so when legs can fail the first failure is the EARLIEST failing
+cell's -- a shared producer's ahead of a leg's, leg order breaking a tie --
+not the first leg's (gap G101; every lane, the interpreter included).
 
 Legs referring to the same **named deferred** computation evaluate it once per
 joint cell; the name is the declaration, whether it stands in an operand slot

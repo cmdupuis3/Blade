@@ -1,0 +1,7 @@
+// TEST: An imported per-group map and its reassembled axis read from another module
+// MODULE: Main
+// Main's reads of Lib.b: a fold and a square of every cell.
+module Main
+import Lib
+let spread = reduce(Lib.b * Lib.b, (+))
+// EXPECT: spread = 202.0

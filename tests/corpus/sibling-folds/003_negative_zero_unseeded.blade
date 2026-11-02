@@ -10,13 +10,15 @@
 // compare the printed text: a numeric `-0.0` pin accepts either zero);
 // 1.0 / s_neg pins the sign.
 //
-// The (+) group carries one UNLICENSED sibling (`p + 2.0 * v` is no builtin
-// fold), so in a reordering build the group DECLINES (legs disagree on the
-// licence) and every fold keeps today's form; in the repro build -- the build
-// the identity claim is about, and the one `blade test interp` and `blade test
-// opt-diff` run -- it fires, and opt-diff compares the joined -0.0 chain with
-// the unseeded one. The (*) group is all licensed and fires everywhere: a
-// product's simd lanes start at 1.0 and keep the sign.
+// The (+) legs fold with `radd`, a `where repro` function whose body is the
+// builtin `p + q`: each is an UNSEEDED builtin-operator leg (seeded -0.0) that
+// no lane reassociates, so with the UNLICENSED sibling (`p + 2.0 * v`) the
+// five legs join in EVERY build, and the -0.0 seed is visible in every lane.
+// (Until round 4 wave 4 the legs were `(+)`: a reordering build declined the
+// mixed group, so they stayed apart. Since G107 (2) a mixed group is SPLIT by
+// licence, and licensed `(+)` legs would join in the licensed form, whose
+// zero sign is not kept -- see below.) The (*) group is all licensed and fires
+// everywhere: a product's simd lanes start at 1.0 and keep the sign.
 //
 // What is NOT here, and why: the sign of a zero LICENSED sum belongs to the
 // licensed form (a C++ join's `omp simd reduction` lanes start at +0.0; the
@@ -29,13 +31,15 @@
 type R = Idx<3>
 type P = Idx<4>
 
+function radd(p: Float64, q: Float64) where repro -> Float64 = p + q
+
 let fzero: Float64 = 0.0
 
 let (s_neg, s_inf, s_nan, q, twice) = {
     let z: Array<Float64 like R> = [-0.0, -0.0, -0.0]
     let fz: Array<Float64 like R> = [-1.0 / fzero, 1.0, 1.0]
     let nz: Array<Float64 like R> = [fzero / fzero, 1.0, 1.0]
-    (reduce(z, (+)), reduce(fz, (+)), reduce(nz, (+)), reduce(z * z, (+)),
+    (reduce(z, radd), reduce(fz, radd), reduce(nz, radd), reduce(z * z, radd),
      reduce(fz, lambda(p, v) -> p + 2.0 * v, 0.0))
 }
 let inv_neg = 1.0 / s_neg

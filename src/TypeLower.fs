@@ -1697,9 +1697,9 @@ let private multiAxisShapeClash (shape0: IRIndexType list) (rest: IRArrayType li
 ///      in-bounds; the operands just are not over the same index space.
 ///
 /// Only the HEAD is compared. A rank-2 operand zipped with a rank-1 one takes
-/// this arm too (`minRank <= 1`), and there the shared record is the leading
-/// one; the trailing records are the kernel's business, trimmed by its slice
-/// rank in buildApplyInfo.
+/// this arm too (`minRank <= 1`); when every record is plain dense the caller
+/// then refuses the rank mismatch (gap G99: neither lane co-iterates the
+/// leading axis of operands of different ranks).
 let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
     match arrayTypes with
     | [] | [_] -> None
@@ -1759,7 +1759,31 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             // reached g++ as invalid C++.
             match zipHeadClash arrayTypes with
             | Some e when minRank > 0 -> Error e
-            | _ -> Ok (if minRank > 0 then [shape0.Head] else [])
+            | _ ->
+            // RANK AGREEMENT (gap G99, round 4 wave 4): plain dense operands
+            // of DIFFERENT ranks (`zip(A, t)`, A over (R, C), t over R) have
+            // no shared index space -- the walk is over every axis of its
+            // operands, and the lower-rank one has no cells on the extra
+            // axes. Neither lane co-iterated the leading axis (a lambda kernel
+            // was typed rank-1 and stored a row into a scalar cell; a named
+            // row kernel emitted the OUTER product), so it is refused here,
+            // for every spelling that reaches the zip (method_for(zip(..)),
+            // a let-bound zip, a join leg). Packed and grouped records keep
+            // their own rules.
+            let maxRank = arrayTypes |> List.map (_.IndexTypes.Length) |> List.max
+            let allPlainDense = arrayTypes |> List.forall (fun at -> at.IndexTypes |> List.forall isPlainDenseIx)
+            if minRank > 0 && maxRank > minRank && allPlainDense then
+                let shapeOf (at: IRArrayType) = at.IndexTypes |> List.map ppIndexType |> String.concat ", "
+                let hi = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = maxRank)
+                let lo = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = minRank)
+                let (a, b) = (min hi lo, max hi lo)
+                let at (i: int) = arrayTypes.[i]
+                Error (IndexSpaceErr
+                    ($"co-iteration operands must have the SAME rank: operand {a + 1} is over ({shapeOf (at a)}) (rank {(at a).IndexTypes.Length}) "
+                     + $"and operand {b + 1} over ({shapeOf (at b)}) (rank {(at b).IndexTypes.Length}). A zip walks every axis of its operands as ONE index space, "
+                     + "and the lower-rank operand has no cells on the extra axes. To pair each row of the higher-rank operand with one cell of the lower-rank one, "
+                     + "iterate the shared leading axis and read both: `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`."))
+            else Ok (if minRank > 0 then [shape0.Head] else [])
         elif not (rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)) then
             Error (IndexSpaceErr (multiAxisShapeClash shape0 rest))
         elif isGroupedRaggedShape shape0 then

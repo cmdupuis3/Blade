@@ -1,0 +1,14 @@
+// TEST: Ungroup Of A Key Grouping (rejects)
+// ERROR: BL3029
+// A key grouping's rows sit in the grouping's PERMUTED order, so restoring
+// the source axis is a scatter by its permutation (G90 v2, not built). It is
+// refused at the type checker, by name; before G90 the C++ lane scattered
+// and the interpreter concatenated the rows in group order (the lanes
+// disagreed). `ungroup` restores the axis of a structural grouping.
+type I = Idx<6>
+type CI = Chunked<I, 3>
+let keys: Array<Int64 like I> = [1, 0, 1, 0, 2, 2]
+let vals: Array<Float64 like I> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+let gv = group_by(vals, gk)
+let back = ungroup(gv, CI)

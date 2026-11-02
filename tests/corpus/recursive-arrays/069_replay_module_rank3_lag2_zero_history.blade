@@ -1,0 +1,17 @@
+// TEST: Replay Module Rank3 Lag2 Zero History
+// ============================================================================
+// PRINT REPLAY of a rank-3 Int64 recursion with lag 2 and NO seed arm: rows 0
+// and 1 read rows before the prefix (implicit zero history), so the ring of
+// 3 rows starts empty; a rank-3 value prints as ONE flat run (the print
+// regime), which the replay reproduces row by row.
+// Row n = row(n - 1) + row(n - 2) + 1: 1, 2, 4, 7, 12, 20 in every cell.
+// ============================================================================
+type T = Idx<6>
+type A = Idx<2>
+type B = Idx<2>
+
+let rec w: Array<Int64 like T, A, B> =
+    match w with
+    | zero -> zero
+    | prefix :: n -> prefix :: prefix(n - 1) + prefix(n - 2) + 1
+// EXPECT: w = [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 7, 7, 7, 7, 12, 12, 12, 12, 20, 20, 20, 20]

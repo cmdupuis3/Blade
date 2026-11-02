@@ -1,0 +1,21 @@
+// TEST: Replay Declines Assigned Input
+// ============================================================================
+// The C++ lane's replay admission (rule `rec-print-replay`) DECLINES a sweep
+// that reads a module binding the program ASSIGNS later: x is computed at its
+// slot with m(0) = 1, and a print-time replay would read the later 5. The
+// trajectory is stored in full (the replay binding emits nothing); the rows
+// printed are the ones computed at x's slot.
+// ============================================================================
+type Step = Idx<6>
+
+let mut m = Float64([1.0, 2.0])
+
+let rec x: Array<Float64 like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + m(0)
+
+m(0) = 5.0
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+// EXPECT: m = [5.0, 2.0]

@@ -1,0 +1,10 @@
+// TEST: Former Over Scalar (rejects)
+// ----------------------------------------------------------------------------
+// Gap G125's second member (round 4 wave 4, lane K): a loop former over a
+// SCALAR has nothing to iterate. It typechecked as a rank-1 loop over an
+// invented extent and reached g++ as `x.extents` (BL9002); refused at the
+// operand, BL3007.
+// ----------------------------------------------------------------------------
+let x: Float64 = 2.0
+let y = reduce(method_for(x) <@> lambda(v) -> v + 1.0, (+))
+// ERROR: BL3007 @ 8:27

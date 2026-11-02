@@ -364,6 +364,64 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
                 NFor (j, iLit 0L, iLit (int64 n),
                       [ NLet (i, false, sub (v j) (iLit (int64 k)))
                         NAssign (cell, syn (ExprIf (inRange, collected, cell))) ]))
+        // PM38 (ad-gather-fuse v1): the taps' passes as ONE loop. Each tap's
+        // statement keeps its own guarded window (`i` scoped in its block), in
+        // the descending-offset order the passes ran, so every cell sees the
+        // same updates in the same order; the gathers read only the halo
+        // map's cotangent and primal values, never a gradient they write.
+        // ADMISSION (fail closed; Codex review round 1): the taps may be
+        // interleaved only when no tap reads storage another tap writes and
+        // none can fail. A caller may pass the primal and its gradient buffer
+        // as ONE array (`ad.grad(f)(identity(a), a)`), so a tap reading a
+        // primal array may read a cell an earlier tap of the same cell row
+        // already updated. Admitted: every addend and temp is arithmetic
+        // (+ - * /, negation) over literals, the cotangent cell `c` and the
+        // temps -- the linear stencil's reverse rule; anything else (an array
+        // read, a call, a cast, another name) keeps the per-tap passes.
+        let tempNames = temps |> List.map (fun (nm, _, _) -> nm) |> Set.ofList
+        let rec cotOnly (e: Expr) : bool =
+            match e.Kind with
+            | ExprKind.ExprLit (LitFloat _) | ExprKind.ExprLit (LitInt _) -> true
+            | ExprKind.ExprVar n -> n = c || tempNames.Contains n
+            | ExprKind.ExprTyped (inner, _) -> cotOnly inner
+            | ExprKind.ExprUnaryOp (OpNeg, inner) -> cotOnly inner
+            | ExprKind.ExprBinOp (Elementwise, (OpAdd | OpSub | OpMul | OpDiv), l, r) -> cotOnly l && cotOnly r
+            | _ -> false
+        let fusable =
+            (temps |> List.forall (fun (_, _, e) -> cotOnly e))
+            && (assigns |> List.forall (fun (_, rhs) -> match addend rhs with Some a -> cotOnly a | None -> true))
+        let gathers =
+            match gathers with
+            | _ :: _ :: _ when adGatherFuseEnabled () && not fusable ->
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Declined "a tap reads storage or may fail (only taps over the cotangent and literals are interleaved: a caller may pass a primal and its gradient as one array)"
+                      Evidence = [] }
+                gathers
+            | _ :: _ :: _ when adGatherFuseEnabled () ->
+                let taps =
+                    assigns
+                    |> List.choose (fun (t, rhs) ->
+                        windowTarget t |> Option.bind (fun (g, k) -> addend rhs |> Option.map (fun a -> (g, k, a))))
+                    |> List.sortByDescending (fun (_, k, _) -> k)
+                let stmts =
+                    taps |> List.map (fun (g, k, a) ->
+                        let cell = syn (ExprApp (v g, [ v j ]))
+                        let collected = syn (ExprBlock (letOf c cotRead :: tempLets, Some (add cell a)))
+                        NAssign (cell, syn (ExprBlock ([ letOf i (sub (v j) (iLit (int64 k))) ],
+                                                       Some (syn (ExprIf (inRange, collected, cell)))))))
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Applied
+                      Evidence = [ $"the halo gather's {taps.Length} taps ({wname}) accumulate into the caller's gradient in ONE pass over the input ordinal (was one pass per tap)"
+                                   "per cell the same updates in the same descending-offset order, the incoming gradient first: the same parenthesized sum" ] }
+                [ NFor (j, iLit 0L, iLit (int64 n), stmts) ]
+            | _ :: _ :: _ ->
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Declined "disabled by BLADE_AD_GATHER_FUSE"; Evidence = [] }
+                gathers
+            | _ -> gathers
         let scalars = assigns |> List.filter (fun (t, _) -> isScalarTarget t)
         let scalarLoop =
             if scalars.IsEmpty then []
@@ -1391,7 +1449,9 @@ let rec internal toStmts (ns: NStmt list) : Stmt list =
         | NLet (n, isMut, value) ->
             StmtLet { Pattern = synPat (PatVar n)
                       Type = None
-                      Value = value
+                      Value = (match value with
+                               | LargeZeroFill n -> inheritSpan value (zeroFormerOfCount n).Kind
+                               | _ -> value)
                       Mutability = if isMut then BindMut else BindLet }
         | NAssign (lhs, rhs) -> StmtExpr (mkExpr (mergeSpan lhs.Span rhs.Span) (ExprAssign (lhs, rhs)))
         | NFor (var, lo, hi, body) -> StmtForIn (var, mkExpr (mergeSpan lo.Span hi.Span) (ExprDotDot (lo, hi)), toStmts body))

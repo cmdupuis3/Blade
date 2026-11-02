@@ -2682,6 +2682,27 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 match lengthsSource with
                 | None -> None
                 | Some (ngroupsExpr, perRowLenExpr) ->
+                    // stream-group-fold v1 (Blade.Optimize.planStreamGroupFold,
+                    // G133 / ST07): the group site built no pool; each run is
+                    // read from the store into ONE window (the largest run)
+                    // right before its row is folded -- the peel's own fold
+                    // text over the same cells in the same order. Serial (the
+                    // provider read handles are not thread-safe).
+                    let streamRun =
+                        match arrExpr with
+                        | IRVar (gid, _) when isGroupedOuter ->
+                            (match Blade.Optimize.StreamGroupFoldTable.tryGroup gid with
+                             | Some plan when plan.Emitted.Value ->
+                                 (match Map.tryFind plan.SourceId ctx.VarNames
+                                        |> Option.bind (fun vn -> Map.tryFind vn ctx.StreamedArrays |> Option.map (fun s -> (vn, s))),
+                                        Map.tryFind arrName ctx.GroupedArrays with
+                                  | Some (vn, spec), Some gkName ->
+                                      (match (Blade.ProviderRegistry.tryFind spec.Provider) |> Option.bind (fun p -> p.GenStreamRows) with
+                                       | Some genRows -> Some (plan, vn, spec, gkName, genRows)
+                                       | None -> None)
+                                  | _ -> None)
+                             | _ -> None)
+                        | _ -> None
                     // Elementwise-vs-consuming dispatch, keyed on the OUTPUT
                     // type -- the authoritative signal, because TypeCheck
                     // already made this exact decision (paramUsedAsArray):
@@ -2715,14 +2736,112 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         | _ -> false
                     match resolveCallable info.Kernel with
                     | Some callable when callable.Params.Length = 1 && outputIsGroupShaped ->
-                        // Elementwise map over a group_by result. The grouped
-                        // value is an Array<T*,1> without lens/offsets wrapper
-                        // members, and the group-shaped output type has no
-                        // consumer support downstream (print, further peels
-                        // resolve lengths through ctx.GroupedArrays, which this
-                        // site cannot extend). Gate rather than miscompile;
-                        // mapping BEFORE grouping is semantically equivalent.
-                        Some (codegenError ctx ind "elementwise map over a group_by result is not yet supported; apply the map to the values BEFORE group_by (equivalent), or reduce per group")
+                        // PER-GROUP MAP over a group_by result (G90, rule
+                        // `group-rowmap v1`, docs/plans/plan-group-rowmap-ungroup.md).
+                        // The type checker admitted it only as LENGTH-PRESERVING
+                        // (its closed kernel grammar: an ELEMENT parameter, or the
+                        // ROW parameter returned as an elementwise expression of
+                        // itself and scalars), so every result row is exactly as
+                        // long as its group and the result is a grouped value over
+                        // the SAME grouping: one pool of offsets[ngroups] cells in
+                        // group order, a row table slicing it, and the grouping's
+                        // extents table -- the grouped-copy layout (genBinding's
+                        // `let h = g` arm), so peels, print, extents(h(i)) and
+                        // ungroup read h exactly like g. The binding site
+                        // registers `name -> grouping` (noteGroupRowMap).
+                        // Groups run ascending, serially: a failing kernel fails
+                        // at the first failing group, as the interpreter's walk.
+                        let gkName =
+                            match Map.tryFind arrName ctx.GroupedArrays with
+                            | Some gk -> gk
+                            | None -> ""
+                        let param = callable.Params.[0]
+                        let inElemStr = elemTypeToCpp arrType.ElemType
+                        let outElem =
+                            match info.OutputType with
+                            | ArrayElem a -> a.ElemType
+                            | t -> t
+                        let outElemStr = elemTypeToCpp outElem
+                        let rowLen = $"{gkName}__offsets[__g + 1] - {gkName}__offsets[__g]"
+                        let elementForm =
+                            match info.KernelInputRanks with
+                            | [ 0 ] -> Some true
+                            | [ 1 ] -> Some false
+                            | _ -> None
+                        if gkName = "" || not isGroupedOuter then
+                            Some (codegenError ctx ind $"per-group map: '{arrName}' is not a group_by result this emitter can trace to its grouping")
+                        else
+                        match elementForm with
+                        | None ->
+                            Some (codegenError ctx ind "a per-group map whose kernel binds neither one element nor one row of the group")
+                        | Some isElement ->
+                        let header =
+                            [ $"{ind}// group row map over '{arrName}' (G90, group-rowmap v1): one pool of {gkName}__offsets[{gkName}__ngroups] cells in group order, rows over grouping {gkName}" ]
+                            @ fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
+                            @ [ $$"""{{ind}}Array<{{outElemStr}}*, 1> {{name}} = { new {{outElemStr}}*[{{gkName}}__ngroups], {{name}}_extents };"""
+                                $"{ind}{outElemStr}* {name}__pool = new {outElemStr}[{gkName}__offsets[{gkName}__ngroups]];"
+                                $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {name}[__g] = {name}__pool + {gkName}__offsets[__g];" ]
+                        let loop =
+                            if isElement then
+                                let eName = $"{name}__e"
+                                let nameMap =
+                                    withCaptureNames EnclosingNamesWin callable.Captures (Map.add param.VarId eName ctx.VarNames)
+                                // A statement-shaped element body (a nested map, a fold over
+                                // a local array) renders as a CALL of the lifted callable,
+                                // which owns and frees its locals (peelBodyExpr).
+                                let bodyStr = exprToCpp nameMap (peelBodyExpr callable)
+                                [ $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+                                  $$"""{{ind}}    for (size_t __k = 0, __n = {{rowLen}}; __k < __n; __k++) {"""
+                                  $"{ind}        const {inElemStr} {eName} = {arrName}[__g][__k];"
+                                  $"{ind}        {name}[__g][__k] = {bodyStr};"
+                                  $$"""{{ind}}    }"""
+                                  $"{ind}}}" ]
+                            else
+                                // The ROW form: the kernel runs once per group on
+                                // the group's row (a view of g's row, no copy) and
+                                // its row value -- one run of cells live at a time
+                                // -- lands in the group's slice of the pool.
+                                let subName = $"{name}__sub"
+                                let paramIsRaggedRow =
+                                    match param.Type with
+                                    | ArrayElem at -> declaresAsRaggedRow at
+                                    | _ -> false
+                                let subDecl =
+                                    if paramIsRaggedRow then
+                                        [ $$"""{{ind}}    RaggedRow<{{inElemStr}}> {{subName}} = { {{arrName}}[__g], {{perRowLenExpr}} };""" ]
+                                    else
+                                        [ $"{ind}    size_t {subName}_extents[1] = {{{perRowLenExpr}}};"
+                                          $$"""{{ind}}    Array<{{inElemStr}}, 1> {{subName}} = { {{arrName}}[__g], {{subName}}_extents };""" ]
+                                let callExpr =
+                                    let paramTypes = callable.Params |> List.map (_.Type)
+                                    IRApp (IRVar (callable.Id, mkFuncArrow paramTypes callable.RetType),
+                                           callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)),
+                                           callable.RetType)
+                                let nameMap =
+                                    withCaptureNames EnclosingNamesWin callable.Captures (Map.add param.VarId subName ctx.VarNames)
+                                let callStr = exprToCpp nameMap callExpr
+                                let freeLine =
+                                    match callExpr with
+                                    | IRApp (f, _, _) when freshReturnOf f = FreshPool ->
+                                        [ $"{ind}        deallocate<typename promote<{outElemStr}, 1>::type, nullptr>(__rowv.data, __rowv.extents);" ]
+                                    | _ -> []
+                                [ $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {""" ]
+                                @ subDecl
+                                @ [ $$"""{{ind}}    {"""
+                                    $"{ind}        auto __rowv = {callStr};"
+                                    $"{ind}        const auto* __rows = nested_array_utilities::pool_base(__rowv.data);"
+                                    $"{ind}        for (size_t __k = 0, __n = {rowLen}; __k < __n; __k++) {name}[__g][__k] = __rows[__k];" ]
+                                @ freeLine
+                                @ [ $$"""{{ind}}    }"""
+                                    $"{ind}}}" ]
+                        registerShapedAlloc name "deallocate_ragged_storage" ($"{name}.data, {name}__pool")
+                        noteGroupRowMap name gkName
+                        // v1 runs the groups serially: a thread request is RECORDED
+                        // as emitted serial (the census line), never dropped silently.
+                        let serialNote =
+                            peelRowPragma peelOmpRequested peelRowLicensed
+                                (Some "a per-group map over a group_by result (G90, group-rowmap v1) runs its groups serially") ind
+                        Some (header @ serialNote @ loop)
                     | Some callable when callable.Params.Length = 1 && outputIsRaggedShaped ->
                         // Elementwise map over a ragged array: shape-preserving.
                         // The output is a fresh Ragged<T> that SHARES the
@@ -2838,7 +2957,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             match param.Type with
                             | ArrayElem at -> declaresAsRaggedRow at
                             | _ -> false
-                        let subDeclLines =
+                        let subDeclLines0 =
                             if paramIsRaggedRow then
                                 // RaggedRow: inline `len` scalar, no separate _extents.
                                 [ $$"""{{ind}}    RaggedRow<{{arrElemStr}}> {{subName}} = { {{arrName}}[__g], {{perRowLenExpr}} };""" ]
@@ -2846,12 +2965,22 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                 // Array<T,1>: length via a materialized _extents buffer.
                                 [ $"{ind}    size_t {subName}_extents[1] = {{{perRowLenExpr}}};"
                                   $$"""{{ind}}    Array<{{arrElemStr}}, 1> {{subName}} = { {{arrName}}[__g], {{subName}}_extents };""" ]
+                        let winName = $"{name}__win"
+                        let subDeclLines =
+                            match streamRun with
+                            | None -> subDeclLines0
+                            | Some (_, vn, spec, gkName, genRows) ->
+                                (genRows spec.FilePath spec.VarName vn winName $"{gkName}__offsets[__g]" $"{gkName}__offsets[__g + 1]" spec.VarType
+                                 |> List.map (fun s -> ind + "    " + s))
+                                @ (subDeclLines0 |> List.map (fun l -> l.Replace($"{arrName}[__g]", winName)))
                         let outRank =
                             match info.OutputType with
                             | ArrayElem a -> arrayRank a
                             | _ -> 1
                         let code =
-                            if outputHasDenseTrailing && outRank >= 2 then
+                            if streamRun.IsSome && outputHasDenseTrailing && outRank >= 2 then
+                                [ refusalErrorLine ind "stream-group-fold: an array-valued row peel over a streamed grouping is not streamed (v1 folds rows to scalars)" ]
+                            elif outputHasDenseTrailing && outRank >= 2 then
                                 // ARRAY-VALUED ROWS. Same emission the grouped
                                 // co-iteration uses -- one helper, so a
                                 // single-operand ragged literal and a k-operand
@@ -2886,11 +3015,18 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             // ORDER is untouched -- only which row a thread reaches
                             // first is reordered -- so the values are bitwise
                             // identical to the serial emission.
-                            @ peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind
+                            @ (match streamRun with
+                               | Some (plan, _, spec, _, _) ->
+                                   Blade.Optimize.recordStreamGroupFold (exprToCppCtx ctx arrExpr) Blade.Effects.Applied plan.Evidence
+                                   let wElem = elemTypeToCpp spec.VarType.ElemType
+                                   [ $"{ind}// stream-group-fold v1: each run of '{spec.VarName}' read into ONE window of {plan.MaxRun} cell(s), then folded by this peel (serial: one read session)"
+                                     $"{ind}{wElem}* {winName} = new {wElem}[{max 1L plan.MaxRun}UL];" ]
+                               | None -> peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind)
                             @ [ $$"""{{ind}}for (size_t __g = 0; __g < {{ngroupsExpr}}; __g++) {""" ]
                             @ subDeclLines
                             @ [ $"{ind}    {name}[__g] = {bodyStr};"
                                 $"{ind}}}" ]
+                            @ (match streamRun with Some _ -> [ $"{ind}delete[] {winName};" ] | None -> [])
                         // Raw `new T[n]` backing (not allocate<>). The extents
                         // table is deliberately unowned here (`None`) for the
                         // reason spelled out beside its emission above -- it
@@ -3169,11 +3305,22 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                 (match idxTys with
                  | [ix] ->
                      (match ix.Extent with
-                      | IRCompoundMask (IRVar (mid, _)) ->
+                      | IRCompoundMask (IRVar (mid, mty)) ->
                           (match Map.tryFind mid tempCtx.VarNames with
                            | Some maskName ->
+                               // A mask over a COMPOUND (G128) is a `Compound<bool, R>`
+                               // sharing its source's index: the index builder reads a
+                               // flat Bool pool, so it gets a non-owning rank-1 view of
+                               // the bits (the compound's present cells in order).
+                               let (viewLines, maskName) =
+                                   match mty with
+                                   | ArrayElem a when isCompoundArrayType a && a.IndexTypes.Length = 1 ->
+                                       let v = $"{rname}__maskv"
+                                       ([ $"{ind}size_t {v}_ext[1] = {{ {maskName}.size() }};"
+                                          $"{ind}Array<bool, 1> {v} = {{ {maskName}.data, {v}_ext }};" ], v)
+                                   | _ -> ([], maskName)
                                let (idxLines, _) = genCompoundIndexFromMask maskName ix.Rank ($"{rname}_cidx")
-                               preCode <- preCode @ (idxLines |> List.map (fun s -> ind + s))
+                               preCode <- preCode @ viewLines @ (idxLines |> List.map (fun s -> ind + s))
                                // Owns the standalone driver index. Registered
                                // BEFORE any compound map output that shares it:
                                // newest-first pop then frees the output's data
@@ -4379,10 +4526,30 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     // ascending order, misses in today's order within a
                                     // window. The read itself is serial (the kernel's omp
                                     // request lives in the loop body after the read).
+                                    // E6 / ST03 (round 4 wave 4): the ELEMENTWISE segment
+                                    // route over rank-1 Zarr sources (a zip of differently
+                                    // chunked streams) takes the same slots per source: its
+                                    // runs are the first source's chunk edge, ascending and
+                                    // contiguous, so every source's windows have
+                                    // non-decreasing ends and width <= W -- the exactness
+                                    // argument holds per source, and a source whose chunk is
+                                    // wider than the run (B chunk 3001 under 1001-cell runs)
+                                    // is decoded once instead of once per run it spans
+                                    // OPT-IN (the stop rule: the second review of this class found a
+                                    // second member): BLADE_HALO_CACHE=elementwise
+                                    let elementwiseRoute =
+                                        Blade.Optimize.haloCacheElementwiseEnabled ()
+                                        && kind = "elementwise" && rank1WindowPlan.IsSome && rank = 1 && spec.Provider = "zarr"
+                                        && sources |> List.forall (fun (_, s) -> s.Provider = "zarr" && s.VarType.IndexTypes.Length = 1)
+                                        && (match runShape with
+                                            | SegmentTable.ExplicitRuns offsets ->
+                                                not offsets.IsEmpty && offsets.Head = 0L && (List.pairwise offsets |> List.forall (fun (a, b) -> b > a))
+                                            | _ -> false)
                                     let haloRoute =
-                                        (match runShape with SegmentTable.UniformRuns _ -> true | _ -> false)
-                                        && rank1WindowPlan.IsSome && rank = 1 && spec.Provider = "zarr"
-                                        && sources.Length = 1 && kind = "stencil"
+                                        ((match runShape with SegmentTable.UniformRuns _ -> true | _ -> false)
+                                         && rank1WindowPlan.IsSome && rank = 1 && spec.Provider = "zarr"
+                                         && sources.Length = 1 && kind = "stencil")
+                                        || elementwiseRoute
                                     let io = $"{name}__io{k}"
                                     let cb = $"{name}__hc{k}"
                                     let cacheGeom =
@@ -4407,17 +4574,22 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                             let w = max 1L maxWin
                                             let slots = (w - 1L + c - 1L) / c + 1L
                                             let slotBytes = slots * cbytes
-                                            let evidence =
+                                            let evidenceCore =
                                                 [ $"`{spec.VarName}` streamed through {slots} chunk slot(s) of {c} cells ({slotBytes} bytes) for the whole run loop: S = ceil((W - 1) / C) + 1 with the certified window capacity W = {w}, chunk C = {c}"
                                                   "exactness: the uniform cursor's windows have non-decreasing ends and width <= W, so chunk c's slot c % S is never shared within a window and an evicted chunk is never requested again: each chunk is fetched once per evaluation, ascending; within a window misses keep today's order (the first short read / null-fill chunk fails where it does today); the per-window BL8015 scan, the intersection clip and the fill are unchanged"
                                                   "read session: the slots live inside this binding's run loop only (never across bindings or a provider write); neither arm defines behaviour for a store another process mutates during the run -- the cache observes each chunk once per evaluation"
                                                   "lanes: the LLVM lane has no segments arm (such a program runs in the C++ lane)"
                                                   $"memory: {slotBytes} bytes of slots + the window ({w} cells) + the required output, independent of the variable's size; the uncached arm holds one chunk per window" ]
+                                            let evidence =
+                                                if elementwiseRoute then
+                                                    ($"the elementwise segment route (E6 / ST03): {sources.Length} streamed source(s) co-iterated one run of the first source's chunk edge at a time; each source has its own slots") :: evidenceCore
+                                                else evidenceCore
                                             if not (Blade.Optimize.haloCacheEnabled ()) then
                                                 recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined "disabled by BLADE_HALO_CACHE") evidence
                                                 None
-                                            elif slotBytes > (256L <<< 20) then
-                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined $"the slots would hold {slotBytes} bytes (cap 256 MiB)") evidence
+                                            elif bigint slots * bigint cbytes + bigint slots * 9I > bigint (256L <<< 20) then
+                                                let wide = bigint slots * bigint cbytes + bigint slots * 9I
+                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined $"the slots and their tables would hold {wide} bytes (cap 256 MiB)") evidence
                                                 None
                                             else
                                                 recordCodegenDecision "halo-chunk-cache" name Blade.Effects.Applied evidence
@@ -4429,17 +4601,19 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                             @ (match cacheGeom with
                                                | Some (slots, c, disk, _) ->
                                                    [ $"{ind}{disk}* {cb}_buf = new {disk}[{int64 slots * c}UL];"
-                                                     $"{ind}size_t {cb}_ord[{slots}]; for (size_t __hs = 0; __hs < {slots}UL; __hs++) {cb}_ord[__hs] = SIZE_MAX;"
-                                                     $"{ind}unsigned char {cb}_st[{slots}] = {{ 0 }};" ]
+                                                     // heap tables (Codex review E6-1): a tiny-chunk source under
+                                                     // long runs may need millions of slots -- never on the stack
+                                                     $"{ind}std::vector<size_t> {cb}_ord({slots}UL, SIZE_MAX);"
+                                                     $"{ind}std::vector<unsigned char> {cb}_st({slots}UL, 0);" ]
                                                | None -> [])
-                                    let ioClose =
+                                    let ioClose (site: string) =
                                         if not haloRoute then []
                                         else
                                             let (form, slots, slotBytes) =
                                                 match cacheGeom with
                                                 | Some (s, _, _, b) -> ("halo-chunk-cache", int64 s, b)
                                                 | None -> ("per-window", 0L, 0L)
-                                            [ $"{ind}blade_rr::note_io(\"{name}\", \"{spec.VarName}\", \"{form}\", {io}[0], {io}[1], {io}[2], {io}[3], {slots}LL, {slotBytes}LL);" ]
+                                            [ $"{ind}blade_rr::note_io(\"{site}\", \"{spec.VarName}\", \"{form}\", {io}[0], {io}[1], {io}[2], {io}[3], {slots}LL, {slotBytes}LL);" ]
                                             @ (match cacheGeom with Some _ -> [ $"{ind}delete[] {cb}_buf;" ] | None -> [])
                                     let rowsCode =
                                         if haloRoute then
@@ -4450,28 +4624,59 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     let read =
                                         (rowsCode |> List.map (fun s -> ind + "    " + s))
                                         @ alias
-                                    (decl @ ioDecl, read, ioClose @ [ $"{ind}delete[] {win};" ] @ (if rank = 2 && not directRows then [ $"{ind}delete[] {rows};" ] else [])))
+                                    (decl @ ioDecl, read, fun (site: string) -> ioClose site @ [ $"{ind}delete[] {win};" ] @ (if rank = 2 && not directRows then [ $"{ind}delete[] {rows};" ] else [])))
                             let what = sources |> List.map (fun (_, s) -> $"'{s.VarName}'") |> String.concat ", "
                             let lastN = sources |> List.map (fun (_, s) -> match s.VarType.IndexTypes.[0].Extent with IRLit (IRLitInt n) -> n | _ -> runExtent) |> List.min
-                            [ (if kind = "stencil"
-                               then $"{ind}// stencil over segments: {what} streamed one run at a time, each run read with its ghost cells [{rLo}, {rHi}] (HaloAccess.haloDemand); no whole-array buffer"
-                               else $"{ind}// elementwise over segments: {what} streamed one run at a time (the store's chunk edge), each run its own window; no whole-array buffer") ]
-                            @ runDecl
-                            @ (windows |> List.collect (fun (d, _, _) -> d))
-                            @ runOpen
-                            @ [ $"{ind}    size_t __c_lo = {rawLo} < {cMin}UL ? {cMin}UL : {rawLo};"
-                                $"{ind}    size_t __c_hi = {rawHi} > {cMax}UL ? {cMax}UL : {rawHi};"
-                                $"{ind}    if (__c_lo >= __c_hi) continue;"
-                                (if rank1WindowPlan.IsSome then
-                                     $"{ind}    size_t __w_lo = static_cast<size_t>(static_cast<int64_t>(__c_lo) + ({rLo}LL)); size_t __w_hi = static_cast<size_t>(static_cast<int64_t>(__c_hi) + ({rHi}LL));"
-                                 else $"{ind}    size_t __w_lo = __c_lo + ({rLo}LL); size_t __w_hi = __c_hi + ({rHi}LL);")
-                                $"{ind}    if (__w_hi > {lastN}UL) __w_hi = {lastN}UL;" ]
-                            @ (windows |> List.collect (fun (_, r, _) -> r))
-                            @ [ $"{ind}    size_t __blade_mpi_lo_{name} = __c_lo - {start}UL;"
-                                $"{ind}    size_t __blade_mpi_hi_{name} = __c_hi - {start}UL;" ]
-                            @ (loopCode |> List.map (fun s -> "    " + s))
-                            @ [ $"{ind}}}" ]
-                            @ (windows |> List.collect (fun (_, _, f) -> f))
+                            // this member's per-run body: its slab bounds and its kernel
+                            // loop (scoped when it shares the run loop with siblings)
+                            let memberBody (scoped: bool) =
+                                let slab =
+                                    [ $"{ind}    size_t __blade_mpi_lo_{name} = __c_lo - {start}UL;"
+                                      $"{ind}    size_t __blade_mpi_hi_{name} = __c_hi - {start}UL;" ]
+                                    @ (loopCode |> List.map (fun s -> "    " + s))
+                                if scoped then
+                                    [ $"{ind}    {{ // {name}: its kernel over this run" ] @ (slab |> List.map (fun s -> "    " + s)) @ [ $"{ind}    }}" ]
+                                else slab
+                            // the run loop, with (E1 / G106) the stashed sibling members'
+                            // window aliases and per-run bodies ahead of this member's own
+                            let render (siblings: SegStash list) (site: string) =
+                                let winName = $"{name}__win0"
+                                let winElem = match sources with (_, s) :: _ -> elemTypeToCpp s.VarType.ElemType | [] -> "double"
+                                [ (if kind = "stencil"
+                                   then $"{ind}// stencil over segments: {what} streamed one run at a time, each run read with its ghost cells [{rLo}, {rHi}] (HaloAccess.haloDemand); no whole-array buffer"
+                                   else $"{ind}// elementwise over segments: {what} streamed one run at a time (the store's chunk edge), each run its own window; no whole-array buffer") ]
+                                @ (if siblings.IsEmpty then []
+                                   else [ $"""{ind}// sibling maps (E1 / G106): ONE run loop for {String.concat ", " ((siblings |> List.map (fun s -> s.GName)) @ [ name ])} -- one window, one chunk cache, one read and BL8015 scan per run""" ])
+                                @ runDecl
+                                @ (windows |> List.collect (fun (d, _, _) -> d))
+                                @ (siblings |> List.map (fun s -> $"{ind}{winElem}* {s.GWin} = {winName}; // {s.GName} reads the shared window"))
+                                @ runOpen
+                                @ [ $"{ind}    size_t __c_lo = {rawLo} < {cMin}UL ? {cMin}UL : {rawLo};"
+                                    $"{ind}    size_t __c_hi = {rawHi} > {cMax}UL ? {cMax}UL : {rawHi};"
+                                    $"{ind}    if (__c_lo >= __c_hi) continue;"
+                                    (if rank1WindowPlan.IsSome then
+                                         $"{ind}    size_t __w_lo = static_cast<size_t>(static_cast<int64_t>(__c_lo) + ({rLo}LL)); size_t __w_hi = static_cast<size_t>(static_cast<int64_t>(__c_hi) + ({rHi}LL));"
+                                     else $"{ind}    size_t __w_lo = __c_lo + ({rLo}LL); size_t __w_hi = __c_hi + ({rHi}LL);")
+                                    $"{ind}    if (__w_hi > {lastN}UL) __w_hi = {lastN}UL;" ]
+                                @ (windows |> List.collect (fun (_, r, _) -> r))
+                                @ (siblings |> List.collect (fun s -> s.GBody))
+                                @ memberBody (not siblings.IsEmpty)
+                                @ [ $"{ind}}}" ]
+                                @ (windows |> List.collect (fun (_, _, f) -> f site))
+                            // E1 (G106): the certified route a streamed sibling group shares
+                            let certified =
+                                match runShape, sources with
+                                | SegmentTable.UniformRuns _, [ (vn, spec) ]
+                                    when rank1WindowPlan.IsSome && kind = "stencil" && spec.Provider = "zarr"
+                                         && spec.VarType.IndexTypes.Length = 1 && not directRows ->
+                                    Ok (sprintf "%A|%d|%d|%d|%d|%d|%s|%s|%s|%d|%s" runShape cMin cMax rLo rHi start vn spec.FilePath spec.VarName maxWin (elemTypeToCpp spec.VarType.ElemType))
+                                | _ -> Error "the member's run loop is not the certified uniform rank-1 Zarr single-source halo route"
+                            match siblingSegHook name certified (memberBody true) $"{name}__win0" (fun () -> render [] name) ind with
+                            | SegNormal -> render [] name
+                            | SegStashed lines -> lines
+                            | SegFlush lines -> lines @ render [] name
+                            | SegFuse stash ->
+                                render stash (String.concat "+" ((stash |> List.map (fun s -> s.GName)) @ [ name ]))
                 preCode @ streamPrologue @ [""] @ extentDecls @ [""; allocDecl; ""]
                 @ mpiSlabPrologue @ segLoop @ mpiGather
 

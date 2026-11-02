@@ -1,0 +1,17 @@
+// TEST: a pack former's kernel holding a lambda that captures the ordinal is refused (rejects)
+// Gap G95 (round 4 wave 4 lane A; G93's class): the former unrolls into one
+// copy of the kernel per pack element with the ordinal `k` replaced by a
+// literal, but the nested lambda `h` captures `k` and is not copied with it
+// -- its call named an undeclared `k` in the C++ lane. Cloning the lambda per
+// element is not built; the program is refused with a diagnostic.
+// ERROR: BL7004
+// ERROR-CONTAINS: a pack former's kernel holds a lambda that captures
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(x: Float64) -> x + Float64(k)
+        h(args[k])
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)
