@@ -2434,6 +2434,11 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env a |> Result.bind (fun tA ->
         inferExpr env value |> Result.bind (fun tValue ->
             requireArrayArg env tA "contains" |> Result.bind (fun arrTy ->
+                // G114's class (round 4 wave 5 lane c): a literal-only target
+                // takes the set's element width (`contains(a64, 0.0)` probes
+                // a Float64), the partner rule of formalism 2.4; it was typed
+                // at the literal default and refused BL3001 over a Float64 set.
+                let tValue = adaptLiteralToFirst env [ arrTy.ElemType ] tValue
                 unify env.Subst tValue.Type arrTy.ElemType
                 |> Result.bind (fun () ->
                     Ok (mkTyped (TExprContains (tA, tValue)) (IRTScalar ETBool))))))
@@ -2459,6 +2464,13 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             requireArrayArg env tArr "sort" |> Result.bind (fun arrTy ->
                 if arrTy.IndexTypes.Length <> 1 then
                     Error (NotYetSupportedErr "sort() requires a rank-1 array (multi-rank sort not yet supported)")
+                // G126 (round 4 wave 5 lane c): a NON-PLAIN single record --
+                // `range<SymIdx<2, n>>`, whose cells are index tuples -- passed
+                // the record count and was BL7001 in C++ / unsupported in the
+                // interpreter. Only a rank-1 record sorts its own cells.
+                elif ((match array.Kind with ExprKind.ExprRange _ -> true | _ -> false) || arrTy.IsVirtual)
+                     && (arrTy.IndexTypes.[0].Rank <> 1 || arrTy.IndexTypes.[0].Symmetry <> SymNone) then
+                    Error (NotYetSupportedErr $"sort() requires a rank-1 array or a plain single-slot range; this operand is over {ppIndexType arrTy.IndexTypes.[0]}, whose cells are index tuples (sorting them is not supported)")
                 else
                     let srcIdx = arrTy.IndexTypes.[0]
                     // Fresh anonymous index, same extent as source. Sort doesn't
@@ -2485,7 +2497,27 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         | TExprLambda info when info.Params.Length = 1 ->
                             unify env.Subst info.Params.[0].Type arrTy.ElemType
                         | _ -> Ok ()
-                    unifyKeyParam |> Result.bind (fun () ->
+                    // THE KEY'S RESULT TYPE (gap G126; docs/features/sql.md
+                    // section 9): a real, integer, Bool or String scalar --
+                    // the types sort's total preorder is written for, in
+                    // every lane. A COMPLEX key has no order (it was BL9002
+                    // in C++ and sorted by the real part in the
+                    // interpreter); a TUPLE key compiled in C++ (std::tuple
+                    // `<`, lexicographic) while the interpreter tied every
+                    // key; an array key has no scalar order. Refused here.
+                    let keyResultOk () =
+                        let rec ok (t: IRType) =
+                            match IR.stripUnits (env.Subst.Resolve t) with
+                            | IRTScalar (ETComplex64 | ETComplex128) -> false
+                            | IRTScalar _ | IRTNat _ | IRTInfer _ -> true
+                            | IRTIdxTagged (inner, _) -> ok inner
+                            | _ -> false
+                        match env.Subst.Resolve tKey.Type with
+                        | FuncElem (_, ret) ->
+                            if ok ret then Ok ()
+                            else Error (NotYetSupportedErr $"sort(A, key): the key must return a real, integer, Bool or String scalar -- the types sort's order is defined for (NaN first, signed zeros tied; strings by code point) -- but this key returns {ppIRType (env.Subst.Resolve ret)}. A complex value has no order, and a tuple or array key is not supported: sort by one scalar key, or compose the key into one (`k1 * scale + k2`).")
+                        | _ -> Ok ()
+                    unifyKeyParam |> Result.bind keyResultOk |> Result.bind (fun () ->
                         let resultType = mkArrayArrow [resultIdx] arrTy.ElemType None
                         Ok (mkTyped (TExprSort (tArr, tKey)) resultType)))))
 
@@ -4032,7 +4064,22 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
     | Some result -> result
     | None ->
     inferExpr env array |> Result.bind (fun tArr ->
-    inferExpr env kernel |> Result.bind (fun tKernelDecl ->
+    // G114: the fold's ELEMENT parameter (the second; the first is the
+    // accumulator, whose width the seed may set) is hinted by the operand's
+    // narrow element, so its literal partners take that width
+    // (`reduce(a32, lambda(x, y) -> x + y * 2.0)` folds Float32).
+    let kernelTyped =
+        match kernel.Kind, IR.stripUnits (env.Subst.Resolve tArr.Type) with
+        | ExprKind.ExprLambda ([ _; p1 ] as parms, wc, body), ArrayElem at when p1.Type.IsNone ->
+            (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+             | IRTScalar (ETFloat32 | ETInt32 | ETComplex64 as et) ->
+                 if kernel.Span.StartLine > 0 then setCurrentExprSpan kernel.Span
+                 inferLambdaHinted env parms wc body [] [ None; Some et ]
+                 |> Result.map (fun te ->
+                     if te.Span.StartLine = 0 && kernel.Span.StartLine > 0 then { te with Span = kernel.Span } else te)
+             | _ -> inferExpr env kernel)
+        | _ -> inferExpr env kernel
+    kernelTyped |> Result.bind (fun tKernelDecl ->
     // A declared GENERIC function as the fold kernel (`reduce(xs, add)`) is a
     // USE, typed at an instantiated copy of its signature exactly as a call or
     // a `<@>` kernel is: unifying the kernel's parameters with the element
@@ -6670,8 +6717,35 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                 | ExprKind.ExprMethodFor [ { Kind = ExprKind.ExprZip zs } ] -> Some zs
                 | ExprKind.ExprMethodFor ops -> Some ops
                 | ExprKind.ExprVar _ -> Some [ e ]
+                // G114: the implicit former over an operand EXPRESSION
+                // (`(a + a) <@> lambda ..`) or a tuple (`(A, B) <@> ..`).
+                | ExprKind.ExprBinOp (Elementwise, (OpAdd | OpSub | OpMul | OpDiv), _, _)
+                | ExprKind.ExprUnaryOp (OpNeg, _) -> Some [ e ]
+                | ExprKind.ExprTuple es -> Some es
+                | _ -> None
+            // G114: a STORED method former (`let loop = method_for(a)`, then
+            // `loop <@> lambda ..`) hints its arrays' elements.
+            let storedLoopHints (nParams: int) =
+                match left.Kind with
+                | ExprKind.ExprVar v ->
+                    (match lookupVar v env with
+                     | Some vi ->
+                         (match env.Subst.Resolve vi.Type with
+                          | IRTLoop lt when lt.Kind = LKMethod && lt.ArrayTypes.Length = nParams ->
+                              let hs = lt.ArrayTypes |> List.map (fun t ->
+                                  match IR.stripUnits (env.Subst.Resolve t) with
+                                  | ArrayElem at ->
+                                      (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+                                       | IRTScalar (ETFloat32 | ETInt32 | ETComplex64 as et) -> Some et
+                                       | _ -> None)
+                                  | _ -> None)
+                              if hs |> List.exists Option.isSome then Some hs else None
+                          | _ -> None)
+                     | None -> None)
                 | _ -> None
             match operandsOf left, right.Kind with
+            | _, ExprKind.ExprLambda (parms, wc, body) when (storedLoopHints parms.Length).IsSome ->
+                Some (inferLambdaHinted env parms wc body [] (storedLoopHints parms.Length).Value)
             | Some operands, ExprKind.ExprLambda (parms, wc, body)
                     when parms.Length = operands.Length ->
                 let rTag (n: string) =
@@ -6703,7 +6777,18 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                          | None -> None)
                     | _ -> None
                 let seeds = operands |> List.map seedOf
-                if seeds |> List.exists Option.isSome then Some (inferLambdaSeeded env parms wc body seeds) else None
+                // G114: an operand the G110 seed does not reach (a rank >= 2
+                // array, an operand expression) HINTS its narrow element: the
+                // parameter stays open -- its body decides cell or row -- and
+                // only its literal partners take the hinted width.
+                let hints =
+                    List.zip operands seeds |> List.map (fun (o, s) ->
+                        match s with
+                        | Some _ -> None
+                        | None -> operandElemHint env o)
+                if seeds |> List.exists Option.isSome || hints |> List.exists Option.isSome then
+                    Some (inferLambdaHinted env parms wc body seeds hints)
+                else None
             | Some operands, ExprKind.ExprApp (func, args)
                     when not args.IsEmpty && not (args |> List.exists _.Kind.IsExprWildcard) ->
                 // A prefix partial used as a scalar kernel receives its
@@ -6822,6 +6907,39 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                       | _ -> false)
                  | _ -> false)
             | _ -> false
+        // G114: an OBJECT former's lambda kernel -- `object_for(lambda ..) <@>
+        // ops` or the implicit `(lambda ..) <@> ops` -- is hinted by its
+        // operands' narrow elements exactly as a method former's is (the
+        // seededKernel arm above): its literal partners take the operand
+        // width, the parameters stay open.
+        let objectKernelHints =
+            let kernelLam =
+                match left.Kind with
+                | ExprKind.ExprObjectFor ({ Kind = ExprKind.ExprLambda _ } as k) -> Some k
+                | ExprKind.ExprLambda _ -> Some left
+                | _ -> None
+            match kernelLam with
+            | Some ({ Kind = ExprKind.ExprLambda (parms, _, _) } as k) when not rightKernelShaped ->
+                let ops = match right.Kind with ExprKind.ExprTuple es -> es | _ -> [ right ]
+                if ops.Length = parms.Length then
+                    let hints = ops |> List.map (operandElemHint env)
+                    if hints |> List.exists Option.isSome then Some (k, hints) else None
+                else None
+            | _ -> None
+        match objectKernelHints with
+        | Some (k, hints) ->
+            let kernelTyped () =
+                match k.Kind with
+                | ExprKind.ExprLambda (parms, wc, body) ->
+                    if k.Span.StartLine > 0 then setCurrentExprSpan k.Span
+                    inferLambdaHinted env parms wc body [] hints
+                    |> Result.map (fun te ->
+                        if te.Span.StartLine = 0 && k.Span.StartLine > 0 then { te with Span = k.Span } else te)
+                | _ -> inferExpr env k
+            inferObjectForCore env k (Some kernelTyped)
+            |> Result.map (stampSynthSpan left)
+            |> Result.bind applyWith
+        | None ->
         match left.Kind with
         | ExprKind.ExprMethodFor arrays when polyNamedKernelRight && not arrays.IsEmpty ->
             let operand =
@@ -9590,6 +9708,42 @@ and functorMapInheritError (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr)
 /// Returns None when `kernelExpr` is not a bare function reference -- callers
 /// then fall back to their ordinary `inferExpr env kernelExpr`. Gated to
 /// kernel positions only, so bare function VALUES elsewhere are unaffected.
+/// G114: the NARROW element (Float32 / Int32 / Complex64) a map operand
+/// expression delivers, read syntactically WITHOUT typing it (the operand is
+/// typed after its kernel): a named array (any rank) or scalar, elementwise
+/// `+ - * /` and negation of such leaves and literals, every non-literal
+/// leaf the same element. Anything else (a call, a mixed width) is None, so
+/// the kernel parameter keeps today's wide literal partners. A hint only, so
+/// a wrong guess cannot change a shape: the parameter stays open.
+and operandElemHint (env: TypeEnv) (e: Expr) : ElemType option =
+    // Some (Some et): an operand of element et; Some None: a literal.
+    let rec guess (fuel: int) (e: Expr) : ElemType option option =
+        if fuel <= 0 then None else
+        match e.Kind with
+        | ExprKind.ExprLit (LitInt _ | LitFloat _) -> Some None
+        | ExprKind.ExprVar v ->
+            (match lookupVar v env with
+             | Some vi ->
+                 let elemOf (t: IRType) =
+                     match IR.stripUnits (env.Subst.Resolve t) with
+                     | IRTScalar et when litClassOf et >= 0 -> Some (Some et)
+                     | _ -> None
+                 (match IR.stripUnits (env.Subst.Resolve vi.Type) with
+                  | ArrayElem at -> elemOf at.ElemType
+                  | t -> elemOf t)
+             | None -> None)
+        | ExprKind.ExprUnaryOp (OpNeg, x) -> guess (fuel - 1) x
+        | ExprKind.ExprBinOp (Elementwise, (OpAdd | OpSub | OpMul | OpDiv), l, r) ->
+            (match guess (fuel - 1) l, guess (fuel - 1) r with
+             | Some (Some a), Some (Some b) when a = b -> Some (Some a)
+             | Some (Some a), Some None | Some None, Some (Some a) -> Some (Some a)
+             | Some None, Some None -> Some None
+             | _ -> None)
+        | _ -> None
+    match guess 32 e with
+    | Some (Some (ETFloat32 | ETInt32 | ETComplex64 as et)) -> Some et
+    | _ -> None
+
 and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<TypedExpr> option =
     match kernelExpr.Kind with
     // A MODULE-QUALIFIED named function (`A.f`, `U.f` after `import A as U`)
@@ -13107,6 +13261,17 @@ and inferLambdaSeeded env parms whereClause body (seeds: IRType option list) : T
 /// no variable at all -- it became the nominal type `T` and the parameter with
 /// it (BL3001 "declared T but the argument is Float64").
 and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retAnnot: TypeExpr option) : TypeResult<TypedExpr> =
+    inferLambdaFullHinted env parms whereClause body seeds [] retAnnot
+
+/// `inferLambdaSeeded` plus ELEMENT HINTS (gap G114): by position, the
+/// element a still-unseeded parameter's map operand delivers. The parameter
+/// stays an open variable (its body decides whether it receives cells or
+/// rows); the hint only fixes the width of its literal partners
+/// (TypeCheckSupport.adaptLiteralOperands).
+and inferLambdaHinted env parms whereClause body (seeds: IRType option list) (hints: ElemType option list) : TypeResult<TypedExpr> =
+    inferLambdaFullHinted env parms whereClause body seeds hints None
+
+and inferLambdaFullHinted env parms whereClause body (seeds: IRType option list) (hints: ElemType option list) (retAnnot: TypeExpr option) : TypeResult<TypedExpr> =
     let scopeEnv = enterCallableBody env
     // `repro` rides the emitted function boundary (noinline + contraction-off
     // attribute; call form everywhere) -- a lambda kernel is textually inlined
@@ -13145,7 +13310,12 @@ and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retA
                          let v = env.Subst.Fresh()
                          (match v with IRTInfer id -> env.Subst.MarkPolymorphic id | _ -> ())
                          v
-                     | _ -> env.Subst.Fresh()  // Infer from usage
+                     | _ ->
+                         let v = env.Subst.Fresh()  // Infer from usage
+                         (match v, List.tryItem i hints with
+                          | IRTInfer id, Some (Some h) -> env.Subst.SetElemHint(id, h)
+                          | _ -> ())
+                         v
         // WIDTH SCHEMA (docs/plan-tuples-vs-arg-packs.md 6c): record the
         // WRITTEN `Tuple<k>` width before the annotation is thrown away by
         // lowering. Keyed by binder id, so the matcher at buildApplyInfo reads
@@ -17026,10 +17196,18 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
         Ok (mkTyped (TExprMethodFor info) loopTy))
 
 and inferObjectFor env kernel : TypeResult<TypedExpr> =
+    inferObjectForCore env kernel None
+
+/// `inferObjectFor` with an optional override that types the kernel (G114:
+/// a lambda kernel hinted by the operands of its `<@>` site).
+and inferObjectForCore env kernel (typeKernel: (unit -> TypeResult<TypedExpr>) option) : TypeResult<TypedExpr> =
     // A bare named-function reference used as an object_for kernel is
     // eta-expanded to lambda(__k..) -> f(__k..), so `object_for(lkm) <@> ...`
     // works symmetrically with `method_for(...) <@> lkm`.
     let kernelResult =
+        match typeKernel with
+        | Some f -> f ()
+        | None ->
         match etaExpandFunctionKernel env kernel with
         | Some r -> r
         | None -> inferExpr env kernel

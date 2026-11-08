@@ -36,6 +36,7 @@ COLUMNS = [
     "ratio_ref", "ratio", "ci_lo", "ci_hi", "verdict",
     "block_class", "block_flags", "ctl_compute_median_s", "ctl_memory_median_s", "rounds",
     "fold_form", "parallelism", "exe_sha", "build_wall_s", "checksum", "note",
+    "peak_commit_mb",   # added 2026-11-08 (round 4 wave 5, lane E): max Win32 PeakPagefileUsage over all samples
 ]
 KEY = ("bundle", "kernel", "regime", "size", "arm")
 
@@ -123,6 +124,7 @@ def rows_of(session_path: Path) -> list[dict]:
                 "fold_form": _evidence(build, "fold_form"), "parallelism": _evidence(build, "parallelism"),
                 "exe_sha": str(build.get("exe_sha256", ""))[:16], "build_wall_s": build.get("build_wall_s", ""),
                 "checksum": checksum, "note": a.get("note", ""),
+                "peak_commit_mb": round(max(pcs) / 1048576, 2) if (pcs := [s.get("peak_commit_bytes") for s in samples if isinstance(s.get("peak_commit_bytes"), (int, float))]) else "",
             })
             out.append(row)
     return out
@@ -178,7 +180,8 @@ def cmd_sql(query: str) -> None:
     rows = load()
     con = sqlite3.connect(":memory:")
     numeric = {"n", "min_s", "median_s", "q1_s", "q3_s", "iqr_s", "mean_s", "max_s", "trend", "peak_ws_mb", "ratio",
-               "ci_lo", "ci_hi", "ctl_compute_median_s", "ctl_memory_median_s", "rounds", "build_wall_s"}
+               "ci_lo", "ci_hi", "ctl_compute_median_s", "ctl_memory_median_s", "rounds", "build_wall_s",
+               "peak_commit_mb"}
     cols = ", ".join(f'"{c}" {"REAL" if c in numeric else "TEXT"}' for c in COLUMNS)
     con.execute(f"CREATE TABLE stats ({cols})")
     def conv(c, v):

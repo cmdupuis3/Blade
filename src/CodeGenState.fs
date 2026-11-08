@@ -1745,6 +1745,18 @@ let internal recReplayPlansStorage = System.Threading.AsyncLocal<RecReplayPlan l
 let internal recReplayActiveStorage = System.Threading.AsyncLocal<(RecReplayPlan * Map<int64, string>) option ref>()
 let recReplayPlansCell () = asyncCell recReplayPlansStorage []
 let recReplayActiveCell () = asyncCell recReplayActiveStorage None
+/// The LU column-major companions THIS program emitted (gap G109, round 4
+/// wave 4 lane K; Blade.Optimize.LuCompanionTable admits, the C++ emitter
+/// builds): factor binding id -> the C++ name of the `blade_lu_cm` object
+/// kept beside (LU, piv). Set only when the factor's ROUTED arm emitted it,
+/// so a solve reads a companion that exists.
+let internal luCompanionStorage = System.Threading.AsyncLocal<Map<IRId, string> ref>()
+let private luCompanionCell () = asyncCell luCompanionStorage Map.empty
+let noteLuCompanion (factorId: IRId) (cppName: string) : unit =
+    let cell = luCompanionCell ()
+    cell.Value <- Map.add factorId cppName cell.Value
+let luCompanionOf (factorId: IRId) : string option =
+    Map.tryFind factorId (luCompanionCell ()).Value
 
 /// Per-program reset, beside the other codegen channels (fresh refs: see
 /// `freshCell`).
@@ -1783,6 +1795,7 @@ let resetProgramStateCells () : unit =
     freshCell orbitScatterUsedStorage false
     freshCell cudaLinalgUsedStorage false
     freshCell lapackUsedStorage false
+    freshCell luCompanionStorage Map.empty
     freshCell ompApiUsedStorage false
     freshCell mpiProgramOnStorage false
     freshCell userNameRenamesStorage Map.empty

@@ -1,0 +1,13 @@
+// TEST: a fused fold's kernel capture of a deferred map is forced before its first cell (aborts)
+// Gap G115 (round 4 wave 5 lane c; formalism 10.2): the kernel reads `g` only
+// at cells past 4 and fails itself at cell 2 (`100 / (i - 2)`); `g` fails at
+// its cell 7. The capture is forced when the kernel is formed, before the
+// fold's first cell, so the failure is `g`'s (line 8 once the harness drops the
+// TEST line), in every lane.
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = reduce(method_for(range<I>) <@> lambda(i) -> if i > 4 then g(i) else 100 / (i - 2), (+))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:8

@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "name": "pm51_gather",
+  "group": "M",
+  "title": "PM51 gather locality control: sequential / permutation / clustered / repeated index streams",
+  "sizes": {
+    "smoke": {
+      "n": 20011,
+      "k": 3,
+      "kind": 2
+    },
+    "full": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 1
+    },
+    "d1": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 1
+    },
+    "c1": {
+      "n": 1200007,
+      "k": 51,
+      "kind": 1
+    },
+    "d2": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 2
+    },
+    "c2": {
+      "n": 1200007,
+      "k": 51,
+      "kind": 2
+    },
+    "d3": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 3
+    },
+    "c3": {
+      "n": 1200007,
+      "k": 51,
+      "kind": 3
+    },
+    "d4": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 4
+    },
+    "c4": {
+      "n": 1200007,
+      "k": 51,
+      "kind": 4
+    },
+    "d5": {
+      "n": 6000011,
+      "k": 11,
+      "kind": 5
+    },
+    "c5": {
+      "n": 1200007,
+      "k": 51,
+      "kind": 5
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "d<kind> = DRAM tier (n = 6,000,011: y 48 MB + idx 48 MB), c<kind> = L3-sized y (n = 1,200,007: 9.6 MB + 9.6 MB idx); per repetition n index reads and n gathered reads.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py"
+}

@@ -1,0 +1,25 @@
+// TEST: Math lu: many right-hand sides against one factor, bitwise the solve
+// Gap G109 (round 4 wave 4, lane K; plan rule `lu-companion v1`). On the
+// LAPACK route the factor keeps ?getrf's column-major scratch (the companion)
+// and every top-level solve hands it to ?getrs instead of rebuilding it from
+// the row-major value per right-hand side. The rebuild was an exact copy, so
+// the bits are the ones `m.solve` (?gesv = ?getrf + ?getrs) computes: the
+// counts below are cells that DIFFER (0 = bitwise equal), in the default
+// native build and under BLADE_BLAS=1 alike. A 7 x 7 matrix (not a power of
+// two), diagonally dominant; the chain re-solves its own answers, plain and
+// transposed, so every solve reads the factor (the transposed solve has no
+// bitwise reference: `m.solve` of the transpose is another factorization).
+import math as m
+type N = Idx<7>
+let A: Array<Float64 like N, N> = method_for(range<N>, range<N>) <@> lambda(i, j) -> if i == j then 2.0 + Float64(i % 3) / 4.0 else cos(Float64(3 * i + 5 * j)) / 7.0 |> compute
+let b: Array<Float64 like N> = method_for(range<N>) <@> lambda(i) -> 1.0 + Float64(i) / 8.0 |> compute
+let f = m.lu(A)
+let x1: Array<Float64 like N> = m.lu_solve(f, b)
+let x2: Array<Float64 like N> = m.lu_solve_t(f, x1)
+let x3: Array<Float64 like N> = m.lu_solve(f, x2)
+let r1 = m.solve(A, b)
+let r3 = m.solve(A, x2)
+let d1 = reduce(method_for(zip(x1, r1)) <@> lambda(p, q) -> if p == q then 0 else 1, (+))
+let d3 = reduce(method_for(zip(x3, r3)) <@> lambda(p, q) -> if p == q then 0 else 1, (+))
+// EXPECT: d1 = 0
+// EXPECT: d3 = 0

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "name": "pm56_member_small",
+  "group": "M",
+  "title": "PM56 membership representation: linear / bitmap / hash / scan",
+  "sizes": {
+    "smoke": {
+      "n": 2003,
+      "m": 101,
+      "gap": 3
+    },
+    "full": {
+      "n": 200003,
+      "m": 11,
+      "gap": 3
+    },
+    "m11g3": {
+      "n": 200003,
+      "m": 11,
+      "gap": 3
+    },
+    "m1001g3": {
+      "n": 200003,
+      "m": 1001,
+      "gap": 3
+    },
+    "m1001g1009": {
+      "n": 200003,
+      "m": 1001,
+      "gap": 1009
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "m<m>g<gap>: set size m, key gap (span m * gap; the chooser takes linear for m <= 16, bitmap when the span is <= max(64 m, 4096), else hash).",
+  "arms": [
+    "blade-cpp",
+    "blade-cpp@off",
+    "blade-cpp@linear",
+    "blade-cpp@bitmap",
+    "blade-cpp@hash",
+    "blade-llvm"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
+  "variants": {
+    "off": {
+      "compile": {
+        "BLADE_MEMBER_HOIST": "0"
+      }
+    },
+    "linear": {
+      "compile": {
+        "BLADE_MEMBER_HOIST": "linear"
+      }
+    },
+    "bitmap": {
+      "compile": {
+        "BLADE_MEMBER_HOIST": "bitmap"
+      }
+    },
+    "hash": {
+      "compile": {
+        "BLADE_MEMBER_HOIST": "hash"
+      }
+    }
+  }
+}

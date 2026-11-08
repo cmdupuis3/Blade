@@ -971,7 +971,7 @@ let private cmpValues (a: Value) (b: Value) : int =
     | VInt x, VInt y -> compare x y
     | VInt32 x, VInt32 y -> compare x y
     | VBool x, VBool y -> compare x y
-    | VString x, VString y -> System.String.CompareOrdinal(x, y)
+    | VString x, VString y -> N.codePointCompare x y
     | _ -> compare (toF64v a) (toF64v b)
 
 let private eqValues (a: Value) (b: Value) : bool = cmpValues a b = 0

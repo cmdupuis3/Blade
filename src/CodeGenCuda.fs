@@ -2703,6 +2703,11 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                   | _ -> None)
                              | _ -> None)
                         | _ -> None
+                    // stream-group-fold v2 (D2 / G143): a LATER peel was folded
+                    // in the first peel's run loop (its array declared there)
+                    if (match streamRun with Some (p, _, _, _, _) -> p.ExtraDone.Value.Contains name | None -> false) then
+                        Some [ $"{ind}// `{name}`: folded in the first peel's run loop (stream-group-fold v2) -- declared there" ]
+                    else
                     // Elementwise-vs-consuming dispatch, keyed on the OUTPUT
                     // type -- the authoritative signal, because TypeCheck
                     // already made this exact decision (paramUsedAsArray):
@@ -2977,6 +2982,39 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             match info.OutputType with
                             | ArrayElem a -> arrayRank a
                             | _ -> 1
+                        // stream-group-fold v2 (D2 / G143 item 1): the LATER peels
+                        // of the same group fold each run in THIS loop, in peel
+                        // order, from the same window; each keeps its own text
+                        // (its row parameter bound to the same window view)
+                        let extraPeels : (string * string * string) list =
+                            match streamRun with
+                            | Some (plan, _, _, _, _) when not (outputHasDenseTrailing && outRank >= 2) ->
+                                plan.Extra |> List.choose (fun (bJ, infoJ) ->
+                                    match resolveCallable infoJ.Kernel with
+                                    | Some cJ when cJ.Params.Length = 1 ->
+                                        let pJ = cJ.Params.[0]
+                                        let nameJ = if bJ.Name.StartsWith "_(" then $"__tup_{bJ.Id}" else sanitizeCppName bJ.Name
+                                        let outJ =
+                                            match infoJ.OutputType with
+                                            | ArrayElem a -> elemTypeToCpp a.ElemType
+                                            | IRTScalar _ as ty -> elemTypeToCpp ty
+                                            | _ -> outElemStr
+                                        let nameMapJ = withCaptureNames EnclosingNamesWin cJ.Captures (Map.add pJ.VarId subName ctx.VarNames)
+                                        Some (nameJ, outJ, exprToCpp nameMapJ cJ.Body)
+                                    | _ -> None)
+                            | _ -> []
+                        let extraBroken =
+                            match streamRun with
+                            | Some (plan, _, _, _, _) -> extraPeels.Length <> plan.Extra.Length
+                            | None -> false
+                        if extraBroken then
+                            Some [ refusalErrorLine ind "stream-group-fold: a later peel of the same group could not be emitted in the first peel's run loop (internal)" ]
+                        else
+                        (match streamRun with
+                         | Some (plan, _, _, _, _) ->
+                             plan.ExtraDone.Value <- extraPeels |> List.map (fun (n, _, _) -> n) |> Set.ofList
+                             for (nameJ, _, _) in extraPeels do registerAlloc (RawArrayData (nameJ, None, None))
+                         | None -> ())
                         let code =
                             if streamRun.IsSome && outputHasDenseTrailing && outRank >= 2 then
                                 [ refusalErrorLine ind "stream-group-fold: an array-valued row peel over a streamed grouping is not streamed (v1 folds rows to scalars)" ]
@@ -3006,6 +3044,9 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                             // ownership rule beside the pool's.
                             @ fst (emitExtentsTable ind (name + "_extents") 1 [(ngroupsExpr, false)])
                             @ [ $$"""{{ind}}Array<{{outElemStr}}, 1> {{name}} = { new {{outElemStr}}[{{ngroupsExpr}}], {{name}}_extents };""" ]
+                            @ (extraPeels |> List.collect (fun (nameJ, outJ, _) ->
+                                fst (emitExtentsTable ind (nameJ + "_extents") 1 [(ngroupsExpr, false)])
+                                @ [ $$"""{{ind}}Array<{{outJ}}, 1> {{nameJ}} = { new {{outJ}}[{{ngroupsExpr}}], {{nameJ}}_extents };""" ]))
                             // Row-disjoint by construction, so no data clause is
                             // needed and adding one would be wrong: `subDeclLines`
                             // are emitted INSIDE the body (C++ block scope already
@@ -3024,8 +3065,9 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                                | None -> peelRowPragma peelOmpRequested peelRowLicensed (peelStreamBlocker ()) ind)
                             @ [ $$"""{{ind}}for (size_t __g = 0; __g < {{ngroupsExpr}}; __g++) {""" ]
                             @ subDeclLines
-                            @ [ $"{ind}    {name}[__g] = {bodyStr};"
-                                $"{ind}}}" ]
+                            @ [ $"{ind}    {name}[__g] = {bodyStr};" ]
+                            @ (extraPeels |> List.map (fun (nameJ, _, bodyJ) -> $"{ind}    {nameJ}[__g] = {bodyJ};"))
+                            @ [ $"{ind}}}" ]
                             @ (match streamRun with Some _ -> [ $"{ind}delete[] {winName};" ] | None -> [])
                         // Raw `new T[n]` backing (not allocate<>). The extents
                         // table is deliberately unowned here (`None`) for the

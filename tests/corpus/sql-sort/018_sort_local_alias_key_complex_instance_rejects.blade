@@ -1,0 +1,13 @@
+// TEST: a generic sort whose key, named through a local alias, turns complex at the instance is refused (rejects)
+// Gap G126 (round 4 wave 5 lane c; Codex review round 2): the post-
+// monomorphization check resolves a key named through a local `let` alias to
+// its callable, so the complex result at the instance is BL3033 here too.
+// ERROR: BL3033
+// REJECT-AT: lower
+function ordered(a: T^1) = {
+    let key = lambda(i: Int64) -> a(0)
+    let xs: Array<Int64 like Idx<2>> = [2, 1]
+    sort(xs, key)
+}
+let z: Array<Complex128 like Idx<2>> = [complex(2.0, 0.0), complex(1.0, 0.0)]
+let result = ordered(z)

@@ -1,0 +1,11 @@
+// TEST: sort over a compound whose one record has coordinate rank two sorts its scalar cells
+// Gap G126 (round 4 wave 5 lane c; Codex review round 1): the refusal of a
+// non-plain record is for RANGE operands (whose cells are index tuples); a
+// stored compound over a rank-2 mask has scalar cells and sorts its compact
+// buffer, as before. Present cells in lex order: 4.0, 3.0, 2.0.
+type R = Idx<2>
+type C = Idx<2>
+let a: Array<Float64 like R, C> = [[4.0, 1.0], [3.0, 2.0]]
+let kept = compound(a, mask(a, lambda(x) -> x > 1.5))
+let ordered = sort(kept, lambda(x) -> x)
+// EXPECT: ordered = [2.0, 3.0, 4.0]

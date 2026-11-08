@@ -3168,6 +3168,174 @@ only a FULL fold is), ST16's T (the streamed sink takes rank-1 map producers), S
 over the leading mode). F3's in-place mode product saves one tensor (6.6 MB) but measured ~10% slower in wall time
 (nested-pointer cell stores), so it ships OPT-IN (`BLADE_MODE_PRODUCT_DEST=1`), the flat form staying the default.
 
+## 20. Round 4 wave 5, lane E (2026-11-08) -- measurement and policy controls (PM49-PM56, PM08, ST05)
+
+**Method.** Every number below is a row of `bench/results/stats.csv`, labels `r4w5-pm49`, `r4w5-pm50`, `r4w5-pm51`,
+`r4w5-pm53`, `r4w5-pm55`, `r4w5-pm56`, `r4w5-pm08`, `r4w5-st05` (bundles under `C:\bt_r2ab\r4w5-<item>`; 53 bench
+sessions, 66 kernel blocks, 340 rows, 0 failures). `run.py bench` (harness 2.2 plus the knob-variant arms of `harness/README.md`), one
+session per (kernel set, size): arms interleaved in seeded random rounds with both drift controls, n = 11 (21 for
+memory-bound full-size blocks; mt8 7), odd sizes only. Blade at `db3a297d` (the integration tip f6a88da9 plus this
+lane's bench files; no compiler change), Ryzen 7 5800HS (32 KB L1d, 512 KB L2 per core, 16 MB L3), AC, max processor
+state 100%. Serial arms are pinned to one logical CPU. "net" = median(arm) - median(its input-only twin) (a
+difference of medians, no interval); "GB/s" = the kernel's LOGICAL stream bytes / net (a model of useful traffic,
+not measured DRAM traffic). Peak WS / commit = process lifetime high water (max over all samples, MiB). 30 of the
+66 blocks carry a drift flag (`block_class = indicative` in the rows: a control or twin moved > 5% between halves);
+no verdict is drawn here, the medians are reported as measured. The control kernels (Blade-only, group M, pins by
+`validation/ref_controls.py`) are `bench/kernels/pm49_*` ... `st05_*`; each source states its contract.
+
+**PM49 streaming tiers** (`pm49_{copy,triad}{64,32}`: a block-body `let rec` ring -- rec-window + slice-write fusion,
+every row stored, 2 rows resident -- over n cells for k - 1 steps; 30.0e6 cell updates per run at every tier):
+
+| kernel | tier (n) | C++ net ms | GB/s | LLVM net ms | GB/s |
+|---|---|---|---|---|---|
+| triad64 (3 x 8 B) | l1 (1,201) | 2.99 | 241 | 2.92 | 247 |
+| | l2 (12,007) | 5.78 | 125 | 5.72 | 126 |
+| | l3 (300,007) | 8.53 | 84 | 8.39 | 86 |
+| | full (1,500,007) | 34.53 | 21 | 40.57 | 18 |
+| copy64 (2 x 8 B) | l1 / l2 / l3 / full | 3.15 / 4.28 / 6.31 / 27.72 | 153 / 112 / 76 / 17 | 3.08 / 4.07 / 6.51 / 30.86 | 156 / 118 / 74 / 16 |
+| triad32 (3 x 4 B) | l1 / l2 / l3 / full | 1.52 / 2.91 / 4.31 / 13.14 | 237 / 124 / 84 / 27 | 1.49 / 2.89 / 4.48 / 15.05 | 242 / 125 / 80 / 24 |
+| copy32 (2 x 4 B) | l1 / l2 / l3 / full | 1.55 / 2.08 / 2.93 / 7.28 | 155 / 115 / 82 / 33 | 1.55 / 2.06 / 3.20 / 9.06 | 155 / 117 / 75 / 26 |
+
+Readings: the two lanes agree within ~5% in L1-L3; at the DRAM tier the LLVM lane is 12-24% slower on all four
+kernels. The 32-bit "full" size is NOT a DRAM tier (its ring + inputs, 18 MB / 12 MB, sit near the 16 MB L3), so its
+GB/s are not comparable with the 64-bit full row. The 8-byte DRAM triad sustains ~21 GB/s of logical traffic.
+
+**PM50 strided traversal** (`pm50_stride`: an r x s row-major Float64 array walked column by column, k passes;
+ns per element read, net):
+
+| stride s | DRAM (r s ~ 6.0e6, 48 MB) C++ / LLVM | L3 (r s ~ 1.2e6, 9.6 MB) C++ / LLVM |
+|---|---|---|
+| 1 | 0.58 / 0.26 | 0.51 / 0.09 |
+| 3 | 1.23 / 0.86 | -- |
+| 7 / 8 / 9 | 2.07 / 2.17 / 2.46  --  1.78 / 1.89 / 2.47 | 0.68 / 0.75 / --  --  0.54 / 0.60 / -- |
+| 17 | 3.41 / 2.83 | 1.07 / 0.68 |
+| 511 / 512 / 513 | 2.07 / 6.83 / 2.04  --  1.44 / 7.11 / 1.37 | -- / 6.07 / --  --  -- / 6.11 / -- |
+
+Readings: stride 512 doubles (4 KiB) is 3.3-5x slower than its odd neighbours 511 / 513 in both lanes and at BOTH
+tiers -- at the L3 size it is as slow as at DRAM (6.1 ns), so it is a set/page aliasing effect, not bandwidth.
+Stride 8 (one line) is within ~10% of 7 and 9. The C++ lane is slower at every stride but 512 / 9 and its peak WS is
+higher at small s (s = 1: 96.8 vs 50.2 MiB, twin 27.7 vs 13.9 ms): its rank-2 storage carries a row-pointer table
+(8 B per row, read once per element of a column walk), so at s = 1 the table is as large as the data (gap G183).
+
+**PM51 gather locality** (`pm51_gather`: n index reads + n gathered reads per pass, identical index sequences in
+both arms; ns per gather, net):
+
+| index stream | DRAM (n = 6,000,011) C++ / LLVM | L3-sized y (n = 1,200,007) C++ / LLVM |
+|---|---|---|
+| 1 sequential | 0.63 / 1.06 | 0.51 / 1.05 |
+| 2 full permutation | 6.37 / 5.71 | 4.40 / 3.36 |
+| 3 permutation inside 1021-blocks | 1.04 / 1.25 | 0.84 / 1.20 |
+| 4 random with replacement | 5.89 / 5.17 | 1.71 / 1.38 |
+| 5 with replacement inside 1021-blocks | 1.13 / 1.40 | 0.97 / 1.26 |
+
+Readings: a scattered gather costs ~6 ns per element at DRAM size (10x the sequential stream); clustering the same
+permutation into 8 KiB blocks brings it to 1.0-1.3 ns. Random-with-replacement equals the permutation at DRAM size
+but is 2.6x cheaper than it at the L3 size (fewer distinct lines). The LLVM lane is ~1.7-2x slower on the sequential
+and clustered gathers and ~10-25% faster on the scattered ones.
+
+**PM53 worker saturation** (`pm53_triad_omp`, mt8 regime, ONE block, arms differ only in OMP_NUM_THREADS; the
+step's `where omp(a: 1)` keeps a materialized step pool + a copy into the ring -- rec-step-parallel and slice-write
+fusion both decline -- so a step moves 5 logical streams):
+
+| size | P = 1 | P = 3 | P = 5 | P = 8 (net ms; peak WS MiB) |
+|---|---|---|---|---|
+| full (n = 1,500,007) | 103.9 | 90.4 | 87.5 | 96.2 (73.8-74.1 for all P) |
+| l3 (n = 300,007) | 18.1 | 17.0 | 16.6 | 17.2 (18.8-19.2) |
+
+Readings: concurrency buys at most ~16% (P = 5) and P = 8 is slower than P = 5; the blocks are indicative (drift).
+Even the best threaded form is 2.5x slower than the SERIAL fused triad on the same recurrence (PM49 triad64 full
+34.5 ms, 3 streams, no step pool): the omp request costs the fused in-place form (gap G182). Retained bytes and
+per-worker workspace were not measured (no `BLADE_WORKSPACE_CENSUS` arm in this session).
+
+**PM54 page touch** (`run.py diagnose-memory --bytes 64000007`, bundle
+`C:\bt_r2ab\r4w5-pm54\session-20261108-102623-590015`, not a bench session, so NOT in stats.csv): committing 64 MB
+raised process commit by 64.1 MB with no resident change; a sparse touch of 920 pages (1 per 17) raised resident by
+3.8 MB; a dense touch raised resident by 64.0 MB (15,626 extra faults); release returned commit and resident to
+baseline while the lifetime peaks stayed. In the bench rows the same gap shows as peak commit < peak WS by ~3.8-4.2
+MiB in every arm (the harness's process baseline), except where an arm commits ahead of touch (PM56 `gather`, below).
+
+**PM55 fixed budget** (`pm49_triad64` ladder, same task and contract; peak WS / peak commit MiB, all validated):
+
+| n | C++ | LLVM | fits 64 MiB (C++ / LLVM) | fits 128 MiB |
+|---|---|---|---|---|
+| 1,500,007 | 62.1 / 58.3 | 72.6 / 69.4 | yes / no | yes / yes |
+| 2,500,009 | 100.2 / 96.6 | 118.4 / 115.3 | no / no | yes / yes |
+| 3,500,017 | 138.4 / 134.8 | 164.2 / 161.1 | no / no | no / no |
+| 4,500,007 / 6,000,011 | 176.5 / 233.8 | 210.0 / 278.6 | no | no |
+
+The budget metric is the process peak WS measured after the fact; nothing enforces it. The required payload is
+5 n-cell arrays (x, y, two ring rows, the read snapshot = 40 n bytes = 57.2 MiB at n = 1.5e6): the C++ lane holds it
+plus the ~5 MiB process baseline, the LLVM lane one more n-cell array at every n (+10.5 to +44.9 MiB; noted under G183).
+
+**PM56 mask / membership representation.** Selection (`pm56_mask`, n = 3,000,017 Int64 keys, net ms; peak WS /
+commit MiB):
+
+| selectivity, key runs | v2 default (positions elided) | b4 (positions built) | gather (mask-site) | LLVM |
+|---|---|---|---|---|
+| 1 %, runs 1 | 2.55 (31.4 / 27.3) | 2.54 (31.7 / 27.5) | 2.75 (31.5 / 50.0) | 4.32 |
+| 1 %, runs 1001 | 3.55 | 3.73 | 2.45 (commit 49.9) | 4.02 |
+| 50 %, runs 1 | 7.49 (53.9 / 49.7) | 9.82 (65.3 / 61.2) | 6.39 (53.9 / 61.2) | 8.25 |
+| 50 %, runs 1001 | 7.66 | 10.11 | 6.57 | 8.18 |
+| 99 %, runs 1 | 11.72 (76.3 / 72.2) | 15.88 (99.0 / 94.9) | 10.99 (76.4 / 72.5) | 12.95 |
+| 99 %, runs 1001 | 12.48 | 16.04 | 11.35 | 13.40 |
+
+Membership (`pm56_member_*`: `mask(probe, contains(set, .))`, n probes; net ms; the plain arm = the chooser):
+
+| set m, key gap (chooser's pick) | chooser | linear | bitmap | hash | off (scan) | LLVM |
+|---|---|---|---|---|---|---|
+| 11, 3 (linear), n = 200,003 | 2.12 | 2.17 | 1.41 | 1.69 | 1.07 | 1.36 |
+| 1001, 3 (bitmap) | 1.44 | 14.46 | 1.43 | 2.15 | 12.99 | 0.45 |
+| 1001, 1009 (hash: span 1.0e6 > 64 m) | 2.20 | 15.02 | 1.37 | 2.17 | 13.93 | 1.75 |
+| 100003, 3 (bitmap), n = 2,000,003 | 14.37 | -- | 14.50 | 26.62 | -- | 5.10 |
+| 100003, 1009 (hash; bitmap over its cap builds a hash) | 20.26 | -- | 20.28 | 20.14 | -- | 14.06 |
+
+Readings: building the kept positions (b4) costs 2-4 ms and 11-23 MiB at 50-99 % selectivity; the opt-in mask-site
+gather is the fastest selection form at 50 % and 99 % (0.7-1.1 ms under v2) and at 1 % with long runs, but commits
+~23 MiB more than it touches at 1 % (n + 1 private cells per buffer, committed up front). For membership the bitmap
+was never slower than the chooser's pick and was faster where the chooser picked linear (m = 11: 1.41 vs 2.12 ms --
+there even the as-written scan, 1.07 ms, beat the hoisted linear form) or hash with a span within the 2^26-bit cap
+(m = 1001, gap 1009: 1.37 vs 2.20 ms). Run-length encoding is not built (no arm). Policy rows: gap G185.
+
+**PM08 allocation churn** (`pm08_churn`: per repetition a fresh m-cell and a fresh 513-cell array, each folded and
+released; m * k ~ 1e8 cells; median ms; peak WS MiB):
+
+| m (bytes) | C++ default | C++ `BLADE_POOL_RETAIN=1` | LLVM default | LLVM retain | peak WS C++ / LLVM |
+|---|---|---|---|---|---|
+| 1,001 (8 KB, below the band) | 70.8 | 70.7 | 483.7 | 487.1 | 5.4 / 1220.8 |
+| 8,191 (64 KB) | 42.5 | 46.1 | 340.4 | 339.2 | 5.3 / 821.3 |
+| 131,071 (1 MB) | 36.1 | 36.1 | 172.9 | 176.1 | 6.0 / 773.8 |
+| 500,009 (4.0 MB) | 37.8 | 35.9 | 165.6 | 165.2 | 8.8 / 764.8 |
+| 786,431 (6.3 MB, above 4 MB) | 146.6 | 37.6 | 172.6 | 170.7 | 10.9-11.0 / 767.6 |
+| 3,000,017 (24 MB) | 187.4 | 85.2 | 172.9 | 170.5 | 27.8-27.9 / 760.1 |
+| 9,000,011 (72 MB, above 64 MB) | 192.7 | 198.2 | 165.7 | 166.3 | 73.6 / 759.9 |
+
+Readings: in the C++ lane the retention arm is time-neutral inside the 16 KiB-4 MiB band and 2.2-3.9x faster for the
+6.3 MB and 24 MB temporaries, with the SAME peak WS (one block is reused, not accumulated); above its 64 MB block it
+changes nothing. The LLVM lane's peak WS is 760-1221 MiB at every m: it does not release these pools (gap G184), so
+its times measure page faulting, not churn, and its retention arm changes nothing.
+
+**ST05 frontier** (`st05_cheap` p = 2 v + 1, `st05_costly` p = exp(sin v) cos v; n = 3,000,017; net ms / peak WS MiB):
+
+| arm (rules applied, from each arm's plan.txt) | cheap | costly |
+|---|---|---|
+| default | 0.21 / 51.0 (recompute v2 + one 3-leg traversal) | 39.13 / 73.6 (join producer recorded, p stored by main's inline copy) |
+| `share` (BLADE_RECOMPUTE=0) | 6.25 / 73.5 (join producer recorded; p stored, as costly) | 39.14 / 73.6 |
+| `nojoin` (no sibling join / join producer) | 3.22 / 51.0 (recompute, separate passes) | 41.50 / 73.6 (materialized) |
+| `materialize` (all three off) | 8.55 / 73.5 | 41.65 / 73.6 |
+| LLVM default | 0.25 / 50.2 | 37.93 / 72.6 |
+
+Readings: for the cheap producer the cost model's replay inside one traversal is both the fastest and the smallest
+(p never stored, -22.5 MiB); for the costly one every arm is within 6% in time (the libm calls dominate) and none
+saves p's 22.9 MiB: the join producer is recorded `applied` on `kernel`'s body, but the program runs the sibling-fold
+pass's inline copy of `kernel` in main, which materializes p (gap G186). The spool candidate of ST05 was not
+measured (its only built form, `BLADE_PRIVATE_SPOOL`, admits a streamed Zarr source, not this shape).
+
+**Policy summary (no default changed).** G182 (the omp request on a ringed recurrence step), G183 (C++ rank-2
+row-pointer table; LLVM extra resident array), G184 (LLVM lane does not release per-call pools in a top-level
+kernel lambda), G185 (defaults the controls question: pool block size, membership chooser thresholds, the compaction
+gather arm), G186 (join producer vs sibling-fold inlining). Not measured: per-worker retained bytes (PM53), cache /
+TLB counters (PM50), physical DRAM traffic (all), run-length mask encoding (PM56), the ST05 spool.
+
 ## 12. Decisions put to the user — BOTH DECIDED (2026-10-18)
 
 **Decisions:** (1) mt8 matched parallelism — option (A) below: every arm threads input

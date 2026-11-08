@@ -2053,13 +2053,26 @@ let private selectedTerminalRefusals () =
           [ "default_print", "BLADE_PRINT", "", "printed"
             "selected_output", "BLADE_PRINT", "result;y", "printed"
             "mask_output", "BLADE_PRINT", "result keep", "printed"
-            "default_licensed_graph", "BLADE_FP_REPRO", "0", "reproducible"
             "optimizer_off", "BLADE_COMPACTION_FUSION", "0", "disabled"
             "legacy_mirror", "BLADE_COMPACTION_FUSION", "b4", "disabled"
             "positions_elided_mirror", "BLADE_COMPACTION_FUSION", "unshared", "disabled" ] do
         let name = $"selected_terminal_declines_{suffix}"
         yield withSelectedTerminal (fun () -> withGate gate value (fun () ->
             decisionCase name selectedTerminalSrc "selected-terminal" (declinedMentioning why) why))
+      // G122 (round 4 wave 5): a LICENSED leg (a builtin `+` body, a `comm`
+      // kernel) keeps the repro-only rule in the default build ...
+      for suffix, src in
+          [ "default_licensed_graph", selectedTerminalSrc.Replace("lambda(a, b) -> a * 2.0 + b", "lambda(a, b) -> a + b")
+            "default_licensed_comm", selectedTerminalSrc.Replace("lambda(a, b) -> a * 2.0 + b", "lambda(a, b) where comm(a, b) -> a * b + 0.5") ] do
+        let name = $"selected_terminal_declines_{suffix}"
+        yield withSelectedTerminal (fun () -> withGate "BLADE_FP_REPRO" "0" (fun () ->
+            decisionCase name src "selected-terminal" (declinedMentioning "reproducible") "reproducible"))
+      // ... while an all-UNLICENSED leg set takes the guarded chain in the
+      // default build too: its stored fold is the same ascending chain.
+      yield withSelectedTerminal (fun () -> withGate "BLADE_FP_REPRO" "0" (fun () ->
+          decisionCase "selected_terminal_default_build_unlicensed_admitted" selectedTerminalSrc
+              "selected-terminal" (fun d -> d.Subject = "y" && applied d)
+              "an unlicensed leg keeps one association in every build"))
       // lowerTypeExpr erases the mask in this UNUSED alias to IRParam
       // ("compound", 0, IRTNat None). It has no surviving keep reference;
       // a real declared-index payload is checked independently below.
@@ -11085,6 +11098,21 @@ let private dcfMatVecDeferredSrc =
     + "let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0\n"
     + "let y = method_for(decompact(S, 0)) <@> lambda(row) -> prodsum(row, v) |> compute\n"
 
+// G123 (round 4 wave 5): the FUNCTION-BODY arm, opt-in (BLADE_DECOMPACT_FOLD=body).
+let private dcfBodySrc =
+    dcfHead
+    + "function rowsum(P: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {\n"
+    + "    reduce(decompact(P, 0), (+), 0.0)\n"
+    + "}\n"
+    + "let rows = rowsum(S)\n"
+let private dcfBodyTupleSrc =
+    dcfHead
+    + "function rowpair(P: Array<Float64 like SymIdx<2, I>>) = {\n"
+    + "    let y = reduce(decompact(P, 0), (+), 0.0)\n"
+    + "    (reduce(y, (+), 0.0), 1.0)\n"
+    + "}\n"
+    + "let rows = rowpair(S)\n"
+
 let private decompactRowFoldCases () : bool list =
     let dcf (d: Blade.Effects.Decision) = d.Subject = "rows"
     let mainAllocs (cpp: string) = System.Text.RegularExpressions.Regex.Matches(cpp, @"(?<!de)allocate<").Count
@@ -11141,6 +11169,17 @@ let private decompactRowFoldCases () : bool list =
           (fun d -> dcf d && (declinedMentioning "the seed is not a Float64 literal" d
                               || declinedMentioning "not the plain partial fold's row map" d))
           "declined: a seed naming a value (the minted row walk embeds only a literal seed; the partial fold's row kernel captures it)"
+      withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
+          decisionCase "decision_decompact_body_param_applied" dcfBodySrc "decompact-row-fold"
+              (fun d -> d.Subject = "rowsum" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "a parameter of `rowsum`"))
+              "applied under BLADE_DECOMPACT_FOLD=body: the function-body pool is a parameter")
+      decisionCase "decision_decompact_body_default_declined" dcfBodySrc "decompact-row-fold"
+          (fun d -> d.Subject = "rowsum" && declinedMentioning "opt-in (BLADE_DECOMPACT_FOLD=body)" d)
+          "declined by default: the function-body arm is opt-in"
+      withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
+          decisionCase "decision_decompact_body_tuple_return_declined" dcfBodyTupleSrc "decompact-row-fold"
+              (fun d -> d.Subject = "rowpair" && declinedMentioning "returns a tuple" d)
+              "declined: the LLVM lane inlines a tuple-returning callee over a possibly deferred argument")
       withGate "BLADE_DECOMPACT_FOLD" "0" (fun () ->
           decisionCase "decision_decompact_row_fold_disabled" dcfSymSrc "decompact-row-fold"
               (fun d -> dcf d && declinedMentioning "disabled by BLADE_DECOMPACT_FOLD" d)

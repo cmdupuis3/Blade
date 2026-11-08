@@ -3508,6 +3508,15 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
             ln c ($"{r} = load i1, ptr {found}")
             { Reg = r; Ty = ScBool }
 
+    // Gap G124 (round 4 wave 5, lane B): an ARRAY-valued map reached in a
+    // SCALAR value position -- typically the body of a row kernel that returns
+    // a computed rank-k row (`method_for(range<I>) <@> lambda(i) -> { ..;
+    // (method_for(Vt) <@> lambda(v) -> prodsum(e, v) / z) |> compute }`,
+    // examples/10 section 4: a RANK-RAISING ROW MAP). This lane has no form
+    // that stores a kernel's computed row as the output's row; refused by
+    // name, so the program builds in the C++ lane (which has one).
+    | IRApplyCombinator _ ->
+        refuse "an array-valued map in a scalar value position (a rank-raising row map: a row kernel returning a COMPUTED array row, gap G124) -- the llvm lane stores no kernel-computed row as an output row; the C++ lane builds it"
     | other ->
         refuse ($"the IR node {(caseName other)} in value position -- no arm in the llvm lane")
 

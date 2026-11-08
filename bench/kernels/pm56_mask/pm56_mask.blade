@@ -1,0 +1,29 @@
+// pm56_mask -- PM56 mask-representation control: mask + compound + folds (bench/RESULTS.md section 20 (round 4 wave 5, lane E))
+//
+//   x(i) = hash(i / run) mod 100 (Int64): runs of `run` equal keys;  keep = x < sel (~ sel % kept)
+//   y = compound(x, keep);  checksum = sum y^2 + |y|  (exact integers)
+// The arms differ only in the compiler-internal selection representation (BLADE_COMPACTION_FUSION):
+// default v2 (kept positions elided), b4 (positions built), gather (mask-site gather).
+
+type Ix = Idx<3000017>   // SIZE n
+let static run = 1   // SIZE run
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function hash(k: Int64, seed: Int64) -> Int64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    (h4 * 1103515245 + 12345) % 2147483648
+}
+
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    lo + (hi - lo) * (Float64(hash(k, seed)) / 2147483648.0)
+}
+
+let x = method_for(range<Ix>) <@> lambda(i) -> hash(Int64(i) / Int64(run), 10000019) % 100 |> compute
+let keep = mask(x, lambda(q) -> q < 50)   // SIZE sel
+let y = compound(x, keep)
+let checksum = Float64(reduce(y * y, (+))) + Float64(extents(y))
+let input_checksum = Float64(reduce(x, (+)))

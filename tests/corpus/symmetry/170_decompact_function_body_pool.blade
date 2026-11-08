@@ -1,0 +1,59 @@
+// TEST: Decompact Function Body Pool
+// ============================================================================
+// G123 (round 4 wave 5, `decompact-row-fold`, BLADE_DECOMPACT_FOLD): the row
+// fold and the mat-vec of a decompacted rank-2 pool read the packed pool cell
+// by cell inside a FUNCTION BODY too, when the pool (and the mat-vec vector)
+// is a parameter of the function -- no n x n dense buffer per call -- under
+// the OPT-IN arm BLADE_DECOMPACT_FOLD=body (`blade test opt-diff` runs it as a
+// gate mirror; the default build declines it and builds the buffer). The pins
+// are the hand values and the differential against the stored decompaction
+// (`DS`, printed, so it keeps its buffer). `rowsum_let` reads a pool bound by
+// a body let: declined (gap G167), the buffer stays, the value is the same.
+// ============================================================================
+type I = Idx<5>
+let x = Float64(range<I>)
+// S(i, j) = i j + 1 (SymIdx<2, 5>); A(i, j) = i - j (AntisymIdx<2, 5>)
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1.0 |> compute
+let An = method_for(x, x) <@> lambda(a, b) where anticomm(a, b) -> a - b |> compute
+let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
+
+function matvec(P: Array<Float64 like SymIdx<2, I>>, w: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let D = decompact(P, 0)
+    method_for(D) <@> lambda(r) -> prodsum(r, w) |> compute
+}
+function rowsum(P: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {
+    reduce(decompact(P, 0), (+), 0.0)
+}
+function arowsum(P: Array<Float64 like AntisymIdx<2, I>>) -> Array<Float64 like I> = {
+    reduce(decompact(P, 1), (+), 0.0)
+}
+function rowsum_let(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {
+    let P = Q * 2.0 |> compute
+    reduce(decompact(P, 0), (+), 0.0)
+}
+
+// sum(v) = 15, sum(j v_j) = 40: S -> 40 i + 15
+let ys = matvec(S, v)
+// EXPECT: ys = [15.0, 55.0, 95.0, 135.0, 175.0]
+// row sums of S: 10 i + 5; of A (i - j over j): 5 i - 10
+let rs = rowsum(S)
+// EXPECT: rs = [5.0, 15.0, 25.0, 35.0, 45.0]
+let ra = arowsum(An)
+// EXPECT: ra = [-10.0, -5.0, 0.0, 5.0, 10.0]
+let rl = rowsum_let(S)
+// EXPECT: rl = [10.0, 30.0, 50.0, 70.0, 90.0]
+
+let DS = decompact(S, 0)
+let ys_ref = method_for(DS) <@> lambda(row) -> prodsum(row, v) |> compute
+let rs_ref = reduce(DS, (+), 0.0)
+let ys_same = reduce(method_for(zip(ys, ys_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: ys_same = true
+let rs_same = reduce(method_for(zip(rs, rs_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: rs_same = true
+
+// A LAMBDA host (here capturing `bias`) is declined: the LLVM lane inlines a
+// capturing callee and may bind its parameter to a still-deferred producer.
+let bias: Float64 = 1.0
+let lam = lambda(P: Array<Float64 like SymIdx<2, I>>) -> reduce(reduce(decompact(P, 0), (+), 0.0), (+), bias)
+let lsum = lam(S)
+// EXPECT: lsum = 126.0

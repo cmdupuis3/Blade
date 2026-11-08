@@ -385,7 +385,8 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
             | _ -> m) paramDims
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv
-               SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = [] }
+               SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
+               FreshLocals = freshLocalsOf arrays stmts }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals).
@@ -520,14 +521,27 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
         |> Result.map List.concat
     folded |> Result.map (fun reverse ->
 
+    // PM40 (ad-checkpoint v1): a long recurrence keeps checkpoints and
+    // replays its segments in the descending sweep instead of its tape.
+    let hasGradBuffers = prep.Classes |> List.exists (fun (_, c) -> match c with DiffArray -> true | _ -> false)
+    let arrayParams =
+        fd.Params |> List.choose (fun p ->
+            match p.Type |> Option.map (resolveArrayTy ctx) with
+            | Some (TyArray _) -> Some p.Name
+            | _ -> None)
+        |> Set.ofList
+    let stmtsCk, finalCk, cotsCk, revCk =
+        checkpointCarries rc hasGradBuffers arrayParams
+            (fd.Params |> List.map (fun p -> p.Name) |> Set.ofList |> fun ps -> Set.difference ps arrayParams)
+            stmts finalE (localDecls @ scalarCots) (seed @ reverse)
     // assemble: forward + primal + cot decls + seed + reverse + return
     let primalName = "__primal"
-    let fwd = toStmts stmts @ [ StmtLet { Pattern = synPat (PatVar primalName)
-                                          Type = None
-                                          Value = finalE
-                                          Mutability = BindLet } ]
-    let cotDecls = toStmts (localDecls @ scalarCots)
-    let revStmts = toStmts (seed @ reverse)
+    let fwd = toStmts stmtsCk @ [ StmtLet { Pattern = synPat (PatVar primalName)
+                                            Type = None
+                                            Value = finalCk
+                                            Mutability = BindLet } ]
+    let cotDecls = toStmts cotsCk
+    let revStmts = toStmts revCk
     let retExpr =
         match scalarDiff with
         | [] -> v primalName
@@ -660,7 +674,8 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     // one's operands.
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty
-               Dims = Map.empty; SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = [] }
+               Dims = Map.empty; SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
+               FreshLocals = Set.empty }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR = tangentOfStmts rc stmts
@@ -826,6 +841,12 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclLet b | DeclStatic b -> patNames b.Pattern
             | _ -> [])
         |> Set.ofList
+    let moduleMuts =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclLet b when b.Mutability = BindMut -> patNames b.Pattern
+            | _ -> [])
+        |> Set.ofList
     // What each FUNCTION declaration can see: everything declared above it,
     // plus itself (a named function may self-recurse; mutual recursion is
     // BL2001). Snapshotted in declaration order rather than collected
@@ -888,6 +909,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         if requestsOrdered.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals
+                        ModuleMuts = moduleMuts
                         ModuleLets = moduleLets; Fresh = ref 0
                         NormMemo = System.Collections.Generic.Dictionary()
                         PackMemo = System.Collections.Generic.Dictionary() }
@@ -1043,6 +1065,7 @@ let fuseProgram (program: Program) : Program =
         let freshCell = ref 0
         let ctxNow () =
             { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
+              ModuleMuts = Set.empty
               ModuleLets = Map.empty; Fresh = freshCell
               NormMemo = System.Collections.Generic.Dictionary()
               PackMemo = System.Collections.Generic.Dictionary() }

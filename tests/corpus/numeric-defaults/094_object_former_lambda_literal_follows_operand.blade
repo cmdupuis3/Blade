@@ -1,0 +1,17 @@
+// TEST: an object former's lambda and a stored method former hint their operand width to literal partners
+// Gap G114 (round 4 wave 5 lane c): `object_for(lambda ..) <@> a`, the implicit
+// object form `(lambda ..) <@> a` and a stored `let loop = method_for(a)`
+// applied to a lambda were Float64 maps over a Float32 operand (BL3001 here);
+// the kernel parameter is now hinted by the operand's element.
+type I = Idx<4>
+let a: Array<Float32 like I> = [1.0, 2.0, 3.0, 4.0]
+let y: Array<Float32 like I> = object_for(lambda(v) -> v * 2.0) <@> a |> compute
+let z: Array<Float32 like I> = (lambda(v) -> v + 1.0) <@> a |> compute
+let loop = method_for(a)
+let w: Array<Float32 like I> = loop <@> lambda(v) -> v * 0.5 |> compute
+let n: Array<Int32 like I> = [1, 2, 3, 4]
+let k: Array<Int32 like I> = object_for(lambda(v) -> v * 3 + 1) <@> n |> compute
+// EXPECT: y = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: z = [2.0, 3.0, 4.0, 5.0]
+// EXPECT: w = [0.5, 1.0, 1.5, 2.0]
+// EXPECT: k = [4, 7, 10, 13]

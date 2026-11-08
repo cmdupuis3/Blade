@@ -258,12 +258,59 @@ let private emissionCases : (string * bool * string * string list * string list)
       // must be gone, as for solve.
       ("lu_factor_once_routes_to_getrf_getrs", true,
        sysF64 + "let f = m.lu(A)\nlet x = m.lu_solve(f, bv)\nlet y = m.lu_solve_t(f, bv)\n",
-       [ lapackInclude; "blade_lapack::blade_lu_d("; "blade_lapack::blade_lu_solve_d("
+       [ lapackInclude; "blade_lapack::blade_lu_keep_d("; "blade_lapack::blade_lu_solve_cm_d("
          "lapack dispatch: lu(A) -> (LU, piv), dense square operand"
          "lapack dispatch: lu_solve(LU, piv, b) -> x, plain"
          "lapack dispatch: lu_solve(LU, piv, b) -> x, transposed"
          "blade_rt::panic(\"BL8007\"" ],
        [ "LAPACKE_"; "__math_lu"; "/* lu factor"; "/* lu solve"; "blade_linalg.hpp" ])
+      // Gap G109 (round 4 wave 4, lane K; rule `lu-companion v1`): a
+      // never-written top-level factor keeps ?getrf's column-major scratch
+      // (`f__lucm`) and its top-level solves hand it to ?getrs -- no per-solve
+      // rebuild of the column-major factor; the LAST admitted solve releases
+      // it. The copying entry points are gone from this program.
+      ("lu_companion_kept_and_released", true,
+       sysF64 + "let f = m.lu(A)\nlet x = m.lu_solve(f, bv)\nlet y = m.lu_solve_t(f, x)\n",
+       [ "blade_lapack::blade_lu_cm f__lucm;"
+         "blade_lapack::blade_lu_keep_d(f__n, A.data, f__lu.data, f__piv.data, f__lucm)"
+         "blade_lapack::blade_lu_solve_cm_d(x__n, f__lucm,"
+         "blade_lapack::blade_lu_solve_cm_d(y__n, f__lucm,"
+         "blade_lapack::blade_lu_cm_release(f__lucm);" ],
+       [ "blade_lapack::blade_lu_d("; "blade_lapack::blade_lu_solve_d(" ])
+      // ...and the destructured spelling: the two halves of the same tuple.
+      ("lu_companion_destructured_halves", true,
+       sysF64 + "let (LU, piv) = m.lu(A)\nlet x = m.lu_solve(LU, piv, bv)\n",
+       [ "blade_lapack::blade_lu_keep_d("; "blade_lapack::blade_lu_solve_cm_d(x__n," ],
+       [ "blade_lapack::blade_lu_solve_d(" ])
+      // A WRITE through a view of the factor (`let L = f[0]; L(0, 0) = 9.0`)
+      // could make the companion stale: declined, the per-solve copy stays.
+      ("lu_companion_declined_when_factor_written", true,
+       sysF64 + "let f = m.lu(A)\nlet L = f[0]\nL(0, 0) = 9.0\nlet x = m.lu_solve(f, bv)\n",
+       [ "blade_lapack::blade_lu_d("; "blade_lapack::blade_lu_solve_d(" ],
+       [ "blade_lu_keep_d"; "blade_lu_solve_cm_d"; "__lucm" ])
+      // Wave 5 review round 1: assignability is no refusal (every ordinary
+      // top-level `let` is assignable), an actual ASSIGNMENT is. A factor
+      // reassigned after its first solve, and a named half reassigned
+      // (`L = A`: y then solves with A as its LU), both decline: the closure reaches them.
+      // ...and named projections that are never written: admitted.
+      ("lu_companion_named_projections", true,
+       sysF64 + "let f = m.lu(A)\nlet L = f[0]\nlet p = f[1]\nlet x = m.lu_solve(L, p, bv)\n",
+       [ "blade_lapack::blade_lu_keep_d("; "blade_lapack::blade_lu_solve_cm_d(x__n,"; "blade_lapack::blade_lu_cm_release(f__lucm);" ],
+       [ "blade_lapack::blade_lu_solve_d(" ])
+      ("lu_companion_declined_when_factor_reassigned", true,
+       sysF64 + "let f = m.lu(A)\nlet x = m.lu_solve(f, bv)\nf = m.lu(A)\nlet y = m.lu_solve(f, x)\n",
+       [ "blade_lapack::blade_lu_solve_d(" ],
+       [ "blade_lu_keep_d"; "blade_lu_solve_cm_d"; "__lucm" ])
+      ("lu_companion_declined_when_half_reassigned", true,
+       sysF64 + "let f = m.lu(A)\nlet L = f[0]\nlet p = f[1]\nlet x = m.lu_solve(L, p, bv)\nL = A\nlet y = m.lu_solve(L, p, x)\n",
+       [ "blade_lapack::blade_lu_solve_d(" ],
+       [ "blade_lu_keep_d"; "blade_lu_solve_cm_d"; "__lucm" ])
+      // A solve inside a function body (a captured factor) keeps the copy;
+      // the top-level solve still reads the companion.
+      ("lu_companion_function_body_solve_keeps_copy", true,
+       sysF64 + "let f = m.lu(A)\nfunction g(c: Array<Float64 like Idx<3>>) -> Float64 = { reduce(m.lu_solve(f, c), (+)) }\nlet s = g(bv)\nlet x = m.lu_solve(f, bv)\n",
+       [ "blade_lapack::blade_lu_keep_d("; "blade_lapack::blade_lu_solve_cm_d(x__n,"; "blade_lapack::blade_lu_solve_d(" ],
+       [])
       // Gate OFF: Blade's own factor loop (once) and the two apply loops,
       // the byte-identity truth `blade test interp math` compares.
       ("lu_gate_off_is_native_factor_and_applies", false,
@@ -453,6 +500,22 @@ let runLapackEmissionTests () : BlockResult =
                 passed <- passed + 1
                 resultLine Pass name (if gateOn then "routing as expected (gate on)"
                                       else "synthesized Jacobi as expected (gate off)")
+
+    // BLADE_LU_COMPANION=0: the per-solve column-major rebuild (the gate-off
+    // twin of `lu_companion_kept_and_released`).
+    (let name = "lu_companion_gate_off_keeps_copy"
+     let prior = Environment.GetEnvironmentVariable "BLADE_LU_COMPANION"
+     try
+         Environment.SetEnvironmentVariable("BLADE_LU_COMPANION", "0")
+         match cppOf true name (sysF64 + "let f = m.lu(A)\nlet x = m.lu_solve(f, bv)\n") with
+         | Error e -> fail name e
+         | Ok cpp ->
+             if cpp.Contains "blade_lapack::blade_lu_solve_d(" && cpp.Contains "blade_lapack::blade_lu_d(" && not (cpp.Contains "__lucm") then
+                 passed <- passed + 1
+                 resultLine Pass name "per-solve copy (BLADE_LU_COMPANION=0)"
+             else fail name "expected the per-solve copy and no companion under BLADE_LU_COMPANION=0"
+     finally
+         Environment.SetEnvironmentVariable("BLADE_LU_COMPANION", prior))
 
     for (name, src, expectedFragment) in rejectionCases do
         match cppOf true name src with

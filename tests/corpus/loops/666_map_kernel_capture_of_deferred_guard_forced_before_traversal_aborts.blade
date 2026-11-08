@@ -1,0 +1,14 @@
+// TEST: a computed map's kernel capture of a deferred GUARD is forced before its first cell (aborts)
+// Gap G115 (round 4 wave 5 lane c; Codex review round 2): a computed map forces
+// EVERY deferred capture of its kernel before its first cell (a guard, not
+// only a map). `g` wraps `base`, which fails at its cell 7 (line 8 once the
+// harness drops the TEST line), ahead of the kernel's own cell-2 failure, in
+// every lane.
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let base = method_for(d) <@> lambda(a) -> 100 / a
+let g = guard(true, base)
+let m = method_for(range<I>) <@> lambda(i) -> if i > 4 then g(i) else 100 / (i - 2) |> compute
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:8

@@ -1319,27 +1319,248 @@ let counts = method_for(g) <@> lambda(r) -> extents(r) |> compute
                      else check "per-segment stream: compiles" false e)
             | Error e -> check "per-segment stream: lowers" false e
         with ex -> check "per-segment stream" false ex.Message
-        // a key grouping over a streamed variable still refuses
-        let bad = sprintf """
+        // A KEY grouping over a streamed variable (round 4 wave 4 lane H,
+        // H2 / ST08, gap G129; it used to refuse): the variable is read in
+        // windows (BLADE_TILE_TUNE group_win, default 65536 cells) and each
+        // row is scattered into its group's next CSR slot -- rows ascending,
+        // the CSR order -- so the whole variable is never buffered. Dynamic
+        // (first occurrence), positional (empty groups) and EnumIdx (declared
+        // order) keys; windows of 3 cells (a window boundary inside a chunk and
+        // inside a group's run) and the default single window; the values are
+        // the resident (`.read`) program's.
+        let keyed (readOrStream: string) = sprintf """
 import zarr as z
 
 let sample = z.load("%s")
-let A = sample.vars.A |> z.stream
+let A = sample.vars.A |> z.%s
+type K10 = Idx<10>
+type R4 = Idx<4>
+type L2 = EnumIdx<[7, 3]>
 let keys = [0, 0, 1, 1, 2, 2, 0, 1, 2, 0]
 let gk = group_keys(keys)
 let g = group_by(A, gk)
 let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+let fps = method_for(g) <@> lambda(r) -> reduce(r, lambda(a, b) -> a * 2.0 - b, 0.5) |> compute
+let pkeys: Array<R4 like K10> = [3, 3, 0, 0, 3, 0, 0, 3, 0, 3]
+let pgk = group_keys(pkeys)
+let pg = group_by(A, pgk)
+let psums = method_for(pg) <@> lambda(r) -> reduce(r, (+), 0.0) |> compute
+let ekeys: Array<L2 like K10> = [7, 3, 3, 7, 7, 3, 3, 3, 7, 7]
+let egk = group_keys(ekeys)
+let eg = group_by(A, egk)
+let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
 """
-                            segStore
-        (match lower bad with
+                                                  segStore readOrStream
+        let expected = [ "sums = [20.0, 15.0, 20.0]"; "fps = [-32.0, -24.0, -37.0]"; "psums = [29.0, 0.0, 0.0, 26.0]"; "esums = [29.0, 26.0]" ]
+        // a third arm: the STATE form (stream-group-aggregate v1, opt-in) under a
+        // print selection that excludes the grouped arrays: g (dynamic, unseeded
+        // folds) and pg (positional, seeded) keep per-group states, no pool; eg
+        // (EnumIdx keys, an unseeded fold: empty groups possible) declines and
+        // keeps the windowed scatter. Under BLADE_FP_REPRO=1: the `(+)` folds
+        // carry a reorder licence, which the strict-first rule declines BY
+        // DESIGN in the default build (wave 5: the fixture, not the rule)
+        for (label, tune, sga) in [ ("windows of 3", "group_win=3", false); ("default window", "", false); ("state form, windows of 3", "group_win=3", true) ] do
+            let savedTune = Environment.GetEnvironmentVariable "BLADE_TILE_TUNE"
+            let savedSga = Environment.GetEnvironmentVariable "BLADE_STREAM_GROUP_AGG"
+            let savedPrint = Environment.GetEnvironmentVariable "BLADE_PRINT"
+            let savedRepro = Environment.GetEnvironmentVariable "BLADE_FP_REPRO"
+            try
+                try
+                    Environment.SetEnvironmentVariable("BLADE_TILE_TUNE", (if tune = "" then null else tune))
+                    if sga then
+                        Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+                        Environment.SetEnvironmentVariable("BLADE_PRINT", "sums,fps,psums,esums")
+                        Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+                    match lower (keyed "stream") with
+                    | Error e -> check $"streamed key grouping ({label}): lowers" false e
+                    | Ok ir ->
+                        let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ("zarr_streamed_keys_" + (if sga then "sga" elif tune = "" then "dflt" else "w3"))
+                        check $"streamed key grouping ({label}): windowed scatter, no whole-array buffer"
+                            (cppCode.Contains "KEY grouping over the STREAMED" && not (cppCode.Contains "Array<double, 1> A = ")) ""
+                        if sga then
+                            check $"streamed key grouping ({label}): g and pg keep states, eg declines to the scatter"
+                                (cppCode.Contains "stream-group-aggregate v1: `g` is not stored" && cppCode.Contains "stream-group-aggregate v1: `pg` is not stored"
+                                 && not (cppCode.Contains "* g__pool = new") && not (cppCode.Contains "* pg__pool = new") && cppCode.Contains "* eg__pool = new") cppCode
+                        CodeGen.deployRuntimeHeaders e2eDir
+                        let cppFile = Path.Combine(e2eDir, "zarr_streamed_keys.cpp")
+                        File.WriteAllText(cppFile, cppCode)
+                        match compileCpp cppFile e2eDir with
+                        | Ok exePath ->
+                            (match runExecutable exePath with
+                             | Ok (0, runOut) ->
+                                 for line in expected do
+                                     check $"streamed key grouping ({label}): {line}" (runOut.Contains line) runOut
+                             | Ok (code, out) -> check $"streamed key grouping ({label}): runs" false ($"exit {code}: {out}")
+                             | Error e -> check $"streamed key grouping ({label}): runs" false e)
+                        | Error e ->
+                            if isSkipError e then printfn "  SKIP streamed key grouping (compile skipped): %s" e
+                            else check $"streamed key grouping ({label}): compiles" false e
+                with ex -> check $"streamed key grouping ({label})" false ex.Message
+            finally
+                Environment.SetEnvironmentVariable("BLADE_TILE_TUNE", savedTune)
+                Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", savedSga)
+                Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
+                Environment.SetEnvironmentVariable("BLADE_FP_REPRO", savedRepro)
+        // the resident twin prints the same values
+        (match lower (keyed "read") with
          | Ok ir ->
              (try
-                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_segments_streamed_bad"
-                 let refusals = CodeGen.takeCodegenRefusalDiagnostics cppCode
-                 check "per-segment stream: a key grouping over a streamed variable refuses with a steer"
-                     (refusals |> List.exists (fun r -> (string r).Contains "needs a structural grouping") || cppCode.Contains "needs a structural grouping") cppCode
-              with ex -> check "per-segment stream: a key grouping over a streamed variable refuses with a steer" (ex.Message.Contains "needs a structural grouping") ex.Message)
-         | Error e -> check "per-segment stream: key grouping program lowers" false e)
+                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_resident_keys"
+                 CodeGen.deployRuntimeHeaders e2eDir
+                 let cppFile = Path.Combine(e2eDir, "zarr_resident_keys.cpp")
+                 File.WriteAllText(cppFile, cppCode)
+                 match compileCpp cppFile e2eDir with
+                 | Ok exePath ->
+                     (match runExecutable exePath with
+                      | Ok (0, runOut) ->
+                          for line in expected do check $"resident key grouping twin: {line}" (runOut.Contains line) runOut
+                      | Ok (code, out) -> check "resident key grouping twin: runs" false ($"exit {code}: {out}")
+                      | Error e -> check "resident key grouping twin: runs" false e)
+                 | Error e -> if isSkipError e then printfn "  SKIP resident twin: %s" e else check "resident key grouping twin: compiles" false e
+              with ex -> check "resident key grouping twin" false ex.Message)
+         | Error e -> check "resident key grouping twin: lowers" false e)
+        // Codex review of ST08 (a), round 1 (wave 5): (1) the scatter reads a
+        // SNAPSHOT of the CSR's row -> group map, never the live keys -- keys
+        // written between group_keys and group_by leave the grouping as built
+        // (the resident twin prints the same); (2) the non-finite tally covers
+        // the WHOLE variable and is reported after the last window: a NaN in
+        // window 0 and a short chunk later report the short chunk (as a whole
+        // read does), and the count is the whole variable's under any window.
+        let gkRunEnv (label: string) (tune: string) (extra: (string * string) list) (src: string) : string option =
+            let keys = "BLADE_TILE_TUNE" :: (extra |> List.map fst)
+            let saved = keys |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+            try
+                try
+                    Environment.SetEnvironmentVariable("BLADE_TILE_TUNE", (if tune = "" then null else tune))
+                    for (k, v) in extra do Environment.SetEnvironmentVariable(k, v)
+                    match lower src with
+                    | Error e -> check $"{label}: lowers" false e; None
+                    | Ok ir ->
+                        let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ("zarr_gk_" + label.Replace(" ", "_"))
+                        // the route under test: the state form when the gate is on, the scatter otherwise
+                        let stateForm = extra |> List.exists (fun (k, v) -> k = "BLADE_STREAM_GROUP_AGG" && v = "1")
+                        if cppCode.Contains "KEY grouping over the STREAMED" || cppCode.Contains "stream-group-aggregate v1: `g` is not stored" then
+                            let routeName = if stateForm then "state form" else "windowed scatter"
+                            check $"{label}: route ({routeName})"
+                                (if stateForm then cppCode.Contains "stream-group-aggregate v1: `g` is not stored" else not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored")) ""
+                        CodeGen.deployRuntimeHeaders e2eDir
+                        let cppFile = Path.Combine(e2eDir, "zarr_gk_review.cpp")
+                        File.WriteAllText(cppFile, cppCode)
+                        match compileCpp cppFile e2eDir with
+                        | Ok exePath ->
+                            (match runExecutable exePath with
+                             | Ok (code, out) -> Some (sprintf "exit %d\n%s" code out)
+                             | Error e -> check $"{label}: runs" false e; None)
+                        | Error e ->
+                            if isSkipError e then printfn "  SKIP %s: %s" label e
+                            else check $"{label}: compiles" false e
+                            None
+                with ex -> check label false ex.Message; None
+            finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v)
+        let gkRun (label: string) (tune: string) (src: string) = gkRunEnv label tune [] src
+        // the state form's arm: the gate, a print selection excluding g, and the
+        // strict build its float folds need
+        let sgaOn (printed: string) = [ ("BLADE_STREAM_GROUP_AGG", "1"); ("BLADE_PRINT", printed); ("BLADE_FP_REPRO", "1") ]
+        let mutKeysT = """
+import zarr as z
+
+let sample = z.load("@STORE@")
+let A = sample.vars.A |> z.@MODE@
+let mut keys = [0, 1, 1, 1, 0, 0, 1, 1, 0, 0]
+let gk = group_keys(keys)
+keys(0) = 1
+keys(4) = 7
+let g = group_by(A, gk)
+let msums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+"""
+        let mutKeys (readOrStream: string) = mutKeysT.Replace("@STORE@", segStore).Replace("@MODE@", readOrStream)
+        (match gkRun "keys written after group_keys (stream)" "group_win=3" (mutKeys "stream"),
+               gkRun "keys written after group_keys (read)" "" (mutKeys "read") with
+         | Some so, Some ro ->
+             check "streamed key grouping: keys written after group_keys keep the grouping as built (the resident twin's output)"
+                 (let ms (o: string) = o.Split('\n') |> Array.filter (fun l -> l.StartsWith "msums = ") |> String.concat "|" in so.StartsWith "exit 0" && ro.StartsWith "exit 0" && ms so <> "" && ms so = ms ro) (sprintf "stream: %s / read: %s" so ro)
+         | _ -> ())
+        let gkStore (tag: string) (data: float[]) =
+            let st = Path.GetFullPath(Path.Combine(e2eDir, tag)).Replace("\\", "/")
+            (try Directory.Delete(st, true) with _ -> ())
+            ZarrWrite.writeStoreV2 st
+                [ { Name = "A"; DimNames = Some [ "x" ]; Shape = [ int64 data.Length ]; Chunks = [ 4L ]
+                    FillValue = FillFloat -1.0; Data = ZarrWrite.WF64 data; OmitChunks = []; Blade = None } ]
+            st
+        let nanProgT = """
+import zarr as z
+
+let sample = z.load("@STORE@")
+let A = sample.vars.A |> z.@MODE@
+let keys = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+let gk = group_keys(keys)
+let g = group_by(A, gk)
+let nsums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+"""
+        let nanProg (st: string) (readOrStream: string) = nanProgT.Replace("@STORE@", st).Replace("@MODE@", readOrStream)
+        let nanShort = gkStore "gk_nan_short2" [| nan; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0; 10.0 |]
+        File.WriteAllBytes(nanShort + "/A/2", Array.zeroCreate 8)
+        for (label, tune, env) in [ ("windows of 2", "group_win=2", []); ("default window", "", []); ("state form, windows of 2", "group_win=2", sgaOn "nsums") ] do
+            match gkRunEnv $"NaN then a later short chunk ({label})" tune env (nanProg nanShort "stream") with
+            | Some out ->
+                check $"streamed key grouping: a NaN in the first window and a later short chunk report the short chunk ({label})"
+                    (out.Contains "is short" && not (out.Contains "BL8015")) out
+            | None -> ()
+        let twoNan = gkStore "gk_two_nan" [| nan; 2.0; 3.0; 4.0; 5.0; nan; 7.0; 8.0; 9.0; 10.0 |]
+        let outs =
+            [ for (label, tune, env) in [ ("windows of 2", "group_win=2", []); ("default window", "", []); ("state form, windows of 2", "group_win=2", sgaOn "nsums") ] do
+                match gkRunEnv $"two NaN cells ({label})" tune env (nanProg twoNan "stream") with
+                | Some out -> yield (label, out)
+                | None -> () ]
+        (match gkRun "two NaN cells (read)" "" (nanProg twoNan "read") with
+         | Some ro ->
+             let refusal (o: string) = o.Split('\n') |> Array.filter (fun l -> l.Contains "BL8015") |> String.concat "|"
+             for (label, out) in outs do
+                 check $"streamed key grouping: two NaN cells report the whole variable's BL8015 sentence, as the resident read ({label})"
+                     (out.Contains "BL8015" && refusal out = refusal ro && refusal out <> "") (sprintf "stream: %s / read: %s" out ro)
+         | None -> ())
+        // (3) Codex round 2: the pass covers the VARIABLE (the store's extent),
+        // and a key array of another length is the co-iteration mismatch
+        // BL8011 before any read or allocation -- shorter keys used to leave
+        // the variable's tail unread, longer ones (excess rows dropped) to
+        // run a window past the variable's end.
+        let lenProgT = """
+import zarr as z
+
+let sample = z.load("@STORE@")
+let A = sample.vars.A |> z.stream
+let keys = @KEYS@
+let gk = group_keys(keys)
+let g = group_by(A, gk)
+let lsums = method_for(g) <@> lambda(r) -> reduce(r, (+), 0.0) |> compute
+"""
+        for (label, keys) in [ ("shorter keys", "[0, 1]"); ("longer keys, excess rows dropped", "[0, 1, 0, 1, 0, 1, 0, 1, 0, 1, -1, -1]") ] do
+            for (arm, env) in [ ("scatter", []); ("state form", sgaOn "lsums") ] do
+                match gkRunEnv $"key length ({label}, {arm})" "group_win=2" env (lenProgT.Replace("@STORE@", segStore).Replace("@KEYS@", keys)) with
+                | Some out -> check $"streamed key grouping: {label} than the variable is BL8011 before any read ({arm})" (out.Contains "BL8011" && not (out.Contains "lsums = [")) out
+                | None -> ()
+        // a KEYED streamed grouping in a FUNCTION BODY, called twice: same
+        // values each call, and the row table and pool freed at its exit
+        let keyedFnT = """
+import zarr as z
+
+let sample = z.load("@STORE@")
+let A = sample.vars.A |> z.stream
+let keys = [0, 0, 1, 1, 2, 2, 0, 1, 2, 0]
+function keyed_total(k: Int64) -> Float64 = {
+    let gk = group_keys(keys)
+    let g = group_by(A, gk)
+    let s = method_for(g) <@> lambda(r) -> reduce(r, (+), 0.0) |> compute
+    reduce(s, (+)) + Float64(k)
+}
+let t1 = keyed_total(0)
+let t2 = keyed_total(1)
+"""
+        (match gkRun "keyed grouping in a function body" "group_win=3" (keyedFnT.Replace("@STORE@", segStore)) with
+         | Some out ->
+             check "streamed key grouping in a function body: the same values on each call"
+                 (out.StartsWith "exit 0" && out.Contains "t1 = 55.0" && out.Contains "t2 = 56.0") out
+         | None -> ())
         // The same streamed group_by inside a FUNCTION BODY -- where an
         // allocation scope exists, so the result must be freed at its exit.
         // The row table and the one pool its rows slice are freed together
@@ -3197,11 +3418,31 @@ let w = z.write("%s", A)
         // through its segment route (the stored `|> compute` contract), and
         // compute elision declines a streamed operand
         let foldSrc (body: string) = zipSrc za zb + body
+        let zaShortZ = mkStore2 "zip_a13_shortz" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 4L)
+        File.WriteAllBytes(zaShortZ + "/A/1", Array.zeroCreate 8)
+        let oneShortZ = "import zarr as z\n" + $"let sa = z.load(\"{zaShortZ}\")\n" + "let A = sa.vars.A |> z.stream\n"
         let zipHead = (zipSrc za zb).Replace("let p = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute\n", "")
         twin "G1 fold over a zip of two streams" [] (zipHead + "let t = reduce(method_for(zip(A, B)) <@> lambda(a, b) -> a * b, (+))\n")
             [ "materialized through its segment route"; "elementwise over segments" ] [ "t = 1456.0" ]
-        twin "G1 fold over a map of one stream" [] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")
+        twin "G1 fold over a map of one stream (staged, BLADE_STREAM_FOLD_FUSE=0)" [ ("BLADE_STREAM_FOLD_FUSE", "0") ] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")
             [ "materialized through its segment route" ] [ "t = 819.0" ]
+        // D4 (round 4 wave 5, G145 item 2): stream-fold-fuse v1 -- the map and
+        // the fold per block of the store's sweep, no N-cell buffer
+        twin "D4 fused streamed fold (licensed K-lane round robin)" [ ("BLADE_STREAM_FOLD_FUSE", "1") ] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")
+            [ "fused per block (stream-fold-fuse v1)" ] [ "t = 819.0" ]
+        twin "D4 fused streamed fold, an unlicensed kernel (serial chain)" [ ("BLADE_STREAM_FOLD_FUSE", "1") ] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * 2.0, lambda(acc, v) -> acc * 0.5 + v, 1.0)\n")
+            [ "fused per block (stream-fold-fuse v1)" ] []
+        twin "D4 fused streamed fold under BLADE_FP_REPRO=1" [ ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off"); ("BLADE_STREAM_FOLD_FUSE", "1") ] (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * 0.1, (+))\n")
+            [ "fused per block (stream-fold-fuse v1)" ] []
+        (match withEnv [ ("BLADE_STREAM_FOLD_FUSE", "1") ] (fun () -> runArm "D4 fused cpp" "1" (zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")) with
+         | Ok (cpp, _) -> check "D4: no N-cell staging buffer" (not (cpp.Contains "t__strm")) ""
+         | Error e -> check "D4: builds" false e)
+        (match withEnv [ ("BLADE_STREAM_FOLD_FUSE", "1") ] (fun () -> runArm "D4 short A" "1" (oneShortZ + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")),
+               withEnv [ ("BLADE_STREAM_FOLD_FUSE", "0") ] (fun () -> runArm "D4 short A off" "1" (oneShortZ + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n")) with
+         | Ok (_, Some (c1, o1, _)), Ok (_, Some (c2, o2, _)) ->
+             check "D4: a short chunk fails the same way fused / staged" (c1 = c2 && c1 <> 0 && strip o1 = strip o2 && o1.Contains "is short") (sprintf "%d %s / %d %s" c1 o1 c2 o2)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP D4 short A: toolchain unavailable"
+         | x, y -> check "D4 short A: both build" false (sprintf "%A / %A" x y))
         twin "G1 compute-elision spelling under --print t" [ ("BLADE_PRINT", "t") ] (foldSrc "let t = reduce(p, (+))\n")
             [ "elementwise over segments" ] [ "t = 1456.0" ]
         (let recs =
@@ -3239,6 +3480,38 @@ let w = z.write("%s", A)
          | Ok (_, Some (c, out, _)) -> check "G3 streamed mask over a short chunk: fails loudly with the provider's message" (c <> 0 && out.Contains "is short") (sprintf "%d %s" c out)
          | Ok (_, None) -> printfn "  SKIP G3 short A: toolchain unavailable"
          | Error e -> check "G3 short A: builds" false e)
+        // D1 (round 4 wave 5, G142 item 1): stream-mask-replay v1 -- a mask over
+        // a stream read only by its compound is never stored: its sweep counts,
+        // the gather replays the predicate (one compiled body)
+        twin "D1 stream mask replay (positions elided)" [ ("BLADE_PRINT", "t,n") ] (one + maskBody)
+            [ "NEVER STORED (stream-mask-replay v1)"; "keep__pred"; "positions_elided"; "BL9001" ] [ "t = 152.0"; "n = 8" ]
+        twin "D1 stream mask replay, a keyed read demands positions" [ ("BLADE_PRINT", "t,n,r") ] (one + maskBody + "let r = y(7)\n")
+            [ "NEVER STORED (stream-mask-replay v1)"; "y_pos" ] [ "r = 8.0"; "t = 152.0" ]
+        (match withEnv [ ("BLADE_PRINT", "t,n") ] (fun () -> runArm "D1 replay cpp" "1" (one + maskBody)),
+               withEnv [ ("BLADE_PRINT", "t,n"); ("BLADE_STREAM_MASK_REPLAY", "0") ] (fun () -> runArm "D1 replay off cpp" "1" (one + maskBody)) with
+         | Ok (cppOn, Some (cOn, outOn, _)), Ok (cppOff, Some (cOff, outOff, _)) ->
+             check "D1: no Bool mask is allocated with the replay; the knob off stores it" (not (cppOn.Contains "Array<bool, 1> keep") && cppOff.Contains "Array<bool, 1> keep") ""
+             check "D1: same exit and output replayed / stored" (cOn = cOff && strip outOn = strip outOff) (sprintf "on %d %s / off %d %s" cOn outOn cOff outOff)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP D1 replay on/off: toolchain unavailable"
+         | a, b -> check "D1 replay on/off: both arms build" false (sprintf "on %A / off %A" a b))
+        (match withEnv [ ("BLADE_PRINT", "t,n") ] (fun () -> runArm "D1 short A" "1" (oneShort + maskBody)) with
+         | Ok (_, Some (c, out, _)) -> check "D1 replayed mask over a short chunk: fails in the count sweep with the provider's message" (c <> 0 && out.Contains "is short") (sprintf "%d %s" c out)
+         | Ok (_, None) -> printfn "  SKIP D1 short A: toolchain unavailable"
+         | Error e -> check "D1 short A: builds" false e)
+        (let recs (pins: (string * string) list) (src: string) =
+            withEnv pins (fun () ->
+                Blade.Effects.Decisions.start ()
+                (match lower src with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
+                Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-mask-replay") |> List.map Blade.Effects.Decisions.render)
+         let has (rs: string list) (n: string) = rs |> List.exists (fun r -> r.Contains n)
+         check "D1 plan: applied with its cost line" (let r = recs [ ("BLADE_PRINT", "t,n") ] (one + maskBody) in has r "applied" && has r "cost: work") ""
+         check "D1 plan: a printed mask declines" (has (recs [ ("BLADE_PRINT", null) ] (one + maskBody)) "declined -- `keep` is printed") ""
+         check "D1 plan: a second reader declines"
+             (has (recs [ ("BLADE_PRINT", "t,n,k") ] (one + maskBody + "let k = reduce(method_for(keep) <@> lambda(b) -> if b then 1 else 0, (+))\n")) "another reader") ""
+         check "D1 plan: the knob declines by name"
+             (has (recs [ ("BLADE_PRINT", "t,n"); ("BLADE_STREAM_MASK_REPLAY", "0") ] (one + maskBody)) "disabled by BLADE_STREAM_MASK_REPLAY") ""
+         check "D1 plan: a compound over another source than the mask declines (no record or a decline)"
+             (not (has (recs [ ("BLADE_PRINT", "t") ] (one + "let B = sa.vars.A |> z.stream\nlet keep = mask(A, lambda(v) -> v > 5.0)\nlet y = compound(B, keep)\nlet t = reduce(y, (+))\n")) "applied")) "")
         // G4 (G133 / ST07): a group over a stream whose one reader is the next
         // binding's fold peel never builds the pool: each run read into one
         // window (the largest run, 4 cells), folded there
@@ -3269,6 +3542,31 @@ let w = z.write("%s", A)
          check "G4 plan: a type-carried reference keeps the pool (Codex round 1)" (hasRec r "declined") (String.concat "\n" r))
         (let r = groupRecs [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", null) ] grp
          check "G4 plan: the default (opt-in arm unset) keeps the pool" (hasRec r "opt-in (BLADE_STREAM_GROUP_FOLD=1)") (String.concat "\n" r))
+        // D2 (round 4 wave 5, G143 items 1-2): several peels over one group in
+        // ONE run loop; allocation-free closed-total statements between
+        let maxK = "lambda(a, b) -> if a > b then a else b"
+        let grp2 = grp.Replace("let t = reduce(rs, (+))\n", $"let rm = reduce(g, {maxK})\nlet t = reduce(rs, (+))\n")
+        twin "D2 two folds over one streamed group" [ ("BLADE_PRINT", "rs,rm,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] grp2
+            [ "folded in the first peel's run loop (stream-group-fold v2)"; "rs__win" ] [ "rs = [10.0, 26.0, 42.0, 13.0]"; "rm = [4.0, 8.0, 12.0, 13.0]"; "t = 91.0" ]
+        (match withEnv [ ("BLADE_PRINT", "rs,rm,t"); ("BLADE_STREAM_GROUP_FOLD", "1") ] (fun () -> runArm "D2 two folds_cpp" "1" grp2) with
+         | Ok (cpp, _) -> check "D2: no grouped pool is built for two peels" (not (cpp.Contains "g__pool")) ""
+         | Error e -> check "D2: builds" false e)
+        let grpMid = grp2.Replace("let rs = reduce(g, (+))\n", "let k: Float64 = 2.5 * 3.0\nlet rs = reduce(g, (+))\nlet k2 = k > 1.0\n")
+        twin "D2 statements between the group and its peels" [ ("BLADE_PRINT", "rs,rm,t,k,k2"); ("BLADE_STREAM_GROUP_FOLD", "1") ] grpMid
+            [ "folded in the first peel's run loop (stream-group-fold v2)" ] [ "rm = [4.0, 8.0, 12.0, 13.0]"; "k = 7.5"; "k2 = true" ]
+        (let pins = [ ("BLADE_PRINT", "rs,rm,t,q"); ("BLADE_STREAM_GROUP_FOLD", "1") ]
+         let r = groupRecs pins grpMid
+         check "D2 plan: two peels and the intervening statements applied" (hasRec r "applied" && hasRec r "`rs`, `rm`" && hasRec r "interval: `k`, `k2`") (String.concat "\n" r)
+         let r = groupRecs pins (grp2.Replace("let rs = reduce(g, (+))\n", "let q = sqrt(2.0)\nlet rs = reduce(g, (+))\n"))
+         let r = groupRecs pins (grp + $"let rm = reduce(g, {maxK})\n")
+         check "D2 plan: a statement between peels reading a peel output (a fold) declines" (hasRec r "declined" && hasRec r "`t` (between") (String.concat "\n" r)
+         check "D2 plan: a call between declines" (hasRec r "declined" && hasRec r "not an allocation-free") (String.concat "\n" r)
+         let r = groupRecs pins (grp2.Replace("let rs = reduce(g, (+))\n", "let msg = \"a long message string\"\nlet rs = reduce(g, (+))\n"))
+         check "D2 plan: a string between declines" (hasRec r "declined") (String.concat "\n" r)
+         let r = groupRecs pins (grp.Replace("let t = reduce(rs, (+))\n", "") + "let bias: Float64 = 2.0\nlet rm = reduce(g, lambda(a, b) -> a + b + bias)\n")
+         check "D2 plan: a later kernel reading a module value declines (Codex design round 1)" (hasRec r "declined") (String.concat "\n" r)
+         let r = groupRecs pins (grp.Replace("let t = reduce(rs, (+))\n", "") + "let rm = reduce(g, lambda(a, b) -> if (if a > b then \"x\" else \"y\") == \"x\" then a else b)\n")
+         check "D2 plan: a kernel with a string intermediate declines (Codex design round 2)" (hasRec r "declined") (String.concat "\n" r))
         // one huge group bounds the window by that group (the false bound)
         let zaBig = mkStore2 "zip_a13_one_chunk" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 13L)
         let grpBig = grp.Replace(za, zaBig)

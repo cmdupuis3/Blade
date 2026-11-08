@@ -282,7 +282,11 @@ Full **SQL set semantics** — value-based and deduplicating:
 - `union`: distinct values from either; A's first occurrences before B's.
 
 Result extent is dynamic (runtime cardinality). Implementation: two-pass
-`unordered_set`. Contrast with §1's positional mask combination — masks preserve
+`unordered_set`. VALUE EQUALITY is the class of §9's key order, in every lane:
+every NaN is ONE value, `-0.0` and `+0.0` are one value, other values by `==`;
+each class keeps its FIRST occurrence (a `-0.0` before a `0.0` stays `-0.0`).
+The same holds for `unique` (§4). `contains` (§5) stays the scalar `==`: a NaN
+target matches nothing (gap G126, `sql-set-ops/014`). Contrast with §1's positional mask combination — masks preserve
 coordinates, set ops produce fresh dense value arrays.
 
 Tests: `sql-set-ops` ("Intersect Dedups A", "Union Dedups Both",
@@ -841,7 +845,12 @@ Takes a **key extractor**, not a comparator; ascending by key
 (`lambda(t) -> -t` for descending). Stable. The key order is a **total
 preorder**, the same in every lane: every NaN key orders before every other
 key and all NaNs tie (they keep their input order), `-0.0` and `+0.0` tie,
-other keys compare by `<`. A descending key `-x` therefore still puts NaN
+other keys compare by `<`; String keys compare by Unicode CODE POINT (the
+UTF-8 byte order). The key must return a real, integer, Bool or String
+scalar: a complex key (no order), a tuple key and an array key are refused at
+the type check (BL3033), as is a range over a non-plain record
+(`range<SymIdx<2, n>>`, whose cells are index tuples) (gap G126,
+`sql-sort/011`-`014`). A descending key `-x` therefore still puts NaN
 keys first (a negated NaN is a NaN). The result is unique -- the order by
 (key, input position) -- so how often or in what order the key is evaluated
 is unspecified; the compiler evaluates a total, write-free key once per

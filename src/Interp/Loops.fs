@@ -327,6 +327,56 @@ let rec force (st: InterpState) (env: Env) (v: Value) : Value =
          | _ -> forceExpr st denv expr)
     | other -> other
 
+/// A KERNEL'S CAPTURE OF A DEFERRED MAP IS A FORCING USE (gap G115, formalism
+/// 10.2), and it happens when the kernel is formed for its traversal: before
+/// the traversal's first cell, kernels in order, each kernel's captures in
+/// declaration order -- what the compiled lanes do (the binding prelude forces
+/// CodeGenFusion.collectDeferredKernelCaptures under each map's own name). So
+/// a failure inside a captured map fires before every cell of the traversal,
+/// even when the kernel reads the map only at a later cell (or never): the
+/// interpreter used to force it at its first READ, so another failure at an
+/// earlier cell won. Only a capture bound to a DIRECT deferred map is forced
+/// (the compiled rule at main's top level); `exclude` names the traversal's
+/// own operands, forced as operands. Forced through `force`, so a module-level
+/// map is memoized and printed under its own name, as there.
+and private forceKernelDeferredCaptures (st: InterpState) (env: Env) (anyDeferred: bool) (kernels: IRExpr list) (exclude: Set<IRId>) : unit =
+    kernels
+    |> List.collect (fun k ->
+        match resolveKernel k with
+        | Some rk -> rk.Callable.Captures |> List.map (_.Id)
+        | None -> [])
+    |> List.distinct
+    |> List.iter (fun id ->
+        if not (exclude.Contains id) then
+            match envTryFind env id with
+            | Some cell ->
+                // A DEFERRED ALIAS of a map (`let g2 = g`, a projection of a
+                // wholly-deferred tuple: `VDeferred (IRVar ..)`) is that map
+                // (formalism 10.2): followed through each alias's own env to
+                // its root, and forced through the alias (`force` forces the
+                // root under its own name first), as the compiled lanes force
+                // a captured alias (Codex review round 1).
+                // `anyDeferred` (a computed map's kernel, the compiled
+                // genComputeBinding prelude): EVERY deferred capture -- a
+                // guard, a choice, a fallback too -- is forced; otherwise (the
+                // reduce-compute / join prelude) only a map or an alias of one
+                // (Codex review round 2). Chains are followed with a visited
+                // set, no depth cutoff.
+                let rec rootIsMap (seen: Set<IRId>) (v: Value) =
+                    match v with
+                    | VDeferred ((IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _), _) -> true
+                    | VDeferred (IRVar (src, _), denv) when not (seen.Contains src) ->
+                        (match envTryFind denv src with
+                         | Some c -> rootIsMap (seen.Add src) c.V
+                         | None -> false)
+                    | _ -> false
+                let forced =
+                    match cell.V with
+                    | VDeferred _ when anyDeferred -> true
+                    | v -> rootIsMap (Set.singleton id) v
+                if forced then force st env cell.V |> ignore
+            | None -> ())
+
 // ----------------------------------------------------------------------------
 // resolveComputation (CodeGen.fs:7480) in value space: peel IRCompute /
 // IRFunctorMap (collecting wrappers innermost-first) / IRVar-through-deferred /
@@ -1007,6 +1057,10 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     // Resolve input array values by position.
     let inputs = Dictionary<int, ArraySource>()
     info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveArraySource st env arr)
+    // G115: the kernel's deferred captures, after the inputs (the compiled
+    // genComputeBinding order) and before the first cell.
+    forceKernelDeferredCaptures st env true [ info.Kernel ]
+        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
     let realAt (pos: int) =
         match inputs.TryGetValue pos with
         | true, SReal a -> a
@@ -2424,6 +2478,29 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
             @ slotShareIds info)
         |> List.distinct
         |> List.choose directApply
+    // G115 (formalism 10.2): every leaf kernel's and fold kernel's deferred
+    // captures are forced BEFORE the traversal -- the compiled prelude's
+    // order (CodeGenBinding's join emitter: leaf kernels, then fold
+    // kernels) -- so a captured map's failure precedes every cell of every
+    // leg. The traversal's own operands and the spine are excluded.
+    (let operandIds =
+        // The compiled join encoding forces no operand up front (its
+        // operands are per-cell shares), so a capture that is also a join
+        // operand is still forced as a capture there (CodeGenBinding's
+        // `deferredOperandIds = []` for a join).
+        if isJoinEncoding then [] else
+        infos |> List.collect (fun i -> i.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None))
+     let rec spineIds e =
+        match e with
+        | IRVar (id, _) ->
+            id :: (match envTryFind env id with
+                   | Some cell -> (match cell.V with VDeferred (e2, _) -> spineIds e2 | _ -> [])
+                   | None -> [])
+        | IRFusion (l, r) -> spineIds l @ spineIds r
+        | _ -> []
+     let foldKernels = match kernel with IRTuple ks -> ks | k -> [ k ]
+     forceKernelDeferredCaptures st env false ((infos |> List.map (_.Kernel)) @ foldKernels)
+        (Set.ofList (operandIds @ spineIds comp)))
     let accVals =
         match infos with
         | [ info ] -> [ runLeg 0 info legFolds.[0] ignore ]
@@ -2757,7 +2834,11 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                  | None -> None)
             | _ -> None
         match compoundSrc with
-        | Some cv when cv.TrailingStride = 1L ->
+        // G146 (1): with TRAILING dims too -- the Bool compound keeps the
+        // source's index and trailing stride, its bits the compact buffer's
+        // cardinality x stride cells in storage order (the C++ arm's walk).
+        // It used to fall to the dense path and flatten.
+        | Some cv ->
             let bits = A.maskPresence (A.compoundToDense cv) (resolveUnaryKernel st env predExpr)
             let ixs = match typeOf expr with ArrayElem t -> t.IndexTypes | _ -> cv.IndexTypes
             VCompound { cv with ElemType = IRTScalar ETBool; IndexTypes = ixs; Data = bits.Data }

@@ -1,0 +1,12 @@
+// TEST: a literal beside a kernel parameter over a RANK-2 Float32 operand takes the Float32 width
+// Gap G114 (round 4 wave 5 lane c; formalism 2.4's partner rule): the cell
+// kernel of a rank-2 operand is HINTED with the operand's element (its
+// parameter stays open -- the body decides cell or row), so `v * 2.0 + 1.0` is
+// Float32 (it typed Float64, so the annotation below was BL3001).
+type R = Idx<2>
+type C = Idx<3>
+let m: Array<Float32 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let y: Array<Float32 like R, C> = method_for(m) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+let s: Float32 = reduce(y, (+), axes = 2)
+// EXPECT: y = [[3.0, 5.0, 7.0], [9.0, 11.0, 13.0]]
+// EXPECT: s = 48.0

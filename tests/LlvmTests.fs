@@ -598,6 +598,8 @@ let memberHoistRoutes : MemberHoistRoute list =
       row "sql-semijoins" "Semijoin Float64" [] 0 None
       row "sql-semijoins" "Unique Of Semijoin" [ "inB" ] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
       row "sql-semijoins" "Semijoin Then Mask" [ "inB" ] 0 None
+      // G126 (round 4 wave 5 lane c): two bare top-level probes, no host; `unique` has no LLVM arm
+      row "sql-set-ops" "Set Ops NaN One Value" [] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
       // compaction fusion T4c's membership-probe certificate (round 3 W2-2)
       row "index-types" "Compaction fusion T4c: a membership-probe predicate certified by member-hoist's admission" [ "keep" ] 0 None
       row "index-types" "Compaction fusion T4c: a probe membership hoisting declines is not certified" [] 0 None
@@ -2203,6 +2205,23 @@ let one = contains(evens, Int64(44))
      | Ok ll when ll.Contains "define internal i64 @bl_at_" -> pass "g75_function_reads_unforced_map_privately" "taken (out-of-line `at`)"
      | Ok _ -> fail "g75_function_reads_unforced_map_privately" "no out-of-line `at` in the emitted .ll"
      | Error e -> fail "g75_function_reads_unforced_map_privately" e)
+    // G124 (round 4 wave 5): a RANK-RAISING ROW MAP (a row kernel returning a
+    // computed rank-1 row, examples/10 section 4) is refused BY NAME, so the
+    // program builds in the C++ lane and the fallback notice says why.
+    let rowMap =
+        "type I = Idx<3>\n"
+        + "type D = Idx<2>\n"
+        + "let x = Float64(range<I>)\n"
+        + "let Vt = method_for(range<D>, range<I>) <@> lambda(d, j) -> Float64(d) + Float64(j) |> compute\n"
+        + "let rows = (method_for(range<I>) <@> lambda(i) -> {\n"
+        + "    let e = (method_for(x) <@> lambda(b) -> b * x(i)) |> compute\n"
+        + "    (method_for(Vt) <@> lambda(vrow: T^1) -> prodsum(e, vrow)) |> compute\n"
+        + "}) |> compute\n"
+    (match emitUnder [] "facts" rowMap with
+     | Error e when e.Contains "rank-raising row map" && e.Contains "G124" ->
+         pass "g124_rank_raising_row_map_refuses_by_name" "refused by name"
+     | Error e -> fail "g124_rank_raising_row_map_refuses_by_name" ("refused for another reason: " + e)
+     | Ok _ -> fail "g124_rank_raising_row_map_refuses_by_name" "emitted: the lane grew the form -- replace this pin with a differential")
 
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]

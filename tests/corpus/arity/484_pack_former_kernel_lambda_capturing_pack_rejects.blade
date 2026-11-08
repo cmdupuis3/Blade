@@ -1,0 +1,17 @@
+// TEST: a pack former's kernel lambda capturing both the ordinal and the pack is refused (rejects)
+// Gap G112 (round 4 wave 5 lane c): a nested lambda that captures the kernel
+// ordinal is cloned per unrolled element, but one that ALSO captures the pack
+// (`args[k]` inside it) would read a pack the specialization no longer has
+// (its elements are scalar parameters there), so it is still refused. (The
+// kernel itself reads the pack too, which is what unrolls the former.)
+// ERROR: BL7004
+// ERROR-CONTAINS: AND the pack itself
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(x: Float64) -> x + args[k]
+        h(args[k])
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

@@ -848,6 +848,14 @@ type Subst() =
     /// at unification (ScalarPinnedArray), travels on var-to-var binds and
     /// with a call's instantiated copy (CopyArityConstraint).
     let mutable scalarPins : Set<int> = Set.empty
+    /// ELEMENT HINTS (gap G114, formalism 2.4's partner rule): the element a
+    /// kernel parameter will receive, known from its map operand at the apply
+    /// site while the parameter's RANK is still decided by its body (a cell or
+    /// a row). Read ONLY by the literal partner rule (TypeCheckSupport
+    /// adaptLiteralOperands): a literal beside the still-open parameter takes
+    /// the hinted width instead of its class's wide width. Never a binding, so
+    /// no shape decision changes; travels on var-to-var binds.
+    let mutable elemHints : Map<int, ElemType> = Map.empty
 
     member _.Fresh() =
         let id = nextId
@@ -880,6 +888,10 @@ type Subst() =
          | IRTInfer id2, Some et when not (Map.containsKey id2 paramDefaults) ->
              paramDefaults <- Map.add id2 et paramDefaults
          | _ -> ())
+        (match ty, Map.tryFind id elemHints with
+         | IRTInfer id2, Some et when not (Map.containsKey id2 elemHints) ->
+             elemHints <- Map.add id2 et elemHints
+         | _ -> ())
         // An element-cast variable deferring to another variable hands its
         // relation to the survivor (an unannotated return variable unified
         // with `Float64(x)`'s result), or the relation is lost behind the bind.
@@ -909,6 +921,12 @@ type Subst() =
 
     member _.GetParamDefault(id: int) : ElemType option =
         Map.tryFind id paramDefaults
+
+    member _.SetElemHint(id: int, et: ElemType) =
+        elemHints <- Map.add id et elemHints
+
+    member _.GetElemHint(id: int) : ElemType option =
+        Map.tryFind id elemHints
 
     member _.IsIndexDefault(id: int) : bool =
         Set.contains id indexDefaults
@@ -1184,14 +1202,15 @@ type Subst() =
     member _.Snapshot() : obj =
         box (map, typeVarScope, arityConstraints, literalDefaults, wideDefaultVars, knownTypeVarNames, polymorphicIds,
              rankLowerBounds, indexDefaults, paramDefaults,
-             (elemCasts, elemCastMemo, elemCastPartner, elemCastDropUnits, elemBoolMemo, scalarPins))
+             (elemCasts, elemCastMemo, elemCastPartner, elemCastDropUnits, elemBoolMemo, scalarPins), elemHints)
 
     member _.Restore(s: obj) =
-        let (m, tvs, ac, ld, wd, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp)) =
+        let (m, tvs, ac, ld, wd, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp), eh) =
             unbox<Map<int, IRType> * Map<string, IRType * int> * Map<int, int> * Map<int, ElemType> * Set<int> * Set<string>
                   * Set<int> * Map<int, int> * Set<int> * Map<int, ElemType>
                   * (Map<int, int * ElemType> * Map<int * ElemType, int> * Map<int, int> * Set<int>
-                     * Map<int * int * ElemType, int> * Set<int>)> s
+                     * Map<int * int * ElemType, int> * Set<int>) * Map<int, ElemType>> s
+        elemHints <- eh
         map <- m
         typeVarScope <- tvs
         arityConstraints <- ac

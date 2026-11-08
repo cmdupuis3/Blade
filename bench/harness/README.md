@@ -67,6 +67,17 @@ Base arms `blade-llvm`, `blade-cpp`, `gfortran-natural`, `gfortran-expert`, `ifx
 source with `fortran_twin_flags` (`-cpp -DBENCH_INPUTONLY` / `/fpp /DBENCH_INPUTONLY`). A
 twin must print `checksum = 0.0` and the pinned `input_checksum`.
 
+**Knob variants (2026-11-08, round 4 wave 5 lane E).** A kernel.json may declare
+`variants: {"<v>": {"compile": {BLADE_*: "..."}, "run": {ENV: "..."}}}` and list arms
+`blade-cpp@<v>` / `blade-llvm@<v>` (Blade base arms only; `<v>` is `[a-z0-9_]+`). Such an arm builds
+from the same source with the regime's knobs PLUS `compile`, and runs with the regime's run env PLUS
+`run` (e.g. `OMP_NUM_THREADS` for a P sweep inside one mt8 block), so policy arms are interleaved in
+ONE block instead of compared across sessions. Its twin is `blade-cpp@<v>-inputonly`; its smoke
+evidence carries the variant's hash (plain arms' evidence is unchanged). The group-M measurement
+controls (`pm49_*` ... `st05_frontier`, pins by `validation/ref_controls.py` in `validation/pins.json`)
+use it; `RESULTS.md` section 20. `stats.py` gained the column `peak_commit_mb` (max Win32
+PeakPagefileUsage over all samples, the population of `peak_ws_mb`; empty for older rows).
+
 Regimes are `<serial|mt<N>>-<licensed|repro|fastmath>-<native|blas>` (`mt8` = the box's matrix; a session's thread
 counts come from `config.json` `threads`, default `[8]`; `--regimes all` and `bench` expand every threaded
 FAMILY a kernel declares over that list). Per regime the knobs come

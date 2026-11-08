@@ -1768,11 +1768,21 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             // was typed rank-1 and stored a row into a scalar cell; a named
             // row kernel emitted the OUTER product), so it is refused here,
             // for every spelling that reaches the zip (method_for(zip(..)),
-            // a let-bound zip, a join leg). Packed and grouped records keep
-            // their own rules.
+            // a let-bound zip, a join leg). Grouped, ragged and dependent
+            // records keep their own rules. G113 (round 4 wave 5 lane c): a
+            // PACKED symmetric or a COMPOUND / sparse head took the old
+            // single-record arm and paired each cell with a whole row of the
+            // higher-rank operand (`zip(S, M)`, M over (SymIdx<2, I>, K); a
+            // compound with trailing dims beside its rank-1 twin): both lanes
+            // stored a row into a scalar cell (invalid C++, BL9002). Refused
+            // the same way.
             let maxRank = arrayTypes |> List.map (_.IndexTypes.Length) |> List.max
-            let allPlainDense = arrayTypes |> List.forall (fun at -> at.IndexTypes |> List.forall isPlainDenseIx)
-            if minRank > 0 && maxRank > minRank && allPlainDense then
+            let refusableRecord (ix: IRIndexType) =
+                isPlainDenseIx ix
+                || (ix.IxKind = IxKPlain && ix.Symmetry <> SymNone)
+                || ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic || ix.IxKind = IxKSparse
+            let allRefusable = arrayTypes |> List.forall (fun at -> at.IndexTypes |> List.forall refusableRecord)
+            if minRank > 0 && maxRank > minRank && allRefusable then
                 let shapeOf (at: IRArrayType) = at.IndexTypes |> List.map ppIndexType |> String.concat ", "
                 let hi = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = maxRank)
                 let lo = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = minRank)

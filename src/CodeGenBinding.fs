@@ -736,6 +736,22 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
               | None -> false) ->
         let p = (Blade.OptimizeJoinAgg.JoinAggTable.tryFold binding.Id).Value
         genJoinAggFold ctx binding p p.JoinId kernel seed
+    // stream-group-aggregate v1 (Blade.OptimizeStreamGroup, H2 / ST08): a
+    // per-group fold of an unstored streamed grouping adopts its state array
+    | _ when (match Blade.OptimizeStreamGroup.StreamGroupAggTable.tryFold binding.Id with
+              | Some (p, _) -> Blade.OptimizeStreamGroup.StreamGroupAggTable.emitted p.GroupById
+              | None -> false) ->
+        let (p, f) = (Blade.OptimizeStreamGroup.StreamGroupAggTable.tryFold binding.Id).Value
+        let name = bindingCppName binding
+        let ind = indentStr ctx
+        let g = sanitizeCppName p.GroupByName
+        let elemStr = match binding.Type with ArrayElem a -> elemTypeToCpp a.ElemType | t -> irTypeToCpp t
+        recordCodegenDecision "stream-group-aggregate" name Blade.Effects.Applied
+            [ $"c++ lane: `{name}` adopts its per-group states from `{g}`'s windowed pass" ]
+        ([ $"{ind}// stream-group-aggregate v1: `{name}` adopts the per-group states of `{g}`'s windowed pass"
+           $"{ind}size_t* {name}_extents = new size_t[1]{{ {g}__sga_n }};"
+           $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { __sga{{f.Id}}_state, {{name}}_extents };""" ],
+         addVarName binding.Id name ctx)
     // ... and the selection's mask and compound are never built
     | _ when (match Blade.OptimizeJoinAgg.JoinAggTable.elidedBy binding.Id with
               | Some p -> Blade.Optimize.EquiJoinTable.tryCompound p.JoinId |> Option.exists (fun jp -> jp.EmittedCpp.Value)
@@ -3456,6 +3472,22 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          // store, branchless at the cursor exactly as the stored gather: the
          // kept cells land in source order, and no array of the source's
          // values exists. A rank-k mask or trailing dims keep the refusal.
+         // stream-mask-replay v1: the mask site skipped the storage, so the
+         // replay form is MANDATORY here (a stored-mask fallback would read an
+         // undeclared array): anything else is a codegen error
+         let replayed =
+             match Blade.Optimize.MaskReplayTable.tryCompound binding.Id with
+             | Some rp -> rp.Replayed.Value
+             | None -> None
+         let replayBroken =
+             match replayed with
+             | Some (cnt, _) ->
+                 not (rank1 && trailingDimCount = 0) || (streamedRank1Of ctx denseExpr).IsNone
+                 || (planHere |> Option.bind (fun p -> p.CountCpp.Value)) <> Some cnt
+             | None -> false
+         if replayBroken then
+             (codegenError ctx ind $"stream-mask-replay: the mask of compound '{name}' was not stored but its compound cannot take the replay form (internal)", addVarName binding.Id name ctx)
+         else
          match streamedRank1Of ctx denseExpr with
          | Some (vn, spec, n, block) ->
              if not (rank1 && trailingDimCount = 0) then
@@ -3467,14 +3499,26 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              let pos = if fused.IsSome && positions then Some $"{name}_pos" else None
              let cardExpr = match fused with Some c -> c | None -> $"{idxName}->cardinality"
              let gather (v: string) (i: string) =
+                 match replayed with
+                 | Some (_, fn) ->
+                     // the predicate replayed on the cell; the cursor clamped
+                     // to the slack cell, so a store that changed between the
+                     // sweeps stays memory-safe until the BL9001 check below
+                     [ $"const {elemCpp} {name}_v = {v};"
+                       $"const size_t {name}_w = {name}_q < {cardExpr} ? {name}_q : {cardExpr};"
+                       $"{name}_compact[{name}_w] = {name}_v;" ]
+                     @ (pos |> Option.map (fun p -> [ $"{p}[{name}_w][0] = {i};" ]) |> Option.defaultValue [])
+                     @ [ $"{name}_q += (size_t){fn}({name}_v);" ]
+                 | None ->
                  [ $"const {elemCpp} {name}_v = {v};"
                    $"{name}_compact[{name}_q] = {name}_v;" ]
                  @ (pos |> Option.map (fun p -> [ $"{p}[{name}_q][0] = {i};" ]) |> Option.defaultValue [])
                  @ [ $"{name}_q += (size_t){name}__mp[{i}];" ]
              let head =
-                 match fused with
-                 | Some _ -> [ $"{ind}size_t {idxName}_grid = {maskName}.extents[0];" ]
-                 | None -> maskPre @ (idxLines |> List.map (fun l -> ind + l))
+                 match fused, replayed with
+                 | Some _, Some _ -> [ $"{ind}size_t {idxName}_grid = {n}UL;" ]
+                 | Some _, None -> [ $"{ind}size_t {idxName}_grid = {maskName}.extents[0];" ]
+                 | None, _ -> maskPre @ (idxLines |> List.map (fun l -> ind + l))
              let (representation, idxDecl) =
                  match fused, pos with
                  | Some c, Some p ->
@@ -3484,19 +3528,23 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                      ("rank-1 compaction (counted in the mask's sweep, gathered in one sweep -- compaction fusion; positions elided: the demand census found no consumer that reads them)",
                       [ $"{ind}compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {c}, compound_index_t<1>::positions_elided); // rank-1 compaction over a stream, positions elided" ])
                  | None, _ -> ("rank-1 compaction (the index built from the stored mask; the values gathered in one sweep of the store)", [])
+             let maskWord = if replayed.IsSome then "the mask is NOT stored: the gather replays its predicate (stream-mask-replay v1), its count re-checked (BL9001)" else "the mask is stored (1 byte per cell)"
              recordCodegenDecision "compound" name Blade.Effects.Applied
                  [ $"representation: {representation}"
-                   $"the dense operand is the STREAMED variable '{spec.VarName}': the gather is one storage-order sweep of the store ({block} cells per block), branchless at the cursor; the mask is stored (1 byte per cell); no array of the source's values exists" ]
+                   $"the dense operand is the STREAMED variable '{spec.VarName}': the gather is one storage-order sweep of the store ({block} cells per block), branchless at the cursor; {maskWord}; no array of the source's values exists" ]
              let lines =
                  densePre
                  @ [ $"{ind}// compound over the STREAMED variable '{spec.VarName}' (G132 / ST06): the kept cells gathered in one storage-order sweep of the store; the source's values never exist as an array" ]
                  @ head
-                 @ [ $"{ind}size_t {name}_trail = 1;"
-                     $"{ind}const bool* {name}__mp = nested_array_utilities::pool_base({maskName}.data);" ]
+                 @ [ $"{ind}size_t {name}_trail = 1;" ]
+                 @ (if replayed.IsSome then [] else [ $"{ind}const bool* {name}__mp = nested_array_utilities::pool_base({maskName}.data);" ])
                  @ (pos |> Option.map (fun p -> [ $"{ind}compound_index_t<1>::IDX* {p} = new compound_index_t<1>::IDX[{cardExpr} + 1];" ]) |> Option.defaultValue [])
                  @ [ $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{cardExpr} + 1];"
                      $"{ind}size_t {name}_q = 0;" ]
                  @ genStreamedSweep ind name vn spec n block gather
+                 @ (if replayed.IsSome then
+                        [ $"{ind}if ({name}_q != {cardExpr}) blade_rt::panic(\"BL9001\", \"stream-mask-replay: the gather sweep kept a different number of cells than the count sweep (the streamed store changed during the run; internal invariant)\", nullptr, 0);" ]
+                    else [])
                  @ idxDecl
                  @ [ $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, 1> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
              registerShapedAlloc name "deallocate_compound" name
@@ -4322,8 +4370,33 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                 | Some s -> not (s.Members |> List.exists (fun (_, _, src) -> ctx.DeferredComputations.ContainsKey src))
                 | None -> true))
     let streamedSrc = streamedRank1Of ctx arrExpr
+    // stream-mask-replay v1 (Blade.Optimize.planStreamMaskReplay, D1 / G142):
+    // the handshake starts clean at every emission of the mask
+    let replayPlan = Blade.Optimize.MaskReplayTable.tryMask binding.Id
+    replayPlan |> Option.iter (fun rp -> rp.Replayed.Value <- None)
     let matStmts =
         match streamedSrc with
+        | Some (vn, spec, n, block) when replayPlan.IsSome && plan.IsSome && countVar.IsSome
+                                         && (match resolveCallable predExpr with Some c -> c.Params.Length = 1 | None -> false) ->
+            // the mask is never stored: one storage-order sweep COUNTS with
+            // the predicate (one compiled body, which the compound's gather
+            // sweep calls again); no Bool array exists
+            let rp = replayPlan.Value
+            let c = countVar.Value
+            let callable = (resolveCallable predExpr).Value
+            let (wrapperCode, wname) = genCallableWrapper ctx.VarNames name callable
+            let elemStr = elemTypeToCpp spec.VarType.ElemType
+            let fn = $"{name}__pred"
+            let body (v: string) (_: string) = [ $"{c} += (size_t){fn}({v});" ]
+            let lines =
+                wrapperCode
+                @ [ $"auto {fn} = [&](const {elemStr} __v) BLADE_ONE_BODY {{ return (bool){wname}(__v); }};"
+                    $"// mask `{name}` over the STREAMED variable '{spec.VarName}': NEVER STORED (stream-mask-replay v1) -- one storage-order sweep of the store counts the kept cells; the compound's gather sweep calls `{fn}` again"
+                    $"size_t {c} = 0;" ]
+                @ genStreamedSweep "" name vn spec n block body
+            plan.Value.CountCpp.Value <- Some c
+            rp.Replayed.Value <- Some (c, fn)
+            lines
         | Some (vn, spec, n, block) ->
             // G132 / ST06: a streamed source sweeps the store (the planner
             // never plans a mask-site gather or a shared selection over one)
@@ -4678,8 +4751,139 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         recordViewKept "the values are streamed (the pool is their only materialization)"
         let gkName = exprToCppCtx ctx gk
         if not (Set.contains gkName ctx.StructuralGroupings) then
+            // A KEY grouping over a streamed rank-1 variable (round 4 wave 4
+            // lane H, H2 / ST08, gap G129): windows of W cells are read from
+            // the store (BLADE_TILE_TUNE group_win, a speed-only parameter),
+            // and each row goes to its group's NEXT slot -- rows ascending
+            // within every group, which is the CSR's stable order -- so the
+            // pool is the grouped array's only copy of the values; the whole
+            // variable is never buffered. The row -> group map is a SNAPSHOT of
+            // the CSR (built from its offsets and permutation at this site, one
+            // uint32 per source row, freed after the pass), never the live keys
+            // (Codex review of ST08 (a), round 1: keys written between
+            // group_keys and group_by made the scatter overrun the pool). The
+            // non-finite tally runs over the WHOLE variable and is reported
+            // after the last window, as a whole read reports it: a later chunk
+            // failure still comes first, and the window size (speed only)
+            // changes no diagnostic.
+            let pspec = (Blade.ProviderRegistry.tryFind spec.Provider).Value
+            let gaHere =
+                match gk with
+                | IRVar (gkId, _) -> Blade.Optimize.GroupAggTable.tryGk gkId |> Option.exists (fun p -> p.EmittedCpp.Value)
+                | _ -> true
+            match pspec.GenStreamRows with
+            | Some genRows when spec.VarType.IndexTypes.Length = 1 && not gaHere
+                                && (match spec.VarType.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> n >= 0L && n <= int64 System.Int32.MaxValue | _ -> false)
+                                && Result.isOk (Blade.ZarrProvider.CppZarr.haloCacheGeometry spec.FilePath spec.VarName) ->
+                let nVar = match spec.VarType.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> n | _ -> 0L
+                let elemStr = elemTypeToCpp spec.VarType.ElemType
+                let win = max 1L (tileTune "group_win" 65536L)
+                let extentsDecl = fst (emitGroupedExtentsTable ind (name + "_extents") gkName)
+                ignore genRows
+                let tally = $"{name}__read"
+                let missRule = Blade.ZarrProvider.missingRuleOf spec.FilePath spec.VarName
+                let windowRead =
+                    Blade.ZarrProvider.CppZarr.genStreamRowsTerminal spec valsName ($"{name}__win") "__wlo" "__whi" tally
+                    |> List.map (fun s -> ind + "    " + s)
+                let lengthCheck = [ $"{ind}if ({gkName}__nsrc != {nVar}UL) blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch: the group_keys rows and the streamed '{spec.VarName}' ({nVar} cells) differ\", {declPanicArgs ()});" ]
+                let rowGroupBuild =
+                    [ $"{ind}if ((uint64_t){gkName}__ngroups >= (uint64_t)0xFFFFFFFFu) throw std::length_error(\"group_by: more than 2^32 - 2 groups over a streamed variable\");"
+                      $"{ind}uint32_t* {name}__rowg = new uint32_t[{gkName}__nsrc + 1];"
+                      $"{ind}for (size_t __r = 0; __r < {gkName}__nsrc; __r++) {name}__rowg[__r] = 0xFFFFFFFFu; // dropped unless the CSR places it"
+                      $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) for (size_t __p = {gkName}__offsets[__g]; __p < {gkName}__offsets[__g + 1]; __p++) {name}__rowg[{gkName}__perm[__p]] = (uint32_t)__g;" ]
+                    @ (Blade.ProviderRegistry.tallyDeclCpp missRule tally |> List.map (fun l -> ind + l))
+                let rowGroupDone =
+                    (Blade.ProviderRegistry.tallyReportCpp missRule tally spec.VarName spec.FilePath [ $"{nVar}UL" ] |> List.map (fun l -> ind + l))
+                    @ [ $"{ind}delete[] {name}__rowg;" ]
+                // stream-group-aggregate v1 (Blade.OptimizeStreamGroup, H2 /
+                // ST08): no pool -- the same windowed pass advances one state
+                // per group per fold, rows ascending within each group (the
+                // pool's order), each chain from its seed (unseeded: the
+                // group's first row; the plan admits that for dynamic keys).
+                let sga =
+                    match Blade.OptimizeStreamGroup.StreamGroupAggTable.tryGroupBy binding.Id with
+                    | Some plan ->
+                        let ks = plan.Folds |> List.map (fun f -> (f, resolveCallable f.Kernel))
+                        if ks |> List.forall (fun (_, k) -> k.IsSome) then Some (ks |> List.map (fun (f, k) -> (f, k.Value))) else None
+                    | None -> None
+                match sga with
+                | Some folds ->
+                    let wrappers = folds |> List.map (fun (f, kc) -> (f, genCallableWrapper ctx.VarNames $"__sga{f.Id}_k" kc))
+                    let st (f: Blade.OptimizeStreamGroup.StreamFold) = $"__sga{f.Id}_state"
+                    let fs (f: Blade.OptimizeStreamGroup.StreamFold) = $"__sga{f.Id}_first"
+                    let decls =
+                        wrappers |> List.collect (fun (f, (wcode, _)) ->
+                            (wcode |> List.map (fun l -> ind + l))
+                            @ [ $"{ind}{elemStr}* {st f} = new {elemStr}[{gkName}__ngroups + 1];" ]
+                            @ (match f.Seed with
+                               | Some s -> [ $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {st f}[__g] = ({elemStr})({exprToCppCtx ctx s});" ]
+                               | None -> [ $"{ind}bool* {fs f} = new bool[{gkName}__ngroups + 1];"
+                                           $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {fs f}[__g] = true;" ]))
+                    let updates =
+                        wrappers |> List.map (fun (f, (_, wn)) ->
+                            match f.Seed with
+                            | Some _ -> $"{ind}        {st f}[__b] = {wn}({st f}[__b], __v);"
+                            | None -> $"{ind}        if ({fs f}[__b]) {{ {st f}[__b] = __v; {fs f}[__b] = false; }} else {st f}[__b] = {wn}({st f}[__b], __v);")
+                    let frees = wrappers |> List.choose (fun (f, _) -> match f.Seed with None -> Some $"{ind}delete[] {fs f};" | Some _ -> None)
+                    let code =
+                        lengthCheck @ [ $"{ind}// stream-group-aggregate v1: `{name}` is not stored -- ONE windowed pass over the STREAMED '{spec.VarName}' ({win} cells a window) advances {folds.Length} per-group fold state(s), rows ascending within each group" ]
+                        @ decls
+                        @ rowGroupBuild
+                        @ [ $"{ind}{elemStr}* {name}__win = new {elemStr}[{win}];"
+                            $$"""{{ind}}for (size_t __wlo = 0; __wlo < {{nVar}}UL; __wlo += {{win}}) {"""
+                            $"{ind}    const size_t __whi = __wlo + {win} < {nVar}UL ? __wlo + {win} : {nVar}UL;" ]
+                        @ windowRead
+                        @ [ $$"""{{ind}}    for (size_t __wi = __wlo; __wi < __whi; __wi++) {"""
+                            $"{ind}        const uint32_t __b = {name}__rowg[__wi];"
+                            $"{ind}        if (__b == 0xFFFFFFFFu) continue;"
+                            $"{ind}        const {elemStr} __v = {name}__win[__wi - __wlo];" ]
+                        @ updates
+                        @ [ $"{ind}    }}"
+                            $"{ind}}}"
+                            $"{ind}delete[] {name}__win;" ]
+                        @ rowGroupDone
+                        @ frees
+                        @ [ $"{ind}size_t {name}__sga_n = {gkName}__ngroups; // the group count the folds adopt" ]
+                    Blade.OptimizeStreamGroup.StreamGroupAggTable.markEmitted binding.Id
+                    recordCodegenDecision "stream-group-aggregate" name Blade.Effects.Applied
+                        [ $"c++ lane: one windowed pass, {folds.Length} state array(s) of ngroups cells; no pool" ]
+                    (code, addVarName binding.Id name ctx)
+                | None ->
+                let code =
+                    lengthCheck @ [ $"{ind}// group_by: KEY grouping over the STREAMED '{spec.VarName}' -- windows of {win} cells read from the store, each row scattered to its group's next slot (rows ascending: the CSR order); no whole-array buffer" ]
+                    @ extentsDecl
+                    @ [ $$"""{{ind}}Array<{{elemStr}}*, 1> {{name}} = { new {{elemStr}}*[{{gkName}}__ngroups], {{name}}_extents };"""
+                        $"{ind}{elemStr}* {name}__pool = new {elemStr}[{gkName}__offsets[{gkName}__ngroups]];"
+                        $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {name}[__g] = {name}__pool + {gkName}__offsets[__g];"
+                        $"{ind}size_t* {name}__cur = new size_t[{gkName}__ngroups + 1]();" ]
+                    @ rowGroupBuild
+                    @ [ $"{ind}{elemStr}* {name}__win = new {elemStr}[{win}];"
+                        $$"""{{ind}}for (size_t __wlo = 0; __wlo < {{nVar}}UL; __wlo += {{win}}) {"""
+                        $"{ind}    const size_t __whi = __wlo + {win} < {nVar}UL ? __wlo + {win} : {nVar}UL;" ]
+                    @ windowRead
+                    @ [ $$"""{{ind}}    for (size_t __wi = __wlo; __wi < __whi; __wi++) {"""
+                        $"{ind}        const uint32_t __b = {name}__rowg[__wi];"
+                        $"{ind}        if (__b == 0xFFFFFFFFu) continue;"
+                        $"{ind}        {name}__pool[{gkName}__offsets[__b] + {name}__cur[__b]++] = {name}__win[__wi - __wlo];"
+                        $"{ind}    }}"
+                        $"{ind}}}"
+                        $"{ind}delete[] {name}__win;"
+                        $"{ind}delete[] {name}__cur;" ]
+                    @ rowGroupDone
+                registerShapedAlloc name "deallocate_ragged_storage" ($"{name}.data, {name}__pool")
+                let ctx' = addVarName binding.Id name ctx
+                let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
+                (code, ctx')
+            | _ ->
             let ctx' = addVarName binding.Id name ctx
-            (codegenError ctx ind $"group_by over the streamed variable '{spec.VarName}' needs a structural grouping (`segments(..)` / `files(..)`), which reads one run at a time; a key grouping needs the whole variable -- bind it with .read", ctx')
+            let why =
+                if gaHere then "its grouping runs the aggregate-only pass (no CSR)"
+                elif (match spec.VarType.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> n < 0L || n > int64 System.Int32.MaxValue | _ -> true) then "the variable's extent is not a static extent below 2^31 (the window reader's int arithmetic)"
+                elif spec.VarType.IndexTypes.Length = 1 && Result.isError (Blade.ZarrProvider.CppZarr.haloCacheGeometry spec.FilePath spec.VarName) then
+                    match Blade.ZarrProvider.CppZarr.haloCacheGeometry spec.FilePath spec.VarName with Error e -> $"its chunk geometry is not admitted ({e})" | Ok _ -> ""
+                elif spec.VarType.IndexTypes.Length <> 1 then $"a key grouping streams rank-1 variables only (this one is rank {spec.VarType.IndexTypes.Length})"
+                else $"provider '{spec.Provider}' has no windowed rank-1 stream"
+            (codegenError ctx ind $"group_by over the streamed variable '{spec.VarName}' with a key grouping: {why} -- bind it with .read, or group it structurally (`segments(..)` / `files(..)`)", ctx')
         else
         let pspec = (Blade.ProviderRegistry.tryFind spec.Provider).Value
         match Map.tryFind gkName ctx.GridGroupings, pspec.GenStreamWindow with
@@ -4727,6 +4931,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             // registered so the peel resolves its rows' lengths.
             let plan = (Blade.Optimize.StreamGroupFoldTable.tryGroup binding.Id).Value
             plan.Emitted.Value <- true
+            plan.ExtraDone.Value <- Set.empty
             let code = [ $"{ind}// group_by `{name}` over the STREAMED '{spec.VarName}': never built (stream-group-fold v1) -- its one fold peel streams each run into a window of {plan.MaxRun} cell(s)" ]
             let ctx' = addVarName binding.Id name ctx
             let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
@@ -5252,6 +5457,10 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "external-sort"; Version = 1; Span = decisionSpan (); Subject = name
               Outcome = outcome; Evidence = evidence }
+    // sort-terminal v1 (D5 / G127): the handshake starts clean at every
+    // emission of the sort (a stale accumulator name would be undeclared)
+    let terminalPlan = Blade.OptimizeSort.SortTerminalTable.trySort binding.Id
+    terminalPlan |> Option.iter (fun tp -> tp.Fed.Value <- None)
     let external =
         if not keyErrCode.IsEmpty || not elemErrCode.IsEmpty then None
         else
@@ -5264,8 +5473,15 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
                   "v1 limits: one merge pass (refused with memory_quota beyond the fan-in the allowance buys); the sorted output stays resident (its ABI); main's top level only"
                   "llvm lane: no sort arm (the program falls back to the C++ lane)" ]
             Some r
-        | Error "no grant" -> None
-        | Error why -> recordExternal (Blade.Effects.Declined why) []; None
+        | Error "no grant" ->
+            terminalPlan |> Option.iter (fun tp ->
+                Blade.OptimizeSort.recordSortTerminal name (Blade.Effects.Declined "no BLADE_PRIVATE_SPOOL grant (the terminal form rides external-sort v1; the resident sort keeps its output)") tp.Evidence)
+            None
+        | Error why ->
+            recordExternal (Blade.Effects.Declined why) []
+            terminalPlan |> Option.iter (fun tp ->
+                Blade.OptimizeSort.recordSortTerminal name (Blade.Effects.Declined $"external-sort v1 declined: {why}") tp.Evidence)
+            None
     match external with
     | Some (lines, ctx') -> (forceCode @ lines, ctx')
     | None ->
@@ -5337,6 +5553,65 @@ and tryGenExternalSortBinding (ctx: CodeGenContext) (binding: IRBinding) (arrExp
         let cPerm = cellAt (name + "__perm[__si]")
         let cI = cellAt "__i"
         let cO = cellAt "__o"
+        // sort-terminal v1 (D5 / G127): the sorted cells feed the fold's
+        // chain in sorted order; no sorted output exists
+        let terminal =
+            match Blade.OptimizeSort.SortTerminalTable.trySort binding.Id with
+            | Some tp ->
+                (match resolveCallable tp.Kernel with
+                 | Some kc when kc.Params.Length = 2 && boundDim |> snd ->
+                     let (kw, kname) = genCallableWrapper ctx.VarNames ($"{name}__fold") kc
+                     let accT = elemTypeToCpp kc.RetType
+                     let acc = $"{name}__acc"
+                     let init =
+                         match tp.Seed with
+                         | Some s -> $"{accT} {acc} = ({accT})({exprToCpp ctx.VarNames s});"
+                         | None -> $"{accT} {acc}{{}};"
+                     let feed (pos: string) (cell: string) =
+                         match tp.Seed with
+                         | Some _ -> $"{{ const {elemStr} __tv = {cell}; {acc} = {kname}({acc}, __tv); }}"
+                         | None -> $"{{ const {elemStr} __tv = {cell}; if ({pos} == 0) {acc} = ({accT})__tv; else {acc} = {kname}({acc}, __tv); }}"
+                     Some (tp, kw, init, acc, feed)
+                 | _ -> None)
+            | None -> None
+        match terminal with
+        | Some (tp, kw, init, acc, feed) ->
+            let feedPerm = feed "__si" cPerm
+            let feedMerge = feed "__p" cO
+            let lines =
+                [ $"{ind}// external-sort v1 (ST14) + sort-terminal v1 (G127): `{name}` is NEVER STORED -- its sorted cells feed `{tp.FoldName}`'s fold in sorted order (resident: the permutation walk; spool: the merge's emit, positions ascending)" ]
+                @ (wrapperCode |> List.map (fun l -> ind + l))
+                @ (kw |> List.map (fun l -> ind + l))
+                @ (prelude |> List.map (fun l -> ind + l))
+                @ [ $"{ind}using {name}__K = std::decay_t<std::invoke_result_t<decltype({w})&, {pcpp}>>;"
+                    $"{ind}const uint64_t {name}__n = (uint64_t)({fst boundDim});"
+                    $"{ind}{init}"
+                    $"{ind}if ({name}__n == 0 || {name}__n <= {policy.ResidentBytes}ULL / (sizeof({name}__K) + 16)) {{"
+                    $"{i1}{name}__K* {name}__keys = new {name}__K[{name}__n];"
+                    $"{i1}for (uint64_t __ki = 0; __ki < {name}__n; __ki++) {name}__keys[__ki] = {w}({cKi});"
+                    $"{i1}uint64_t* {name}__perm = new uint64_t[{name}__n];"
+                    $"{i1}for (uint64_t __pi = 0; __pi < {name}__n; __pi++) {name}__perm[__pi] = __pi;"
+                    $"{i1}std::stable_sort({name}__perm, {name}__perm + {name}__n, [&](uint64_t __a, uint64_t __b) {{ return blade_rt::sort_key_less({name}__keys[__a], {name}__keys[__b]); }});"
+                    $"{i1}for (uint64_t __si = 0; __si < {name}__n; __si++) {feedPerm}"
+                    $"{i1}delete[] {name}__perm;"
+                    $"{i1}delete[] {name}__keys;"
+                    $"{ind}}} else {{"
+                    $"{i1}namespace es = blade_external_sort;"
+                    $"{i1}es::Stats {name}__st; blade_private_spool::Status {name}__clean;"
+                    $"{i1}const auto {name}__s = es::sort({root}, {policy.TrackedWorkspaceBytes}ULL, {policy.LogicalDiskBytes}ULL, {axis}ULL, {name}__n,"
+                    $"{i1}    [&](uint64_t __i) {{ return es::key_code({w}({cI})); }},"
+                    $"{i1}    [&](uint64_t __p, uint64_t __o) {feedMerge}, {name}__st, {name}__clean);"
+                    $"{i1}if (!{name}__s) {{"
+                    $"{i1}    std::cerr << \"external sort `{name}` code=\" << int({name}__s.code) << \" os=\" << {name}__s.os_error << \" cleanup=\" << int({name}__clean.code) << std::endl;"
+                    $"{i1}    blade_rt::panic(\"BL8016\", \"private intermediate resource or protocol failure\", {declPanicArgs ()});"
+                    $"{i1}}}"
+                    $"{i1}blade_rr::note_private_spool(\"{name}\", 2ULL * {name}__n, 2ULL * {name}__st.shape.block, {name}__st.plan.blocks, {name}__st.counters.payload_written, {name}__st.counters.payload_read, {name}__st.counters.logical_disk_high_water, {name}__st.plan.reserved_disk, {root}, {policy.TrackedWorkspaceBytes}ULL, {policy.LogicalDiskBytes}ULL);"
+                    $"{ind}}}" ]
+            Blade.OptimizeSort.recordSortTerminal name Blade.Effects.Applied tp.Evidence
+            tp.Fed.Value <- Some acc
+            (externalSortUsedCell ()).Value <- true
+            Ok (lines, addVarName binding.Id name ctx)
+        | None ->
         let lines =
             [ $"{ind}// external-sort v1 (ST14): `{name}` -- the grant-bound stable sort; resident cached-key form when n x (key + 16) bytes fits the resident allowance {policy.ResidentBytes}, else spool runs (mem {policy.TrackedWorkspaceBytes}, disk {policy.LogicalDiskBytes}) and one bounded-fan-in merge" ]
             @ (wrapperCode |> List.map (fun l -> ind + l))
@@ -5685,7 +5960,21 @@ and genLuBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
     // types itself.
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // The column-major companion (Optimize.planLuCompanion, gap G109): main's
+    // top level only, where nothing is scope-freed and the companion object
+    // lives as long as the factor value.
+    let companion =
+        match binding.Value with
+        | IRLu mExpr when Blade.Optimize.LuCompanionTable.isFactor binding.Id && (currentAllocScope ()).IsNone ->
+            Some mExpr
+        | _ -> None
     let matStmts =
+        match companion with
+        | Some mExpr ->
+            (match materializeLuFormWith emptySubst ctx.VarNames name mExpr (Some (binding.Id, $"{name}__lucm")) with
+             | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+             | None -> [])
+        | None ->
         match materializeInlineForm emptySubst ctx.VarNames name (lazy "") binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
@@ -5704,7 +5993,24 @@ and genLuSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         match binding.Type with
         | ArrayElem at -> irTypeToCpp at.ElemType
         | _ -> "double"
+    // An admitted solve of a factor whose companion the routed arm built
+    // (Optimize.planLuCompanion, gap G109) reads it; the plan's LAST admitted
+    // solve releases it after itself (a solve emitted later answers through
+    // the copy: blade_lu_solve_cm_d).
+    let companion =
+        match binding.Value, Blade.Optimize.LuCompanionTable.factorOfSolve binding.Id with
+        | IRLuSolve (lExpr, pExpr, rExpr, transposed), Some fid when (currentAllocScope ()).IsNone ->
+            luCompanionOf fid |> Option.map (fun cm -> (cm, lExpr, pExpr, rExpr, transposed, Blade.Optimize.LuCompanionTable.isLastSolve binding.Id))
+        | _ -> None
     let matStmts =
+        match companion with
+        | Some (cm, lExpr, pExpr, rExpr, transposed, last) ->
+            (match materializeLuSolveFormWith emptySubst ctx.VarNames name elemStr lExpr pExpr rExpr transposed (Some cm) with
+             | Some (s, allocs) ->
+                registerMaterializedAllocs allocs
+                if last then s @ [ $"blade_lapack::blade_lu_cm_release({cm}); /* lu-companion: the last admitted solve */" ] else s
+             | None -> [])
+        | None ->
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
@@ -5737,6 +6043,13 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
 
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
+    // sort-terminal v1 (D5 / G127): the sort fed this fold in sorted order
+    match Blade.OptimizeSort.SortTerminalTable.tryFold binding.Id |> Option.bind (fun tp -> tp.Fed.Value) with
+    | Some acc ->
+        let name = bindingCppName binding
+        let ty = irTypeToCpp binding.Type
+        ([ $"{indentStr ctx}const {ty} {name} = {acc}; // sort-terminal v1: folded in the sort's sorted order" ], addVarName binding.Id name ctx)
+    | None ->
     let sparseTerminal = Blade.Optimize.certifySparseWildcardFold ctx.StreamTerminalModule binding arrExpr kernelExpr initExpr
     match arrExpr, sparseTerminal with
     | _, Ok plan when ctx.ParamIds.IsEmpty && ctx.TilePlans.IsEmpty && ctx.TileReads.IsEmpty && ctx.StreamedArrays.IsEmpty
@@ -6395,6 +6708,94 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     match streamedLeaf with
     | Some (Error why) -> (prelude @ codegenError ctx (indentStr ctx) why, addVarName binding.Id (bindingCppName binding) ctx)
     | Some (Ok (leaf, leafTy)) ->
+        // stream-fold-fuse v1 (round 4 wave 5, D4 / G145 item 2): a map of ONE
+        // streamed rank-1 variable folded by a total kernel and seed is folded
+        // per block of the store's sweep -- the map kernel and the fold step on
+        // each cell in cell order -- with no N-cell buffer. The fold keeps the
+        // stored form's association: the licensed K-lane round robin
+        // (fpReassocLaneStmts' lane of every cell, its tail rule and its
+        // ascending combine) or the serial chain; bitwise the staged form under
+        // BLADE_FP_CONTRACT=off (fast contraction may fuse the map's product
+        // into the fold's add, a last-ULP schedule difference).
+        let fusedArm =
+            if not (Blade.Optimize.streamFoldFuseEnabled ()) then Error "opt-in (BLADE_STREAM_FOLD_FUSE=1): the second Codex review of the bypassed-staged-admission class found another member (stop rule)"
+            else
+            match leaf with
+            | IRApplyCombinator info ->
+                (match info.Arrays, resolveCallable info.Kernel, resolveCallable kernelExpr with
+                 | [ src ], Some mk, Some fk when mk.Params.Length = 1 && fk.Params.Length = 2 && info.KernelInputRanks = [ 0 ] ->
+                     // Codex diff review D4 round 1: the stored fold's FORM must be
+                     // the serial chain or the global K lanes (an `omp` fold takes
+                     // Path A / B: declined), and the staged segment route's own
+                     // admission must not be bypassed -- v1 fuses only a closed
+                     // capture-free total map (`totalScalarOver` of its one
+                     // parameter) with a real output, in a non-MPI, non-CUDA build
+                     let realOut =
+                         match stripUnits leafTy with
+                         | ArrayElem at -> (match stripUnits at.ElemType with IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) -> true | _ -> false)
+                         | _ -> false
+                     if fk.IsOmpParallel || not fk.Parallelism.IsEmpty || mk.IsOmpParallel || not mk.Parallelism.IsEmpty || mk.IsCudaKernel || fk.IsCudaKernel then
+                         Error "a parallel kernel (the stored fold takes Path A / B, whose association v1 does not reproduce)"
+                     elif not mk.Captures.IsEmpty || not (Blade.Optimize.totalScalarOver mk.Params mk.Body)
+                          || not (Blade.Optimize.allocFreeScalar (fun x -> match x with IRVar (v, _) -> v = mk.Params.Head.VarId | IRParam (_, i, _) -> i = mk.Params.Head.Index | _ -> false) mk.Body) then
+                         Error "the map kernel is not a closed capture-free total scalar of its cell (v1 keeps the staged segment route's admission)"
+                     elif not realOut then Error "the map's output is not a real scalar (the staged route's output check stays)"
+                     elif mpiProgramOn () then Error "an MPI build"
+                     else
+                     (match streamedRank1Of ctx src with
+                      | Some (vn, spec, n, block) ->
+                          (match seedExpr with
+                           | IRUnseededSeed _ when n <= 0L -> Error "an unseeded fold over an empty variable (its BL8003 stays with the staged form)"
+                           | _ -> Ok (mk, fk, vn, spec, n, block))
+                      | None -> Error "the map's operand is not one streamed rank-1 variable of static extent read by blocks")
+                 | _ -> Error "the map is not a one-operand elementwise map with a resolved kernel, or the fold kernel is not a two-parameter callable")
+            | _ -> Error "the leaf is not a map application"
+        match fusedArm with
+        | Ok (mk, fk, vn, spec, n, block) ->
+            let ind = indentStr ctx
+            let name = bindingCppName binding
+            let accT = elemTypeToCpp (match stripUnits binding.Type with IRTScalar _ as ty -> ty | ty -> ty)
+            let mapT =
+                match stripUnits leafTy with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | _ -> accT
+            let (mw, mname) = genCallableWrapper ctx.VarNames ($"{name}__map") mk
+            let (fw, fname) = genCallableWrapper ctx.VarNames ($"{name}__fold") fk
+            let licensed = fpReassocEnabled () && foldReorderLicensed fk
+            let kL = int64 foldLaneCount
+            let laneForm = licensed && n >= kL
+            let fullEnd = if laneForm then kL + ((n - kL) / kL) * kL else 0L
+            let lanes = $"{name}__fl"
+            let cell (v: string) (i: string) =
+                [ $"const {mapT} {name}__m = {mname}({v});" ]
+                @ (if laneForm then
+                       [ $"const size_t {name}__j = {i};"
+                         $"if ({name}__j < {kL}UL) {lanes}[{name}__j] = {name}__m;"
+                         $"else if ({name}__j < {fullEnd}UL) {lanes}[{name}__j %% {kL}UL] = {fname}({lanes}[{name}__j %% {kL}UL], {name}__m);"
+                         $"else {lanes}[{name}__j - {fullEnd}UL] = {fname}({lanes}[{name}__j - {fullEnd}UL], {name}__m);" ]
+                   else [ $"{name} = {fname}({name}, {name}__m);" ])
+            let form = if laneForm then $"K-lanes({kL}) round robin (the stored form's lanes, tail and ascending combine)" elif licensed then "the serial chain (n < K: the stored form's short fallback)" else "the serial chain (unlicensed or BLADE_FP_REPRO=1, as the stored form)"
+            recordCodegenDecision "stream-fold-fuse" name Blade.Effects.Applied
+                [ $"`{name}` folds the map of the STREAMED '{spec.VarName}' per block of the store's sweep ({block} cells per block): map kernel then fold step on each cell, in cell order; no N-cell buffer ({n} cells of {mapT} not stored)"
+                  $"fold form: {form}"
+                  "legality: the fold kernel and its seed are closed-total (the staging admission), so interleaving them with the reads and the map moves no failure; the map's failures and the reads' come in the same cell / block order as the staged form"
+                  "bitwise the staged form under BLADE_FP_CONTRACT=off; the fast default may contract the map's product into the fold's add (a last-ULP schedule difference)"
+                  "llvm lane: refuses streamed provider reads (the program falls back to C++)" ]
+            let code =
+                prelude
+                @ [ $"{ind}// reduce over a map of the STREAMED variable '{spec.VarName}': fused per block (stream-fold-fuse v1) -- no N-cell buffer" ]
+                @ (mw |> List.map (fun l -> ind + l))
+                @ (fw |> List.map (fun l -> ind + l))
+                @ [ $"{ind}{accT} {name} = {exprToCppCtx ctx seedExpr};" ]
+                @ (if laneForm then [ $"{ind}{mapT} {lanes}[{kL}];" ] else [])
+                @ genStreamedSweep ind name vn spec n block cell
+                @ (if laneForm then
+                       [ for l in 1L .. kL - 1L -> $"{ind}{lanes}[0] = {fname}({lanes}[0], {lanes}[{l}]);" ]
+                       @ [ $"{ind}{name} = {fname}({name}, {lanes}[0]);" ]
+                   else [])
+            (code, addVarName binding.Id name ctx)
+        | Error why ->
+        recordCodegenDecision "stream-fold-fuse" (bindingCppName binding) (Blade.Effects.Declined why) []
         let tmpId = builder.FreshId()
         let tmp = $"{bindingCppName binding}__strm"
         let matBinding = { Id = tmpId; Name = tmp; Type = leafTy; Value = IRCompute leaf; IsConst = true; IsMutable = false }
@@ -6506,13 +6907,17 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             // through a chain of deferred references: a projection of a
             // wholly-deferred module tuple registers its member (`IRVar d1`),
             // gap G100, and the kernel reads `v` by name, so it is forced
-            // under its own name like a direct map. Main's top level keeps
-            // its old rule (a forced projection's print class is not settled
-            // there: the interpreter prints the projected root too).
+            // under its own name like a direct map. At main's top level such
+            // a projection is a DEFERRED ALIAS of its member (gap G111,
+            // genTupleProjBinding records it): forced through the alias arm
+            // of forceDeferredArrayInput, the member under its own name
+            // first, then the projection as its copy -- both print, the
+            // alias-class rule the interpreter applies.
             && (let rec isMap (seen: Set<IRId>) (id: IRId) =
                     match Map.tryFind id ctx.DeferredComputations with
                     | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
-                    | Some (IRVar (r, _)) when ctx.Indent > 0 && not (seen.Contains r) -> isMap (seen.Add r) r
+                    | Some (IRVar (r, _)) when (ctx.Indent > 0 || Map.containsKey id ctx.DeferredAliasOf)
+                                              && not (seen.Contains r) -> isMap (seen.Add r) r
                     | _ -> false
                 isMap (Set.singleton id) id))
     let (capForceLines, ctx) = deferredCaptureIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__cap")
@@ -8594,6 +8999,22 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
         // Parent is a deferred tuple -- project out the element and defer it
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id elems.[projIdx] ctx'.DeferredComputations }
+        // G111 (round 4 wave 5 lane c; formalism 10.2's alias rule): at
+        // MAIN'S TOP LEVEL a projection of a wholly-deferred tuple whose
+        // member is a NAMED deferred map (`let p = (d1, d2); let v = p[0]`)
+        // is that map by substitution -- a deferred ALIAS, one alias class
+        // with it. Recorded as one, so its first forcing use forces the
+        // member under its own name first and binds the projection as its
+        // copy, and both print (the interpreter's alias-class rule); a
+        // capture by a top-level kernel is such a use (it used to leave the
+        // projection undeclared: BL9002).
+        let ctx' =
+            match elems.[projIdx], binding.Type with
+            | IRVar (srcId, _), ArrayElem _
+                    when ctx.Indent = 0 && not (Set.contains binding.Id ctx.MutableArrayLets)
+                         && Map.containsKey srcId ctx.DeferredComputations ->
+                { ctx' with DeferredAliasOf = Map.add binding.Id srcId ctx'.DeferredAliasOf }
+            | _ -> ctx'
         ([$"{ind}// {name} = <deferred computation (tuple proj)>"], ctx')
     | Some (IRParallel _ | IRFusion _) ->
         // Parent is a deferred combinator -- defer the projection too

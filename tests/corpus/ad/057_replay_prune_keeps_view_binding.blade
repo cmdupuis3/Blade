@@ -1,0 +1,24 @@
+// TEST: AD Replay Prune Keeps The View A Kept Overwrite Writes Through
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 (opt-in) KEEPS the loop-local view `let mut v = d(0)`:
+// the kept element overwrite `v(1) = 7` needs its binding although it reads
+// no cell (Codex review of PM59, wave 5 round 2: the pruned replay referred
+// to an unbound view). `blade test opt-diff` runs this with the arm on.
+// ============================================================================
+type D = Array<Int32 like Idx<1>, Idx<2>>
+function touch(x: Float64, d: D) -> Float64 = {
+    let mut v = d(0)
+    v(1) = 7
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let d: D = [[1, 1]]
+    let t = x * Float64(d(0, 1))
+    let ys = method_for(range<Idx<2>>)
+        <@> lambda(i) -> touch(x, d) |> compute
+    t + reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// EXPECT: value = 6.0
+// EXPECT: dx = 9.0

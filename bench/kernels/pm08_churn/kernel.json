@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "name": "pm08_churn",
+  "group": "M",
+  "title": "PM08 allocation churn across the pool-retention arms",
+  "sizes": {
+    "smoke": {
+      "m": 2003,
+      "k": 5
+    },
+    "full": {
+      "m": 131071,
+      "k": 763
+    },
+    "m1001": {
+      "m": 1001,
+      "k": 99901
+    },
+    "m8191": {
+      "m": 8191,
+      "k": 12209
+    },
+    "m131071": {
+      "m": 131071,
+      "k": 763
+    },
+    "m500009": {
+      "m": 500009,
+      "k": 199
+    },
+    "m786431": {
+      "m": 786431,
+      "k": 127
+    },
+    "m3000017": {
+      "m": 3000017,
+      "k": 33
+    },
+    "m9000011": {
+      "m": 9000011,
+      "k": 11
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": false,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "m<cells>: the large temporary's cells (8 B each): below (1001), inside (8191, 131071, 500009) and above (786431, 3000017, 9000011) the 16 KiB - 4 MiB cached band; m * k ~ 1e8 cells.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "blade-llvm@retain",
+    "blade-cpp@retain"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
+  "variants": {
+    "retain": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "1"
+      }
+    }
+  }
+}

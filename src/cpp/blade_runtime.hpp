@@ -23,6 +23,8 @@
 #include <type_traits>
 #include <locale>
 #include <initializer_list>
+#include <functional>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -347,6 +349,27 @@ namespace blade_rt {
     if constexpr (std::is_floating_point<K>::value) return a < b || (a != a && b == b);
     else return a < b;
   }
+  // The SET EQUALITY of unique / intersect / union (docs/features/sql.md
+  // section 3; gap G126): the classes of sort's key order -- every NaN ONE
+  // value, -0.0 and +0.0 one value, other keys by `==` -- the interpreter's
+  // `compare = 0`. Each class keeps its FIRST occurrence. (`contains` stays
+  // the scalar `==`: NaN matches nothing.)
+  template <class K> struct set_eq {
+    bool operator()(const K& a, const K& b) const {
+      if constexpr (std::is_floating_point<K>::value) return a == b || (a != a && b != b);
+      else return a == b;
+    }
+  };
+  template <class K> struct set_hash {
+    std::size_t operator()(const K& k) const {
+      if constexpr (std::is_floating_point<K>::value) {
+        if (k != k) return static_cast<std::size_t>(0x9e3779b97f4a7c15ull); // every NaN: one class
+        if (k == K(0)) return std::hash<K>{}(K(0));                           // -0.0 and +0.0
+      }
+      return std::hash<K>{}(k);
+    }
+  };
+  template <class K> using set_of = std::unordered_set<K, set_hash<K>, set_eq<K>>;
 }
 namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };

@@ -1,0 +1,16 @@
+// TEST: a zip of a packed symmetric array with a higher-rank packed array is refused (rejects)
+// Gap G113 (round 4 wave 5 lane c; G99 remainder): `S` is over one SymIdx<2, I>
+// record, `M` over (SymIdx<2, I>, K). The head records agree, so the zip took
+// the single-record arm and paired each canonical cell of `S` with a whole row
+// of `M` -- a row stored into a scalar cell (invalid C++). A zip walks every
+// axis of its operands as one index space; operands of different ranks are
+// refused, packed heads as plain ones (BL3027).
+// ERROR: BL3027
+// ERROR-CONTAINS: co-iteration operands must have the SAME rank
+type I = Idx<3>
+type K = Idx<2>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let X: Array<Float64 like I, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let M = method_for(X, X) <@> lambda(a: Array<Float64 like K>, b: Array<Float64 like K>) where comm(a, b) -> a + b |> compute
+let Z = method_for(zip(S, M)) <@> lambda(s, m) -> s + m |> compute

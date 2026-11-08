@@ -1,0 +1,10 @@
+// TEST: Sort Tuple Key Refused (rejects)
+// A sort key must be a real, integer, Bool or String scalar (gap G126, round 4
+// wave 5 lane c). A TUPLE key compiled in C++ (std::tuple `<`,
+// lexicographic) while the interpreter read it as NaN (every key tied): a
+// silent divergence. Refused at the type check until a lexicographic key
+// contract is written.
+// ERROR: BL3033
+type R = Idx<3>
+let xs: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let s = sort(xs, lambda(x) -> (2.0 - x, 1.0))

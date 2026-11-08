@@ -1,0 +1,16 @@
+// TEST: Mask Over Compound With Trailing Dims
+// ----------------------------------------------------------------------------
+// A mask over a compound WITH TRAILING DIMS (gap G146 (1), round 4 wave 5 lane
+// c): `cX` is over (CompoundIdx, K); the mask is a Bool compound sharing its
+// index and trailing stride, one bit per stored cell in storage order. The C++
+// lane refused it (`mask over a rank-2 array is supported over plain dense
+// arrays only`) while the interpreter flattened it to a dense array.
+// ----------------------------------------------------------------------------
+type I = Idx<3>
+type K = Idx<2>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let X: Array<Float64 like I, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let m = mask(x, lambda(v) -> v > 1.5)
+let cX = compound(X, m)
+let keep = mask(cX, lambda(v) -> v > 3.5)
+// EXPECT: keep = [[false, true], [true, true]]

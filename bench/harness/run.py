@@ -640,6 +640,7 @@ class ArmSpec:
     lane: str | None     # llvm | cpp (blade only)
     tier: str            # blade | natural | expert
     twin: bool
+    variant: str | None = None   # `blade-cpp@<v>`: a KNOB VARIANT of a Blade base arm (kernel.json `variants`)
 
     @property
     def base(self) -> str:
@@ -649,8 +650,13 @@ class ArmSpec:
     def parse(name: str) -> "ArmSpec":
         twin = name.endswith("-inputonly")
         base = name[: -len("-inputonly")] if twin else name
+        base, sep, variant = base.partition("@")
+        if sep and not re.fullmatch(r"[a-z0-9_]+", variant):
+            raise HarnessError(f"arm {name!r}: a variant name is [a-z0-9_]+")
         if base in ("blade-llvm", "blade-cpp"):
-            return ArmSpec(name, "blade", base.split("-")[1], "blade", twin)
+            return ArmSpec(name, "blade", base.split("-")[1], "blade", twin, variant or None)
+        if sep:
+            raise HarnessError(f"arm {name!r}: only the Blade base arms take a knob variant")
         fam, _, tier = base.partition("-")
         if fam in ("gfortran", "ifx") and tier in ("natural", "expert"):
             return ArmSpec(name, fam, None, tier, twin)
@@ -774,6 +780,22 @@ def load_kernel(kdir: Path) -> Kernel:
         raise HarnessError(f"{path}: no_parallel_form must be true, false or a list of regime names")
     else:
         npf = [x if x == "all" else Regime.family_of(x) for x in npf]
+    # `variants`: {"<v>": {"compile": {BLADE_*: value}, "run": {ENV: value}}}; an arm `blade-cpp@<v>` builds
+    # with the regime's knobs plus `compile` and runs with the regime's run env plus `run` -- so knob arms
+    # interleave in ONE block (the measurement lane's policy controls; harness/README.md "Knob variants").
+    variants = raw.get("variants", {})
+    if not isinstance(variants, dict):
+        raise HarnessError(f"{path}: variants must be an object")
+    for vname, v in variants.items():
+        if not re.fullmatch(r"[a-z0-9_]+", vname) or not isinstance(v, dict) or set(v) - {"compile", "run", "_why"}:
+            raise HarnessError(f"{path}: variants.{vname} must be {{compile: {{..}}, run: {{..}}}}")
+        for part in ("compile", "run"):
+            if not isinstance(v.get(part, {}), dict) or any(not isinstance(x, str) for x in v.get(part, {}).values()):
+                raise HarnessError(f"{path}: variants.{vname}.{part} must map names to strings")
+    for a in arms:
+        va = ArmSpec.parse(a).variant
+        if va is not None and va not in variants:
+            raise HarnessError(f"{path}: arm {a!r} names an undeclared variant")
     contract = raw.get("memory_contract")
     if contract is not None:
         if not isinstance(contract, dict):
@@ -1212,6 +1234,14 @@ class Build:
     lane: str | None = None
 
 
+def variant_knobs(kernel: Kernel, arm: ArmSpec, part: str) -> dict[str, str]:
+    """The `compile` or `run` knobs of an arm's kernel.json variant (empty for a plain arm)."""
+    if arm.variant is None:
+        return {}
+    return {k: str(v) for k, v in kernel.raw.get("variants", {}).get(arm.variant, {}).get(part, {}).items()
+            if not k.startswith("_")}
+
+
 def prepare_source(kernel: Kernel, arm: ArmSpec, regime: Regime, size_name: str, armdir: Path,
                    stem: str) -> tuple[Path, dict[str, Any]]:
     """Copy the arm's committed source into ``armdir/src`` with sizes substituted."""
@@ -1238,6 +1268,7 @@ def build_arm(kernel: Kernel, arm: ArmSpec, regime: Regime, size_name: str, root
     to what identifies the build (see :func:`prune_arm_dir`)."""
     b = Build(arm=arm.name, regime=regime.name, size=size_name, run_knobs=run_knobs(regime, config),
               twin=arm.twin, lane=arm.lane)
+    b.run_knobs.update(variant_knobs(kernel, arm, "run"))
     armdir = root / kernel.name / size_name / regime.name / arm.name
     if armdir.exists():
         shutil.rmtree(armdir)
@@ -1338,6 +1369,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
         return
     exe = armdir / f"{stem}{EXE_SUFFIX}"
     b.knobs = blade_knobs(regime, arm.lane or "cpp", config)
+    b.knobs.update(variant_knobs(k, arm, "compile"))
     b.flags = ["--verbose", "--print", "checksum,input_checksum"]
     b.command = [str(BLADE_EXE), "compile", str(src), "-o", str(exe), *b.flags]
     b.compiler = {"blade": blade, "gpp": tools.gpp()}
@@ -1997,8 +2029,11 @@ class Session:
         return {"checksum": float(pin["checksum"]), "input_checksum": float(pin["input_checksum"]),
                 "_source": f"pin {Path(pin['_file']).name}"}
 
-    def _evidence_hashes(self, src: Path, a: ArmSpec) -> dict[str, str | None]:
-        return {"source": sha256_file(src),
+    def _evidence_hashes(self, src: Path, a: ArmSpec, k: Kernel | None = None) -> dict[str, str | None]:
+        extra = {}
+        if a.variant is not None:   # only a variant arm carries the key: plain arms' evidence stays current
+            extra["variant"] = hashlib.sha256(json.dumps((k.raw.get("variants", {}) if k else {}).get(a.variant), sort_keys=True).encode()).hexdigest()
+        return {**extra, "source": sha256_file(src),
                 "bench_support": sha256_file(BENCH_SUPPORT) if (a.family != "blade" and BENCH_SUPPORT.is_file()) else None,
                 "blade_dll": self.tools.blade().get("dll_sha256") if a.family == "blade" else None,
                 "config": build_config_hash(self.opt.config)}
@@ -2052,8 +2087,8 @@ class Session:
                         continue
                     key = f"{k.name}|{regime.name}|{a.name}"
                     e = evidence.get(key)
-                    if e is None or e.get("hashes") != self._evidence_hashes(src, a) or e.get("status") not in ACCEPTED_SMOKE_STATUSES:
-                        why = "none" if e is None else ("stale hashes" if e.get("hashes") != self._evidence_hashes(src, a) else e.get("status"))
+                    if e is None or e.get("hashes") != self._evidence_hashes(src, a, k) or e.get("status") not in ACCEPTED_SMOKE_STATUSES:
+                        why = "none" if e is None else ("stale hashes" if e.get("hashes") != self._evidence_hashes(src, a, k) else e.get("status"))
                         problems.append(f"{key}: no passing smoke evidence for the current sources ({why}); "
                                         f"run `smoke --kernels {k.name} --regimes {regime.name}`")
         if self.opt.skip_smoke_check:
@@ -2094,7 +2129,7 @@ class Session:
                     continue
                 evidence[f"{k.name}|{regime.name}|{arm}"] = {
                     "status": e["status"], "pinned": blk.get("checksum_reference", "").startswith("pin"),
-                    "hashes": self._evidence_hashes(src, a),
+                    "hashes": self._evidence_hashes(src, a, k),
                     "when": dt.datetime.now().isoformat(timespec="seconds"), "session": str(self.bundle)}
         SMOKE_EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(SMOKE_EVIDENCE, evidence)
@@ -2664,7 +2699,7 @@ def render_summary(data: dict[str, Any]) -> str:
         head.append("notes")
         lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
         for b in rows:
-            for arm in [a for a in ALL_ARMS if a in b["arms"]]:
+            for arm in [a for a in ALL_ARMS if a in b["arms"]] + [a for a in b["arms"] if a not in ALL_ARMS]:
                 e = b["arms"][arm]
                 st = e.get("stats", {})
                 is_ref = arm == b.get("ratio_reference")

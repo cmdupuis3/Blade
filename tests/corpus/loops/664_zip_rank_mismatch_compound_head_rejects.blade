@@ -1,0 +1,17 @@
+// TEST: a zip of a compound with trailing dims and its rank-1 twin is refused (rejects)
+// Gap G113 (round 4 wave 5 lane c; G99 remainder): `cX` is over (CompoundIdx, K)
+// and `cx` over the same CompoundIdx. The zip took the single-record arm and
+// paired each present cell of `cx` with a whole row of `cX` (a row pointer
+// added to a scalar: invalid C++). Operands of different ranks are refused,
+// compound heads as plain ones (BL3027); pair the rows through the shared
+// compound axis explicitly instead.
+// ERROR: BL3027
+// ERROR-CONTAINS: co-iteration operands must have the SAME rank
+type I = Idx<3>
+type K = Idx<2>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let X: Array<Float64 like I, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let m = mask(x, lambda(v) -> v > 1.5)
+let cx = compound(x, m)
+let cX = compound(X, m)
+let Z = method_for(zip(cX, cx)) <@> lambda(r, s) -> r + s |> compute

@@ -659,6 +659,59 @@ let runExternalSortTests (workDirectory: string) : int =
             check "ST14 BLADE_SORT_FORM=0: the key is not cached, the external form declines (recorded)"
                 (not (offCpp.Contains "es::sort(")
                  && offDs |> List.exists (fun d -> d.Subject = "perm" && (match d.Outcome with Blade.Effects.Declined w -> w.Contains "not cached" | _ -> false))) (sprintf "%A" offDs)
+            // D5 (round 4 wave 5, G127 item a): sort-terminal v1 -- a sort read
+            // only by one strict fold feeds it in sorted order; no sorted output
+            let terminalSrc =
+                String.concat "\n"
+                    [ "type N = Idx<5001>"
+                      "let iv = method_for(range<N>) <@> lambda(i) -> (Int64(i) * 7919) % 1013 - 500 |> compute"
+                      "let s = sort(iv, lambda(x) -> -x)"
+                      "let fp = reduce(s, lambda(a, b) -> a * 31 + b, 7)"
+                      "let t = sort(range<N>, lambda(i) -> iv(i))"
+                      "let fq = reduce(t, lambda(a, b) -> a - b)" ]
+            let termDecided (pins: (string * string) list) (f: unit -> string) =
+                let saved2 = pins |> List.map (fun (k, _) -> k, Environment.GetEnvironmentVariable k)
+                try
+                    for (k, v) in pins do Environment.SetEnvironmentVariable(k, v)
+                    Blade.Effects.Decisions.start ()
+                    let text = f ()
+                    let ds = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "sort-terminal")
+                    text, ds
+                finally
+                    for (k, v) in saved2 do Environment.SetEnvironmentVariable(k, v)
+            let pinsT = [ ("BLADE_PRINT", "fp,fq") ]
+            let termCpp, termDs =
+                termDecided pinsT (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions {PrivateSpool=Some policy} (lower terminalSrc) "D5_sort_terminal" |> fst)
+            check "D5 route: both sorts feed their folds (no sorted output declared)"
+                (termCpp.Contains "sort-terminal v1 (G127): `s` is NEVER STORED" && termCpp.Contains "sort-terminal v1 (G127): `t` is NEVER STORED"
+                 && not (termCpp.Contains "s__buf") && not (termCpp.Contains "t__buf")) ""
+            check "D5 record: applied for s and t"
+                (["s"; "t"] |> List.forall (fun s -> termDs |> List.exists (fun d -> d.Subject = s && d.Outcome = Blade.Effects.Applied))) (sprintf "%A" termDs)
+            let termResident, _ = termDecided pinsT (fun () -> Blade.CodeGen.genSelfContainedProgramFromIR (lower terminalSrc) "D5_sort_terminal_ref" |> fst)
+            let termRef = nativeCheck "D5_resident_reference" termResident (fun code _ -> code = 0)
+            let termRun = nativeCheck "D5_terminal_spool_runs" termCpp (fun code _ -> code = 0)
+            (match termRef, termRun with
+             | Some r, Some e -> check "D5 the terminal fold equals the stored fold (fp, fq)" (values r = values e && r.Contains "fp = " && r.Contains "fq = ") (r + " / " + e)
+             | _ -> ())
+            let termResPolicy, _ =
+                termDecided pinsT (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions {PrivateSpool=Some { policy with ResidentBytes = 1048576UL }} (lower terminalSrc) "D5_sort_terminal_res" |> fst)
+            (match termRef, nativeCheck "D5_terminal_resident_selection" termResPolicy (fun code _ -> code = 0) with
+             | Some r, Some e -> check "D5 the terminal fold in the resident branch equals the stored fold" (values r = values e) ""
+             | _ -> ())
+            let declinedWith (pins: (string * string) list) (src: string) (needle: string) =
+                let _, ds = termDecided pins (fun () -> Blade.CodeGen.genSelfContainedProgramFromIRWithOptions {PrivateSpool=Some policy} (lower src) "D5_decl" |> fst)
+                ds |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w.Contains needle | _ -> false), sprintf "%A" ds
+            let ok1, d1 = declinedWith [ ("BLADE_PRINT", null) ] terminalSrc "is printed"
+            check "D5 plan: a printed sort keeps its output" ok1 d1
+            let ok2, d2 = declinedWith pinsT (terminalSrc + "\nlet extra = s(0)") "another reader"
+            check "D5 plan: a second reader keeps the output" ok2 d2
+            let ok3, d3 = declinedWith [ ("BLADE_PRINT", "fp,fq,fl") ] (terminalSrc + "\nlet fv = method_for(range<N>) <@> lambda(i) -> Float64(i) |> compute\nlet u = sort(fv, lambda(x) -> -x)\nlet fl = reduce(u, (+), 0.0)") "LICENSED"
+            check "D5 plan: a licensed float fold declines (strict first)" ok3 d3
+            let ok4, d4 = declinedWith (pinsT @ [ ("BLADE_SORT_TERMINAL", "0") ]) terminalSrc "disabled by BLADE_SORT_TERMINAL"
+            check "D5 plan: the knob declines by name" ok4 d4
+            let _, dsNoGrant = termDecided pinsT (fun () -> Blade.CodeGen.genSelfContainedProgramFromIR (lower terminalSrc) "D5_nogrant" |> fst)
+            check "D5 no grant: recorded declined, the sort keeps its output"
+                (dsNoGrant |> List.exists (fun d -> match d.Outcome with Blade.Effects.Declined w -> w.Contains "no BLADE_PRIVATE_SPOOL grant" | _ -> false)) (sprintf "%A" dsNoGrant)
             // the default-options entry never sees a grant
             check "ST14 no grant: the emission is the ordinary sort" (not (resident.Contains "external-sort v1")) ""
         with ex -> check "ST14 focused gate completes" false (ex.ToString())

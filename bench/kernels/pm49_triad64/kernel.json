@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "name": "pm49_triad64",
+  "group": "M",
+  "title": "PM49 streaming tier control: triad Float64, ring recurrence",
+  "sizes": {
+    "smoke": {
+      "n": 2003,
+      "k": 5,
+      "kl": 4
+    },
+    "full": {
+      "n": 1500007,
+      "k": 21,
+      "kl": 20
+    },
+    "l1": {
+      "n": 1201,
+      "k": 25013,
+      "kl": 25012
+    },
+    "l2": {
+      "n": 12007,
+      "k": 2503,
+      "kl": 2502
+    },
+    "l3": {
+      "n": 300007,
+      "k": 101,
+      "kl": 100
+    },
+    "b2": {
+      "n": 2500009,
+      "k": 21,
+      "kl": 20
+    },
+    "b3": {
+      "n": 3500017,
+      "k": 21,
+      "kl": 20
+    },
+    "b4": {
+      "n": 4500007,
+      "k": 21,
+      "kl": 20
+    },
+    "b5": {
+      "n": 6000011,
+      "k": 21,
+      "kl": 20
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "3 logical streams x 8 B per cell per step; useful bytes per run = 24 * n * (k - 1). Tiers: l1/l2/l3/full(=DRAM) sized for the Ryzen 7 5800HS (32 KB L1d, 512 KB L2, 16 MB L3). b2..b5 = PM55 fixed-budget ladder.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py"
+}

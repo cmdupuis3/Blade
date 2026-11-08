@@ -1,0 +1,23 @@
+// TEST: AD Replay Prune Keeps A Checked Ascription (aborts)
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 (opt-in) KEEPS `let unused = (a(0) : Float64<min=1.0>)`:
+// its value is dead, but the ascription is a run-time bound check, and the
+// gradient buffer (the input's own storage through `identity`) changes a(0)
+// between reverse iterations, so the replay fails BL8001 (Codex review of
+// PM59, wave 5 round 2). An ascription is never trap-free.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+function k(a: A) -> Float64 = {
+    let unused = (a(0) : Float64<min=1.0>)
+    (-a(0))
+}
+function f(a: A) -> Float64 = {
+    let ys = method_for(range<Idx<3>>)
+        <@> lambda(i) -> k(a) |> compute
+    reduce(ys, (+))
+}
+let mut a: A = [2.0]
+let r = ad.grad(f)(identity(a), a)
+// ABORT: BL8001

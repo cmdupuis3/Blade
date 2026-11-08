@@ -1,0 +1,16 @@
+// TEST: a pack former's kernel holding a lambda that captures the ordinal clones the lambda per element
+// Gap G112 (round 4 wave 5 lane c; G95's remainder): the former unrolls into
+// one copy of the kernel per pack element with the ordinal `k` a literal; the
+// nested lambda `h` captures `k`, so it is CLONED per element through the
+// closure graph (each clone captures its own element's ordinal). It was
+// refused BL7004 (gap G95).
+//   terms = [10 + 0, 20 + 1, 30 + 2] = [10, 21, 32]; sum 63.
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(x: Float64) -> x + Float64(k)
+        h(args[k])
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)
+// EXPECT: result = 63.0

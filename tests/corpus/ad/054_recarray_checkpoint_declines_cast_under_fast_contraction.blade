@@ -1,0 +1,22 @@
+// TEST: AD Recursive Array, Checkpoints Decline A Step With An Integer Cast Under Fast Contraction
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES under the default fast
+// contraction: the step casts a float to an integer (a subscript), and g++
+// may contract the replayed copy of the step differently from the first
+// run, so the replay could fail a check the first run passed (Codex review
+// of J1, round 2). Under BLADE_FP_CONTRACT=off it is admitted.
+// s = [3.5, 2.75, 2.125, 1.8125, 1.15625, 0.828125]; ds5/dx = 0.5^5.
+// ============================================================================
+let table: Array<Float64 like Idx<8>> = [0.5, 0.25, 0.75, 1.0, 0.125, 0.5, 0.25, 0.375]
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<6>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + table(Int64(floor(prefix(n - 1))))
+    s(5)
+}
+let (value, dx) = ad.grad(f)(Float64(3.5))
+// EXPECT: value = 0.828125
+// EXPECT: dx = 0.03125

@@ -152,6 +152,7 @@
     <Compile Include="src/OptimizePrivateSpool.fs" />
     <Compile Include="src/OptimizeSort.fs" />
     <Compile Include="src/OptimizeJoinAgg.fs" />
+    <Compile Include="src/OptimizeStreamGroup.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />
     <!-- Exact ordinary scratch lifetime; consumes final planner ownership and

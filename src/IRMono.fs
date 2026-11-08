@@ -3378,7 +3378,12 @@ let packHeadLinks (spec: IRFuncDef) : Map<int, IRType> =
             | _ -> ()) spec.Body
     link
 
-let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder) : IRFuncDef =
+/// `clonesOut` collects the callables a pack former's unroll CLONED per
+/// element (gap G112: a nested lambda capturing the kernel's ordinal or one of
+/// its binders, `rebindThroughClosures`); the caller registers them beside
+/// the specializations.
+let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder)
+                       (clonesOut: System.Collections.Generic.List<IRFuncDef>) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
     if List.isEmpty polyIndices then func  // Not actually poly -- shouldn't happen
     elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
@@ -3705,9 +3710,22 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                             // (the substitution stops at the body); cloning it
                             // per element is not built, so it is refused here
                             // with a diagnostic instead of an undeclared name.
+                            // EVERY binder kind (gap G115's second half): a
+                            // `match` arm's pattern variables and a for-range
+                            // variable are copied with the body as well, so
+                            // they are freshened like the lets (they used to
+                            // keep one id across the copies: a latent
+                            // duplicate declaration).
                             let bodyLets =
                                 let acc = System.Collections.Generic.List<IRId>()
-                                iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) lam.Body
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, _, _) -> acc.Add id
+                                    | IRForRange (vid, _, _, _) -> acc.Add vid
+                                    | IRMatch (_, cases) ->
+                                        for c in cases do
+                                            for id in patternBoundIds c.Pattern do acc.Add id
+                                    | _ -> ()) lam.Body
                                 acc |> Seq.distinct |> List.ofSeq
                             let ownBinders = Set.ofList (ordinalParam.VarId :: bodyLets)
                             let capturedOwn =
@@ -3719,21 +3737,89 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                             d.Captures |> List.exists (fun cap -> ownBinders.Contains cap.Id) || reach d.Body
                                         | _ -> false)
                                 reach lam.Body
-                            if capturedOwn then
+                            // G112 (round 4 wave 5 lane c): such a lambda is
+                            // now CLONED per element through the closure graph
+                            // (`rebindThroughClosures`, G93's machinery): the
+                            // element's binders are fresh, the ordinal is a
+                            // let of the literal k that the clones capture,
+                            // and the clones are registered beside the
+                            // specializations. Only a capturing callable that
+                            // ALSO captures the pack itself is still refused:
+                            // its clone would read the pack the specialization
+                            // no longer has.
+                            let capturesPack =
+                                let seen = System.Collections.Generic.HashSet<IRId>()
+                                let rec reach (x: IRExpr) =
+                                    collectVarRefsIR x |> Set.exists (fun id ->
+                                        match Map.tryFind id funcMap with
+                                        | Some d when d.Id <> lam.Id && seen.Add d.Id ->
+                                            d.Captures |> List.exists (fun cap ->
+                                                Map.containsKey cap.Id aliasToSlot || Map.containsKey cap.Id aliasInfo
+                                                || polyIndices |> List.exists (fun pi -> func.Params.[pi].VarId = cap.Id)
+                                                || (match cap.Type with IRTPoly _ -> true | _ -> false))
+                                            || reach d.Body
+                                        | _ -> false)
+                                reach lam.Body
+                            if capturedOwn && capturesPack then
                                 raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
-                                    $"'{func.SourceName}': a pack former's kernel holds a lambda that captures the kernel's own ordinal or one of its lets; the former is unrolled into one copy of the kernel per pack element, and a capturing lambda is not copied with it (gap G95). Compute the value inline instead of through the nested lambda.")))
+                                    $"'{func.SourceName}': a pack former's kernel holds a lambda that captures both the kernel's own ordinal or one of its lets AND the pack itself; the former is unrolled into one copy of the kernel per pack element, and such a lambda cannot be copied with it (gaps G95, G112). Compute the value inline instead of through the nested lambda.")))
+                            let renameSites (fresh: Map<IRId, IRId>) (e: IRExpr) =
+                                match e with
+                                | IRForRange (vid, lo, hi, b) when fresh.ContainsKey vid -> IRForRange (fresh.[vid], lo, hi, b)
+                                | IRMatch (s, cases) ->
+                                    let rec renamePat (p: IRPattern) =
+                                        match p with
+                                        | IRPatVar id when fresh.ContainsKey id -> IRPatVar fresh.[id]
+                                        | IRPatTuple ps -> IRPatTuple (ps |> List.map renamePat)
+                                        | IRPatCons (h, t) -> IRPatCons (renamePat h, renamePat t)
+                                        | IRPatVariant (a, b, Some q, c) -> IRPatVariant (a, b, Some (renamePat q), c)
+                                        | IRPatStruct (sn, flds) -> IRPatStruct (sn, flds |> List.map (fun (f, q) -> (f, renamePat q)))
+                                        | _ -> p
+                                    IRMatch (s, cases |> List.map (fun c -> { c with Pattern = renamePat c.Pattern }))
+                                | _ -> e
                             let elems =
                                 [ for k in 0 .. n - 1 ->
                                     let fresh = bodyLets |> List.map (fun id -> id, builder.FreshId()) |> Map.ofList
-                                    let substituted =
-                                        mapIRExpr (fun e ->
-                                            match e with
-                                            | IRVar (vid, _) when vid = ordinalParam.VarId ->
-                                                IRLit (IRLitInt (int64 k))
-                                            | IRVar (vid, t) when fresh.ContainsKey vid -> IRVar (fresh.[vid], t)
-                                            | IRLet (id, v, b) when fresh.ContainsKey id -> IRLet (fresh.[id], v, b)
-                                            | _ -> e) lam.Body
-                                    mapIRExpr rewrite substituted ]
+                                    if capturedOwn then
+                                        let ordId = builder.FreshId()
+                                        let renames =
+                                            Map.ofList (
+                                                (ordinalParam.VarId, (ordId, $"__v{ordId}"))
+                                                :: (fresh |> Map.toList |> List.map (fun (o, nn) -> (o, (nn, $"__v{nn}")))))
+                                        let (body1, clones) =
+                                            rebindThroughClosures builder (fun id -> Map.tryFind id funcMap) renames lam.Body
+                                        clonesOut.AddRange clones
+                                        let body2 =
+                                            mapIRExpr (fun e ->
+                                                match e with
+                                                | IRVar (vid, _) when vid = ordId -> IRLit (IRLitInt (int64 k))
+                                                | _ -> renameSites fresh e) body1
+                                        let ordCaptured =
+                                            clones |> List.exists (fun c -> c.Captures |> List.exists (fun cap -> cap.Id = ordId))
+                                        let bound =
+                                            if ordCaptured then IRLet (ordId, IRLit (IRLitInt (int64 k)), body2) else body2
+                                        mapIRExpr rewrite bound
+                                    else
+                                        let substituted =
+                                            mapIRExpr (fun e ->
+                                                match e with
+                                                | IRVar (vid, _) when vid = ordinalParam.VarId ->
+                                                    IRLit (IRLitInt (int64 k))
+                                                | IRVar (vid, t) when fresh.ContainsKey vid -> IRVar (fresh.[vid], t)
+                                                | IRLet (id, v, b) when fresh.ContainsKey id -> IRLet (fresh.[id], v, b)
+                                                | IRForRange (vid, lo, hi, b) when fresh.ContainsKey vid -> IRForRange (fresh.[vid], lo, hi, b)
+                                                | IRMatch (s, cases) ->
+                                                    let rec renamePat (p: IRPattern) =
+                                                        match p with
+                                                        | IRPatVar id when fresh.ContainsKey id -> IRPatVar fresh.[id]
+                                                        | IRPatTuple ps -> IRPatTuple (ps |> List.map renamePat)
+                                                        | IRPatCons (h, t) -> IRPatCons (renamePat h, renamePat t)
+                                                        | IRPatVariant (a, b, Some q, c) -> IRPatVariant (a, b, Some (renamePat q), c)
+                                                        | IRPatStruct (n, flds) -> IRPatStruct (n, flds |> List.map (fun (f, q) -> (f, renamePat q)))
+                                                        | _ -> p
+                                                    IRMatch (s, cases |> List.map (fun c -> { c with Pattern = renamePat c.Pattern }))
+                                                | _ -> e) lam.Body
+                                        mapIRExpr rewrite substituted ]
                             Some (IRArrayLit (elems, arrTy))
                         | None -> None
                     | _ -> None
@@ -3932,6 +4018,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    spec's body and enqueues what it finds until nothing new appears.
     let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let mutable specMap : Map<IRId * int list, IRFuncDef> = Map.empty
+    let packClones = System.Collections.Generic.List<IRFuncDef>()
     let queue = System.Collections.Generic.Queue<IRId * int list>()
     for site in (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct do
         queue.Enqueue site
@@ -3942,7 +4029,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         let (funcId, arity) = queue.Dequeue()
         if not (Map.containsKey (funcId, arity) specMap) then
             let origFunc = polyFuncMap.[funcId]
-            let spec = specializeFunction origFunc arity funcMap builder
+            let spec = specializeFunction origFunc arity funcMap builder packClones
             specMap <- Map.add (funcId, arity) spec specMap
             for site in collectPolyCallSites polyFuncMap spec.Body do
                 if not (Map.containsKey site specMap) then queue.Enqueue site
@@ -4006,7 +4093,10 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // applications of the ORIGINAL poly id); rewrite those to the concrete specs
     // too, or the recursion would reference a poly function that no longer exists.
     let specFuncs =
-        specializations |> List.map (fun (_, spec) ->
+        (specializations |> List.map snd)
+        // G112: the per-element clones of a pack former's capturing lambdas.
+        @ List.ofSeq packClones
+        |> List.map (fun spec ->
             { spec with Body = mapIRExpr (rewriteCallSiteWith false) spec.Body })
 
     // Prune lifted kernel lambdas that captured a poly PACK and are now dead.

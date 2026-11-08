@@ -1,0 +1,8 @@
+// TEST: Sort Packed Range Operand Refused (rejects)
+// sort over a NON-PLAIN range (`range<SymIdx<2, n>>`: its cells are index
+// tuples) passed the rank test and was BL7001 in C++ and unsupported in the
+// interpreter (gap G126, round 4 wave 5 lane c). Refused at the type
+// check: only a plain single-slot range sorts its own values.
+// ERROR: BL3033
+type S = SymIdx<2, 3>
+let s = sort(range<S>, lambda(t) -> 1.0)

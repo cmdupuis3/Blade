@@ -2892,6 +2892,49 @@ let private refuseUncountableStorage (modules: IRModule list) : unit =
             for p in f.Params do check f.Name $"parameter '{p.Name}' of '{f.SourceName}'" p.Type
             check f.Name $"the result of '{f.SourceName}'" f.RetType
 
+/// THE SORT KEY'S RESULT TYPE after monomorphization (gap G126): the type
+/// check refuses a complex / tuple / array key it can see, but a key whose
+/// result is still a type variable there (`function ordered(a: T^1) = sort(a,
+/// lambda(x) -> x)` called on a complex array) is fixed only by the instance.
+/// Checked once every instance is concrete, the same BL3033 the checker gives.
+let private refuseUnorderableSortKeys (modules: IRModule list) : unit =
+    let funcs = modules |> List.collect (fun m -> m.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let unorderable (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETComplex64 | ETComplex128) | IRTTuple _ | ArrayElem _ -> true
+        | IRTIdxTagged (inner, _) -> (match stripUnits inner with IRTScalar (ETComplex64 | ETComplex128) -> true | _ -> false)
+        | _ -> false
+    let checkExpr (owner: string) (e: IRExpr) =
+        // A key named through a local alias (`let key = lambda ..` then
+        // `sort(xs, key)`, Codex review round 2): the lets of this body, so
+        // the alias chain resolves to the callable.
+        let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> letValues.[id] <- v | _ -> ()) e
+        let rec callableRet (seen: Set<IRId>) (k: IRExpr) =
+            match k with
+            | IRVar (kid, _) ->
+                (match Map.tryFind kid funcs with
+                 | Some f -> Some f.RetType
+                 | None ->
+                     match letValues.TryGetValue kid with
+                     | true, v when not (seen.Contains kid) -> callableRet (seen.Add kid) v
+                     | _ -> resolveCallable k |> Option.map (fun c -> c.RetType))
+            | _ -> resolveCallable k |> Option.map (fun c -> c.RetType)
+        iterIRExpr (fun n ->
+            match n with
+            | IRSort (_, key) ->
+                let ret = callableRet Set.empty key
+                match ret with
+                | Some r when unorderable r ->
+                    raise (Blade.Diagnostics.BladeDiagnosticException
+                            (Blade.Diagnostics.mkError "BL3033" Blade.Diagnostics.PhTypes (IR.declSpanOf owner)
+                                $"sort(A, key): the key must return a real, integer, Bool or String scalar -- the types sort's order is defined for -- but at this instance it returns {ppIRType r}. A complex value has no order, and a tuple or array key is not supported."))
+                | _ -> ()
+            | _ -> ()) e
+    for m in modules do
+        for b in m.Bindings do checkExpr b.Name b.Value
+        for f in m.Functions do checkExpr f.Name f.Body
+
 /// ONE EVALUATION CONTRACT FOR AN EFFECTFUL NAMED DEFERRED MAP (gap G45;
 /// formalism §10.2's closing paragraph). A `let` bound to a bare map
 /// (`method_for(..) <@> k`, an `object_for` application) whose evaluation
@@ -4191,8 +4234,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CompactionTable.reset ()
     Optimize.EquiJoinTable.reset ()
     OptimizeSort.SortFormTable.reset ()
+    OptimizeSort.SortTerminalTable.reset ()
     OptimizeJoinAgg.JoinAggTable.reset ()
     Optimize.HoistDeclTable.reset ()
+    OptimizeStreamGroup.StreamGroupAggTable.reset ()
     Optimize.CompactRowTable.reset ()
     Optimize.OrbitPullTable.reset ()
     Optimize.OrbitActionTable.reset ()
@@ -4203,13 +4248,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     Optimize.CallSpanTable.reset ()
     Optimize.InlineEventSpans.reset ()
     Optimize.AliasElideTable.reset ()
+    Optimize.LuCompanionTable.reset ()
     Optimize.GroupViewTable.reset ()
     Optimize.GroupRowMapTable.reset ()
     Optimize.StreamGroupFoldTable.reset ()
     Optimize.KeyedProjectionTable.reset ()
+    Optimize.MaskReplayTable.reset ()
     Optimize.SinkStreamTable.reset ()
     Optimize.AssemblyDestTable.reset ()
     Optimize.blasGateProbe <- Blade.LinAlgPatterns.blasAvailable
+    Optimize.lapackGateProbe <- Blade.LinAlgPatterns.lapackAvailable
     // The raw decl list callers hand us is the program they PARSED, not the
     // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
     // checkout rewrite is applied again here, ahead of Phase 0's
@@ -4311,6 +4359,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
     refuseUncountableStorage irModules
+    refuseUnorderableSortKeys irModules
     // G45: an effectful named map runs once, at its definition, in every
     // scope (before the join refusal: a join over a stored map writes nothing)
     let irModules =
@@ -4488,11 +4537,21 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // extents is never stored -- each fold walks the probe at its own
         // site. Side table, the C++ emitter. Gate: BLADE_JOIN_AGG.
         OptimizeJoinAgg.planJoinAggregate programFuncs foreignRefs irModule
+        // Streamed key grouping to aggregate (Blade.OptimizeStreamGroup, round
+        // 4 wave 4 H2 / ST08): an unprinted group_by over a streamed variable
+        // read only by per-group strict folds keeps one state per group per
+        // fold in the windowed pass, no pool. Gate: BLADE_STREAM_GROUP_AGG.
+        OptimizeStreamGroup.planStreamGroupAggregate programFuncs foreignRefs irModule
         // The sort form (Blade.OptimizeSort.planSortForms, round 4 wave 4
         // D1): a range operand sorted as its iota in place, a total pure
         // key cached once per element; side table, the C++ emitter reads
         // it, the interpreter runs the as-written sort. Gate: BLADE_SORT_FORM.
         OptimizeSort.planSortForms programFuncs irModule
+        // The sort terminal (Blade.OptimizeSort.planSortTerminal, round 4
+        // wave 5 D5 / G127): a sort read only by one strict fold feeds the fold
+        // in sorted order under the spool grant; s never stored. Gate:
+        // BLADE_SORT_TERMINAL.
+        OptimizeSort.planSortTerminal programFuncs (foreignRefs) (irModules.Length < 2) irModule
         // Compact row classes (Blade.Optimize.planCompactRowClasses): a
         // compact rank-2 producer's orbit-fold class partials computed behind
         // each packed row; side table, both emitters. Gate:
@@ -4522,6 +4581,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // the interpreter keeps its copy. Last, over the final tree. Gate:
         // BLADE_TRANSPOSE_ELIDE.
         Optimize.planAliasElision programFuncs (foreignRefs) irModule
+        // The LU column-major companion (Blade.Optimize.planLuCompanion, gap
+        // G109): a never-written top-level factor keeps ?getrf's column-major
+        // scratch for its top-level solves (the routed arm only). Side table,
+        // C++ emitter. Gate: BLADE_LU_COMPANION.
+        Optimize.planLuCompanion programFuncs (foreignRefs) irModule
         // The structural group view (Blade.Optimize.planStructuralGroupView,
         // PM57): a top-level group_by over contiguous segments whose source,
         // grouped array and derived values are never written reads its rows
@@ -4543,6 +4607,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // keeps its whole validating sweep but no array. Gate:
         // BLADE_KEYED_PROJECTION.
         Optimize.planKeyedCellProjection (foreignRefs) (irModules.Length < 2) irModule
+        // The stream mask replay (Blade.Optimize.planStreamMaskReplay, lane D
+        // item D1 / G142): a mask over a streamed variable read only by its
+        // compound is never stored -- its sweep counts, the gather replays the
+        // predicate. Reads CompactionTable. Gate: BLADE_STREAM_MASK_REPLAY.
+        Optimize.planStreamMaskReplay programFuncs (foreignRefs) (irModules.Length < 2) irModule
         // The checker's stored-alias identity verdicts (plan 2.1 second step,
         // rule `alias-identity v1`), each applied one cross-checked against
         // the plan above. Records only; no IR change.

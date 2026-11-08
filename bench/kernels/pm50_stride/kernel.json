@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "name": "pm50_stride",
+  "group": "M",
+  "title": "PM50 strided traversal control: column walk of an r x s row-major array",
+  "sizes": {
+    "smoke": {
+      "r": 2003,
+      "s": 7,
+      "k": 3
+    },
+    "full": {
+      "r": 6000011,
+      "s": 1,
+      "k": 11
+    },
+    "d1": {
+      "r": 6000011,
+      "s": 1,
+      "k": 11
+    },
+    "d3": {
+      "r": 2000003,
+      "s": 3,
+      "k": 11
+    },
+    "d7": {
+      "r": 857143,
+      "s": 7,
+      "k": 11
+    },
+    "d8": {
+      "r": 750001,
+      "s": 8,
+      "k": 11
+    },
+    "d9": {
+      "r": 666667,
+      "s": 9,
+      "k": 11
+    },
+    "d17": {
+      "r": 352941,
+      "s": 17,
+      "k": 11
+    },
+    "d511": {
+      "r": 11743,
+      "s": 511,
+      "k": 11
+    },
+    "d512": {
+      "r": 11719,
+      "s": 512,
+      "k": 11
+    },
+    "d513": {
+      "r": 11697,
+      "s": 513,
+      "k": 11
+    },
+    "c1": {
+      "r": 1200007,
+      "s": 1,
+      "k": 51
+    },
+    "c7": {
+      "r": 171429,
+      "s": 7,
+      "k": 51
+    },
+    "c8": {
+      "r": 150001,
+      "s": 8,
+      "k": 51
+    },
+    "c17": {
+      "r": 70589,
+      "s": 17,
+      "k": 51
+    },
+    "c512": {
+      "r": 2345,
+      "s": 512,
+      "k": 51
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "d<s> = DRAM tier (r * s ~ 6.0e6 doubles, 48 MB > 16 MB L3), c<s> = L3 tier (~1.2e6 doubles, 9.6 MB); useful bytes per run = 8 * r * s * k; one stride per size variant.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py"
+}

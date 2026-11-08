@@ -413,7 +413,7 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Combinator | Signature sketch | Semantics | Status |
 |-----------|------------------|-----------|--------|
-| `zip(A₁..Aₙ)` | → Tuple elements over the operands' ONE shared index space | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; plain dense operands of different ranks share no index space and are refused (BL3027, gap G99: pair a row with a cell by iterating the leading axis, `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`); output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
+| `zip(A₁..Aₙ)` | → Tuple elements over the operands' ONE shared index space | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; operands of different ranks -- plain dense, packed symmetric or compound records alike -- share no index space and are refused (BL3027, gaps G99 and G113: pair a row with a cell by iterating the leading axis, `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`); output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
 | `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments | **(planned)** |
 | `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s | **(planned)** — neighbor access today is `halo<I, [offsets]>` (§7.3) |
 | `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k | Implemented |
@@ -2419,7 +2419,12 @@ deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
 map (one that writes nothing, so it keeps the deferred reading above) is
 evaluated where a FORCING USE reads it: a positional read, a capture by a
 kernel, an eager array operation (`sort`, the set operations, `group_by`,
-...), a call argument, or `|> compute`. A fold, a map or a join over it FUSES
+...), a call argument, or `|> compute`. A CAPTURE is made when its kernel is
+formed for a traversal -- a map, a fold, a join -- so the captured map is
+forced before that traversal's FIRST cell, captures of the join's leg kernels
+and then its fold kernels in order, even when the kernel reads it only at a
+later cell or never: its failure precedes every failure of the traversal's
+cells (gap G115, `loops/660`-`662`, `665` through a deferred alias, `666` a guard, every lane). A fold, a map or a join over it FUSES
 instead and forces nothing, and a member of a tuple value evaluates a COPY
 (next paragraph). Its evaluation count is unobservable, so a program observes
 exactly two things: WHERE its first failure fires -- at its first forcing use
@@ -2447,7 +2452,10 @@ form added later is not silently fresh (the classification is exhaustive). The A
 deferred map binds `g2` to the SAME deferred value -- substitution holds. The
 alias evaluates nothing (so nothing can fail there), and a use through `g2` is
 that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
-is refused where that is). A deferred map and its top-level aliases form ONE
+is refused where that is). A TOP-LEVEL projection of a wholly-deferred tuple
+whose member is a named deferred map (`let p = (d1, d2); let v = p[0]`) is
+such an alias of the member, by the same substitution (gap G111,
+`tuples/084`-`086`; the class includes sibling projections). A deferred map and its top-level aliases form ONE
 ALIAS CLASS (siblings and chains included), whose members are ONE array for
 the identity groups of §8.3 (`method_for(g, g2)` under a comm kernel is
 packed). The PRINT rule: a class prints,

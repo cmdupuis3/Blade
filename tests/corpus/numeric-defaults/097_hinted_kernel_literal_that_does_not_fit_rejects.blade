@@ -1,0 +1,9 @@
+// TEST: a literal beside a hinted kernel parameter that does not fit the operand width is refused (rejects)
+// Gap G114 (round 4 wave 5 lane c; Codex review round 1): the element hint
+// makes a literal partner take the operand's Float32 width, so a literal past
+// Float32's range is refused exactly as beside a concrete Float32 operand
+// (BL3020), not silently kept at Float64 (and later narrowed to infinity).
+// ERROR: BL3020
+type I = Idx<2>
+let a: Array<Float32 like I> = [1.0, 2.0]
+let y = object_for(lambda(v) -> v + 1e300) <@> a |> compute

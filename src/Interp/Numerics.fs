@@ -1257,6 +1257,19 @@ let private cmpI32 op (a: int32) (b: int32) =
     match op with
     | IREq -> a = b | IRNeq -> a <> b | IRLt -> a < b | IRLe -> a <= b | IRGt -> a > b | IRGe -> a >= b | _ -> false
 
+/// String order in every lane (gap G126; docs/features/sql.md section 9):
+/// Unicode CODE POINT order, which is the C++ lane's std::string order of the
+/// UTF-8 bytes (char_traits compares them unsigned). Compared on the UTF-8
+/// bytes, so it is that order exactly.
+let codePointCompare (a: string) (b: string) : int =
+    if String.CompareOrdinal(a, b) = 0 then 0 else
+    let ba = Text.Encoding.UTF8.GetBytes a
+    let bb = Text.Encoding.UTF8.GetBytes b
+    let n = min ba.Length bb.Length
+    let mutable i = 0
+    while i < n && ba.[i] = bb.[i] do i <- i + 1
+    if i < n then compare ba.[i] bb.[i] else compare ba.Length bb.Length
+
 let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
     match l, r with
     // Tuples, mirroring `std::tuple`'s own operators -- which is what codegen
@@ -1294,10 +1307,11 @@ let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
         | IRNeq -> VBool (not (ar = br && ai = bi))
         | _ -> VBool false
     | VString a, VString b ->
-        // std::string byte-lexicographic order. NOTE: Blade strings are UTF-8
-        // bytes in std::string; .NET strings are UTF-16 -- ordinal comparison
-        // agrees for ASCII, may differ for multibyte (documented edge).
-        let c = String.CompareOrdinal(a, b)
+        // std::string byte-lexicographic order: the UTF-8 bytes, i.e. Unicode
+        // CODE POINT order (gap G126). .NET strings are UTF-16, whose ordinal
+        // order differs from it where a supplementary-plane character meets
+        // one in U+E000..U+FFFF, so the comparison is on the UTF-8 bytes.
+        let c = codePointCompare a b
         VBool (match op with IREq -> c = 0 | IRNeq -> c <> 0 | IRLt -> c < 0 | IRLe -> c <= 0 | IRGt -> c > 0 | IRGe -> c >= 0 | _ -> false)
     | VBool a, VBool b ->
         VBool (match op with IREq -> a = b | IRNeq -> a <> b | IRLt -> a < b | IRLe -> a <= b | IRGt -> a > b | IRGe -> a >= b | _ -> false)

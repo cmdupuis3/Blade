@@ -1,0 +1,33 @@
+// TEST: AD Recursive Array, Checkpoints Decline A Step Reading An Array Parameter
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`) DECLINES here, and the full tape is kept:
+// the step reads the array parameter `w`, and the function has gradient
+// buffers -- a caller may pass `w`'s own storage AS a gradient buffer
+// (ad/046's alias), which the reverse sweep writes before a replay would
+// read it. The additive carry s(n) = s(n-1) + w(n-1) xs(n-1) over 5003 rows:
+// d s(N-1) / d w(k) = xs(k) for k < N - 1, 0 at k = N - 1.
+// ============================================================================
+let xs = 2.0 + 0.5 * Float64(0..5003)
+function h(w: Array<Float64 like Idx<5003>>) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5003>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: 0.0
+        | prefix :: n -> prefix :: prefix(n - 1) + w(n - 1) * xs(n - 1)
+    s(5002)
+}
+let w0 = 1.0 + 0.001 * Float64(0..5003)
+let mut dh = 0.0 * Float64(0..5003)
+let hv = ad.grad(h)(w0, dh)
+let g0 = dh(0)
+let gmid = dh(2500)
+let gpen = dh(5001)
+let glast = dh(5002)
+let gsum = reduce(dh, (+))
+// EXPECT: hv = 27140858.2525
+// EXPECT: g0 = 2.0
+// EXPECT: gmid = 1252.0
+// EXPECT: gpen = 2502.5
+// EXPECT: glast = 0.0
+// EXPECT: gsum = 6263754.5

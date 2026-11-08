@@ -250,6 +250,10 @@ type internal Ctx = {
     /// Module-level value binding names (DeclLet / DeclStatic): reads of these
     /// inside a differentiated body are constant data, not unknown calls.
     ModuleVals: Set<string>
+    /// The module-level `let mut` names: the only module bindings a caller
+    /// may pass as a `mut` gradient buffer (a plain `let` is BL4005 there),
+    /// so the only module storage the reverse sweep can write under a read.
+    ModuleMuts: Set<string>
     /// Module-level single-name bindings visible to the body being
     /// differentiated -- a PREFIX snapshot taken at that body's declaration,
     /// so nothing resolves through a `let` declared below it.
@@ -323,6 +327,51 @@ let internal adGatherFuseEnabled () : bool =
     match Blade.Toolchain.envSwitch "BLADE_AD_GATHER_FUSE" with
     | Blade.Toolchain.SwitchOff -> false
     | _ -> true
+
+/// CHECKPOINTED recurrence reverse sweep (PM40, round 4 wave 4 J1; rule
+/// `ad-checkpoint v1`, GradSweeps.checkpointCarries). OPT-IN since wave 5
+/// (the stop rule: the second review of the replay-input class found three
+/// more members, each now declined). `1`/`on`/`auto` = on: a differentiated
+/// rank-1 `let rec` whose tape exceeds 4096 cells keeps K = ceil(sqrt(T - 1))
+/// -spaced checkpoints and replays each segment from its checkpoint in the
+/// descending sweep. Unset/`0`/`off` (or any other text) = the full T-cell
+/// tape. An integer k >= 2 = checkpoints every k steps for any tape longer
+/// than k + 1 cells (the A/B and witness arm). Read per call; an optimizer
+/// gate with the mirror `3`.
+type internal AdCheckpointMode =
+    | AdCkUnset
+    | AdCkOff
+    | AdCkAuto
+    | AdCkEvery of int
+
+let internal adCheckpointMode () : AdCheckpointMode =
+    match Blade.Toolchain.envSwitch "BLADE_AD_CHECKPOINT" with
+    | Blade.Toolchain.SwitchOff -> AdCkOff
+    | Blade.Toolchain.SwitchOn -> AdCkAuto
+    | Blade.Toolchain.SwitchUnset -> AdCkUnset
+    | Blade.Toolchain.SwitchOther t ->
+        (match System.Int32.TryParse (t.Trim()) with
+         | true, k when k >= 2 -> AdCkEvery k
+         | _ when t.Trim().ToLowerInvariant() = "auto" -> AdCkAuto
+         | _ -> AdCkOff)
+
+/// DEAD-REPLAY PRUNING in the reverse sweep (PM59, round 4 wave 5 A4; rule
+/// `ad-replay-prune v1`). The generic `NFor` adjoint REPLAYS the whole loop
+/// body before the body adjoints of each iteration; a replayed statement
+/// whose target is a loop-local let or a FRESH function local (a scalar, or
+/// an array built by a literal, a fill or a `compute`) that no kept replayed
+/// statement, cotangent declaration or adjoint of the iteration reads -- a
+/// FIXPOINT over the iterations, so a read in a later iteration's replay
+/// keeps it -- is dead work. OPT-IN (the stop rule: the second review of the
+/// replay-liveness class found three more members, each now kept): only `1`
+/// / `on` prunes; unset / `0` / `off` replays the whole body. Read per call;
+/// an optimizer gate with the mirror `1` (opt-diff compares).
+type internal AdReplayPruneMode = ArpUnset | ArpOff | ArpOn
+let internal adReplayPruneMode () : AdReplayPruneMode =
+    match Blade.Toolchain.envSwitch "BLADE_AD_REPLAY_PRUNE" with
+    | Blade.Toolchain.SwitchOn -> ArpOn
+    | Blade.Toolchain.SwitchUnset -> ArpUnset
+    | _ -> ArpOff
 
 // Kernel-shape refusal wording, spoken by more than one site.
 //

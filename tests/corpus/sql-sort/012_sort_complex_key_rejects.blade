@@ -1,0 +1,8 @@
+// TEST: Sort Complex Key Refused (rejects)
+// A complex sort key has no order (gap G126, round 4 wave 5 lane c): it
+// was BL9002 in C++ (std::complex has no `<`) while the interpreter sorted by
+// the real part. Refused at the type check.
+// ERROR: BL3033
+type R = Idx<3>
+let xs: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let s = sort(xs, lambda(x) -> complex(x, 1.0))

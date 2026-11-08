@@ -585,6 +585,257 @@ let private g78Pins () : bool list =
       // the saved full-size shape (n = 1,000,003): the tape d and its cotangent
       g78Case "g78_llvm_frees_haloadjoint_full_size" bench [ "bl_loss__grad" ] ]
 
+// ---------------------------------------------------------------------------
+// PM40: the CHECKPOINTED recurrence reverse sweep (round 4 wave 4 J1; rule
+// `ad-checkpoint v1`, knob BLADE_AD_CHECKPOINT). The checkpointed gradient
+// must equal the full-tape gradient BIT FOR BIT in the reproducible build
+// (BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off, raw bits through
+// BLADE_PRINT_BITS) at every checkpoint interval, segment edges included.
+// ---------------------------------------------------------------------------
+
+let private withEnvs (pairs: (string * string option) list) (f: unit -> 'a) : 'a =
+    let prev = pairs |> List.map (fun (k, _) -> (k, System.Environment.GetEnvironmentVariable k))
+    for (k, value) in pairs do System.Environment.SetEnvironmentVariable(k, Option.toObj value)
+    try f () finally for (k, value) in prev do System.Environment.SetEnvironmentVariable(k, value)
+
+/// Scalar parameters only (no gradient buffers): the logistic map at r = 3.7
+/// over 23 rows, the loss reading the seed, checkpoint, interior and last rows.
+let private ckLogistic = """import ad as ad
+function f(x: Float64, r: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<23>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: r * prefix(n - 1) * (1.0 - prefix(n - 1))
+    s(22) + 0.5 * s(7) * s(7) + s(9) - s(0) * s(13)
+}
+let (gv, gx, gr) = ad.grad(f)(Float64(0.3), Float64(3.7))
+"""
+
+/// A step reading the step ordinal and an immutable module array (no
+/// gradient buffers: nothing is written during the reverse sweep, so the
+/// replay is admitted).
+let private ckForcing = """import ad as ad
+let xs = 0.25 + 0.125 * Float64(0..31)
+function g(x: Float64, a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<31>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: a * sin(prefix(n - 1)) + xs(n - 1) * Float64(n) * 0.01
+    s(30) * s(11) + s(1) * 0.75 + 1.5 * s(30)
+}
+let (gv, gx, ga) = ad.grad(g)(Float64(0.4), Float64(0.9))
+"""
+
+/// The same step beside an array parameter OUTSIDE it (gradient buffers
+/// exist): a module ARRAY read by the step declines (round 4 wave 5, gap
+/// G162: three review rounds found ways a module array may share storage
+/// with the buffer a caller passes); a module scalar constant is admitted.
+let private ckForcingBuffers = """import ad as ad
+let xs = 0.25 + 0.125 * Float64(0..31)
+let c0: Float64 = 0.01
+function g(x: Float64, a: Float64, w: Array<Float64 like Idx<3>>) -> Float64 = {
+    let rec s: Array<Float64 like Idx<31>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: a * sin(prefix(n - 1)) + xs(n - 1) * Float64(n) * c0
+    s(30) * s(11) + s(1) * w(2) + w(0) * s(30)
+}
+let w0: Array<Float64 like Idx<3>> = [1.5, 2.0, 0.75]
+let mut dw: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let (gv, gx, ga) = ad.grad(g)(Float64(0.4), Float64(0.9), w0, dw)
+let dw0 = dw(0)
+let dw2 = dw(2)
+"""
+
+/// A step reading only scalars and a module scalar constant, beside an array
+/// parameter (gradient buffers exist): admitted.
+let private ckScalarBuffers = """import ad as ad
+let c0: Float64 = 0.01 * 2.0
+function g(x: Float64, a: Float64, w: Array<Float64 like Idx<3>>) -> Float64 = {
+    let rec s: Array<Float64 like Idx<31>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: a * sin(prefix(n - 1)) + Float64(n) * c0
+    s(30) * s(11) + s(1) * w(2) + w(0) * s(30)
+}
+let w0: Array<Float64 like Idx<3>> = [1.5, 2.0, 0.75]
+let mut dw: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let (gv, gx, ga) = ad.grad(g)(Float64(0.4), Float64(0.9), w0, dw)
+let dw0 = dw(0)
+let dw2 = dw(2)
+"""
+
+let private ckDecisions (src: string) (knob: string option) : Result<Blade.Effects.Decision list, string> =
+    withEnvs [ ("BLADE_AD_CHECKPOINT", knob) ] (fun () ->
+        Blade.Effects.Decisions.start ()
+        let r =
+            try
+                match lower src with
+                | Error e -> Error ($"lower: {e}")
+                | Ok _ -> Ok (Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "ad-checkpoint"))
+            with ex -> Error ($"lower raised: {ex.Message}")
+        Blade.Effects.Decisions.drain () |> ignore
+        r)
+
+/// Raw bits of `src` under each knob value equal the full tape's (knob 0);
+/// each knob value's decision is the one expected (Ok = applied, Error =
+/// declined with that substring).
+let private ckDifferential (name: string) (src: string) (arms: (string * Result<string, string>) list) : bool option list =
+    let repro = [ ("BLADE_FP_REPRO", Some "1"); ("BLADE_FP_CONTRACT", Some "off"); ("BLADE_PRINT_BITS", Some "1") ]
+    let runArm (knob: string) =
+        withEnvs (("BLADE_AD_CHECKPOINT", Some knob) :: repro) (fun () -> runUnder $"{name}_k{knob}" None src)
+    match runArm "0" with
+    | Error e when e.StartsWith "Skipped:" -> resultLine Skip name e; [ None ]
+    | Error e -> resultLine Fail name e; [ Some false ]
+    | Ok full ->
+        [ for (knob, want) in arms do
+            let caseName = $"{name}: BLADE_AD_CHECKPOINT={knob}"
+            let decisionOk, seen =
+                match ckDecisions src (Some knob) with
+                | Error e -> false, e
+                | Ok ds ->
+                    let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                    let ok =
+                        match want, ds with
+                        | Ok ev, [ d ] -> d.Outcome = Blade.Effects.Applied && d.Evidence |> List.exists (fun e -> e.Contains ev)
+                        | Error why, [ d ] -> (match d.Outcome with Blade.Effects.Declined r -> r.Contains why | _ -> false)
+                        | _ -> false
+                    ok, seen
+            if not decisionOk then
+                resultLine Fail caseName $"decision: wanted {want}; saw {seen}"; yield Some false
+            else
+            match runArm knob with
+            | Error e when e.StartsWith "Skipped:" -> resultLine Skip caseName e; yield None
+            | Error e -> resultLine Fail caseName e; yield Some false
+            | Ok lines ->
+                let bits = lines |> List.forall (fun l -> not (l.Contains " = ") || not (l.Contains ".") || l.Contains " #")
+                if lines = full && not lines.IsEmpty && bits then
+                    resultLine Pass caseName $"""raw bits equal the full tape's: {String.concat " | " lines}"""; yield Some true
+                else
+                    resultLine Fail caseName $"""full [{String.concat " | " full}] vs checkpointed [{String.concat " | " lines}]"""; yield Some false ]
+
+/// The corpus witnesses' decisions under the opt-in arm (`1`; unset declines
+/// since wave 5), and the emission of ad/048: no 5001-cell buffer once
+/// checkpointed.
+let private ckCorpusPins () : bool list =
+    let table =
+        [ "047_recarray_tape_100001_zero_fill.blade", Ok "segments of K = 317 steps"
+          "048_recarray_checkpoint_5001_rows.blade", Ok "71 segments of K = 71 steps"
+          "049_recarray_checkpoint_declines_array_forcing.blade", Error "the step reads array 'w'"
+          "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole"
+          "050_recarray_checkpoint_declines_aliased_module_array.blade", Error "a tape of 5 cells (<= 4096) is kept whole" ]
+    // unset: the opt-in decline (wave 5, the stop rule)
+    let unset =
+        [ "048_recarray_checkpoint_5001_rows.blade", Error "opt-in (BLADE_AD_CHECKPOINT=1)" ]
+    // forced to K = 2, the size gate passes and the storage proof decides
+    let forced =
+        [ "028_recarray_carry_final_257.blade", Error "the step reads array 'w'"
+          "050_recarray_checkpoint_declines_aliased_module_array.blade", Error "the step reads array 'forcing'"
+          "035_recarray_logistic_grad.blade", Ok "2 segments of K = 2 steps (the last 1)"
+          // Codex round 2 (wave 5): a fresh array a later mut binding
+          // aliases, a local alias, a destructured component
+          "051_recarray_checkpoint_declines_fresh_array_aliased_later.blade", Error "the step reads array 'forcing'"
+          "052_recarray_checkpoint_declines_local_alias.blade", Error "the step reads array 'local_forcing'"
+          "053_recarray_checkpoint_declines_destructured_alias.blade", Error "the step reads array 'forcing'"
+          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction" ]
+    let decisionPins =
+        [ for (file, want, knob) in (table |> List.map (fun (f, w) -> (f, w, Some "1"))) @ (unset |> List.map (fun (f, w) -> (f, w, None))) @ (forced |> List.map (fun (f, w) -> (f, w, Some "2"))) do
+            let suffix = match knob with Some k -> " (BLADE_AD_CHECKPOINT=" + k + ")" | None -> ""
+            let name = "ad_checkpoint_corpus: " + file + suffix
+            match corpusSource file with
+            | Error e -> resultLine Fail name e; yield false
+            | Ok src ->
+                match ckDecisions src knob with
+                | Error e -> resultLine Fail name e; yield false
+                | Ok ds ->
+                    let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                    let ok =
+                        ds.Length = 1
+                        && (match want, ds.Head.Outcome with
+                            | Ok ev, Blade.Effects.Applied -> ds.Head.Evidence |> List.exists (fun e -> e.Contains ev)
+                            | Error why, Blade.Effects.Declined r -> r.Contains why
+                            | _ -> false)
+                    if ok then resultLine Pass name seen else resultLine Fail name $"wanted {want}; saw {seen}"
+                    yield ok ]
+    let emission =
+        let name = "ad_checkpoint_emission: ad/048 holds no 5001-cell tape or cotangent; BLADE_AD_CHECKPOINT=0 does"
+        match corpusSource "048_recarray_checkpoint_5001_rows.blade" with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+            let full (cpp: string) =
+                System.Text.RegularExpressions.Regex.Matches(cpp, "_extents\[1\] = \{ ?5001 ?\}").Count
+            match withEnvs [ ("BLADE_AD_CHECKPOINT", Some "1") ] (fun () -> cppOf "ck048_on" None src),
+                  withEnvs [ ("BLADE_AD_CHECKPOINT", Some "0") ] (fun () -> cppOf "ck048_off" None src) with
+            | Error e, _ | _, Error e -> resultLine Fail name e; false
+            | Ok on, Ok off ->
+                // the jvp keeps its own primal and tangent buffers (forward
+                // mode: no tape), so the gradient's two are the difference
+                let a, b = full on, full off
+                if b = a + 2 then resultLine Pass name $"5001-cell buffers: {a} checkpointed, {b} full"; true
+                else resultLine Fail name $"5001-cell buffers: {a} checkpointed vs {b} full (want full = checkpointed + 2)"; false
+    decisionPins @ [ emission ]
+
+/// ad-replay-prune v1 (PM59, round 4 wave 5 A4): the reverse sweep's replay
+/// of the forward fold of ad/030 is dead work and is dropped under the
+/// opt-in `1`; unset records the opt-in decline, `0` the disabled one. The printed
+/// values are compared by `blade test opt-diff ad` (an optimizer gate).
+let private replayPrunePins () : bool list =
+    let decisions (knob: string option) (src: string) =
+        withEnvs [ ("BLADE_AD_REPLAY_PRUNE", knob) ] (fun () ->
+            Blade.Effects.Decisions.start ()
+            let r =
+                try
+                    match lower src with
+                    | Error e -> Error ($"lower: {e}")
+                    | Ok _ -> Ok (Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "ad-replay-prune"))
+                with ex -> Error ($"lower raised: {ex.Message}")
+            Blade.Effects.Decisions.drain () |> ignore
+            r)
+    [ for (knob, applied, why) in [ (None, false, "opt-in (BLADE_AD_REPLAY_PRUNE=1)"); (Some "1", true, ""); (Some "0", false, "disabled by BLADE_AD_REPLAY_PRUNE") ] do
+        let name = $"""ad_replay_prune: ad/030 {(match knob with None -> "default" | Some k -> "BLADE_AD_REPLAY_PRUNE=" + k)}"""
+        match corpusSource "030_halo_stencil_grad_linear.blade" with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok src ->
+            match decisions knob src with
+            | Error e -> resultLine Fail name e; yield false
+            | Ok ds ->
+                let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let ok =
+                    not ds.IsEmpty
+                    && ds |> List.forall (fun d ->
+                        match d.Outcome with
+                        | Blade.Effects.Applied -> applied && d.Evidence |> List.exists (fun e -> e.Contains "replayed statements dropped")
+                        | Blade.Effects.Declined r -> not applied && r.Contains why)
+                if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
+                yield ok ]
+
+let private ckCases () : bool option list =
+    if not Build.capabilities.Value.HasGpp then
+        resultLine Skip "ad_checkpoint_differential" "g++ not available"
+        [ None ]
+    else
+        ckDifferential "ad_checkpoint_logistic" ckLogistic
+            [ "auto", Error "a tape of 23 cells (<= 4096) is kept whole"
+              "2", Ok "11 segments of K = 2 steps (the last 2)"
+              "3", Ok "8 segments of K = 3 steps (the last 1)"
+              "5", Ok "5 segments of K = 5 steps (the last 2)"
+              "7", Ok "4 segments of K = 7 steps (the last 1)"
+              "21", Ok "2 segments of K = 21 steps (the last 1)"
+              "22", Error "covers the whole recurrence of 22 steps" ]
+        @ ckDifferential "ad_checkpoint_forcing" ckForcing
+            [ "3", Ok "10 segments of K = 3 steps (the last 3)"
+              "4", Ok "8 segments of K = 4 steps (the last 2)"
+              "11", Ok "3 segments of K = 11 steps (the last 8)" ]
+        @ ckDifferential "ad_checkpoint_forcing_buffers" ckForcingBuffers
+            [ "3", Error "the step reads array 'xs'" ]
+        @ ckDifferential "ad_checkpoint_scalar_buffers" ckScalarBuffers
+            [ "3", Ok "10 segments of K = 3 steps (the last 3)"
+              "7", Ok "5 segments of K = 7 steps (the last 2)" ]
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
@@ -608,7 +859,8 @@ let runAccessTests () =
               differential "halo_route_differential_wide_127" wideProgram
               differential "halo_route_differential_scalar_capture" scalarCaptureProgram
               differential "halo_route_differential_two_arrays" twoArrayProgram ]
-    let diffs = diffs @ zeroFill
+    let diffs = diffs @ zeroFill @ ckCases ()
+    let pins = pins @ ckCorpusPins () @ replayPrunePins ()
     let passed = (pins |> List.filter id |> List.length) + (diffs |> List.filter (fun d -> d = Some true) |> List.length)
     let failed = (pins |> List.filter not |> List.length) + (diffs |> List.filter (fun d -> d = Some false) |> List.length)
     let skipped = diffs |> List.filter Option.isNone |> List.length

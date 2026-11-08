@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "name": "pm56_mask",
+  "group": "M",
+  "title": "PM56 selection representation: positions elided / built / mask-site gather",
+  "sizes": {
+    "smoke": {
+      "n": 20011,
+      "sel": 50,
+      "run": 7
+    },
+    "full": {
+      "n": 3000017,
+      "sel": 50,
+      "run": 1
+    },
+    "s1r1": {
+      "n": 3000017,
+      "sel": 1,
+      "run": 1
+    },
+    "s1r1001": {
+      "n": 3000017,
+      "sel": 1,
+      "run": 1001
+    },
+    "s50r1": {
+      "n": 3000017,
+      "sel": 50,
+      "run": 1
+    },
+    "s50r1001": {
+      "n": 3000017,
+      "sel": 50,
+      "run": 1001
+    },
+    "s99r1": {
+      "n": 3000017,
+      "sel": 99,
+      "run": 1
+    },
+    "s99r1001": {
+      "n": 3000017,
+      "sel": 99,
+      "run": 1001
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "s<sel>r<run>: selectivity ~sel %, key runs of length run; n = 3,000,017.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "blade-cpp@b4",
+    "blade-cpp@gather"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
+  "variants": {
+    "b4": {
+      "compile": {
+        "BLADE_COMPACTION_FUSION": "b4"
+      }
+    },
+    "gather": {
+      "compile": {
+        "BLADE_COMPACTION_FUSION": "gather"
+      }
+    }
+  }
+}

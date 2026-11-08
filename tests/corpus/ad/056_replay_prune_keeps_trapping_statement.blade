@@ -1,0 +1,24 @@
+// TEST: AD Replay Prune Keeps A Replayed Statement That May Trap (aborts)
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 KEEPS the replayed `let unused = 1 / Int64(..)`: its
+// value is dead, but it can FAIL, and the gradient buffer `a` (the same
+// storage as the primal input, passed through `identity`) changes a(0)
+// between reverse iterations, so the replay divides by zero (Codex review of
+// PM59, wave 5 round 1: dropping it turned BL8013 into a success). A
+// statement is dropped only when its value is trap-free.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+function k(a: A) -> Float64 = {
+    let unused = 1 / Int64(floor(a(0)))
+    (-a(0))
+}
+function f(a: A) -> Float64 = {
+    let ys = method_for(range<Idx<3>>)
+        <@> lambda(i) -> k(a) |> compute
+    reduce(ys, (+))
+}
+let mut a: A = [2.0]
+let r = ad.grad(f)(identity(a), a)
+// ABORT: BL8013

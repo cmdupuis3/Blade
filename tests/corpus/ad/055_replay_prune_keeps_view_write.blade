@@ -1,0 +1,26 @@
+// TEST: AD Replay Prune Keeps A Write Through A Loop-Local View
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 KEEPS the replayed `v(1) += 1`: `v` is a loop-local VIEW
+// of `d`, and the adjoint of the earlier `t` (after the loop in the reverse
+// sweep) reads d(0, 1) -- so the replay's write is observed (Codex review of
+// PM59, wave 5 round 1: dropping it gave dx = 5.0). Element writes are never
+// dropped; only loop-local lets and whole assignments of fresh locals with a
+// trap-free value are.
+// ============================================================================
+type D = Array<Int32 like Idx<1>, Idx<2>>
+function touch(x: Float64, d: D) -> Float64 = {
+    let mut v = d(0)
+    v(1) += 1
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let d: D = [[1, 1]]
+    let t = x * Float64(d(0, 1))
+    let ys = method_for(range<Idx<2>>)
+        <@> lambda(i) -> touch(x, d) |> compute
+    t + reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// EXPECT: value = 6.0
+// EXPECT: dx = 7.0

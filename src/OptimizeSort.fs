@@ -200,3 +200,199 @@ let planSortForms (programFuncs: IRCallable list) (modul: IRModule) : unit =
             decide subject Blade.Effects.Applied [ identityLine; cacheLine; order; llvmNote ]
         else
             decide subject (Blade.Effects.Declined $"general form ({cacheLine.Substring(11)})") [ identityLine; order; llvmNote ]
+
+// ===========================================================================
+// THE SORT TERMINAL (round 4 wave 5, lane D item D5, gap G127 item a; plan
+// rule `sort-terminal v1`, gate BLADE_SORT_TERMINAL). Under the private-spool
+// grant (`external-sort v1`), a top-level `s = sort(A, key)` whose ONLY reader
+// is one later top-level binding whose whole value is `fp = reduce(s, k[,
+// seed])` never holds the sorted output: the sort feeds the fold in sorted
+// order (the resident branch walks its permutation, the spool branch's merge
+// hands each record to the fold as it emits it, positions ascending), from the
+// same seed (unseeded: the first sorted cell), and fp binds the accumulator.
+// The same cells, the same order, the same kernel applications. MOVED: the
+// fold, from fp's site to s's (earlier): k is a closed allocation-free total
+// scalar of its two parameters, so it cannot fail, allocate, or read anything
+// an intervening statement changes. REMOVED: the n-cell output allocation
+// (BLADE_SINK_STREAM precedent). Codex design review round 1 (BUILD WITH
+// CHANGES): literal operand extents only (a dynamic range bound is evaluated
+// again by the output's extents table), BLADE_FP_CONTRACT=off whenever the
+// kernel holds any floating node, the unseeded first-cell initialization, an
+// emission-local handshake.
+// ===========================================================================
+
+/// BLADE_SORT_TERMINAL=0|off keeps the sorted output stored. Unset = on.
+let sortTerminalEnabled () = Blade.Toolchain.envFlag "BLADE_SORT_TERMINAL" true
+
+type SortTerminalPlan = {
+    SortId: IRId
+    FoldId: IRId
+    FoldName: string
+    Kernel: IRExpr
+    Seed: IRExpr option
+    Evidence: string list
+    /// The sort site's handshake: the accumulator's C++ name, published only
+    /// when the terminal form was emitted (reset at every sort emission).
+    Fed: string option ref
+}
+
+module SortTerminalTable =
+    open System.Threading
+    type private State = { BySort: Map<IRId, SortTerminalPlan>; ByFold: Map<IRId, SortTerminalPlan> }
+    let private cell = new AsyncLocal<State>()
+    let private get () = match box cell.Value with null -> { BySort = Map.empty; ByFold = Map.empty } | _ -> cell.Value
+    let reset () = cell.Value <- { BySort = Map.empty; ByFold = Map.empty }
+    let record (p: SortTerminalPlan) =
+        let s = get ()
+        cell.Value <- { BySort = Map.add p.SortId p s.BySort; ByFold = Map.add p.FoldId p s.ByFold }
+    let trySort (id: IRId) : SortTerminalPlan option = Map.tryFind id (get ()).BySort
+    let tryFold (id: IRId) : SortTerminalPlan option = Map.tryFind id (get ()).ByFold
+
+let recordSortTerminal (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "sort-terminal"; Version = 1
+          Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = evidence }
+
+let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (singleModule: bool) (modul: IRModule) : unit =
+    let sorts = modul.Bindings |> List.filter (fun b -> match b.Value with IRSort _ -> true | _ -> false)
+    if sorts.IsEmpty then () else
+    let funcs = (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let resolve (k: IRExpr) = match k with IRVar (fid, _) -> Map.tryFind fid funcs | _ -> None
+    let writes = Blade.Optimize.scheduleMayWriteIn programFuncs modul
+    let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
+    let deferred = Blade.Optimize.programDeferredId modul allCallables Seq.empty
+    let arr = List.toArray modul.Bindings
+    let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+    let printSelection =
+        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
+        | null -> None
+        | v ->
+            let names =
+                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
+                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
+            if names.Length = 0 then None else Some (Set.ofArray names)
+    let builtinOp (c: IRCallable) : IRBinOp option =
+        match c.Params, c.Body with
+        | [ p0; p1 ], IRBinOp (_, op, IRVar (a, _), IRVar (b, _), _)
+            when (match op with IRAdd | IRMul -> true | _ -> false)
+                 && ((a = p0.VarId && b = p1.VarId) || (a = p1.VarId && b = p0.VarId)) -> Some op
+        | _ -> None
+    let licensed (c: IRCallable) =
+        let vetoed =
+            c.IsRepro
+            || (match c.Body with
+                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+                | _ -> false)
+        not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
+    let isFloat (t: IRType) = match stripUnits t with IRTScalar (ETFloat64 | ETFloat32) -> true | _ -> false
+    let contractOff () =
+        System.String.Equals(System.Environment.GetEnvironmentVariable "BLADE_FP_CONTRACT", "off", System.StringComparison.OrdinalIgnoreCase)
+    for sb in sorts do
+        match sb.Value with
+        | IRSort (operand, _) ->
+            // the operand's extent: a literal (a dynamic range bound would be
+            // evaluated again by the output's extents table -- Codex round 1)
+            let literalExtent =
+                match operand with
+                | IRRange ([ ix ], off) ->
+                    (match ix.Extent, off with
+                     | IRLit (IRLitInt n), (None | Some (IRLit (IRLitInt _))) -> Some n
+                     | _ -> None)
+                | IRVar (_, ty) ->
+                    (match stripUnits ty with
+                     | ArrayElem at when at.IndexTypes.Length = 1 ->
+                         (match at.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+                     | _ -> None)
+                | _ -> None
+            let found = Blade.Optimize.referenceCensus allCallables modul sb.Id sb.Name
+            let decision : Result<IRBinding * IRCallable * IRExpr option * string list, string> =
+                match literalExtent with
+                | None -> Error "the operand's extent is not a literal (a plain range with literal bounds or a stored rank-1 array of literal extent; a dynamic bound is evaluated again by the output's extents table)"
+                | Some n ->
+                match printSelection with
+                | None -> Error $"`{sb.Name}` is printed (no print selection: printing reads the sorted output)"
+                | Some sel when sel.Contains sb.Name -> Error $"`{sb.Name}` is printed (the print selection names it)"
+                | Some _ when not singleModule -> Error "a multi-module program (v1 plans a single module)"
+                | Some _ ->
+                if foreignRefs.Contains sb.Id then Error $"another module names `{sb.Name}`"
+                else
+                match found with
+                | [ (who, 1) ] ->
+                    let fold =
+                        arr |> Array.tryFind (fun b ->
+                            who = $"`{b.Name}`"
+                            && (match b.Value with IRReduce (IRVar (v, _), _, _) -> v = sb.Id | _ -> false))
+                    (match fold with
+                     | None -> Error $"`{sb.Name}`'s one reader ({who}) is not a top-level binding whose whole value is `reduce({sb.Name}, k[, seed])`"
+                     | Some fb ->
+                     match indexOf sb.Id, indexOf fb.Id with
+                     | Some si, Some fi when si < fi ->
+                        (match fb.Value with
+                         | IRReduce (_, k, seed) ->
+                            (match resolve k with
+                             | Some kc when kc.Params.Length = 2 && kc.Captures.IsEmpty && not kc.IsOmpParallel && kc.Parallelism.IsEmpty && not kc.IsCudaKernel && not kc.IsMpiParallel ->
+                                 let isP (x: IRExpr) =
+                                     kc.Params |> List.exists (fun q ->
+                                         match x with
+                                         | IRVar (v, _) -> v = q.VarId
+                                         | IRParam (_, i, _) -> i = q.Index
+                                         | _ -> false)
+                                 let anyFloat =
+                                     let mutable hit = kc.Params |> List.exists (fun p -> isFloat p.Type) || isFloat kc.RetType
+                                     iterIRExpr (fun e -> if (try isFloat (typeOf e) with _ -> false) then hit <- true) kc.Body
+                                     hit
+                                 let exactInt =
+                                     (match stripUnits fb.Type with IRTScalar (ETInt64 | ETInt32) -> true | _ -> false)
+                                     && (builtinOp kc).IsSome
+                                 if not (Blade.Optimize.totalScalarOver kc.Params kc.Body && Blade.Optimize.allocFreeScalar isP kc.Body) then
+                                     Error $"the fold kernel of `{fb.Name}` is not a closed allocation-free total scalar of its two parameters (it moves from `{fb.Name}` to `{sb.Name}`)"
+                                 else
+                                 match IRTotality.auditCallable resolve (fun _ -> None) deferred kc [] with
+                                 | Error why -> Error $"the fold kernel of `{fb.Name}` is not proved total ({why})"
+                                 | Ok () ->
+                                 if not (exactInt || Blade.Toolchain.fpReproEnabled () || not (licensed kc)) then
+                                     Error $"the fold `{fb.Name}` is LICENSED in this build (its stored form may take a reassociated tree, which the sorted chain does not reproduce); BLADE_FP_REPRO=1 or an unlicensed kernel keeps the serial chain"
+                                 elif anyFloat && not (contractOff ()) then
+                                     Error "the fold kernel holds floating arithmetic and BLADE_FP_CONTRACT is not off (g++ may contract it differently in the merge's context than in the stored fold's)"
+                                 else
+                                 let seedOk =
+                                     match seed with
+                                     | None when n >= 1L -> Ok "unseeded: the first sorted cell initializes the chain (n >= 1, a literal extent: no BL8003 moves)"
+                                     | None -> Error "an unseeded fold over a possibly empty sort (its BL8003 would move from the fold to the sort)"
+                                     | Some (IRLit (IRLitInt _ | IRLitFloat _ | IRLitFloat32 _ | IRLitBool _)) -> Ok "seeded by a literal"
+                                     | Some _ -> Error "the fold seed is not a non-string literal"
+                                 match seedOk with
+                                 | Error why -> Error why
+                                 | Ok seedLine ->
+                                 let between = arr.[si + 1 .. fi - 1]
+                                 match between |> Array.tryFind (fun b ->
+                                         let ps = Blade.Optimize.bindingPayload modul b
+                                         (ps @ (ps |> List.collect Blade.Optimize.embeddedExtentExprs) @ Blade.Optimize.irTypeExtentExprs b.Type) |> List.exists writes) with
+                                 | Some b -> Error $"`{b.Name}` (between `{sb.Name}` and `{fb.Name}`) may write"
+                                 | None ->
+                                 let strictLine = if exactInt then "an exact integer builtin" elif Blade.Toolchain.fpReproEnabled () then "BLADE_FP_REPRO=1" else "an unlicensed kernel"
+                                 let contractLine = if anyFloat then "BLADE_FP_CONTRACT=off" else "no floating node"
+                                 Ok (fb, kc, seed,
+                                     [ $"`{sb.Name}` is never stored: the sort feeds `{fb.Name}`'s fold in sorted order (resident branch: its permutation walk; spool branch: the merge hands each record to the fold as it emits it, positions ascending) -- the same cells, order and kernel applications as the stored fold; {seedLine}"
+                                       $"census: `{sb.Name}` is named once, as `{fb.Name}`'s fold operand (every module root); not printed, single module"
+                                       $"moved: the fold, from `{fb.Name}` to `{sb.Name}` -- its kernel is a closed allocation-free total scalar of its two parameters (no failure, no allocation, nothing an intervening statement changes); strict chain ({strictLine}); {contractLine}"
+                                       "removed: the n-cell sorted output (a program that died BL8005 there may succeed or reach a later failure: the BLADE_SINK_STREAM precedent)"
+                                       "realized only under the BLADE_PRIVATE_SPOOL grant (external-sort v1); the C++ emitter records the outcome"
+                                       "llvm lane: no sort arm (the program falls back to the C++ lane)" ])
+                             | _ -> Error $"the fold kernel of `{fb.Name}` is not a resolved, capture-free, serial two-parameter callable")
+                         | _ -> Error "unreachable")
+                     | _ -> Error $"`{fb.Name}` is not a later top-level binding")
+                | [] -> Error $"nothing reads `{sb.Name}`"
+                | xs -> Error ($"`{sb.Name}` has another reader than one whole-binding fold: " + (xs |> List.map (fun (w, c) -> $"{w} ({c})") |> String.concat ", "))
+            match decision with
+            | Error why -> recordSortTerminal sb.Name (Blade.Effects.Declined why) []
+            | Ok (fb, _, seed, ev) ->
+                if not (sortTerminalEnabled ()) then
+                    recordSortTerminal sb.Name (Blade.Effects.Declined "disabled by BLADE_SORT_TERMINAL") ev
+                else
+                    match fb.Value with
+                    | IRReduce (_, k, _) ->
+                        SortTerminalTable.record { SortId = sb.Id; FoldId = fb.Id; FoldName = fb.Name; Kernel = k; Seed = seed; Evidence = ev; Fed = ref None }
+                    | _ -> ()
+        | _ -> ()

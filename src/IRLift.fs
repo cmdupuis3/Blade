@@ -1472,10 +1472,28 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
 let deferredAliasClasses (bindings: IRBinding list) (deferredIds: Set<int>) : Map<IRId, IRId list> =
     let isArray (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
     let parent = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let valueOf = bindings |> List.map (fun b -> (b.Id, b.Value)) |> Map.ofList
     for b in bindings do
         match b.Value with
         | IRVar (src, _) when deferredIds.Contains b.Id && deferredIds.Contains src && isArray b.Type ->
             parent.[b.Id] <- src
+        // A projection of a WHOLLY-DEFERRED tuple of named members (`let p =
+        // (d1, d2); let v = p[0]`) is that member by substitution (gap G111):
+        // the same class, so forcing either prints both (siblings included).
+        | IRTupleProj (IRVar (pid, _), k, _) when deferredIds.Contains b.Id && isArray b.Type ->
+            // through tuple ALIASES (`let q = p`) to the tuple itself
+            let rec tupleOf (seen: Set<IRId>) (id: IRId) =
+                match Map.tryFind id valueOf with
+                | Some (IRVar (q, _)) when not (seen.Contains q) -> tupleOf (seen.Add q) q
+                | other -> other
+            (match tupleOf (Set.singleton pid) pid with
+             | Some (IRTuple elems) when k >= 0 && k < elems.Length
+                                         && deferredIds.Contains pid
+                                         && not (elems |> List.exists (function IRTuple _ -> true | _ -> false)) ->
+                 (match elems.[k] with
+                  | IRVar (src, _) when deferredIds.Contains src -> parent.[b.Id] <- src
+                  | _ -> ())
+             | _ -> ())
         | _ -> ()
     // To the chain's end, no depth cutoff (gap G59); a module binding's
     // initializer names only earlier bindings, so the walk ends -- the visited

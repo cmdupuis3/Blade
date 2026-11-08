@@ -3199,7 +3199,13 @@ let internal adaptLiteralOperands (env: TypeEnv) (op: BinOp) (tL: TypedExpr) (tR
                 (match subst.GetElemCast v with
                  | Some (_, tgt) when litClassOf tgt >= 0 -> Some (Choice1Of2 tgt)
                  | Some _ -> None
-                 | None when (subst.GetLiteralDefault v).IsNone -> Some (Choice2Of2 ())
+                 | None when (subst.GetLiteralDefault v).IsNone ->
+                     // G114: an open kernel parameter whose map operand's
+                     // element is known (an element hint) fixes the width
+                     // its literal partners take; its rank stays open.
+                     (match subst.GetElemHint v with
+                      | Some h -> Some (Choice1Of2 h)
+                      | None -> Some (Choice2Of2 ()))
                  | None -> None)
             | _ -> None
         match IR.stripUnits (subst.Resolve t.Type) with
@@ -3266,6 +3272,10 @@ let internal literalFitRefusal (env: TypeEnv) (op: BinOp) (tL: TypedExpr) (tR: T
              | IRTScalar et -> Some et
              | _ -> None)
         | IRTScalar et -> Some et
+        // G114: a hinted open kernel parameter fixes its literal partners'
+        // width (adaptLiteralOperands), so a literal that does not fit it is
+        // refused exactly as beside the concrete width (Codex review round 1).
+        | IRTInfer v when (subst.GetElemCast v).IsNone && (subst.GetLiteralDefault v).IsNone -> subst.GetElemHint v
         | _ -> None
     let judge (lo: TypedExpr) (partner: TypedExpr) =
         match literalOnlyElem subst lo, partnerElem partner with
@@ -3344,8 +3354,14 @@ let internal adaptLiteralPeers (env: TypeEnv) (peers: TypedExpr list) : TypedExp
             | None when openPeer ->
                 // Beside a still-OPEN peer (a kernel parameter before its
                 // apply site binds it): the class's wide width, as an operator
-                // partner gives it (adaptLiteralOperands).
-                (match wideOfClass cls with
+                // partner gives it (adaptLiteralOperands) -- or, G114, the
+                // width its map operand hints for it.
+                let hinted =
+                    List.zip peers los |> List.tryPick (fun (p, lo) ->
+                        match lo, IR.stripUnits (subst.Resolve p.Type) with
+                        | None, IRTInfer v -> subst.GetElemHint v |> Option.filter (fun h -> litClassOf h = cls)
+                        | _ -> None)
+                (match hinted |> Option.orElse (wideOfClass cls) with
                  | Some w -> retypeLiteralOnly subst w p |> Option.defaultValue p
                  | None -> p)
             | None ->
@@ -3370,7 +3386,12 @@ let internal adaptLiteralToFirst (env: TypeEnv) (candidates: IRType list) (te: T
                 match IR.stripUnits (subst.Resolve u) with
                 | IRTScalar et when litClassOf et = cls -> Some (Choice1Of2 et)
                 | IRTScalar et when cls = 1 && litClassOf et = 2 -> None
-                | IRTInfer v when (subst.GetLiteralDefault v).IsNone && (subst.GetElemCast v).IsNone -> Some (Choice2Of2 ())
+                | IRTInfer v when (subst.GetLiteralDefault v).IsNone && (subst.GetElemCast v).IsNone ->
+                    // G114: a hinted open candidate (a kernel parameter whose
+                    // map operand's element is known) gives that width.
+                    (match subst.GetElemHint v with
+                     | Some h when litClassOf h = cls -> Some (Choice1Of2 h)
+                     | _ -> Some (Choice2Of2 ()))
                 | _ -> None
             match IR.stripUnits (subst.Resolve t) with
             | ArrayElem a -> ofElem a.ElemType

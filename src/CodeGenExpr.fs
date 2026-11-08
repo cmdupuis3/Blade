@@ -2291,9 +2291,22 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
     // buffer in J's lex order -- `size()` cells of `.data` -- and its bits
     // are the flat Bool array the compound index of `compound(J, keep)`
     // compacts by position (the interpreter's compoundToDense view).
+    // G146 (1) (round 4 wave 5 lane c): a compound WITH TRAILING plain dense
+    // dims (`Array<T like CompoundIdx<m>, K>`) is the same walk -- its compact
+    // buffer holds `size()` = cardinality x trailing_stride cells in storage
+    // order, and the Bool compound shares its index AND its trailing stride
+    // (the interpreter's twin keeps both). It used to be refused here while
+    // the interpreter flattened it.
     let compoundSrc =
         match inferExprType arrExpr with
-        | ArrayElem a -> isCompoundArrayType a && a.IndexTypes.Length = 1
+        | ArrayElem a ->
+            isCompoundArrayType a
+            && (match a.IndexTypes with
+                | [ _ ] -> true
+                | head :: trailing ->
+                    head.IxKind = IxKCompound
+                    && trailing |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+                | [] -> false)
         | _ -> false
     let srcBoundDim =
         match inferExprType arrExpr with
@@ -2357,7 +2370,7 @@ and materializeMaskFormCounted (subst: SubstMap) (names: Map<IRId, string>) (var
             ))
         | _ ->
             uncounted (Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array needs a one-parameter predicate")], []))
-    elif maskRank <> 1 then
+    elif maskRank <> 1 && not compoundSrc then
         uncounted (Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is supported over plain dense arrays only (packed, ragged, compound and sparse sources have no row-major pool)")], []))
     else
     match resolveCallable predExpr with
@@ -2604,9 +2617,9 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        $"std::unordered_set<{elemTypeStr}> {varName}__b_set;"
+        $"blade_rt::set_of<{elemTypeStr}> {varName}__b_set;"
         $"""for (size_t __si = 0; __si < {bBound}; __si++) {varName}__b_set.insert({bAt "__si"});"""
-        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"blade_rt::set_of<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
         $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
         $"""    {elemTypeStr} __x = {aAt "__si"};"""
@@ -2635,7 +2648,7 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"blade_rt::set_of<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
         $$"""for (size_t __si = 0; __si < {{aBound}}; __si++) {"""
         $"""    if ({varName}__seen.insert({aAt "__si"}).second) {varName}__count++;"""
@@ -2669,7 +2682,7 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     let (extentsDecl, ownedExtents) =
         emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"blade_rt::set_of<{elemTypeStr}> {varName}__seen;"
         $"size_t {varName}__count = 0;"
         $$"""for (size_t __ui = 0; __ui < {{aBound}}; __ui++) {"""
         $"""    if ({varName}__seen.insert({aAt "__ui"}).second) {varName}__count++;"""
@@ -4482,6 +4495,14 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
 
 
 and materializeLuForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (mExpr: IRExpr) : (string list * MaterializedAlloc list) option =
+    materializeLuFormWith subst names varName mExpr None
+
+/// `companion` = Some (factor binding id, C++ name): the plan admitted a
+/// column-major companion for this factor (Optimize.LuCompanionTable, gap
+/// G109); the ROUTED arm keeps `?getrf`'s scratch under that name and notes
+/// it (CodeGenState.noteLuCompanion) so the admitted solves read it. The
+/// native arm ignores it (its solves already read the factor in place).
+and materializeLuFormWith (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (mExpr: IRExpr) (companion: (IRId * string) option) : (string list * MaterializedAlloc list) option =
     // lu(A) -> (LU, piv): the partial-pivoted LU `materializeSolveForm`
     // computes, KEPT. LU is a fresh n x n dense pool holding L (unit lower,
     // multipliers below the diagonal) and U (on and above); piv is a fresh
@@ -4521,8 +4542,21 @@ and materializeLuForm (subst: SubstMap) (names: Map<IRId, string>) (varName: str
             @ pivExtentsDecl
             @ [ arrayAlloc { Ind = ""; Elem = "int64_t"; Rank = 1; Name = pivName; Symm = "nullptr"; Strict = None; Extents = pivExtents } ]
         let panicLine = $"blade_rt::panic(\"BL8007\", \"lu(A): the matrix is SINGULAR -- LU factorization found an exactly-zero pivot\", {(declPanicArgs ())});"
+        // The companion object is declared OUTSIDE the factor's own block so
+        // it outlives it (main's top level only: the plan admits nothing else).
+        let companionDecl =
+            match shimEntry, companion with
+            | Some _, Some (fid, cmName) ->
+                noteLuCompanion fid cmName
+                [ $"blade_lapack::blade_lu_cm {cmName}; /* lu-companion: the column-major factor kept for the solves (gap G109) */" ]
+            | _ -> []
         let body =
             match shimEntry with
+            | Some _ when not companionDecl.IsEmpty ->
+                let cmName = snd companion.Value
+                [ $"const size_t {nName} = {nExtent};"
+                  $"/* lapack dispatch: lu(A) -> (LU, piv), dense square operand, column-major factor kept */ int {infoName} = blade_lapack::blade_lu_keep_d({nName}, {aName}.data, {luName}.data, {pivName}.data, {cmName});"
+                  $$"""if ({{infoName}} != 0) { {{panicLine}} }""" ]
             | Some entry ->
                 [ $"const size_t {nName} = {nExtent};"
                   $"/* lapack dispatch: lu(A) -> (LU, piv), dense square operand */ int {infoName} = {entry}({nName}, {aName}.data, {luName}.data, {pivName}.data);"
@@ -4551,12 +4585,19 @@ and materializeLuForm (subst: SubstMap) (names: Map<IRId, string>) (varName: str
                   "}" ]
         let tupleLine =
             $"std::tuple<Array<{elemStr}, 2>, Array<int64_t, 1>> {varName} = std::make_tuple({luName}, {pivName});"
-        Some (decls @ ["{"] @ body @ ["}"; tupleLine],
+        Some (decls @ companionDecl @ ["{"] @ body @ ["}"; tupleLine],
               [ MatPool (luName, elemStr, 2, "nullptr", None, luOwned)
                 MatPool (pivName, "int64_t", 1, "nullptr", None, pivOwned) ])
      | _ -> None)
 
 and materializeLuSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (lExpr: IRExpr) (pExpr: IRExpr) (rExpr: IRExpr) (transposed: bool) : (string list * MaterializedAlloc list) option =
+    materializeLuSolveFormWith subst names varName elemTypeStr lExpr pExpr rExpr transposed None
+
+/// `companion` = Some C++ name of the factor's column-major companion (gap
+/// G109): the routed arm hands it to `?getrs` instead of rebuilding the
+/// column-major factor from the row-major value (a released companion falls
+/// back to that copy inside `blade_lu_solve_cm_d`).
+and materializeLuSolveFormWith (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (elemTypeStr: string) (lExpr: IRExpr) (pExpr: IRExpr) (rExpr: IRExpr) (transposed: bool) (companion: string option) : (string list * MaterializedAlloc list) option =
     // lu_solve(LU, piv, b) -> x with A x = b from the stored factors: x = b,
     // the pivot swaps applied in step order, the multipliers applied in the
     // solve form's fused order (k outer, i inner), then the same back
@@ -4590,6 +4631,10 @@ and materializeLuSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName
         let transArg = if transposed then 1 else 0
         let body =
             match shimEntry with
+            | Some _ when companion.IsSome ->
+                [ $"const size_t {nName} = {nExtent};"
+                  $"/* lapack dispatch: lu_solve(LU, piv, b) -> x, {modeWord}, reads the column-major companion */ int {infoName} = blade_lapack::blade_lu_solve_cm_d({nName}, {companion.Value}, {lName}.data, {pName}.data, {bName}.data, {varName}.data, {transArg});"
+                  $$"""if ({{infoName}} != 0) { blade_rt::panic("BL8007", "lu_solve: the stored factorization is invalid", {{declPanicArgs ()}}); }""" ]
             | Some entry ->
                 [ $"const size_t {nName} = {nExtent};"
                   $"/* lapack dispatch: lu_solve(LU, piv, b) -> x, {modeWord} */ int {infoName} = {entry}({nName}, {lName}.data, {pName}.data, {bName}.data, {varName}.data, {transArg});"

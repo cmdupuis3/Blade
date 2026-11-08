@@ -1,0 +1,16 @@
+// TEST: a projection through an alias of a wholly-deferred tuple prints with its member
+// Gap G111 (round 4 wave 5 lane c; Codex review round 2): `q = p` is the same
+// deferred tuple, so `v = q[0]` is `g` by substitution, in `g`'s alias class
+// like `sibling = p[1]`; forcing `g` prints all three names.
+type I = Idx<3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(a) <@> lambda(x) -> x * 2.0
+let p = (g, g)
+let q = p
+let v = q[0]
+let sibling = p[1]
+let first = g(0)
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: v = [2.0, 4.0, 6.0]
+// EXPECT: sibling = [2.0, 4.0, 6.0]
+// EXPECT: first = 2.0
