@@ -455,8 +455,13 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
     let p1 = parse (Some "1")
     let pOn = parse (Some " ON ")
     let pPair = parse (Some "16:48")
-    check "pool parser: unset / 0 / off are the default 4 MB / 8 MB"
-        ([ None; Some "0"; Some "off"; Some "" ] |> List.forall (fun v -> let p = parse v in p.IsDefault && p.MaxBlockMB = 4L && p.BudgetMB = 8L && p.Malformed.IsNone)) ""
+    check "pool parser: unset / default are the default 32 MB / 64 MB (round 4 wave 6)"
+        ([ None; Some "default"; Some " DEFAULT "; Some "" ] |> List.forall (fun v -> let p = parse v in p.IsDefault && p.MaxBlockMB = 32L && p.BudgetMB = 64L && p.Malformed.IsNone)) ""
+    check "pool parser: 0 / off are the pre-wave-6 4 MB / 8 MB, an arm with its define pair"
+        ([ Some "0"; Some "off"; Some " OFF "; Some "false" ] |> List.forall (fun v ->
+            let p = parse v
+            not p.IsDefault && p.Arm = "off" && p.Setting = "0" && p.MaxBlockMB = 4L && p.BudgetMB = 8L && p.Malformed.IsNone
+            && Toolchain.poolRetentionDefines p = [ "BLADE_POOL_MAX_BLOCK", 4194304L; "BLADE_POOL_BUDGET", 8388608L ])) ""
     check "pool parser: 1 / on are the 64 MB / 96 MB arm"
         (p1.Arm = "retain" && p1.MaxBlockBytes = 67108864L && p1.BudgetBytes = 100663296L && pOn.Arm = "retain" && pOn.Setting = "1") $"{p1}"
     check "pool parser: a valid <max>:<budget> pair"
@@ -464,7 +469,7 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
          && (parse (Some " 8 : 8 ")).Arm = "pair") $"{pPair}"
     check "pool parser: max > budget, zero, negative, overflow and garbage are the default, flagged malformed"
         ([ "96:64"; "0:8"; "-4:8"; "4:2000000"; "4:8:16"; "lots"; "4MB:8MB"; "2" ]
-         |> List.forall (fun v -> let p = parse (Some v) in p.IsDefault && p.MaxBlockMB = 4L && p.Malformed = Some v)) ""
+         |> List.forall (fun v -> let p = parse (Some v) in p.IsDefault && p.MaxBlockMB = 32L && p.Malformed = Some v)) ""
     check "pool parser: the default contributes no define; the arm the twin pair"
         (Toolchain.poolRetentionDefines (parse None) = []
          && Toolchain.poolRetentionDefines p1 = [ "BLADE_POOL_MAX_BLOCK", 67108864L; "BLADE_POOL_BUDGET", 100663296L ]) ""
@@ -484,34 +489,40 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
             Toolchain.refresh ()
             (try File.Delete path with _ -> ())
     let fileArm = "{\"BLADE_POOL_RETAIN\": \"1\"}"
-    let fileOff = "{\"BLADE_POOL_RETAIN\": \"off\"}"
+    let fileOff = "{\"BLADE_POOL_RETAIN\": \"default\"}"
     let resolved (json: string) (env: string option) = withToolchain json (fun () -> withPool env Toolchain.poolRetention)
     let rUnset = resolved "{}" None
     let rFile = resolved fileArm None
-    let rFileArmEnvOff = resolved fileArm (Some "off")
+    let rFileArmEnvOff = resolved fileArm (Some "default")
     let rFileOffEnvArm = resolved fileOff (Some "1")
     check "pool precedence: unset with an empty toolchain file is the default, from no source"
         (rUnset.IsDefault && rUnset.Source = "default" && rUnset.Setting = "default") $"{rUnset}"
     check "pool precedence: unset env reads the toolchain file's arm"
         (rFile.Arm = "retain" && rFile.Source = "blade.toolchain.json") $"{rFile}"
-    check "pool precedence: file=1, env=off is the default (env wins)"
+    check "pool precedence: file=1, env=default is the default (env wins)"
         (rFileArmEnvOff.IsDefault && rFileArmEnvOff.Source = "env BLADE_POOL_RETAIN") $"{rFileArmEnvOff}"
-    check "pool precedence: file=off, env=1 is the arm (env wins)"
+    check "pool precedence: file=default, env=1 is the arm (env wins)"
         (rFileOffEnvArm.Arm = "retain" && rFileOffEnvArm.Source = "env BLADE_POOL_RETAIN") $"{rFileOffEnvArm}"
     let poolSource = "let x = 1.0 * Float64(0..6000000)\nlet y = x * 2.0 |> compute\nlet s = reduce(y, (+))\n"
     (match Blade.Lowering.lower poolSource with
      | Error e -> check "pool emission: program lowers" false e
      | Ok ir ->
          let emitUnder v = withPool v (fun () -> fst (genSelfContainedProgramFromIR ir "rr_pool"))
-         let dflt = emitUnder (Some "off")
+         let dflt = emitUnder (Some "default")
          let unsetEmpty = withToolchain "{}" (fun () -> emitUnder None)
-         check "pool emission: unset (empty toolchain file) emits exactly the `off` default" (unsetEmpty = dflt) ""
+         check "pool emission: unset (empty toolchain file) emits exactly the `default` default" (unsetEmpty = dflt) ""
          let off = emitUnder (Some "0")
          let bad = emitUnder (Some "96:64")
          let arm = emitUnder (Some "1")
          check "pool emission: the default writes no pool define"
              (not (dflt.Contains "BLADE_POOL_MAX_BLOCK") && not (dflt.Contains "BLADE_POOL_BUDGET") && not (dflt.Contains "BLADE_POOL_RETAIN")) ""
-         check "pool emission: `0` and a malformed value emit the default byte for byte" (off = dflt && bad = dflt) ""
+         check "pool emission: a malformed value emits the default byte for byte" (bad = dflt) ""
+         let offLines = off.Replace("\r\n", "\n").Split('\n')
+         check "pool emission: `0` (the pre-wave-6 limits) writes the 4 MB / 8 MB define pair"
+             (offLines.[0].StartsWith "// BLADE_POOL_RETAIN=0:" && offLines.[1] = "#define BLADE_POOL_MAX_BLOCK 4194304"
+              && offLines.[2] = "#define BLADE_POOL_BUDGET 8388608"
+              && String.concat "\n" (Array.skip 3 offLines) = dflt.Replace("\r\n", "\n"))
+             (String.concat " | " (Array.truncate 4 offLines))
          let lines = arm.Replace("\r\n", "\n").Split('\n')
          let firstInclude = lines |> Array.findIndex (fun l -> l.StartsWith "#include")
          check "pool emission: the arm writes its #define pair ahead of every include"
@@ -540,7 +551,7 @@ let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
          let policyMembers = [ "march"; "fp_contract"; "fp_reassoc"; "pool" ]
          let poolMembers = [ "retain"; "max_block"; "budget"; "budget_scope"; "cache" ]
          for (name, v, memcheck, (retain, maxBlock, budget, cache)) in
-             [ "rr_pool_default", Some "off", false, ("default", 4194304L, 8388608L, "on")
+             [ "rr_pool_default", Some "default", false, ("default", 33554432L, 67108864L, "on")
                "rr_pool_pair", Some "16:48", false, ("arm", 16777216L, 50331648L, "on")
                "rr_pool_memcheck_arm", Some "1", true, ("arm", 67108864L, 100663296L, "off") ] do
              let label = $"pool record (parsed): {name} -- policy.pool {retain} {maxBlock}/{budget} per-thread, cache {cache}"

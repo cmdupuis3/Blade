@@ -1401,6 +1401,118 @@ let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
                 Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", savedSga)
                 Environment.SetEnvironmentVariable("BLADE_PRINT", savedPrint)
                 Environment.SetEnvironmentVariable("BLADE_FP_REPRO", savedRepro)
+        // G188 (wave 6 lane b): the state form's adopted `__sga<f>_state` arrays
+        // and their extents tables are registered as the fold bindings' own
+        // storage. ASan census (BLADE_MEMCHECK=1) of the state form vs the pool
+        // form over the same fixture: no ASan report, the same values, and the
+        // state form holds no more bytes at exit than the pool form (module
+        // bindings are deliberately held to exit in both; the state form must
+        // not add an unregistered allocation on top of them)
+        (let census (sga: bool) : Result<string * int64, string> =
+            let keysE = [ "BLADE_MEMCHECK"; "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO"; "BLADE_TILE_TUNE" ]
+            let saved = keysE |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+            try
+                Environment.SetEnvironmentVariable("BLADE_MEMCHECK", "1")
+                Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", (if sga then "1" else "0"))
+                Environment.SetEnvironmentVariable("BLADE_PRINT", "sums,fps,psums,esums")
+                Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+                Environment.SetEnvironmentVariable("BLADE_TILE_TUNE", "group_win=3")
+                match lower (keyed "stream") with
+                | Error e -> Error ("lower: " + e)
+                | Ok ir ->
+                    let stem = if sga then "zarr_sga_memcheck_on" else "zarr_sga_memcheck_off"
+                    let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir stem
+                    // the ownership itself (Codex diff review, wave 6): at main's top
+                    // level a registration frees nothing and lands in main's ledger
+                    // -- each adopted state must be there as raw array data owning
+                    // its extents table (so a live frame would free both once)
+                    let ledger = Blade.CodeGenLoopNest.mainAllocLedgerCell().Value
+                    let owns (n: string) =
+                        match Map.tryFind n ledger with
+                        | Some (Blade.CodeGenLoopNest.RawArrayData (m, Some ex, _)) -> m = n && ex = n + "_extents"
+                        | _ -> false
+                    if sga && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") then Error "the state form did not apply"
+                    elif sga && not (owns "sums" && owns "fps" && owns "psums") then
+                        Error (sprintf "the adopted states are not registered (main ledger: %A)" (ledger |> Map.toList |> List.map fst))
+                    else
+                    CodeGen.deployRuntimeHeaders e2eDir
+                    let cppFile = Path.Combine(e2eDir, stem + ".cpp")
+                    File.WriteAllText(cppFile, cppCode)
+                    match compileCpp cppFile e2eDir with
+                    | Error e when isSkipError e -> Error e
+                    | Error e -> Error ("compile: " + e)
+                    | Ok exe ->
+                        match runExecutable exe with
+                        | Ok (0, out) ->
+                            let m = Text.RegularExpressions.Regex.Match(out, @"outstanding_bytes=(-?\d+) outstanding_blocks=(\d+)")
+                            if out.Contains "ERROR: AddressSanitizer" then Error ("ASan reported: " + out)
+                            elif not m.Success then Error ("no census line: " + out)
+                            elif not (out.Contains "asan=1") then Error ("not an ASan build: " + out)
+                            else Ok (out, int64 m.Groups.[1].Value)
+                        | Ok (code, out) -> Error ($"exit {code}: {out}")
+                        | Error e -> Error e
+            finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v)
+         let name = "stream-group-aggregate state form (G188): ASan census clean, values, bytes at exit <= the pool form"
+         let unavailable (e: string) = isSkipError e
+         match census true, census false with
+         | Error e, _ | _, Error e when unavailable e -> printfn "  SKIP %s: %s" name e
+         | Error e, _ | _, Error e -> check name false e
+         | Ok (onOut, onBytes), Ok (offOut, offBytes) ->
+             let valuesOk = expected |> List.forall (fun l -> onOut.Contains l && offOut.Contains l)
+             check name (valuesOk && onBytes <= offBytes) (sprintf "state form %d bytes outstanding, pool form %d; values %b" onBytes offBytes valuesOk))
+        // wave 6 lane b (Codex class-closure round of stream-group-aggregate): a
+        // DEFERRED fold binding (no `|> compute`) forced later by a sort under a
+        // print selection naming it lost its forcing bookkeeping in the state
+        // form (BL7004); v1 declines it by name and the program keeps the pool
+        (let src = (keyed "stream").Replace("let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute", "let sums = method_for(g) <@> lambda(r) -> reduce(r, (+))\nlet ordered = sort(sums, lambda(x) -> x)")
+         let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+         try
+             Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+             Environment.SetEnvironmentVariable("BLADE_PRINT", "sums,ordered,fps,psums,esums")
+             Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+             Blade.Effects.Decisions.start ()
+             let lowered = lower src
+             let recs = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-aggregate") |> List.map Blade.Effects.Decisions.render
+             match lowered with
+             | Error e -> check "stream-group-aggregate: a deferred fold binding declines (lowers)" false e
+             | Ok ir ->
+                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_sga_deferred_fold"
+                 let refusals = CodeGen.takeCodegenRefusalDiagnostics cppCode |> List.map string
+                 check "stream-group-aggregate: a DEFERRED fold binding declines by name, the pool stays, no refusal"
+                     (recs |> List.exists (fun r -> r.Contains "declined" && r.Contains "DEFERRED per-group map")
+                      && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") && refusals.IsEmpty)
+                     (String.concat "\n" (recs @ refusals))
+         finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
+        // wave 6 lane b, the R0 class-closure round (Codex 19d5e4b8): a FLOATING
+        // dynamic key may be NaN, which never equals itself, so the CSR can hold
+        // an EMPTY group whose unseeded fold is BL8003 at the fold; the state form
+        // skipped that check. An unseeded fold over float keys now declines; a
+        // seeded one (empty groups answer the seed) and integer keys still apply.
+        (let floatKeys (seeded: bool) =
+            sprintf "import zarr as z\nlet sample = z.load(\"%s\")\nlet A = sample.vars.A |> z.stream\nlet q: Float64 = 0.0 / 0.0\nlet keys = [q, q, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]\nlet gk = group_keys(keys)\nlet g = group_by(A, gk)\nlet sums = method_for(g) <@> lambda(r) -> reduce(r, (+)%s) |> compute\n" segStore (if seeded then ", 0.0" else "")
+         let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+         try
+             Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+             Environment.SetEnvironmentVariable("BLADE_PRINT", "sums")
+             Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+             // lowering (the planner's declines) AND the C++ emission (the
+             // emitter records `applied` when it takes the state form)
+             let recsOf (src: string) =
+                 Blade.Effects.Decisions.start ()
+                 let lowered = lower src
+                 (match lowered with
+                  | Ok ir -> ignore (CodeGen.genSelfContainedProgramFromIR ir "zarr_sga_float_keys")
+                  | Error _ -> ())
+                 (Result.isOk lowered, Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-aggregate") |> List.map Blade.Effects.Decisions.render)
+             let (ok1, unseeded) = recsOf (floatKeys false)
+             let (ok2, seeded) = recsOf (floatKeys true)
+             check "stream-group-aggregate: an UNSEEDED fold over FLOATING dynamic keys declines (a NaN key leaves an empty group: BL8003 stays at the fold); seeded it applies"
+                 (ok1 && ok2
+                  && unseeded |> List.exists (fun r -> r.Contains "declined" && r.Contains "may be NaN")
+                  && not (seeded |> List.exists (fun r -> r.Contains "declined"))
+                  && seeded |> List.exists (fun r -> r.Contains "applied"))
+                 (String.concat "\n" (unseeded @ [ "-- seeded --" ] @ seeded))
+         finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
         // the resident twin prints the same values
         (match lower (keyed "read") with
          | Ok ir ->
@@ -3321,6 +3433,43 @@ let w = z.write("%s", A)
         let withDiv = stencil seg + "let q: Int64 = 7\nlet z: Int64 = 0\nlet r = q / z\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n"
         let recDiv = planOf withDiv
         check "G106 plan: an intervening possibly failing statement keeps two run loops" (not (has recDiv "d, d2: applied")) (String.concat "\n" recDiv)
+        // wave 6 lane b, the R0 class-closure round (Codex d6837177): in a
+        // FUNCTION BODY of a multi-module program, an intervening fold forcing
+        // an IMPORTED deferred map (`bad`, whose cells divide by zero: BL8013)
+        // escaped the interval audit (this module's census only), so the fused
+        // form failed BL8013 before the moved reads' short chunk; the audit now
+        // uses the program-wide classifier. The control without the fold fuses.
+        (let dir = Path.Combine(hdir, "g106_imported_deferred")
+         (try Directory.Delete(dir, true) with _ -> ())
+         Directory.CreateDirectory dir |> ignore
+         let helpers = "module Helpers\ntype I = Idx<3>\nlet zz: Array<Int64 like I> = [1, 0, 2]\nlet bad = method_for(range<I>) <@> lambda(i) -> Float64(100 / zz(i))\n"
+         let mainSrc (withFold: bool) =
+             "module Main\nimport zarr as z\nimport Helpers\nfrom Helpers import I, bad\n\n"
+             + $"let sample = z.load(\"{seg}\")\n"
+             + "type CX = Chunked<sample.index.x, store>\n"
+             + "let A: Array<Float64 like CX> = sample.vars.A |> z.stream\n"
+             + "function run_stencils(k: Float64) -> Float64 = {\n"
+             + "    let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute\n"
+             + (if withFold then "    let q = reduce(method_for(range<I>) <@> lambda(i) -> bad(i), (+))\n" else "    let q: Float64 = 1.5\n")
+             + "    let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n"
+             + "    reduce(d, (+)) + reduce(d2, (+)) + q + k\n"
+             + "}\n"
+             + "let result = run_stencils(0.0)\n"
+         File.WriteAllText(Path.Combine(dir, "Helpers.blade"), helpers)
+         let recsOf (withFold: bool) =
+             let mainPath = Path.Combine(dir, "Main.blade")
+             let src = mainSrc withFold
+             File.WriteAllText(mainPath, src)
+             withEnv [ ("BLADE_SIBLING_MAPS", "streamed") ] (fun () ->
+                 Blade.Effects.Decisions.start ()
+                 let lowered = fst (Lowering.lowerFileDiag mainPath src)
+                 let recs = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "sibling-maps") |> List.map Blade.Effects.Decisions.render
+                 (Result.isOk lowered, recs))
+         let (okFold, recFold) = recsOf true
+         let (okCtl, recCtl) = recsOf false
+         check "G106 plan (R0 round): an interval fold forcing an IMPORTED deferred map keeps two run loops; the control fuses"
+             (okFold && okCtl && not (has recFold "applied [2 sibling outputs") && has recCtl "applied [2 sibling outputs")
+             (String.concat "\n" (recFold @ [ "-- control --" ] @ recCtl)))
         // an intervening TOTAL statement keeps the group
         let withTotal = stencil seg + "let k: Float64 = 2.5 * 3.0\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> k * A(w(1)) + A(w(-1)) |> compute\n"
         let recTotal = planOf withTotal
@@ -3342,8 +3491,8 @@ let w = z.write("%s", A)
                 (match lower (twoFir seg) with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
                 Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "sibling-maps") |> List.map Blade.Effects.Decisions.render)
         check "G106 plan: the default build keeps one run loop per binding (the streamed kind is opt-in)" (not (has recDefault "d, d2: applied")) (String.concat "\n" recDefault)
-        // (8) E6 / ST03 (round 4 wave 4; the OPT-IN arm BLADE_HALO_CACHE=elementwise
-        // against the default =1, whose elementwise route is unchanged): a zip of two DIFFERENTLY chunked
+        // (8) E6 / ST03 (round 4 wave 4; the elementwise route, DEFAULT ON since round 4 wave 6 --
+        // BLADE_HALO_CACHE=elementwise reads as the default; `stencil` is the old default): a zip of two DIFFERENTLY chunked
         // streams (A chunk 4, B chunk 6, N = 13) runs one block of A's chunk
         // edge at a time; B's chunk spans two runs. With the cache each B
         // chunk is decoded once (3 fetches), per window it is fetched per run
@@ -3365,11 +3514,11 @@ let w = z.write("%s", A)
             + "let A = sa.vars.A |> z.stream\n"
             + "let B = sb.vars.B |> z.stream\n"
             + "let p = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute\n"
-        (match runArm "zip two chunkings_on" "elementwise" (zipSrc za zb), runArm "zip two chunkings_off" "1" (zipSrc za zb) with
+        (match runArm "zip two chunkings_on" "elementwise" (zipSrc za zb), runArm "zip two chunkings_off" "stencil" (zipSrc za zb) with
          | Ok (cppOn, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
              check "E6 zip of two chunkings: same output cached / per window"
                  (strip outOn = strip outOff && outOn.Contains "p = [0.0, 4.0, 12.0, 24.0, 40.0") outOn
-             check "E6 zip of two chunkings (BLADE_HALO_CACHE=elementwise, opt-in): each source its own slots (B decoded once per chunk: 3 fetches; A 4); the default (=1) keeps the uncounted per-run reader"
+             check "E6 zip of two chunkings (the default since wave 6): each source its own slots (B decoded once per chunk: 3 fetches; A 4); BLADE_HALO_CACHE=stencil (the old default) keeps the uncounted per-run reader"
                  (cppOn.Contains "p__hc1_buf" && rrOn.Contains "\"variable\":\"B\",\"form\":\"halo-chunk-cache\",\"fetches\":3,"
                   && rrOn.Contains "\"variable\":\"A\",\"form\":\"halo-chunk-cache\",\"fetches\":4,"
                   && not (rrOff.Contains "\"provider_io\"")) (rrOn + " / " + rrOff)
@@ -3379,7 +3528,7 @@ let w = z.write("%s", A)
         // B chunks of 1 -- 13 slots for B, whose tables live on the heap
         let za13 = mkStore2 "zip_a13_one" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 13L)
         let zb1 = mkStore2 "zip_b13_c1" (wv2 "B" [| for j in 0 .. 12 -> float (2 * j) |] 1L)
-        (match runArm "zip tiny B chunks_on" "elementwise" (zipSrc za13 zb1), runArm "zip tiny B chunks_off" "1" (zipSrc za13 zb1) with
+        (match runArm "zip tiny B chunks_on" "elementwise" (zipSrc za13 zb1), runArm "zip tiny B chunks_off" "stencil" (zipSrc za13 zb1) with
          | Ok (cppOn, Some (0, outOn, rrOn)), Ok (_, Some (0, outOff, rrOff)) ->
              check "E6 zip, one long run over 13 one-cell chunks (opt-in arm): same output as the default, 13 slots on the heap, 13 fetches"
                  (strip outOn = strip outOff && outOn.Contains "p = [0.0, 4.0, 12.0" && cppOn.Contains "std::vector<size_t> p__hc1_ord(13UL, SIZE_MAX);"
@@ -3391,7 +3540,7 @@ let w = z.write("%s", A)
         // the same message
         let zbShort = mkStore2 "zip_b13_short" (wv2 "B" [| for j in 0 .. 12 -> float (2 * j) |] 6L)
         File.WriteAllBytes(zbShort + "/B/1", Array.zeroCreate 8)
-        (match runArm "zip short B_on" "elementwise" (zipSrc za zbShort), runArm "zip short B_off" "1" (zipSrc za zbShort) with
+        (match runArm "zip short B_on" "elementwise" (zipSrc za zbShort), runArm "zip short B_off" "stencil" (zipSrc za zbShort) with
          | Ok (_, Some (cOn, outOn, _)), Ok (_, Some (cOff, outOff, _)) ->
              check "E6 zip, a short chunk of B: same exit and message cached / per window"
                  (cOn = cOff && cOn <> 0 && strip outOn = strip outOff && outOn.Contains "is short") (sprintf "on %d %s / off %d %s" cOn outOn cOff outOff)
@@ -3443,6 +3592,34 @@ let w = z.write("%s", A)
              check "D4: a short chunk fails the same way fused / staged" (c1 = c2 && c1 <> 0 && strip o1 = strip o2 && o1.Contains "is short") (sprintf "%d %s / %d %s" c1 o1 c2 o2)
          | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP D4 short A: toolchain unavailable"
          | x, y -> check "D4 short A: both build" false (sprintf "%A / %A" x y))
+        // wave 6 lane b (the class review of the resource-ordering class): a
+        // padded chunk far wider than the variable (N = 13, chunk 1000) -- the
+        // fused sweep's converted block is clipped to the extent, as the staged
+        // route's window is, so the fused form allocates no more ahead of its
+        // first read than the staged one
+        (let zaWide = mkStore2 "zip_a13_wide" (wv2 "A" [| for j in 0 .. 12 -> float (j + 1) |] 1000L)
+         let wideSrc = "import zarr as z\n" + $"let sa = z.load(\"{zaWide}\")\n" + "let A = sa.vars.A |> z.stream\n" + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n"
+         twin "D4 fused streamed fold over a padded chunk wider than the variable" [ ("BLADE_STREAM_FOLD_FUSE", "1") ] wideSrc
+             [ "fused per block (stream-fold-fuse v1)"; "t__blk = new double[13];" ] [ "t = 819.0" ]
+         match withEnv [ ("BLADE_STREAM_FOLD_FUSE", "1") ] (fun () -> runArm "D4 wide chunk cpp" "1" wideSrc) with
+         | Ok (cpp, _) -> check "D4: the block buffer is clipped to the extent, not the padded chunk" (not (cpp.Contains "new double[1000]")) ""
+         | Error e -> check "D4 wide chunk: builds" false e)
+        // wave 6 lane b (Codex class-closure round of stream-fold-fuse, m8):
+        // where the staged elementwise route counts its reads into the run
+        // record's provider_io census (the halo chunk cache's elementwise route,
+        // the default since wave 6), the fused sweep counts its own (one
+        // per-window site `t`, A's 4 chunks fetched once each); under
+        // BLADE_HALO_CACHE=stencil neither form reports
+        (let src = zipHead + "let t = reduce(method_for(A) <@> lambda(a) -> a * a, (+))\n"
+         match withEnv [ ("BLADE_STREAM_FOLD_FUSE", null) ] (fun () -> runArm "D4 under elementwise cache" "1" src),
+               withEnv [ ("BLADE_STREAM_FOLD_FUSE", null) ] (fun () -> runArm "D4 under stencil cache" "stencil" src) with
+         | Ok (cpp, Some (0, out, rr)), Ok (cppS, Some (0, outS, rrS)) ->
+             check "D4 (default on): the fused sweep keeps the provider_io census where the staged elementwise route would report; none under BLADE_HALO_CACHE=stencil"
+                 (cpp.Contains "fused per block (stream-fold-fuse v1)" && cppS.Contains "fused per block (stream-fold-fuse v1)"
+                  && rr.Contains "\"site\":\"t\",\"variable\":\"A\",\"form\":\"per-window\",\"fetches\":4,"
+                  && not (rrS.Contains "\"provider_io\"") && out.Contains "t = 819.0" && strip out = strip outS) (rr + " / " + rrS + " / " + out)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP D4 under elementwise cache: toolchain unavailable"
+         | a, b -> check "D4 under elementwise cache: both arms run" false (sprintf "%A / %A" a b))
         twin "G1 compute-elision spelling under --print t" [ ("BLADE_PRINT", "t") ] (foldSrc "let t = reduce(p, (+))\n")
             [ "elementwise over segments" ] [ "t = 1456.0" ]
         (let recs =
@@ -3541,7 +3718,9 @@ let w = z.write("%s", A)
         (let r = groupRecs [ ("BLADE_PRINT", "rs,t,xs") ] (grp + "let xs = 0..extents(g(0)) |> compute\n")
          check "G4 plan: a type-carried reference keeps the pool (Codex round 1)" (hasRec r "declined") (String.concat "\n" r))
         (let r = groupRecs [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", null) ] grp
-         check "G4 plan: the default (opt-in arm unset) keeps the pool" (hasRec r "opt-in (BLADE_STREAM_GROUP_FOLD=1)") (String.concat "\n" r))
+         check "G4 plan: the default (unset) applies since wave 6" (hasRec r "applied") (String.concat "\n" r))
+        (let r = groupRecs [ ("BLADE_PRINT", "rs,t"); ("BLADE_STREAM_GROUP_FOLD", "0") ] grp
+         check "G4 plan: BLADE_STREAM_GROUP_FOLD=0 keeps the pool" (hasRec r "disabled by BLADE_STREAM_GROUP_FOLD") (String.concat "\n" r))
         // D2 (round 4 wave 5, G143 items 1-2): several peels over one group in
         // ONE run loop; allocation-free closed-total statements between
         let maxK = "lambda(a, b) -> if a > b then a else b"
@@ -3557,10 +3736,12 @@ let w = z.write("%s", A)
         (let pins = [ ("BLADE_PRINT", "rs,rm,t,q"); ("BLADE_STREAM_GROUP_FOLD", "1") ]
          let r = groupRecs pins grpMid
          check "D2 plan: two peels and the intervening statements applied" (hasRec r "applied" && hasRec r "`rs`, `rm`" && hasRec r "interval: `k`, `k2`") (String.concat "\n" r)
-         let r = groupRecs pins (grp2.Replace("let rs = reduce(g, (+))\n", "let q = sqrt(2.0)\nlet rs = reduce(g, (+))\n"))
+         // (wave 6 lane b: the call case used to be shadowed by the next binding
+         // -- Codex R0 round 143743b0 -- each now asserts its own records)
+         let rCall = groupRecs pins (grp2.Replace("let rs = reduce(g, (+))\n", "let q = sqrt(2.0)\nlet rs = reduce(g, (+))\n"))
+         check "D2 plan: a call between declines" (hasRec rCall "declined" && hasRec rCall "`q` (between") (String.concat "\n" rCall)
          let r = groupRecs pins (grp + $"let rm = reduce(g, {maxK})\n")
          check "D2 plan: a statement between peels reading a peel output (a fold) declines" (hasRec r "declined" && hasRec r "`t` (between") (String.concat "\n" r)
-         check "D2 plan: a call between declines" (hasRec r "declined" && hasRec r "not an allocation-free") (String.concat "\n" r)
          let r = groupRecs pins (grp2.Replace("let rs = reduce(g, (+))\n", "let msg = \"a long message string\"\nlet rs = reduce(g, (+))\n"))
          check "D2 plan: a string between declines" (hasRec r "declined") (String.concat "\n" r)
          let r = groupRecs pins (grp.Replace("let t = reduce(rs, (+))\n", "") + "let bias: Float64 = 2.0\nlet rm = reduce(g, lambda(a, b) -> a + b + bias)\n")

@@ -1,0 +1,15 @@
+// TEST: Sparse Range Map Forces Its Captured Map Before The Key Index (aborts)
+// Gap G173 (2) (round 4 wave 6 lane d): a kernel's capture of a deferred map
+// is a forcing use made when the kernel is formed for its traversal. The
+// interpreter did that only on its main dense and reduce-compute arms; its
+// sparse / compound / halo / row-peel / grouped / wreath / compound-value
+// arms forced at the first READ. Here the sparse key set has a duplicate
+// (BL8005 when the key index is built) and the captured `g` divides by zero
+// (BL8013): the compiled lanes force `g` in the binding's prelude, before the
+// index -- so must the interpreter (it reported the duplicate key).
+// ABORT: integer division by zero
+type I = Idx<2>
+let keys: Array<Int64 like I> = [0, 0]
+let d: Array<Int64 like I> = [1, 0]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let out = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> if i > 4 then g(0) else i |> compute

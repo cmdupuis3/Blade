@@ -1,0 +1,35 @@
+// TEST: AD A Named-Slot Read Keeps Its Bounds Check In The Derivative (aborts)
+import ad as ad
+// ============================================================================
+// Gap G187 (round 4 wave 6): `sin` is an array over the NAMED index type S,
+// read at a computed position `d(0, 0)` -- formalism 3.10 checks it at run
+// time (BL8006). The forward pass reads positions 0 and 1; the reverse
+// sweep REPLAYS the loop body, whose `row(0) += 1` keeps moving the
+// position (2, then 3), so the replayed read is out of S and the program
+// fails with BL8006 in `f__grad` -- in every lane. The C++ lane used to lose
+// the guard in the derivative only: the AD transform dropped the array
+// annotation of `let sin: A = ...`, so the inlined read was a read of an
+// ANONYMOUS array, unchecked (formalism 3.10, "not covered"), while the
+// interpreter checked it. The annotation is now restored on the emitted
+// let. (The anonymous-slot twin, `Array<Int32 like Idx<3>>`, stays outside
+// the guarantee: gap G192.)
+// ============================================================================
+type D = Array<Int32 like Idx<1>, Idx<1>>
+type S = Idx<3>
+type A = Array<Int32 like S>
+function k(x: Float64, d: D, sin: A) -> Float64 = {
+    let unused = sin(d(0, 0))
+    let mut row = d(0)
+    row(0) += 1
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let d: D = [[0]]
+    let sin: A = [10, 20, 30]
+    let ys = method_for(range<Idx<2>>)
+        <@> lambda(i) -> k(x, d, sin) |> compute
+    reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// WARN: BL4003
+// ABORT: BL8006

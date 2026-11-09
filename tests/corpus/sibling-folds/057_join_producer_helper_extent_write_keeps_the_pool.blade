@@ -1,0 +1,26 @@
+// TEST: A write hidden in a helper's range bound keeps the join producer stored
+// ============================================================================
+// G186 (round 4 wave 6, the second Codex diff review): sibling-folds/056 with
+// the mutating range bound moved INTO a helper (`hidden(x)`). The shared
+// write analysis summarized a callee's body without the extents its types
+// carry, so `hidden` looked write-free and p became the join's shared leaf,
+// read after the write. Every write summary now walks a body's carried
+// extents too (transitively, through callees): p stays stored.
+// ============================================================================
+function bump(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    a(0) = 100.0
+    3
+}
+function hidden(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    let m = method_for(0..bump(a)) <@> lambda(v) -> v + 1 |> compute
+    reduce(m, (+))
+}
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = {
+    let p = method_for(x) <@> lambda(v) -> exp(v) |> compute
+    let m = hidden(x)
+    let (a, b) = object_for(<&!>) <@> (reduce(p, (+)), reduce(p, (+), 1.0))
+    a + b + Float64(m)
+}
+// 2 (e + e^2 + e^3) + 1 + (1 + 2 + 3)
+// EXPECT: r = 67.3857497011547

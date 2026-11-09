@@ -936,10 +936,19 @@ and private KArg =
 /// such a binding (`materializeExpr`, whole-array rebinding) outlives the
 /// scope and is kept by nulling its slot at the escape site.
 and private PoolScope =
-    { At: int
+    { mutable At: int
       Pools: ResizeArray<string * string>
       mutable InlineId: IRId option
-      KnownIds: HashSet<IRId> }
+      KnownIds: HashSet<IRId>
+      /// A KERNEL scope (gap G184): one application of a numeric-valued kernel
+      /// body (`withKernelScope`), opened so the pools that body allocates
+      /// -- a FreshPool call result folded there, a local `|> compute` -- are
+      /// freed after each application instead of accumulating once per cell
+      /// (at module scope nothing tracked them; in a function the one
+      /// tracking slot per site kept only the last). Invisible to the
+      /// statement-level hoist (`forceHoistable` counts only the other
+      /// scopes, and a hoisted force detaches these while it runs).
+      IsKernel: bool }
 
 /// One emitted group_keys binding: the llvm-lane port of the C++ lane's
 /// name-suffixed CSR ABI (`<name>__ngroups/__offsets/__perm/__nsrc`,
@@ -1455,11 +1464,14 @@ let private allocaOf (c: Ctx) (llType: string) : string =
 /// Open a tracking scope at the CURRENT body position. Everything `allocPool`
 /// hands out while this scope is innermost gets a tracking slot; the matching
 /// `popPoolScope` frees what the slots still hold.
-let private pushPoolScope (c: Ctx) : unit =
+let private pushPoolScopeKind (c: Ctx) (isKernel: bool) : unit =
     c.PoolScopes.Add { At = c.Body.Count
                        Pools = ResizeArray()
                        InlineId = None
-                       KnownIds = HashSet(c.ArrSlots.Keys) }
+                       KnownIds = HashSet(c.ArrSlots.Keys)
+                       IsKernel = isKernel }
+
+let private pushPoolScope (c: Ctx) : unit = pushPoolScopeKind c false
 
 /// The pool now held by binding `id` OUTLIVES every open scope the binding
 /// PREDATES (`KnownIds` holds it: the scope opened after the binding, so the
@@ -7199,7 +7211,8 @@ and private refusePrivateUnhoistable (c: Ctx) (id: IRId) : unit =
 /// function body (its frame's scope the only one open)? (materializeExpr's
 /// hoist, below, says why each condition is needed.)
 and private forceHoistable (c: Ctx) (id: IRId) : bool =
-    c.StmtStart >= 0 && c.PoolScopes.Count = (if c.InFunction then 1 else 0)
+    c.StmtStart >= 0
+    && (c.PoolScopes |> Seq.filter (fun s -> not s.IsKernel) |> Seq.length) = (if c.InFunction then 1 else 0)
     && c.BindingValues.ContainsKey id
     && c.StmtSlots.ContainsKey id
     && c.StmtSlots |> Seq.forall (fun kv ->
@@ -7254,6 +7267,12 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
         | IRVar (id, _) when forceHoistable c id ->
             let outer = c.Body
             let at = c.StmtStart
+            // KERNEL scopes (G184) are open inside the statement, past `at`:
+            // the hoisted code runs before them, so they are detached while it
+            // is emitted (its pools belong to the statement's own scope, as
+            // before) and their body positions move with the insertion.
+            let kernelScopes = c.PoolScopes |> Seq.filter (fun s -> s.IsKernel) |> List.ofSeq
+            c.PoolScopes.RemoveAll(fun s -> s.IsKernel) |> ignore
             c.Body <- ResizeArray()
             c.StmtStart <- 0
             try materialize c (emitArr c e)
@@ -7263,6 +7282,9 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
                 c.Body.InsertRange(at, hoisted)
                 c.StmtStart <- at + hoisted.Count
                 c.HoistedIds.Add id |> ignore
+                for s in kernelScopes do
+                    s.At <- s.At + hoisted.Count
+                    c.PoolScopes.Add s
         | IRVar (id, _) ->
             refusePrivateUnhoistable c id
             materialize c (emitArr c e)
@@ -7370,6 +7392,111 @@ and private bindKernelParam (c: Ctx) (p: IRParam) (arg: KArg) : unit =
         let sc = match scalarTyOf p.Type with Some s -> s | None -> v.Ty
         bindScalar c p.VarId p.Name (coerce c sc v)
 
+/// THE KERNEL SCOPE (gap G184): one application of a kernel body whose value
+/// is NUMERIC / Bool, or a tuple of those (a String is a ptr this lane may
+/// share with storage, and an array result is a pool the caller owns: both
+/// keep today's arena). Every pool the body allocates -- a FreshPool call
+/// result it folds (`reduce(big(w), (+))`), a local `|> compute` -- is dead
+/// once the value is formed, so it is freed right there, once per
+/// application, through the ordinary tracking slots.
+///
+/// FAIL CLOSED ON ANY ESCAPE: the frees are emitted only when no binding that
+/// existed before the application now holds a different array or tuple (a
+/// whole-array rebinding of an outer `let mut` -- to a pool, a row view of a
+/// pool, or a producer reading one --, an inline force of a deferred module
+/// binding); a hoisted force (allocated before the statement, outside this
+/// scope) does not count. On an escape the scope's records go to the
+/// enclosing scope instead -- exactly where they were tracked before this
+/// scope existed -- so nothing is freed earlier than it used to be.
+///
+/// The bindings the application BORN (its lets, a nested kernel's
+/// parameters) are lexically dead after it: they are dropped from the slot
+/// tables (and the function-parameter name table is restored), so a later
+/// emission of the same body (a named fold kernel applied at two sites) does
+/// not mistake its own locals for outer bindings. A panic exits the
+/// process: no free runs twice.
+and private withKernelScope<'T> (c: Ctx) (retType: IRType) (body: unit -> 'T) : 'T =
+    let rec plain (t: IRType) =
+        match t with
+        | IRTTuple ts -> not ts.IsEmpty && ts |> List.forall plain
+        | _ -> (match scalarTyOf t with Some s -> s <> ScVoid && s <> ScStr | None -> false)
+    if not (plain retType) then body ()
+    else
+    let arrBefore = Dictionary(c.ArrSlots)
+    let namesBefore = Dictionary(c.NameArrSlots)
+    let tuplesBefore = Dictionary(c.TupleSlots)
+    pushPoolScopeKind c true
+    let opened = c.PoolScopes.[c.PoolScopes.Count - 1]
+    let v =
+        try body ()
+        with _ ->
+            // a refusal unwinds: drop the scope (and anything left above it)
+            // without emitting, so a caller that recovers sees the old stack
+            let k = c.PoolScopes.FindLastIndex(fun x -> obj.ReferenceEquals(x, opened))
+            if k >= 0 then c.PoolScopes.RemoveRange(k, c.PoolScopes.Count - k)
+            reraise ()
+    if c.PoolScopes.Count = 0 || not (obj.ReferenceEquals(c.PoolScopes.[c.PoolScopes.Count - 1], opened)) then
+        refuse "a kernel body left a pool scope open"
+    // a hoisted force's value (its binding and every alias the force
+    // upgraded hold it) was allocated before the statement: not an escape
+    let hoistedVals =
+        [ for id in c.HoistedIds do
+            match c.ArrSlots.TryGetValue id with
+            | true, a -> yield a
+            | _ -> () ]
+    let rec holdsArray (k: ValKind) =
+        match k with
+        | VScalar _ -> false
+        | VArray _ -> true
+        | VTuple ks -> ks |> List.exists holdsArray
+        | VOpaque -> true
+    // a rebinding to storage that existed before the application (`out = a`)
+    // cannot retain anything the application allocated
+    let poolsBefore = HashSet<string>()
+    for kv in arrBefore do
+        match kv.Value.Src with
+        | APool p -> poolsBefore.Add p |> ignore
+        | _ -> ()
+    // a callable PARAMETER is lexically scoped to its application: a nested
+    // application (a deferred row map re-emitted here) rebinds it, and it is
+    // dead once that application ends -- never an escape
+    let paramIds = lazy (
+        let h = HashSet<IRId>()
+        for KeyValue (_, cl) in c.Callables do
+            for p in cl.Params do h.Add p.VarId |> ignore
+        h)
+    let escaped =
+        (arrBefore |> Seq.exists (fun kv ->
+            match c.ArrSlots.TryGetValue kv.Key with
+            | true, now ->
+                not (obj.ReferenceEquals(now, kv.Value))
+                && not (hoistedVals |> List.exists (fun h -> obj.ReferenceEquals(h, now)))
+                && not (match now.Src with APool p -> poolsBefore.Contains p | _ -> false)
+                && not (paramIds.Force().Contains kv.Key)
+            | _ -> true))
+        // a tuple binding rebound to one holding an array (a scalar-only
+        // tuple -- a fold's tuple parameters -- holds no storage)
+        || (tuplesBefore |> Seq.exists (fun kv ->
+            match c.TupleSlots.TryGetValue kv.Key with
+            | true, now -> not (obj.ReferenceEquals(now, kv.Value)) && (now |> List.exists holdsArray)
+            | _ -> true))
+    if escaped then
+        // today's tracking: the records belong to the enclosing scope (none
+        // at module scope: the arena)
+        c.PoolScopes.RemoveAt(c.PoolScopes.Count - 1)
+        if c.PoolScopes.Count > 0 then
+            c.PoolScopes.[c.PoolScopes.Count - 1].Pools.AddRange opened.Pools
+    else
+        if opened.Pools.Count > 0 then ln c "; G184: kernel application cleanup"
+        popPoolScope c None true
+        for k in List.ofSeq c.ArrSlots.Keys do
+            if not (arrBefore.ContainsKey k) then c.ArrSlots.Remove k |> ignore
+        for k in List.ofSeq c.TupleSlots.Keys do
+            if not (tuplesBefore.ContainsKey k) then c.TupleSlots.Remove k |> ignore
+        c.NameArrSlots.Clear()
+        for kv in namesBefore do c.NameArrSlots.[kv.Key] <- kv.Value
+    v
+
 /// Inline a kernel at a call site: bind its parameters, emit its body. Kernels
 /// are inlined rather than outlined because they routinely CAPTURE enclosing
 /// bindings, and a capture list is a closure ABI this lane deliberately does
@@ -7401,7 +7528,9 @@ and private applyKernelFramed (c: Ctx) (framed: bool) (cl: IRCallable) (args: KA
     let named =
         not (cl.Name.StartsWith "__lambda")
         && ((Blade.IR.declSpanOf cl.Name).StartLine > 0 || (Blade.IR.declSpanOf cl.SourceName).StartLine > 0)
-    let v = if named then withCalleeDecl c cl (fun () -> emitExpr c cl.Body) else emitExpr c cl.Body
+    let v =
+        withKernelScope c cl.RetType (fun () ->
+            if named then withCalleeDecl c cl (fun () -> emitExpr c cl.Body) else emitExpr c cl.Body)
     if framed then framePop c
     v
 
@@ -7550,7 +7679,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                 match paramOf el.ParamVarId with
                 | Some p -> bindKernelParam c2 p (KScalar (readFlat c2 a k))
                 | None -> refuse "a compound level with no kernel parameter"
-            coerce c2 elem (emitExpr c2 cg.KernelExpr)) }
+            coerce c2 elem (withKernelScope c2 rk.Callable.RetType (fun () -> emitExpr c2 cg.KernelExpr))) }
     else
     let extents =
         cg.Bindings |> List.map (fun b ->
@@ -7739,7 +7868,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                      | Some p -> bindKernelParam c2 p (KScalar (readFlat c2 a k))
                      | None -> refuse "an array level with no kernel parameter")
                 | [] -> ()
-            coerce c2 elem (emitExpr c2 cg.KernelExpr)) }
+            coerce c2 elem (withKernelScope c2 rk.Callable.RetType (fun () -> emitExpr c2 cg.KernelExpr))) }
     else
     // The reuse hint (plan-simplex-blocked-compute.md section 0, third block):
     // bytes of the largest operand a kernel parameter binds as a ROW VIEW in
@@ -7905,7 +8034,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                     | Some p -> bind p arg
                     | None -> refuse "an array level with no kernel parameter"
         match reynoldsPlan with
-        | None -> coerce c2 elem (emitExpr c2 cg.KernelExpr)
+        | None -> coerce c2 elem (withKernelScope c2 rk.Callable.RetType (fun () -> emitExpr c2 cg.KernelExpr))
         | Some plan ->
             // sum_perm coeff * kernel(args permuted), left-associated in the
             // plan's first-occurrence order -- and, when the plan is empty,
@@ -7919,7 +8048,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                     | _ -> refuse "a reynolds kernel whose parameters are not all bound by the nest")
             let termOf (perm: int list) =
                 List.iteri (fun i (p: IRParam) -> bindKernelParam c2 p args.[perm.[i]]) cg.KernelParams
-                coerce c2 elem (emitExpr c2 cg.KernelExpr)
+                coerce c2 elem (withKernelScope c2 rk.Callable.RetType (fun () -> emitExpr c2 cg.KernelExpr))
             let scaled (coeff: int) (v: Val) =
                 if coeff = 1 then v
                 else
@@ -9234,7 +9363,9 @@ and private tryTupleStateFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
             let named =
                 not (cl.Name.StartsWith "__lambda")
                 && ((Blade.IR.declSpanOf cl.Name).StartLine > 0 || (Blade.IR.declSpanOf cl.SourceName).StartLine > 0)
-            let parts = if named then withCalleeDecl c cl (fun () -> emitTupleParts c cl.Body) else emitTupleParts c cl.Body
+            let parts =
+                withKernelScope c cl.RetType (fun () ->
+                    if named then withCalleeDecl c cl (fun () -> emitTupleParts c cl.Body) else emitTupleParts c cl.Body)
             framePop c
             parts
         emitCountedLoopTo c (string n) (fun i ->
@@ -9602,7 +9733,8 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
             // its span.
             withCalleeDecl c cl (fun () ->
                 framePushFor c cl
-                let parts = emitTupleParts c cl.Body
+                // G184: an inlined scalar-tuple call is one application
+                let parts = withKernelScope c cl.RetType (fun () -> emitTupleParts c cl.Body)
                 framePop c
                 parts)
         finally c.Inlining.Remove cl.Id |> ignore

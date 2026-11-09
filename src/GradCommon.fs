@@ -718,6 +718,33 @@ let internal substParamMany (fname: string) (subs: (string * Expr) list) (body: 
 
 // Body -> NStmt conversion
 
+/// The ARRAY annotations of the user lets of the function being
+/// differentiated (gap G187, round 4 wave 6): `NStmt` has no annotation
+/// field, so `let sin: A = [10, 20, 30]` reached the synthesized derivative
+/// as an ANONYMOUS array -- and a computed read of a NAMED index slot lost
+/// its formalism 3.10 guard (BL8006) in `f__grad` while the primal kept it.
+/// Keyed by the binding NAME (normalization rebuilds the value expressions,
+/// so their identity is no key) and by the differentiated function (`fname`,
+/// which every converted body of one synthesis carries, inlined callees
+/// included, so a nested synthesis neither clears nor feeds this one): every
+/// let a converted body binds is counted, and `toStmts` restores an
+/// annotation only for a name let EXACTLY ONCE across the expansion and
+/// annotated there (a rebinding, or a callee local of the same name, makes
+/// it ambiguous: no annotation). The driver names the owner before it emits.
+let internal letAnnotations = System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>()
+let internal letAnnotationOwner = ref ""
+let internal resetLetAnnotations (fname: string) =
+    for k in List.ofSeq letAnnotations.Keys do
+        if fst k = fname then letAnnotations.Remove k |> ignore
+let internal noteLetAnnotation (fname: string) (name: string) (ty: TypeExpr option) =
+    match letAnnotations.TryGetValue ((fname, name)) with
+    | true, (_, k) -> letAnnotations.[(fname, name)] <- (None, k + 1)
+    | _ -> letAnnotations.[(fname, name)] <- (ty, 1)
+let internal restoredLetAnnotation (name: string) : TypeExpr option =
+    match letAnnotations.TryGetValue ((letAnnotationOwner.Value, name)) with
+    | true, (Some ty, 1) -> Some ty
+    | _ -> None
+
 let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt list, string> =
     let one stmt =
         match unwrapStmt stmt with
@@ -735,6 +762,13 @@ let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt 
                     | Some (TyNamed (("Float32" | "Float64" | "Int32" | "Int64" | "Complex64" | "Complex128"), []) as ty) ->
                         inheritSpan binding.Value (ExprTyped (binding.Value, ty))
                     | _ -> binding.Value
+                // an ARRAY annotation (written or through a type alias) is
+                // restored on the emitted let by `toStmts` (G187); scalar
+                // ones ride the value above
+                noteLetAnnotation fname name (match binding.Type with
+                                              | Some (TyArray _ as ty) -> Some ty
+                                              | Some (TyNamed (_, []) as ty) when (match value.Kind with ExprKind.ExprTyped _ -> false | _ -> true) -> Some ty
+                                              | _ -> None)
                 Ok (NLet (name, isMut, value))
             | _ -> err fname "tuple/struct patterns in let are not differentiable (v1); bind names individually"
         | StmtExpr { Kind = ExprKind.ExprAssign (lhs, rhs) } ->

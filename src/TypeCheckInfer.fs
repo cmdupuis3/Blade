@@ -4069,12 +4069,42 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
     // narrow element, so its literal partners take that width
     // (`reduce(a32, lambda(x, y) -> x + y * 2.0)` folds Float32).
     let kernelTyped =
-        match kernel.Kind, IR.stripUnits (env.Subst.Resolve tArr.Type) with
-        | ExprKind.ExprLambda ([ _; p1 ] as parms, wc, body), ArrayElem at when p1.Type.IsNone ->
-            (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
-             | IRTScalar (ETFloat32 | ETInt32 | ETComplex64 as et) ->
+        let hinted (v: int) =
+            match env.Subst.GetElemHint v with
+            | Some (ETFloat32 | ETInt32 | ETComplex64 as et) -> Some et
+            | _ -> None
+        // G172 (a): the operand's element, narrow: a concrete narrow element;
+        // an open element carrying a hint; or an operand that is itself a
+        // still-open hinted kernel parameter (a ROW of a narrow operand inside
+        // a row kernel: its hint is that operand's element)
+        let elemNarrow =
+            match IR.stripUnits (env.Subst.Resolve tArr.Type) with
+            | ArrayElem at ->
+                (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+                 | IRTScalar (ETFloat32 | ETInt32 | ETComplex64 as et) -> Some et
+                 | IRTInfer v -> hinted v
+                 | _ -> None)
+            | IRTInfer v -> hinted v
+            | _ -> None
+        match kernel.Kind with
+        | ExprKind.ExprLambda ([ p0; p1 ] as parms, wc, body) when p1.Type.IsNone ->
+            let narrow = elemNarrow
+            // the ACCUMULATOR takes the element width too when nothing else
+            // can set it: no seed, or a literal seed (which adapts); a typed
+            // seed keeps its own width (and its refusals)
+            let accHint =
+                match init with
+                | None -> narrow
+                // (a literal-only seed reaches here ascribed at the element by the
+                // ROUND-6 seed rule: `ExprTyped (literal, <element>)`)
+                | Some ie when p0.Type.IsNone
+                               && ((surfaceLiteralClass ie).IsSome
+                                   || (match ie.Kind with ExprKind.ExprTyped (l, _) -> (surfaceLiteralClass l).IsSome | _ -> false)) -> narrow
+                | _ -> None
+            (match narrow with
+             | Some et ->
                  if kernel.Span.StartLine > 0 then setCurrentExprSpan kernel.Span
-                 inferLambdaHinted env parms wc body [] [ None; Some et ]
+                 inferLambdaHinted env parms wc body [] [ accHint; Some et ]
                  |> Result.map (fun te ->
                      if te.Span.StartLine = 0 && kernel.Span.StartLine > 0 then { te with Span = kernel.Span } else te)
              | _ -> inferExpr env kernel)
@@ -6937,6 +6967,71 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                         if te.Span.StartLine = 0 && k.Span.StartLine > 0 then { te with Span = k.Span } else te)
                 | _ -> inferExpr env k
             inferObjectForCore env k (Some kernelTyped)
+            |> Result.map (stampSynthSpan left)
+            |> Result.bind applyWith
+        | None ->
+        // G172 (c): a COMPOSE CHAIN of one-parameter object_for(lambda)
+        // stages over ONE narrow operand is hinted STAGE BY STAGE: stage 1
+        // by the operand's element, stage k+1 by stage k's result when that
+        // is narrow -- a resolved narrow scalar, a cast to a narrow type
+        // (`Float32(v)` restarts the hint), or an open result carrying the
+        // hint (`v + 1.0`); a widening cast or anything unknown stops it. A
+        // hint fixes only the width of literal partners, never a shape; the
+        // chain is then applied exactly as the unhinted spelling is.
+        let composeHints =
+            let rec stages (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprBinOp (_, OpComposeObj, l, r) ->
+                    stages l |> Option.bind (fun ls -> stages r |> Option.map (fun rs -> ls @ rs))
+                | ExprKind.ExprObjectFor ({ Kind = ExprKind.ExprLambda ([ p ], _, _) } as k) when p.Type.IsNone -> Some [ (e, k) ]
+                | _ -> None
+            match left.Kind with
+            | ExprKind.ExprBinOp (_, OpComposeObj, _, _) when not rightKernelShaped ->
+                (match right.Kind, stages left, operandElemHint env right with
+                 | ExprKind.ExprTuple _, _, _ -> None
+                 | _, Some ks, Some h0 when ks.Length >= 2 -> Some (ks, h0)
+                 | _ -> None)
+            | _ -> None
+        match composeHints with
+        | Some (ks, h0) ->
+            let rec narrowOf (t: IRType) : ElemType option =
+                let isNarrow et = (match et with ETFloat32 | ETInt32 | ETComplex64 -> true | _ -> false)
+                match IR.stripUnits (env.Subst.Resolve t) with
+                | IRTScalar et when isNarrow et -> Some et
+                | IRTInfer v ->
+                    (match env.Subst.GetElemCast v with
+                     | Some (_, et) -> if isNarrow et then Some et else None
+                     | None -> env.Subst.GetElemHint v |> Option.filter isNarrow)
+                // an array-valued stage (`lambda(v) -> [v, v]`): its element
+                | ArrayElem at -> narrowOf at.ElemType
+                | _ -> None
+            let typeStage (hint: ElemType option) ((stageExpr: Expr), (k: Expr)) : TypeResult<TypedExpr * ElemType option> =
+                let next : ElemType option ref = ref None
+                let kernelTyped () =
+                    match k.Kind with
+                    | ExprKind.ExprLambda (parms, wc, body) ->
+                        if k.Span.StartLine > 0 then setCurrentExprSpan k.Span
+                        inferLambdaHinted env parms wc body [] [ hint ]
+                        |> Result.map (fun te ->
+                            next.Value <-
+                                (match env.Subst.Resolve te.Type with
+                                 | FuncElem (_, ret) -> narrowOf ret
+                                 | _ -> None)
+                            if te.Span.StartLine = 0 && k.Span.StartLine > 0 then { te with Span = k.Span } else te)
+                    | _ -> inferExpr env k
+                inferObjectForCore env k (Some kernelTyped)
+                |> Result.map (fun t -> (stampSynthSpan stageExpr t, next.Value))
+            let typedStages =
+                ks |> List.fold (fun acc stage ->
+                    acc |> Result.bind (fun (done_, hint) ->
+                        typeStage hint stage |> Result.map (fun (t, next) -> (done_ @ [ t ], next))))
+                    (Ok ([], Some h0))
+            typedStages
+            |> Result.map (fun (ts, _) ->
+                // the OpComposeObj judgment, left-associated
+                ts.Tail |> List.fold (fun (tL: TypedExpr) (tR: TypedExpr) ->
+                    let resultType = match tR.Type with IRTLoop _ -> tR.Type | _ -> tL.Type
+                    mkTyped (TExprCompose (OpComposeObj, tL, tR)) resultType) ts.Head)
             |> Result.map (stampSynthSpan left)
             |> Result.bind applyWith
         | None ->

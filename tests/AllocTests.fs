@@ -25,6 +25,7 @@ let private poolPolicies () : (string * string * string) list =
         let expect = if p.IsDefault then "" else $" -DBLADE_POOL_TEST_MAX={p.MaxBlockBytes} -DBLADE_POOL_TEST_BUDGET={p.BudgetBytes}"
         (label, suffix, defs + expect)
     [ build "default" "" None
+      build "BLADE_POOL_RETAIN=0" "_off" (Some "0")
       build "BLADE_POOL_RETAIN=1" "_retain1" (Some "1")
       build "BLADE_POOL_RETAIN=32:64" "_retain32_64" (Some "32:64") ]
 

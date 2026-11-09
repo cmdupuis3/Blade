@@ -748,6 +748,11 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         let elemStr = match binding.Type with ArrayElem a -> elemTypeToCpp a.ElemType | t -> irTypeToCpp t
         recordCodegenDecision "stream-group-aggregate" name Blade.Effects.Applied
             [ $"c++ lane: `{name}` adopts its per-group states from `{g}`'s windowed pass" ]
+        // G188: the adopted state (`new T[ngroups + 1]`) and the extents table
+        // are this binding's own storage -- registered like every array it
+        // owns (a live frame frees both once at its exit; main's top level
+        // records them in its ledger, as every module binding)
+        registerMaterializedAllocs [ MatRawData (name, Some ($"{name}_extents")) ]
         ([ $"{ind}// stream-group-aggregate v1: `{name}` adopts the per-group states of `{g}`'s windowed pass"
            $"{ind}size_t* {name}_extents = new size_t[1]{{ {g}__sga_n }};"
            $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { __sga{{f.Id}}_state, {{name}}_extents };""" ],
@@ -4286,8 +4291,13 @@ and genStreamedSweep (ind: string) (tag: string) (vn: string) (spec: ProviderRea
     let genRows = ((Blade.ProviderRegistry.tryFind spec.Provider).Value).GenStreamRows.Value
     let elemStr = elemTypeToCpp spec.VarType.ElemType
     let blk = $"{tag}__blk"
+    // the converted block holds at most the cells one block can cover, so it
+    // is clipped to the extent (Codex class review, wave 6 lane b: a padded
+    // chunk far wider than the variable made the fused sweep allocate the
+    // whole padded chunk where the staged route's window is clipped to N)
+    let blockCells = max 1L (min block n)
     [ $"{ind}{{"
-      $"{ind}    {elemStr}* {blk} = new {elemStr}[{block}];"
+      $"{ind}    {elemStr}* {blk} = new {elemStr}[{blockCells}];"
       $$"""{{ind}}    for (size_t __lo = 0; __lo < {{n}}UL; __lo += {{block}}UL) {"""
       $"{ind}        size_t __hi = __lo + {block}UL; if (__hi > {n}UL) __hi = {n}UL;" ]
     @ (genRows spec.FilePath spec.VarName vn blk "__lo" "__hi" spec.VarType |> List.map (fun s -> ind + "        " + s))
@@ -4295,6 +4305,31 @@ and genStreamedSweep (ind: string) (tag: string) (vn: string) (spec: ProviderRea
     @ (cell $"{blk}[__q]" "(__lo + __q)" |> List.map (fun s -> ind + "            " + s))
     @ [ $"{ind}        }}"
         $"{ind}    }}"
+        $"{ind}    delete[] {blk};"
+        $"{ind}}}" ]
+
+/// genStreamedSweep over a rank-1 ZARR variable with its chunk traffic counted
+/// into a provider_io census site `tag` (form per-window): the same window
+/// core, the same reads in the same order (genStreamRowsCounted is the window
+/// core genStreamRows calls, plus the counters). Used where the staged
+/// elementwise route would have reported the same reads (wave 6 lane b, m8).
+and genStreamedSweepCounted (ind: string) (tag: string) (vn: string) (spec: ProviderReadSpec) (n: int64) (block: int64) (cell: string -> string -> string list) : string list =
+    let elemStr = elemTypeToCpp spec.VarType.ElemType
+    let blk = $"{tag}__blk"
+    let io = $"{tag}__io"
+    let blockCells = max 1L (min block n)
+    [ $"{ind}{{"
+      $"{ind}    long long {io}[4] = {{ 0, 0, 0, 0 }}; // provider_io census: fetches, fetched bytes, decoded bytes, cache hits"
+      $"{ind}    {elemStr}* {blk} = new {elemStr}[{blockCells}];"
+      $$"""{{ind}}    for (size_t __lo = 0; __lo < {{n}}UL; __lo += {{block}}UL) {"""
+      $"{ind}        size_t __hi = __lo + {block}UL; if (__hi > {n}UL) __hi = {n}UL;" ]
+    @ (Blade.ZarrProvider.CppZarr.genStreamRowsCounted io None spec.FilePath spec.VarName vn blk "__lo" "__hi" spec.VarType
+       |> List.map (fun s -> ind + "        " + s))
+    @ [ $"{ind}        for (size_t __q = 0; __q < __hi - __lo; __q++) {{" ]
+    @ (cell $"{blk}[__q]" "(__lo + __q)" |> List.map (fun s -> ind + "            " + s))
+    @ [ $"{ind}        }}"
+        $"{ind}    }}"
+        $"{ind}    blade_rr::note_io(\"{tag}\", \"{spec.VarName}\", \"per-window\", {io}[0], {io}[1], {io}[2], {io}[3], 0LL, 0LL);"
         $"{ind}    delete[] {blk};"
         $"{ind}}}" ]
 
@@ -6718,7 +6753,7 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         // BLADE_FP_CONTRACT=off (fast contraction may fuse the map's product
         // into the fold's add, a last-ULP schedule difference).
         let fusedArm =
-            if not (Blade.Optimize.streamFoldFuseEnabled ()) then Error "opt-in (BLADE_STREAM_FOLD_FUSE=1): the second Codex review of the bypassed-staged-admission class found another member (stop rule)"
+            if not (Blade.Optimize.streamFoldFuseEnabled ()) then Error "disabled by BLADE_STREAM_FOLD_FUSE"
             else
             match leaf with
             | IRApplyCombinator info ->
@@ -6788,7 +6823,14 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
                 @ (fw |> List.map (fun l -> ind + l))
                 @ [ $"{ind}{accT} {name} = {exprToCppCtx ctx seedExpr};" ]
                 @ (if laneForm then [ $"{ind}{mapT} {lanes}[{kL}];" ] else [])
-                @ genStreamedSweep ind name vn spec n block cell
+                // wave 6 lane b (Codex f9b6ecc9, m8): where the staged
+                // elementwise route would count its reads into the run record's
+                // provider_io census (the halo chunk cache's elementwise route,
+                // a Zarr source), the fused sweep counts its own: one census site
+                // `name`, form per-window (one window per chunk-edge block)
+                @ (if Blade.Optimize.haloCacheElementwiseEnabled () && spec.Provider = "zarr"
+                   then genStreamedSweepCounted ind name vn spec n block cell
+                   else genStreamedSweep ind name vn spec n block cell)
                 @ (if laneForm then
                        [ for l in 1L .. kL - 1L -> $"{ind}{lanes}[0] = {fname}({lanes}[0], {lanes}[{l}]);" ]
                        @ [ $"{ind}{name} = {fname}({name}, {lanes}[0]);" ]

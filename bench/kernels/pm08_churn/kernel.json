@@ -53,11 +53,25 @@
   "arms": [
     "blade-llvm",
     "blade-cpp",
+    "blade-llvm@old",
+    "blade-cpp@old",
+    "blade-llvm@c32",
+    "blade-cpp@c32",
     "blade-llvm@retain",
     "blade-cpp@retain"
   ],
   "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
   "variants": {
+    "old": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "0"
+      }
+    },
+    "c32": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "32:64"
+      }
+    },
     "retain": {
       "compile": {
         "BLADE_POOL_RETAIN": "1"

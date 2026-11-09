@@ -1,0 +1,17 @@
+// TEST: a pack former whose kernel aliases the pack for a nested lambda is refused (rejects)
+// Gap G174 (round 4 wave 6 lane d; Codex diff review round 2): the pack alias
+// is made in the KERNEL (`let a = args`) and only the nested lambda reads
+// through it (`a[k]`); the alias is carried across the closure boundary and
+// the read refused at lowering like arity/485.
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let a = args
+        let h = lambda(x: Float64) -> x + a[k]
+        h(1.0)
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

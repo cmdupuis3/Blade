@@ -103,10 +103,11 @@ let internal suiteClearedKnobs =
 /// machine whose toolchain file says `library` -- or `BLADE_BLAS_FLAVOR=mkl`,
 /// under which `auto` resolves to `library` -- would otherwise flip every
 /// BLAS-on dispatch pin. The preference's own cases set it in their scope.
-/// BLADE_POOL_RETAIN is pinned `off` (the default policy) for the same reason:
+/// BLADE_POOL_RETAIN is pinned `default` (the default policy; since round 4
+/// wave 6 `off` is the pre-wave-6 arm) for the same reason:
 /// a toolchain file that persisted the retention arm would otherwise put its
 /// defines into every program the suite emits.
-let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "off" ]
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "default" ]
 
 /// A program the LLVM lane REFUSES (it has no complex values), so `blade plan`
 /// under BLADE_LLVM=1 falls back to the C++ lane -- the cli case that pins the
@@ -543,12 +544,18 @@ let runCliSmokeTests () : TH.BlockResult =
             let poolEnv (file: string) (v: string) = [ ("BLADE_TOOLCHAIN_FILE", file); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", null) ]
             let buildLine (out: string) =
                 out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "build: ") |> Option.defaultValue "<none>"
-            let defaultLine = "build: pool retention: default (4 MB / 8 MB per thread)"
+            let defaultLine = "build: pool retention: default (32 MB / 64 MB per thread)"
             let (codeU, outU, errU) = spawnWith (poolEnv emptyToolchain null) dir [ "plan"; "cov.blade" ]
-            let (codeO, outO, errO) = spawnWith (poolEnv emptyToolchain "off") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` build line for an unset and an `off` default is exactly the plain default line (no provenance)"
+            let (codeO, outO, errO) = spawnWith (poolEnv emptyToolchain "default") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line for an unset and a `default` default is exactly the plain default line (no provenance)"
                 (codeU = 0 && codeO = 0 && buildLine outU = defaultLine && buildLine outO = defaultLine)
-                ($"unset: '{buildLine outU}' / off: '{buildLine outO}' {errU}{errO}")
+                ($"unset: '{buildLine outU}' / default: '{buildLine outO}' {errU}{errO}")
+            // round 4 wave 6 (G185 (a)): `off` / `0` is the PRE-WAVE-6 limits,
+            // a non-default arm restated as defines
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "off") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line names `off` as the pre-wave-6 4 MB / 8 MB limits"
+                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=0 (env BLADE_POOL_RETAIN) -> 4 MB / 8 MB per thread (the pre-wave-6 limits, C++ lane blade_pool, restated as defines; the default since round 4 wave 6 is 32 MB / 64 MB per thread; the run record's policy.pool says which arm ran)")
+                (buildLine out + err)
             let (code, out, err) = spawnWith (poolEnv emptyToolchain "1") dir [ "plan"; "cov.blade" ]
             recordCase "cli: `plan` build line names the BLADE_POOL_RETAIN=1 arm in the C++ lane, per thread"
                 (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per thread (opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. 64 MB stays committed until reuse, eviction, flush or thread exit, so T threads may retain T x 96 MB and the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; the run record's policy.pool says which arm ran)")
@@ -557,8 +564,8 @@ let runCliSmokeTests () : TH.BlockResult =
             recordCase "cli: `plan` reads the arm from the toolchain file when the variable is unset"
                 (code = 0 && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (blade.toolchain.json) -> 64 MB / 96 MB per thread")
                 (buildLine out + err)
-            let (code, out, err) = spawnWith (poolEnv armToolchain "off") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` lets env `off` override a toolchain file's arm"
+            let (code, out, err) = spawnWith (poolEnv armToolchain "default") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` lets env `default` override a toolchain file's arm"
                 (code = 0 && buildLine out = defaultLine) (buildLine out + err)
             let (code, out, err) = spawnWith (poolEnv emptyToolchain "16:48") dir [ "plan"; "cov.blade"; "--json" ]
             recordCase "cli: `plan --json` carries an explicit retention pair, per-thread in the C++ lane"
@@ -567,7 +574,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 (out + err)
             let (code, out, err) = spawnWith (poolEnv emptyToolchain "96:64") dir [ "plan"; "cov.blade" ]
             recordCase "cli: `plan` reads a malformed retention pair (max > budget) as the default, with a warning"
-                (code = 0 && (buildLine out).StartsWith "build: pool retention: default (4 MB / 8 MB per thread) -- BLADE_POOL_RETAIN='96:64'"
+                (code = 0 && (buildLine out).StartsWith "build: pool retention: default (32 MB / 64 MB per thread) -- BLADE_POOL_RETAIN='96:64'"
                  && err.Contains "warning: BLADE_POOL_RETAIN='96:64'")
                 (out + err)
             // The LLVM lane holds its pools in the shim allocator: ONE process
@@ -585,10 +592,10 @@ let runCliSmokeTests () : TH.BlockResult =
                      && (buildLine out).Contains "atexit flush" && (buildLine out).Contains "writes NO run record"
                      && not ((buildLine out).Contains "per thread") && not ((buildLine out).Contains "T threads"))
                     (out + err)
-                let (code, out, err) = spawnWith (llvmEnv "off") dir [ "plan"; "cov.blade" ]
+                let (code, out, err) = spawnWith (llvmEnv "default") dir [ "plan"; "cov.blade" ]
                 recordCase "cli: `plan` under BLADE_LLVM=1 names the default as the shim's process budget"
                     (code = 0 && out.Contains "lane: LLVM"
-                     && buildLine out = "build: pool retention: default (4 MB / 8 MB per process, the LLVM lane's shim allocator)")
+                     && buildLine out = "build: pool retention: default (32 MB / 64 MB per process, the LLVM lane's shim allocator)")
                     (buildLine out + err)
                 let (code, out, err) = spawnWith (llvmEnv "16:48") dir [ "plan"; "cov.blade"; "--json" ]
                 recordCase "cli: `plan --json` under BLADE_LLVM=1 says budget_scope process"
@@ -2088,7 +2095,8 @@ let runCliSmokeTests () : TH.BlockResult =
                      recordCase "member hoist: the C core (blade_member.h): every probe of every representation is integer == against every cell, every free releases every allocation"
                          (code = 0 && summary.EndsWith " 0 bad" && kinds.Length = 220) summary
                      recordCase "member hoist: the C core's chooser is Optimize.memberChooseRep's PREFERRED representation (the plan record's restatement), case for case, and with every allocation made the actual one is it"
-                         (kinds.Length = 220 && disagree.Length = 0 && used = set [ 1; 2; 3 ])
+                         // G185 (b), round 4 wave 6: 1 <= M <= 16 under the chooser is 0 = none (nothing built, the as-written scan)
+                         (kinds.Length = 220 && disagree.Length = 0 && used = set [ 0; 1; 2; 3 ])
                          ($"{disagree.Length} disagreements of {kinds.Length}; representations seen: {used}")
                      // (id, preferred, actual, fallback bits, live after build, report text)
                      let wantF =
@@ -2145,14 +2153,18 @@ let runCliSmokeTests () : TH.BlockResult =
                 |> List.ofArray
             // each setting's EXPECTED builds: host -> the representation it
             // prefers and builds (every allocation succeeds here); the knob
-            // off builds nothing
+            // off builds nothing. G185 (b), round 4 wave 6: under the chooser
+            // the LITERAL 4-key `small` is not hoisted (no build, no report),
+            // the run-time 5-key `picked` builds `none` (the as-written scan),
+            // and `elig` (span 36,000,109 within the 2^26-bit cap) is a bitmap
             let hosts = [ "k_small"; "k_even"; "k_wide"; "k_none"; "k_pick"; "flags" ]
-            let expectedReps (s: string) =
+            let expectedReps (s: string) : (string * string) list option =
+                let all reps = Some (List.zip hosts reps)
                 match s with
-                | null -> Some [ "linear"; "bitmap"; "hash"; "linear"; "linear"; "hash" ]
-                | "linear" -> Some [ "linear"; "linear"; "linear"; "linear"; "linear"; "linear" ]
-                | "bitmap" -> Some [ "bitmap"; "bitmap"; "hash"; "linear"; "bitmap"; "bitmap" ]
-                | "hash" -> Some [ "hash"; "hash"; "hash"; "linear"; "hash"; "hash" ]
+                | null -> Some [ ("k_even", "bitmap"); ("k_wide", "hash"); ("k_none", "linear"); ("k_pick", "none"); ("flags", "bitmap") ]
+                | "linear" -> all [ "linear"; "linear"; "linear"; "linear"; "linear"; "linear" ]
+                | "bitmap" -> all [ "bitmap"; "bitmap"; "hash"; "linear"; "bitmap"; "bitmap" ]
+                | "hash" -> all [ "hash"; "hash"; "hash"; "linear"; "hash"; "hash" ]
                 | _ -> None
             let settings = [ null; "0"; "linear"; "bitmap"; "hash" ]
             let runs =
@@ -2167,9 +2179,9 @@ let runCliSmokeTests () : TH.BlockResult =
                             match expectedReps s with
                             | None -> reports.IsEmpty
                             | Some reps ->
-                                reports.Length = hosts.Length
-                                && List.forall2 (fun h r ->
-                                        reports |> List.exists (fun l -> l.StartsWith $"[member] {h}: " && l.EndsWith $"preferred {r}, actual {r}")) hosts reps
+                                reports.Length = reps.Length
+                                && reps |> List.forall (fun (h, r) ->
+                                        reports |> List.exists (fun l -> l.StartsWith $"[member] {h}: " && l.EndsWith $"preferred {r}, actual {r}"))
                         yield (lane, (if isNull s then "unset" else s), c, strip o, laneOk, routeOk, reports.Length) ]
             let (_, _, c0, o0, _, _, _) = List.head runs
             let agree = runs |> List.forall (fun (_, _, c, o, laneOk, _, _) -> c = 0 && laneOk && o = o0)
@@ -2204,7 +2216,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 String.concat "\n"
                     [ "type Row = Idx<5>"
                       "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
-                      "let stored = Int64([4, 9, 7])"
+                      "let stored = Int64([4, 9, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])"
                       "let S1 = stored"
                       "let S2 = S1"
                       "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute"

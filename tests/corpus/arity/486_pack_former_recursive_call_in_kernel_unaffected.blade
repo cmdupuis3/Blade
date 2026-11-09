@@ -1,0 +1,16 @@
+// TEST: a pack former whose kernel only calls the enclosing function recursively still compiles
+// Gap G174's boundary (round 4 wave 6 lane d; Codex diff review round 1): the
+// hidden-pack-read refusal follows only callables that CAPTURE the pack (a
+// nested or let-bound lambda); a call to a function -- the enclosing one
+// included, recursively -- reads its OWN parameters, which its own
+// specialization resolves. f(10.0) is the arity-1 arm, 10.0, twice.
+function f(args: Poly<T^0>) -> T^0 = {
+    match arity(args) with
+    | 1 -> args[0 + 0]
+    | _ -> {
+        let terms = method_for(range<Idx<2>>) <@> lambda(k) -> f(10.0) |> compute
+        reduce(terms, (+))
+    }
+}
+let result = f(1.0, 2.0, 3.0)
+// EXPECT: result = 20.0

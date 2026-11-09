@@ -231,11 +231,12 @@ let joinReportEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_REPORT" false
 /// SELECTION over J (round 4 wave 4 lane H, H1 / ST15): `mask(J, p)` bound
 /// whole to a top-level name and `compound(J, keep)` / `compound(J, mask(J, p))`
 /// read J by its compact buffer and cardinality only, so J keeps the CSR and
-/// its cardinality-only index. OPT-IN under the wave-4 stop rule (the second
-/// Codex review of the census class found another member: a block-local
-/// mask). Unset / 0 / off = a mask over J demands the tuple table (the
-/// as-written passes, as before). Read per call; an optimizer gate mirror.
-let joinSelectionEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_SELECTION" false
+/// its cardinality-only index. DEFAULT ON since round 4 wave 6 (the fresh
+/// class-closure review of the census class found no member; wave 4 found a
+/// block-local mask, declined since). 0 / off = a mask over J demands the
+/// tuple table (the as-written passes, the old default). Read per call; an
+/// optimizer gate (opt-diff compares off vs on).
+let joinSelectionEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_SELECTION" true
 /// BLADE_COMPUTE_ELIDE=0|off keeps every function- and block-body `|> compute`
 /// stored (`elideSingleConsumerComputesModule`): the admission still runs and
 /// a compute it would have elided records `compute-elision` DECLINED
@@ -290,16 +291,15 @@ let recReplayEnabled () = gateOn "BLADE_REC_REPLAY"
 /// rule `fold-state-in-place`, an arm of `fuseSliceWritesModule`, so it is
 /// also off under BLADE_FUSION=0). Unset = on.
 let foldStateEnabled () = gateOn "BLADE_FOLD_STATE"
-/// BLADE_REC_FOLD=1|on (EXPLICIT; OPT-IN this wave, the BLADE_EPILOGUE_LEGS
-/// pattern) rings a recursion whose trajectory is consumed only by folds and
-/// moves those folds into the sweep (`windowRecFoldsModule`, round 4 wave 2,
-/// PM35; rule `rec-fold-ring`). Unset / `0` / `off` = the full history: the
-/// admission still runs and records what it WOULD do, `declined -- opt-in
-/// this wave ...` (five review rounds each found a member of the trajectory
-/// use census; default-on is a next-wave item after one more class audit).
-let recFoldRingEnabled () = Blade.Toolchain.envSwitch "BLADE_REC_FOLD" = Blade.Toolchain.SwitchOn
-let recFoldOptInDecline =
-    "opt-in this wave (BLADE_REC_FOLD=1): seven review rounds each found a member of the trajectory use census (wave 3: the constructor table closes the naming channels by reflection; its two reviews each found a deferred value a moved kernel could force, both fixed); default-on awaits a review that finds none (gap G94)"
+/// BLADE_REC_FOLD rings a recursion whose trajectory is consumed only by
+/// folds and moves those folds into the sweep (`windowRecFoldsModule`, round
+/// 4 wave 2, PM35; rule `rec-fold-ring`). DEFAULT ON since round 4 wave 6
+/// (gap G94: the fresh class-closure review of the EVALUATION class found no
+/// member; the naming class is closed by the reflected constructor table).
+/// `0` / `off` = the full history: the admission still runs and records
+/// what it WOULD do, `declined -- disabled by BLADE_REC_FOLD`.
+let recFoldRingEnabled () = gateOn "BLADE_REC_FOLD"
+let recFoldOptInDecline = "disabled by BLADE_REC_FOLD"
 /// `BLADE_FOLD_LANES=0|off|false|no`: the fold-lane forms are off. The ONE
 /// parse both the C++ emitters (CodeGenExprSupport.foldLanesMode) and the
 /// optimizer's ring planner read (a threaded step's row partials need them).
@@ -333,7 +333,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal"); ("BLADE_REC_FOLD", "1"); ("BLADE_SINK_STREAM", "always"); ("BLADE_JOIN_AGG", "1"); ("BLADE_JOIN_SELECTION", "1"); ("BLADE_SIBLING_FOLDS", "strict"); ("BLADE_SIBLING_FOLDS", "top"); ("BLADE_COMPUTE_ELIDE", "chain"); ("BLADE_MODE_PRODUCT_DEST", "1"); ("BLADE_HALO_CACHE", "elementwise"); ("BLADE_SIBLING_MAPS", "streamed"); ("BLADE_STREAM_GROUP_FOLD", "1"); ("BLADE_DECOMPACT_FOLD", "body"); ("BLADE_STREAM_FOLD_FUSE", "1"); ("BLADE_AD_CHECKPOINT", "3"); ("BLADE_STREAM_GROUP_AGG", "1"); ("BLADE_AD_REPLAY_PRUNE", "1") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal"); ("BLADE_SINK_STREAM", "always"); ("BLADE_JOIN_AGG", "1"); ("BLADE_SIBLING_FOLDS", "strict"); ("BLADE_SIBLING_FOLDS", "top"); ("BLADE_COMPUTE_ELIDE", "chain"); ("BLADE_MODE_PRODUCT_DEST", "1"); ("BLADE_HALO_CACHE", "stencil"); ("BLADE_SIBLING_MAPS", "streamed"); ("BLADE_DECOMPACT_FOLD", "body"); ("BLADE_AD_CHECKPOINT", "3"); ("BLADE_STREAM_GROUP_AGG", "1"); ("BLADE_AD_REPLAY_PRUNE", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -1252,6 +1252,91 @@ let private isDeferredForm (e: IRExpr) : bool =
     | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
+/// The extent expressions a TYPE carries (its index records' extents, a tagged
+/// index's anonymous extent, nested types' extents): what the generic child
+/// walk (`childrenOf`) never enters.
+let rec irTypeExtentExprs (t: IRType) : IRExpr list =
+    match t with
+    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> []
+    | IRTTuple ts -> List.collect irTypeExtentExprs ts
+    | IRTLoop l -> List.collect irTypeExtentExprs l.ArrayTypes @ (l.KernelType |> Option.map irTypeExtentExprs |> Option.defaultValue [])
+    | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> irTypeExtentExprs t
+    | IRTIdxTagged (t, tag) -> irTypeExtentExprs t @ (match tag with IRefAnon (_, e) -> [ e ] | _ -> [])
+    | IRTDist (_, t, axes) -> irTypeExtentExprs t @ (axes |> List.map (fun ix -> ix.Extent))
+    | IRTGroupKeys (a, b, _) -> [ a.Extent; b.Extent ]
+    | IRTArrow (slots, r, _) ->
+        (slots |> List.collect (function SIdx ix | SIdxVirt ix -> [ ix.Extent ] | SVal st -> irTypeExtentExprs st)) @ irTypeExtentExprs r
+
+let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
+    (at.IndexTypes |> List.map (fun ix -> ix.Extent)) @ irTypeExtentExprs at.ElemType
+
+/// Every type and index expression embedded in the nodes of `e` -- a
+/// variable's or call's type, an array literal's, an apply's output, operand
+/// and shared index types, a range's index records, an `ungroup`'s source
+/// index records -- as extent expressions; and, recursively, those embedded
+/// in the extracted extents themselves, to COMPLETION (types are finite
+/// trees; each extent object is expanded once, by reference, which also keeps
+/// it linear on a type shared by many nodes). Each extent object is returned
+/// once.
+let embeddedExtentExprs (e: IRExpr) : IRExpr list =
+    let acc = ResizeArray<IRExpr>()
+    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+    let rec visit (depth: int) (root: IRExpr) =
+        let found = ResizeArray<IRExpr>()
+        let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
+        let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
+            | IRApplyCombinator info ->
+                addTy info.OutputType
+                for at in info.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx info.SharedIndexTypes
+                addIx info.KernelTDims
+            | IRComposeApply info -> addTy info.OutputType
+            | IRMethodFor mf ->
+                for at in mf.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx mf.SharedIndexTypes
+            | IRRange (ixs, _) -> addIx ixs
+            | IRVirtualReverse ix -> addIx [ ix ]
+            // the source index records `childrenOf` does not hand out
+            | IRUngroup (_, src) -> addIx [ src ]
+            | IRUngroupRows (_, _, src) -> addIx [ src ]
+            | IRUngroupGrid (_, srcs, _) -> addIx srcs
+            // EXHAUSTIVE (no wildcard; PM35's constructor table): every other
+            // constructor carries no type and no index record -- its
+            // expressions are children the walk above already visits. A new
+            // IRExpr variant is classified here, not defaulted
+            // (OptimizeTests `rec_fold_ring_constructor_table_walkers` pins
+            // every type-carrying field against this function).
+            | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _ | IRCurry _ | IRTuple _ | IRComplex _
+            | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _
+            | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _ | IRBeginPoolScope _ | IRReleasePools _
+            | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _
+            | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _
+            | IRCompute _ | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _
+            | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
+            | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
+            | IRSegmentsGrid _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
+            | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+            | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _
+            | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRHaloUnhash _ | IRArity _ | IRNth
+            | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
+            | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _
+            | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> ()) root
+        for x in found do
+            // COMPLETE (gap G89, lane-D review): every extent is expanded
+            // once, by reference -- extents are subterms of finite type
+            // trees, so this terminates without a depth bound (the old bound
+            // of 8 let a write nested deeper slip past every client: the
+            // never-written closure, the foreign-reference census).
+            if seen.Add x then
+                acc.Add x
+                visit (depth + 1) x
+    visit 0 e
+    List.ofSeq acc
+
 /// THE WRITE ANALYSIS (gaps G41 / G43; exprMayWriteWith / callableMayWriteWith): does evaluating `root` write storage
 /// that another evaluation can observe? Shared by codegen's reorder licence
 /// (CodeGenExprSupport.callableMayWrite / exprMayWrite: a writing kernel or
@@ -1336,7 +1421,13 @@ let private writeAnalyzer (facts: WriteFacts) =
     and walkBody (paramIdx: Map<IRId, int>) (paramNames: Map<string, int>) (body: IRExpr) : WriteProvenance =
         let locals = System.Collections.Generic.Dictionary<IRId, IRExpr>()
         let walkedLets = System.Collections.Generic.HashSet<IRId>()
-        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> locals.[id] <- v | _ -> ()) body
+        // THE ROOTS: the body AND the extents its types carry (a range bound
+        // may hold a block with its own lets, rebindings and writes) -- every
+        // scan below, the provenance collections included, covers all of them
+        // (round 4 wave 6, the G186 diff reviews: a write, a rebinding `t = a`
+        // and fresh scratch storage hidden in a bound)
+        let roots = body :: embeddedExtentExprs body
+        for r in roots do iterIRExpr (fun n -> match n with IRLet (id, v, _) -> locals.[id] <- v | _ -> ()) r
         // Every value a local or parameter can come to hold: its initializer
         // plus each later whole rebinding, and each storage-bearing value
         // stored into one of its fields / elements (a reference stored in an
@@ -1359,7 +1450,7 @@ let private writeAnalyzer (facts: WriteFacts) =
                           | true, l -> l.Add v
                           | _ -> rebinds.[id] <- ResizeArray [ v ])
                  | _ -> ())
-            | _ -> ()) body
+            | _ -> ()) |> fun scan -> for r in roots do scan r
         let rec prov (seen: Set<IRId>) (e: IRExpr) : WriteProvenance =
             let scalarTyped = try holdsNoStorage (typeOf e) with _ -> false
             let rebound (seen: Set<IRId>) (id: IRId) =
@@ -1502,7 +1593,12 @@ let private writeAnalyzer (facts: WriteFacts) =
         and visitChildren (e: IRExpr) =
             let (ExprShape (children, _)) = e
             children |> List.iter visit
-        visit body
+        // the extents the body's TYPES carry run too (`method_for(0..bump(a))`:
+        // a mutating call in a range bound), and the child walk never enters
+        // them -- so every summary, transitively through callees, counts their
+        // writes (round 4 wave 6, the G186 diff review: a helper hiding such a
+        // bound slipped past the join producer's interval audit)
+        for r in roots do visit r
         acc
     (summaryOf, walkBody)
 
@@ -1643,10 +1739,16 @@ let callbackTable (resolve: IRExpr -> IRCallable option) (funcs: IRCallable list
         defs.Add (id, v)
         defined.Add id |> ignore
         scan false v
+        // the extents its types carry are code too (round 4 wave 6: call
+        // sites and aliases inside a range bound feed the table, as the
+        // write analysis's roots do)
+        for x in embeddedExtentExprs v do scan false x
     // a function's result flows to its callers (RETURN FLOW, G47): the body's
     // value is the callable's return value, which each call evaluates to and
     // which escapes with the callable itself -- the tail is not an escape
-    for f in funcs do scan false f.Body
+    for f in funcs do
+        scan false f.Body
+        for x in embeddedExtentExprs f.Body do scan false x
     // ---- the abstract values ----
     let env = System.Collections.Generic.Dictionary<IRId, FnVal>()
     let ret = System.Collections.Generic.Dictionary<IRId, FnVal>()
@@ -1921,7 +2023,11 @@ and scheduleMayWriteWith (withCallbacks: bool) (programFuncs: IRCallable list) (
     let funcs =
         (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
-    let note (e: IRExpr) = iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) e
+    // the lets of carried extents too (a range bound may bind its own
+    // scratch: round 4 wave 6, the write analysis's roots)
+    let note (e: IRExpr) =
+        for r in e :: embeddedExtentExprs e do
+            iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) r
     // a side-table binding's initializer is its PAYLOAD (its value is a
     // placeholder): a reference to it is charged with what its site runs
     for b in modul.Bindings do
@@ -3942,6 +4048,11 @@ type MemberHoistPlan = {
     Forced: int
     /// The admission record (`membershipAdmits`' matrix) that let it through.
     Admission: string
+    /// G185 (b): admitted, but NOTHING is built -- a literal set of at most
+    /// 16 keys keeps the as-written scan. Only the admission readers
+    /// (`admittedOf`: compaction fusion's probe certificate) see it; every
+    /// build / probe / ownership reader (`plansOf`, `tryProbe`, `all`) skips it.
+    ScanOnly: bool
 }
 
 /// AsyncLocal like CompactionTable; reset once per program in
@@ -3956,15 +4067,19 @@ module MemberHoistTable =
         let prev = Map.tryFind p.HostId s |> Option.defaultValue []
         cell.Value <- Map.add p.HostId (prev @ [ p ]) s
     /// The structures to build before host `hostId`, in plan order.
-    let plansOf (hostId: IRId) : MemberHoistPlan list = Map.tryFind hostId (get ()) |> Option.defaultValue []
+    let plansOf (hostId: IRId) : MemberHoistPlan list =
+        Map.tryFind hostId (get ()) |> Option.defaultValue [] |> List.filter (fun p -> not p.ScanOnly)
+    /// Every ADMITTED probe of host `hostId`, scan-only ones included (the
+    /// proof input of compaction fusion's membership-probe certificate).
+    let admittedOf (hostId: IRId) : MemberHoistPlan list = Map.tryFind hostId (get ()) |> Option.defaultValue []
     /// The plan whose structure a probe of set `setId` may read while the
     /// declaration `declId` is being emitted: the host itself, or one of its
     /// probing kernels.
     let tryProbe (declId: IRId) (setId: IRId) : MemberHoistPlan option =
         get () |> Map.toSeq |> Seq.collect snd
-        |> Seq.tryFind (fun p -> p.SetId = setId && (p.HostId = declId || p.Kernels.Contains declId))
+        |> Seq.tryFind (fun p -> not p.ScanOnly && p.SetId = setId && (p.HostId = declId || p.Kernels.Contains declId))
     /// Every plan, hosts in id order then plan order.
-    let all () : MemberHoistPlan list = get () |> Map.toList |> List.collect snd
+    let all () : MemberHoistPlan list = get () |> Map.toList |> List.collect snd |> List.filter (fun p -> not p.ScanOnly)
 
 // --- Compaction fusion: mask -> compound -> fold (round 2 item B4) ----------
 //
@@ -4221,90 +4336,6 @@ module CompactionTable =
     let foldsOf (compoundId: IRId) : CompactionFoldPlan list =
         Map.tryFind compoundId (get ()).FoldsByCompound |> Option.defaultValue []
 
-/// The extent expressions a TYPE carries (its index records' extents, a tagged
-/// index's anonymous extent, nested types' extents): what the generic child
-/// walk (`childrenOf`) never enters.
-let rec irTypeExtentExprs (t: IRType) : IRExpr list =
-    match t with
-    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> []
-    | IRTTuple ts -> List.collect irTypeExtentExprs ts
-    | IRTLoop l -> List.collect irTypeExtentExprs l.ArrayTypes @ (l.KernelType |> Option.map irTypeExtentExprs |> Option.defaultValue [])
-    | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> irTypeExtentExprs t
-    | IRTIdxTagged (t, tag) -> irTypeExtentExprs t @ (match tag with IRefAnon (_, e) -> [ e ] | _ -> [])
-    | IRTDist (_, t, axes) -> irTypeExtentExprs t @ (axes |> List.map (fun ix -> ix.Extent))
-    | IRTGroupKeys (a, b, _) -> [ a.Extent; b.Extent ]
-    | IRTArrow (slots, r, _) ->
-        (slots |> List.collect (function SIdx ix | SIdxVirt ix -> [ ix.Extent ] | SVal st -> irTypeExtentExprs st)) @ irTypeExtentExprs r
-
-let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
-    (at.IndexTypes |> List.map (fun ix -> ix.Extent)) @ irTypeExtentExprs at.ElemType
-
-/// Every type and index expression embedded in the nodes of `e` -- a
-/// variable's or call's type, an array literal's, an apply's output, operand
-/// and shared index types, a range's index records, an `ungroup`'s source
-/// index records -- as extent expressions; and, recursively, those embedded
-/// in the extracted extents themselves, to COMPLETION (types are finite
-/// trees; each extent object is expanded once, by reference, which also keeps
-/// it linear on a type shared by many nodes). Each extent object is returned
-/// once.
-let embeddedExtentExprs (e: IRExpr) : IRExpr list =
-    let acc = ResizeArray<IRExpr>()
-    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
-    let rec visit (depth: int) (root: IRExpr) =
-        let found = ResizeArray<IRExpr>()
-        let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
-        let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
-        iterIRExpr (fun n ->
-            match n with
-            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
-            | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
-            | IRApplyCombinator info ->
-                addTy info.OutputType
-                for at in info.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
-                addIx info.SharedIndexTypes
-                addIx info.KernelTDims
-            | IRComposeApply info -> addTy info.OutputType
-            | IRMethodFor mf ->
-                for at in mf.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
-                addIx mf.SharedIndexTypes
-            | IRRange (ixs, _) -> addIx ixs
-            | IRVirtualReverse ix -> addIx [ ix ]
-            // the source index records `childrenOf` does not hand out
-            | IRUngroup (_, src) -> addIx [ src ]
-            | IRUngroupRows (_, _, src) -> addIx [ src ]
-            | IRUngroupGrid (_, srcs, _) -> addIx srcs
-            // EXHAUSTIVE (no wildcard; PM35's constructor table): every other
-            // constructor carries no type and no index record -- its
-            // expressions are children the walk above already visits. A new
-            // IRExpr variant is classified here, not defaulted
-            // (OptimizeTests `rec_fold_ring_constructor_table_walkers` pins
-            // every type-carrying field against this function).
-            | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _ | IRCurry _ | IRTuple _ | IRComplex _
-            | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _
-            | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _ | IRBeginPoolScope _ | IRReleasePools _
-            | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _
-            | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _
-            | IRCompute _ | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _
-            | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
-            | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
-            | IRSegmentsGrid _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
-            | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
-            | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _
-            | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRHaloUnhash _ | IRArity _ | IRNth
-            | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
-            | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _
-            | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> ()) root
-        for x in found do
-            // COMPLETE (gap G89, lane-D review): every extent is expanded
-            // once, by reference -- extents are subterms of finite type
-            // trees, so this terminates without a depth bound (the old bound
-            // of 8 let a write nested deeper slip past every client: the
-            // never-written closure, the foreign-reference census).
-            if seen.Add x then
-                acc.Add x
-                visit (depth + 1) x
-    visit 0 e
-    List.ofSeq acc
 /// A root of THE MODULE TRAVERSAL that the compaction census (T4b) and the
 /// foreign-demand collection (`moduleReferencedIds`, which Lowering hands to
 /// every other module's census) share: every executable expression of the
@@ -5038,7 +5069,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     // not certified. The snapshot / effect proof is unchanged: the predicate
     // party is still `scheduleMayWriteIn` over its body.
     let probeCertificate (kb: IRBinding) (pc: IRCallable) (p: IRParam) : Result<string, string> =
-        let plans = MemberHoistTable.plansOf kb.Id |> List.filter (fun hp -> hp.Kernels.Contains pc.Id)
+        let plans = MemberHoistTable.admittedOf kb.Id |> List.filter (fun hp -> hp.Kernels.Contains pc.Id)
         let planOf (sid: IRId) = plans |> List.tryFind (fun hp -> hp.SetId = sid)
         let used = ResizeArray<MemberHoistPlan>()
         let mutable why : string option = None
@@ -5071,7 +5102,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
         | None ->
             let sets = used |> Seq.map (fun hp -> $"`{hp.SetName}`") |> String.concat ", "
             let proofs = used |> Seq.map (fun hp -> $"[{hp.SetName}: {hp.Admission}]") |> String.concat " "
-            Ok $"membership probe certified pure/total by member-hoist's admission: `{kb.Name}`'s predicate probes {sets} through the structure(s) membership hoisting built before `{kb.Name}` (proof input, the T1 planner's own record: {proofs}); every target and every other operand is a pure, total scalar of the cell (no panic site); no capture but the certified set(s); `totalScalar` itself is not widened"
+            Ok $"membership probe certified pure/total by member-hoist's admission: `{kb.Name}`'s predicate probes {sets} through the probe(s) membership hoisting admitted for `{kb.Name}` -- a structure built before it, or, for a literal set of at most 16 keys, the as-written scan (G185) -- (proof input, the T1 planner's own record: {proofs}); every target and every other operand is a pure, total scalar of the cell (no panic site); no capture but the certified set(s); `totalScalar` itself is not widened"
     // The mask predicate's admission: `totalScalar` (B4's), or -- in the T4c
     // modes only (the default and `gather`), so `b4` stays exactly the
     // round-2 form and `unshared` the pre-T4c v2 -- the certificate above.
@@ -6945,8 +6976,9 @@ let memberRepName (k: int) : string =
 /// cannot make degrades it, bitmap -> hash -> linear, reported by the build,
 /// never by this function): M = 0 -> linear (before min / max exist); a forced
 /// representation (a forced bitmap over a span past its 2^26-bit cap ->
-/// hash); else M <= 16 -> linear, span <= max(64 M, 4096) within the cap ->
-/// bitmap, otherwise hash. The span is the unsigned difference max - min,
+/// hash); else M <= 16 -> none, the as-written scan (a LITERAL set that small is
+/// not hoisted at all: `planMembershipHoist` declines it, G185), a span within the 2^26-bit
+/// cap -> bitmap, otherwise hash. The span is the unsigned difference max - min,
 /// never max - min + 1 (which overflows for the full Int64 range).
 let memberChooseRep (m: int64) (lo: int64) (hi: int64) (forced: int) : int =
     if m <= 0L then 1
@@ -6956,12 +6988,14 @@ let memberChooseRep (m: int64) (lo: int64) (hi: int64) (forced: int) : int =
         if forced = 1 then 1
         elif forced = 2 then (if fits then 2 else 3)
         elif forced = 3 then 3
-        elif m <= 16L then 1
-        else
-            let limit =
-                if m >= (1L <<< 57) then System.UInt64.MaxValue
-                else max 4096UL (uint64 m * 64UL)
-            if fits && spanM1 < limit then 2 else 3
+        // G185 (b), the user's decision of 2026-11-08: a small set is the
+        // as-written scan (0 = none: nothing built, the probe scans the set)
+        elif m <= 16L then 0
+        // the bitmap whenever
+        // its span fits the 2^26-bit cap (it never lost to the pick in the
+        // wave-5 controls), the hash beyond
+        elif fits then 2
+        else 3
 
 /// Plan membership hoisting over the module's top-level bindings. Records
 /// into `MemberHoistTable` and the decision collector (`member-hoist`); the
@@ -7124,7 +7158,7 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
             if ks |> List.forall Option.isSome then Some (ks |> List.map Option.get) else None
         | _ -> None
     let repLine (setB: IRBinding) =
-        let ruleText = "linear when M <= 16, bitmap when the span max - min + 1 <= max(64 M, 4096) and <= 2^26 bits, else hash"
+        let ruleText = "none -- the as-written scan, nothing built -- when M <= 16 (a literal set that small is not hoisted at all), bitmap when the span max - min + 1 <= 2^26 bits, else hash"
         let fallbackText = "the ACTUAL representation can differ: an allocation the build cannot make degrades it (bitmap -> hash -> linear, the same booleans), and the build reports actual vs preferred and why (stderr under BLADE_MEMBER_VERBOSE=1, both lanes; the C++ run record's member_hoist)"
         match literalKeys setB.Value with
         | Some ks ->
@@ -7297,13 +7331,49 @@ let planMembershipHoist (programFuncs: IRCallable list) (modul: IRModule) : unit
                         decide host.Name (Blade.Effects.Declined why) [ setLine; matrix ]
                     | None ->
                         let evidence = [ setLine; repLine sb; targetLine; matrix; sameLine ]
+                        // G185 (b), the user's decision of 2026-11-08: a
+                        // LITERAL set of at most 16 keys keeps the as-written
+                        // per-cell scan (measured faster than every built
+                        // structure at M = 11); a forced representation
+                        // (`linear` / `bitmap` / `hash`) still builds
+                        // M known at compile time: the literal at the ROOT of
+                        // the set's alias chain, or a dense set's static
+                        // extent (`Array<Int64 like Idx<11>>`, a computed set);
+                        // a compound's cardinality is a run-time count (the
+                        // C core's chooser answers `none` for it instead)
+                        let staticM =
+                            match chain |> List.tryPick (fun b -> literalKeys b.Value) with
+                            | Some ks -> Some (int64 ks.Length)
+                            | None when not compound ->
+                                (match Blade.IR.stripUnits sb.Type with
+                                 | ArrayElem at ->
+                                     (match at.IndexTypes with
+                                      | [ ix ] -> (match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+                                      | _ -> None)
+                                 | _ -> None)
+                            | None -> None
+                        let smallLiteral =
+                            forced = 0 && (match staticM with Some m -> m <= 16L | None -> false)
                         if not enabled then
                             decide host.Name (Blade.Effects.Declined "disabled by BLADE_MEMBER_HOIST") evidence
+                        elif smallLiteral then
+                            // nothing is built, but the five-party admission
+                            // stands: recorded SCAN-ONLY, so compaction
+                            // fusion's membership-probe certificate (T4c)
+                            // still reads it as its proof input
+                            MemberHoistTable.record
+                                { HostId = host.Id; HostName = host.Name; SetId = sb.Id; SetName = sb.Name
+                                  Kernels = probingKernels |> List.map (fun c -> c.Id) |> Set.ofList
+                                  Forced = forced; Admission = matrix; ScanOnly = true }
+                            let scanLine =
+                                $"set `{sb.Name}` ({setShape}, Int64 keys): NO structure is built -- the {sites} probe site(s) in {kernelNames} keep the as-written scan (the admission below stands, recorded scan-only: compaction fusion's membership-probe certificate reads it)"
+                            decide host.Name (Blade.Effects.Declined "small set: the as-written scan is faster (G185)")
+                                [ scanLine; repLine sb; targetLine; matrix; sameLine ]
                         else
                             MemberHoistTable.record
                                 { HostId = host.Id; HostName = host.Name; SetId = sb.Id; SetName = sb.Name
                                   Kernels = probingKernels |> List.map (fun c -> c.Id) |> Set.ofList
-                                  Forced = forced; Admission = matrix }
+                                  Forced = forced; Admission = matrix; ScanOnly = false }
                             decide host.Name Blade.Effects.Applied evidence
 
 // --- Aggregate-only grouping (round 3 wave 3, W3-1: T3 redesigned; gap G71) -
@@ -9952,7 +10022,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 elif consumers.Count > 0 && (interval |> List.exists writes) then
                     decline "a statement between the recursion and its last fold may write (the folds would move across it)"
                 elif not (recFoldRingEnabled ()) then
-                    Some (Error recFoldOptInDecline, evidenceBase @ [ "admitted: with BLADE_REC_FOLD=1 the trajectory would ring and its folds ride the sweep" ])
+                    Some (Error recFoldOptInDecline, evidenceBase @ [ "admitted: by default the trajectory would ring and its folds ride the sweep" ])
                 else
                 // ---- the rewrite
                 let ringIx = { lead with Extent = IRLit (IRLitInt r); Tag = None; Id = builder.FreshId () }
@@ -10425,6 +10495,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     // wholly-deferred tuple's projection and a let chain ending deferred,
     // which the node census above misses, for the leg totality audits.
     let classifiedDeferred = widenDeferredOpen modul (funcs |> Map.toSeq |> Seq.map snd) (fun _ -> false)
+    // the top-level payload resolver, built ONCE (it indexes every binding;
+    // per statement it made the top-level region quadratic)
+    let topPayloadOf = intervalPayloadOf modul
     // A STREAMED provider read (`s.vars.A |> z.stream`) has an ordinary dense
     // array type but no storage a join can share: it is walked one block at a
     // time by its own fold, and it is an external read, not a pure value.
@@ -10801,8 +10874,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         | Some id ->
                             Set.contains id topBarrier.Value
                             || intervalHasProviderEffect modul id
-                            || schedWritesTop.Force () (intervalPayloadOf modul id u.Value)
-                            || mayWrite (intervalPayloadOf modul id u.Value)
+                            || (let pl = topPayloadOf id u.Value in schedWritesTop.Force () pl || mayWrite pl)
                         | None -> false)
                     || (topLevel.Value
                         && (let mutable hit = false
@@ -10891,7 +10963,13 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             // (A module binding is not refused for being reassignable: inside
             // one region only a CALL or an assignment can write it, and both
             // are barriers above.)
-            if deferred.Contains id || deferred.Contains (resolveAlias 64 id) then
+            // round 4 wave 6 (the top-level class-closure round): the
+            // program's deferred-value classifier too -- a projection of a
+            // tuple holding a deferred map (`let y = pack[0]`) is deferred,
+            // and joining it would force its producer at the join (earlier
+            // than its first reader: another failure first, and its print).
+            if deferred.Contains id || deferred.Contains (resolveAlias 64 id)
+               || classifiedDeferred id || classifiedDeferred (resolveAlias 64 id) then
                 Some "an operand is a deferred computation (one level of sharing only)"
             elif isStreamed id then Some "an operand is a streamed provider read (walked one block at a time by its own fold; not a stored, pure value)"
             elif not (boundAt.ContainsKey id || regionParams.Contains id || ownBindingIds.Contains id) then
@@ -12858,6 +12936,21 @@ let gatherTerminalCertificate (resolve: IRExpr -> IRCallable option) (isDeferred
              "the gathered array is not an operand of the gather (no alias overlap)" ]
     | _ -> Error "more than one subscript could each be the producer's only failure (ambiguous)"
 
+/// THE PROGRAM-WIDE VALUE-REFERENCE CENSUS (wave 3 B, P4 remainder (b): a
+/// callee in ANOTHER module). `elideCallsModule` sees one module's bindings,
+/// so a callable another module passes AS A VALUE (an alias, an argument, a
+/// kernel) would be invisible to its `referencedAsValue` check. Lowering
+/// installs, before the per-module optimizer runs, the ids of every callable
+/// some module's bindings or some function body names outside the head of a
+/// call (`programValueRefs`); None (not installed: a caller that optimizes a
+/// lone module) makes every foreign callee decline, fail closed.
+module CallElideProgram =
+    open System.Threading
+    let private cell = new AsyncLocal<Set<IRId> option>()
+    let install (ids: Set<IRId>) = cell.Value <- Some ids
+    let reset () = cell.Value <- None
+    let valueRefs () : Set<IRId> option = match box cell.Value with null -> None | _ -> cell.Value
+
 /// BLADE_DECOMPACT_FOLD=0|off keeps the dense decompaction under a row fold
 /// (round 4 wave 3, PM29, rule `decompact-row-fold`,
 /// `decompactRowFoldModule`): the admission still runs and records DECLINED
@@ -13256,29 +13349,119 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
         match stripUnits f.RetType with
         | IRTTuple _ -> true
         | _ -> false
+    // Wave 6 class-closure round (gap G123): the census above sees this
+    // module's bindings only, so a function ANOTHER module names as a value
+    // -- a `>>=` continuation, which the LLVM lane splices through
+    // `bindContinuationBody` with its parameter bound to the still-deferred
+    // producer -- counted zero value references here. The program-wide value
+    // census Lowering installs (CallElideProgram, as call elision's) closes
+    // it; not installed (a lone module optimized outside the driver) = every
+    // parameter route declines, fail closed.
     let directCallsOnly (f: IRCallable) =
         f.Captures.IsEmpty && not (f.Name.StartsWith "__lambda_") && not (returnsTuple f)
         && countOf varRefs f.Id = countOf callHeads f.Id
+        && (match CallElideProgram.valueRefs () with
+            | Some refs -> not (refs.Contains f.Id)
+            | None -> false)
+    // G167 (round 4 wave 6): the module's assignment census (an IRAssign
+    // rooted at a name, element or whole, in any body, lambdas included) --
+    // a body let it names is not read in place. (A capture's IsMutable means
+    // ASSIGNABLE -- every plain `let` is -- so it is not consulted; a write
+    // through a `mut` parameter is the interval audit's.)
+    let assignedAnywhere =
+        let s = System.Collections.Generic.HashSet<IRId>()
+        let rec rootOf (t: IRExpr) =
+            match t with
+            | IRIndex (b, _, _) | IRFieldAccess (b, _) | IRTupleProj (b, _, _) -> rootOf b
+            | IRVar (id, _) -> Some id
+            | _ -> None
+        let census (e: IRExpr) =
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (t, _) -> (match rootOf t with Some id -> s.Add id |> ignore | None -> ())
+                | _ -> ()) e
+        for g in (programFuncs @ modul.Functions) |> List.distinctBy (fun g -> g.Id) do
+            census g.Body
+        for b in modul.Bindings do
+            for pl in bindingPayload modul b do census pl
+        s
     let funcRewrite (f: IRCallable) : IRCallable =
         if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f then f
         else
         let region = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
         let paramsById = f.Params |> List.map (fun p -> (p.VarId, p)) |> Map.ofList
         let direct = directCallsOnly f
-        let locate (id: IRId) =
+        let bodyOptIn = "the function-body arm is opt-in (BLADE_DECOMPACT_FOLD=body): three review rounds each found a member of the parameter-storage class (gap G123: a capturing callee, a tuple-returning callee, another module naming the function as a value)"
+        let paramLocate (id: IRId) =
             match Map.tryFind id paramsById with
             | Some p ->
                 let isVirtual = match stripUnits p.Type with ArrayElem at -> at.IsVirtual | _ -> true
                 Some (p.Name, false, fun () ->
                     if isVirtual then Error $"`{p.Name}` is not a stored array parameter"
                     elif not direct then Error $"`{region}` captures a value, is a lambda, returns a tuple or is referenced other than by a direct call (a parameter is proved stored only on the ordinary call ABI; the LLVM lane inlines a capturing or tuple-returning callee over a possibly deferred argument)"
-                    elif not (decompactFoldBodyEnabled ()) then Error "the function-body arm is opt-in (BLADE_DECOMPACT_FOLD=body): its second review found a second member of the parameter-storage class (gap G123)"
+                    elif not (decompactFoldBodyEnabled ()) then Error bodyOptIn
                     else Ok $"a parameter of `{region}`, a capture-free function reached only by direct calls (an array argument arrives stored)")
             | None -> None
-        let host (subject: string) (value: IRExpr) (ty: IRType) : DecompactHost =
-            { Subject = subject; Value = value; Type = ty; SideFree = true; Locate = locate
-              PoolNotPlaced = $"the pool is not a parameter of `{region}` (a function body's pool is read only when it is a parameter; a pool bound by a body let is gap G167)"
-              VectorNotPlaced = $"the vector is not a parameter of `{region}`" }
+        // G167 (round 4 wave 6): a pool / vector bound by a BODY LET of the
+        // host's own spine, before the host. `earlier` = the spine lets
+        // before the host, in order; `hostValue` = the host statement. The
+        // let is materialized at its own site in every route that runs the
+        // body (the ordinary call, the LLVM capturing-callee and tuple
+        // inlines, the interpreter), so its proof does not lean on the call
+        // ABI: its value is a `|> compute` or an array literal (never a
+        // deferred form), it is never assigned nor captured mutably anywhere,
+        // and every statement from it to the host -- each intervening let
+        // value and the host value, each its own root -- writes nothing
+        // (scheduleMayWriteIn: a mut-parameter callee, a write through a view
+        // or a deferred alias). An alias `let P = Q` chains to Q's own proof.
+        let locate (earlier: (IRId * IRExpr) list) (hostValue: IRExpr) (id: IRId) =
+            let rec go (seen: Set<IRId>) (id: IRId) =
+                match paramLocate id with
+                | Some r -> Some r
+                | None ->
+                match earlier |> List.tryFindIndex (fun (lid, _) -> lid = id) with
+                | None -> None
+                | Some li ->
+                    let name = $"__v{id}"
+                    let v = snd earlier.[li]
+                    let interval = (earlier |> List.skip (li + 1) |> List.map snd) @ [ hostValue ]
+                    let intervalProof () =
+                        if assignedAnywhere.Contains id then Error $"the body let `{name}` is assigned in the program"
+                        elif interval |> List.exists writes then Error $"a statement between the body let `{name}` and the host may write (scheduleMayWriteIn: the pool is read in place at the host)"
+                        else Ok ()
+                    match v with
+                    | IRVar (aid, _) when not (seen.Contains aid) ->
+                        (match go (seen.Add id) aid with
+                         | Some (an, _, aproof) ->
+                             // the capture is the alias itself (its own id
+                             // and emitted name); the proof is its root's
+                             Some (name, false, fun () ->
+                                 match intervalProof () with
+                                 | Error why -> Error why
+                                 | Ok () -> aproof () |> Result.map (fun how -> $"a body let aliasing `{an}`, {how}"))
+                         | None -> Some (name, false, fun () -> Error $"the body let `{name}` aliases a value that is not a parameter or an earlier let of `{region}`"))
+                    | _ ->
+                    Some (name, false, fun () ->
+                        let form =
+                            if isDeferredForm v then None
+                            else
+                            match v with
+                            | IRCompute _ -> Some "a `|> compute`"
+                            | IRArrayLit _ -> Some "an array literal"
+                            | _ -> None
+                        match form with
+                        | None -> Error $"the body let `{name}` is not a `|> compute` or an array literal (v1 proves only those stored at their own site)"
+                        | Some how ->
+                        match intervalProof () with
+                        | Error why -> Error why
+                        | Ok () ->
+                        if not (decompactFoldBodyEnabled ()) then Error bodyOptIn
+                        else Ok $"a body let of `{region}`, {how} materialized at its own site in every route that runs the body; never assigned, nothing between it and the host writes (scheduleMayWriteIn)")
+            go Set.empty id
+        let host (earlier: (IRId * IRExpr) list) (subject: string) (value: IRExpr) (ty: IRType) : DecompactHost =
+            { Subject = subject; Value = value; Type = ty; SideFree = true; Locate = locate earlier value
+              PoolNotPlaced = $"the pool is not a parameter or an earlier body let of `{region}`'s spine (a pool bound inside a nested block or captured from outside is not read)"
+              VectorNotPlaced = $"the vector is not a parameter or an earlier body let of `{region}`'s spine" }
         let isDecompactTail (e: IRExpr) =
             match e with
             | IRLet (_, IRDecompact _, (IRReduce _ | IRCompute _)) -> true
@@ -13289,20 +13472,21 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
             let mutable hit = false
             iterIRExpr (fun n -> match n with IRDecompact _ -> hit <- true | _ -> ()) e
             hit
-        let rec walk (e: IRExpr) : IRExpr =
+        // the spine lets before the host, NEWEST first (reversed only at a host)
+        let rec walk (earlierRev: (IRId * IRExpr) list) (e: IRExpr) : IRExpr =
             match e with
             | IRLet (_, IRDecompact _, (IRReduce _ | IRCompute _)) ->
-                (match rewrite (host region e f.RetType) with Some v -> v | None -> e)
+                (match rewrite (host (List.rev earlierRev) region e f.RetType) with Some v -> v | None -> e)
             | IRLet (id, v, rest) ->
                 let v' =
                     if mentionsDecompact v then
-                        (match rewrite (host region v (typeOf v)) with Some nv -> nv | None -> v)
+                        (match rewrite (host (List.rev earlierRev) region v (typeOf v)) with Some nv -> nv | None -> v)
                     else v
-                IRLet (id, v', walk rest)
+                IRLet (id, v', walk ((id, v') :: earlierRev) rest)
             | tail when isDecompactTail tail && mentionsDecompact tail ->
-                (match rewrite (host region tail f.RetType) with Some v -> v | None -> tail)
+                (match rewrite (host (List.rev earlierRev) region tail f.RetType) with Some v -> v | None -> tail)
             | tail -> tail
-        { f with Body = walk f.Body }
+        { f with Body = walk [] f.Body }
     let modul = { modul with Functions = modul.Functions |> List.map funcRewrite }
     if minted.Count = 0 then { modul with Bindings = bindings' }
     else
@@ -14107,20 +14291,6 @@ let recordComputeElisionMapOutcomes (pending: ComputeElisionPending list) (modul
 let recordCallElision (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
     recordPendingElision "call-elision" subject outcome evidence
 
-/// THE PROGRAM-WIDE VALUE-REFERENCE CENSUS (wave 3 B, P4 remainder (b): a
-/// callee in ANOTHER module). `elideCallsModule` sees one module's bindings,
-/// so a callable another module passes AS A VALUE (an alias, an argument, a
-/// kernel) would be invisible to its `referencedAsValue` check. Lowering
-/// installs, before the per-module optimizer runs, the ids of every callable
-/// some module's bindings or some function body names outside the head of a
-/// call (`programValueRefs`); None (not installed: a caller that optimizes a
-/// lone module) makes every foreign callee decline, fail closed.
-module CallElideProgram =
-    open System.Threading
-    let private cell = new AsyncLocal<Set<IRId> option>()
-    let install (ids: Set<IRId>) = cell.Value <- Some ids
-    let reset () = cell.Value <- None
-    let valueRefs () : Set<IRId> option = match box cell.Value with null -> None | _ -> cell.Value
 
 /// Callables named as a VALUE anywhere in the program: more IRVar mentions
 /// than call heads, counted over every module's binding payloads (side-table
@@ -16728,15 +16898,11 @@ let planGroupRowMap (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (mo
 // program falls back to C++); the interpreter runs the as-written CSR.
 // ===========================================================================
 
-/// OPT-IN (the stop rule: Codex review round 2 found a second member of the
-/// moved-read class -- the peel's output and window allocations precede the
-/// moved run reads, so BL8005 can overtake a read failure): only an explicit
-/// BLADE_STREAM_GROUP_FOLD=1|on admits; unset / anything else keeps the CSR
-/// pool. Read per call.
-let streamGroupFoldEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_STREAM_GROUP_FOLD" with
-    | null -> false
-    | v -> (let t = v.Trim().ToLowerInvariant() in t = "1" || t = "on" || t = "true")
+/// DEFAULT ON since round 4 wave 6: the allocation-ordering member of earlier
+/// rounds is not a member under R0 (docs/formalism.md 2.4: BL8005 is an
+/// environment outcome), and a fresh class-closure round under R0 found none
+/// (G198). BLADE_STREAM_GROUP_FOLD=0|off keeps the CSR pool. Read per call.
+let streamGroupFoldEnabled () = gateOn "BLADE_STREAM_GROUP_FOLD"
 
 /// group binding id -> (its one peel's binding id, the largest run's length,
 /// the plan evidence); the emitters' handshake: the group site sets
@@ -16985,7 +17151,7 @@ let planStreamGroupFold (programFuncs: IRCallable list) (foreignRefs: Set<IRId>)
             | Error why -> recordStreamGroupFold gb.Name (Blade.Effects.Declined why) []
             | Ok (peels, maxRun, ev) ->
                 if not (streamGroupFoldEnabled ()) then
-                    recordStreamGroupFold gb.Name (Blade.Effects.Declined "opt-in (BLADE_STREAM_GROUP_FOLD=1): the moved run reads would follow the peels' output allocations (Codex review round 2, stop rule)") ev
+                    recordStreamGroupFold gb.Name (Blade.Effects.Declined "disabled by BLADE_STREAM_GROUP_FOLD") ev
                 else
                     let (first, _) = peels.Head
                     StreamGroupFoldTable.record
@@ -17014,14 +17180,10 @@ let planStreamGroupFold (programFuncs: IRCallable list) (foreignRefs: Set<IRId>)
 // to C++); the interpreter runs the stored mask (the oracle).
 // ===========================================================================
 
-/// BLADE_STREAM_FOLD_FUSE (D4 / G145 item 2): OPT-IN by the stop rule (the
-/// second Codex review of the bypassed-staged-admission class found another
-/// member: a CUDA map, a string intermediate): only `1` / `on` fuses; unset /
-/// anything else stages the map through its segment route. Read per call.
-let streamFoldFuseEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_STREAM_FOLD_FUSE" with
-    | null -> false
-    | v -> (let t = v.Trim().ToLowerInvariant() in t = "1" || t = "on" || t = "true")
+/// BLADE_STREAM_FOLD_FUSE (D4 / G145 item 2): DEFAULT ON since round 4 wave 6
+/// (a fresh class-closure round under R0 found no member, G195); `0` / `off`
+/// stages the map through its segment route. Read per call.
+let streamFoldFuseEnabled () = gateOn "BLADE_STREAM_FOLD_FUSE"
 
 /// BLADE_STREAM_MASK_REPLAY=0|off keeps the stored mask; unset = on.
 let streamMaskReplayEnabled () = gateOn "BLADE_STREAM_MASK_REPLAY"
@@ -17347,13 +17509,17 @@ let planKeyedCellProjection (foreignRefs: Set<IRId>) (singleModule: bool) (modul
 /// touches. `0`/`off` = a fetch per window per chunk. Read per call by the
 /// C++ emitter (CodeGenCuda's segment run loop), which records the decision.
 let haloCacheEnabled () = gateOn "BLADE_HALO_CACHE"
-/// BLADE_HALO_CACHE=elementwise (round 4 wave 4, E6 / ST03; OPT-IN under the
-/// stop rule): the cache also takes the ELEMENTWISE segment route (a zip of
-/// differently chunked streams), per source. A knob mirror (optimizerGateMirrors).
+/// The ELEMENTWISE segment route of the halo chunk cache (round 4 wave 4, E6 /
+/// ST03; DEFAULT ON since round 4 wave 6, a fresh class-closure round under R0
+/// found no member): the cache also takes the elementwise segment route (a zip
+/// of differently chunked streams), per source. `BLADE_HALO_CACHE=stencil` =
+/// the old default (the certified stencil route only; a knob mirror), `0` /
+/// `off` = no cache at all.
 let haloCacheElementwiseEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_HALO_CACHE" with
-    | null -> false
-    | v -> v.Trim().ToLowerInvariant() = "elementwise"
+    haloCacheEnabled ()
+    && (match System.Environment.GetEnvironmentVariable "BLADE_HALO_CACHE" with
+        | null -> true
+        | v -> v.Trim().ToLowerInvariant() <> "stencil")
 
 type SinkStreamMode =
     | SinkStreamOff
@@ -18811,7 +18977,11 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
             || (match (try Blade.IRTotality.scalarElem (typeOf p) with _ -> None) with
                 | Some et -> not (Blade.IRTotality.isReal et || et = ETBool)
                 | None -> true)
-            || (match Blade.IRTotality.walk resolve (fun _ -> None) (fun d -> deferred.Contains d || moduleDeferred.Contains d)
+            // wave 6 lane b, Codex R0 round (continuation d6837177): the
+            // program-wide classifier (deferredW), not only this module's
+            // census -- an imported deferred map forced by an interval
+            // statement could fail (BL8013) ahead of the moved reads
+            || (match Blade.IRTotality.walk resolve (fun _ -> None) (fun d -> deferredW d || moduleDeferred.Contains d)
                         Map.empty Map.empty Set.empty Set.empty Set.empty p with
                 | Ok _ -> false
                 | Error _ -> true)
@@ -18993,6 +19163,11 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
     for f in modul.Functions do resolver.[f.Id] <- f
     let mayWrite = scheduleMayWriteIn programFuncs modul
     let deferredIds = IRLift.computeDeferredIds modul.Bindings
+    // the totality audits' DEFERRED-VALUE predicate: the program classifier,
+    // fail closed (round 4 wave 6, the class-closure round: a kernel reading an
+    // IMPORTED deferred map, `H.d(i)` inside p's kernel, was certified total
+    // under this module's census alone -- fusion then interleaved its failure)
+    let deferredW = widenDeferred modul (modul.Functions @ programFuncs) deferredIds.Contains
     let deferredValue =
         modul.Bindings |> List.choose (fun b ->
             if Set.contains b.Id deferredIds then
@@ -19019,7 +19194,7 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
                      exts |> List.exists (List.exists Option.isNone) || (exts |> List.distinct |> List.length) > 1) then
                 Some "it co-iterates over run-time or unequal extents (its agreement check would move)"
             else
-                match Blade.IRTotality.auditApply resolve (fun _ -> None) deferredIds.Contains info with
+                match Blade.IRTotality.auditApply resolve (fun _ -> None) deferredW info with
                 | Error why -> Some $"its kernel is not proved total ({why})"
                 | Ok () -> None
     // WHO NAMES A DEFERRED BINDING (Codex review of the C2 diff, finding 1): a
@@ -19119,6 +19294,21 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
         | None ->
         if pinfo.Arrays |> List.exists (function IRVar (id, _) -> Set.contains id deferredIds | IRRange _ -> false | _ -> true) then
             decline $"an operand of `{pName}` is not a stored array or a range (a deeper chain declines)"
+        // Round 4 wave 6 (the class-closure round): POSITIVE storage evidence
+        // for every array operand of p -- a binding of THIS module proved
+        // stored at its own site through its alias chain (storedArrayProof).
+        // An IMPORTED operand (`method_for(H.d)`, H.d a deferred map of
+        // another module) is absent from this module's deferred census and
+        // was taken as stored: a hidden third level, forced privately inside
+        // the nest instead of persistently at the fold (a later write to its
+        // input then changed a later read, its print and a BL8013).
+        elif pinfo.Arrays |> List.exists (function
+                                             | IRVar (id, _) ->
+                                                 (match modul.Bindings |> List.tryFind (fun b -> b.Id = id) with
+                                                  | Some b -> Result.isError (storedArrayProof modul b)
+                                                  | None -> true)
+                                             | _ -> false) then
+            decline $"an operand of `{pName}` is not proved stored by this module (an imported value, or one storedArrayProof does not prove: its cells may be a deferred computation forced elsewhere)"
         else
         let pos = qinfo.Arrays |> List.findIndex (function IRVar (id, _) -> id = p | _ -> false)
         let qk = (tileKernelOf localCallables qinfo).Value
@@ -19133,13 +19323,13 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
         match fk with
         | None -> decline "the fold kernel does not resolve to a callable"
         | Some fkc ->
-        match Blade.IRTotality.auditCallable resolve (fun _ -> None) deferredIds.Contains fkc [] with
+        match Blade.IRTotality.auditCallable resolve (fun _ -> None) deferredW fkc [] with
         | Error why -> decline $"the fold kernel is not proved total ({why}); interleaving could change which failure comes first"
         | Ok () ->
         let seedTotal =
             match init with
             | None -> Ok 0L
-            | Some s -> Blade.IRTotality.walk resolve (fun _ -> None) deferredIds.Contains Map.empty Map.empty Set.empty Set.empty Set.empty s
+            | Some s -> Blade.IRTotality.walk resolve (fun _ -> None) deferredW Map.empty Map.empty Set.empty Set.empty Set.empty s
         match seedTotal with
         | Error why -> decline $"the seed is not proved total ({why})"
         | Ok _ ->
@@ -19222,6 +19412,13 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
     let writes = scheduleMayWriteWithCallbacksIn programFuncs modul
     let payloadOf = intervalPayloadOf modul
     let moduleDeferred = IRLift.computeDeferredIds modul.Bindings
+    // G186 (round 4 wave 6): the FAIL-CLOSED program classifier
+    // (`widenDeferred`: aliases, tuple projections, let chains, streamed reads,
+    // and an id bound nowhere this module shows -- another module's binding)
+    // for the producer's inputs and its totality audit: a module binding's
+    // block (the inlined copy below) runs under the deferred protocol, where
+    // the node census alone misses deferred forms (Codex design review)
+    let programDeferred = widenDeferred modul (modul.Functions @ programFuncs) moduleDeferred.Contains
     let capturedIds = funcs |> Map.fold (fun acc _ f -> f.Captures |> List.fold (fun a c -> Set.add c.Id a) acc) Set.empty
     let streamed (id: IRId) = match Map.tryFind id modul.ProviderReads with Some s -> s.Streamed | None -> false
     let isBareMap (v: IRExpr) =
@@ -19276,7 +19473,8 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
         let mutable c = 0
         iterIRExpr (fun n -> match n with IRVar (id, _) when id = p -> c <- c + 1 | _ -> ()) e
         c
-    let processBody (region: string) (body: IRExpr) : IRExpr =
+    let processBody (note: string option) (region: string) (body: IRExpr) : IRExpr =
+        let recordJoinProducer subject outcome (ev: string list) = recordJoinProducer subject outcome (ev @ Option.toList note)
         let rec spine (e: IRExpr) acc =
             match e with
             | IRLet (id, v, rest) -> spine rest ((id, v) :: acc)
@@ -19284,7 +19482,7 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
         let (stmts, tail) = spine body []
         if stmts.Length < 2 then body else
         let localDeferred = stmts |> Array.choose (fun (id, v) -> if isBareMap v then Some id else None) |> Set.ofArray
-        let isDeferred (id: IRId) = localDeferred.Contains id || moduleDeferred.Contains id
+        let isDeferred (id: IRId) = localDeferred.Contains id || programDeferred id
         let rewrites = System.Collections.Generic.Dictionary<IRId, IRExpr>()
         let extentExprs = lazy (embeddedExtentExprs body)
         for i in 0 .. stmts.Length - 1 do
@@ -19299,7 +19497,17 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
                              (match ix.Extent with IRLit (IRLitInt n) when n >= 1L -> Some n | _ -> None)
                          | _ -> None)
                     | _ -> None
-                let total = countRefs p body
+                // a reference in a lifetime region's RELEASE list (the inlined
+                // copy's pool, listed for its free) is not a reader: elided, p
+                // owns no pool and leaves the list (G186)
+                let releaseRefs =
+                    let mutable c = 0
+                    iterIRExpr (fun n ->
+                        match n with
+                        | IRReleasePools (_, pools, _) -> for e in pools do c <- c + countRefs p e
+                        | _ -> ()) body
+                    c
+                let total = countRefs p body - releaseRefs
                 let joins =
                     [ for j in i + 1 .. stmts.Length - 1 do
                         let (jid, jv) = stmts.[j]
@@ -19364,7 +19572,10 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
                     if writes (IRApplyCombinator info) then decline "the producer may write (its writes would move into the join)"
                     else
                     let interval = [ i + 1 .. j ]
-                    match interval |> List.tryFind (fun t -> let (tid, tv) = stmts.[t] in writes (payloadOf tid tv) || intervalHasProviderEffect modul tid) with
+                    // the extents an intervening statement's TYPES carry run too
+                    // (`method_for(0..bump(x))`: a mutating call in a range bound;
+                    // Codex diff review of G186) -- audited like its payload
+                    match interval |> List.tryFind (fun t -> let (tid, tv) = stmts.[t] in writes (payloadOf tid tv) || (embeddedExtentExprs tv |> List.exists writes) || intervalHasProviderEffect modul tid) with
                     | Some t -> decline $"__v{fst stmts.[t]} between the producer and the join (or the join) may write or has a provider effect (the snapshot)"
                     | None ->
                     let n = literalRank1.Value
@@ -19391,14 +19602,61 @@ let elideJoinProducersModule (programFuncs: IRCallable list) (modul: IRModule) :
                      | _ -> IRLet (id, v, rebuild rest))
                 | tail -> tail
             ignore tail
+            // an elided producer owns no pool: it leaves its lifetime region's
+            // release list (the region pair itself stays, even when its list
+            // empties -- IRValidate derives ownership from the forced lets left)
+            let isElided (e: IRExpr) = match e with IRVar (id, _) -> rewrites.ContainsKey id | _ -> false
             rebuild body
-    { modul with
-        Functions =
-            modul.Functions |> List.map (fun f ->
-                if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f then f
-                else
-                    let region = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
-                    { f with Body = processBody region f.Body }) }
+            |> mapIRExpr (fun n ->
+                match n with
+                | IRReleasePools (scope, pools, call) when pools |> List.exists isElided ->
+                    IRReleasePools (scope, pools |> List.filter (isElided >> not), call)
+                | other -> other)
+    // G186 (round 4 wave 6): a MODULE BINDING whose value is a block -- the
+    // site the sibling-fold pass inlines a callee into (`kernel(x, y)` in the
+    // tuple of `let (checksum, input_checksum) = { .. }`) -- is planned too:
+    // the inlined copy of the function's producer runs THERE, so the plan
+    // must describe it (the user rule: the plan describes the executed
+    // program). Its lets are locals of main in both lanes; the binding itself
+    // (and a top-level `let p`) stays under the deferred protocol, unplanned.
+    let bindings' =
+        modul.Bindings |> List.map (fun b ->
+            match b.Value with
+            | IRLet _ when not (modul.ProviderWrites.ContainsKey b.Id) && (bindingSideOperands modul b.Id).IsEmpty ->
+                { b with Value = processBody None b.Name b.Value }
+            | _ -> b)
+    // A function no call or value reference of THIS module names any more
+    // (the sibling-fold pass inlined its call sites) still carries its body
+    // record; it says so, and that the inlined copy has its own record.
+    let referencedHere =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        // every name the module's code, the extents its types carry and its
+        // declared types reach (a call in a range bound is a call)
+        let addExpr (e: IRExpr) =
+            for id in collectVarRefsIR e do acc.Add id |> ignore
+            for x in embeddedExtentExprs e do
+                for id in collectVarRefsIR x do acc.Add id |> ignore
+        let addTy (t: IRType) = for x in irTypeExtentExprs t do addExpr x
+        for b in bindings' do
+            for pl in bindingPayload modul b do addExpr pl
+            addExpr b.Value
+            addTy b.Type
+        for f in modul.Functions do
+            addExpr f.Body
+            for c in f.Captures do acc.Add c.Id |> ignore
+            for prm in f.Params do addTy prm.Type
+            addTy f.RetType
+        acc
+    let functions' =
+        modul.Functions |> List.map (fun f ->
+            if f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || hasTypeVarsInSignature f then f
+            else
+                let region = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
+                let note =
+                    if referencedHere.Contains f.Id then None
+                    else Some $"no call of `{region}` remains in this module (its code, types and extents; a call the sibling-fold pass inlined is planned at its own site, under its binding's name); another module may still call it"
+                { f with Body = processBody note region f.Body })
+    { modul with Functions = functions'; Bindings = bindings' }
 
 let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) foreignCensus (modul: IRModule) : IRModule =
     // Normal lowering constructs the events LAST. If a consumer re-applies

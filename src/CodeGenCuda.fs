@@ -4577,8 +4577,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     // argument holds per source, and a source whose chunk is
                                     // wider than the run (B chunk 3001 under 1001-cell runs)
                                     // is decoded once instead of once per run it spans
-                                    // OPT-IN (the stop rule: the second review of this class found a
-                                    // second member): BLADE_HALO_CACHE=elementwise
+                                    // DEFAULT ON since round 4 wave 6 (a fresh class-closure round
+                                    // under R0 found no member); BLADE_HALO_CACHE=stencil keeps
+                                    // the old default (stencil route only), 0 / off no cache
                                     let elementwiseRoute =
                                         Blade.Optimize.haloCacheElementwiseEnabled ()
                                         && kind = "elementwise" && rank1WindowPlan.IsSome && rank = 1 && spec.Provider = "zarr"
@@ -4606,6 +4607,8 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                                     elif rank1WindowPlan.IsNone then "no rank-1 window certificate (the D04 route did not admit the kernel)"
                                                     else "explicit (non-uniform) runs: the cursor route is the uniform segmentation"
                                                 recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined why) []
+                                            elif kind = "elementwise" && Blade.Optimize.haloCacheEnabled () && not (Blade.Optimize.haloCacheElementwiseEnabled ()) then
+                                                recordCodegenDecision "halo-chunk-cache" name (Blade.Effects.Declined "the elementwise segment route is not cached under BLADE_HALO_CACHE=stencil (the certified stencil route only)") []
                                             None
                                         else
                                         match Blade.ZarrProvider.CppZarr.haloCacheGeometry spec.FilePath spec.VarName with

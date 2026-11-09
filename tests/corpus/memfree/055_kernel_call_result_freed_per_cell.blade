@@ -1,0 +1,38 @@
+// TEST: An Array Returning Call Folded Inside A Kernel Is Freed Per Cell (G184)
+// Gap G184 (bench pm08_churn): in the LLVM lane an array-returning call
+// folded inside a TOP-LEVEL kernel lambda never released its result pool (no
+// tracking scope was open at module scope), so the process grew by one pool
+// per cell; inside a function body the one tracking slot per call site kept
+// only the last cell's pool. Each application of a numeric kernel body is now
+// its own tracking scope: the pool is freed right after the fold, once per
+// cell. `blade test llvm` pins the free inside the loop of main and of `per`.
+// sum big(w) = w * 500500, sum small(w) = w * 78; w = 1 + 0.001 t, t < 7:
+// 500578 * 7.021 = 3514558.138; the function form: 500578 * (1 + 1.001) = 1001656.578
+type Big = Idx<1001>
+type Small = Idx<13>
+type Rep = Idx<7>
+type Two = Idx<2>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+function small(w: Float64) -> Array<Float64 like Small> = {
+    method_for(range<Small>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+function per(k: Float64) -> Float64 = {
+    let s = reduce(method_for(range<Two>) <@> lambda(t) -> {
+        let w = k + 0.001 * Float64(t)
+        reduce(big(w), (+)) + reduce(small(w), (+))
+    }, (+))
+    s
+}
+
+let checksum = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let w = 1.0 + 0.001 * Float64(t)
+    reduce(big(w), (+)) + reduce(small(w), (+))
+}, (+))
+let in_function = per(1.0)
+// EXPECT: checksum = 3514558.138
+// EXPECT: in_function = 1001656.578

@@ -1,0 +1,18 @@
+// TEST: a pack former whose kernel reads the pack only through a nested lambda is refused (rejects)
+// Gap G174 (round 4 wave 6 lane d): the former unrolls per pack element only
+// when the kernel body itself reads the pack; a dynamic `args[k]` hidden in a
+// nested lambda used to leave the former rolled, so the lambda kept a pack
+// subscript over a specialization whose pack is scalar parameters and g++
+// rejected the emission (BL9002). The read is now found through the closure
+// graph and refused at lowering, like arity/484's capturing lambda.
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(x: Float64) -> x + args[k]
+        h(1.0)
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

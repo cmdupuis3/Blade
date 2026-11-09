@@ -1,0 +1,25 @@
+// TEST: An Inlined Scalar Tuple Call Frees Its Pool Per Application (G184)
+// Gap G184 (Codex class-closure review round 4): the LLVM lane inlines a
+// tuple-returning call (`pair`); its body is one application too, so the
+// pool it allocates (`tmp`) is freed right after it -- at the top-level
+// `warm` and once per cell inside the kernel. Before, `warm` left `tmp` in the
+// slot tables and the kernel's re-emission read as an escape, so nothing was
+// freed. `blade test llvm` pins the frees.
+type Big = Idx<1001>
+type Rep = Idx<7>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+function pair(x: Float64) -> (Float64, Float64) = {
+    let tmp = big(x)
+    (reduce(tmp, (+)), reduce(tmp, (+)))
+}
+
+let warm = pair(1.0)
+let got = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let p = pair(Float64(t))
+    p[0] + p[1]
+}, (+))
+// EXPECT: got = 21021000.0

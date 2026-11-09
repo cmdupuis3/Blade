@@ -1,0 +1,25 @@
+// TEST: A write hidden in an intervening range bound keeps the join producer stored
+// ============================================================================
+// G186 (round 4 wave 6, Codex diff review of the inlined-copy planning): the
+// join producer plans a top-level binding's block. Between the producer p
+// and its join, `m`'s range bound `0..bump(x)` calls a function that WRITES
+// p's input x through a `mut` parameter: the bound is an extent a type
+// carries, not the payload, and the interval audit read only the payload --
+// so p became the join's shared leaf, read after the write (exp(100) in the
+// first leg). The audit now reads every intervening statement's carried
+// extents too: p stays stored (the snapshot), the value is the as-written
+// one. (Function bodies take the same audit.)
+// ============================================================================
+function bump(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    a(0) = 100.0
+    3
+}
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = {
+    let p = method_for(x) <@> lambda(v) -> exp(v) |> compute
+    let m = method_for(0..bump(x)) <@> lambda(v) -> v + 1 |> compute
+    let (a, b) = object_for(<&!>) <@> (reduce(p, (+)), reduce(p, (+), 1.0))
+    a + b + Float64(reduce(m, (+)))
+}
+// 2 (e + e^2 + e^3) + 1 + (1 + 2 + 3)
+// EXPECT: r = 67.3857497011547

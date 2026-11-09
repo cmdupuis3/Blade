@@ -43,8 +43,14 @@
  *   forced BITMAP               -> BITMAP when the span fits the bit cap
  *                                  (2^26 bits = 8 MiB), else HASH
  *   forced HASH                 -> HASH
- *   auto, m <= 16               -> LINEAR (tiny sets never lose)
- *   auto, span <= max(64 m, 4096) and span <= 2^26 -> BITMAP
+ *   auto, m <= 16               -> NONE: nothing is built, every probe is
+ *                                  the as-written scan (G185 (b), the
+ *                                  user's decision of 2026-11-08: the scan
+ *                                  beat every structure at m = 11; a set
+ *                                  known that small at compile time is
+ *                                  not hoisted at all)
+ *   auto, span <= 2^26          -> BITMAP (G185 (b), 2026-11-08: the bitmap
+ *                                  never lost to the pick in the controls)
  *   auto, otherwise             -> HASH
  * The span is computed as the UNSIGNED difference hi - lo (exact for every
  * hi >= lo, no signed overflow) and compared without forming hi - lo + 1;
@@ -135,22 +141,15 @@ typedef struct blade_member_i64 {
  * as auto). `lo` / `hi` are read only when m > 0. */
 static inline int blade_member_choose_i64(int64_t m, int64_t lo, int64_t hi, int forced) {
     uint64_t span_m1;
-    int bitmapFits, bitmapDense;
+    int bitmapFits;
     if (m <= 0) return BLADE_MEMBER_LINEAR;
     span_m1 = (uint64_t)hi - (uint64_t)lo;
     bitmapFits = span_m1 < BLADE_MEMBER_SPAN_BITS;
     if (forced == BLADE_MEMBER_LINEAR) return BLADE_MEMBER_LINEAR;
     if (forced == BLADE_MEMBER_BITMAP) return bitmapFits ? BLADE_MEMBER_BITMAP : BLADE_MEMBER_HASH;
     if (forced == BLADE_MEMBER_HASH) return BLADE_MEMBER_HASH;
-    if (m <= BLADE_MEMBER_LINEAR_MAX) return BLADE_MEMBER_LINEAR;
-    {
-        /* span <= max(64 m, 4096)  <=>  span_m1 < limit */
-        uint64_t limit = (uint64_t)BLADE_MEMBER_SPAN_FLOOR;
-        if (m >= ((int64_t)1 << 57)) limit = UINT64_MAX;
-        else if ((uint64_t)m * BLADE_MEMBER_SPAN_PER_KEY > limit) limit = (uint64_t)m * BLADE_MEMBER_SPAN_PER_KEY;
-        bitmapDense = span_m1 < limit;
-    }
-    return (bitmapFits && bitmapDense) ? BLADE_MEMBER_BITMAP : BLADE_MEMBER_HASH;
+    if (m <= BLADE_MEMBER_LINEAR_MAX) return BLADE_MEMBER_NONE;
+    return bitmapFits ? BLADE_MEMBER_BITMAP : BLADE_MEMBER_HASH;
 }
 
 static inline void blade_member_free_i64(blade_member_i64 *t) {
@@ -182,6 +181,14 @@ static inline void blade_member_build_i64(blade_member_i64 *t, const int64_t *ce
     }
     kind = blade_member_choose_i64(t->m, lo, hi, forced);
     t->preferred = kind;
+    if (kind == BLADE_MEMBER_NONE) {
+        /* G185 (b): a small set keeps the as-written scan -- nothing is
+         * allocated; the C++ probe sees kind NONE and scans the set itself,
+         * and blade_member_test_i64 (the LLVM lane's probe) scans the
+         * borrowed cells: the same booleans in the same order */
+        t->kind = BLADE_MEMBER_NONE;
+        return;
+    }
     if (kind == BLADE_MEMBER_BITMAP) {
         uint64_t span_m1 = (uint64_t)hi - (uint64_t)lo;
         size_t words = (size_t)((span_m1 >> 6) + 1);
@@ -240,8 +247,9 @@ static inline void blade_member_build_i64(blade_member_i64 *t, const int64_t *ce
 }
 
 /* Is x one of the set's keys? Integer `==` against every cell, whatever the
- * representation; BLADE_MEMBER_NONE (never built) answers 0 -- the emitters
- * never probe one. Read-only. */
+ * representation; BLADE_MEMBER_NONE scans the borrowed cells (a small set the
+ * chooser left as the as-written scan, G185 (b); the all-zero static
+ * initializer has m = 0 and answers 0). Read-only. */
 static inline int blade_member_test_i64(const blade_member_i64 *t, int64_t x) {
     switch (t->kind) {
     case BLADE_MEMBER_BITMAP: {
@@ -257,7 +265,8 @@ static inline int blade_member_test_i64(const blade_member_i64 *t, int64_t x) {
             h = (h + 1) & t->cap_mask;
         }
     }
-    case BLADE_MEMBER_LINEAR: {
+    case BLADE_MEMBER_LINEAR:
+    case BLADE_MEMBER_NONE: {
         int64_t i;
         for (i = 0; i < t->m; i++)
             if (t->cells[i] == x) return 1;

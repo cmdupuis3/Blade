@@ -306,7 +306,7 @@ let runPrivateSpoolTests (workDirectory: string) : int =
                     SetName = producer.Name
                     Kernels = Set.empty
                     Forced = 1
-                    Admission = "test-only owner conflict"
+                    Admission = "test-only owner conflict"; ScanOnly = false
                 }
                 rejects "D08 foreign membership owner cannot borrow the private producer" ir
                 Blade.Optimize.MemberHoistTable.reset ()

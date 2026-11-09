@@ -570,12 +570,14 @@ type MemberHoistRoute =
 let memberHoistRoutes : MemberHoistRoute list =
     let row cat test hosts compound refusal = { Category = cat; Test = test; Hosts = hosts; CompoundBuilds = compound; LlvmRefusal = refusal }
     let compoundParam = Some "parameter 'a' of 'own_hit' has type Array<Int64 like Idx<?>> -- the llvm lane handles Int64/Int32/Float64/Float32/Bool/String scalars only"
+    // G185 (b), round 4 wave 6: a LITERAL set of at most 16 keys keeps the
+    // as-written scan (no build): the rows whose sets are that small list no host
     [ row "sql-unique-contains" "Contains Present" [] 0 None
       row "sql-unique-contains" "Contains Absent" [] 0 None
       row "sql-unique-contains" "Contains Empty After Mask" [] 0 None
-      row "sql-unique-contains" "Contains In Mask Predicate" [ "in_B" ] 0 None
-      row "sql-unique-contains" "Unique Of Rank-1 Compound" [ "keep" ] 0 (Some "group_keys over a key array that is not a dense rank-1 axis")
-      row "sql-unique-contains" "Member Hoist Small Set Linear" [ "keep"; "outside" ] 0 None
+      row "sql-unique-contains" "Contains In Mask Predicate" [] 0 None
+      row "sql-unique-contains" "Unique Of Rank-1 Compound" [] 0 (Some "group_keys over a key array that is not a dense rank-1 axis")
+      row "sql-unique-contains" "Member Hoist Small Set Linear" [] 0 None
       row "sql-unique-contains" "Member Hoist Literal Set Bitmap" [ "hit"; "next_hit" ] 0 None
       row "sql-unique-contains" "Member Hoist Extreme Keys Hash" [ "hit" ] 0 None
       row "sql-unique-contains" "Member Hoist Empty Compound Set" [ "hit"; "cnt" ] 2 None
@@ -590,14 +592,14 @@ let memberHoistRoutes : MemberHoistRoute list =
       row "sql-unique-contains" "Contains Target Mutates A Dense Set" [] 0 None
       row "sql-unique-contains" "Contains Target Mutates A Compound Set" [] 0 compoundParam
       row "sql-unique-contains" "Member Hoist Fold Kernel Probe" [ "picked" ] 0 None
-      row "sql-unique-contains" "Member Hoist Stored Alias Chain" [ "flags_s" ] 0 None
-      row "sql-semijoins" "Semijoin Preserves Multiplicity" [ "r" ] 0 None
-      row "sql-semijoins" "Antijoin Basic" [ "r" ] 0 None
-      row "sql-semijoins" "Antijoin Preserves Multiplicity" [ "r" ] 0 None
-      row "sql-semijoins" "Pattern Does Not Fire On Conjunction" [ "r" ] 0 None
+      row "sql-unique-contains" "Member Hoist Stored Alias Chain" [] 0 None
+      row "sql-semijoins" "Semijoin Preserves Multiplicity" [] 0 None
+      row "sql-semijoins" "Antijoin Basic" [] 0 None
+      row "sql-semijoins" "Antijoin Preserves Multiplicity" [] 0 None
+      row "sql-semijoins" "Pattern Does Not Fire On Conjunction" [] 0 None
       row "sql-semijoins" "Semijoin Float64" [] 0 None
-      row "sql-semijoins" "Unique Of Semijoin" [ "inB" ] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
-      row "sql-semijoins" "Semijoin Then Mask" [ "inB" ] 0 None
+      row "sql-semijoins" "Unique Of Semijoin" [] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
+      row "sql-semijoins" "Semijoin Then Mask" [] 0 None
       // G126 (round 4 wave 5 lane c): two bare top-level probes, no host; `unique` has no LLVM arm
       row "sql-set-ops" "Set Ops NaN One Value" [] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
       // compaction fusion T4c's membership-probe certificate (round 3 W2-2)
@@ -1974,7 +1976,7 @@ let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
             let donor = directLets f.Body |> List.head |> fst
             Blade.Optimize.MemberHoistTable.record
                 { HostId = 990498; HostName = "outside body"; SetId = donor; SetName = "A04 donor"
-                  Kernels = Set.empty; Forced = 0; Admission = "A04 hidden owner control" }
+                  Kernels = Set.empty; Forced = 0; Admission = "A04 hidden owner control"; ScanOnly = false }
             ir
         let hiddenMetadata ir (f: Blade.IR.IRCallable) =
             let p = f.Params.Head
@@ -2222,6 +2224,112 @@ let one = contains(evens, Int64(44))
          pass "g124_rank_raising_row_map_refuses_by_name" "refused by name"
      | Error e -> fail "g124_rank_raising_row_map_refuses_by_name" ("refused for another reason: " + e)
      | Ok _ -> fail "g124_rank_raising_row_map_refuses_by_name" "emitted: the lane grew the form -- replace this pin with a differential")
+
+    // G184 (round 4 wave 6): an array-returning call folded inside a kernel
+    // lambda is freed once per kernel application -- at module scope (main)
+    // and inside a function body (`per`) alike. Per call result: one tracking
+    // store, the scope-entry null reset BEFORE the call, and after the
+    // `; G184: kernel application cleanup` marker exactly one load of its slot
+    // and one free of that load, the pool register never named again.
+    let g184ProofOf (calleeRx: string) (minCalls: int) (ll: string) (fnRx: string) : Result<int, string> =
+        let text = ll.Replace("\r\n", "\n")
+        let fm = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define [^\n]*@" + fnRx + @"\([^\n]*\{\n.*?^\}")
+        if not fm.Success then Error ($"no function matching @{fnRx}")
+        else
+        let body = fm.Value
+        let rx (p: string) = System.Text.RegularExpressions.Regex.Matches(body, p)
+        let calls = rx (@"(%r\d+) = call ptr @(?:" + calleeRx + @")\(")
+        if calls.Count < minCalls then Error ($"@{fnRx}: {calls.Count} array-returning calls")
+        else
+        let problems =
+            [ for cm in calls do
+                let p = cm.Groups.[1].Value
+                let tok = System.Text.RegularExpressions.Regex.Escape p + @"(?![0-9])"
+                let stores = rx (@"store ptr " + tok + @", ptr (%r\d+)(?![0-9])")
+                if stores.Count <> 1 then yield $"{p}: {stores.Count} tracking stores"
+                else
+                    let slot = stores.[0].Groups.[1].Value
+                    let stok = System.Text.RegularExpressions.Regex.Escape slot + @"(?![0-9])"
+                    let reset = body.IndexOf("store ptr null, ptr " + slot + "\n")
+                    let mark = body.IndexOf("; G184: kernel application cleanup", stores.[0].Index)
+                    if reset < 0 || reset > cm.Index then yield $"{p}: no scope-entry reset of {slot} before the call"
+                    elif mark < 0 then yield $"{p}: no kernel cleanup after its store"
+                    else
+                        let tail = body.Substring mark
+                        let loads = System.Text.RegularExpressions.Regex.Matches(tail, @"(%r\d+) = load ptr, ptr " + stok)
+                        if loads.Count <> 1 then yield $"{p}: slot loaded {loads.Count} times after the cleanup marker"
+                        else
+                            let l = System.Text.RegularExpressions.Regex.Escape loads.[0].Groups.[1].Value + @"\)"
+                            let frees = System.Text.RegularExpressions.Regex.Matches(tail, @"call void @blade_free\(ptr " + l)
+                            let later = System.Text.RegularExpressions.Regex.IsMatch(tail, tok)
+                            if frees.Count <> 1 || later then yield $"{p}: frees={frees.Count}, named after cleanup={later}" ]
+        match problems with
+        | [] -> Ok calls.Count
+        | ps -> Error (String.concat "; " ps)
+    let g184Proof (ll: string) (fnRx: string) = g184ProofOf @"bl_(?:big|small)_\d+" 2 ll fnRx
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Array Returning Call Folded Inside A Kernel Is Freed Per Cell (G184)") with
+     | None -> fail "g184_kernel_call_result_freed_per_application" "missing corpus witness memfree/055"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_call_result_freed_per_application" e
+         | Ok ll ->
+             match g184Proof ll "main", g184Proof ll @"bl_per_\d+" with
+             | Ok m, Ok f -> pass "g184_kernel_call_result_freed_per_application" ($"main: {m} call results, per: {f}, each freed once per application")
+             | a, b -> fail "g184_kernel_call_result_freed_per_application" (sprintf "main %A; per %A" a b))
+    // ... and its boundary (memfree/056): a pool that escapes an application
+    // (an outer `let mut` rebound to a row view of it, or to a producer
+    // reading it) is NOT freed by the kernel scope; a named fold kernel
+    // applied at two sites frees its local at both (exactly two cleanups in
+    // main, one free each, and no other free).
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Whose Pool Escapes Keeps It Alive (G184)") with
+     | None -> fail "g184_kernel_scope_escape_boundary" "missing corpus witness memfree/056"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_escape_boundary" e
+         | Ok ll ->
+             let text = ll.Replace("\r\n", "\n")
+             let m = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define i32 @main\(.*?^\}")
+             let count (p: string) = System.Text.RegularExpressions.Regex.Matches(m.Value, p).Count
+             let marks = count "; G184: kernel application cleanup"
+             let frees = count @"call void @blade_free\("
+             let calls = count @"= call ptr @bl_big_\d+\("
+             if m.Success && marks = 2 && frees = 2 && calls = 4 then
+                 pass "g184_kernel_scope_escape_boundary" "the escaping pools are kept; the twice-applied fold kernel frees its local at both sites"
+             else fail "g184_kernel_scope_escape_boundary" ($"main: {marks} cleanups, {frees} frees, {calls} calls of big (wanted 2, 2, 4)"))
+    // ... and two harmless changes that are not escapes (memfree/057): a
+    // hoisted force's alias and a reused tuple fold's scalar parameters.
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Hoisted Alias And A Reused Tuple Fold (G184)") with
+     | None -> fail "g184_kernel_scope_not_an_escape" "missing corpus witness memfree/057"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_not_an_escape" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_kernel_scope_not_an_escape" ($"main: {n} call results of big, each freed once per application")
+             | Error e -> fail "g184_kernel_scope_not_an_escape" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Reused Row Map And A Rebinding To Existing Storage (G184)") with
+     | None -> fail "g184_kernel_scope_param_and_existing_storage" "missing corpus witness memfree/058"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_param_and_existing_storage" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_kernel_scope_param_and_existing_storage" ($"main: {n} call results of big, each freed once per application")
+             | Error e -> fail "g184_kernel_scope_param_and_existing_storage" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Inlined Scalar Tuple Call Frees Its Pool Per Application (G184)") with
+     | None -> fail "g184_inlined_tuple_call" "missing corpus witness memfree/059"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_inlined_tuple_call" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_inlined_tuple_call" ($"main: {n} call results of big (top level and per cell), each freed once per application")
+             | Error e -> fail "g184_inlined_tuple_call" e)
 
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
@@ -4080,6 +4188,7 @@ let private shimPoolDriver = """
 void *blade_alloc_cells(long long n, long long cellBytes);
 void blade_free(void *p);
 void blade_pool_cache_stats(long long *out);
+void blade_pool_cache_policy(long long *out);
 static int pass = 0, total = 0;
 static void check(const char *name, int ok) {
     total++;
@@ -4088,6 +4197,9 @@ static void check(const char *name, int ok) {
 static long long st(int k) { long long s[5]; blade_pool_cache_stats(s); return s[k]; }
 int main(void) {
     long long s0[5]; blade_pool_cache_stats(s0);
+    /* the policy in force (round 4 wave 6: the default is 32 MB / 64 MB): the
+     * band and budget cases below are sized from it */
+    long long pol[3]; blade_pool_cache_policy(pol);
     int on = (int)s0[4];
     printf("  [info]: cache %s\n", on ? "on" : "off");
     blade_free((void *)0);
@@ -4106,14 +4218,15 @@ int main(void) {
     blade_free(b);
     long long t0 = st(2);
     void *small = blade_alloc_cells(100, 8);
-    void *huge = blade_alloc_cells(600000, 8);
+    void *huge = blade_alloc_cells(pol[0] / 8 + 1, 8);   /* one cell past the block cap */
     blade_free(small); blade_free(huge);
     check("small_and_huge_not_retained", st(2) == t0);
-    void *x = blade_alloc_cells(393216, 8), *y = blade_alloc_cells(393216, 8), *w = blade_alloc_cells(393216, 8);
+    long long third = pol[1] * 3 / 8 / 8;                    /* 3/8 of the budget, in doubles */
+    void *x = blade_alloc_cells(third, 8), *y = blade_alloc_cells(third, 8), *w = blade_alloc_cells(third, 8);
     long long e0 = st(3);
     blade_free(x); blade_free(y); blade_free(w);
-    /* the 24 KB pool above is still retained too: the third 3 MB block evicts
-     * it AND the first 3 MB block to stay within the 8 MB budget */
+    /* the 24 KB pool above is still retained too: the third 3/8-budget block
+     * evicts it AND the first one to stay within the budget */
     if (on) check("budget_evicts_oldest", st(3) == e0 + 2);
     long long f0 = st(0), u0 = st(1);
     double sum = 0.0;
@@ -4174,7 +4287,7 @@ int main(void) {
 #if defined(EXPECT_MAX)
     check("shim_policy_reads_the_arm_defines", pol[2] == 1 && pol[0] == EXPECT_MAX && pol[1] == EXPECT_BUDGET);
 #else
-    check("shim_policy_default_is_4mb_8mb", pol[2] == 0 && pol[0] == (4LL << 20) && pol[1] == (8LL << 20));
+    check("shim_policy_default_is_32mb_64mb", pol[2] == 0 && pol[0] == (32LL << 20) && pol[1] == (64LL << 20));
 #endif
     t0 = st(2); r0 = st(1);
     a = blade_alloc_cells(traj, 8);
@@ -4254,9 +4367,10 @@ let runLlvmRuntimeShimTests () : BlockResult =
                 record ($"shim_pool_cache_{mode}") ok ($"exit {code}")
     // BLADE_POOL_RETAIN (round-3 A4, gap G52). (a) The policy is part of the
     // shim object's identity (so of llvmExeCacheKey): the arm and a pair each
-    // build their own object, `0` and a malformed value build the DEFAULT one,
-    // and the defines are exactly the twin pair the C++ lane emits.
-    // Every default case says `off` explicitly: an UNSET variable falls back to
+    // build their own object, `default` and a malformed value build the DEFAULT
+    // one, `0` (the pre-wave-6 4 MB / 8 MB, round 4 wave 6) its own, and the
+    // defines are exactly the twin pair the C++ lane emits.
+    // Every default case says `default` explicitly: an UNSET variable falls back to
     // blade.toolchain.json, which may have persisted the arm. Unset is tested
     // once, against an isolated empty toolchain file (selector and parse cache
     // restored afterwards).
@@ -4268,23 +4382,24 @@ let runLlvmRuntimeShimTests () : BlockResult =
         withEnv [ "BLADE_TOOLCHAIN_FILE", Some emptyToolchain ] (fun () ->
             Blade.Toolchain.refresh ()
             try buildWith None finally Blade.Toolchain.refresh ())
-    (match buildWith (Some "off"), buildWith (Some "1"), buildWith (Some "32:64"), buildWith (Some "0"), buildWith (Some "bogus"), buildUnsetIsolated () with
+    (match buildWith (Some "default"), buildWith (Some "1"), buildWith (Some "32:64"), buildWith (Some "0"), buildWith (Some "bogus"), buildUnsetIsolated () with
      | (d0, Ok (o0, i0)), (d1, Ok (o1, i1)), (d2, Ok (o2, i2)), (dz, Ok (oz, iz)), (db, Ok (ob, ib)), (du, Ok (ou, iu)) ->
-         record "pool_retain_default_adds_no_shim_define" (d0 = "" && dz = "" && db = "" && du = "") $"defines '{d0}' / '{dz}' / '{db}' / unset '{du}'"
-         record "pool_retain_unset_isolated_is_the_default_identity" (iu = i0 && ou = o0) $"unset {iu} vs off {i0}"
+         record "pool_retain_default_adds_no_shim_define" (d0 = "" && db = "" && du = "") $"defines '{d0}' / '{db}' / unset '{du}'"
+         record "pool_retain_unset_isolated_is_the_default_identity" (iu = i0 && ou = o0) $"unset {iu} vs default {i0}"
          record "pool_retain_arm_shim_defines" (d1 = " -DBLADE_POOL_MAX_BLOCK=67108864 -DBLADE_POOL_BUDGET=100663296"
-                                                && d2 = " -DBLADE_POOL_MAX_BLOCK=33554432 -DBLADE_POOL_BUDGET=67108864") $"'{d1}' / '{d2}'"
-         record "pool_retain_changes_the_shim_identity" (i1 <> i0 && i2 <> i0 && i1 <> i2 && o1 <> o0 && o2 <> o0)
-                $"default {i0} / arm {i1} / pair {i2}"
-         record "pool_retain_off_and_malformed_keep_the_default_identity" (iz = i0 && ib = i0 && oz = o0 && ob = o0)
-                $"off {iz} / malformed {ib} vs default {i0}"
+                                                && d2 = " -DBLADE_POOL_MAX_BLOCK=33554432 -DBLADE_POOL_BUDGET=67108864"
+                                                && dz = " -DBLADE_POOL_MAX_BLOCK=4194304 -DBLADE_POOL_BUDGET=8388608") $"'{d1}' / '{d2}' / off '{dz}'"
+         record "pool_retain_changes_the_shim_identity" (i1 <> i0 && i2 <> i0 && i1 <> i2 && o1 <> o0 && o2 <> o0 && iz <> i0 && oz <> o0)
+                $"default {i0} / arm {i1} / pair {i2} / off {iz}"
+         record "pool_retain_malformed_keeps_the_default_identity" (ib = i0 && ob = o0)
+                $"malformed {ib} vs default {i0}"
      | _ -> record "pool_retain_shim_builds" false "a shim build under BLADE_POOL_RETAIN failed")
     // (b) The allocator under each policy: the 48 MB release retained and
     // evicted at exit under the arm, freed at once under the default and a
     // 32 MB cap.
     let retainDriver = Path.Combine(dir, "shim_retain_driver.c")
     File.WriteAllText(retainDriver, shimRetainDriver)
-    for (mode, setting, keptExpected) in [ "default", None, false; "retain1", Some "1", true; "retain32_64", Some "32:64", false ] do
+    for (mode, setting, keptExpected) in [ "default", None, false; "off", Some "0", false; "retain1", Some "1", true; "retain32_64", Some "32:64", false ] do
         let p = Blade.Toolchain.parsePoolRetention setting "test"
         let defs =
             (Blade.Toolchain.poolRetentionDefines p |> List.map (fun (n, b) -> $" -D{n}={b}") |> String.concat "")

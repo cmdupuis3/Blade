@@ -3679,6 +3679,87 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                             | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
                                 packSlot <- Some aliasToSlot.[pid]
                             | _ -> ()) lam.Body
+                        // G174 (round 4 wave 6): a DYNAMIC pack read hidden
+                        // in a callable the kernel reaches (a nested lambda,
+                        // a let-bound lambda it calls) did not unroll the
+                        // former, so the read stayed `args[k]` over a
+                        // specialization whose pack is scalar parameters
+                        // (g++ rejected the emission, BL9002). Found through
+                        // the closure graph and refused, as the direct
+                        // form's capturing lambda is (arity/484).
+                        if packSlot.IsNone then
+                            // the pack's own ids: its parameter(s) and every
+                            // function-level alias the specialization knows
+                            let packIds =
+                                Set.union
+                                    (aliasToSlot |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                    (polyIndices |> List.map (fun pi -> func.Params.[pi].VarId) |> Set.ofList)
+                            // a LET-BOUND lambda (`let h = lambda ..` in the
+                            // function body, the kernel naming `h`) resolves
+                            // through its binding to the lifted callable
+                            let letCallables =
+                                let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, IRVar (lid, _), _) -> acc.[id] <- lid
+                                    | _ -> ()) expr
+                                acc
+                            // a let-bound callable resolves through its
+                            // binding, transitively (`let h2 = h`)
+                            let rec callableOfSeen (seenIds: Set<IRId>) (id: IRId) =
+                                match Map.tryFind id funcMap with
+                                | Some d -> Some d
+                                | None ->
+                                    match letCallables.TryGetValue id with
+                                    | true, lid when not (seenIds.Contains lid) -> callableOfSeen (seenIds.Add id) lid
+                                    | _ -> None
+                            let callableOf (id: IRId) = callableOfSeen Set.empty id
+                            // the ids that name the pack in a body: the known
+                            // ones and every local alias chain of one
+                            // (`let a = args; let b = a`)
+                            let aliasesIn (known0: Set<IRId>) (body: IRExpr) =
+                                let mutable known = known0
+                                let mutable grew = true
+                                while grew do
+                                    grew <- false
+                                    iterIRExpr (fun e ->
+                                        match e with
+                                        | IRLet (id, IRVar (src, _), _) when known.Contains src && not (known.Contains id) ->
+                                            known <- known.Add id
+                                            grew <- true
+                                        | _ -> ()) body
+                                known
+                            // a body reads the pack DYNAMICALLY through one of
+                            // those ids; a literal index is resolved by the
+                            // specialization and is left alone
+                            let readsPack (known: Set<IRId>) (body: IRExpr) =
+                                let mutable reads = false
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRPolyIndex (_, IRLit _) -> ()
+                                    | IRPolyIndex (IRVar (pid, _), _) when known.Contains pid -> reads <- true
+                                    | _ -> ()) body
+                                reads
+                            // every LAMBDA the kernel reaches (directly, through
+                            // a let binding or an alias of one, or through
+                            // another lambda that calls it) is searched, the
+                            // pack's ids carried across each closure boundary
+                            // (an alias made in the kernel and captured inside);
+                            // a NAMED function -- the enclosing one included,
+                            // recursively -- reads its OWN parameters, which its
+                            // own specialization resolves, and is not followed
+                            let seen = System.Collections.Generic.HashSet<IRId>()
+                            let rec hiddenIn (known: Set<IRId>) (x: IRExpr) =
+                                collectVarRefsIR x |> Set.exists (fun id ->
+                                    match callableOf id with
+                                    | Some d when d.Id <> lam.Id && d.Name.StartsWith "__lambda" && seen.Add d.Id ->
+                                        let inner = aliasesIn known d.Body
+                                        readsPack inner d.Body || hiddenIn inner d.Body
+                                    | _ -> false)
+                            let hidden (x: IRExpr) = hiddenIn (aliasesIn packIds x) x
+                            if hidden lam.Body then
+                                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                    $"'{func.SourceName}': a pack former's kernel reads the pack only through a nested lambda (a dynamic `args[k]` inside it); the former is unrolled per pack element only when the kernel itself reads the pack, so the lambda would keep a pack subscript the specialization no longer has (gap G174). Compute the value inline instead of through the nested lambda.")))
                         match packSlot with
                         | Some slotIdx ->
                             let n = aritiesArr.[slotIdx]

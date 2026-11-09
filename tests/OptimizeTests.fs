@@ -308,7 +308,7 @@ let private sliceWriteRk4Emission () =
         let rowDeallocs = System.Text.RegularExpressions.Regex.Matches(body, @"deallocate<typename promote<double, 1>").Count
         // (row n's slot: `n`, or `n % R` when rec-fold-ring rings the
         // trajectory -- its only consumer is the fused row fold)
-        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[(__kv\d+|\(static_cast<int64_t>\(__kv\d+\) % \d+L\))\]\[__kv\d+\] = __v\d+;")
+        let rowStore = System.Text.RegularExpressions.Regex.IsMatch(body, @"__v\d+\[(__kv\d+|\(static_cast<int64_t>\(__kv\d+\) % \d+LL?\))\]\[__kv\d+\] = __v\d+;")
         if start >= 0 && stepCalls = 0 && rowDeallocs = 0 && rowStore then
             resultLine Pass name "kernel: no step call, no rank-1 temporary freed, cells stored straight into the trajectory row"
             true
@@ -962,18 +962,19 @@ let private recFoldEmission () : bool list =
             let full = cpp.Contains "{ 1001 }"
             if ring && not full then resultLine Pass name "ring extents { 2 }, `% 2LL` subscripts, no { 1001 } allocation"; true
             else resultLine Fail name $"ring={ring} full1001={full}"; false
-    // The DEFAULT build (unset) and an explicit `0` keep the full trajectory
-    // and record the opt-in decline (the analysis still says it would apply).
+    // DEFAULT ON since round 4 wave 6 (gap G94): an explicit `0` / `off`
+    // keeps the full trajectory and records the disabled decline (the
+    // analysis still says it would apply).
     let offWith (label: string) (value: string) =
-        let name = $"rec_fold_ring_emission_default_{label}: BLADE_REC_FOLD {label} keeps the 1001-row trajectory and records the opt-in decline"
+        let name = $"rec_fold_ring_emission_off_{label}: BLADE_REC_FOLD={label} keeps the 1001-row trajectory and records the disabled decline"
         match withGate "BLADE_REC_FOLD" value (fun () -> cppOfSource name src46, decisionsOf src46) with
         | Error e, _ | _, Error e -> resultLine Fail name e; false
         | Ok cpp, Ok ds ->
             let full = cpp.Contains "{ 1001 }"
-            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "opt-in this wave (BLADE_REC_FOLD=1)" d)
-            if full && declined then resultLine Pass name "1001-row trajectory allocated; rec-fold-ring declined -- opt-in this wave"; true
-            else resultLine Fail name $"full1001={full} declinedOptIn={declined}"; false
-    let off = offWith "unset" null && offWith "0" "0"
+            let declined = ds |> List.exists (fun d -> d.Rule = "rec-fold-ring" && declinedMentioning "disabled by BLADE_REC_FOLD" d)
+            if full && declined then resultLine Pass name "1001-row trajectory allocated; rec-fold-ring declined -- disabled by BLADE_REC_FOLD"; true
+            else resultLine Fail name $"full1001={full} declinedDisabled={declined}"; false
+    let off = offWith "0" "0" && offWith "off" "off"
     let llvm =
         let name = "rec_fold_ring_llvm_lane: the LLVM lane emits the ringed recursion and its in-sweep folds"
         match lower src46 with
@@ -1049,7 +1050,7 @@ let private recFoldEmission () : bool list =
             if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning why d) then
                 resultLine Pass name $"rec-fold-ring declined -- ...{why}..."; true
             else resultLine Fail name ("saw: " + (mine |> List.map Blade.Effects.Decisions.render |> String.concat " | ")); false
-    let effect = declinesWith "rec_fold_ring_declines_effect_in_range_extent: a range bound that calls a storing helper" effectInExtent "a type carries"
+    let effect = declinesWith "rec_fold_ring_declines_effect_in_range_extent: a range bound that calls a storing helper" effectInExtent "may write storage other than its own row stores"
     let deep = declinesWith "rec_fold_ring_declines_deep_extent_read: a trajectory read ten range extents deep" deepExtent "inside a type's extent"
     // Codex review round 5: a module-level DEFERRED map the step forces, whose
     // kernel calls a writer in a range bound (reached by the write analysis
@@ -9304,10 +9305,23 @@ let private memberRule = "member-hoist"
 let private memberApplied (subject: string) (d: Blade.Effects.Decision) = applied d && d.Subject = subject
 
 let private memberHoistDecisionCases () =
-    [ decisionCase "decision_member_hoist_small_linear" memberSmallSrc memberRule
-          (fun d -> memberApplied "keep" d && evidenceHas "representation: linear (span 9, M 4)" d
-                    && evidenceHas "set `eligible` (rank-1 dense, Int64 keys): ONE search structure built immediately before `keep`" d)
-          "applied: four literal keys, linear"
+    [ // G185 (b), round 4 wave 6: a LITERAL set of at most 16 keys keeps the
+      // as-written scan (the five-party evidence is still recorded)
+      decisionCase "decision_member_hoist_small_set_declines" memberSmallSrc memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "small set: the as-written scan is faster (G185)" d
+                    && evidenceHas "representation: none (span 9, M 4)" d
+                    && evidenceHas "set `eligible` (rank-1 dense, Int64 keys): NO structure is built -- the 1 probe site(s) in `lambda in keep` keep the as-written scan" d)
+          "declined: four literal keys keep the as-written scan"
+      // G185 (b): a COMPUTED dense set's static extent counts too (the
+      // pm56_member_small control: Idx<11>); 16 keys decline, 17 build
+      decisionCase "decision_member_hoist_static_extent_16_declines"
+          ("type E = Idx<16>\n" + memberHead + "let s16 = method_for(range<E>) <@> lambda(e) -> Int64(e) * 2 |> compute\nlet keep = mask(customer, lambda(c) -> contains(s16, c))\n") memberRule
+          (fun d -> d.Subject = "keep" && declinedMentioning "small set: the as-written scan is faster (G185)" d)
+          "declined: a computed Idx<16> set keeps the as-written scan"
+      decisionCase "decision_member_hoist_static_extent_17_applies"
+          ("type E = Idx<17>\n" + memberHead + "let s17 = method_for(range<E>) <@> lambda(e) -> Int64(e) * 2 |> compute\nlet keep = mask(customer, lambda(c) -> contains(s17, c))\n") memberRule
+          (fun d -> memberApplied "keep" d && evidenceHas "chosen at run time" d)
+          "applied: a computed Idx<17> set is hoisted (the representation chosen at run time)"
       decisionCase "decision_member_hoist_literal_bitmap" memberBitmapSrc memberRule
           (fun d -> memberApplied "keep" d && evidenceHas "representation: bitmap (span 61, M 20)" d) "applied: bitmap (span 61, M 20)"
       decisionCase "decision_member_hoist_extreme_keys_hash" memberExtremeSrc memberRule
@@ -9315,9 +9329,9 @@ let private memberHoistDecisionCases () =
       decisionCase "decision_member_hoist_computed_set_runtime_choice" memberComputedSrc memberRule
           (fun d -> memberApplied "flags" d && evidenceHas "representation: chosen at run time from (M, min, max) only, never from timing" d)
           "applied: a computed stored set's representation is chosen at run time"
-      decisionCase "decision_member_hoist_five_party_matrix" memberSmallSrc memberRule
+      decisionCase "decision_member_hoist_five_party_matrix" memberBitmapSrc memberRule
           (fun d -> memberApplied "keep" d
-                    && evidenceHas "membershipAdmits (five parties, each through Optimize.scheduleMayWriteIn): set producer `eligible`: stored at its own site" d
+                    && evidenceHas "membershipAdmits (five parties, each through Optimize.scheduleMayWriteIn): set producer `evens`: stored at its own site" d
                     && evidenceHas "consumer kernel(s) `lambda in keep`: no write" d
                     && evidenceHas "outer fold kernel(s) / seed(s): none (no fold in the host)" d
                     && evidenceHas "between the build and `keep`: no binding" d
@@ -9329,7 +9343,7 @@ let private memberHoistDecisionCases () =
       decisionCase "decision_member_hoist_omp_kernel_read_only" memberComputedSrc memberRule
           (fun d -> memberApplied "flags" d && evidenceHas "`where omp` -- the build runs serially before the team and every thread only reads it; no function-valued parameter" d)
           "a `where omp` kernel: serial build, read-only probes"
-      decisionCase "decision_member_hoist_target_contract" memberSmallSrc memberRule
+      decisionCase "decision_member_hoist_target_contract" memberBitmapSrc memberRule
           (fun d -> memberApplied "keep" d && evidenceHas "target: evaluated exactly once per probe, before any cell is read" d)
           "the one target-evaluation contract is stated"
       withGate "BLADE_MEMBER_HOIST" "hash" (fun () ->
@@ -9374,12 +9388,13 @@ let private memberHoistDecisionCases () =
                     && declinedMentioning "the set `C` is not proved stored at the build point: `C` is an alias of `B`, and `B` is an alias of `lazy`, and `lazy` is a deferred computation" d)
           "declined: a two-hop alias of a deferred map"
       decisionCase "decision_member_hoist_stored_alias_chain_applied" memberDeferredAliasSrc memberRule
-          (fun d -> memberApplied "flags_s" d && evidenceHas "an alias of `S1`, an alias of `stored`, an array literal" d)
-          "applied: a two-hop alias of a literal, proved stored"
+          (fun d -> d.Subject = "flags_s" && evidenceHas "an alias of `S1`, an alias of `stored`, an array literal" d
+                    && declinedMentioning "small set: the as-written scan is faster (G185)" d)
+          "a two-hop alias of a literal, proved stored (and, three keys at its root, kept as the scan: G185)"
       // the canonical semijoin keeps its mask INLINE in the compound's side
       // table: the compound binding (whose site runs the mask) is the host
       decisionCase "decision_member_hoist_inline_semijoin_compound_host"
-          (memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet semi = compound(customer, mask(customer, lambda(c) -> contains(eligible, c)))\n") memberRule
+          (memberHead + "let eligible = Int64([3, 3, 1, -5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])\nlet semi = compound(customer, mask(customer, lambda(c) -> contains(eligible, c)))\n") memberRule
           (fun d -> memberApplied "semi" d && evidenceHas "built immediately before `semi`" d)
           "applied: the compound whose inline mask probes is the host" ]
 
@@ -9619,7 +9634,9 @@ let private memberHoistCorpusRoutes () : bool list =
 /// wrapper after the free.
 let private memberHoistPlacementMutations () : bool list =
     let name = "member_hoist_route_cpp_checker_refuses_misplacements"
-    match (try Blade.Tests.Corpus.category "sql-unique-contains" |> List.tryFind (fun (n, _) -> n = "Member Hoist Small Set Linear") with _ -> None) with
+    // (G185 (b), round 4 wave 6: the small-set file keeps the as-written scan;
+    // the 17-key failing-target file still builds a structure for `keep`)
+    match (try Blade.Tests.Corpus.category "sql-unique-contains" |> List.tryFind (fun (n, _) -> n = "Member Hoist Failing Target (aborts)") with _ -> None) with
     | None -> resultLine Fail name "the corpus file is missing (renamed?)"; [ false ]
     | Some (_, src) ->
     match loweredValidated src (fun ir -> fst (CodeGen.genSelfContainedProgramFromIR ir name)) with
@@ -9692,7 +9709,7 @@ let private memberHoistFailClosedGuards () : bool list =
                     | _ -> ()) host.Value
                 Blade.Optimize.MemberHoistTable.record
                     { HostId = host.Id; HostName = host.Name; SetId = set.Id; SetName = set.Name
-                      Kernels = Set.ofSeq kernels; Forced = 0; Admission = "hand-built" }
+                      Kernels = Set.ofSeq kernels; Forced = 0; Admission = "hand-built"; ScanOnly = false }
                 Blade.Effects.Decisions.start ()
                 let emitted = try Ok (emit ir) with ex -> Error ("raised: " + ex.Message)
                 let ds = Blade.Effects.Decisions.drain ()
@@ -11113,6 +11130,208 @@ let private dcfBodyTupleSrc =
     + "}\n"
     + "let rows = rowpair(S)\n"
 
+// G167 (round 4 wave 6): a pool bound by a BODY LET of the host's spine.
+let private dcfBodyLetSrc =
+    dcfHead
+    + "function rowsum_let(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {\n"
+    + "    let P = Q * 2.0 |> compute\n"
+    + "    reduce(decompact(P, 0), (+), 0.0)\n"
+    + "}\n"
+    + "let rows = rowsum_let(S)\n"
+let private dcfBodyLetWrittenSrc =
+    dcfHead
+    + "function poke(A: mut Array<Float64 like SymIdx<2, I>>) -> Float64 = {\n"
+    + "    A(0, 0) = 100.0\n"
+    + "    1.0\n"
+    + "}\n"
+    + "function written(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {\n"
+    + "    let mut P = Q * 2.0 |> compute\n"
+    + "    let z = poke(P)\n"
+    + "    reduce(decompact(P, 0), (+), 0.0)\n"
+    + "}\n"
+    + "let rows = written(S)\n"
+let private dcfBodyLetNestedSrc =
+    dcfHead
+    + "function nested(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {\n"
+    + "    let P = { let T = Q * 2.0 |> compute; T }\n"
+    + "    reduce(decompact(P, 0), (+), 0.0)\n"
+    + "}\n"
+    + "let rows = nested(S)\n"
+
+// G123 wave-6 class-closure member: ANOTHER module names the host function as
+// a value (a `>>=` continuation the LLVM lane splices over the deferred
+// producer). The program-wide value census declines the parameter route.
+let private dcfForeignBindSources =
+    [ ("Lib", "module Lib\ntype I = Idx<5>\nlet mut weights: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]\n"
+              + "function rowsum(P: Array<Float64 like SymIdx<2, I>>) -> Float64 = {\n"
+              + "    let w = weights |> compute\n"
+              + "    let y = method_for(decompact(P, 0)) <@> lambda(r) -> prodsum(r, w) |> compute\n"
+              + "    reduce(y, (+), 0.0)\n"
+              + "}\n")
+      ("Main", "module Main\nfrom Lib import I, rowsum, weights\nlet x = Float64(range<I>)\n"
+               + "let result = ((method_for(x, x) <@> lambda(a, b) where comm(a, b) -> {\n"
+               + "        weights(0) = a + b\n"
+               + "        Float64(1.0)\n"
+               + "    }) >>= rowsum) |> compute\n") ]
+
+let private decompactForeignBindCase () : bool =
+    let name = "decision_decompact_body_foreign_value_ref_declined"
+    match withGate "BLADE_DECOMPACT_FOLD" "body" (fun () -> decisionsOfMulti dcfForeignBindSources) with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "decompact-row-fold" && d.Subject = "rowsum")
+        if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning "referenced other than by a direct call" d) then
+            resultLine Pass name "declined: another module names `rowsum` as a value (a `>>=` continuation)"; true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted a decline naming the value reference; saw: {shown}"); false
+
+// Round 4 wave 6 class-closure members of the sibling-folds `top` arm (a
+// deferred tuple projection operand; G107) and of the compute-elision `chain`
+// arm (an imported deferred operand; G108).
+let private sfTopDeferredProjSrc =
+    "type I = Idx<3>\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "let iv: Array<Int64 like I> = [1, 4, 2]\n"
+    + "let pack = (method_for(iv) <@> lambda(v) -> Float64(100 / v), method_for(x) <@> lambda(v) -> v)\n"
+    + "let y = pack[0]\n"
+    + "let a = prodsum(x, x)\n"
+    + "let note = a + 1.0\n"
+    + "let b = prodsum(y, y)\n"
+let private chainImportedSources =
+    [ ("H", "module H\nlet mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\nlet d = method_for(x) <@> lambda(v) -> v * 2.0\n")
+      ("Main", "module Main\nimport H\nlet p3 = method_for(H.d) <@> lambda(v) -> v + 1.0\n"
+               + "let q3 = method_for(p3) <@> lambda(v) -> v * v\n"
+               + "let r3 = reduce(q3, (+), 0.0)\n"
+               + "H.x(0) = 10.0\n"
+               + "let z = H.d(0)\n") ]
+
+let private wave6ClassClosureCases () : bool list =
+    let topCase =
+        let name = "decision_sibling_folds_top_deferred_projection_not_joined"
+        match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> decisionsOf sfTopDeferredProjSrc) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let sf = ds |> List.filter (fun d -> d.Rule = "sibling-folds" && d.Subject = "top level")
+            if sf |> List.exists applied then
+                let seen = sf |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                resultLine Fail name ($"the top-level region joined over the deferred projection: {seen}"); false
+            else
+                resultLine Pass name "the top-level region does not join a fold over a deferred tuple projection"; true
+    let chainCase =
+        let name = "decision_compute_elision_chain_imported_operand_declined"
+        match withGate "BLADE_COMPUTE_ELIDE" "chain" (fun () -> decisionsOfMulti chainImportedSources) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "compute-elision" && d.Subject.Contains "q3")
+            if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning "not proved stored by this module" d) then
+                resultLine Pass name "declined: an imported deferred operand of p has no storage evidence in this module"; true
+            else
+                let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let shown = if seen = "" then "no decisions" else seen
+                resultLine Fail name ($"wanted the storage decline; saw: {shown}"); false
+    // the kernel-capture route of the same member: p over a RANGE whose
+    // kernel reads an imported deferred map (H.d(i)); the totality audits
+    // now use the fail-closed program classifier
+    let chainCaptureCase =
+        let name = "decision_compute_elision_chain_imported_kernel_read_declined"
+        let sources =
+            [ ("H", "module H\ntype I = Idx<3>\nlet x: Array<Int64 like I> = [1, 0, 3]\nlet y: Array<Float64 like I> = [1.0, 0.0, 3.0]\n"
+                    + "let d = method_for(x) <@> lambda(v) -> 100 / v\nlet e = method_for(y) <@> lambda(v) -> Int64(floor(v / v))\n")
+              ("Main", "module Main\nimport H\nlet p3 = method_for(range<H.I>) <@> lambda(i) -> if i == 2 then H.d(i) else 1\n"
+                       + "let q3 = method_for(zip(p3, range<H.I>)) <@> lambda(v, i) -> v + H.e(i)\n"
+                       + "let r3 = reduce(q3, (+), 0)\n") ]
+        match withGate "BLADE_COMPUTE_ELIDE" "chain" (fun () -> decisionsOfMulti sources) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "compute-elision" && d.Subject.Contains "q3")
+            if mine |> List.exists applied then
+                let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                resultLine Fail name ($"the chain applied over an imported deferred kernel read: {seen}"); false
+            else
+                resultLine Pass name "not applied: a kernel reading an imported deferred map is not certified total"; true
+    // join-aggregate (G128 / ST15): a print selection naming an IMPORTED
+    // module's J (`--print Lib.J`) -- qualified after the plan runs -- used to
+    // miss, so J's buffer was never built and printed through null
+    let joinAggQualifiedPrintCase =
+        let name = "join_aggregate_qualified_print_selection_declines"
+        let lib = "module Lib\ntype L = Idx<2>\ntype R = Idx<2>\n"
+                  + "let ak: Array<Int64 like L> = [1, 2]\nlet av: Array<Int64 like L> = [2, 3]\n"
+                  + "let bk: Array<Int64 like R> = [1, 2]\nlet bv: Array<Int64 like R> = [10, 20]\n"
+                  + "let J = compound(method_for(av, bv) <@> lambda(l, r) -> l * r, mask(method_for(ak, bk) <@> lambda(l, r) -> l == r, lambda(e) -> e))\n"
+                  + "let s = reduce(J, (+), 0)\n"
+        let sources = [ ("Lib", lib); ("Main", "module Main\nimport Lib\nlet total = 1\n") ]
+        match withGates [ ("BLADE_JOIN_AGG", "1"); ("BLADE_PRINT", "Lib.J,total") ] (fun () -> decisionsOfMulti sources) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "join-aggregate" && d.Subject = "J")
+            if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning "the print selection names J" d) then
+                resultLine Pass name "declined: `--print Lib.J` names the imported relation"; true
+            else
+                let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let shown = if seen = "" then "no decisions" else seen
+                resultLine Fail name ($"wanted the printed-J decline; saw: {shown}"); false
+    // G186: the join producer plans the sibling pass's INLINED copy at its
+    // site (a module binding's block), and the dead function's record says so
+    let joinProducerInlinedCases =
+        let file = "tests/corpus/sibling-folds/055_join_producer_plans_the_inlined_copy.blade"
+        if not (System.IO.File.Exists file) then
+            resultLine Fail "join_producer_inlined_copy" $"missing {file} (run from the repo root)"; [ false ]
+        else
+        let src = System.IO.File.ReadAllText file
+        let dec =
+            let name = "decision_join_producer_inlined_copy_applied"
+            match decisionsOf src with
+            | Error e -> resultLine Fail name e; false
+            | Ok ds ->
+                let jp = ds |> List.filter (fun d -> d.Rule = "join-producer")
+                let site = jp |> List.exists (fun d -> d.Subject.StartsWith "_(checksum" && applied d)
+                let dead = jp |> List.exists (fun d -> d.Subject.StartsWith "kernel." && evidenceHas "no call of `kernel` remains in this module" d)
+                if site && dead then resultLine Pass name "the inlined copy is applied at its site; kernel's record says no call remains"; true
+                else
+                    let seen = jp |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                    resultLine Fail name ($"site applied: {site}, dead note: {dead}; saw: {seen}"); false
+        let alloc =
+            let name = "join_producer_inlined_copy_cpp_two_pools_fewer"
+            match cppOfSource name src, withGate "BLADE_JOIN_PRODUCER" "0" (fun () -> cppOfSource name src) with
+            | Ok on, Ok off ->
+                let count (c: string) = System.Text.RegularExpressions.Regex.Matches(c, @"(?<!de)allocate<").Count
+                // two pools fewer: the function's own p (still emitted) AND the
+                // inlined copy's p in main (the program's executed producer)
+                if count on = count off - 2 then resultLine Pass name ($"{count on} allocation(s) on, {count off} off: p is gone from the function and from main's inlined copy"); true
+                else resultLine Fail name ($"{count on} allocation(s) on, {count off} off; wanted exactly two fewer (the function and the inlined copy)"); false
+            | Error e, _ | _, Error e -> resultLine Fail name e; false
+        [ dec; alloc ]
+    // the write analysis's roots: FRESH scratch storage bound inside a range
+    // bound of an omp kernel is private (no BL4005), as when hoisted
+    let extentScratchOmpCase =
+        let name = "write_analysis_extent_local_scratch_not_a_parallel_write"
+        let src =
+            "function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {\n    a(0) = 3\n    3\n}\n"
+            + "let xs: Array<Int64 like Idx<4>> = [1, 2, 3, 4]\n"
+            + "let ys = method_for(xs) <@> lambda(v) where omp(v: 1) -> v * reduce(method_for(0..{ let mut scratch: Array<Int64 like Idx<3>> = [1, 2, 3]; bump(scratch) }) <@> lambda(k) -> k, (+)) |> compute\n"
+        // and a `let mut` COPY of a captured array bound in the bound (the
+        // copied-let census reads carried extents too)
+        let copiedSrc =
+            "function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {\n    a(0) = 3\n    3\n}\n"
+            + "let seed: Array<Int64 like Idx<3>> = [1, 2, 3]\n"
+            + "let xs: Array<Int64 like Idx<4>> = [1, 2, 3, 4]\n"
+            + "let ys = method_for(xs) <@> lambda(v) where omp(v: 1) -> v * reduce(method_for(0..{ let mut scratch = seed; bump(scratch) }) <@> lambda(k) -> k, (+)) |> compute\n"
+        match decisionsOf src, decisionsOf copiedSrc with
+        | Ok _, Ok _ -> resultLine Pass name "lowers: extent-local scratch (fresh, or a let mut copy) is the kernel's own storage"; true
+        | Error e, _ -> resultLine Fail name ("fresh scratch: " + e); false
+        | _, Error e -> resultLine Fail name ("copied scratch: " + e); false
+    let internalNameCase =
+        let name = "internal_binding_name_reads_qualified_segment"
+        let ok =
+            Blade.CodeGen.isInternalBindingName "A.__sfj18" && Blade.CodeGen.isInternalBindingName "__sfj18"
+            && not (Blade.CodeGen.isInternalBindingName "A.answer") && not (Blade.CodeGen.isInternalBindingName "A.__expr3")
+        if ok then resultLine Pass name "a qualified internal name is internal; a qualified __expr carrier and a user name are not"
+        else resultLine Fail name "isInternalBindingName misreads a qualified name"
+        ok
+    [ topCase; chainCase; chainCaptureCase; joinAggQualifiedPrintCase; extentScratchOmpCase; internalNameCase ] @ joinProducerInlinedCases
+
 let private decompactRowFoldCases () : bool list =
     let dcf (d: Blade.Effects.Decision) = d.Subject = "rows"
     let mainAllocs (cpp: string) = System.Text.RegularExpressions.Regex.Matches(cpp, @"(?<!de)allocate<").Count
@@ -11176,6 +11395,39 @@ let private decompactRowFoldCases () : bool list =
       decisionCase "decision_decompact_body_default_declined" dcfBodySrc "decompact-row-fold"
           (fun d -> d.Subject = "rowsum" && declinedMentioning "opt-in (BLADE_DECOMPACT_FOLD=body)" d)
           "declined by default: the function-body arm is opt-in"
+      withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
+          decisionCase "decision_decompact_body_let_applied" dcfBodyLetSrc "decompact-row-fold"
+              (fun d -> d.Subject = "rowsum_let" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "a body let of `rowsum_let`"))
+              "applied under BLADE_DECOMPACT_FOLD=body: the pool is a body let (G167)")
+      withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
+          decisionCase "decision_decompact_body_let_written_declined" dcfBodyLetWrittenSrc "decompact-row-fold"
+              (fun d -> d.Subject = "written" && declinedMentioning "may write" d)
+              "declined: a statement between the body let and the host writes it (mut parameter)")
+      withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
+          decisionCase "decision_decompact_body_let_nested_block_declined" dcfBodyLetNestedSrc "decompact-row-fold"
+              (fun d -> d.Subject = "nested" && declinedMentioning "is not a `|> compute` or an array literal" d)
+              "declined: a pool bound through a nested block is not proved stored")
+      decompactForeignBindCase ()
+      (let name = "decompact_body_let_cpp_no_buffer"
+       match withGate "BLADE_DECOMPACT_FOLD" "body" (fun () -> cppOfSource name dcfBodyLetSrc),
+             withGate "BLADE_DECOMPACT_FOLD" "0" (fun () -> cppOfSource name dcfBodyLetSrc) with
+       | Ok on, Ok off ->
+           let count (c: string) = System.Text.RegularExpressions.Regex.Matches(c, @"(?<!de)allocate<").Count
+           if count on = count off - 1 then
+               resultLine Pass name ($"{count on} allocation(s) under body, {count off} off: the body let's decompaction buffer is gone"); true
+           else
+               resultLine Fail name ($"{count on} allocation(s) under body, {count off} off; wanted exactly one fewer"); false
+       | Error e, _ | _, Error e -> resultLine Fail name e; false)
+      (let name = "decompact_body_let_llvm_no_buffer"
+       match withGate "BLADE_DECOMPACT_FOLD" "body" (fun () -> ceLlvmOf name dcfBodyLetSrc),
+             withGate "BLADE_DECOMPACT_FOLD" "0" (fun () -> ceLlvmOf name dcfBodyLetSrc) with
+       | Ok on, Ok off ->
+           let count (b: string) = System.Text.RegularExpressions.Regex.Matches(b, @"call ptr @blade_alloc_cells").Count
+           if count on = count off - 1 then
+               resultLine Pass name ($"llvm lane: {count on} pool allocation(s) under body, {count off} off"); true
+           else
+               resultLine Fail name ($"llvm lane: {count on} allocation(s) under body, {count off} off; wanted exactly one fewer"); false
+       | Error e, _ | _, Error e -> resultLine Fail name ($"the llvm lane refused: {e}"); false)
       withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
           decisionCase "decision_decompact_body_tuple_return_declined" dcfBodyTupleSrc "decompact-row-fold"
               (fun d -> d.Subject = "rowpair" && declinedMentioning "returns a tuple" d)
@@ -12251,9 +12503,10 @@ let private hashJoinCorpusRoutes () =
           ("022_equijoin_residual_not_total_declines.blade", Error [ (m, "a residual conjunct of the key kernel is not a pure, total scalar") ])
           ("023_equijoin_residual_rejects_every_match.blade", admitted [ (m, "residual (D3, ST15): the conjunctive key kernel is re-evaluated", "if (!__wrap_") ])
           // round 4 wave 4 H1 (G128, ST15): a payload mask over J and the compound over it
-          ("024_equijoin_payload_mask_then_compound.blade", Error [ (m, "`matched` as an operand of IRMask") ])
-          ("025_equijoin_payload_mask_inline.blade", Error [ (m, "a use of `matched` the census does not certify") ])
-          ("026_equijoin_payload_mask_keyed_read_declines.blade", Error [ (m, "`matched` as an operand of IRMask") ]) ]
+          // (BLADE_JOIN_SELECTION default on since round 4 wave 6)
+          ("024_equijoin_payload_mask_then_compound.blade", admitted [ (m, "a mask over the compact buffer", "compound_index_t<2>::cardinality_only") ])
+          ("025_equijoin_payload_mask_inline.blade", admitted [ (m, "", "compound_index_t<2>::cardinality_only") ])
+          ("026_equijoin_payload_mask_keyed_read_declines.blade", Error [ (m, "the mask `keep` over `matched` as an operand") ]) ]
     if not (System.IO.Directory.Exists dir) then
         resultLine Fail "hash_join_corpus_route_census" $"missing {dir} (run from the repo root)"
         [ false ]
@@ -12480,7 +12733,8 @@ let private joinAggCases () : bool list =
         let on src = withGate "BLADE_JOIN_SELECTION" "1" (fun () -> decisionsOf src, cppOfSource "hj_sel" src)
         let blockLocal = joinAggSrc + "let keep = {\n    let bits = mask(matched, lambda(v) -> v > 25)\n    bits\n}\nlet first_pair = keep(0, 0)\n"
         match on (read "024_equijoin_payload_mask_then_compound.blade"), on (read "025_equijoin_payload_mask_inline.blade"),
-              on (read "026_equijoin_payload_mask_keyed_read_declines.blade"), on blockLocal, decisionsOf (read "024_equijoin_payload_mask_then_compound.blade") with
+              on (read "026_equijoin_payload_mask_keyed_read_declines.blade"), on blockLocal,
+              withGate "BLADE_JOIN_SELECTION" "0" (fun () -> decisionsOf (read "024_equijoin_payload_mask_then_compound.blade")) with
         | (Error e, _), _, _, _, _ | (_, Error e), _, _, _, _ | _, (Error e, _), _, _, _ | _, (_, Error e), _, _, _
         | _, _, (Error e, _), _, _ | _, _, _, (Error e, _), _ | _, _, _, _, Error e -> [ e ]
         | (Ok d24, Ok c24), (Ok d25, Ok c25), (Ok d26, _), (Ok dbl, _), Ok dOff ->
@@ -12490,7 +12744,7 @@ let private joinAggCases () : bool list =
               if not (hj d25 |> List.exists applied) || not (cardOnly c25) then yield "025: the inline selection census did not apply"
               if not (hj d26 |> List.exists (declinedMentioning "the mask `keep` over `matched` as an operand")) then yield "026: the keyed read through the mask is not declined"
               if hj dbl |> List.exists applied then yield "a block-local mask over J was certified"
-              if not (hj dOff |> List.exists (declinedMentioning "`matched` as an operand of IRMask")) then yield "the default build certifies a selection" ])
+              if not (hj dOff |> List.exists (declinedMentioning "`matched` as an operand of IRMask")) then yield "BLADE_JOIN_SELECTION=0 certifies a selection (the old default)" ])
       // H1 / ST15: join -> payload predicate (a mask over J, the compound over
       // it) -> strict aggregate: the selection is never stored either
       check "join_aggregate_st15_selection_applied" (fun () ->
@@ -12960,11 +13214,11 @@ let runOptimizeTests () =
           yield! recReplayCorpusCases ()
           yield! recReplayEmission ()
           yield! atDrawFoldCases ()
-          // PM35: folds riding a windowed recurrence.
-          // (OPT-IN this wave: every APPLIED assertion runs with an explicit
-          // BLADE_REC_FOLD=1; the default-build decline is pinned inside.)
-          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldCorpusCases ())
-          yield! withGate "BLADE_REC_FOLD" "1" (fun () -> recFoldEmission ())
+          // PM35: folds riding a windowed recurrence. DEFAULT ON since round
+          // 4 wave 6 (gap G94): the applied assertions run in the default
+          // build; the `0` / `off` decline is pinned inside.
+          yield! recFoldCorpusCases ()
+          yield! recFoldEmission ()
           // PM35's constructor table: closed by reflection, each row's walker.
           yield! recFoldConstructorTableCases ()
           // PM14: the leading-axis fold's state updated in place.
@@ -13287,6 +13541,7 @@ let runOptimizeTests () =
           notAppliedCase "hoist_array_call_reading_the_cell_stays" hoistArrayCallCellSrc "invariant-hoist" "prep(row) reads the element: it stays in the kernel"
           yield! gatherTerminalCases ()
           yield! decompactRowFoldCases ()
+          yield! wave6ClassClosureCases ()
           yield! ceRemainderCases ()
           yield! g98DeferredValueCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.

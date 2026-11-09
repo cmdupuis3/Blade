@@ -314,6 +314,7 @@ let private adBodyWhere : WhereClause option =
 let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<FunctionDecl, string> =
     errMode.Value <- (if vjp then "vjp" else "grad")
     let fname = fd.Name
+    resetLetAnnotations fname
     let modeName = if vjp then "vjp" else "grad"
     let suffix = if vjp then vjpSuffix else gradSuffix
     let seedName = "__seed"
@@ -386,7 +387,13 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv
                SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
-               FreshLocals = freshLocalsOf arrays stmts }
+               FreshLocals = freshLocalsOf arrays stmts
+               RealScalars =
+                   fd.Params |> List.choose (fun p ->
+                       match p.Type |> Option.map (resolveTy ctx) with
+                       | Some (TyFloat64 | TyFloat32) -> Some p.Name
+                       | Some (TyNamed (("Float64" | "Float32"), _)) -> Some p.Name
+                       | _ -> None) |> Set.ofList }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals).
@@ -530,12 +537,31 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
             | Some (TyArray _) -> Some p.Name
             | _ -> None)
         |> Set.ofList
+    // A parameter is a SCALAR only when its declared type is positively a
+    // scalar numeric (or Bool) type: a tuple or a callable parameter may
+    // carry an array a caller aliased into a gradient buffer (Codex design
+    // review of the wave-6 snapshot, finding 1), so it is neither an array
+    // parameter nor a scalar one and the replay admission declines it.
+    let rec scalarParamTy (t: TypeExpr) =
+        match resolveTy ctx t with
+        | TyFloat64 | TyFloat32 | TyInt64 | TyInt32 | TyBool -> true
+        | TyNamed (("Float64" | "Float32" | "Int64" | "Int32"), _) -> true
+        | TyBounded (b, _, _) -> scalarParamTy b
+        | _ -> false
+    let scalarParams =
+        fd.Params |> List.choose (fun p ->
+            match p.Type with
+            | Some t when not (Set.contains p.Name arrayParams) && scalarParamTy t -> Some p.Name
+            | _ -> None)
+        |> Set.ofList
+    let paramTys = fd.Params |> List.choose (fun p -> p.Type |> Option.map (fun t -> (p.Name, t))) |> Map.ofList
+    let allParams = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
     let stmtsCk, finalCk, cotsCk, revCk =
-        checkpointCarries rc hasGradBuffers arrayParams
-            (fd.Params |> List.map (fun p -> p.Name) |> Set.ofList |> fun ps -> Set.difference ps arrayParams)
+        checkpointCarries rc hasGradBuffers arrayParams scalarParams paramTys allParams
             stmts finalE (localDecls @ scalarCots) (seed @ reverse)
     // assemble: forward + primal + cot decls + seed + reverse + return
     let primalName = "__primal"
+    letAnnotationOwner.Value <- fname
     let fwd = toStmts stmtsCk @ [ StmtLet { Pattern = synPat (PatVar primalName)
                                             Type = None
                                             Value = finalCk
@@ -597,6 +623,7 @@ let private jvpSuffix = "__jvp"
 let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result<FunctionDecl, string> =
     errMode.Value <- "jvp"
     let fname = fd.Name
+    resetLetAnnotations fname
     let isFloatish (t: TypeExpr) =
         isFloatTy t || (match t with TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> true | _ -> false)
     (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
@@ -675,7 +702,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty
                Dims = Map.empty; SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
-               FreshLocals = Set.empty }
+               FreshLocals = Set.empty; RealScalars = Set.empty }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR = tangentOfStmts rc stmts
@@ -704,7 +731,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
       Params = jvpParams
       WhereClause = adBodyWhere
       ReturnType = Some (TyTuple retTys)
-      Body = inheritSpan fd.Body (ExprBlock (toStmts swept, Some retExpr))
+      Body = (letAnnotationOwner.Value <- fname; inheritSpan fd.Body (ExprBlock (toStmts swept, Some retExpr)))
       IsStatic = false
       NameSpan = noSpan }))))))
 

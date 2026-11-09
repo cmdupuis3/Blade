@@ -1,0 +1,19 @@
+// TEST: row folds and fold accumulators give their literals the operand's narrow width
+// Gap G172 (a) (round 4 wave 6 lane d; Codex design review): a fold of a row
+// of a narrow operand inside a row kernel (`reduce(r, (+)) + 1.0`, a nested
+// fold kernel `s + x * 2.0`), and a fold ACCUMULATOR whose seed is a literal
+// or absent (`s * 0.5 + x`), take the operand width for their literal
+// partners -- they used to type them Float64 (a Float64 map, or BL3020 at
+// the `+`). An explicit widening cast keeps the wide width, so a literal past
+// Float32's range stays legal there.
+type R = Idx<2>
+type C = Idx<3>
+let m: Array<Float32 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let a: Array<Float32 like C> = [1.0, 2.0, 3.0]
+let y: Array<Float32 like R> = method_for(m) <@> lambda(r) -> reduce(r, (+)) + 1.0 |> compute
+let w: Array<Float32 like R> = method_for(m) <@> lambda(r) -> reduce(r, lambda(s, x) -> s + x * 2.0, 0.0) |> compute
+let acc: Float32 = reduce(a, lambda(s, x) -> s * 0.5 + x, 0.0)
+let wide: Array<Float64 like R> = method_for(m) <@> lambda(r) -> Float64(prodsum(r, r)) + 1e100 |> compute
+// EXPECT: y = [7.0, 16.0]
+// EXPECT: w = [12.0, 30.0]
+// EXPECT: acc = 4.25

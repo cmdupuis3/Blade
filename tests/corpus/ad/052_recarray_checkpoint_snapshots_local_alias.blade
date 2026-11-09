@@ -1,11 +1,11 @@
-// TEST: AD Recursive Array, Checkpoints Decline A Local Alias Of A Module Array
+// TEST: AD Recursive Array, Checkpoints Snapshot A Local Alias Of A Module Array
 import ad as ad
 // ============================================================================
-// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: the step reads the LOCAL
-// `local_forcing`, an alias of the module binding `forcing` that may be the
-// storage of the gradient buffer `backing` (ad/050). The admission judges a
-// forward local through the names its value reads, so the alias is the
-// module array itself (Codex review of J1, round 2, finding 2).
+// PM40 (rule `ad-checkpoint v1`, opt-in): the step reads the LOCAL
+// `local_forcing`, an alias of the module binding `forcing` that is the
+// storage of the gradient buffer `backing` (ad/050). The local itself is
+// copied before the forward loop and only the replay reads the copy (round 4
+// wave 6, gap G162; Codex review of J1, round 2, finding 2).
 // s = [1, 3, 11, 123, 15131]; ds4/dx = 64944.
 // ============================================================================
 type A = Array<Float64 like Idx<1>>

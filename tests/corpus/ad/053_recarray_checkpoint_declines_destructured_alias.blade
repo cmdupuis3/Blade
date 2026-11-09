@@ -4,8 +4,9 @@ import ad as ad
 // PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: `forcing = hidden`, and
 // `hidden` is a component of a destructuring binding, which records no value
 // a storage proof could read (it is `identity(backing)`, the gradient
-// buffer). An unknown name fails the proof (Codex review of J1, round 2,
-// finding 3: it used to pass).
+// buffer). The replay-input snapshot (round 4 wave 6) copies a target only
+// when it is proved a plain dense stored or total value, so an unknown name
+// still declines (Codex review of J1, round 2, finding 3).
 // s = [1, 3, 11, 123, 15131]; ds4/dx = 64944.
 // ============================================================================
 type A = Array<Float64 like Idx<1>>

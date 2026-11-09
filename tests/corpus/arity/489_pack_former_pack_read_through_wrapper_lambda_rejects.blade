@@ -1,0 +1,17 @@
+// TEST: a pack former whose kernel reaches the pack through a wrapper lambda and an alias is refused (rejects)
+// Gap G174 (round 4 wave 6 lane d; Codex diff review round 2): the lambda that
+// reads `args[j]` may be reached through ANOTHER lambda that only calls it
+// (`h2`) and through an alias of that one (`h3 = h2`): every lambda the kernel
+// reaches is searched, whether or not it captures the pack itself, and the
+// read is refused at lowering like arity/485 (g++ rejected the emission).
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let h = lambda(j: Int64) -> args[j]
+    let h2 = lambda(j: Int64) -> h(j)
+    let h3 = h2
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> h3(k) |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

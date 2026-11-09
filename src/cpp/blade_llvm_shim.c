@@ -231,8 +231,8 @@ int blade_f2i32(double x, const char *file, long long line) {
  * pools this allocator made ever reach blade_free.
  *
  * Policy (measured, not semantics; review section 4.4): payloads of 16 KB ..
- * 4 MB (BLADE_POOL_RETAIN's arm: its own cap, below), at most 16 slots and
- * 8 MB retained (the arm: its budget), oldest evicted first, exact-size
+ * 32 MB (since round 4 wave 6, G185 (a); BLADE_POOL_RETAIN's arms: their own
+ * cap, below), at most 16 slots and 64 MB retained (the arms: their budget), oldest evicted first, exact-size
  * matching, newest first. PLAIN GLOBALS, like the shadow stack above: this
  * lane has no threads (every emitted function is `nosync`); a future thread
  * runtime must make these _Thread_local. Retained blocks are freed by an
@@ -267,7 +267,8 @@ int blade_f2i32(double x, const char *file, long long line) {
  * -DBLADE_POOL_BUDGET=<bytes> (1 / on = 64 MB / 96 MB, or an explicit
  * <maxMB>:<budgetMB> pair); the defines enter the shim object's identity hash
  * and through it the executable cache key. Without them the policy is the
- * default 4 MB / 8 MB below, unchanged. Under the arm a released pool up to
+ * default 32 MB / 64 MB below (round 4 wave 6, G185 (a); `0` / `off` restates
+ * the pre-wave-6 4 MB / 8 MB as these defines). Under the arm a released pool up to
  * the larger cap stays committed until reuse, eviction or the atexit flush:
  * the release leaves the timed region, it is not less work, and the peak
  * working set can rise. This lane has no threads, so its one budget is the
@@ -283,8 +284,8 @@ int blade_f2i32(double x, const char *file, long long line) {
 #  define BLADE_CACHE_BUDGET   ((size_t)(BLADE_POOL_BUDGET))
 #  define BLADE_CACHE_RETAIN_ARM 1
 #else
-#  define BLADE_CACHE_MAXBLOCK ((size_t)4 << 20)
-#  define BLADE_CACHE_BUDGET   ((size_t)8 << 20)
+#  define BLADE_CACHE_MAXBLOCK ((size_t)32 << 20)   /* default since round 4 wave 6 (G185 (a)) */
+#  define BLADE_CACHE_BUDGET   ((size_t)64 << 20)
 #  define BLADE_CACHE_RETAIN_ARM 0
 #endif
 #define BLADE_CACHE_MIN      ((size_t)16 << 10)

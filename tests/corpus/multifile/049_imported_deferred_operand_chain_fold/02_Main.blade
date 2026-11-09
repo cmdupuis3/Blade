@@ -1,0 +1,12 @@
+// TEST: An imported deferred map under a deferred chain to fold
+// MODULE: Main
+module Main
+import H
+let p3 = method_for(H.d) <@> lambda(v) -> v + 1.0
+let q3 = method_for(p3) <@> lambda(v) -> v * v
+let r3 = reduce(q3, (+), 0.0)
+H.x(0) = 10.0
+let z = H.d(0)
+// 3^2 + 5^2 + 7^2 = 83
+// EXPECT: r3 = 83.0
+// EXPECT: z = 2.0

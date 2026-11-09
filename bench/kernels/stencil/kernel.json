@@ -31,7 +31,27 @@
     "gfortran-natural",
     "gfortran-expert",
     "ifx-natural",
-    "ifx-expert"
+    "ifx-expert",
+    "blade-cpp@old",
+    "blade-cpp@c32",
+    "blade-cpp@retain"
   ],
-  "source_of_truth": "bench/kernels/stencil/spec.md + bench/notes/kernel-list.md (2026-10-17)"
+  "source_of_truth": "bench/kernels/stencil/spec.md + bench/notes/kernel-list.md (2026-10-17)",
+  "variants": {
+    "old": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "0"
+      }
+    },
+    "c32": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "32:64"
+      }
+    },
+    "retain": {
+      "compile": {
+        "BLADE_POOL_RETAIN": "1"
+      }
+    }
+  }
 }

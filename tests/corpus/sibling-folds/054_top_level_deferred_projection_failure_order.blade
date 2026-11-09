@@ -1,0 +1,19 @@
+// TEST: A deferred tuple projection keeps its failure after an earlier one (aborts)
+// ============================================================================
+// Round 4 wave 6 (the class-closure round of BLADE_SIBLING_FOLDS=top, gap
+// G107): the deferred projection `y = pack[0]` panics BL8013 (100 / 0) when
+// forced -- by `b`, AFTER `fail` panics BL8014. Joining `prodsum(y, y)` with
+// `prodsum(x, x)` at `a` forced y first: BL8013 first. The operand census reads
+// the deferred-value classifier, so the pair is not joined and BL8014 at
+// `fail` stays the first failure in every build.
+// ============================================================================
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let iv: Array<Int64 like I> = [1, 0, 2]
+let pack = (method_for(iv) <@> lambda(v) -> Float64(100 / v), method_for(x) <@> lambda(v) -> v)
+let y = pack[0]
+let a = prodsum(x, x)
+let fz: Float64 = 0.0
+let fail = Int64(floor(fz / fz))
+let b = prodsum(y, y)
+// ABORT: BL8014

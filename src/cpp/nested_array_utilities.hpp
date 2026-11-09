@@ -59,7 +59,7 @@
 //     and the real blocks the cache pinned between them fragmented that heap
 //     (60% of the run) -- 6.6 s uncached, 9.8 s caching reals only, 3.6 s
 //     caching both;
-//   * blocks of 16 KB .. 4 MB; at most 16 slots and 8 MB per THREAD, one
+//   * blocks of 16 KB .. 32 MB; at most 16 slots and 64 MB per THREAD, one
 //     budget across all element types (oldest slot evicted first). Both
 //     numbers are measured policy (review section 4.4), not semantics -- the
 //     DEFAULT; the opt-in BLADE_POOL_RETAIN arm raises both (see kMaxBlock);
@@ -169,11 +169,12 @@ namespace blade_pool {
     // Policy constants (bytes). kMaxBlock <= kBudget, so a block that passes
     // the size test always fits once the oldest slots are evicted.
     //
-    // BLADE_POOL_RETAIN (round-3 A4, bench gap G52) is an OPT-IN arm: the
-    // compiler writes `#define BLADE_POOL_MAX_BLOCK <bytes>` / `BLADE_POOL_BUDGET
-    // <bytes>` at the top of the generated program ONLY when it is set (1 / on
-    // = 64 MB / 96 MB, or an explicit <maxMB>:<budgetMB> pair). Without them
-    // the policy below is the default, unchanged. Under the arm a released
+    // BLADE_POOL_RETAIN (round-3 A4, bench gap G52; default raised in round 4
+    // wave 6, G185 (a)): the compiler writes `#define BLADE_POOL_MAX_BLOCK
+    // <bytes>` / `BLADE_POOL_BUDGET <bytes>` at the top of the generated program
+    // when it is set to anything but the default (1 / on = 64 MB / 96 MB, 0 / off
+    // = the pre-wave-6 4 MB / 8 MB, or an explicit <maxMB>:<budgetMB> pair).
+    // Without them the policy below (32 MB / 64 MB) is the default. Under the arm a released
     // pool up to the larger cap (recur's 48 MB trajectory, stencil's 24 MB
     // `lap`) stays committed until reuse, eviction or THREAD EXIT, so its
     // release leaves the timed region -- it is not less work, the budget is per
@@ -189,8 +190,13 @@ namespace blade_pool {
     constexpr size_t kBudget   = size_t(BLADE_POOL_BUDGET);
     constexpr bool kRetainArm  = true;
 #else
-    constexpr size_t kMaxBlock = size_t(4) << 20;    // default: a whole trajectory (48 MB) is never retained
-    constexpr size_t kBudget   = size_t(8) << 20;    // per thread, ALL element types together
+    // default since round 4 wave 6 (G185 (a), the user's decision of
+    // 2026-11-08, measured: bench pm08_churn, a 24 MB per-call temporary,
+    // 0.199 -> 0.10 s; stencil mt8 peak WS 51.4 -> 51.6 MiB): a 32 MB block
+    // is retained, 64 MB per thread; BLADE_POOL_RETAIN=0 restates the
+    // pre-wave-6 4 MB / 8 MB as defines
+    constexpr size_t kMaxBlock = size_t(32) << 20;   // a whole trajectory (48 MB) is still never retained
+    constexpr size_t kBudget   = size_t(64) << 20;   // per thread, ALL element types together
     constexpr bool kRetainArm  = false;
 #endif
     static_assert(kMaxBlock <= kBudget, "blade_pool: the largest retained block must fit the budget");

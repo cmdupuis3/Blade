@@ -20,7 +20,7 @@
 > LLVM lane: the replay binding is dropped and recorded (`llvm lane: print replay is built in the C++ lane
 > only`) -- a gap row.
 
-> **Status (2026-10-26): P2 v2a (fold fusion) BUILT at IR level, round 4 wave 2 (PM35), OPT-IN** (`BLADE_REC_FOLD=1`;
+> **Status (2026-11-08): P2 v2a (fold fusion) BUILT at IR level, round 4 wave 2 (PM35), DEFAULT ON since round 4 wave 6 (G94: the fresh class-closure review found no member; `BLADE_REC_FOLD=0` / `off` = the full history). Earlier status (2026-10-26): OPT-IN** (`BLADE_REC_FOLD=1`;
 > default-on waits for one more converged use-census audit, gap G94: five review rounds each found
 > a member of the trajectory use census). Not the
 > surface splice section 9 sketches: `Optimize.windowRecFoldsModule` (rule `rec-fold-ring`, knob

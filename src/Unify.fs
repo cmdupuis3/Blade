@@ -891,6 +891,20 @@ type Subst() =
         (match ty, Map.tryFind id elemHints with
          | IRTInfer id2, Some et when not (Map.containsKey id2 elemHints) ->
              elemHints <- Map.add id2 et elemHints
+         // G172 (a): a hinted kernel parameter that turns out to be a ROW
+         // (bound to an array shape -- requireArrayArg's synthesized one,
+         // `prodsum(r, r)`, `reduce(r, ..)`) hands its hint to the row's
+         // open ELEMENT variable: the element is the operand's, so a fold of
+         // the row is the operand width and its literal partner takes it.
+         // Metadata only (no bind); a cast relation or a literal default on
+         // the element wins.
+         | ArrayElem at, Some et ->
+             (match at.ElemType with
+              | IRTInfer id2 when not (Map.containsKey id2 elemHints)
+                                  && not (Map.containsKey id2 elemCasts)
+                                  && not (Map.containsKey id2 literalDefaults) ->
+                  elemHints <- Map.add id2 et elemHints
+              | _ -> ())
          | _ -> ())
         // An element-cast variable deferring to another variable hands its
         // relation to the survivor (an unannotated return variable unified

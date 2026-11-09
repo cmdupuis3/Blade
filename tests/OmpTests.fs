@@ -3159,7 +3159,7 @@ let private g7RefusedCases : (string * string) list =
     let omp = "lambda(u, v) where omp -> u + v"
     [ // a serial captured write in a leg's map (corpus mutability-errors/021)
       ("g7_fused_join_serial_captured_write_refused",
-       "let mut counter = 0\nlet x = [1.0, 2.0, 3.0]\nlet l = method_for(x)\n"
+       "let mut counter = 0\nlet x = Float64([1.0, 2.0, 3.0])\nlet l = method_for(x)\n"
        + "let (s1, s2) = reduce((l <@> lambda(v) -> {\n    counter = counter + 1\n    v\n}) <&!> (l <@> lambda(v) -> v * v), " + omp + ", 0.0)\n")
       // a WRITING SHARED PRODUCER through a transitive helper (per-leg pack)
       ("g7_pack_join_writing_shared_producer_refused",
@@ -4661,7 +4661,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                141149320.0, 521.0)
               ("g41_comm_fold_kernel_write_through_rebound_local",
                pre + "let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
-               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let mut t = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
                + "let g0 = G((0 : K), (0 : K))\n",
                141149320.0, 521.0)
               ("g41_omp_fold_over_writing_map",

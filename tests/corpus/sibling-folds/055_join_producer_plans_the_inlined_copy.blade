@@ -1,0 +1,28 @@
+// TEST: The join producer plans a callee's inlined copy at its site
+// ============================================================================
+// G186 (round 4 wave 6, `join-producer v1`, BLADE_JOIN_PRODUCER): the
+// sibling-fold pass inlines `kernel` into the block of `(checksum, sums)` for
+// the join of the input sums, so the program runs the INLINED copy of the
+// producer p, not the function. The join producer now plans that block too:
+// p is the five-leg join's shared leaf there (no pool), its lifetime region
+// releases nothing for it, and `kernel`'s own record says no call of it
+// remains in this module. Values: the same in every build and lane (p is
+// costly, exp(sin v) cos v, so the recompute selection keeps it shared).
+// ============================================================================
+type Ix = Idx<7>
+
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let p = method_for(x) <@> lambda(v) -> exp(sin(v)) * cos(v) |> compute
+    let a = reduce(p, (+))
+    let mid = reduce(method_for(zip(x, y)) <@> lambda(u, v) -> u * v, (+))
+    let b = reduce(p, (+), 1.0)
+    a + mid + b
+}
+
+let (checksum, sums) = {
+    let x = method_for(range<Ix>) <@> lambda(i) -> Float64(i) |> compute
+    let y = method_for(range<Ix>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
+    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))
+}
+// EXPECT: checksum = 114.2167873299
+// EXPECT: sums = 49.0

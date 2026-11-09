@@ -1,0 +1,34 @@
+// TEST: A Kernel Application Still Frees Beside A Hoisted Alias And A Reused Tuple Fold (G184)
+// Gap G184 (Codex diff review round 2): the kernel scope's escape test must
+// not mistake two harmless changes for an escape -- the ALIAS `h` of a
+// deferred module map that a force inside the kernel hoists (the force
+// upgrades every alias to the hoisted pool, allocated before the statement)
+// and a tuple-state fold's SCALAR tuple parameters, rebound when the fold
+// (first emitted by `warm`) is emitted again inside the kernel. Both used to
+// keep every pool of the application alive; `blade test llvm` pins the free
+// of `big`'s result in both kernels.
+type Big = Idx<1001>
+type Rep = Idx<7>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+let g = method_for(range<Big>) <@> lambda(i) -> Float64(i)
+let h = g
+let total = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let v = g((1 : Big))
+    reduce(big(Float64(t) + v), (+))
+}, (+))
+
+function pair(x: Float64) -> (Float64, Float64) = (x, x)
+function addpair(a: (Float64, Float64), b: (Float64, Float64)) -> (Float64, Float64) = (a[0] + b[0], a[1] + b[1])
+let xs = Float64(range<Rep>) |> compute
+let warm = reduce(method_for(xs) <@> pair, addpair, (Float64(0.0), Float64(0.0)))
+let got = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let tmp = big(Float64(t))
+    let p = reduce(method_for(xs) <@> pair, addpair, (Float64(0.0), Float64(0.0)))
+    reduce(tmp, (+)) + p[0]
+}, (+))
+// EXPECT: total = 14014000.0
+// EXPECT: got = 10510647.0

@@ -47,10 +47,15 @@ type private Program = {
     Source: string
     Scalars: string list
     Pools: (string * int) list
-    /// A FUNCTION-LOCAL rank-2 pool (function name, cells) hashed right
-    /// before the function frees it -- recur's trajectory, which no source
-    /// reader may touch (a reader would disable row-fold fusion itself).
-    LocalPool: (string * int) option
+    /// A FUNCTION-LOCAL rank-2 pool (its function's name) hashed over its OWN
+    /// extents right before the function frees it -- recur's trajectory, which
+    /// no source reader may touch (a reader would disable row-fold fusion
+    /// itself). The cell count is read from the pool's extents table, not
+    /// pinned: since round 4 wave 6 the rec-fold ring (BLADE_REC_FOLD, default
+    /// on) stores recur's 9-row trajectory as 2 rows, and under
+    /// BLADE_REC_FOLD=0 it is the full 9 again -- a pinned 9 x 1003 read past
+    /// the 2 x 1003 ring (an access violation in every repro arm).
+    LocalPool: string option
     Needle: string -> string option
 }
 
@@ -123,7 +128,7 @@ let private recur =
         + "let tot = total(u0)\n"
       Scalars = [ "tot" ]
       Pools = []
-      LocalPool = Some ("total", 9 * 1003)
+      LocalPool = Some "total"
       Needle = fun r ->
         match r with
         | "rep_ser" | "rep_mt" | "rep_fast" -> Some "= __cfc_"
@@ -166,7 +171,7 @@ let private injectProbe (p: Program) (cpp0: string) : string option =
     let cppLocal =
         match p.LocalPool with
         | None -> Some cpp
-        | Some (fname, cells) ->
+        | Some fname ->
             let fAt = cpp.IndexOf($"\ndouble {fname}(")
             if fAt < 0 then None else
             let defAt = cpp.IndexOf("{\n", fAt)
@@ -176,7 +181,7 @@ let private injectProbe (p: Program) (cpp0: string) : string option =
             let freeLine = $"    deallocate<typename promote<double, 2>::type, nullptr>({buf}.data, {buf}.extents);"
             let freeAt = cpp.IndexOf(freeLine, defAt)
             if freeAt < 0 then None else
-            let hash = $"    {{ unsigned long long __h = 0; const double* __p = nested_array_utilities::pool_base({buf}.data); for (size_t __q = 0; __q < (size_t){cells}; __q++) {{ unsigned long long __b; std::memcpy(&__b, __p + __q, 8); __h = __h * 1000003ULL ^ __b; }} __cep_local_hash = __h; }}\n"
+            let hash = $"    {{ unsigned long long __h = 0; const double* __p = nested_array_utilities::pool_base({buf}.data); for (size_t __q = 0; __q < (size_t)({buf}.extents[0] * {buf}.extents[1]); __q++) {{ unsigned long long __b; std::memcpy(&__b, __p + __q, 8); __h = __h * 1000003ULL ^ __b; }} __cep_local_hash = __h; }}\n"
             Some (cpp.Substring(0, freeAt) + hash + cpp.Substring(freeAt))
     match cppLocal with
     | None -> None
@@ -191,7 +196,7 @@ let private injectProbe (p: Program) (cpp0: string) : string option =
                 $"    {{ unsigned long long __h = 0; const double* __p = nested_array_utilities::pool_base({n}.data); for (size_t __q = 0; __q < (size_t){cells}; __q++) {{ unsigned long long __b; std::memcpy(&__b, __p + __q, 8); __h = __h * 1000003ULL ^ __b; }} std::printf(\"RAW {n} %%llx\\n\", __h); }}")
         let local =
             match p.LocalPool with
-            | Some (fname, _) -> [ $"    std::printf(\"RAW {fname}.local %%llx\\n\", __cep_local_hash);" ]
+            | Some fname -> [ $"    std::printf(\"RAW {fname}.local %%llx\\n\", __cep_local_hash);" ]
             | None -> []
         let team = [ "    std::printf(\"RAW team %d\\n\", __cep_team_seen);" ]
         let probe = String.concat "\n" (scalars @ pools @ local @ team)

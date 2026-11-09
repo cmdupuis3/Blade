@@ -339,7 +339,7 @@ static long long pool_evicted()  { return blade_pool::g_stats.evicted.load(); }
 static const size_t k_ext3000[1] = { 3000 };       // 24 KB of doubles: eligible
 static const size_t k_ext100[1]  = { 100 };        // 800 B: below the band
 static const size_t k_ext3001[1] = { 3001 };
-static const size_t k_big[1]     = { 600000 };     // 4.8 MB: above the DEFAULT 4 MB block cap
+static const size_t k_big[1]     = { 600000 };     // 4.8 MB: above the PRE-WAVE-6 4 MB block cap (`0`)
 // 3/8 of the budget (exactly 3 MB of doubles under the default 8 MB budget):
 // two fit, the third evicts the oldest -- under either retention policy.
 static const size_t k_3mb[1]     = { blade_pool::kBudget * 3 / 8 / sizeof(double) };
@@ -358,8 +358,8 @@ static void run_pool_policy_tests() {
     check("pool_policy_reads_the_arm_defines", blade_pool::kRetainArm
           && blade_pool::kMaxBlock == size_t(BLADE_POOL_TEST_MAX) && blade_pool::kBudget == size_t(BLADE_POOL_TEST_BUDGET));
 #else
-    check("pool_policy_default_is_4mb_8mb", !blade_pool::kRetainArm
-          && blade_pool::kMaxBlock == (size_t(4) << 20) && blade_pool::kBudget == (size_t(8) << 20));
+    check("pool_policy_default_is_32mb_64mb", !blade_pool::kRetainArm
+          && blade_pool::kMaxBlock == (size_t(32) << 20) && blade_pool::kBudget == (size_t(64) << 20));
 #endif
     const bool trajKept = k_traj[0] * sizeof(double) <= blade_pool::kMaxBlock;
     printf("  [info]: pool policy: max block %zu B, budget %zu B per thread; a 48 MB release is %s\n",

@@ -1,0 +1,15 @@
+// TEST: a pack former whose kernel calls a let-bound lambda reading the pack is refused (rejects)
+// Gap G174 (round 4 wave 6 lane d; Codex diff review round 1): the hidden pack
+// read may sit in a lambda bound OUTSIDE the kernel (`let h = lambda(j) ->
+// args[j]`) that the kernel calls -- found through the let binding to the
+// lifted callable and refused at lowering like arity/485 (it was an invalid
+// scalar subscript in the emitted C++, BL9002).
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let h = lambda(j: Int64) -> args[j]
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> h(k) |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

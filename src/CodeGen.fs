@@ -3273,8 +3273,13 @@ let isDestructureCarrier (b: IRBinding) : bool = b.Name.StartsWith "_("
 /// -- a ppl program used to print a screenful of these around the user's own
 /// bindings -- but prints when selected by name (`--print`). A bare top-level
 /// expression's carrier `__expr<n>` is the user's value and always prints.
+/// An IMPORTED module's bindings are qualified (`A.__sfj18`), so the test
+/// reads the name's last dotted segment (round 4 wave 6, the class-closure
+/// round of the top-level sibling folds: an imported module's join carriers
+/// printed as `A.__sfj18`).
 let isInternalBindingName (name: string) : bool =
-    name.StartsWith "__" && not (System.Text.RegularExpressions.Regex.IsMatch(name, @"^__expr\d+$"))
+    let seg = match name.LastIndexOf '.' with -1 -> name | i -> name.Substring(i + 1)
+    seg.StartsWith "__" && not (System.Text.RegularExpressions.Regex.IsMatch(seg, @"^__expr\d+$"))
 
 /// The printed form of a COMPOUND array (G22: its extent is a run-time
 /// cardinality, `Idx<?>`): Some false = one flat run of the present cells in

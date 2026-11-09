@@ -1,0 +1,25 @@
+// TEST: AD Recursive Array, Checkpoints Decline A Snapshot Beside A Step Value That May Fail (aborts)
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: the full tape REPLAYS the
+// step value in its descending sweep, reading `forcing` LIVE -- and `forcing`
+// is the gradient buffer, which the reverse sweep has already moved from 2
+// to 0, so `lgamma(forcing(0))` fails there (BL8008). A checkpointed replay
+// reads the snapshot and would print a value instead (Codex class-closure
+// review of the wave-6 snapshot, round 1). With a snapshot the step value
+// must be trap-free; lgamma is not. The program fails as written.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+let mut backing: A = [2.0]
+let forcing = identity(backing)
+function f(x: Float64, w: A) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * prefix(n - 1) + lgamma(forcing(0))
+    s(4) - 2.0 * w(0)
+}
+let (value, dx) = ad.grad(f)(Float64(1.0), identity(backing), backing)
+// ABORT: BL8008

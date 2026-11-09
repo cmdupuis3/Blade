@@ -3008,8 +3008,11 @@ let private programWriteContext (modules: IRModule list) =
     // that NAMES a deferred computation, an alias of one, or an alias of a
     // callable resolves through it.
     let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    // the lets of the extents types carry too (a range bound may bind its
+    // own scratch: round 4 wave 6, the shared write analysis's roots)
     let noteLets (e: IRExpr) =
-        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) e
+        for r in e :: Optimize.embeddedExtentExprs e do
+            iterIRExpr (fun n -> match n with IRLet (id, v, _) -> lets.[id] <- v | _ -> ()) r
     for m in modules do
         for b in m.Bindings do
             lets.[b.Id] <- b.Value

@@ -347,9 +347,10 @@ build point — a literal, a `|> compute`, a compound, an eager set operation, a
 call result or a provider read, through any chain of `let B = A` aliases (a
 deferred map, directly or through an alias, is not stored there and declines) —
 ONE search structure is built over B right before the host and every probe reads
-it: O(|A| + |B|). The PREFERRED representation (linear for |B| <= 16, a bitmap
-when the span is within max(64 |B|, 4096) and 2^26 bits, else a hash) is chosen
-from (|B|, min, max) only; an allocation the build cannot make degrades the
+it: O(|A| + |B|). The PREFERRED representation (none for |B| <= 16 -- nothing
+is built and every probe is the as-written scan, and a LITERAL set that small
+is not hoisted at all (G185 (b), round 4 wave 6) --, a bitmap when the span is
+within 2^26 bits, else a hash) is chosen from (|B|, min, max) only; an allocation the build cannot make degrades the
 ACTUAL one (bitmap -> hash -> linear), and each build reports both and why
 (`BLADE_MEMBER_VERBOSE=1` on stderr, both lanes; the C++ run record's
 `member_hoist`). All three answer exactly integer `==` — build-side duplicates

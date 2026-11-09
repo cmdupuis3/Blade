@@ -220,6 +220,9 @@ let runRecStepTests () : BlockResult =
     use _tune = pinEnv "BLADE_TILE_TUNE" null
     use _llvm = pinEnv "BLADE_LLVM" null
     use _gate = pinEnv "BLADE_REC_STEP_OMP" null
+    // the harness hashes the WHOLE rank-2 trajectory pool: keep it whole
+    // (rec-fold-ring, default on since round 4 wave 6, would ring it)
+    use _ring = pinEnv "BLADE_REC_FOLD" "0"
     let emitCpp (p: Program) (stem: string) : Result<string, string> =
         try
             match lower p.Source with

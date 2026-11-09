@@ -1,19 +1,18 @@
-// TEST: AD Recursive Array, Checkpoints Decline A Module Array That May Alias A Gradient Buffer
+// TEST: AD Recursive Array, Checkpoints Snapshot A Fresh Module Array A Later Mut Binding Aliases
 import ad as ad
 // ============================================================================
-// PM40 (rule `ad-checkpoint v1`) DECLINES: the step reads the module binding
-// `forcing`, a plain `let` whose value is a call (`identity(backing)`) and
-// so may be the storage of the `let mut` passed below AS the gradient
-// buffer. The reverse sweep adds the loss's d/dw into that buffer before a
-// replay would read `forcing` again, so a replayed trajectory could differ
-// from the first run's; the full tape is kept (its stored predecessors are
-// the first run's). (Codex review of J1, round 1: the witness.)
+// PM40 (rule `ad-checkpoint v1`, opt-in): `forcing` is a FRESH array literal,
+// and the later `let mut backing = identity(forcing)` may be its very
+// storage, passed as the gradient buffer. The replay reads a copy of
+// `forcing` taken before the forward loop, so the buffer write the reverse
+// sweep makes first is not seen (round 4 wave 6, gap G162; Codex review of
+// J1, round 2, finding 1).
 // s = [1, 3, 11, 123, 15131]; ds4/dx = 2 s3 * 2 s2 * 2 s1 * 2 s0 = 64944.
 // ============================================================================
 type A = Array<Float64 like Idx<1>>
 function identity(a: A) -> A = a
-let mut backing: A = [2.0]
-let forcing = identity(backing)
+let forcing: A = [2.0]
+let mut backing = identity(forcing)
 function f(x: Float64, w: A) -> Float64 = {
     let rec s: Array<Float64 like Idx<5>> =
         match s with

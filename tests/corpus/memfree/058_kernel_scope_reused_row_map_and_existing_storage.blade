@@ -1,0 +1,39 @@
+// TEST: A Kernel Application Still Frees Beside A Reused Row Map And A Rebinding To Existing Storage (G184)
+// Gap G184 (Codex diff review round 3): two more changes the kernel scope's
+// escape test must not count -- a deferred ROW MAP (`rows`, first used by
+// `warm`) re-emitted inside the kernel rebinds its kernel's array PARAMETER
+// (a parameter is dead once its application ends), and `out = a` rebinds an
+// outer `let mut` to storage that existed before the application (it cannot
+// retain anything the application allocated). Both used to keep `big`'s
+// result alive per application; `blade test llvm` pins its free in both
+// kernels.
+type Big = Idx<1001>
+type Rep = Idx<7>
+type R = Idx<2>
+type C = Idx<3>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+function sumrow(a: Array<Float64 like C>) -> Float64 = reduce(a, (+))
+let mat = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let rows = method_for(mat) <@> sumrow
+let warm = reduce(rows, (+))
+let got = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let tmp = big(Float64(t))
+    let p = reduce(rows, (+))
+    reduce(tmp, (+)) + p
+}, (+))
+
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let got2 = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    out = a
+    reduce(big(Float64(t)), (+))
+}, (+))
+let after = reduce(out, (+))
+// EXPECT: warm = 9.0
+// EXPECT: got = 10510563.0
+// EXPECT: got2 = 10510500.0
+// EXPECT: after = 6.0

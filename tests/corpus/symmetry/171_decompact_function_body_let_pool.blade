@@ -1,0 +1,51 @@
+// TEST: Decompact Function Body Let Pool
+// ============================================================================
+// G167 (round 4 wave 6, `decompact-row-fold`, BLADE_DECOMPACT_FOLD): inside a
+// function body the row fold / mat-vec of a decompacted pool reads the pool in
+// place when the pool (or the mat-vec vector) is bound by a BODY LET of the
+// same spine before the host -- a `|> compute` or an array literal, never
+// assigned, nothing between it and the host writing -- or by a body let
+// aliasing a parameter (the parameter's own proof). The let is materialized at
+// its own site in every route that runs the body (the ordinary call, the LLVM
+// lane's tuple inline, the interpreter). `nested` binds its pool through a
+// nested block: declined, the buffer stays. Every value equals the hand value
+// and the dense decompaction's.
+// ============================================================================
+type I = Idx<5>
+let x = Float64(range<I>)
+// S(i, j) = i j + 1 (SymIdx<2, 5>)
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1.0 |> compute
+let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
+
+// both mat-vec operands body lets
+function mv_local(Q: Array<Float64 like SymIdx<2, I>>, w: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let P = Q * 2.0 |> compute
+    let u = w + 1.0 |> compute
+    method_for(decompact(P, 0)) <@> lambda(r) -> prodsum(r, u) |> compute
+}
+// a body let aliasing a parameter
+function alias_param(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {
+    let P = Q
+    reduce(decompact(P, 0), (+), 0.0)
+}
+// a tuple-returning host (the LLVM lane inlines it): the let is still computed
+function pair_let(Q: Array<Float64 like SymIdx<2, I>>) = {
+    let P = Q * 2.0 |> compute
+    let y = reduce(decompact(P, 0), (+), 0.0)
+    (reduce(y, (+), 0.0), 1.0)
+}
+// the pool bound through a nested block: declined
+function nested(Q: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {
+    let P = { let T = Q * 2.0 |> compute; T }
+    reduce(decompact(P, 0), (+), 0.0)
+}
+
+// sum_j 2 S(i, j) (j + 2) = 2 (40 i + 20) = 80 i + 40
+let a1 = mv_local(S, v)
+// EXPECT: a1 = [40.0, 140.0, 240.0, 340.0, 440.0]
+let a2 = alias_param(S)
+// EXPECT: a2 = [5.0, 15.0, 25.0, 35.0, 45.0]
+let a3 = pair_let(S)
+// EXPECT: a3 = (250.0, 1.0)
+let a5 = nested(S)
+// EXPECT: a5 = [10.0, 30.0, 50.0, 70.0, 90.0]

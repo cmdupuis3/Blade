@@ -1,0 +1,28 @@
+// TEST: A rebinding hidden in a helper's range bound keeps the join producer stored
+// ============================================================================
+// G186 (round 4 wave 6, the third Codex diff review): `hidden` rebinds its
+// local `t` to its `mut` argument INSIDE a range bound (`0..{ t = a; 3 }`),
+// then writes `t(0)`. The shared write analysis walked the bound for writes
+// but collected locals and rebindings from the body alone, so `t` still
+// looked fresh and the write local. Every scan of a body (locals,
+// rebindings, writes) now covers the extents its types carry: p stays stored.
+// ============================================================================
+function bump(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    a(0) = 100.0
+    3
+}
+function hidden(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    let mut t: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+    let m = method_for(0..{ t = a; 3 }) <@> lambda(v) -> v + 1 |> compute
+    t(0) = 100.0
+    reduce(m, (+))
+}
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = {
+    let p = method_for(x) <@> lambda(v) -> exp(v) |> compute
+    let m = hidden(x)
+    let (a, b) = object_for(<&!>) <@> (reduce(p, (+)), reduce(p, (+), 1.0))
+    a + b + Float64(m)
+}
+// 2 (e + e^2 + e^3) + 1 + (1 + 2 + 3)
+// EXPECT: r = 67.3857497011547

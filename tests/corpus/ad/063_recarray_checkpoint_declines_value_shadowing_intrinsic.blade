@@ -1,17 +1,17 @@
-// TEST: AD Recursive Array, Checkpoints Decline A Fresh Module Array A Later Mut Binding Aliases
+// TEST: AD Recursive Array, Checkpoints Decline A Row View Of A Module Array Named Like An Intrinsic
 import ad as ad
 // ============================================================================
-// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: `forcing` is a FRESH
-// array literal, but the later `let mut backing = identity(forcing)` may be
-// its very storage, and `backing` is passed as the gradient buffer. The
-// reverse sweep would add d/dw into it before a replay reads `forcing(0)`.
-// A fresh value is not enough: no declaration other than the differentiated
-// function may name the array (Codex review of J1, round 2, finding 1).
-// s = [1, 3, 11, 123, 15131]; ds4/dx = 2 s3 * 2 s2 * 2 s1 * 2 s0 = 64944.
+// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: `sin` is a module ARRAY,
+// so `sin(0)` is a row view, and `backing = identity(forcing)` makes it the
+// gradient buffer. A value binding shadows the intrinsic name (Codex design
+// review of the wave-6 snapshot, finding 2: it passed as a scalar constant
+// and the checkpointed dx was 87296); a subscript is not a stored form the
+// snapshot copies. s = [1, 3, 11, 123, 15131]; ds4/dx = 64944.
 // ============================================================================
 type A = Array<Float64 like Idx<1>>
 function identity(a: A) -> A = a
-let forcing: A = [2.0]
+let sin: Array<Float64 like Idx<1>, Idx<1>> = [[2.0]]
+let forcing = sin(0)
 let mut backing = identity(forcing)
 function f(x: Float64, w: A) -> Float64 = {
     let rec s: Array<Float64 like Idx<5>> =

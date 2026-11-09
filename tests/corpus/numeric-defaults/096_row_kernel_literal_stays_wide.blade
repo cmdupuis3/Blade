@@ -1,13 +1,13 @@
-// TEST: a ROW kernel over a rank-2 Float32 operand keeps its literal at the wide width (not covered)
-// Gap G114 remainder (round 4 wave 5 lane c, gap G172): the hint reaches a
-// literal only while its partner is the open parameter itself; a row kernel's
-// literal partner here is the prodsum RESULT, so the map is Float64 as before.
-// Pinned so a later fix (seeding the proven fiber type) changes it on purpose.
-// A Float64 operand is unchanged.
+// TEST: a ROW kernel over a rank-2 Float32 operand gives its literal the row's width
+// Gap G172 (a) (round 4 wave 6 lane d; the G114 remainder this file pinned at
+// the WIDE width, so the fix changes it on purpose): the element hint of a row
+// kernel's parameter reaches the row's element when the body folds the row
+// (`prodsum(r, r)`), so the literal partner of the fold result takes Float32
+// and the map is Float32. A Float64 operand is unchanged.
 type R = Idx<2>
 type C = Idx<3>
 let m: Array<Float32 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let y: Array<Float64 like R> = method_for(m) <@> lambda(r) -> prodsum(r, r) + 1.0 |> compute
+let y: Array<Float32 like R> = method_for(m) <@> lambda(r) -> prodsum(r, r) + 1.0 |> compute
 let x: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let z: Array<Float64 like R, C> = method_for(x) <@> lambda(v) -> v * 0.5 |> compute
 // EXPECT: y = [15.0, 78.0]

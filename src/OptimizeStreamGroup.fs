@@ -123,16 +123,44 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<I
                     (match outer.Extent, enumValues with
                      | IRLit (IRLitInt _), _ -> false   // positional: groups 0 .. N-1, empty ones included
                      | _, Some _ -> false               // EnumIdx: every declared member, empty ones included
-                     | _ -> true)                       // dynamic: a group exists because a row holds its key
+                     | _ ->
+                         // dynamic: a group exists because a row holds its key --
+                         // only for keys equal to themselves. A FLOATING key may be
+                         // NaN, which never equals itself: the CSR then leaves an
+                         // EMPTY bucket whose unseeded fold is BL8003 at the fold
+                         // (wave 6 lane b, Codex R0 round 19d5e4b8). Every key
+                         // operand must be integer-, Bool- or string-typed.
+                         let keyOps =
+                             modul.Bindings |> List.tryPick (fun kb ->
+                                 if kb.Id <> gkId then None
+                                 else match kb.Value with IRGroupKeys ks -> Some ks | _ -> None)
+                         let exactKey (e: IRExpr) =
+                             match stripUnits (typeOf e) with
+                             | ArrayElem a ->
+                                 (match scalarOf a.ElemType with
+                                  | Some (ETInt64 | ETInt32 | ETBool) -> true
+                                  | _ -> (match stripUnits a.ElemType with IRTScalar ETString -> true | _ -> false))
+                             | _ -> false
+                         match keyOps with
+                         | Some ks when not ks.IsEmpty -> ks |> List.forall exactKey
+                         | _ -> false)
                 | _ -> false
             let readers = modul.Bindings |> List.filter (fun r -> r.Id <> gid && (Blade.Optimize.bindingPayload modul r |> List.exists refsG))
             // a reader is `method_for(g) <@> lambda(r) -> reduce(r, k[, s])`, whole value, |> compute
             let foldOf (r: IRBinding) : Result<StreamFold, string> =
                 let info =
                     match r.Value with
-                    | IRCompute (IRApplyCombinator info) | IRApplyCombinator info -> Some info
+                    | IRCompute (IRApplyCombinator info) -> Some info
                     | _ -> None
                 match info with
+                // wave 6 lane b, Codex class-closure round (continuation
+                // 93d4a24e): a DEFERRED fold binding (no `|> compute`) was
+                // admitted and adopted as an ordinary array, losing the deferred
+                // forcing / print bookkeeping (a later `sort(sums, ..)` under a
+                // print selection naming it became BL7004); v1 admits only the
+                // computed spelling
+                | None when (match r.Value with IRApplyCombinator _ -> true | _ -> false) ->
+                    Error $"`{r.Name}` is a DEFERRED per-group map (no `|> compute`): adopting the states would bypass its deferred forcing and print protocol (v1 admits the computed spelling only)"
                 | None -> Error $"`{r.Name}` reads g other than as a whole-binding per-group fold (`method_for(g) <@> lambda(r) -> reduce(r, k[, s])`)"
                 | Some info ->
                 match info.Arrays, resolve (fst (peelReynolds info.Kernel)) with
@@ -159,7 +187,7 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<I
                     (match f.Seed with
                      | Some (IRLit _) -> None
                      | Some _ -> Some $"`{f.Name}`: the seed is not a literal"
-                     | None when not noEmptyGroups -> Some $"`{f.Name}`: an unseeded fold over a grouping with empty groups (positional / EnumIdx keys): BL8003 stays at the fold"
+                     | None when not noEmptyGroups -> Some $"`{f.Name}`: an unseeded fold over a grouping that may hold empty groups (positional / EnumIdx keys, or a floating key that may be NaN): BL8003 stays at the fold"
                      | None -> None)
                     |> Option.orElse (
                         let exactInt = (match elemEt with Some (ETInt64 | ETInt32) -> true | _ -> false) && (builtinOp c).IsSome

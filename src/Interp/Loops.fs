@@ -377,6 +377,15 @@ and private forceKernelDeferredCaptures (st: InterpState) (env: Env) (anyDeferre
                 if forced then force st env cell.V |> ignore
             | None -> ())
 
+/// G173 (2): every materialize ARM forces its kernel's deferred captures the
+/// way the main dense arm does (after its inputs, before its first cell) --
+/// compound / sparse / halo / row-peel / grouped / wreath / compound-value
+/// maps used to force a captured map at its first read, so a failure at an
+/// earlier cell won there and not in the compiled lanes.
+and private forceArmCaptures (st: InterpState) (env: Env) (info: ApplyInfo) : unit =
+    forceKernelDeferredCaptures st env true [ info.Kernel ]
+        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
+
 // ----------------------------------------------------------------------------
 // resolveComputation (CodeGen.fs:7480) in value space: peel IRCompute /
 // IRFunctorMap (collecting wrappers innermost-first) / IRVar-through-deferred /
@@ -1256,6 +1265,8 @@ and private materializeWreathApply
         match resolveArraySource st env (List.head info0.Arrays) with
         | SReal a -> a
         | _ -> raise (InterpUnsupported "OrbIdx application: the tied argument is not a materialized array")
+    // G173 (2): the kernel's deferred captures, after the inputs, before the first cell
+    forceArmCaptures st env info0
     let out = A.allocWreath elemTy outIdxTys tie.OutputLevels n
     // Kernel env: captures by reference + one reusable cell per param, exactly
     // as interpretNest builds them.
@@ -1331,6 +1342,10 @@ and private materializeCompoundRangeMap
         // present cells, the flat view the C++ lane's range driver reads
         | VCompound cv -> A.compoundToDense cv
         | _ -> raise (InterpUnsupported "range<CompoundIdx>: mask is not an array")
+    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
+    // the index build (whose own failures -- a duplicate key -- come after
+    // the compiled prelude's forces), before the first cell
+    forceArmCaptures st env info0
     let leadExtents = maskArr.Extents
     let maskBits = A.maskToBits maskArr
     let (table, rankOf, card) = A.buildCompoundIndex leadExtents maskBits
@@ -1421,6 +1436,10 @@ and private materializeSparseRangeMap
     if not (List.isEmpty wrappers) then
         raise (InterpUnsupported "functor-map wrapper over a range<SparseIdx> map")
     let keys = resolveSparseKeys st env src leadRank
+    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
+    // the index build (whose own failures -- a duplicate key -- come after
+    // the compiled prelude's forces), before the first cell
+    forceArmCaptures st env info0
     let (rankOf, card) = A.buildSparseIndex keys
     let arrayNames = info0.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info0 arrayNames "out" st.Builder
@@ -1487,6 +1506,10 @@ and private materializeCompoundHaloMap
         match force st env (Core.evalExpr st env maskExpr) with
         | VArray a -> a
         | _ -> raise (InterpUnsupported "compound-halo: mask is not an array")
+    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
+    // the index build (whose own failures -- a duplicate key -- come after
+    // the compiled prelude's forces), before the first cell
+    forceArmCaptures st env info
     let (table, _, card) = A.buildCompoundIndex maskArr.Extents (A.maskToBits maskArr)
     let start = Blade.Types.haloStartOffsetOfTag tag |> Option.defaultValue 0L
     let shrink = Blade.Types.haloShrinkOfTag tag |> Option.defaultValue 0L
@@ -1583,6 +1606,8 @@ and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo)
         match cg.KernelParams with
         | [ p ] -> p
         | _ -> raise (InterpUnsupported "row-peel map: kernel is not single-parameter")
+    // G173 (2): the kernel's deferred captures, after the inputs, before the first cell
+    forceArmCaptures st env info
     let kenv = envChild env
     bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let cell = { V = VUnit }
@@ -1822,6 +1847,8 @@ and private materializeGroupedZipPeel (st: InterpState) (env: Env) (info: ApplyI
         match info.OutputType with
         | ArrayElem a -> a.IndexTypes |> List.sumBy _.Rank
         | _ -> 1
+    // G173 (2): the kernel's deferred captures, after the inputs, before the first cell
+    forceArmCaptures st env info
     let caps = bindCallCaptures st env callable
     let ngroups = int arrs.Head.Extents.[0]
     let rowAt (g: int) : Value =
@@ -1898,6 +1925,8 @@ and private materializeCompoundValueMap (st: InterpState) (env: Env) (info: Appl
         match info.OutputType with
         | ArrayElem a -> a
         | _ -> raise (InterpUnsupported "compound-value map: output is not an array type")
+    // G173 (2): the kernel's deferred captures, after the inputs, before the first cell
+    forceArmCaptures st env info
     let caps = bindCallCaptures st env callable
     let denses = operands |> List.map A.compoundToDense
     let n = int cv.Cardinality

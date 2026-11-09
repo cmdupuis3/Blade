@@ -1,12 +1,15 @@
-// TEST: AD Recursive Array, Checkpoints Decline A Step Reading An Array Parameter
+// TEST: AD Recursive Array, Checkpoints Snapshot An Array Parameter The Step Reads
 import ad as ad
 // ============================================================================
-// PM40 (rule `ad-checkpoint v1`) DECLINES here, and the full tape is kept:
-// the step reads the array parameter `w`, and the function has gradient
-// buffers -- a caller may pass `w`'s own storage AS a gradient buffer
-// (ad/046's alias), which the reverse sweep writes before a replay would
-// read it. The additive carry s(n) = s(n-1) + w(n-1) xs(n-1) over 5003 rows:
-// d s(N-1) / d w(k) = xs(k) for k < N - 1, 0 at k = N - 1.
+// PM40 (rule `ad-checkpoint v1`, opt-in) with the REPLAY-INPUT SNAPSHOT
+// (round 4 wave 6, gap G162): the step reads the array parameter `w` and the
+// module array `xs`, and the function has gradient buffers -- a caller may
+// pass the storage of `w` AS a gradient buffer (ad/046's alias), which the
+// reverse sweep writes before a replay reads it. Admitted: both are copied
+// right before the checkpointed forward loop and only the replay reads the
+// copies (`blade test access` compares the gradient with the full tape's
+// bit for bit). The additive carry s(n) = s(n-1) + w(n-1) xs(n-1) over 5003
+// rows: d s(N-1) / d w(k) = xs(k) for k < N - 1, 0 at k = N - 1.
 // ============================================================================
 let xs = 2.0 + 0.5 * Float64(0..5003)
 function h(w: Array<Float64 like Idx<5003>>) -> Float64 = {

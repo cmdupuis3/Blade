@@ -80,6 +80,14 @@ let private printSelectionNames () : Set<string> option =
                     |> Array.map (fun n -> n.Trim()) |> Array.filter ((<>) "") |> Set.ofArray
         if names.IsEmpty then None else Some names
 
+/// Does a print selection name this binding? An IMPORTED module's bindings
+/// are qualified AFTER this plan runs (`Lib.J`), so an entry matches by its
+/// last dotted segment too (fail closed: any module's `J` counts; round 4
+/// wave 6 class-closure round -- `--print Lib.J` read a never-built buffer).
+let private selects (names: Set<string>) (name: string) : bool =
+    names.Contains name
+    || names |> Set.exists (fun n -> match n.LastIndexOf '.' with -1 -> false | i -> n.Substring(i + 1) = name)
+
 let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let funcs = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let resolve (k: IRExpr) = match k with IRVar (fid, _) -> Map.tryFind fid funcs | _ -> None
@@ -204,7 +212,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
                 | _ -> None))
         let familyPrinted =
             match selection with
-            | Some names -> derived |> Seq.tryFind (fun id -> names.Contains (nameOf id))
+            | Some names -> derived |> Seq.tryFind (fun id -> selects names (nameOf id))
             | None -> derived |> Seq.tryHead
         // the four sources must hold from J's site to the last fold: no binding
         // in between may write ANYTHING (the shared write analysis; a callee
@@ -239,7 +247,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
         let why =
             if not enabled then Some "disabled by BLADE_JOIN_AGG"
             elif selection.IsNone then Some "J is printed (no print selection excludes it): its rows are an output"
-            elif selection.Value.Contains jname then Some "the print selection names J: its rows are an output"
+            elif selects selection.Value jname then Some "the print selection names J: its rows are an output"
             elif foreignRefs.Contains jid then Some "another module names J"
             elif familyPrinted.IsSome then Some $"the selection member `{nameOf familyPrinted.Value}` (a mask over J or the compound over it) is printed: its cells are an output"
             elif derived |> Seq.exists foreignRefs.Contains then Some "another module names a mask over J or the compound over it"

@@ -191,8 +191,14 @@ let ompThreadEmissionEnabled () : bool =
 /// has no threads, so its one cache is the process's). The policy is two
 /// numbers -- the largest block retained and the retained-bytes budget:
 ///
-///   unset / `0` / `off`   -> the default, 4 MB blocks / 8 MB budget, and the
-///                            emission is byte-for-byte what it was (no define);
+///   unset / `default`     -> the default, 32 MB blocks / 64 MB budget since
+///                            round 4 wave 6 (G185 (a), the user's decision of
+///                            2026-11-08, measured: pm08_churn's 24 MB per-call
+///                            temporary 0.199 -> 0.10 s in both lanes, stencil
+///                            mt8 peak WS 51.4 -> 51.6 MiB); no define, the
+///                            runtimes' own constants;
+///   `0` / `off`           -> the PRE-WAVE-6 limits, 4 MB / 8 MB, restated as
+///                            the define pair (a non-default arm, `off`);
 ///   `1` / `on`            -> the measured probe's retention: 64 MB / 96 MB;
 ///   `<maxMB>:<budgetMB>`  -> an explicit pair for A/B sweeps, whole MB with
 ///                            0 < max <= budget <= 1048576;
@@ -214,7 +220,7 @@ let ompThreadEmissionEnabled () : bool =
 /// without any page reuse (a retained A stays resident while an unrelated B
 /// allocates) -- or stay where it was. Per call, never cached.
 type PoolRetention =
-    { /// "default" (unset, `0`/`off`, or malformed) | "retain" (`1`/`on`) | "pair"
+    { /// "default" (unset, `default`, or malformed) | "off" (`0`/`off`, the pre-wave-6 limits) | "retain" (`1`/`on`) | "pair"
       Arm: string
       /// As the plan and the emitted comment spell it: "default" | "0" | "1" | "<max>:<budget>"
       Setting: string
@@ -228,8 +234,11 @@ type PoolRetention =
     member p.MaxBlockBytes = p.MaxBlockMB <<< 20
     member p.BudgetBytes = p.BudgetMB <<< 20
 
-/// The default policy (MB) -- the runtime headers' own constants, restated.
-let poolRetainDefaultMB = (4L, 8L)
+/// The default policy (MB) -- the runtime headers' own constants, restated
+/// (round 4 wave 6, G185 (a)).
+let poolRetainDefaultMB = (32L, 64L)
+/// `BLADE_POOL_RETAIN=0` / `off`: the pre-wave-6 default, as a define pair.
+let poolRetainOffMB = (4L, 8L)
 /// `BLADE_POOL_RETAIN=1`: the probe arm measured in wave 3 (G52).
 let poolRetainArmMB = (64L, 96L)
 /// The largest budget a pair may name (1 TiB): keeps every shift in range.
@@ -246,7 +255,8 @@ let parsePoolRetention (value: string option) (source: string) : PoolRetention =
     | None | Some "" -> dflt "default" None
     | Some v ->
         match v.ToLowerInvariant() with
-        | "0" | "off" | "false" -> dflt "0" None
+        | "default" -> dflt "default" None
+        | "0" | "off" | "false" -> (let (m, b) = poolRetainOffMB in mk "off" "0" m b None)
         | "1" | "on" | "true" -> (let (m, b) = poolRetainArmMB in mk "retain" "1" m b None)
         | _ ->
             match v.Split(':') with
@@ -298,12 +308,20 @@ let describePoolRetention (lane: PoolLane) (p: PoolRetention) : string =
         let laneNote = match lane with PoolLaneCpp -> "" | PoolLaneLlvm -> ", the LLVM lane's shim allocator"
         let why =
             match p.Malformed with
-            | Some v -> $" -- BLADE_POOL_RETAIN='{v}' ({p.Source}) is not 1/on, 0/off or <maxMB>:<budgetMB> with 0 < max <= budget, read as the default"
+            | Some v -> $" -- BLADE_POOL_RETAIN='{v}' ({p.Source}) is not default, 1/on, 0/off or <maxMB>:<budgetMB> with 0 < max <= budget, read as the default"
             | None -> ""
         $"pool retention: default ({m} MB / {b} MB {scope}{laneNote}){why}"
     else
         let head = $"pool retention: BLADE_POOL_RETAIN={p.Setting} ({p.Source}) -> {p.MaxBlockMB} MB / {p.BudgetMB} MB {scope} "
         match lane with
+        | PoolLaneCpp when p.Arm = "off" ->
+            head
+            + "(the pre-wave-6 limits, C++ lane blade_pool, restated as defines; the default since round 4 wave 6 is "
+            + $"{fst poolRetainDefaultMB} MB / {snd poolRetainDefaultMB} MB per thread; the run record's policy.pool says which arm ran)"
+        | PoolLaneLlvm when p.Arm = "off" ->
+            head
+            + "(the pre-wave-6 limits, LLVM lane shim allocator, ONE budget for the process, restated as defines; "
+            + "this lane writes NO run record)"
         | PoolLaneCpp ->
             head
             + $"(opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. {p.MaxBlockMB} MB stays committed until reuse, eviction, flush or thread exit, "
@@ -330,5 +348,5 @@ let warnPoolRetention (p: PoolRetention) : unit =
     match p.Malformed with
     | Some v when poolRetentionWarned.TryAdd(v, true) ->
         let (m, b) = poolRetainDefaultMB
-        eprintfn "warning: BLADE_POOL_RETAIN='%s' (%s) is not 1/on, 0/off or <maxMB>:<budgetMB> with 0 < max <= budget <= %d; the default pool retention (%d MB / %d MB per thread) is used" v p.Source poolRetainLimitMB m b
+        eprintfn "warning: BLADE_POOL_RETAIN='%s' (%s) is not default, 1/on, 0/off or <maxMB>:<budgetMB> with 0 < max <= budget <= %d; the default pool retention (%d MB / %d MB per thread) is used" v p.Source poolRetainLimitMB m b
     | _ -> ()

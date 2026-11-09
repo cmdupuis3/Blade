@@ -629,9 +629,10 @@ let (gv, gx, ga) = ad.grad(g)(Float64(0.4), Float64(0.9))
 """
 
 /// The same step beside an array parameter OUTSIDE it (gradient buffers
-/// exist): a module ARRAY read by the step declines (round 4 wave 5, gap
-/// G162: three review rounds found ways a module array may share storage
-/// with the buffer a caller passes); a module scalar constant is admitted.
+/// exist): the module ARRAY `xs` read by the step (a total arithmetic form)
+/// is SNAPSHOTTED before the forward loop and the replay reads the copy
+/// (round 4 wave 6, gap G162; it declined in wave 5); a module scalar
+/// constant is read directly.
 let private ckForcingBuffers = """import ad as ad
 let xs = 0.25 + 0.125 * Float64(0..31)
 let c0: Float64 = 0.01
@@ -667,6 +668,19 @@ let mut dw: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
 let (gv, gx, ga) = ad.grad(g)(Float64(0.4), Float64(0.9), w0, dw)
 let dw0 = dw(0)
 let dw2 = dw(2)
+"""
+
+/// The aliased-buffer recurrence the snapshot witnesses share (`forcing`
+/// bound by the program prefix).
+let private ckAliasTail = """function f(x: Float64, w: A) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * prefix(n - 1) + forcing(0)
+    s(4) + w(0)
+}
+let (value, dx) = ad.grad(f)(Float64(1.0), identity(backing), backing)
 """
 
 let private ckDecisions (src: string) (knob: string option) : Result<Blade.Effects.Decision list, string> =
@@ -725,23 +739,67 @@ let private ckCorpusPins () : bool list =
     let table =
         [ "047_recarray_tape_100001_zero_fill.blade", Ok "segments of K = 317 steps"
           "048_recarray_checkpoint_5001_rows.blade", Ok "71 segments of K = 71 steps"
-          "049_recarray_checkpoint_declines_array_forcing.blade", Error "the step reads array 'w'"
+          "049_recarray_checkpoint_snapshots_array_parameter.blade", Ok "replay-input snapshot: w -> "
           "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole"
-          "050_recarray_checkpoint_declines_aliased_module_array.blade", Error "a tape of 5 cells (<= 4096) is kept whole" ]
+          "050_recarray_checkpoint_snapshots_aliased_module_array.blade", Error "a tape of 5 cells (<= 4096) is kept whole" ]
     // unset: the opt-in decline (wave 5, the stop rule)
     let unset =
         [ "048_recarray_checkpoint_5001_rows.blade", Error "opt-in (BLADE_AD_CHECKPOINT=1)" ]
-    // forced to K = 2, the size gate passes and the storage proof decides
+    // forced to K = 2, the size gate passes and the replay-input admission
+    // decides: a plain dense stored or total array the step reads is
+    // SNAPSHOTTED (round 4 wave 6, gap G162), anything else declines
     let forced =
-        [ "028_recarray_carry_final_257.blade", Error "the step reads array 'w'"
-          "050_recarray_checkpoint_declines_aliased_module_array.blade", Error "the step reads array 'forcing'"
+        [ "028_recarray_carry_final_257.blade", Ok "replay-input snapshot: w -> "
+          "050_recarray_checkpoint_snapshots_aliased_module_array.blade", Ok "replay-input snapshot: forcing -> "
           "035_recarray_logistic_grad.blade", Ok "2 segments of K = 2 steps (the last 1)"
           // Codex round 2 (wave 5): a fresh array a later mut binding
           // aliases, a local alias, a destructured component
-          "051_recarray_checkpoint_declines_fresh_array_aliased_later.blade", Error "the step reads array 'forcing'"
-          "052_recarray_checkpoint_declines_local_alias.blade", Error "the step reads array 'local_forcing'"
-          "053_recarray_checkpoint_declines_destructured_alias.blade", Error "the step reads array 'forcing'"
-          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction" ]
+          "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", Ok "replay-input snapshot: forcing -> "
+          "052_recarray_checkpoint_snapshots_local_alias.blade", Ok "replay-input snapshot: local_forcing -> "
+          "053_recarray_checkpoint_declines_destructured_alias.blade", Error "the module value 'hidden' records no value"
+          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction"
+          // Codex round 3 (wave 5): a parameter default, a user function
+          // shadowing an intrinsic -- now snapshotted
+          "060_recarray_checkpoint_snapshots_parameter_default_alias.blade", Ok "replay-input snapshot: forcing -> "
+          "061_recarray_checkpoint_snapshots_user_function_shadowing_intrinsic.blade", Ok "replay-input snapshot: forcing -> "
+          // Codex design review of the snapshot (wave 6): a tuple parameter,
+          // a value shadowing an intrinsic, a closure, a ragged array, and a
+          // deferred map with a division
+          "062_recarray_checkpoint_declines_tuple_parameter.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
+          "063_recarray_checkpoint_declines_value_shadowing_intrinsic.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
+          "064_recarray_checkpoint_declines_closure_result.blade", Error "the call of 'factory' does not return a plain dense array"
+          // Codex class-closure review of the snapshot (wave 6 round 1):
+          // literals of closures / tuples copied shallowly, a step value
+          // the full tape re-evaluates live
+          "065_recarray_checkpoint_declines_literal_of_closures.blade", Error "an array literal element is not a proved scalar"
+          "066_recarray_checkpoint_declines_literal_of_tuples.blade", Error "an array literal element is not a proved scalar"
+          "067_recarray_checkpoint_declines_trapping_step_value.blade", Error "the step value may fail"
+          // the class-closure review under R0 (wave 6 round 2): an uneven
+          // nested literal is ragged storage a copy shares
+          "075_recarray_checkpoint_declines_uneven_nested_literal.blade", Error "not rectangular" ]
+    // decision-only shapes whose programs do not compile in a lane today for
+    // reasons outside this rule (gap G190): a ragged array literal and a
+    // deferred module map read inside a differentiated function
+    let inlineForced : (string * Result<string, string> * string) list =
+        [ "ragged_literal", Error "the call of 'identity' does not return a plain dense array",
+          "import ad as ad\ntype A = Array<Float64 like RaggedIdx<_>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [2.0]\nlet forcing = identity(backing)\n" + ckAliasTail
+          "deferred_division", Error "its value is not a stored form",
+          "import ad as ad\ntype A = Array<Float64 like Idx<1>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [4.0]\nlet forcing = method_for(backing) <@> lambda(e) -> 8.0 / e\n" + ckAliasTail ]
+    let inlinePins =
+        [ for (nm, want, src) in inlineForced do
+            let name = "ad_checkpoint_inline: " + nm + " (BLADE_AD_CHECKPOINT=2)"
+            match ckDecisions src (Some "2") with
+            | Error e -> resultLine Fail name e; yield false
+            | Ok ds ->
+                let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let ok =
+                    ds.Length = 1
+                    && (match want, ds.Head.Outcome with
+                        | Ok ev, Blade.Effects.Applied -> ds.Head.Evidence |> List.exists (fun e -> e.Contains ev)
+                        | Error why, Blade.Effects.Declined r -> r.Contains why
+                        | _ -> false)
+                if ok then resultLine Pass name seen else resultLine Fail name $"wanted {want}; saw {seen}"
+                yield ok ]
     let decisionPins =
         [ for (file, want, knob) in (table |> List.map (fun (f, w) -> (f, w, Some "1"))) @ (unset |> List.map (fun (f, w) -> (f, w, None))) @ (forced |> List.map (fun (f, w) -> (f, w, Some "2"))) do
             let suffix = match knob with Some k -> " (BLADE_AD_CHECKPOINT=" + k + ")" | None -> ""
@@ -777,7 +835,7 @@ let private ckCorpusPins () : bool list =
                 let a, b = full on, full off
                 if b = a + 2 then resultLine Pass name $"5001-cell buffers: {a} checkpointed, {b} full"; true
                 else resultLine Fail name $"5001-cell buffers: {a} checkpointed vs {b} full (want full = checkpointed + 2)"; false
-    decisionPins @ [ emission ]
+    decisionPins @ inlinePins @ [ emission ]
 
 /// ad-replay-prune v1 (PM59, round 4 wave 5 A4): the reverse sweep's replay
 /// of the forward fold of ad/030 is dead work and is dropped under the
@@ -812,6 +870,37 @@ let private replayPrunePins () : bool list =
                         | Blade.Effects.Declined r -> not applied && r.Contains why)
                 if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
                 yield ok ]
+    // the typed grammar (round 4 wave 6): the inlined kernel loop of ad/070
+    // drops the dead REAL division `half` and keeps the INTEGER division `q`
+    @ [ let name = "ad_replay_prune_typed: ad/070 drops the real division half, keeps the integer division q"
+        match corpusSource "070_replay_prune_drops_real_division.blade" with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+            match decisions (Some "1") src with
+            | Error e -> resultLine Fail name e; false
+            | Ok ds ->
+                let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let targets =
+                    ds |> List.collect (fun d -> d.Evidence)
+                       |> List.filter (fun e -> e.Contains "replayed statements dropped")
+                       |> String.concat " "
+                let ok =
+                    System.Text.RegularExpressions.Regex.IsMatch(targets, @"_half\b")
+                    && not (System.Text.RegularExpressions.Regex.IsMatch(targets, @"_q\b"))
+                if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
+                ok ]
+
+/// Corpus witnesses whose gradient buffers alias the arrays the step reads:
+/// each checkpointed arm against the full tape, raw bits.
+let private ckCorpusDifferential () : (string * (string * Result<string, string>) list) list =
+    [ "049_recarray_checkpoint_snapshots_array_parameter.blade", [ "auto", Ok "replay-input snapshot: w -> "; "2", Ok "replay-input snapshot: w -> " ]
+      "050_recarray_checkpoint_snapshots_aliased_module_array.blade", [ "2", Ok "replay-input snapshot: forcing -> "; "3", Ok "replay-input snapshot: forcing -> " ]
+      "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "052_recarray_checkpoint_snapshots_local_alias.blade", [ "2", Ok "replay-input snapshot: local_forcing -> " ]
+      "060_recarray_checkpoint_snapshots_parameter_default_alias.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "061_recarray_checkpoint_snapshots_user_function_shadowing_intrinsic.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "062_recarray_checkpoint_declines_tuple_parameter.blade", [ "2", Error "which the replay cannot snapshot" ]
+      "063_recarray_checkpoint_declines_value_shadowing_intrinsic.blade", [ "2", Error "which the replay cannot snapshot" ] ]
 
 let private ckCases () : bool option list =
     if not Build.capabilities.Value.HasGpp then
@@ -831,10 +920,19 @@ let private ckCases () : bool option list =
               "4", Ok "8 segments of K = 4 steps (the last 2)"
               "11", Ok "3 segments of K = 11 steps (the last 8)" ]
         @ ckDifferential "ad_checkpoint_forcing_buffers" ckForcingBuffers
-            [ "3", Error "the step reads array 'xs'" ]
+            [ "3", Ok "replay-input snapshot: xs -> "
+              "7", Ok "replay-input snapshot: xs -> " ]
         @ ckDifferential "ad_checkpoint_scalar_buffers" ckScalarBuffers
             [ "3", Ok "10 segments of K = 3 steps (the last 3)"
               "7", Ok "5 segments of K = 7 steps (the last 2)" ]
+        // the replay-input snapshot (round 4 wave 6, gap G162): gradient
+        // buffers that ALIAS the arrays the step reads; the checkpointed
+        // gradient equals the full tape bit for bit
+        @ (ckCorpusDifferential ()
+           |> List.collect (fun (file, arms) ->
+               match corpusSource file with
+               | Error e -> resultLine Fail ("ad_checkpoint_snapshot: " + file) e; [ Some false ]
+               | Ok src -> ckDifferential ("ad_checkpoint_snapshot_" + file.Substring(0, 3)) src arms))
 
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"

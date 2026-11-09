@@ -1,0 +1,24 @@
+// TEST: A top-level fold over a deferred tuple projection is not joined
+// ============================================================================
+// Round 4 wave 6 (the class-closure round of BLADE_SIBLING_FOLDS=top, gap
+// G107): `y = pack[0]` is a projection of a tuple of deferred maps -- itself
+// deferred (the program's deferred-value classifier), auto-printed at its own
+// binding. Joining `prodsum(y, y)` with `prodsum(x, x)` at the first member
+// forced y's producer at the join and dropped y's print in both lanes. The
+// operand census now reads the classifier: the top-level region declines the
+// pair (an operand is a deferred computation) and y prints where it did. The
+// default build never joins top-level lets; `blade test opt-diff` compares the
+// `top` mirror against it.
+// ============================================================================
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let iv: Array<Int64 like I> = [1, 4, 2]
+let pack = (method_for(iv) <@> lambda(v) -> Float64(100 / v), method_for(x) <@> lambda(v) -> v)
+let y = pack[0]
+let a = prodsum(x, x)
+let note = a + 1.0
+let b = prodsum(y, y)
+// EXPECT: y = [100.0, 25.0, 50.0]
+// EXPECT: a = 14.0
+// EXPECT: note = 15.0
+// EXPECT: b = 13125.0

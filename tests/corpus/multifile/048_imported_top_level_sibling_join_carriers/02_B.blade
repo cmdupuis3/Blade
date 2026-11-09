@@ -1,0 +1,6 @@
+// TEST: An imported module's internal bindings do not print under their qualified name
+// MODULE: B
+module B
+import A
+let answer = A.a + A.b + A.note
+// EXPECT: answer = 35.0
