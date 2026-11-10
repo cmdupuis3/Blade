@@ -2254,6 +2254,10 @@ let one = contains(evens, Int64(44))
                     let mark = body.IndexOf("; G184: kernel application cleanup", stores.[0].Index)
                     if reset < 0 || reset > cm.Index then yield $"{p}: no scope-entry reset of {slot} before the call"
                     elif mark < 0 then yield $"{p}: no kernel cleanup after its store"
+                    // G204: no escape null of the slot between the tracking
+                    // store and the cleanup (it made the cleanup free null)
+                    elif body.Substring(stores.[0].Index, mark - stores.[0].Index).Contains("store ptr null, ptr " + slot + "\n") then
+                        yield $"{p}: slot {slot} nulled between its store and the cleanup"
                     else
                         let tail = body.Substring mark
                         let loads = System.Text.RegularExpressions.Regex.Matches(tail, @"(%r\d+) = load ptr, ptr " + stok)
@@ -2330,6 +2334,83 @@ let one = contains(evens, Int64(44))
              match g184ProofOf @"bl_big_\d+" 2 ll "main" with
              | Ok n -> pass "g184_inlined_tuple_call" ($"main: {n} call results of big (top level and per cell), each freed once per application")
              | Error e -> fail "g184_inlined_tuple_call" e)
+    // G204 (round 4 wave 7): (1) a deferred row map whose row PARAMETER is
+    // materialized inside its application (memfree/060): the row pool is the
+    // application's -- freed at its cleanup, never nulled first; (2) an outer
+    // `let mut` rebound to a ROW VIEW of storage that existed before the
+    // application (memfree/061 `got`) is not an escape: `big`'s result is
+    // freed per application; a view of the application's OWN pool (`got3`)
+    // is still an escape -- recorded, and nothing freed there.
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Frees Its Materialized Row Parameter (G204)") with
+     | None -> fail "g204_row_parameter_owned_by_application" "missing corpus witness memfree/060"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g204_row_parameter_owned_by_application" e
+         | Ok ll ->
+             match g184ProofOf "blade_alloc_cells" 1 ll "main" with
+             | Ok n -> pass "g204_row_parameter_owned_by_application" ($"main: {n} row pool(s), each freed once per application")
+             | Error e -> fail "g204_row_parameter_owned_by_application" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Rebinding To A View Of Existing Storage (G204)") with
+     | None -> fail "g204_view_of_existing_storage" "missing corpus witness memfree/061"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g204_view_of_existing_storage" e
+         | Ok ll ->
+             let text = ll.Replace("\r\n", "\n")
+             let m = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define i32 @main\(.*?^\}")
+             let count (p: string) = System.Text.RegularExpressions.Regex.Matches(m.Value, p).Count
+             let marks = count "; G184: kernel application cleanup"
+             let kept = count "; G204: kernel application pools kept"
+             let frees = count @"call void @blade_free\("
+             let calls = count @"= call ptr @bl_big_\d+\("
+             if m.Success && marks = 1 && kept = 1 && frees = 1 && calls = 2 then
+                 pass "g204_view_of_existing_storage" "a view of existing storage frees big per application; a view of the application's own pool keeps it (recorded)"
+             else fail "g204_view_of_existing_storage" ($"main: {marks} cleanups, {kept} kept records, {frees} frees, {calls} calls of big (wanted 1, 1, 1, 2)"))
+    // ... and an outer array rebound inside a kernel applied PER CELL
+    // (memfree/063) is refused by name (it emitted invalid IR: the rebound
+    // register did not dominate the reads after the loop).
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Outer Array Rebound Inside A Per-Cell Kernel Takes The C++ Lane (G204)") with
+     | None -> fail "g204_per_cell_rebinding_refused" "missing corpus witness memfree/063"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e when e.Contains "rebound inside" -> pass "g204_per_cell_rebinding_refused" "refused by name; the C++ lane takes it"
+         | Error e -> fail "g204_per_cell_rebinding_refused" ("refused for another reason: " + e)
+         | Ok _ -> fail "g204_per_cell_rebinding_refused" "emitted: the rebound register would not dominate the reads after the loop")
+    // ... also a rebinding to storage that existed before, inside a loop that
+    // may run zero times (memfree/064), and a LIVE row parameter forced inside
+    // a nested kernel loop (memfree/065)
+    for (title, pin) in [ ("An Outer Array Rebound Inside A Zero-Trip Kernel Loop Keeps Its Value (G204)", "g204_zero_trip_rebinding_refused")
+                          ("A Row Parameter Forced Inside A Nested Kernel Loop Takes The C++ Lane (G204)", "g204_live_parameter_in_nested_loop_refused")
+                          ("An Array Rebound Inside An If Arm Takes The C++ Lane (G204)", "g204_if_arm_rebinding_refused")
+                          ("A Rebinding After A Stored Read In A Zero-Trip Loop Keeps The Binding (G204)", "g204_rebinding_after_stored_read_refused")
+                          ("An Array Rebound In A Skipped Conditional Operand Keeps The Binding (G204)", "g204_skipped_operand_rebinding_refused") ] do
+        match Blade.Tests.Corpus.category "memfree" |> List.tryFind (fun (n, _) -> n = title) with
+        | None -> fail pin ("missing corpus witness: " + title)
+        | Some (_, src) ->
+            match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+            | Error e when e.Contains "rebound inside" -> pass pin "refused by name; the C++ lane takes it"
+            | Error e -> fail pin ("refused for another reason: " + e)
+            | Ok _ -> fail pin "emitted: the rebinding inside the loop would be read after it"
+    // G205 (round 4 wave 7): a let-bound lambda spliced at each KERNEL use
+    // stays INLINE -- the kernels never call the binding (its std::function
+    // value, kept for other uses, is never invoked in the C++ lane), no
+    // indirect call in the LLVM lane (numeric-defaults/101).
+    (match Blade.Tests.Corpus.category "numeric-defaults"
+           |> List.tryFind (fun (n, _) -> n = "a let-bound lambda in kernel position is instantiated at each use") with
+     | None -> fail "g205_let_lambda_kernel_inline" "missing corpus witness numeric-defaults/101"
+     | Some (_, src) ->
+         match Blade.Tests.Functions.cppOf "g205_inline" src, emitUnder [] "facts" src with
+         | Ok cpp, Ok ll ->
+             let indirect = System.Text.RegularExpressions.Regex.IsMatch(ll, @"call [^@\n]*%r\d+\(")
+             let calledByName = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"\b(sq|add|pos)\(")
+             if calledByName then fail "g205_let_lambda_kernel_inline" "a kernel calls the let-bound lambda value by name in the C++ text"
+             elif indirect then fail "g205_let_lambda_kernel_inline" "an indirect call in the LLVM IR"
+             else pass "g205_let_lambda_kernel_inline" "inline in both lanes: no call of the binding, no indirect call"
+         | Error e, _ -> fail "g205_let_lambda_kernel_inline" ("C++: " + e)
+         | _, Error e -> fail "g205_let_lambda_kernel_inline" ("llvm: " + e))
 
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
@@ -3164,7 +3245,15 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// with the closed-form domain nest (structural/06, bench G4); `sibling-folds`
 /// with the sibling-fold rewrite (round 2), whose joins every lane consumes.
 /// Every other category is reachable standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds" ]
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds"; "multifile" ]
+
+/// The MULTI-FILE categories (tests/corpus/<dir>/<test>/*.blade): each test is
+/// lowered as ONE program through `lowerMultiSourceCaptured`, the lowering the
+/// corpus runner and `test interp` give it. `multifile` joined the default
+/// sweep with gap G199 (round 4 wave 7): an imported deferred map forced by
+/// another module read stale cells in this lane only, and no differential
+/// walked a multi-module program, so no gate could see it.
+let private multiFileDiffCategories = set [ "multifile" ]
 
 /// What happened to one file. `Matched` carries a note so an agreement that
 /// asserts NOTHING -- both lanes printed no values at all -- is visible in the
@@ -3192,7 +3281,9 @@ let private clearArtifacts (dir: string) (stems: string list) =
 /// is in-process and free while the C++ oracle costs a g++ invocation. Each
 /// lane lowers its OWN IRProgram from the same source, so neither back end can
 /// observe state the other left on a shared tree.
-let private runCase (dir: string) (name: string) (source: string) : CaseOutcome =
+/// `lower` produces a FRESH lowering on every call (each lane consumes its
+/// own, see below).
+let private runCaseWith (dir: string) (name: string) (lower: unit -> Result<Blade.IR.IRProgram, 'e>) : CaseOutcome =
     let stem = Build.sanitizeFileName name
     let cppStem = "llvmdiff_cpp_" + stem
     let llStem = "llvmdiff_ll_" + stem
@@ -3210,7 +3301,7 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
         // run` do, and hands warnings back instead of printing them. `lower`
         // refused every stdlib-importing test, which this block then counted
         // as a front-end skip rather than as lane coverage.
-        match fst (Lowering.lowerCaptured source) with
+        match lower () with
         | Error _ -> SkippedCase "the front end refuses this program"
         | Ok ir0 ->
         match IRValidate.validateIR ir0 with
@@ -3225,7 +3316,7 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             // their own analysis contexts over the IR they consume, and the
             // oracle has to be exactly what `blade test basic` would have
             // compiled -- not an IRProgram another emitter has already walked.
-            match fst (Lowering.lowerCaptured source) with
+            match lower () with
             | Error _ -> SkippedCase "the front end refuses this program"
             | Ok ir1 ->
             match IRValidate.validateIR ir1 with
@@ -3292,6 +3383,14 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
                         ($"""stdout differs -- {(String.concat " | " diffs)} (kept {cppFile} and {llFile})""")
     with ex -> FailedCase ($"harness exception: {ex.Message}")
 
+let private runCase (dir: string) (name: string) (source: string) : CaseOutcome =
+    runCaseWith dir name (fun () -> fst (Lowering.lowerCaptured source))
+
+/// runCase over a MULTI-FILE test: the member files lowered as one program
+/// (the corpus runner and `test interp` lower it the same way).
+let private runMultiCase (dir: string) (name: string) (files: (string * string) list) : CaseOutcome =
+    runCaseWith dir name (fun () -> fst (Blade.Runtime.runOnLargeStack (fun () -> Lowering.lowerMultiSourceCaptured files)))
+
 /// The differential sweep over a category list.
 let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
     printHeader "LLVM Differential (llvm lane vs C++ lane)"
@@ -3324,7 +3423,13 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
     let mutable reasons = []
     for cat in categories do
         let tests =
-            try Ok (Blade.Tests.Corpus.category cat)
+            try
+                if multiFileDiffCategories.Contains cat then
+                    Ok (Blade.Tests.Corpus.multiFileCategory cat
+                        |> List.map (fun (name, files) -> (name, fun () -> runMultiCase dir name files)))
+                else
+                    Ok (Blade.Tests.Corpus.category cat
+                        |> List.map (fun (name, source) -> (name, fun () -> runCase dir name source)))
             with ex -> Error ex.Message
         match tests with
         | Error msg ->
@@ -3334,8 +3439,8 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
             failedNames <- failedNames @ [ $"category {cat}" ]
         | Ok tests ->
             printSubHeader ($"{cat} ({tests.Length} files)")
-            for (name, source) in tests do
-                match runCase dir name source with
+            for (name, run) in tests do
+                match run () with
                 | Matched note ->
                     passed <- passed + 1
                     resultLine Pass name note

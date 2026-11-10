@@ -4,8 +4,9 @@
 // fold and the mat-vec of a decompacted rank-2 pool read the packed pool cell
 // by cell inside a FUNCTION BODY too, when the pool (and the mat-vec vector)
 // is a parameter of the function -- no n x n dense buffer per call -- under
-// the OPT-IN arm BLADE_DECOMPACT_FOLD=body (`blade test opt-diff` runs it as a
-// gate mirror; the default build declines it and builds the buffer). The pins
+// the function-body arm, DEFAULT ON since round 4 wave 7 (BLADE_DECOMPACT_FOLD=top
+// is the old default and builds the buffer; `blade test opt-diff` runs it as a
+// gate mirror). The pins
 // are the hand values and the differential against the stored decompaction
 // (`DS`, printed, so it keeps its buffer). `rowsum_let` reads a pool bound by
 // a body let (G167, round 4 wave 6: read in place under the same arm; see

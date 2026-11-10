@@ -1,0 +1,36 @@
+// TEST: a let-bound lambda in kernel position is instantiated at each use
+// Gap G205 (round 4 wave 7 lane d; G172 (b)): `let inc = lambda(x) -> ..`
+// used as a KERNEL resolved to its one typed lambda, so the first use fixed
+// its types for every later one -- `method_for(a32) <@> sq` then
+// `method_for(a64) <@> sq` was BL3001 -- and a literal partner never saw the
+// operand's width. The source lambda is now spliced at each kernel use
+// (`<@>`, `object_for`, a fold kernel, a sort key, a mask predicate) and typed
+// there, inline, exactly as if written in place: each use is its own
+// instance, and the literal follows the operand's width (the annotations
+// below would be BL3001 at the wrong width).
+type I = Idx<3>
+let a32: Array<Float32 like I> = [1.0, 2.0, 3.0]
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let sq = lambda(x) -> x * x + 1.0
+let p: Array<Float32 like I> = method_for(a32) <@> sq |> compute
+let q: Array<Float64 like I> = method_for(a64) <@> sq |> compute
+let o32: Array<Float32 like I> = object_for(sq) <@> a32 |> compute
+let o64: Array<Float64 like I> = object_for(sq) <@> a64 |> compute
+let add = lambda(u, v) -> u + v
+let s32: Float32 = reduce(a32, add)
+let s64: Float64 = reduce(a64, add)
+let pos = lambda(x) -> x > 1.5
+let m32 = mask(a32, pos)
+let m64 = mask(a64, pos)
+let k32 = compound(a32, m32)
+let k64 = compound(a64, m64)
+let c32 = extents(k32)
+let c64 = extents(k64)
+// EXPECT: p = [2.0, 5.0, 10.0]
+// EXPECT: q = [2.0, 5.0, 10.0]
+// EXPECT: o32 = [2.0, 5.0, 10.0]
+// EXPECT: o64 = [2.0, 5.0, 10.0]
+// EXPECT: s32 = 6.0
+// EXPECT: s64 = 6.0
+// EXPECT: c32 = 2
+// EXPECT: c64 = 2

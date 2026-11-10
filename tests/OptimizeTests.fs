@@ -9283,7 +9283,7 @@ let private memberDeferredSetSrc =
 let private memberDeferredHostSrc =
     memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet flags = method_for(customer) <@> lambda(c) -> contains(eligible, c)\nlet n = reduce(method_for(flags) <@> lambda(b) -> if b then 1 else 0, (+), 0)\n"
 let private memberSharedKernelSrc =
-    memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet pred = lambda(c: Int64) -> contains(eligible, c)\nlet k1 = mask(customer, pred)\nlet k2 = mask(customer, pred)\n"
+    memberHead + "let eligible = Int64([3, 3, 1, -5])\nlet mut pred = lambda(c: Int64) -> contains(eligible, c)\nlet k1 = mask(customer, pred)\nlet k2 = mask(customer, pred)\n"
 let private memberFloatSrc =
     "type Row = Idx<4>\nlet xs: Array<Float64 like Row> = [1.5, 2.5, 0.0, -1.0]\nlet fs = Float64([1.5, -0.0, 2.5])\nlet keep = mask(xs, lambda(x) -> contains(fs, x))\n"
 let private memberWritingSeedSrc =
@@ -11115,7 +11115,7 @@ let private dcfMatVecDeferredSrc =
     + "let v = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0\n"
     + "let y = method_for(decompact(S, 0)) <@> lambda(row) -> prodsum(row, v) |> compute\n"
 
-// G123 (round 4 wave 5): the FUNCTION-BODY arm, opt-in (BLADE_DECOMPACT_FOLD=body).
+// G123 (round 4 wave 5): the FUNCTION-BODY arm -- opt-in (BLADE_DECOMPACT_FOLD=body) until round 4 wave 7, DEFAULT ON since (`top` = the old default).
 let private dcfBodySrc =
     dcfHead
     + "function rowsum(P: Array<Float64 like SymIdx<2, I>>) -> Array<Float64 like I> = {\n"
@@ -11187,6 +11187,51 @@ let private decompactForeignBindCase () : bool =
             let shown = if seen = "" then "no decisions" else seen
             resultLine Fail name ($"wanted a decline naming the value reference; saw: {shown}"); false
 
+// Round 4 wave 7 (lane c), the G123 class-closure round (Codex a499815a):
+// the program-wide value census missed a `>>=` continuation hidden in a TYPE
+// EXTENT (a range bound) -- not observable (the compiled lanes refuse the
+// run-time range either way; the interpreter agrees), hardened: the census
+// also walks embeddedExtentExprs and declared types. The direct-call control
+// inside the same extent stays a direct call.
+let private dcfExtentHiddenBindSources =
+    [ (fst dcfForeignBindSources.[0], snd dcfForeignBindSources.[0])
+      ("Main", "module Main\nfrom Lib import I, rowsum, weights\nlet x = Float64(range<I>)\n"
+               + "let result = extents(0..Int64(floor(((method_for(x, x) <@> lambda(a, b) where comm(a, b) -> {\n"
+               + "    weights(0) = a + b\n"
+               + "    Float64(1.0)\n"
+               + "}) >>= rowsum) |> compute)))\n") ]
+let private dcfExtentDirectCallSources =
+    [ (fst dcfForeignBindSources.[0], snd dcfForeignBindSources.[0])
+      ("Main", "module Main\nfrom Lib import I, rowsum\nlet x = Float64(range<I>)\n"
+               + "let P = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> Float64(1.0) |> compute\n"
+               + "let result = extents(0..Int64(floor(rowsum(P))))\n") ]
+
+let private decompactExtentHiddenBindCase () : bool =
+    let name = "decision_decompact_body_extent_hidden_value_ref_declined"
+    match decisionsOfMulti dcfExtentHiddenBindSources with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "decompact-row-fold" && d.Subject = "rowsum")
+        if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning "referenced other than by a direct call" d) then
+            resultLine Pass name "declined: a `>>=` continuation hidden in a range extent names `rowsum` as a value"; true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted a decline naming the value reference; saw: {shown}"); false
+
+let private decompactExtentDirectCallControlCase () : bool =
+    let name = "decision_decompact_body_extent_direct_call_applied"
+    match decisionsOfMulti dcfExtentDirectCallSources with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = "decompact-row-fold" && d.Subject = "rowsum")
+        if not mine.IsEmpty && mine |> List.exists applied then
+            resultLine Pass name "applied: a direct call inside a range extent is not a value reference"; true
+        else
+            let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "no decisions" else seen
+            resultLine Fail name ($"wanted the parameter route applied; saw: {shown}"); false
+
 // Round 4 wave 6 class-closure members of the sibling-folds `top` arm (a
 // deferred tuple projection operand; G107) and of the compute-elision `chain`
 // arm (an imported deferred operand; G108).
@@ -11206,6 +11251,115 @@ let private chainImportedSources =
                + "let r3 = reduce(q3, (+), 0.0)\n"
                + "H.x(0) = 10.0\n"
                + "let z = H.d(0)\n") ]
+
+// Round 4 wave 7 (lane c): the class-closure round of the `top` arm (Codex
+// 18a2f03d) found an extent read of a DEFERRED map in a later fold seed or
+// kernel -- the interpreter forces it, so joining moved its failure ahead of
+// an intervening one (corpus sibling-folds/059-060). The control: a
+// function-body fold reading the extent of a COMPUTED map still joins.
+let private sfDeferredExtentHead =
+    "type I = Idx<3>\n"
+    + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+    + "let iv: Array<Int64 like I> = [1, 0, 2]\n"
+let private sfTopDeferredExtentSeedSrc =
+    sfDeferredExtentHead
+    + "let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)\n"
+    + "let a = prodsum(x, x)\n"
+    + "let note = a + 1.0\n"
+    + "let b = reduce(x, (+), Float64(extents(d)))\n"
+let private sfTopDeferredExtentKernelSrc =
+    sfDeferredExtentHead
+    + "let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)\n"
+    + "let a = prodsum(x, x)\n"
+    + "let note = a + 1.0\n"
+    + "let b = reduce(method_for(x) <@> lambda(v) -> v * Float64(extents(d)), (+))\n"
+let private sfStoredExtentControlSrc =
+    sfDeferredExtentHead
+    + "function stats(fz: Float64) -> Float64 = {\n"
+    + "    let d = method_for(iv) <@> lambda(v) -> Float64(100 / v) |> compute\n"
+    + "    let a = prodsum(x, x)\n"
+    + "    let b = reduce(x, (+), Float64(extents(d)))\n"
+    + "    a + b + fz\n"
+    + "}\n"
+    + "let r = stats(0.0)\n"
+
+let private wave7SiblingFoldCases () : bool list =
+    let joinedIn (subject: string -> bool) (ds: Blade.Effects.Decision list) =
+        ds |> List.exists (fun d -> d.Rule = "sibling-folds" && subject d.Subject && applied d)
+    let notJoined name (gate: string option) src (subject: string -> bool) why =
+        let run () = decisionsOf src
+        match (match gate with Some g -> withGate "BLADE_SIBLING_FOLDS" g run | None -> run ()) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            if joinedIn subject ds then
+                let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                resultLine Fail name ($"joined over a deferred extent read: {seen}"); false
+            else resultLine Pass name why; true
+    [ notJoined "decision_sibling_folds_top_deferred_extent_seed_not_joined" (Some "top") sfTopDeferredExtentSeedSrc ((=) "top level")
+          "the top-level region does not join a fold whose seed reads extents(d) of a deferred d"
+      notJoined "decision_sibling_folds_top_deferred_extent_kernel_not_joined" (Some "top") sfTopDeferredExtentKernelSrc ((=) "top level")
+          "the top-level region does not join a fold whose kernel reads extents(d) of a deferred d"
+      // Codex diff review 27945c90: an IMPORTED deferred map read through
+      // `extents` in a DEFAULT-build function-body fold seed (the open classifier
+      // answered an unseen id not deferred) -- now declined fail closed
+      // G220 (Codex diff review of the class fix): scratch pool reuse's call
+      // census missed a retaining call inside a range bound (`keep(y)` stores
+      // y in a module mut), so z took y's pool (24.0 instead of 23.0). Pinned as
+      // a decision: the retention itself frees y at f's exit in every spelling
+      // (gap G221), so the program is not an ASan-clean corpus witness.
+      decisionCase "decision_pool_reuse_extent_retaining_call_declined"
+          ("type I = Idx<3>\n"
+           + "let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]\n"
+           + "function keep(a: Array<Float64 like I>) -> Int64 = {\n"
+           + "    saved = a\n"
+           + "    3\n"
+           + "}\n"
+           + "function f(x: Array<Float64 like I>) -> Float64 = {\n"
+           + "    let mut y = x * 2.0 |> compute\n"
+           + "    let n = extents(0..keep(y))\n"
+           + "    let z = x * 3.0 |> compute\n"
+           + "    reduce(z, (+)) + saved(0) + Float64(n)\n"
+           + "}\n"
+           + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+           + "let result = f(x)\n")
+          "pool-reuse"
+          (fun d -> d.Subject = "f" && declinedMentioning "no candidate pool is both dead and unaliased" d)
+          "declined: a call in a range bound that may retain y keeps z off y's pool"
+      (let name = "decision_sibling_folds_body_imported_deferred_extent_not_joined"
+       let sources =
+           [ ("Lib", "module Lib\ntype I = Idx<3>\nlet iv: Array<Int64 like I> = [1, 0, 2]\nlet d = method_for(iv) <@> lambda(v) -> Float64(100 / v)\n")
+             ("Main", "module Main\nfrom Lib import I, d\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+                      + "function stats(fz: Float64) -> Float64 = {\n"
+                      + "    let a = prodsum(x, x)\n"
+                      + "    let fail = Int64(floor(fz / fz))\n"
+                      + "    let b = reduce(x, (+), Float64(extents(d)))\n"
+                      + "    a + b + Float64(fail)\n"
+                      + "}\n"
+                      + "let r = stats(0.0)\n") ]
+       match decisionsOfMulti sources with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if joinedIn (fun s -> s.Contains "stats") ds then
+               let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+               resultLine Fail name ($"joined over an imported deferred extent read: {seen}"); false
+           else resultLine Pass name "a function-body region does not join a fold whose seed reads extents(d) of an IMPORTED deferred d"; true)
+      (let name = "decision_sibling_folds_top_stored_extent_joined"
+       let src = sfTopDeferredExtentSeedSrc.Replace("Float64(100 / v)\n", "Float64(100 / v) |> compute\n")
+       match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> decisionsOf src) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if joinedIn ((=) "top level") ds then resultLine Pass name "control: under top, an extent read of a COMPUTED d still joins"; true
+           else
+               let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+               resultLine Fail name ($"the top-level control did not join: {seen}"); false)
+      (let name = "decision_sibling_folds_body_stored_extent_joined"
+       match decisionsOf sfStoredExtentControlSrc with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if joinedIn (fun s -> s.Contains "stats") ds then resultLine Pass name "control: an extent read of a COMPUTED d still joins"; true
+           else
+               let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+               resultLine Fail name ($"the control did not join: {seen}"); false) ]
 
 let private wave6ClassClosureCases () : bool list =
     let topCase =
@@ -11251,6 +11405,22 @@ let private wave6ClassClosureCases () : bool list =
                 resultLine Fail name ($"the chain applied over an imported deferred kernel read: {seen}"); false
             else
                 resultLine Pass name "not applied: a kernel reading an imported deferred map is not certified total"; true
+    // round 4 wave 7 (lane B, B3 class-closure round): a RANGE operand of
+    // RUN-TIME extent under p used to be admitted, and the fused nest read an
+    // undeclared range descriptor (invalid C++); it declines now
+    let chainRuntimeRangeCase =
+        let name = "decision_compute_elision_chain_runtime_range_declined"
+        let src = "let n = 3\nlet p = method_for(0..n) <@> lambda(i) -> Int64(i) + 1\nlet q = method_for(p) <@> lambda(v) -> v * v\nlet r = reduce(q, (+), 0)\n"
+        match withGate "BLADE_COMPUTE_ELIDE" "chain" (fun () -> decisionsOf src) with
+        | Error e -> resultLine Fail name e; false
+        | Ok ds ->
+            let mine = ds |> List.filter (fun d -> d.Rule = "compute-elision" && d.Subject.Contains "q")
+            if not mine.IsEmpty && mine |> List.forall (fun d -> declinedMentioning "run-time extent or offset" d) then
+                resultLine Pass name "declined: a run-time range operand of p keeps its descriptor where p is forced"; true
+            else
+                let seen = mine |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let shown = if seen = "" then "no decisions" else seen
+                resultLine Fail name ($"wanted the run-time range decline; saw: {shown}"); false
     // join-aggregate (G128 / ST15): a print selection naming an IMPORTED
     // module's J (`--print Lib.J`) -- qualified after the plan runs -- used to
     // miss, so J's buffer was never built and printed through null
@@ -11330,7 +11500,7 @@ let private wave6ClassClosureCases () : bool list =
         if ok then resultLine Pass name "a qualified internal name is internal; a qualified __expr carrier and a user name are not"
         else resultLine Fail name "isInternalBindingName misreads a qualified name"
         ok
-    [ topCase; chainCase; chainCaptureCase; joinAggQualifiedPrintCase; extentScratchOmpCase; internalNameCase ] @ joinProducerInlinedCases
+    [ topCase; chainCase; chainCaptureCase; chainRuntimeRangeCase; joinAggQualifiedPrintCase; extentScratchOmpCase; internalNameCase ] @ joinProducerInlinedCases
 
 let private decompactRowFoldCases () : bool list =
     let dcf (d: Blade.Effects.Decision) = d.Subject = "rows"
@@ -11392,9 +11562,14 @@ let private decompactRowFoldCases () : bool list =
           decisionCase "decision_decompact_body_param_applied" dcfBodySrc "decompact-row-fold"
               (fun d -> d.Subject = "rowsum" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "a parameter of `rowsum`"))
               "applied under BLADE_DECOMPACT_FOLD=body: the function-body pool is a parameter")
-      decisionCase "decision_decompact_body_default_declined" dcfBodySrc "decompact-row-fold"
-          (fun d -> d.Subject = "rowsum" && declinedMentioning "opt-in (BLADE_DECOMPACT_FOLD=body)" d)
-          "declined by default: the function-body arm is opt-in"
+      // round 4 wave 7 (lane c): the body arm is DEFAULT ON; =top is the old default
+      decisionCase "decision_decompact_body_default_applied" dcfBodySrc "decompact-row-fold"
+          (fun d -> d.Subject = "rowsum" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "a parameter of `rowsum`"))
+          "applied by default (wave 7 flip): the function-body pool is a parameter"
+      withGate "BLADE_DECOMPACT_FOLD" "top" (fun () ->
+          decisionCase "decision_decompact_body_top_declined" dcfBodySrc "decompact-row-fold"
+              (fun d -> d.Subject = "rowsum" && declinedMentioning "disabled by BLADE_DECOMPACT_FOLD=top" d)
+              "declined under BLADE_DECOMPACT_FOLD=top (the old default): the function-body arm is off")
       withGate "BLADE_DECOMPACT_FOLD" "body" (fun () ->
           decisionCase "decision_decompact_body_let_applied" dcfBodyLetSrc "decompact-row-fold"
               (fun d -> d.Subject = "rowsum_let" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "a body let of `rowsum_let`"))
@@ -11408,6 +11583,8 @@ let private decompactRowFoldCases () : bool list =
               (fun d -> d.Subject = "nested" && declinedMentioning "is not a `|> compute` or an array literal" d)
               "declined: a pool bound through a nested block is not proved stored")
       decompactForeignBindCase ()
+      decompactExtentHiddenBindCase ()
+      decompactExtentDirectCallControlCase ()
       (let name = "decompact_body_let_cpp_no_buffer"
        match withGate "BLADE_DECOMPACT_FOLD" "body" (fun () -> cppOfSource name dcfBodyLetSrc),
              withGate "BLADE_DECOMPACT_FOLD" "0" (fun () -> cppOfSource name dcfBodyLetSrc) with
@@ -12700,11 +12877,12 @@ let private joinAggCases () : bool list =
             match decisionsOf joinAggFloatSrc with
             | Error e -> [ e ]
             | Ok ds -> [ if not (mine ds |> List.exists (declinedMentioning "a float fold under contraction")) then yield "a float fold under contraction was admitted" ]))
-      check "join_aggregate_is_opt_in" (fun () ->
+      // DEFAULT ON since round 4 wave 7 (lane B, B3; it was opt-in)
+      check "join_aggregate_is_default_on" (fun () ->
         withGate "BLADE_PRINT" "match_count,total,fp" (fun () ->
             match decisionsOf joinAggSrc with
             | Error e -> [ e ]
-            | Ok ds -> [ if not (mine ds |> List.exists (declinedMentioning "disabled by BLADE_JOIN_AGG")) then yield "the default build plans it" ]))
+            | Ok ds -> [ if not (mine ds |> List.exists applied) then yield "the default build does not plan it" ]))
       check "join_aggregate_declines_a_printed_join" (fun () ->
         withGate "BLADE_JOIN_AGG" "1" (fun () ->
             match decisionsOf joinAggSrc, cppOfSource "join_agg_printed" joinAggSrc with
@@ -12862,7 +13040,19 @@ let private assemblyDestCases () : bool list =
           (fun d -> d.Subject = "M" && declinedMentioning "`M` is printed" d) "declined: a named map prints"
       withGate "BLADE_ASSEMBLY_DEST" "0" (fun () ->
           planCase "decision_assembly_dest_declined_gate" tSrc "assembly-dest"
-              (fun d -> declinedMentioning "disabled by BLADE_ASSEMBLY_DEST" d) "declined: disabled by BLADE_ASSEMBLY_DEST") ]
+              (fun d -> declinedMentioning "disabled by BLADE_ASSEMBLY_DEST" d) "declined: disabled by BLADE_ASSEMBLY_DEST")
+      // G200 (round 4 wave 7 lane B): an INTERNAL `__` name prints when an
+      // explicit selection names it; the plan used to treat every `__` name
+      // as unprinted BEFORE reading the selection, and omitted the pool the
+      // print then read. The shared resolver is read first now.
+      (let src =
+          "type I = Idx<37>\ntype J = Idx<41>\n"
+          + "let A: Array<Float64 like I, J> = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i) * 100.0 + Float64(j) |> compute\n"
+          + "let __y = A * 2.0 |> compute\nlet T1 = transpose(__y, [0, 1])\nlet c1 = T1(40, 36)\n"
+       withGate "BLADE_PRINT" "__y,c1" (fun () ->
+          planCase "decision_assembly_dest_declined_selected_internal_name" src "assembly-dest"
+              (fun d -> d.Subject = "__y" && declinedMentioning "the print selection names `__y`" d)
+              "declined: `--print __y` names the internal binding (G200)")) ]
 
 /// The per-group map storage plan (group-rowmap v1, BLADE_GROUP_ROWMAP, G90):
 /// the corpus witnesses' emission and decisions.
@@ -13542,6 +13732,7 @@ let runOptimizeTests () =
           yield! gatherTerminalCases ()
           yield! decompactRowFoldCases ()
           yield! wave6ClassClosureCases ()
+          yield! wave7SiblingFoldCases ()
           yield! ceRemainderCases ()
           yield! g98DeferredValueCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.

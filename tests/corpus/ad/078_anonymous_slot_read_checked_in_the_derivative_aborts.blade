@@ -1,0 +1,30 @@
+// TEST: AD An Anonymous-Slot Read Is Checked In The Derivative (aborts)
+import ad as ad
+// ============================================================================
+// Gap G192 (1), user decision 2026-11-09 (the anonymous half of G187, ad/077):
+// `sin` is an array over an ANONYMOUS `Idx<3>` slot, read at a computed
+// position `d(0, 0)`. The forward pass reads positions 0 and 1; the reverse
+// sweep REPLAYS the loop body, whose `row(0) += 1` keeps moving the position
+// (2, then 3), so the replayed read is out of range. An anonymous slot is now
+// checked like a named one, so the program stops with BL8006 in `f__grad` in
+// every lane: the C++ lane used to read past `sin` and print value 4.0,
+// dx 2.0 while the interpreter aborted.
+// ============================================================================
+type D = Array<Int32 like Idx<1>, Idx<1>>
+type A = Array<Int32 like Idx<3>>
+function k(x: Float64, d: D, sin: A) -> Float64 = {
+    let unused = sin(d(0, 0))
+    let mut row = d(0)
+    row(0) += 1
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let d: D = [[0]]
+    let sin: A = [10, 20, 30]
+    let ys = method_for(range<Idx<2>>)
+        <@> lambda(i) -> k(x, d, sin) |> compute
+    reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: at f__grad

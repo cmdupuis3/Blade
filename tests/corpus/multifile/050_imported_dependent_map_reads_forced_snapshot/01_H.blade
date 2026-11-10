@@ -1,0 +1,9 @@
+// TEST: An imported deferred map forced, written, then read through a dependent map
+// MODULE: H
+// Gap G199 (round 4 wave 7): Main binds p over H.d while H.d is deferred,
+// forces H.d, writes H.x, then reads p. Forcing p reads H.d by name -- the
+// snapshot -- in every lane (the LLVM lane reran the captured producer).
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+// EXPECT: H.d = [2.0, 4.0, 6.0]

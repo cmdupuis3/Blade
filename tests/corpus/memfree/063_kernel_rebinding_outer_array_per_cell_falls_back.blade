@@ -1,0 +1,27 @@
+// TEST: An Outer Array Rebound Inside A Per-Cell Kernel Takes The C++ Lane (G204)
+// Gap G204 (2): a kernel applied PER CELL that rebinds an outer `let mut` to
+// a ROW VIEW (`out = a((1 : R))`) or to its own call result left the LLVM
+// lane holding a register born inside the cell loop for the reads after it
+// -- invalid IR ("Instruction does not dominate all uses"), a hard failure
+// of `BLADE_LLVM=1`. A loop body whose rebinding is not to storage a binding
+// already held is now refused by name and the program runs in the C++ lane
+// (`blade test llvm` pins the refusal). Values are the same in every lane.
+// sum big(w) = 500500 w; sum over t < 7 of t = 21: got = got2 = 10510500
+type Big = Idx<1001>
+type Rep = Idx<7>
+type R = Idx<2>
+type C = Idx<3>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+let a = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let got = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    out = a((1 : R))
+    reduce(big(Float64(t)), (+))
+}, (+))
+let after = reduce(out, (+))
+// EXPECT: got = 10510500.0
+// EXPECT: after = 6.0

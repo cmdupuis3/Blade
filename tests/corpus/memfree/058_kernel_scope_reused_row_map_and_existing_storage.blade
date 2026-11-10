@@ -6,7 +6,9 @@
 // outer `let mut` to storage that existed before the application (it cannot
 // retain anything the application allocated). Both used to keep `big`'s
 // result alive per application; `blade test llvm` pins its free in both
-// kernels.
+// kernels. (Round 4 wave 7, G204: the rebinding is now made by a lambda
+// applied ONCE -- a rebinding inside a kernel applied per cell is refused by
+// the LLVM lane, memfree/063 and 064.)
 type Big = Idx<1001>
 type Rep = Idx<7>
 type R = Idx<2>
@@ -28,10 +30,11 @@ let got = reduce(method_for(range<Rep>) <@> lambda(t) -> {
 
 let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
 let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
-let got2 = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+let pick = lambda(t: Float64) -> {
     out = a
-    reduce(big(Float64(t)), (+))
-}, (+))
+    reduce(big(t), (+))
+}
+let got2 = pick(3.0) + pick(18.0)
 let after = reduce(out, (+))
 // EXPECT: warm = 9.0
 // EXPECT: got = 10510563.0

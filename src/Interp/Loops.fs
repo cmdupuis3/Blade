@@ -1018,6 +1018,30 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     let info = applyFunctorWrappers st info0 wrappers
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
+    // Symmetric/antisymmetric/Hermitian output storage (compact) and Reynolds
+    // kernels (permutation sum) are interpreted -- see the ArrayElem arm's
+    // compact allocation and interpretNest's Reynolds path. Fused-joint output
+    // levels (one loop level spanning d plain-dense source dims -- joint
+    // symmetry over the compound axis) are materialized by interpretNest's
+    // fused-peel arm (per-dim coordinate decode, mirrors CodeGen.fs:3087).
+    // Resolve input array values by position.
+    let inputs = Dictionary<int, ArraySource>()
+    // G207: the compiled genComputeBinding order -- the NAMED operands first
+    // (a deferred one is forced under its own name), then the kernel's
+    // deferred captures (G115), then the INLINE operand forms, which the
+    // compiled lanes materialize inside the map's own emission
+    info.Arrays |> List.iteri (fun i arr ->
+        match arr with
+        | IRVar _ -> inputs.[i] <- resolveArraySource st env arr
+        | _ -> ())
+    forceKernelDeferredCaptures st env true [ info.Kernel ]
+        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
+    info.Arrays |> List.iteri (fun i arr ->
+        match arr with
+        | IRVar _ -> ()
+        | _ -> inputs.[i] <- resolveArraySource st env arr)
+    // G207 (3): the halo extent guard runs AFTER the capture prelude, as
+    // genApplyCombinator's guard does after genComputeBinding's forces
     // HALO-EXTENT RUNTIME GUARD (BL8009) -- the interpreter twin of
     // genApplyCombinator's haloExtentGuards, checked ONCE before the nest.
     // A dense halo slot's declared inner extent is a literal; any array read
@@ -1057,19 +1081,6 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
                       | _ -> ())
                  | None -> ())
             | None -> ())
-    // Symmetric/antisymmetric/Hermitian output storage (compact) and Reynolds
-    // kernels (permutation sum) are interpreted -- see the ArrayElem arm's
-    // compact allocation and interpretNest's Reynolds path. Fused-joint output
-    // levels (one loop level spanning d plain-dense source dims -- joint
-    // symmetry over the compound axis) are materialized by interpretNest's
-    // fused-peel arm (per-dim coordinate decode, mirrors CodeGen.fs:3087).
-    // Resolve input array values by position.
-    let inputs = Dictionary<int, ArraySource>()
-    info.Arrays |> List.iteri (fun i arr -> inputs.[i] <- resolveArraySource st env arr)
-    // G115: the kernel's deferred captures, after the inputs (the compiled
-    // genComputeBinding order) and before the first cell.
-    forceKernelDeferredCaptures st env true [ info.Kernel ]
-        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
     let realAt (pos: int) =
         match inputs.TryGetValue pos with
         | true, SReal a -> a
@@ -1335,6 +1346,10 @@ and private materializeCompoundRangeMap
         (maskExpr: IRExpr) (leadRank: int) : Value =
     if not (List.isEmpty wrappers) then
         raise (InterpUnsupported "functor-map wrapper over a range<CompoundIdx> map")
+    // G173 (2) / G207 (2): the kernel's deferred captures, in capture order,
+    // BEFORE the mask is resolved (the compiled prelude forces them ahead of
+    // the range driver's mask) and before the index build
+    forceArmCaptures st env info0
     let maskArr =
         match force st env (Core.evalExpr st env maskExpr) with
         | VArray a -> a
@@ -1342,10 +1357,6 @@ and private materializeCompoundRangeMap
         // present cells, the flat view the C++ lane's range driver reads
         | VCompound cv -> A.compoundToDense cv
         | _ -> raise (InterpUnsupported "range<CompoundIdx>: mask is not an array")
-    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
-    // the index build (whose own failures -- a duplicate key -- come after
-    // the compiled prelude's forces), before the first cell
-    forceArmCaptures st env info0
     let leadExtents = maskArr.Extents
     let maskBits = A.maskToBits maskArr
     let (table, rankOf, card) = A.buildCompoundIndex leadExtents maskBits
@@ -1435,11 +1446,13 @@ and private materializeSparseRangeMap
         (src: SparseKeysSource) (leadRank: int) : Value =
     if not (List.isEmpty wrappers) then
         raise (InterpUnsupported "functor-map wrapper over a range<SparseIdx> map")
-    let keys = resolveSparseKeys st env src leadRank
-    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
-    // the index build (whose own failures -- a duplicate key -- come after
-    // the compiled prelude's forces), before the first cell
+    // G173 (2) / G207 (2): the kernel's deferred captures, in capture order,
+    // BEFORE the keys are resolved (a deferred key map the kernel also
+    // captures is forced there, in its capture position; one it does not is
+    // forced after them) and before the index build (whose own failures -- a
+    // duplicate key -- come after the compiled prelude's forces)
     forceArmCaptures st env info0
+    let keys = resolveSparseKeys st env src leadRank
     let (rankOf, card) = A.buildSparseIndex keys
     let arrayNames = info0.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info0 arrayNames "out" st.Builder
@@ -1502,14 +1515,13 @@ and private materializeCompoundHaloMap
         raise (InterpUnsupported "functor-map wrapper over a compound-halo map")
     if leadRank <> 1 then
         raise (InterpUnsupported "compound-halo over a rank>1 mask (rank-1 only)")
+    // G173 (2) / G207 (2): the kernel's deferred captures BEFORE the mask is
+    // resolved and before the index build
+    forceArmCaptures st env info
     let maskArr =
         match force st env (Core.evalExpr st env maskExpr) with
         | VArray a -> a
         | _ -> raise (InterpUnsupported "compound-halo: mask is not an array")
-    // G173 (2): the kernel's deferred captures, after the inputs and BEFORE
-    // the index build (whose own failures -- a duplicate key -- come after
-    // the compiled prelude's forces), before the first cell
-    forceArmCaptures st env info
     let (table, _, card) = A.buildCompoundIndex maskArr.Extents (A.maskToBits maskArr)
     let start = Blade.Types.haloStartOffsetOfTag tag |> Option.defaultValue 0L
     let shrink = Blade.Types.haloShrinkOfTag tag |> Option.defaultValue 0L
@@ -2346,7 +2358,11 @@ let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) :
 /// (value-identical to CodeGen's staggered merged nest, since leaves don't
 /// interact). Single leaf = scalar; fusion tree = a structured tuple
 /// mirroring the tree shape (same rationale as forceTreeShaped).
-let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seed: Value) : Value =
+let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seedF: unit -> Value) : Value =
+    // G207: the SEED is evaluated where the compiled lanes initialize the
+    // accumulators -- after the capture prelude and (one leg) the deferred
+    // operand forcing, before the traversal; once (memoized)
+    let seedL = lazy (seedF ())
     // HOISTED-OPERAND PRELUDE -- the twin of CodeGen.genReduceComputeBinding's.
     // The lift pass pulls a synthesized loop application out of the
     // combinator's `Arrays` slot into its own let, so a deferred computation
@@ -2388,10 +2404,10 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
         match kernel with
         | IRTuple ks when ks.Length = infos.Length -> ks |> List.map (resolveBinaryFold st env)
         | _ -> infos |> List.map (fun _ -> resolveBinaryFold st env kernel)
-    let legSeeds =
-        match seed with
-        | VTuple ss when ss.Length = infos.Length -> List.ofArray ss
-        | _ -> infos |> List.map (fun _ -> seed)
+    let legSeed (li: int) : Value =
+        match seedL.Force() with
+        | VTuple ss when ss.Length = infos.Length -> ss.[li]
+        | seed -> seed
     // A CLOSED-FORM DOMAIN leaf (`range<R>` over a static struct with linear
     // conjuncts, docs/plans/structural/06) folds its solutions in LEX order --
     // `enumerateDomain`, the same walk the C++ affine nest and the LLVM lane's
@@ -2425,9 +2441,9 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     // One leg's fold over its own nest. `started` marks the end of the leg's
     // pre-traversal work (input gates and forcing) for the join's failure
     // order below.
-    let runLegFrom (seed0: Value) (info: ApplyInfo) (fold: Value -> Value -> Value) (started: unit -> unit) : Value =
+    let runLegFrom (seedOf: unit -> Value) (info: ApplyInfo) (fold: Value -> Value -> Value) (started: unit -> unit) : Value =
             match domainLeaf info with
-            | Some plan -> started (); foldDomainLeaf info plan fold seed0
+            | Some plan -> let seed0 = seedOf () in started (); foldDomainLeaf info plan fold seed0
             | None ->
             gateInputs info
             let names = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
@@ -2446,12 +2462,12 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
                     match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
-            let acc = { V = seed0 }
+            let acc = { V = seedOf () }
             started ()
             interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
             acc.V
     let runLeg (li: int) (info: ApplyInfo) (fold: Value -> Value -> Value) (started: unit -> unit) : Value =
-        runLegFrom legSeeds.[li] info fold started
+        runLegFrom (fun () -> legSeed li) info fold started
     // THE JOIN'S FAILURE ORDER (gap G101; formalism 10.2): the legs share ONE
     // traversal, cell by cell in ascending order; within a cell the SHARED
     // named producers run first (a leaf several legs spell, and every leg's
@@ -2534,6 +2550,18 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
         match infos with
         | [ info ] -> [ runLeg 0 info legFolds.[0] ignore ]
         | _ ->
+            // a reduction JOIN forces no operand up front (per-cell shares):
+            // its seeds are initialized right after the capture prelude; a
+            // fused TREE (`reduce(p <&!> q, ..)`) first forces every leg's
+            // named deferred operand, as the compiled prelude does, and then
+            // initializes the seed (Codex review round 2)
+            if not isJoinEncoding then
+                for info in infos do
+                    for arr in info.Arrays do
+                        match arr with
+                        | IRVar _ -> resolveFusedArraySource st env arr |> ignore
+                        | _ -> ()
+            seedL.Force() |> ignore
             let outcomes =
                 infos |> List.mapi (fun li info ->
                     let cells = ref -1L
@@ -2563,7 +2591,7 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                         let count (a: Value) (_: Value) =
                             cells.Value <- cells.Value + 1L
                             a
-                        try runLegFrom VUnit di count (fun () -> cells.Value <- 0L) |> ignore; None
+                        try runLegFrom (fun () -> VUnit) di count (fun () -> cells.Value <- 0L) |> ignore; None
                         with InterpPanic _ as ex -> Some (cells.Value, 0, si, ex))
                     |> List.choose id
                 match shareFails @ legFails with
@@ -2675,8 +2703,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             A.sparseReduce sv (resolveBinaryFold st env kernel) initV
         | _ -> raise (InterpUnsupported "reduce over a non-array value")
     | IRReduceCompute (comp, kernel, seedExpr) ->
-        let seed = Core.evalExpr st env seedExpr
-        forceReduceCompute st env comp kernel seed
+        forceReduceCompute st env comp kernel (fun () -> Core.evalExpr st env seedExpr)
     | IRProdSum args ->
         let arrs = args |> List.map (fun e -> match force st env (Core.evalExpr st env e) with VArray a -> a | _ -> raise (InterpUnsupported "prodsum over non-array"))
         A.prodSum arrs

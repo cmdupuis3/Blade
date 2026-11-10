@@ -1,0 +1,22 @@
+// TEST: AD An Inlined User Index In Range Runs Unchanged
+import ad as ad
+// ============================================================================
+// Gap G192 (2), the in-range twin of ad/079: the inlined callee reads its
+// array at a renamed user index `j = 2`, inside S -- the check passes and the
+// derivative of x * x is printed.
+// ============================================================================
+type S = Idx<3>
+type A = Array<Float64 like S>
+function k(x: Float64, a: A, i: Int64) -> Float64 = {
+    let j = i + 0
+    let unused = a(j)
+    x * x
+}
+function f(x: Float64) -> Float64 = {
+    let a: A = [1.0, 2.0, 3.0]
+    k(x, a, 2)
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// EXPECT: value = 4.0
+// EXPECT: dx = 4.0
+// WARN: BL4003

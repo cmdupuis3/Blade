@@ -1,0 +1,21 @@
+// TEST: An Array Rebound Inside An If Arm Takes The C++ Lane (G204)
+// Gap G204 (Codex diff review round 2): an `if` arm that rebinds an array
+// binding which existed before it (here through `pick`, inlined into the
+// arm) re-pointed the LLVM binding at EMISSION time, so the code after the
+// `if` read the arm's array even when the arm did not run (6.0 for 0.0), and
+// a register born in the arm did not dominate the merge (invalid IR). An if
+// / match arm that rebinds such a binding is now refused by name, like a loop
+// body, and the C++ lane takes the program. (A kernel-local `let mut` array
+// rebound to an array LITERAL inside a lambda is a C++ BL9002, gap G227.)
+type C = Idx<3>
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let pick = lambda(t: Float64) -> {
+    out = a
+    t
+}
+let flag = reduce(a, (+)) < 0.0
+let r = if flag then pick(1.0) else 0.0
+let after = reduce(out, (+))
+// EXPECT: r = 0.0
+// EXPECT: after = 0.0

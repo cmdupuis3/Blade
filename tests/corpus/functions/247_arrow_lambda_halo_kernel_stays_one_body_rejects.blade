@@ -1,10 +1,14 @@
 // TEST: A let-bound lambda used as a halo kernel stays one body (rejects)
-// ERROR: BL3001 @ 11:11
+// ERROR: BL4003
 // ============================================================================
-// Used as a VALUE -- here the kernel of a halo map, which binds its parameter
-// to the window -- the lambda is ONE body (TypeCheck.generalizeArrowLetLambdas
-// keeps it a lambda), so its kernel use decides its parameter and an array
-// applied later is refused at the argument.
+// Round 4 wave 7 (gap G205): a let-bound lambda used as a KERNEL is spliced
+// at that use and typed there (the halo window decides that copy's
+// parameter), so the binding's remaining uses are calls and
+// TypeCheck.generalizeArrowLetLambdas makes it a generic declaration. The
+// call `d([1, 2, 3])` is then refused for its own reason: the window read
+// `w(-1)` of the 3-cell array argument is a negative literal position (BL4003),
+// where it used to be refused at the argument against the kernel-fixed
+// window type (BL3001).
 type I = Idx<5>
 let A: Array<Float64 like I> = [1.0, 4.0, 9.0, 16.0, 25.0]
 let d = lambda(w) -> A(w(1)) - A(w(-1))

@@ -1,0 +1,19 @@
+// TEST: AD A Lowered Map Index Is Checked In The Derivative (aborts)
+import ad as ad
+// ============================================================================
+// Gap G192 (2), Codex diff review round 4 of G192 (1): reverse mode lowers
+// the map into a loop whose variable `__mi<n>` replaces the kernel parameter
+// `i` -- a user binder. The loop runs over range<Idx<5>> and reads a 3-cell
+// v, which the primal checks; the derivative used to read (and its adjoint
+// write) v at 0..4 unchecked. The loop variable keeps the user provenance
+// (and a literal-bounded loop proves what fits), so `f__grad` stops with
+// BL8006 in every lane.
+// ============================================================================
+function f(x: Float64) -> Float64 = {
+    let v: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+    let a = method_for(range<Idx<5>>) <@> lambda(i) -> v(i) * x |> compute
+    reduce(a, (+))
+}
+let (y, dx) = ad.grad(f)(Float64(2.0))
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: at f__grad

@@ -1,0 +1,22 @@
+// TEST: A fold kernel capture through a deferred alias forces the map
+// Gap G199 (Codex diff review round 5): the fold kernel captures `a`, a
+// deferred ALIAS of d (and `b`, a projection of a wholly deferred tuple of
+// e), read only through extents; the fold forces both maps under their own
+// names before it runs (the C++ lane follows the alias), so the later write
+// to x reaches neither d nor e.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let a = d
+let s = reduce(method_for(x) <@> lambda(v) -> v + Float64(extents(a)), (+), 0.0)
+let e = method_for(x) <@> lambda(v) -> v * 3.0
+let t = (e, e)
+let b = t[0]
+let s2 = reduce(method_for(x) <@> lambda(v) -> v + Float64(extents(b)), (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+let w2 = e(0)
+// EXPECT: s = 15.0
+// EXPECT: s2 = 15.0
+// EXPECT: w = 2.0
+// EXPECT: w2 = 3.0

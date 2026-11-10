@@ -1,0 +1,14 @@
+// TEST: an inline former reaching a pack-reading lambda through a local value is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 3): the inline
+// former check followed only lambdas the kernel names directly; a lambda held
+// by a tuple bound outside the kernel (`fs[0](k)`) reached g++. The inline
+// check now follows every local value initializer and match binder too.
+// ERROR: BL7004
+// ERROR-CONTAINS: Bind the former with `let` first
+// REJECT-AT: lower
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let h = lambda(j: Int64) -> args[j]
+    let fs = (h, 1.0)
+    reduce(method_for(range<Idx<3>>) <@> lambda(k) -> fs[0](k), (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

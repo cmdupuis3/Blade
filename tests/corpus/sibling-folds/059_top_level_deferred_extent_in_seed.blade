@@ -1,0 +1,20 @@
+// TEST: A deferred extent read in a later fold seed keeps its failure order (aborts)
+// ============================================================================
+// Round 4 wave 7 (lane c, the fresh class-closure round of
+// BLADE_SIBLING_FOLDS=top, Codex 18a2f03d, gap G107): `extents(d)` of a
+// DEFERRED map d inside a later fold's seed -- the interpreter forces d to read
+// its extent (BL8013, 100 / 0) where the compiled lanes read the static extent.
+// Joining b with a at `a` moved that force ahead of `fail` (BL8014): the
+// interpreter reported BL8013 first. The totality judge now refuses an extent
+// read of a deferred value, so the pair is not joined and BL8014 at `fail`
+// stays the first failure in every build.
+// ============================================================================
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let iv: Array<Int64 like I> = [1, 0, 2]
+let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)
+let a = prodsum(x, x)
+let fz: Float64 = 0.0
+let fail = Int64(floor(fz / fz))
+let b = reduce(x, (+), Float64(extents(d)))
+// ABORT: BL8014

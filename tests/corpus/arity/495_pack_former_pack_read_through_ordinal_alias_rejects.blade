@@ -1,0 +1,17 @@
+// TEST: an unrolled pack former whose pack read is indexed by an alias of the ordinal is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 2): the unroll
+// substitutes the kernel ORDINAL by each element literal, so only a read
+// indexed by the ordinal itself becomes a literal subscript; `let j = k;
+// args[j]` kept a dynamic subscript (an IR validation failure). Any other
+// index is now refused at lowering.
+// ERROR: BL7004
+// ERROR-CONTAINS: through a local value
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let j = k
+        args[j] + args[k]
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

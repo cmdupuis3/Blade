@@ -1483,6 +1483,43 @@ let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
                       && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") && refusals.IsEmpty)
                      (String.concat "\n" (recs @ refusals))
          finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
+        // G200 (round 4 wave 7 lane B): the print selection is QUALIFIED for an
+        // imported module (`Lib.g`), the plan runs before qualification on `g`.
+        // The shared resolver (Blade.PrintSelection) matches an entry by its
+        // last dotted segment too, so `--print Lib.g,total` keeps Lib.g stored
+        // and printed (the state form used to drop it: `Lib.g` never matched `g`)
+        (let lib = "module Lib\n" + (keyed "stream")
+         let main = "module Main\nimport Lib\nlet total = 1\n"
+         let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO"; "BLADE_TILE_TUNE" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+         let name = "stream-group-aggregate: a QUALIFIED print selection (Lib.g) keeps the imported g stored and printed (G200)"
+         try
+             Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+             Environment.SetEnvironmentVariable("BLADE_PRINT", "Lib.g,total")
+             Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+             Environment.SetEnvironmentVariable("BLADE_TILE_TUNE", "group_win=3")
+             Blade.Effects.Decisions.start ()
+             let lowered = fst (Blade.Runtime.runOnLargeStack (fun () -> Lowering.lowerMultiSourceCaptured [ ("Lib", lib); ("Main", main) ]))
+             let recs = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-aggregate") |> List.map Blade.Effects.Decisions.render
+             match lowered with
+             | Error e -> check name false (sprintf "lowers: %A" e)
+             | Ok ir ->
+                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_sga_qualified_print"
+                 let declined = recs |> List.exists (fun r -> r.Contains "declined" && r.Contains "print selection names g")
+                 if not declined || cppCode.Contains "stream-group-aggregate v1: `g` is not stored" then
+                     check name false (String.concat "\n" recs)
+                 else
+                 CodeGen.deployRuntimeHeaders e2eDir
+                 let cppFile = Path.Combine(e2eDir, "zarr_sga_qualified_print.cpp")
+                 File.WriteAllText(cppFile, cppCode)
+                 match compileCpp cppFile e2eDir with
+                 | Error e when isSkipError e -> printfn "  SKIP %s: %s" name e
+                 | Error e -> check name false ("compile: " + e)
+                 | Ok exe ->
+                     match runExecutable exe with
+                     | Ok (0, out) -> check name (out.Contains "Lib.g = " && out.Contains "total = 1") out
+                     | Ok (code, out) -> check name false ($"exit {code}: {out}")
+                     | Error e -> check name false e
+         finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
         // wave 6 lane b, the R0 class-closure round (Codex 19d5e4b8): a FLOATING
         // dynamic key may be NaN, which never equals itself, so the CSR can hold
         // an EMPTY group whose unseeded fold is BL8003 at the fold; the state form
@@ -1513,6 +1550,57 @@ let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
                   && seeded |> List.exists (fun r -> r.Contains "applied"))
                  (String.concat "\n" (unseeded @ [ "-- seeded --" ] @ seeded))
          finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
+        // round 4 wave 7 (lane c), the fresh class-closure round (Codex
+        // f357ff95), two members, both in an IMPORTED module whose bindings are
+        // qualified after the plan: (1) the fold adoption read the grouping
+        // count by its SOURCE name (`g__sga_n`) where the group emitted
+        // `Data__g__sga_n` -- g++ rejected the program (BL9002); (2) a print
+        // selection naming the grouping QUALIFIED (`Data.g`) did not protect it,
+        // so the plan erased a printed grouping. Fixed: the emitted name by id,
+        // and the selection matches the last dotted segment too.
+        (let dir = Path.Combine(e2eDir, "sga_imported")
+         (try Directory.Delete(dir, true) with _ -> ())
+         Directory.CreateDirectory dir |> ignore
+         let data =
+             "module Data\nimport zarr as z\n"
+             + $"let sample = z.load(\"{segStore}\")\n"
+             + "let A = sample.vars.A |> z.stream\n"
+             + "let keys = [0, 0, 1, 1, 2, 2, 0, 1, 2, 0]\n"
+             + "let gk = group_keys(keys)\n"
+             + "let g = group_by(A, gk)\n"
+             + "let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute\n"
+         let mainSrc = "module Main\nfrom Data import sums\nlet q = sums(0)\n"
+         File.WriteAllText(Path.Combine(dir, "Data.blade"), data)
+         let mainPath = Path.Combine(dir, "Main.blade")
+         File.WriteAllText(mainPath, mainSrc)
+         for (label, sel, wantApplied) in [ ("imported, g not printed", "q", true); ("imported, g printed qualified", "Data.g,q", false) ] do
+             let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+             try
+                 Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+                 Environment.SetEnvironmentVariable("BLADE_PRINT", sel)
+                 Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+                 match fst (Lowering.lowerFileDiag mainPath mainSrc) with
+                 | Error e -> check $"stream-group-aggregate ({label}): lowers" false (sprintf "%A" e)
+                 | Ok (ir, _) ->
+                     let stem = if wantApplied then "zarr_sga_imported" else "zarr_sga_imported_printed"
+                     let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir stem
+                     let stateForm = cppCode.Contains "stream-group-aggregate v1: `"
+                     let verb = if wantApplied then "applies" else "declines (g is printed)"
+                     check $"stream-group-aggregate ({label}): the state form {verb}"
+                         (stateForm = wantApplied) ""
+                     CodeGen.deployRuntimeHeaders e2eDir
+                     let cppFile = Path.Combine(e2eDir, stem + ".cpp")
+                     File.WriteAllText(cppFile, cppCode)
+                     match compileCpp cppFile e2eDir with
+                     | Ok exe ->
+                         (match runExecutable exe with
+                          | Ok (0, out) ->
+                              check $"stream-group-aggregate ({label}): compiles, runs, q = 20.0" (out.Contains "q = 20.0") out
+                          | Ok (code, out) -> check $"stream-group-aggregate ({label}): runs" false ($"exit {code}: {out}")
+                          | Error e -> check $"stream-group-aggregate ({label}): runs" false e)
+                     | Error e when isSkipError e -> printfn "  SKIP stream-group-aggregate (%s): %s" label e
+                     | Error e -> check $"stream-group-aggregate ({label}): compiles (g++ accepts the emitted names)" false e
+             finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
         // the resident twin prints the same values
         (match lower (keyed "read") with
          | Ok ir ->
@@ -3383,8 +3471,9 @@ let w = z.write("%s", A)
         let twoFir (store: string) =
             stencil store + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) - 2.0 * A(w(0)) |> compute\n"
         let count (s: string) (needle: string) = (s.Length - s.Replace(needle, "").Length) / needle.Length
-        // the streamed kind is OPT-IN (BLADE_SIBLING_MAPS=streamed; the default
-        // keeps one run loop per binding, like =0)
+        // the streamed kind is DEFAULT ON since round 4 wave 7 (lane c);
+        // BLADE_SIBLING_MAPS=streamed reads as on, =nostream is the old
+        // default (one run loop per binding, like =0)
         let runSib (label: string) (sib: string) (cache: string) (src: string) =
             withEnv [ ("BLADE_SIBLING_MAPS", sib) ] (fun () -> runArm label cache src)
         (match runSib "halo-cache two FIRs_on" "streamed" "1" (twoFir seg), runSib "halo-cache two FIRs_off" "streamed" "0" (twoFir seg),
@@ -3484,13 +3573,28 @@ let w = z.write("%s", A)
         let withString = stencil seg + "let msg = \"a long message\"\n" + "let d2 = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) + A(w(-1)) |> compute\n"
         let recString = planOf withString
         check "G106 plan: an intervening allocating statement (a string) keeps two run loops (Codex review E1-1)" (not (has recString "d, d2: applied")) (String.concat "\n" recString)
-        // the default build: the streamed kind is opt-in
-        let recDefault =
-            withEnv [ ("BLADE_SIBLING_MAPS", null) ] (fun () ->
+        // the default build (round 4 wave 7, lane c: the streamed kind flipped
+        // DEFAULT ON) fuses; =nostream is the old default and keeps one run
+        // loop per binding, its decline named
+        let recUnder (v: string) =
+            withEnv [ ("BLADE_SIBLING_MAPS", v) ] (fun () ->
                 Blade.Effects.Decisions.start ()
                 (match lower (twoFir seg) with Ok _ -> () | Error e -> failwithf "lowers: %s" e)
                 Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "sibling-maps") |> List.map Blade.Effects.Decisions.render)
-        check "G106 plan: the default build keeps one run loop per binding (the streamed kind is opt-in)" (not (has recDefault "d, d2: applied")) (String.concat "\n" recDefault)
+        let recDefault = recUnder null
+        check "G106 plan: the default build fuses the streamed group (DEFAULT ON since wave 7)" (has recDefault "d, d2: applied") (String.concat "\n" recDefault)
+        let recNoStream = recUnder "nostream"
+        // (no member-level record: a streamed member declines only beside another
+        // admitted candidate sharing its input, and under =nostream there is none)
+        check "G106 plan: BLADE_SIBLING_MAPS=nostream (the old default) keeps one run loop per binding"
+            (not (has recNoStream "d, d2: applied")) (String.concat "\n" recNoStream)
+        // the default build runs the fused loop: same output as the old default
+        (match runSib "two FIRs default" null "1" (twoFir seg), runSib "two FIRs nostream" "nostream" "1" (twoFir seg) with
+         | Ok (cppD, Some (0, outD, _)), Ok (cppN, Some (0, outN, _)) ->
+             check "G106 (wave 7 flip): the default build emits ONE run loop, =nostream two; same output"
+                 (cppD.Contains "ONE run loop for d, d2" && not (cppN.Contains "ONE run loop for d, d2") && strip outD = strip outN) (outD + " / " + outN)
+         | Ok (_, None), _ | _, Ok (_, None) -> printfn "  SKIP two FIRs default / nostream: toolchain unavailable"
+         | a, b -> check "two FIRs default / nostream: both arms run" false (sprintf "%A / %A" a b))
         // (8) E6 / ST03 (round 4 wave 4; the elementwise route, DEFAULT ON since round 4 wave 6 --
         // BLADE_HALO_CACHE=elementwise reads as the default; `stencil` is the old default): a zip of two DIFFERENTLY chunked
         // streams (A chunk 4, B chunk 6, N = 13) runs one block of A's chunk

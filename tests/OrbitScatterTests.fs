@@ -347,11 +347,16 @@ let runOrbitScatterTests () : BlockResult =
             if v.Contains "r1 = 0.0" && v.Contains "e1 = true" && v.Contains "e2 = true" then
                 pass name "the repro addition sees the ROUNDED square (r1 = 0.0); scatter == walk at one and two rows"
             else fail name ($"""wanted r1 = 0.0, e1 = true, e2 = true: {v.Replace("\n", " | ")}""")
-    // (2) An UNFORCED map over a stored SymIdx pool is NOT a stored pool: the
-    // LLVM lane keeps the walk (its producer would run inside the scatter, in
-    // the grouped order), with the walk's forcing / printing rules and its
-    // FIRST error. The C++ lane declines it too (a deferred computation);
-    // these programs run in the LLVM lane only (the C++ lane rejects this
+    // (2) An UNFORCED map over a stored SymIdx pool, CAPTURED by the fold's
+    // kernel. Round 4 wave 7 (lane B, G199): the LLVM lane forces a kernel
+    // capture of a deferred module map before the fold, as the C++ lane does
+    // (collectDeferredKernelCaptures), so the walk reads a STORED snapshot and
+    // the scatter takes it (one site; it used to stay a producer this lane
+    // declined). The force runs the producer in ROW order at its own site,
+    // before the fold: the deferred `h` still prints, the printed text is the
+    // walk's (knob on == knob off), and the FIRST error is the walk's --
+    // the producer's (0, 4), never the grouped scatter's diagonal (1, 1).
+    // These programs run in the LLVM lane only (the C++ lane rejects this
     // walk shape today, pre-existing BL9002 on 6b3e5293).
     let unforcedSrc =
         "type Var = Idx<5>\ntype Obs = Idx<3>\n"
@@ -378,13 +383,14 @@ let runOrbitScatterTests () : BlockResult =
         use _pAll = pinEnv "BLADE_PRINT" null
         let unforcedCase (knob: string) : string option =
             n <- n + 1
-            let name = $"""llvm: an unforced map over a stored pool keeps the walk (BLADE_ORBIT_SCATTER={(if isNull knob then "on" else "0")})"""
+            let name = $"""llvm: a captured unforced map over a stored pool is forced, then scattered (BLADE_ORBIT_SCATTER={(if isNull knob then "on" else "0")})"""
+            let wanted = if isNull knob then 1 else 0
             match buildSrc unforcedSrc "llvm" null knob $"oscat_unforced_{n}" with
             | Error e -> fail name e; None
             | Ok (exe, ll) ->
                 let sites = routeCount "llvm" ll
-                if sites <> 0 then
-                    fail name $"{sites} scatter site(s) over an unforced producer"
+                if sites <> wanted then
+                    fail name $"route census: {sites} scatter site(s), wanted {wanted} (the forced snapshot of `h` is a stored pool)"
                     None
                 else
                 match run exe with
@@ -392,7 +398,8 @@ let runOrbitScatterTests () : BlockResult =
                 | Ok out ->
                     let v = valueText out
                     if v.Contains "h = [[" && v.Contains "s = " && v.Contains "e = true" then
-                        pass name "no scatter site; the deferred `h` still prints; s == the walk-forced twin"
+                        pass name (if isNull knob then "one scatter site over the forced snapshot; the deferred `h` still prints; s == the walk-forced twin"
+                                   else "no scatter site; the deferred `h` still prints; s == the walk-forced twin")
                         Some v
                     else
                         fail name ($"""output list: wanted h, s and e = true: {v.Replace("\n", " | ")}""")
@@ -404,12 +411,14 @@ let runOrbitScatterTests () : BlockResult =
         | _ -> ()
         for knob in [ null; "0" ] do
             n <- n + 1
-            let name = $"""llvm: the first error is the walk's over an unforced producer (BLADE_ORBIT_SCATTER={(if isNull knob then "on" else "0")})"""
+            let name = $"""llvm: the first error is the walk's over a forced captured producer (BLADE_ORBIT_SCATTER={(if isNull knob then "on" else "0")})"""
+            let wanted = if isNull knob then 1 else 0
             use _p = pinEnv "BLADE_PRINT" "s"
             match buildSrc firstErrSrc "llvm" null knob $"oscat_ferr_{n}" with
             | Error e -> fail name e
             | Ok (exe, ll) ->
-            if routeCount "llvm" ll <> 0 then fail name "a scatter site over an unforced producer"
+            let sites = routeCount "llvm" ll
+            if sites <> wanted then fail name $"route census: {sites} scatter site(s), wanted {wanted} (the forced snapshot of `hp` is a stored pool)"
             else
             use _t = pinEnv "OMP_NUM_THREADS" "1"
             match runProc exe 120000 with
@@ -417,7 +426,7 @@ let runOrbitScatterTests () : BlockResult =
             | Ok (code, out, err) ->
                 let all = out + err
                 if code <> 0 && all.Contains "integer division by zero" && not (all.Contains "modulo") then
-                    pass name "BL8013 integer division by zero (cell (0, 4), reached first in row order)"
+                    pass name "BL8013 integer division by zero (cell (0, 4), reached first in row order by the force at the producer's site)"
                 else fail name ($"""wanted the division-by-zero abort: exit {code}: {all.Trim().Replace("\n", " | ")}""")
     // ---- THE ROW-OWNED PULL SCATTER (round 3, D-P3) -------------------------
     // (1) HEADER LEVEL, RAW BITS: cpp/orbit_pull_tests.cpp over the shipped

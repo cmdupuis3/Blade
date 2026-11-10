@@ -1,0 +1,16 @@
+// TEST: An array literal over a leading opaque RaggedIdx is refused (rejects)
+// ============================================================================
+// Gap G190 (a), lead decision 2026-11-09: `RaggedIdx<_>` (the opaque form a
+// row PEELED from a ragged parent carries) as the ONLY slot of an array
+// LITERAL has no outer axis to vary its row lengths over. The interpreter
+// read `[2.0]` as a plain rank-1 array while the C++ lane refused it in
+// codegen (BL7004, "ragged literal value count (1) does not match sum of row
+// lengths (0)"). It is refused at lowering in every lane, with the first-slot
+// RaggedIdx diagnostic (index-types/020's BL4003).
+// ============================================================================
+type A = Array<Float64 like RaggedIdx<_>>
+let mut backing: A = [2.0]
+let s = reduce(backing, (+))
+// ERROR: BL4003
+// ERROR-CONTAINS: RaggedIdx requires at least one prior index
+// REJECT-AT: lower

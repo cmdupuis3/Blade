@@ -14691,7 +14691,21 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
         match unitAnnoError env annot with
         | Some err -> Error err
         | None ->
-        if irTypeHasRaggedNoPrior annotTy then
+        // An array LITERAL annotated with an OPAQUE RaggedIdx (`RaggedIdx<_>`)
+        // as its leading slot has no outer axis either (gap G190 (a), lead
+        // decision 2026-11-09): the opaque form exists for a row PEELED from a
+        // ragged parent (a kernel parameter, `let r: .. = rag(0)`), and a
+        // literal is no peeled row. The interpreter read `[2.0]` as a plain
+        // rank-1 array while the C++ lane refused it in codegen (BL7004) --
+        // refused here, in every lane, like the named first-slot RaggedIdx.
+        let opaqueRaggedLiteral =
+            match env.Subst.Resolve annotTy, binding.Value.Kind with
+            | ArrayElem at, ExprKind.ExprArrayLit _ ->
+                (match at.IndexTypes with
+                 | ix :: _ -> ix.IxKind = IxKRaggedOpaque
+                 | [] -> false)
+            | _ -> false
+        if irTypeHasRaggedNoPrior annotTy || opaqueRaggedLiteral then
             Error (IndexTypeErr "RaggedIdx requires at least one prior index in the array's index list: the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4), so there is nothing for a leading RaggedIdx to vary over. Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>.")
         elif irTypeHasBadDistOrder annotTy then
             Error (StaticValueErr "Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>")

@@ -1,0 +1,12 @@
+// TEST: A Fused Pipeline Stage Index Is Checked (aborts)
+// ============================================================================
+// Gap G192 (2), Codex diff review round 4 of G192 (1): fusing the pipeline
+// renames the stage parameter to a reserved `__fs<n>`, and the guard used to
+// stand down on it, so `v(i + 3)` over 0..3 read 3..5 of a 3-cell array
+// unchecked in C++ and LLVM. The fused parameter keeps the user provenance:
+// BL8006 in every lane.
+// ============================================================================
+let v: Array<Int64 like Idx<3>> = [10, 20, 30]
+let r = (object_for(lambda(i) -> i + 3) >>@ object_for(lambda(j) -> v(j))) <@> (0..3) |> compute
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: .blade:9

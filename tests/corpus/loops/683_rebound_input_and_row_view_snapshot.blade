@@ -1,0 +1,16 @@
+// TEST: Rebound Input And Row View Snapshot
+// Gap G199: a whole-array rebinding of x before d is first forced is what d
+// reads (the C++ lane reads x by name at the force), and a row view of a
+// rank-2 deferred map forces the map at the view: a later element write
+// does not reach the view.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+x = [5.0, 5.0, 5.0]
+let z = d(0)
+let mut y: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let g = method_for(y) <@> lambda(v) -> v * 2.0
+let row = g(0)
+y(0, 0) = 10.0
+let zr = row(0)
+// EXPECT: z = 10.0
+// EXPECT: zr = 2.0

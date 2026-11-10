@@ -34,6 +34,10 @@
          by every gate that used to read only process env (BLAS/LAPACK tiers,
          NETCDF_DIR, MSMPI_BIN). Written by the future `blade setup`. -->
     <Compile Include="src/Toolchain.fs" />
+    <!-- The print selection (BLADE_PRINT, the print flag): one parser and the
+         conservative pre-qualification resolver every optimizer plan and
+         printer reads (gap G200). Dependency-free. -->
+    <Compile Include="src/PrintSelection.fs" />
     <!-- Display frames: the {mime, data} rich-output wire format
          (Blade-REPL/docs/display-frames.md). Dependency-free string work, so
          it sits at the very front and is shared by everything that has to

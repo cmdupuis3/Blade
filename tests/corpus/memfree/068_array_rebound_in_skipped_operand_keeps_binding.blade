@@ -1,0 +1,26 @@
+// TEST: An Array Rebound In A Skipped Conditional Operand Keeps The Binding (G204)
+// Gap G204 (Codex diff review round 3): the right operand of a short
+// circuit, the fallback of a choice, a guard body and a match guard are
+// conditionally evaluated; a call there that rebinds an outer array (`touch`:
+// `out = a`) changed the LLVM binding at EMISSION time, so the reads after
+// saw `a` (6.0) although the operand never ran (0.0 in the interpreter and
+// the C++ lane), and a rebinding to a fresh literal emitted invalid IR. Each
+// such operand is now under the same stable-array guard as an if arm: the
+// program is refused by name and the C++ lane runs it.
+type C = Idx<3>
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let touch = lambda(t: Float64) -> {
+    out = a
+    t > 0.0
+}
+let f1 = false && touch(1.0)
+let f2 = true || touch(1.0)
+let f3 = match 1 with
+    | 0 if touch(1.0) -> true
+    | _ -> false
+let after = reduce(out, (+))
+// EXPECT: f1 = false
+// EXPECT: f2 = true
+// EXPECT: f3 = false
+// EXPECT: after = 0.0

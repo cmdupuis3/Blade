@@ -1,0 +1,15 @@
+// TEST: Anonymous view read in a generic body is checked (aborts)
+// ============================================================================
+// Gap G192 (1): `a(i)(j)` reads a VIEW of a generic `T^2` parameter, whose
+// slots are anonymous with no static extent in the body. The inner position
+// is checked against the extent of the residual slot, read off the variable
+// the view starts from (`extents(a)`, slot 1) -- never by evaluating the
+// view again. Row 0 has two cells, so `j = 5` stops with BL8006 in every
+// lane.
+// ============================================================================
+function g(a: T^2, i: Int64, j: Int64) = a(i)(j)
+let m: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let ok = g(m, 1, 0)
+let r = g(m, 0, 5)
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (its extent)
+// ABORT: .blade:9

@@ -1,0 +1,26 @@
+// TEST: A fold over a runtime-extent range evaluates the seed first and treats a negative extent as empty
+// ============================================================================
+// Gap G201 (Codex design review): a function-body fold over `0..n` read an
+// undeclared `__range0` in the C++ lane. Its holder evaluates the extent
+// ONCE at the loop entry -- AFTER the seed, the interpreter's order (`mark`
+// records 1 then 2: m = 12, never 21) -- as a signed value, so a negative
+// extent is an empty range (the seed), never a huge unsigned bound.
+// ============================================================================
+function mark(a: mut Array<Int64 like Idx<1>>, digit: Int64) -> Int64 = {
+    a(0) = a(0) * 10 + digit
+    3
+}
+function probe(a: mut Array<Int64 like Idx<1>>) -> Int64 = reduce(method_for(0..mark(a, 2)) <@> lambda(k) -> k, (+), mark(a, 1))
+let mut m: Array<Int64 like Idx<1>> = [0]
+let p = probe(m)
+let after = m(0)
+function g(n: Int64) -> Int64 = reduce(method_for(0..n) <@> lambda(k) -> k * 2, (+), 0)
+let g3 = g(3)
+let gneg = g(-1)
+let gzero = g(0)
+// EXPECT: m = [12]
+// EXPECT: p = 6
+// EXPECT: after = 12
+// EXPECT: g3 = 6
+// EXPECT: gneg = 0
+// EXPECT: gzero = 0

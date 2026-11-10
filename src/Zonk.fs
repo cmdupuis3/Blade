@@ -186,8 +186,20 @@ let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
 // Stand-downs: compiler-synthesized buffers and indices (`__` names: `let
 // rec` prefix buffers, reduce desugars, element-bound loops, and the AD
 // sweeps, whose `__hi + offset` walks run over loop bounds already shrunk by
-// the halo -- GradSweeps' interior loop), keyed / compact / ragged slots, and
-// an anonymous (untagged) slot, which is not guarded at all (documented).
+// the halo -- GradSweeps' interior loop) and keyed / compact / ragged slots.
+//
+// ANONYMOUS SLOTS (G192 (1), user decision 2026-11-09): a plain slot with NO
+// named index type is guarded exactly the same way -- proven or checked. It
+// carries no nominal tag, so its proof list is shorter (provenForAnonSlot):
+// an integer literal, a lambda parameter a RANGE whose static bounds lie
+// inside the slot's static extent feeds, or a proven value of a NAMED index
+// type whose static extent fits; an anonymous-tagged value is never proof
+// (an anonymous ascription `(5 : Idx<3>)` is not checked). The extent is the
+// static one, else the array's own `extents` read off the variable, the pack
+// element, or the variable a VIEW chain `a(i)(j)` starts from; an array
+// expression with none of those (a call result, an `if` of arrays) is bound
+// ONCE before the read (zonkExpr's TExprIndex / TExprApp arms) so its extent
+// can be read without evaluating it twice.
 // ---------------------------------------------------------------------------
 
 /// Per-zonk context: a fresh-id source for guards that must bind their index
@@ -222,6 +234,16 @@ type SubscriptGuardCtx = {
     /// an index type is unproven -- a mask predicate, a sort key, a `>>@`
     /// stage, a kernel over a key column all receive DATA.
     RangeFedParams: System.Collections.Generic.HashSet<IRId>
+    /// The STATIC value bounds `[lo, hi)` of the range-fed parameters whose
+    /// range has them (TypeCheck.rangeFedLambdaParamsWithBounds): the only
+    /// proof an ANONYMOUS slot accepts besides a literal (G192 (1)).
+    RangeFedBounds: System.Collections.Generic.Dictionary<IRId, int64 * int64>
+    /// The compiler's own COORDINATES (G192 (2)): the `__`-named loop
+    /// variables of a TStmtForIn and `__`-named lambda parameters, recorded
+    /// at their binders -- never a let (a let holds a value: a hoisted call,
+    /// a reduction result) and never a user binder a compiler pass renamed
+    /// (isUserProvenanceName).
+    CoordVars: System.Collections.Generic.HashSet<IRId>
     /// Calls the checker REPLACED after typing them (TypeEnv.ArrowRetargets,
     /// by node): a call handing an array to an arrow parameter is the call of
     /// that declaration's array instance. Zonked in place of the original.
@@ -260,14 +282,90 @@ let private isDataVar (vid: IRId) =
     | Some ctx -> ctx.DataVars.Contains vid
     | None -> false
 
+/// A `__` name a compiler pass gave a USER binder (G192 (2)): it keeps the
+/// user binder's provenance, so its subscripts are judged as the original
+/// was. The AD inliner's `__in<n>_<name>` (callee locals and expression-bound
+/// parameters; nested inlines stack the prefix -- a compiler name under it,
+/// `__in3___h5`, stays the compiler's), the AD map lowering's loop variable
+/// `__mi<n>` and the partial-fold lowering's `__pf<n>` (each replaces a user
+/// kernel parameter), the fused pipeline stage parameter `__fs<n>`
+/// (GradFusion) and the unrolled pack parameter `__pk<n>` (GradPackUnroll).
+let rec internal isUserProvenanceName (name: string) : bool =
+    let m = System.Text.RegularExpressions.Regex.Match(name, "^__in[0-9]+_(.+)$")
+    if m.Success then
+        let rest = m.Groups.[1].Value
+        not (rest.StartsWith "__") || isUserProvenanceName rest
+    else System.Text.RegularExpressions.Regex.IsMatch(name, "^__(mi|pf|fs|pk)[0-9]+$")
+
+/// A compiler-owned ARRAY: a `__` name that is not a user array a pass
+/// renamed -- the inliner's `__in<n>_<name>`, the checkpoint replay
+/// snapshot `__cp<n>` (a copy of a user array, GradSweeps).
+let private isCompilerArrayName (name: string) : bool =
+    name.StartsWith "__"
+    && not (isUserProvenanceName name)
+    && not (System.Text.RegularExpressions.Regex.IsMatch(name, "^__cp[0-9]+$"))
+
+/// A subscript the compiler's own walk owns (G192 (2)): a COORDINATE -- a
+/// `__` loop variable or lambda parameter (CoordVars), not data, not a
+/// renamed user binder -- or that coordinate plus / minus an integer
+/// literal (the halo sweeps' `__hi + offset`). It used to be any expression
+/// MENTIONING a `__` name, which also exempted a value a coordinate merely
+/// reads (`table(Int64(floor(a(__ci))))`), a hoisted call result (`__hc`),
+/// a reduction result (`__red`) and every renamed user binder (Codex review
+/// of G192 (2)).
 let rec private mentionsReservedName (e: TypedExpr) : bool =
+    let coord (name: string) (vid: IRId) =
+        name.StartsWith "__" && not (isUserProvenanceName name) && not (isDataVar vid)
+        && (match subscriptGuardCtx.Value with
+            | Some ctx -> ctx.CoordVars.Contains vid
+            | None -> true)
+    let isLit (x: TypedExpr) =
+        match x.Kind with
+        | TExprLit (Blade.Ast.LitInt _) -> true
+        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+        | _ -> false
     match e.Kind with
-    | TExprVar (name, vid, _) -> name.StartsWith "__" && not (isDataVar vid)
-    | TExprBinOp (_, _, l, r) -> mentionsReservedName l || mentionsReservedName r
-    | TExprUnaryOp (_, x) -> mentionsReservedName x
-    | TExprApp (f, args) -> mentionsReservedName f || args |> List.exists mentionsReservedName
-    | TExprIf (c, t, f) -> mentionsReservedName c || mentionsReservedName t || mentionsReservedName f
-    | TExprBlock (_, Some f) -> mentionsReservedName f
+    | TExprVar (name, vid, _) -> coord name vid
+    | TExprBinOp (Blade.Ast.Elementwise, (Blade.Ast.OpAdd | Blade.Ast.OpSub), ({ Kind = TExprVar (name, vid, _) }), c) when isLit c -> coord name vid
+    | TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAdd, c, ({ Kind = TExprVar (name, vid, _) })) when isLit c -> coord name vid
+    | TExprBlock ([], Some f) -> mentionsReservedName f
+    | _ -> false
+
+/// The static value bounds `[lo, hi)` of a position (G192 (2)): a bounded
+/// variable (a range-fed lambda parameter, a literal-bounded loop variable),
+/// or one plus / minus an integer literal, shifted without wrapping (an
+/// overflowing shift has no bounds).
+let rec private positionBounds (e: TypedExpr) : (int64 * int64) option =
+    let lit (x: TypedExpr) =
+        match x.Kind with
+        | TExprLit (Blade.Ast.LitInt v) -> Some v
+        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+        | _ -> None
+    let shift (b: (int64 * int64) option) (c: int64) =
+        b |> Option.bind (fun (lo, hi) ->
+            let lo' = bigint lo + bigint c
+            let hi' = bigint hi + bigint c
+            if lo' < bigint System.Int64.MinValue || hi' > bigint System.Int64.MaxValue then None
+            else Some (int64 lo', int64 hi'))
+    match e.Kind with
+    | TExprVar (_, vid, _) ->
+        (match subscriptGuardCtx.Value with
+         | Some ctx when not (ctx.Positions.Contains vid) ->
+             (match ctx.RangeFedBounds.TryGetValue vid with
+              | true, b -> Some b
+              | _ -> None)
+         | _ -> None)
+    | TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAdd, x, c) when (lit c).IsSome -> shift (positionBounds x) (lit c).Value
+    | TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAdd, c, x) when (lit c).IsSome -> shift (positionBounds x) (lit c).Value
+    | TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpSub, x, c) when (lit c).IsSome && (lit c).Value <> System.Int64.MinValue ->
+        shift (positionBounds x) (-(lit c).Value)
+    | TExprBlock ([], Some f) -> positionBounds f
+    | _ -> None
+
+/// A position whose static bounds lie in [0, n) of a slot of static extent n.
+let private boundsProve (slotExt: int64 option) (e: TypedExpr) : bool =
+    match slotExt, positionBounds e with
+    | Some n, Some (lo, hi) -> lo >= 0L && hi <= n
     | _ -> false
 
 let rec private isPureIndexExpr (e: TypedExpr) : bool =
@@ -311,11 +409,59 @@ let rec private isProvenIndex (tag: string option) (e: TypedExpr) : bool =
                                         | TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } -> true
                                         | _ -> false) -> true
     | TExprBlock ([], Some f) -> isProvenIndex tag f
-    | TExprApp (f, _) | TExprIndex (f, _, _) ->
-        // a halo window read `w(o)`: the halo machinery owns the position
+    | TExprApp (f, os) | TExprIndex (f, os, _) when os |> List.forall isLiteralIndex ->
+        // a halo window read `w(o)` at a LITERAL offset: the halo machinery
+        // owns the position (a computed offset `w(off)` is a position like
+        // any other: Codex design review of G192 (1))
         (match f.Type with
          | IRTIdxTagged (_, IRefNamed t) -> t.StartsWith haloWinTagPrefix
          | _ -> false)
+    | _ -> false
+
+/// Is `a` PROVEN to lie in an ANONYMOUS plain slot of static extent
+/// `slotExt` (G192 (1))? A closed list that trusts no anonymous tag: an
+/// integer literal (judged at compile time against a static extent, at run
+/// time by the literal arm otherwise); a lambda parameter a range feeds whose
+/// static bounds lie in [0, slotExt); a proven value of a NAMED index type
+/// whose static extent is at most slotExt.
+let rec private provenForAnonSlot (slotExt: int64 option) (a: TypedExpr) : bool =
+    boundsProve slotExt a ||
+    match a.Kind with
+    | TExprLit (Blade.Ast.LitInt _) -> true
+    | TExprBlock ([], Some f) -> provenForAnonSlot slotExt f
+    // A halo window read at a LITERAL offset in the reach, `w(1)`, by a window
+    // PARAMETER whose own demand -- [0, M + Shrink), recorded per parameter
+    // with the range bounds -- lies in the slot. A computed offset `w(off)`
+    // is not proof (Codex design review), and neither is the halo TAG alone:
+    // two anonymous halos with equal offsets share one (Codex diff review
+    // round 2: `v(z(0))` over `halo<Idx<5>, [0]>` beside `halo<Idx<3>, [0]>`).
+    | TExprApp ({ Kind = TExprVar (_, wid, _) } as f, [ o ]) | TExprIndex ({ Kind = TExprVar (_, wid, _) } as f, [ o ], _) ->
+        let offset =
+            match o.Kind with
+            | TExprLit (Blade.Ast.LitInt v) -> Some v
+            | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+            | _ -> None
+        match f.Type, offset, subscriptGuardCtx.Value, slotExt with
+        | IRTIdxTagged (_, IRefNamed t), Some ov, Some ctx, Some n when t.StartsWith haloWinTagPrefix ->
+            (match haloAccessOfTag t, ctx.RangeFedBounds.TryGetValue wid with
+             | Some h, (true, (lo, hi)) -> haloOffsetInReach h (int ov) && lo >= 0L && hi <= n
+             | _ -> false)
+        | _ -> false
+    | TExprVar (_, vid, _) when not (unprovenVar vid)
+                                 && not (match a.Type with
+                                         | IRTIdxTagged (_, IRefNamed t) -> t.StartsWith haloWinTagPrefix
+                                         | _ -> false) ->
+        match subscriptGuardCtx.Value, slotExt with
+        | Some ctx, Some n ->
+            (match ctx.RangeFedBounds.TryGetValue vid with
+             | true, (lo, hi) -> lo >= 0L && hi <= n
+             | _ ->
+                 match IR.stripUnits a.Type with
+                 | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) when not (tag.StartsWith "__") ->
+                     isProvenIndex (Some tag) a
+                     && (match ctx.IndexExtent tag with Some m -> m <= n | None -> false)
+                 | _ -> false)
+        | _ -> false
     | _ -> false
 
 /// The BL8006 guard around one unproven index `a` against extent `ext`.
@@ -562,26 +708,109 @@ let private posToKey (keys: int64 list) (p: TypedExpr) : TypedExpr =
     let table = mk (TExprArrayLit (keys |> List.map (fun k -> mk (TExprLit (Blade.Ast.LitInt k)) intTy), tableTy)) (mkArrayLike tableTy)
     mk (TExprIndex (table, [ p ], None)) intTy
 
+/// An ANONYMOUS slot: no tag, or the `__anon` tag a stored anonymous range
+/// (`let v = 10..13`) carries (TypeCheckInfer, Lowering) -- user storage,
+/// never a compiler buffer (Codex diff review of G192 (1)).
+let private isAnonSlotTag (ix: IRIndexType) =
+    ix.Tag.IsNone || ix.Tag = Some "__anon"
+
+/// The slot each (zonked, product-folded) subscript addresses, aligned with
+/// the subscripts -- TypeCheckSupport.subscriptSlotPairs' rule: a COMPOUND /
+/// SPARSE head takes one packed tuple, a compound head otherwise k flat
+/// coordinates, a rank-k compact group read with more coordinates than
+/// records takes k of them; one slot per subscript otherwise. None past the
+/// last slot.
+let private subscriptSlots (at: IRArrayType) (idxs: TypedExpr list) : IRIndexType option list =
+    let slots =
+        match at.IndexTypes, idxs with
+        | h :: rest, a0 :: _ when (h.IxKind = IxKCompound || h.IxKind = IxKSparse) && a0.Kind.IsTExprTuple ->
+            h :: rest
+        | ixs, _ ->
+            let isCompact (ix: IRIndexType) =
+                ix.Rank >= 2
+                && (match ix.Symmetry with
+                    | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+                    | SymNone | SymWreath -> false)
+            let flatCompact = idxs.Length > ixs.Length
+            ixs |> List.collect (fun ix ->
+                if ix.IxKind = IxKCompound then List.replicate (max 1 ix.Rank) ix
+                elif flatCompact && isCompact ix then List.replicate ix.Rank ix
+                else [ ix ])
+    idxs |> List.mapi (fun k _ -> if k < slots.Length then Some slots.[k] else None)
+
+/// An integer or index-typed subscript: the only kind the anonymous arms
+/// guard. The provider verbs keep a generic application shape whose head
+/// is typed as the array (`z.stream(view)`: TypeCheckInfer) and whose
+/// argument is the view itself -- never a position.
+let private isPositionType (t: IRType) =
+    match IR.stripUnits t with
+    | IRTScalar (ETInt32 | ETInt64)
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
+    | _ -> false
+
+/// A plain, dense, one-coordinate slot with NO user index name (G192 (1)).
+let private anonPlainSlot (ix: IRIndexType) =
+    isAnonSlotTag ix && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+
+/// Every record of the array a plain dense one-coordinate slot: its
+/// `extents` tuple then lines up with its subscripts.
+let private allPlainRecords (at: IRArrayType) =
+    at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1)
+
+/// The VARIABLE a view chain `a(i)(j)..` starts from, with that variable's
+/// rank and the number of its slots the chain consumed: a slot k of the view
+/// is slot `consumed + k` of the variable, whose extents are read off the
+/// variable -- never by evaluating the view (or its indices) again.
+let rec private viewBase (e: TypedExpr) (consumed: int) : (TypedExpr * int * int) option =
+    match e.Kind with
+    | TExprIndex (b, xs, _) | TExprApp (b, xs) ->
+        match b.Type with
+        | ArrayElem bat when allPlainRecords bat && xs.Length <= bat.IndexTypes.Length
+                             && not (xs |> List.exists (fun x -> x.Kind.IsTExprTuple)) ->
+            (match b.Kind with
+             | TExprVar _ -> Some (b, bat.IndexTypes.Length, consumed + xs.Length)
+             | _ -> viewBase b (consumed + xs.Length))
+        | _ -> None
+    | _ -> None
+
+/// The extent of slot k of `arr` read without evaluating `arr` again: off a
+/// variable, a literal element of a parameter pack (`P[0]`, a variable once
+/// arity monomorphization expands the pack), the variable a view chain starts
+/// from, or `hi - lo` of an anonymous range over pure bounds. None when the
+/// array is any other expression (a call result: zonkExpr binds it first).
+let private arrayExtentExpr (arr: TypedExpr) (span: Blade.Ast.Span) (k: int) : TypedExpr option =
+    let intTy = IRTScalar ETInt64
+    let mk kind ty = mkTypedSpan kind ty span
+    let extOf (b: TypedExpr) (brank: int) (slot: int) =
+        if brank = 1 then mk (TExprExtents b) intTy
+        else mk (TExprTupleIndex (mk (TExprExtents b) (IRTTuple (List.replicate brank intTy)),
+                                  mk (TExprLit (Blade.Ast.LitInt (int64 slot))) intTy)) intTy
+    let directArray =
+        match arr.Kind with
+        | TExprVar _
+        | TExprTupleIndex ({ Kind = TExprVar _ }, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+        | _ -> false
+    match arr.Kind, arr.Type with
+    | _, ArrayElem at when directArray ->
+        Some (extOf arr at.IndexTypes.Length k)
+    | TExprDotDot (lo, hi), _ when k = 0 && isPureIndexExpr lo && isPureIndexExpr hi ->
+        Some (mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpSub, hi, lo)) intTy)
+    | _ ->
+        match viewBase arr 0 with
+        | Some (b, brank, consumed) -> Some (extOf b brank (consumed + k))
+        | None -> None
+
 /// Wrap the unproven subscripts of one (zonked) read in their guards.
-let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
-    let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
+/// `boundTemp`: `arr` is the `__arr` binding zonkExpr made of an array
+/// expression (a user read, not a compiler buffer).
+let private guardSubscriptsPlainAt (boundTemp: bool) (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    let synthetic = not boundTemp && (match arr.Kind with TExprVar (n, _, _) -> isCompilerArrayName n | _ -> false)
     match arr.Type with
     | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length
                         && not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple)) ->
         let rank = at.IndexTypes.Length
-        let mkTA (a: TypedExpr) k ty = mkTypedSpan k ty a.Span
-        // The extent of slot k read off the array itself: a variable, or a
-        // literal element of a parameter pack (`P[0]`, a variable once arity
-        // monomorphization expands the pack).
-        let runtimeExtent (a: TypedExpr) (k: int) : TypedExpr option =
-            let intTy = IRTScalar ETInt64
-            match arr.Kind with
-            | TExprVar _
-            | TExprTupleIndex ({ Kind = TExprVar _ }, { Kind = TExprLit (Blade.Ast.LitInt _) }) ->
-                Some (if rank = 1 then mkTA a (TExprExtents arr) intTy
-                      else mkTA a (TExprTupleIndex (mkTA a (TExprExtents arr) (IRTTuple (List.replicate rank intTy)),
-                                                    mkTA a (TExprLit (Blade.Ast.LitInt (int64 k))) intTy)) intTy)
-            | _ -> None
+        // The extent of slot k read off the array itself (arrayExtentExpr).
+        let runtimeExtent (a: TypedExpr) (k: int) : TypedExpr option = arrayExtentExpr arr a.Span k
         // A RAGGED row's own length, for its inner coordinate, checked in ONE
         // short-circuit condition that first checks the OUTER coordinate
         // (when its row count is static) -- `0 <= i < rows && 0 <= j <
@@ -590,10 +819,25 @@ let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : Typed
         // operator[]'s argument before the call, so the check runs before the
         // row view exists. A curried read `u(i)(j)` checks on `j`. Only for row
         // expressions that are safe to evaluate twice.
+        // A guard block over a pure index (`{ check(0 <= i < n); i }`, the
+        // outer coordinate's own guard) is pure too: evaluating it again
+        // repeats the same check.
+        let pureGuarded (x: TypedExpr) =
+            isPureIndexExpr x
+            || (match x.Kind with
+                | TExprBlock (stmts, Some v) ->
+                    isPureIndexExpr v
+                    && stmts |> List.forall (function
+                        | TStmtExpr { Kind = TExprConstraintCheck _ } -> true
+                        | _ -> false)
+                | _ -> false)
         let rec pureRow (e: TypedExpr) =
             match e.Kind with
             | TExprVar _ -> true
-            | TExprApp (f, xs) | TExprIndex (f, xs, _) -> pureRow f && xs |> List.forall isPureIndexExpr
+            | TExprIndex (f, xs, _) -> pureRow f && xs |> List.forall pureGuarded
+            | TExprApp (f, xs) ->
+                (match f.Type with ArrayElem _ -> true | _ -> false)
+                && pureRow f && xs |> List.forall pureGuarded
             | _ -> false
         let isRagged (ix: IRIndexType) =
             match ix.IxKind with
@@ -688,13 +932,14 @@ let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : Typed
                                      && not (isLiteralIndex a)
                                      && not a.Kind.IsTExprWildcard
                                      && not (ix.Tag |> Option.exists (fun tag -> isProvenIndex (Some tag) a))
+                                     && not ((ix.Tag.IsNone || ix.Tag = Some "__anon") && provenForAnonSlot (Blade.IRPrint.tryEvalIntIR ix.Extent) a)
                                      && not (guardedOrHaloIndex a) ->
                 let n = (Blade.IRPrint.tryEvalIntIR ix.Extent).Value
                 let ext = mkAt a (TExprLit (Blade.Ast.LitInt n)) intTy
                 guardIndex a ext $"a position outside the range (0 .. {n - 1L})"
             | IxKPlain, SymNone when ix.Rank <= 1
                                      && isLiteralIndex a
-                                     && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+                                     && (match ix.Tag with Some t -> not (t.StartsWith "__") || t = "__anon" | None -> true)
                                      && (Blade.IRPrint.tryEvalIntIR ix.Extent).IsNone
                                      && (runtimeExtent a k).IsSome ->
                 let shown = match ix.Tag with Some t -> $"{t} (its extent)" | None -> "the array's extent"
@@ -722,7 +967,8 @@ let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : Typed
             | Some tag when not a.Kind.IsTExprWildcard
                             && not (isLiteralIndex a)
                             && not (mentionsReservedName a)
-                            && not (isProvenIndex (Some tag) a) ->
+                            && not (isProvenIndex (Some tag) a)
+                            && not (boundsProve (Blade.IRPrint.tryEvalIntIR ix.Extent) a) ->
                 let intTy = IRTScalar ETInt64
                 let mkT k ty = mkTypedSpan k ty a.Span
                 let extent =
@@ -734,7 +980,45 @@ let private guardSubscriptsPlain (arr: TypedExpr) (idxs: TypedExpr list) : Typed
                 match extent with
                 | Some (ext, shown) -> guardIndex a ext $"a position outside {tag} ({shown})"
                 | None -> a
-            | _ -> a) idxs
+            | Some _ -> a
+            | None ->
+            // AN ANONYMOUS SLOT (G192 (1)): proven or checked, like a named one.
+            if anonPlainSlot ix && isPositionType a.Type && not a.Kind.IsTExprWildcard && not (isLiteralIndex a)
+               && not (mentionsReservedName a)
+               && not (provenForAnonSlot (Blade.IRPrint.tryEvalIntIR ix.Extent) a) then
+                let intTy = IRTScalar ETInt64
+                match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                | Some n -> guardIndex a (mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) intTy a.Span) $"a position outside the array (0 .. {n - 1L})"
+                | None ->
+                    match runtimeExtent a k with
+                    | Some exts -> guardIndex a exts "a position outside the array (its extent)"
+                    | None -> a
+            else a) idxs
+    | ArrayElem at when not synthetic ->
+        // A read mixing a structured slot (a compact group read by its flat
+        // coordinates, a compound / sparse tuple key) with plain slots: each
+        // plain one-coordinate slot is still proven or checked, against its
+        // STATIC extent (G192 (1); the structured coordinates keep their own
+        // disciplines).
+        let slots = subscriptSlots at idxs
+        List.map2 (fun (a: TypedExpr) (slot: IRIndexType option) ->
+            match slot with
+            | Some ix when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+                           && isPositionType a.Type
+                           && not a.Kind.IsTExprWildcard && not a.Kind.IsTExprTuple
+                           && not (isLiteralIndex a) && not (mentionsReservedName a) ->
+                let userTag = ix.Tag |> Option.filter (fun t -> not (t.StartsWith "__"))
+                let proven =
+                    match userTag with
+                    | Some tag -> isProvenIndex (Some tag) a
+                    | None -> not (isAnonSlotTag ix) || provenForAnonSlot (Blade.IRPrint.tryEvalIntIR ix.Extent) a
+                match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                | Some n when not proven ->
+                    let shown = match userTag with Some t -> t | None -> "the array"
+                    guardIndex a (mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) (IRTScalar ETInt64) a.Span)
+                        $"a position outside {shown} (0 .. {n - 1L})"
+                | _ -> a
+            | _ -> a) idxs slots
     | _ -> idxs
 
 /// A read of a `group_by` result's STORAGE (G1; see groupReadSubscripts for
@@ -760,7 +1044,7 @@ let private groupStorageRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IR
                                    // a per-group kernel's result over the same group axis
                                    && at.IndexTypes.[1].IxKind = IxKGroupMember
                                    && (idxs.Length = 1 || idxs.Length = 2) && arr.Kind.IsTExprVar
-                                   && not (match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> true) ->
+                                   && not (match arr.Kind with TExprVar (n, _, _) -> isCompilerArrayName n | _ -> true) ->
         match ctx.GroupOuter at.IndexTypes.[0].Id with
         | Some { Type = IRTGroupKeys (gko, _, enumVals) } when not (wild idxs.[0]) ->
             let i = idxs.[0]
@@ -864,7 +1148,7 @@ let private groupReadSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedE
     // A PEELED ROW: a group kernel's row parameter or a let-bound row.
     | Some _, ArrayElem at when at.IndexTypes.Length = 1 && at.IndexTypes.[0].IxKind = IxKGroupMember
                                  && idxs.Length = 1 && arr.Kind.IsTExprVar
-                                 && not (match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> true)
+                                 && not (match arr.Kind with TExprVar (n, _, _) -> isCompilerArrayName n | _ -> true)
                                  && not (wild idxs.[0]) ->
         let j = idxs.[0]
         Some [ guardIndex j (mkAt j (TExprExtents arr) intTy) "a position outside its group's rows" ]
@@ -881,7 +1165,61 @@ let private groupReadSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedE
 let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
     match groupReadSubscripts arr idxs with
     | Some guarded -> guarded
-    | None -> guardSubscriptsPlain arr idxs
+    | None -> guardSubscriptsPlainAt false arr idxs
+
+/// Set while zonking an ASSIGNMENT TARGET (zonkStmt / TExprAssign), read and
+/// cleared by the very next zonkExpr: the outermost subscript of a target
+/// is never bound once (a `{ let __arrN = ..; __arrN(k) }` value is no
+/// lvalue); its read-side checks stand (gap G208: a write through a call
+/// result or an `if` of arrays with a runtime extent is not checked).
+let private lvalueTarget = new System.Threading.ThreadLocal<bool>(fun () -> false)
+
+/// Set while zonking an ELEMENT of an array literal, read and cleared by the
+/// next zonkExpr: an inner row of a ragged parent literal carries the opaque
+/// row type structurally and is no standalone opaque-leading literal (G190
+/// (a), Codex diff review round 2: `[[1.0], [2.0, 3.0]]` typed
+/// `Array<Float64 like Idx<2>, RaggedIdx<_>>`).
+let private literalRow = new System.Threading.ThreadLocal<bool>(fun () -> false)
+
+/// Does this read need its ARRAY bound once before it (G192 (1))? A plain
+/// one-coordinate slot whose extent is only known at run time, read at an
+/// unproven position, of an array expression arrayExtentExpr cannot read the
+/// extent of without evaluating it again (a call result, an `if` of arrays).
+let private needsBoundArray (arr: TypedExpr) (idxs: TypedExpr list) : bool =
+    match arr.Kind, arr.Type with
+    | TExprVar _, _ | TExprField _, _ -> false
+    | _, ArrayElem at when idxs.Length <= at.IndexTypes.Length
+                          && not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple))
+                          && (arrayExtentExpr arr arr.Span 0).IsNone
+                          && not (isPackElement arr) ->
+        List.zip idxs (List.truncate idxs.Length at.IndexTypes)
+        |> List.exists (fun (a, ix) ->
+            ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+            && isPositionType a.Type
+            && (Blade.IRPrint.tryEvalIntIR ix.Extent).IsNone
+            && not (ix.Tag |> Option.exists (fun t -> t.StartsWith "__" && t <> "__anon"))
+            && not a.Kind.IsTExprWildcard && not (mentionsReservedName a)
+            && (match ix.Tag with
+                | Some tag when tag <> "__anon" -> not (isProvenIndex (Some tag) a)
+                | _ -> true))
+    | _ -> false
+
+/// `{ let __arrN = arr; __arrN(guarded idxs) }`: the read of an array
+/// expression whose runtime extent must be read without evaluating it twice.
+let private boundArrayRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IRType)
+                           (mkRead: TypedExpr -> TypedExpr list -> TypedExprKind) : TypedExpr =
+    match subscriptGuardCtx.Value with
+    | Some ctx ->
+        let vid = ctx.FreshId ()
+        let name = $"__arr{vid}"
+        let v = mkTypedSpan (TExprVar (name, vid, None)) arr.Type arr.Span
+        let tb : TypedBinding = {
+            Name = name; VarId = vid; Type = arr.Type
+            Identity = None; IsMutable = false; Value = arr
+            SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
+        let read = mkTypedSpan (mkRead v (guardSubscriptsPlainAt true v idxs)) nodeTy arr.Span
+        mkTypedSpan (TExprBlock ([ TStmtLet tb ], Some read)) nodeTy arr.Span
+    | None -> mkTypedSpan (mkRead arr (guardSubscripts arr idxs)) nodeTy arr.Span
 
 /// The same guard on an argument meeting a `Nat<I>` PARAMETER of a direct
 /// call, when it is not proven (the call judgment coerces a CLOSED plain
@@ -1072,6 +1410,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
     | Some ctx, TExprApp (f, _) when ctx.Subscripts.Count > 0 && ctx.Subscripts.ContainsKey f ->
         zonkExpr subst ctx.Subscripts.[f]
     | _ ->
+    let isTarget = lvalueTarget.Value
+    lvalueTarget.Value <- false
+    let isLiteralRow = literalRow.Value
+    literalRow.Value <- false
     let z = zonkExpr subst
     let zs = List.map z
     let zt = zonkType subst
@@ -1141,7 +1483,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprExtents a -> TExprExtents (z a)
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
-        | TExprAssign (l, r) -> TExprAssign (z l, z r)
+        | TExprAssign (l, r) ->
+            lvalueTarget.Value <- true
+            let l' = z l
+            TExprAssign (l', z r)
         | TExprConstraintCheck (c, code, msg) -> TExprConstraintCheck (z c, code, msg)
         | TExprBreakIf c -> TExprBreakIf (z c)
         | TExprPartialApp (op, arg, isL) -> TExprPartialApp (op, z arg, isL)
@@ -1154,11 +1499,13 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             // Inference can resolve an application to an array only after
             // the original call node was built (including virtual ranges).
             // Lowering treats it as indexing, so install the same guards here.
-            let guarded =
-                match f'.Type with
-                | ArrayElem _ -> guardSubscripts f' (foldProductSubscripts f' args')
-                | _ -> guardIndexArgs f' args'
-            TExprApp (f', guarded)
+            match f'.Type with
+            | ArrayElem _ ->
+                let args'' = foldProductSubscripts f' args'
+                if not isTarget && needsBoundArray f' args'' then
+                    (boundArrayRead f' args'' (zt expr.Type) (fun a xs -> TExprApp (a, xs))).Kind
+                else TExprApp (f', guardSubscripts f' args'')
+            | _ -> TExprApp (f', guardIndexArgs f' args')
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
         // A CURRIED read of a grouped value, `grouped(i)(j)`, is judged as the
@@ -1190,7 +1537,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             // Per-dimension coordinates of a product-framed compact group
             // fold to compound positions here, after the judgment has seen
             // every coordinate against its factor; then the ordinary guards.
-            TExprIndex (arr', guardSubscripts arr' (foldProductSubscripts arr' (zs idxs)), id)
+            let idxs' = foldProductSubscripts arr' (zs idxs)
+            if not isTarget && needsBoundArray arr' idxs' then
+                (boundArrayRead arr' idxs' (zt expr.Type) (fun a xs -> TExprIndex (a, xs, id))).Kind
+            else TExprIndex (arr', guardSubscripts arr' idxs', id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
         | TExprTuple es -> TExprTuple (zs es)
@@ -1208,7 +1558,24 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         // body". Writing `[2.0 * t, t]` instead hid the bug entirely, since
         // element 0 was then already Float64.
         | TExprArrayLit (es, arrTy) ->
-            TExprArrayLit (zs es,
+            // G190 (a): an array LITERAL whose final type's leading slot is an
+            // OPAQUE RaggedIdx (`RaggedIdx<_>`, the type of a row peeled from
+            // a ragged parent) has no outer axis to vary its row lengths over
+            // -- the interpreter read it as a plain array, the C++ lane as a
+            // ragged literal of zero rows. Refused here, where every literal
+            // has its final type (a block, a tuple component, a function
+            // return -- Codex diff review of A4), as BL4003.
+            let leadingOpaque (t: IRType) =
+                match t with
+                | ArrayElem at -> (match at.IndexTypes with ix :: _ -> ix.IxKind = IxKRaggedOpaque | [] -> false)
+                | _ -> false
+            (match subscriptGuardCtx.Value with
+             | Some ctx when not isLiteralRow
+                             && (leadingOpaque (zt expr.Type)
+                                 || (match arrTy.IndexTypes with ix :: _ -> ix.IxKind = IxKRaggedOpaque | [] -> false)) ->
+                 ctx.EnumKeyErrors.Add((expr.Span, "RaggedIdx requires at least one prior index in the array's index list: an array literal typed with a leading `RaggedIdx<_>` has no outer axis for its row lengths to vary over (formalism 4.4; the opaque form is the type of a row PEELED from a ragged parent). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>."))
+             | _ -> ())
+            TExprArrayLit (es |> List.map (fun e -> literalRow.Value <- true; z e),
                            { arrTy with ElemType = zt arrTy.ElemType
                                         IndexTypes = arrTy.IndexTypes |> List.map (zonkIndexType subst) })
         | TExprZip es -> TExprZip (zs es)
@@ -1307,10 +1674,36 @@ and zonkPattern (subst: Subst) (pat: TypedPattern) : TypedPattern =
 and zonkStmt (subst: Subst) (stmt: TypedStmt) : TypedStmt =
     match stmt with
     | TStmtLet b -> TStmtLet (zonkBinding subst b)
-    | TStmtAssign (l, r) -> TStmtAssign (zonkExpr subst l, zonkExpr subst r)
+    | TStmtAssign (l, r) ->
+        lvalueTarget.Value <- true
+        let l' = zonkExpr subst l
+        TStmtAssign (l', zonkExpr subst r)
     | TStmtExpr e -> TStmtExpr (zonkExpr subst e)
     | TStmtForIn (name, vid, lo, hi, body) ->
-        TStmtForIn (name, vid, zonkExpr subst lo, zonkExpr subst hi, body |> List.map (zonkStmt subst))
+        let lo' = zonkExpr subst lo
+        let hi' = zonkExpr subst hi
+        // G192 (2): a loop variable is a COORDINATE when the compiler named
+        // it, and has static bounds [lo, hi) over literal bounds -- unless the
+        // body assigns it (fail closed; no surface loop exists, BL1003).
+        (match subscriptGuardCtx.Value with
+         | Some ctx ->
+             let rec assigns (s: TypedStmt) =
+                 match s with
+                 | TStmtAssign ({ Kind = TExprVar (_, v, _) }, _) -> v = vid
+                 | TStmtForIn (_, _, _, _, b) -> b |> List.exists assigns
+                 | _ -> false
+             if not (body |> List.exists assigns) then
+                 if name.StartsWith "__" && not (isUserProvenanceName name) then ctx.CoordVars.Add vid |> ignore
+                 let litOf (x: TypedExpr) =
+                     match x.Kind with
+                     | TExprLit (Blade.Ast.LitInt v) -> Some v
+                     | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+                     | _ -> None
+                 match litOf lo', litOf hi' with
+                 | Some l, Some h when not (ctx.RangeFedBounds.ContainsKey vid) -> ctx.RangeFedBounds.[vid] <- (l, h)
+                 | _ -> ()
+         | None -> ())
+        TStmtForIn (name, vid, lo', hi', body |> List.map (zonkStmt subst))
 
 and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
     let zt = zonkType subst
@@ -1337,9 +1730,13 @@ and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
     (match subscriptGuardCtx.Value with
      | Some ctx ->
          for p in info.Params do
-             if not (p.Name.StartsWith "__") && not (ctx.RangeFedParams.Contains p.VarId)
+             if not (p.Name.StartsWith "__" && not (isUserProvenanceName p.Name))
+                && not (ctx.RangeFedParams.Contains p.VarId)
                 && userIndexValue (zonkType subst p.Type) then
                  ctx.Positions.Add p.VarId |> ignore
+             // A compiler-named parameter is one of its COORDINATES (G192 (2)).
+             if p.Name.StartsWith "__" && not (isUserProvenanceName p.Name) then
+                 ctx.CoordVars.Add p.VarId |> ignore
      | None -> ())
     { info with
         Params = info.Params |> List.map (zonkParam subst)

@@ -1164,6 +1164,8 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
     Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    // Per-program synthesis state (gap G193): a fresh one for this flow.
+    installProgramState ()
     let result =
         expandStr program
         |> Result.mapError (fun msg ->

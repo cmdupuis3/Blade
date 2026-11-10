@@ -1020,7 +1020,7 @@ DIFFERENT named index type is not an integer and the cast refuses it too
 `(Int64(j) : I)`, and is checked like any other integer.
 
 **What is guaranteed.** A read or write of a slot whose index type is NAMED
-is bounds-safe: its subscript is either PROVEN or CHECKED at run time
+is bounds-safe (and so is one whose slot is anonymous, below): its subscript is either PROVEN or CHECKED at run time
 (BL8006, in both lanes; against the static extent, or the array's own
 `extents` when the extent is only known at run time). Proven is a closed
 list that trusts no type: a compile-time-checked literal, a bare variable of
@@ -1052,11 +1052,29 @@ an array parameter whose UNNAMED axis (`m: T^1`, `Float64^1`, an anonymous
 that does -- is checked again for each call passing a NAMED axis there, as
 an ARRAY INSTANCE (§4.3) with the parameter typed as the argument, so the
 read is judged, proven or guarded against the name; a parameter pack's
-element (`P[0](k)`) is checked against its own extent for every caller. Not
-covered: a computed subscript into an ANONYMOUS index slot
-(an array without a named index type) is not checked -- name the index type
-to get the guarantee; compact, compound, sparse and ragged slots keep their
-own disciplines (a compact group's LITERAL coordinates are range-checked at
+element (`P[0](k)`) is checked against its own extent for every caller.
+
+**Anonymous slots.** The guarantee holds for a slot with NO named index type
+too (an array literal `let v = [1.0, 2.0, 3.0]`, an `Array<T like Idx<3>>`, a
+`T^1` parameter, an anonymous range, a view `a(i)` of any of them): a
+computed subscript into it is PROVEN or CHECKED at run time (BL8006,
+`index out of bounds: a position outside the array`, in every lane), against
+its static extent or, when that is only known at run time, the array's own
+`extents` (read off the variable a view starts from; an array expression
+with no variable -- a call result, an `if` of arrays -- is evaluated once and
+read through that value). An anonymous slot has no nominal tag, so its
+proven list is shorter: a literal (judged as rule 3 says), a lambda
+parameter a range feeds whose static bounds lie inside the slot's static
+extent (`method_for(0..3) <@> lambda(i) -> v(i)`, `range<Idx<3>>`), and a
+proven value of a NAMED index type whose static extent fits; an
+anonymous-tagged value is never proof, a symbolic extent never matches, and
+everything else is checked -- with the three leftovers gap row G208 records (a write
+through a variable-less array expression of runtime extent, a runtime-extent plain slot
+beside a compact or sparse slot, and the anonymous ascription `(5 : Idx<3>)` itself,
+whose READS are checked but not the ascription). A plain slot beside a structured one (a compact
+group read by its flat coordinates, a compound or sparse tuple key) is judged
+the same way against its static extent. Compact, compound, sparse and ragged
+slots keep their own disciplines (a compact group's LITERAL coordinates are range-checked at
 compile time, each against the group's extent); compiler-synthesized buffers and indices (`let rec`
 prefixes, which read zero past the prefix by design, reduce desugars, AD
 sweeps) own their walks. (The rank-2 offset arithmetic behind the proven

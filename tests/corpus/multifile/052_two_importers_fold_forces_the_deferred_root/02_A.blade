@@ -1,0 +1,5 @@
+// TEST: Two importers: a fold over a chain spanning three modules
+// MODULE: A
+module A
+import H
+let pa = method_for(H.d) <@> lambda(v) -> v + 1.0

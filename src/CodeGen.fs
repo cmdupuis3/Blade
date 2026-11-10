@@ -3277,9 +3277,7 @@ let isDestructureCarrier (b: IRBinding) : bool = b.Name.StartsWith "_("
 /// reads the name's last dotted segment (round 4 wave 6, the class-closure
 /// round of the top-level sibling folds: an imported module's join carriers
 /// printed as `A.__sfj18`).
-let isInternalBindingName (name: string) : bool =
-    let seg = match name.LastIndexOf '.' with -1 -> name | i -> name.Substring(i + 1)
-    seg.StartsWith "__" && not (System.Text.RegularExpressions.Regex.IsMatch(seg, @"^__expr\d+$"))
+let isInternalBindingName (name: string) : bool = Blade.PrintSelection.isInternal name
 
 /// The printed form of a COMPOUND array (G22: its extent is a run-time
 /// cardinality, `Idx<?>`): Some false = one flat run of the present cells in

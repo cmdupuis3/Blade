@@ -113,18 +113,22 @@ let private routeEmission () =
                 false
 
 /// A computed offset is outside the gather's read discipline: with the gate
-/// ON the map still takes the scatter route (no guard emitted).
+/// ON the map still takes the scatter route -- no gather guard beyond the
+/// gate-OFF emission's. (A window read at a COMPUTED offset is a position,
+/// checked against its slot since G192 (1): those BL8006 guards are in both
+/// emissions alike.)
 let private computedOffsetDeclines () =
     let name = "halo_gather_declines_computed_offset"
     match corpusSource "033_halo_stencil_grad_computed_offset.blade" with
     | Error e -> resultLine Fail name e; false
     | Ok src ->
-        match cppOf name None src with
-        | Error e -> resultLine Fail name e; false
-        | Ok cpp ->
+        match cppOf name None src, cppOf (name + "_off") (Some "0") src with
+        | Error e, _ | _, Error e -> resultLine Fail name e; false
+        | Ok cpp, Ok off ->
             let guards = gatherGuardCount cpp
-            if guards = 0 then resultLine Pass name "no gather guard: the scatter route took it"; true
-            else resultLine Fail name $"expected no gather guard, found {guards}"; false
+            let guardsOff = gatherGuardCount off
+            if guards = guardsOff then resultLine Pass name $"no gather guard: the scatter route took it ({guards} subscript guards in both)"; true
+            else resultLine Fail name $"expected the gate-off guard count {guardsOff}, found {guards}"; false
 
 // ---------------------------------------------------------------------------
 // The differential.
@@ -778,12 +782,12 @@ let private ckCorpusPins () : bool list =
           // nested literal is ragged storage a copy shares
           "075_recarray_checkpoint_declines_uneven_nested_literal.blade", Error "not rectangular" ]
     // decision-only shapes whose programs do not compile in a lane today for
-    // reasons outside this rule (gap G190): a ragged array literal and a
-    // deferred module map read inside a differentiated function
+    // reasons outside this rule (gap G190): a deferred module map read inside
+    // a differentiated function. (The ragged array literal over a leading
+    // `RaggedIdx<_>` is refused at lowering since wave 7, G190 (a):
+    // corpus index-types/579.)
     let inlineForced : (string * Result<string, string> * string) list =
-        [ "ragged_literal", Error "the call of 'identity' does not return a plain dense array",
-          "import ad as ad\ntype A = Array<Float64 like RaggedIdx<_>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [2.0]\nlet forcing = identity(backing)\n" + ckAliasTail
-          "deferred_division", Error "its value is not a stored form",
+        [ "deferred_division", Error "its value is not a stored form",
           "import ad as ad\ntype A = Array<Float64 like Idx<1>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [4.0]\nlet forcing = method_for(backing) <@> lambda(e) -> 8.0 / e\n" + ckAliasTail ]
     let inlinePins =
         [ for (nm, want, src) in inlineForced do
@@ -934,12 +938,46 @@ let private ckCases () : bool option list =
                | Error e -> resultLine Fail ("ad_checkpoint_snapshot: " + file) e; [ Some false ]
                | Ok src -> ckDifferential ("ad_checkpoint_snapshot_" + file.Substring(0, 3)) src arms))
 
+/// Gap G193: the AD pipeline's restored let annotations (G187) and its mode
+/// are PER PROGRAM (GradCommon.FlowCell over AsyncLocal), not process
+/// globals keyed by function name. Two syntheses of SAME-NAMED functions in
+/// parallel tasks -- a host compiling two programs at once -- each install
+/// their own state (as `Grad.expand` does), note `sin` with their own
+/// annotation, wait for the other at a barrier, and must read back their own
+/// annotation and mode. The barrier forces the interleaving the old globals
+/// lost (the second task's reset cleared the first's entry; its note made
+/// the name ambiguous).
+let private gradStatePerProgram () : bool =
+    let name = "ad_state_per_program: two same-named syntheses in parallel keep their own annotations (G193)"
+    let barrier = new System.Threading.Barrier(2)
+    let run (tag: string) (mode: string) =
+        System.Threading.Tasks.Task.Run(fun () ->
+            GradCommon.installProgramState ()
+            GradCommon.errMode.Value <- mode
+            GradCommon.resetLetAnnotations "f"
+            GradCommon.noteLetAnnotation "f" "sin" (Some (Blade.Ast.TyNamed (tag, [])))
+            GradCommon.letAnnotationOwner.Value <- "f"
+            barrier.SignalAndWait()
+            let back = GradCommon.restoredLetAnnotation "sin"
+            barrier.SignalAndWait()
+            (back, GradCommon.errMode.Value))
+    try
+        let a = run "A1" "grad"
+        let b = run "A2" "jvp"
+        System.Threading.Tasks.Task.WaitAll([| a :> System.Threading.Tasks.Task; b :> System.Threading.Tasks.Task |], 30000) |> ignore
+        match a.Result, b.Result with
+        | (Some (Blade.Ast.TyNamed ("A1", [])), "grad"), (Some (Blade.Ast.TyNamed ("A2", [])), "jvp") ->
+            resultLine Pass name "each task read its own annotation and mode"; true
+        | ra, rb -> resultLine Fail name $"task 1 read {ra}, task 2 read {rb}"; false
+    with ex -> resultLine Fail name ex.Message; false
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
         [ recordPins ()
           routeEmission ()
-          computedOffsetDeclines () ]
+          computedOffsetDeclines ()
+          gradStatePerProgram () ]
         @ g78Pins ()
     let zeroFill = zeroFillCases |> List.collect zeroFillCase
     let diffs =

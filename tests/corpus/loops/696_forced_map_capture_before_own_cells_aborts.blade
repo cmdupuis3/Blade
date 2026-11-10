@@ -1,0 +1,12 @@
+// TEST: a forced map evaluates its kernel capture before its own cells (aborts)
+// Gap G199 (Codex diff review round 7): forcing the deferred p (z = p(0))
+// evaluates the deferred d its kernel captures BEFORE p's own cells: d's
+// division by zero (cell 1) fails before p's modulo by zero (cell 1), in every
+// lane, in a program without writes.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> 20 % v + extents(d)
+let z = p(0)
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:6

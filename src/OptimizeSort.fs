@@ -265,13 +265,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
     let arr = List.toArray modul.Bindings
     let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let builtinOp (c: IRCallable) : IRBinOp option =
         match c.Params, c.Body with
         | [ p0; p1 ], IRBinOp (_, op, IRVar (a, _), IRVar (b, _), _)
@@ -312,7 +306,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
                 | Some n ->
                 match printSelection with
                 | None -> Error $"`{sb.Name}` is printed (no print selection: printing reads the sorted output)"
-                | Some sel when sel.Contains sb.Name -> Error $"`{sb.Name}` is printed (the print selection names it)"
+                | Some sel when Blade.PrintSelection.mayName sel sb.Name -> Error $"`{sb.Name}` is printed (the print selection names it)"
                 | Some _ when not singleModule -> Error "a multi-module program (v1 plans a single module)"
                 | Some _ ->
                 if foreignRefs.Contains sb.Id then Error $"another module names `{sb.Name}`"

@@ -1,0 +1,19 @@
+// TEST: Tuple Member And Extent Force Their Inputs
+// Gap G199: a tuple VALUE evaluates its deferred member as a copy, which
+// forces the member inputs (d) under their own names; extents(e) and a
+// wholly deferred tuple member are forcing reads of their maps too. Every
+// later read sees the cells of that force, not the written x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let e = method_for(x) <@> lambda(v) -> v * 3.0
+let td = (e, e)
+let t = (p, 0.0)
+let n = extents(e)
+x(0) = 10.0
+let z = d(0)
+let a = td[0]
+let ze = a(0)
+// EXPECT: n = 3
+// EXPECT: z = 2.0
+// EXPECT: ze = 3.0

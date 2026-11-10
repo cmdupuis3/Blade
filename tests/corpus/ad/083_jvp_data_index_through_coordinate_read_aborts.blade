@@ -1,0 +1,19 @@
+// TEST: AD A Data Index Read Through A Compiler Coordinate Is Checked (aborts)
+import ad as ad
+// ============================================================================
+// Gap G192 (2), Codex design review of A2: forward mode substitutes the
+// kernel parameter by `a(__ci<n>)`, a read at the compiler coordinate. The
+// coordinate proves that read of `a`, never the VALUE it loads: the guard
+// used to stand down on any index mentioning a `__` name, so
+// `table(Int64(floor(a(__ci))))` was unchecked. Only a bare coordinate (plus
+// or minus a literal) is the walk; a(1) = 5.0 indexes the 3-cell table at 5,
+// BL8006 in `f__jvp` in every lane.
+// ============================================================================
+let table: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
+function f(a: Array<Float64 like Idx<2>>) -> Float64 = {
+    let ys = method_for(a) <@> lambda(x) -> table(Int64(floor(x))) * x |> compute
+    reduce(ys, (+))
+}
+let r = ad.jvp(f)([1.0, 5.0], [1.0, 1.0])
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: at f__jvp

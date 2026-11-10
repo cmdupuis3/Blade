@@ -1,0 +1,21 @@
+// TEST: a pack former whose nested lambda reads the pack through a tuple projection is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d): a dynamic pack read through a TUPLE
+// projection inside a nested lambda (`let t = (args, x); t[0][k]`) was not
+// seen by the G174 closure-graph search (it matched only a pack id subscripted
+// directly), so g++ rejected the emission (BL9002). A dynamic subscript of a
+// projection of a tuple holding the pack is now a pack read: refused at
+// lowering.
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(x: Float64) -> {
+            let t = (args, x)
+            t[0][k] + x
+        }
+        h(1.0)
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

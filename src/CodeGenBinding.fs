@@ -744,7 +744,9 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         let (p, f) = (Blade.OptimizeStreamGroup.StreamGroupAggTable.tryFold binding.Id).Value
         let name = bindingCppName binding
         let ind = indentStr ctx
-        let g = sanitizeCppName p.GroupByName
+        // round 4 wave 7 (lane c, Codex f357ff95): the grouping's EMITTED name
+        // (an imported module's binding is qualified after the plan: `Data__g`)
+        let g = match Map.tryFind p.GroupById ctx.VarNames with Some n -> n | None -> sanitizeCppName p.GroupByName
         let elemStr = match binding.Type with ArrayElem a -> elemTypeToCpp a.ElemType | t -> irTypeToCpp t
         recordCodegenDecision "stream-group-aggregate" name Blade.Effects.Applied
             [ $"c++ lane: `{name}` adopts its per-group states from `{g}`'s windowed pass" ]
@@ -6635,7 +6637,67 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
+/// A fold over a deferred computation whose ONE operand is an anonymous range
+/// with a RUNTIME extent (`reduce(method_for(0..n) <@> k, op)` in a function
+/// or kernel body; `0..{ let mut s = ..; bump(s) }`, gap G201) read its bound
+/// off `__range<i>.extents[0]`, which nothing declared (BL9002). Its holder
+/// -- the extent evaluated ONCE as a signed value, a negative one an empty
+/// range as the interpreter treats it, and the static start -- is declared
+/// right before the fold's first use of it, i.e. at the loop's entry, after
+/// the seed (the interpreter's order: seed, then the range when the loop is
+/// entered), and named through CodeGenLoopNest.reduceRangeHolders. Only a
+/// single-leaf, single-operand, single-level fold is admitted (a level of an
+/// outer product is entered once per outer cell; a join or merged compute
+/// shares sources) -- the rest keep the old path (gap G209).
 and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
+    let rec valuesInScope (e: IRExpr) =
+        match e with
+        | IRParam _ -> false
+        | ExprShape (children, _) -> children |> List.forall valuesInScope
+    let holder =
+        match compExpr with
+        | IRApplyCombinator ({ Arrays = [ (IRRange ([ ix ], offset) as arr) ] })
+            when not (reduceRangeHolders.Value.ContainsKey arr)
+                 && ix.IxKind = IxKPlain && ix.Rank = 1
+                 && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true)
+                 && (tryEvalIntIR ix.Extent).IsNone
+                 && offset |> Option.forall (fun o -> (tryEvalIntIR o).IsSome)
+                 && valuesInScope ix.Extent ->
+            let rname = $"__range0_r{binding.Id}"
+            let offStr = offset |> Option.bind tryEvalIntIR |> Option.map string |> Option.defaultValue "0"
+            let ext = $"[&]() {{ const int64_t __e = (int64_t)({exprToCppCtx ctx ix.Extent}); return __e < 0 ? (size_t)0 : (size_t)__e; }}()"
+            let decl = $"const struct {{ size_t extents[1]; int64_t offset; }} {rname} = {{ {{ {ext} }}, (int64_t)({offStr}) }};"
+            Some (arr, rname, decl)
+        | _ -> None
+    match holder with
+    | None -> genReduceComputeBindingUnheld ctx binding builder compExpr kernelExpr seedExpr
+    | Some (arr, rname, decl) ->
+        reduceRangeHolders.Value.[arr] <- rname
+        try
+            let (code, ctx') = genReduceComputeBindingUnheld ctx binding builder compExpr kernelExpr seedExpr
+            // Declared right before the first line that reads it (the loop's
+            // entry); the fold's own lines before it (the seed) keep their order.
+            // The anchor is the loop-entry BOUND declaration itself
+            // (`const size_t __rhi = <holder>.extents[0];`, `__rn` on the
+            // threaded arms), or the ordered fold's own loop header
+            // (`for (size_t __i0 = 0; __i0 < <holder>.extents[0]; ...`, the
+            // strict / repro form) -- never any line merely mentioning the
+            // name: a string literal in the seed may spell it (Codex diff
+            // reviews).
+            let h = System.Text.RegularExpressions.Regex.Escape rname
+            let entry =
+                System.Text.RegularExpressions.Regex(
+                    "^\\s*(const size_t __r[a-z]+ = " + h + "\\.extents\\[0\\];|for \\(size_t (\\w+) = 0; \\2 < " + h + "\\.extents\\[0\\];)")
+            match code |> List.tryFindIndex (fun (l: string) -> entry.IsMatch l) with
+            | Some k ->
+                let lead = (code.[k] |> Seq.takeWhile (fun c -> c = ' ') |> Seq.length)
+                (List.take k code @ [ String.replicate lead " " + decl ] @ List.skip k code, ctx')
+            | None ->
+                (codegenError ctx (indentStr ctx) $"internal: the fold over a runtime-extent range found no loop-entry bound reading its holder {rname} (G201)", ctx')
+        finally
+            reduceRangeHolders.Value.Remove arr |> ignore
+
+and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (compExpr: IRExpr) (kernelExpr: IRExpr) (seedExpr: IRExpr) : string list * CodeGenContext =
     // HOISTED-OPERAND PRELUDE. The lift pass pulls a synthesized loop
     // application out of a combinator's `Arrays` slot into its own let
     // (`liftChildIncludingLoopApp`), so a deferred computation whose operand is
@@ -7617,7 +7679,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     info.Arrays |> List.mapi (fun i arr ->
                         match arr with
                         | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
-                        | IRRange _ -> $"__range{i}"
+                        | IRRange _ -> reduceRangeName i arr
                         | IRVirtualReverse _ -> $"__rev{i}"
                         | _ -> $"arr{i}")
                 let foldCg (info: ApplyInfo) (accName: string) =
@@ -8852,7 +8914,7 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                      | IRVar (srcId, _) -> Map.tryFind srcId ctx.VarNames |> Option.defaultValue ($"arr{i}")
                      | _ -> $"arr{i}")
                  | None -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}"))
-            | IRRange _ -> $"__range{i}"
+            | IRRange _ -> reduceRangeName i arr
             | IRVirtualReverse _ -> $"__rev{i}"
             | _ -> $"arr{i}")
     /// Repoint every deferred operand slot at the deferred map's own leading

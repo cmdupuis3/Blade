@@ -1,0 +1,19 @@
+// TEST: An extents-only kernel capture after a whole-array rebind in a block
+// Gap G199 (Codex diff review round 4): inside the block x is rebound, then a
+// computed map whose kernel captures the deferred d (read only through
+// extents) forces d there: d holds 2 * [5, 6, 7] from that force on, so the
+// later write to x does not reach w. The LLVM lane could not place the force
+// after the inline rebind and left d a producer (w = 20.0); it now declines
+// the program (the C++ lane runs it).
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let r = {
+    x = [5.0, 6.0, 7.0]
+    let t = method_for(range<I>) <@> lambda(i) -> Float64(extents(d)) |> compute
+    reduce(t, (+), 0.0)
+}
+x(0) = 10.0
+let w = d(0)
+// EXPECT: r = 9.0
+// EXPECT: w = 10.0

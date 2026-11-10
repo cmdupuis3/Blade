@@ -73,13 +73,7 @@ module StreamGroupAggTable =
 /// (the windowed scatter). Read per call.
 let streamGroupAggEnabled () = Blade.Toolchain.envFlag "BLADE_STREAM_GROUP_AGG" false
 
-let private printSelectionNames () : Set<string> option =
-    match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-    | null -> None
-    | s ->
-        let names = s.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                    |> Array.map (fun n -> n.Trim()) |> Array.filter ((<>) "") |> Set.ofArray
-        if names.IsEmpty then None else Some names
+let private printSelectionNames () : Set<string> option = Blade.PrintSelection.names ()
 
 let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let funcs = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
@@ -203,7 +197,7 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<I
                 if not enabled then Some "disabled by BLADE_STREAM_GROUP_AGG"
                 elif elemEt.IsNone then Some "the streamed values are not a rank-1 scalar variable"
                 elif selection.IsNone then Some "g is printed (no print selection excludes it): its rows are an output"
-                elif selection.Value.Contains gname then Some "the print selection names g: its rows are an output"
+                elif Blade.PrintSelection.mayName selection.Value gname then Some "the print selection names g: its rows are an output"
                 elif foreignRefs.Contains gid then Some "another module names g"
                 elif fnReader.IsSome then Some $"a callable (`{fnReader.Value.SourceName}`) reads g (v1 plans top-level folds only)"
                 elif typeReader.IsSome then Some $"g is named inside a type extent (in `{typeReader.Value.Name}`)"

@@ -1,0 +1,14 @@
+// TEST: A serial kernel folds over a range whose bound is a block with lets
+// ============================================================================
+// Gap G201, the serial twin of loops/675: the same fold without the omp
+// request failed the same way (an undeclared `__range0`): the holder is not
+// omp-specific.
+// ============================================================================
+function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {
+    a(0) = 3
+    3
+}
+let xs: Array<Int64 like Idx<4>> = [1, 2, 3, 4]
+let ys = method_for(xs) <@> lambda(v) -> v * reduce(method_for(0..{ let mut scratch: Array<Int64 like Idx<3>> = [1, 2, 3]; bump(scratch) }) <@> lambda(k) -> k, (+)) |> compute
+// EXPECT: xs = [1, 2, 3, 4]
+// EXPECT: ys = [3, 6, 9, 12]

@@ -1,0 +1,15 @@
+// TEST: Anonymous slot computed read is checked (aborts)
+// ============================================================================
+// Gap G192 (1), user decision 2026-11-09: a computed subscript into an
+// ANONYMOUS index slot (no named index type) is proven or checked at run
+// time exactly as a named one is (formalism 3.10). `k` is a cell of a data
+// column, so `v(k)` is checked against the static extent of v: the second
+// cell reads position 5 and stops with BL8006 in every lane. The C++ and
+// LLVM lanes used to read past v and print a garbage cell; the interpreter
+// aborted with its own spanless check.
+// ============================================================================
+let v: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let ks: Array<Int64 like Idx<2>> = [1, 5]
+let r = method_for(ks) <@> lambda(k) -> v(k) |> compute
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: .blade:12

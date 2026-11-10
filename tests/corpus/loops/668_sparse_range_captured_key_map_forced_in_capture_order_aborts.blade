@@ -1,0 +1,13 @@
+// TEST: Sparse Range Map Forces Its Captures Before Its Deferred Key Map (aborts)
+// Gap G207 (2) (round 4 wave 7 lane d): the KEYS of a range<SparseIdx<keys>>
+// map are a deferred map the kernel also captures, beside another captured
+// failing map. The compiled lanes force the kernel captures in capture order
+// in the binding prelude (`g` first: integer division by zero at cell 3), the
+// keys with them; the interpreter resolved the keys first and reported their
+// own failure (integer modulo by zero). It now forces the captures first.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 0, 5]
+let keys = method_for(d) <@> lambda(a) -> 200 % a
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> if i > 4 then g(0) + keys(0) else i |> compute

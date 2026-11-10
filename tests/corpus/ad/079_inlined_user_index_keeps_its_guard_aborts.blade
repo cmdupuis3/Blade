@@ -1,0 +1,25 @@
+// TEST: AD An Inlined User Index Keeps Its Bounds Check (aborts)
+import ad as ad
+// ============================================================================
+// Gap G192 (2): the AD inliner renames the callee local `j` to a reserved
+// `__in<n>_j`, and the subscript guard used to stand down on any index that
+// MENTIONED a `__` name, so `a(j)` lost its check in `f__grad` (traced by
+// Codex in the A4 design review of wave 6). A renamed USER binder now keeps
+// its provenance: `j = 7` is outside S and the derivative stops with BL8006
+// in every lane. The in-range twin is ad/080.
+// ============================================================================
+type S = Idx<3>
+type A = Array<Float64 like S>
+function k(x: Float64, a: A, i: Int64) -> Float64 = {
+    let j = i + 0
+    let unused = a(j)
+    x * x
+}
+function f(x: Float64) -> Float64 = {
+    let a: A = [1.0, 2.0, 3.0]
+    k(x, a, 7)
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))
+// ABORT: error[BL8006]: index out of bounds: a position outside S (0 .. 2)
+// ABORT: at f__grad
+// WARN: BL4003

@@ -1,0 +1,16 @@
+// TEST: a pack former reaching a pack-reading lambda through a tuple bound outside the kernel is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 2): the lambda
+// that reads the pack (`h`) is reached through a TUPLE bound outside the
+// kernel (`fs[0](k)`): the closure search now follows the initializer of
+// every local value the kernel names, so the dynamic `args[j]` is found and
+// refused at lowering (it reached g++ as an invalid scalar subscript).
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let h = lambda(j: Int64) -> args[j]
+    let fs = (h, 1.0)
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> fs[0](k) |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

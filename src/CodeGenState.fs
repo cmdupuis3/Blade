@@ -1146,15 +1146,7 @@ let ompSuppressedBlockMarker (requested: bool) (reason: string) : string =
 /// all is a loud refusal (genPrintStatements); a name that IS one but never
 /// prints (a deferred loop value, a streamed read) prints nothing, exactly
 /// as it does without the flag.
-let printSelection () : Set<string> option =
-    match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-    | null -> None
-    | v ->
-        let names =
-            v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-            |> Array.map (fun s -> s.Trim())
-            |> Array.filter (fun s -> s <> "")
-        if names.Length = 0 then None else Some (Set.ofArray names)
+let printSelection () : Set<string> option = Blade.PrintSelection.names ()
 
 let internal tilesUsedStorage =
     System.Threading.AsyncLocal<bool ref>()

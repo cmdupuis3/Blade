@@ -1,0 +1,13 @@
+// TEST: Two importers: a fold over a chain spanning three modules
+// MODULE: Main
+module Main
+import H
+import A
+let q = method_for(A.pa) <@> lambda(v) -> v * v
+let r = reduce(q, (+), 0.0)
+H.x(0) = 10.0
+let z = H.d(0)
+let w = A.pa(0)
+// EXPECT: r = 83.0
+// EXPECT: z = 2.0
+// EXPECT: w = 3.0

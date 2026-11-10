@@ -1,0 +1,13 @@
+// TEST: an inline former whose kernel reads values taken from the pack outside it still compiles
+// Gap G206's boundary (round 4 wave 7 lane d): the inline-former refusal
+// counts a pack read only in the kernel and in the lambdas it reaches, and in
+// a local value only the pack ITSELF (or a tuple holding it); a scalar taken
+// from the pack at a literal index outside the kernel (`first`) and the arity
+// bound outside it (`n`) are ordinary captures. 3 * 10 + (0 + 1 + 2) + 3 * 3.
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let first = args[0]
+    let n = Float64(arity(args))
+    reduce(method_for(range<Idx<3>>) <@> lambda(k) -> first + Float64(k) + n, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)
+// EXPECT: result = 42.0

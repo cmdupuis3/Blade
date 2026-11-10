@@ -1,0 +1,17 @@
+// TEST: AD A Hoisted Call Result Used As An Index Is Checked (aborts)
+import ad as ad
+// ============================================================================
+// Gap G192 (2), Codex design review of A2: the AD expansion binds a call
+// result to a reserved `__hc<n>` let before using it as a subscript. A let
+// holds a VALUE, not one of the compiler walk coordinates, so `a(ix(k))` is
+// judged as written: k = 5 is outside the 3-cell slot, BL8006 in `f__grad`
+// in every lane.
+// ============================================================================
+function ix(k: Int64) -> Int64 = k
+function f(x: Float64, k: Int64) -> Float64 = {
+    let a: Array<Float64 like Idx<3>> = [x, x, x]
+    a(ix(k))
+}
+let r = ad.grad(f)(Float64(2.0), 5)
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 2)
+// ABORT: at f__grad

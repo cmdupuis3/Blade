@@ -1,0 +1,10 @@
+// TEST: an extents-only kernel capture is evaluated, so its failure stays (aborts)
+// Gap G199 (Codex diff review round 5): the fold kernel captures the deferred
+// d, read only through extents (a constant); the capture is still forced
+// before the fold in every lane, so d's division by zero (cell 1) fails there.
+// The LLVM lane never evaluated d in a program without assignments and
+// completed with s = 13.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let s = reduce(method_for(x) <@> lambda(v) -> v + extents(d), (+), 0)
+// ABORT: BL8013

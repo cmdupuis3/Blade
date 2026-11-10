@@ -1,0 +1,10 @@
+// TEST: A ragged parent literal over an opaque RaggedIdx keeps its inner rows
+// ============================================================================
+// Gap G190 (a), Codex diff review round 2: the refusal of a standalone
+// literal over a leading `RaggedIdx<_>` (index-types/579-581) must not catch
+// the INNER rows of a ragged parent literal, which carry the opaque row type
+// structurally -- the outer Idx<2> axis exists.
+// ============================================================================
+let a: Array<Float64 like Idx<2>, RaggedIdx<_>> = [[1.0], [2.0, 3.0]]
+let s = reduce(a(1), (+))
+// EXPECT: s = 5.0

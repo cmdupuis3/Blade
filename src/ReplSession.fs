@@ -1259,7 +1259,12 @@ type ReplSession(runCwd: string) =
                         Frames = memo.Frames |> Map.filter (fun nm _ -> not (Set.contains nm gone)) }
                 else Blade.Interp.Run.emptyMemo
         let watch = System.Diagnostics.Stopwatch.StartNew()
-        match Blade.Interp.Repl.lowerSessionDiag (Some srcPath) src with
+        // The session supplies its own print demand AFTER lowering (an
+        // explicit printOnly wins over BLADE_PRINT at the run): the lowering
+        // must not let an ambient selection license a plan to drop a binding
+        // that demand then prints (gap G200).
+        let lowerIt () = Blade.Interp.Repl.lowerSessionDiag (Some srcPath) src
+        match (if printOnly.IsSome then Blade.PrintSelection.withoutSelection lowerIt else lowerIt ()) with
         | Error (ds, sm) ->
             watch.Stop()
             CandidateRejected (ds, sm)
@@ -1314,7 +1319,11 @@ type ReplSession(runCwd: string) =
                     watch.Stop()
                     CandidateFailed "compiled evaluation is unavailable in this process"
                 | Some run ->
-                    match run srcPath this.RunCwd with
+                    // the compiled lane lowers and emits again: under the same
+                    // suppression, so the ambient selection neither licenses a
+                    // plan nor filters the print the echo is read from (G200)
+                    let runIt () = run srcPath this.RunCwd
+                    match (if printOnly.IsSome then Blade.PrintSelection.withoutSelection runIt else runIt ()) with
                     | Error msg ->
                         watch.Stop()
                         CandidateFailed msg

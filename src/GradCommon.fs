@@ -293,10 +293,30 @@ let internal moduleLetTys (ctx: Ctx) : Map<string, TypeExpr> =
     |> Seq.choose (fun (n, ml) -> ml.Ty |> Option.map (fun t -> (n, t)))
     |> Map.ofSeq
 
+/// PER-PROGRAM synthesis state (gap G193): one value per asynchronous flow,
+/// so two programs synthesized concurrently (a host compiling in parallel,
+/// `BLADE_TEST_FSHARP_PARALLEL`) never read each other's state. A flow that
+/// has not installed one gets a FRESH value of its own on first use (the
+/// `declSpansCell` lesson: a default instance shared by every flow would be
+/// the old process global again); `expand` installs fresh state per program
+/// (installProgramState).
+type internal FlowCell<'T when 'T : not struct>(make: unit -> 'T) =
+    let cell = new System.Threading.AsyncLocal<'T>()
+    member _.Value
+        with get () =
+            match box cell.Value with
+            | null ->
+                let v = make ()
+                cell.Value <- v
+                v
+            | _ -> cell.Value
+        and set (v: 'T) = cell.Value <- v
+    member _.Reset () = cell.Value <- make ()
+
 /// Which transform is currently synthesizing ("grad" | "jvp") -- prefixes
 /// every internal error and selects the diagnostic code at the `expand`
-/// boundary. A module-level ref (like `synthSpan`): the pass is sequential.
-let internal errMode = ref "grad"
+/// boundary. Per program (FlowCell, gap G193).
+let internal errMode = FlowCell<string>(fun () -> "grad")
 
 let internal err (fname: string) (msg: string) : Result<'a, string> =
     Error $"{errMode.Value}({fname}): {msg}"
@@ -731,19 +751,31 @@ let internal substParamMany (fname: string) (subs: (string * Expr) list) (body: 
 /// annotation only for a name let EXACTLY ONCE across the expansion and
 /// annotated there (a rebinding, or a callee local of the same name, makes
 /// it ambiguous: no annotation). The driver names the owner before it emits.
-let internal letAnnotations = System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>()
-let internal letAnnotationOwner = ref ""
+/// Per program, like errMode (FlowCell, gap G193): it was a process global
+/// keyed by function NAME, so two concurrent syntheses of same-named
+/// functions could read each other's annotations.
+let internal letAnnotations =
+    FlowCell<System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>>(fun () ->
+        System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>())
+let internal letAnnotationOwner = FlowCell<string>(fun () -> "")
 let internal resetLetAnnotations (fname: string) =
-    for k in List.ofSeq letAnnotations.Keys do
-        if fst k = fname then letAnnotations.Remove k |> ignore
+    let d = letAnnotations.Value
+    for k in List.ofSeq d.Keys do
+        if fst k = fname then d.Remove k |> ignore
 let internal noteLetAnnotation (fname: string) (name: string) (ty: TypeExpr option) =
-    match letAnnotations.TryGetValue ((fname, name)) with
-    | true, (_, k) -> letAnnotations.[(fname, name)] <- (None, k + 1)
-    | _ -> letAnnotations.[(fname, name)] <- (ty, 1)
+    let d = letAnnotations.Value
+    match d.TryGetValue ((fname, name)) with
+    | true, (_, k) -> d.[(fname, name)] <- (None, k + 1)
+    | _ -> d.[(fname, name)] <- (ty, 1)
 let internal restoredLetAnnotation (name: string) : TypeExpr option =
-    match letAnnotations.TryGetValue ((letAnnotationOwner.Value, name)) with
+    match letAnnotations.Value.TryGetValue ((letAnnotationOwner.Value, name)) with
     | true, (Some ty, 1) -> Some ty
     | _ -> None
+/// Fresh per-program synthesis state for the current flow (`expand`).
+let internal installProgramState () =
+    errMode.Reset ()
+    letAnnotations.Reset ()
+    letAnnotationOwner.Reset ()
 
 let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt list, string> =
     let one stmt =

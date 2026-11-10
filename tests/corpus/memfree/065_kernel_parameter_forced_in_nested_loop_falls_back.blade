@@ -1,0 +1,17 @@
+// TEST: A Row Parameter Forced Inside A Nested Kernel Loop Takes The C++ Lane (G204)
+// Gap G204 (Codex diff review): the row parameter `a` of a deferred row map
+// is materialized INSIDE a nested kernel loop (the `range<K>` fold) and read
+// again after it; the LLVM lane bound it to a register born in that loop --
+// invalid IR (the register did not dominate the read after the loop). The
+// loop now refuses the rebinding of a parameter that is LIVE in an enclosing
+// application, and the C++ lane takes the program.
+// per row i: 3 * i + (i + 1); i < 7: 4 * 21 + 7 = 91
+type R = Idx<7>
+type C = Idx<1001>
+type K = Idx<3>
+let mat = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j)
+let total = reduce(method_for(mat) <@> lambda(a: Array<Float64 like C>) -> {
+    let first = reduce(method_for(range<K>) <@> lambda(k) -> a((0 : C)), (+))
+    first + a((1 : C))
+}, (+))
+// EXPECT: total = 91.0

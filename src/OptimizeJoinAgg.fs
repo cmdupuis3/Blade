@@ -66,27 +66,22 @@ module JoinAggTable =
     let elidedBy (id: IRId) : JoinAggPlan option =
         get () |> Map.toSeq |> Seq.map snd |> Seq.tryFind (fun p -> List.contains id p.Elided)
 
-/// OPT-IN (round 4 wave 4 stop rule: the second review of the census class --
-/// Codex round 1 -- found further members, a J read in a type extent and a
-/// source written between J and a fold): BLADE_JOIN_AGG=1|on plans it; unset /
+/// DEFAULT ON since round 4 wave 7 (lane B, B3): the fresh class-closure round
+/// of the census class (Codex) found no member after the wave-4 members (a J
+/// read in a type extent, a source written between J and a fold) and the
+/// wave-6 one (a qualified print selection, now the shared
+/// PrintSelection.mayName); measured at N 40,009 x M 20,011 (J ~ 2.0 M cells):
+/// peak working set 21.6 -> 6.4 MB, time unchanged. Unset / 1 / on plans it;
 /// 0 / off = J stays stored (the hash join's relation buffer). Read per call.
-let joinAggEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_AGG" false
+let joinAggEnabled () = Blade.Toolchain.envFlag "BLADE_JOIN_AGG" true
 
-let private printSelectionNames () : Set<string> option =
-    match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-    | null -> None
-    | s ->
-        let names = s.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                    |> Array.map (fun n -> n.Trim()) |> Array.filter ((<>) "") |> Set.ofArray
-        if names.IsEmpty then None else Some names
+let private printSelectionNames () : Set<string> option = Blade.PrintSelection.names ()
 
 /// Does a print selection name this binding? An IMPORTED module's bindings
 /// are qualified AFTER this plan runs (`Lib.J`), so an entry matches by its
 /// last dotted segment too (fail closed: any module's `J` counts; round 4
 /// wave 6 class-closure round -- `--print Lib.J` read a never-built buffer).
-let private selects (names: Set<string>) (name: string) : bool =
-    names.Contains name
-    || names |> Set.exists (fun n -> match n.LastIndexOf '.' with -1 -> false | i -> n.Substring(i + 1) = name)
+let private selects (names: Set<string>) (name: string) : bool = Blade.PrintSelection.mayName names name
 
 let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let funcs = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id) |> List.map (fun f -> (f.Id, f)) |> Map.ofList

@@ -1,0 +1,19 @@
+// TEST: Halo Extent Guard Runs After The Kernel Capture Prelude (aborts)
+// Gap G207 (3) (round 4 wave 7 lane d): loops/162 with a captured failing map
+// `g` read in the halo kernel. The compiled lanes force the kernel captures
+// in the binding prelude and check the halo extent (BL8009) inside the map
+// emission after it -- so the capture fails first (integer division by
+// zero); the interpreter checked the halo extent first. It now runs the guard
+// after the capture prelude.
+// ABORT: integer division by zero
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> Float64(k)) |> compute
+let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
+let gk = group_keys(keys)
+let gt = group_by(ts, gk)
+let cells = gt <@> lambda(row: T^1) -> {
+    let s = reduce(row, (+))
+    [s, s * s]
+} |> compute
+let d: Array<Int64 like Idx<3>> = [1, 0, 2]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let pairs = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> cells(w(0), 0) + cells(w(1), 0) + Float64(g(0)) |> compute

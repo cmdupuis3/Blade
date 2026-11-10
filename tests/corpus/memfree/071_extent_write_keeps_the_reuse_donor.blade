@@ -1,0 +1,22 @@
+// TEST: A write hidden in a range bound keeps a scratch-reuse donor alive
+// ============================================================================
+// Round 4 wave 7 (lane c, gap G220; the class found by the Codex design review
+// 5909d69a): an assignment or alias hidden in a TYPE-CARRIED expression -- a
+// range bound `0..{ t = a; 3 }`, which the C++ lane evaluates -- was invisible
+// to the C++ ownership scans (they followed expression children only).
+// Scratch pool reuse: y looked dead after its fold (the later write `y(0) =
+// 100.0` sits in a range bound), so z could take y's pool and the write landed in z.
+// The scans now read every expression a type carries (embeddedExtentExprs).
+// ============================================================================
+type I = Idx<3>
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let s = reduce(y, (+))
+    let z = x * 3.0 + s |> compute
+    let n = extents(0..{ y(0) = 100.0; 3 })
+    reduce(z, (+)) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// 2 (1 + 2 + 3) = 12; z = 3x + 12 sums to 54; n = 3
+// EXPECT: result = 57.0

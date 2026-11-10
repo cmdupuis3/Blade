@@ -1,0 +1,9 @@
+// TEST: A function body forces an imported deferred map privately
+// MODULE: H
+// Gap G199, the other side (G75): a function body evaluates a module-level
+// deferred map privately per call -- no snapshot -- so after the write the
+// top-level read of H.d sees the written x in every lane.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+// EXPECT: H.d = [20.0, 4.0, 6.0]

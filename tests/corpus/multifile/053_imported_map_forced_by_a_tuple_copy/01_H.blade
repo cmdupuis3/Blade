@@ -1,0 +1,8 @@
+// TEST: An imported deferred map forced by the copy of a tuple member
+// MODULE: H
+// Gap G199: the tuple value (p, 0.0) copies p, which forces H.d under its
+// own name; the later write to H.x is not seen by H.d.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+// EXPECT: H.d = [2.0, 4.0, 6.0]

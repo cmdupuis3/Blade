@@ -969,6 +969,22 @@ let compoundArrayNamesOf (bindings: LoopIndexBinding list) : Set<string> =
 /// by genForLoopHeader (the `for` header renderer) and the MPI-dense slab
 /// prologue (which needs the OUTERMOST level's extent to compute per-rank
 /// [lo, hi) bounds) -- factored so the two can never drift.
+/// The C++ holders a fold over a deferred computation declared for its
+/// RUNTIME-extent anonymous range operands (`reduce(method_for(0..n) <@> k,
+/// op)`, `0..{ let .. ; bump(s) }` -- gap G201), by operand node (reference
+/// identity): the fold's array-name maps read the holder instead of a bare
+/// `__range<i>` nothing declared. Set by CodeGenBinding.genReduceComputeBinding
+/// for the extent of its own emission.
+let reduceRangeHolders =
+    new System.Threading.ThreadLocal<System.Collections.Generic.Dictionary<IRExpr, string>>(fun () ->
+        System.Collections.Generic.Dictionary<IRExpr, string>(HashIdentity.Reference))
+
+/// The holder name of a fold's range operand, else the bare `__range<i>`.
+let reduceRangeName (i: int) (arr: IRExpr) : string =
+    match reduceRangeHolders.Value.TryGetValue arr with
+    | true, n -> n
+    | _ -> $"__range{i}"
+
 let genLoopBoundExpr (compoundArrays: Set<string>) (binding: LoopIndexBinding) : string =
     match binding.Extent with
     | IRLit (IRLitInt n) -> string n
@@ -4898,6 +4914,16 @@ let rec allSubExprs (e: IRExpr) : IRExpr list =
     match e with
     | ExprShape (children, _) -> e :: (children |> List.collect allSubExprs)
 
+/// `allSubExprs` plus every expression a TYPE carries inside `e` (an index
+/// record's extent, a range bound: `method_for(0..{ t = a; 3 })`), which the
+/// ExprShape fold never enters (round 4 wave 7, gap G220). The ownership
+/// scans -- the scope-exit escape seeds, the fresh-return facts, copy in
+/// place, the owned move -- read through it: an assignment or an alias hidden
+/// in a range bound is still an assignment or an alias (the C++ lane evaluates
+/// that bound), and a scan that missed it freed the CALLER's array.
+let allSubExprsWithExtents (e: IRExpr) : IRExpr list =
+    (e :: Blade.Optimize.embeddedExtentExprs e) |> List.collect allSubExprs
+
 /// A return that hands the caller an INTERIOR VIEW of storage this scope owns.
 ///
 /// `traj((9999 : T))` at the tail of a function-local `let rec` renders as
@@ -4992,7 +5018,10 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                 // result: one 32 / 64 KB field per sp.ifft2 / sp.fft2 call on
                 // examples/09_qg_atmosphere (1.25 GB over the run).
                 let aliasingUse (v: IRExpr) =
-                    let subs = allSubExprs v
+                    let subs = allSubExprsWithExtents v
+                    // G220: a whole-array REBINDING of r anywhere in the let
+                    // (a range bound included) hands r someone else's storage
+                    let rebinds = subs |> List.exists (fun e -> match e with IRAssign (LVVar t, _) -> t = rid | _ -> false)
                     let refs = subs |> List.sumBy (fun e -> match e with IRVar (i, _) when i = rid -> 1 | _ -> 0)
                     let cellAccesses =
                         subs |> List.sumBy (fun e ->
@@ -5002,9 +5031,9 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                                  | IRTScalar _ | IRTUnitAnnotated (IRTScalar _, _) -> 1
                                  | _ -> 0)
                             | _ -> 0)
-                    refs > cellAccesses
+                    rebinds || refs > cellAccesses
                 let otherUses =
-                    lets |> List.filter (fun (id, v) -> id <> rid && Set.contains rid (collectVarRefsIR v) && aliasingUse v)
+                    lets |> List.filter (fun (id, v) -> id <> rid && aliasingUse v)
                 if boundToLifted && List.isEmpty otherUses then FreshPool else NotFresh
             // An interior view of a scope-local array is no longer returned as
             // a view: genFuncBodyScoped's return arm copies the slice into its
@@ -5089,12 +5118,16 @@ let isFreshPoolForm (e: IRExpr) : bool =
 ///      derived let, before or after), which can only keep a copy.
 let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (srcId: IRId) (tailExprs: IRExpr list) : bool =
     let scopeIds = scopeLets |> List.map fst |> Set.ofList
+    // G220 (Codex diff review): a read inside a type-carried expression (a
+    // range bound the C++ lane evaluates) is a read too
+    let refsWithExtents (e: IRExpr) =
+        (e :: Blade.Optimize.embeddedExtentExprs e) |> List.map collectVarRefsIR |> Set.unionMany
     let derived =
         let rec grow (acc: Set<IRId>) =
             let acc' =
                 scopeLets |> List.fold (fun s (id, v) ->
                     if Some id = selfId || Set.contains id s then s
-                    elif Set.isEmpty (Set.intersect (collectVarRefsIR v) s) then s
+                    elif Set.isEmpty (Set.intersect (refsWithExtents v) s) then s
                     else Set.add id s) acc
             if acc' = acc then acc else grow acc'
         grow (Set.singleton srcId)
@@ -5107,12 +5140,12 @@ let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (
                 | None -> scopeLets |> List.map snd   // self not in scope: assume everything follows
             | None -> []
         (laterLets @ tailExprs)
-        |> List.exists (fun e -> not (Set.isEmpty (Set.intersect (collectVarRefsIR e) derived)))
+        |> List.exists (fun e -> not (Set.isEmpty (Set.intersect (refsWithExtents e) derived)))
     let srcOwnsPool =
         scopeLets |> List.exists (fun (id, v) -> id = srcId && isFreshPoolForm v)
     let assignLeaksSrc =
         scopeLets
-        |> List.collect (fun (_, v) -> allSubExprs v)
+        |> List.collect (fun (_, v) -> allSubExprsWithExtents v)
         |> List.exists (fun e ->
             match e with
             | IRAssign (target, value) when Set.contains srcId (collectVarRefsIR value) ->
@@ -5237,7 +5270,7 @@ let computeCopyInPlaceMuts (modul: IRModule) : Map<IRId, int> =
               @ (exprs |> List.collect letValuesIn))
     let valueOf (id: IRId) =
         allValues.Force () |> List.tryPick (fun (i, v) -> if i = id then Some v else None)
-    let subs = lazy (exprs |> List.collect allSubExprs)
+    let subs = lazy (exprs |> List.collect allSubExprsWithExtents)
     // (a) array-typed, dense, statically shaped, and owning a pool of its own.
     let candidates =
         modul.Bindings
@@ -5282,7 +5315,7 @@ let computeCopyInPlaceMuts (modul: IRModule) : Map<IRId, int> =
     candidates
     |> List.choose (fun (mid, (at, dims)) ->
         // (b) sole ownership: no alias-shaped occurrence anywhere in the module.
-        if exprs |> List.exists (occursOutsideBlessedPositions mid) then None
+        if exprs |> List.collect (fun e -> e :: Blade.Optimize.embeddedExtentExprs e) |> List.exists (occursOutsideBlessedPositions mid) then None
         elif not (assignsOk mid at dims) then None
         else Some (mid, dims |> List.fold (*) 1))
     |> Map.ofList
@@ -5365,7 +5398,10 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
             let (ExprShape (kids, _)) = e
             for k in kids do walk home loops k
     for (home, _, es) in homes do
-        for e in es do walk home [] e
+        // G220: the expressions a type carries (a range bound) run too
+        for e in es do
+            walk home [] e
+            for x in Blade.Optimize.embeddedExtentExprs e do walk home [] x
     if assigns.Count = 0 then Map.empty
     else
     let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
@@ -5402,7 +5438,9 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
     let constructorSite (id: IRId) =
         Map.containsKey id modul.RandomInits || Map.containsKey id modul.CompoundInits
         || Map.containsKey id modul.SparseInits || Map.containsKey id modul.ProviderReads
-    let homeExprs (h: int) = homes |> List.pick (fun (k, _, es) -> if k = h then Some es else None)
+    let homeExprs (h: int) =
+        homes |> List.pick (fun (k, _, es) -> if k = h then Some es else None)
+        |> List.collect (fun e -> e :: Blade.Optimize.embeddedExtentExprs e)
     // Is `tid = rid` an UNCONDITIONAL statement of rid's own let chain (no
     // branch between the let and the move)? A move under an `if` would spare
     // R on the path that never moves it.
@@ -5600,8 +5638,8 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
         match kind with
         | FuncScope (Some retExpr) -> [ retExpr ]
         | _ -> []
-    let letSubs = scopeLets |> List.collect (fun (_, v) -> allSubExprs v)
-    let subs = letSubs @ (retRoots |> List.collect allSubExprs)
+    let letSubs = scopeLets |> List.collect (fun (_, v) -> allSubExprsWithExtents v)
+    let subs = letSubs @ (retRoots |> List.collect allSubExprsWithExtents)
     // Seed 1 -- whole-array reassignment. `a = someOther;` makes a.data alias
     // someOther's pool, so BOTH sides must survive: the target because its
     // original pool is no longer the one it names, the RHS because the target now

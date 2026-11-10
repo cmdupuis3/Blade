@@ -1,0 +1,18 @@
+// TEST: a pack former whose kernel passes the pack to a nested lambda parameter is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d): the pack PASSED as an argument to a nested
+// lambda's own pack parameter (`h(args)`, the lambda reading `p[k]`) was not
+// followed by the G174 closure-graph search, so the lambda kept a dynamic pack
+// subscript over a specialization whose pack is scalar parameters and g++
+// rejected the emission (BL9002). A pack handed to a reachable lambda as an
+// argument is now refused at lowering.
+// ERROR: BL7004
+// ERROR-CONTAINS: passes the pack
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(p: Poly<T^0>) -> p[k]
+        h(args)
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

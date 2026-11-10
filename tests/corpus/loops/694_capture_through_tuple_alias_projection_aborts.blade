@@ -1,0 +1,12 @@
+// TEST: a fold kernel capture through a projection of a tuple alias is forced (aborts)
+// Gap G199 (Codex diff review round 6): the fold kernel captures b, a
+// projection of u, an alias of the wholly deferred tuple t = (d, d), read only
+// through extents. The capture is forced before the fold in every lane, so
+// d's division by zero fails there (the LLVM lane skipped it and printed 13).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let t = (d, d)
+let u = t
+let b = u[0]
+let s = reduce(method_for(x) <@> lambda(v) -> v + extents(b), (+), 0)
+// ABORT: BL8013

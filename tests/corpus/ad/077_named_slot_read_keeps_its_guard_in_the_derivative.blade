@@ -11,8 +11,8 @@ import ad as ad
 // annotation of `let sin: A = ...`, so the inlined read was a read of an
 // ANONYMOUS array, unchecked (formalism 3.10, "not covered"), while the
 // interpreter checked it. The annotation is now restored on the emitted
-// let. (The anonymous-slot twin, `Array<Int32 like Idx<3>>`, stays outside
-// the guarantee: gap G192.)
+// let. (The anonymous-slot twin, `Array<Int32 like Idx<3>>`, is checked too
+// since G192 (1): ad/078.)
 // ============================================================================
 type D = Array<Int32 like Idx<1>, Idx<1>>
 type S = Idx<3>

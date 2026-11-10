@@ -138,6 +138,16 @@ directional's own flags `-cpp -O3 -march=native` (the timed executables, `objdum
 | gfortran twins (natural, expert) | survive (fused fills) | -- (no join) | |
 | ifx (both tiers, twins) | NOT AUDITED (not built in this session) | NOT AUDITED | provisional until the runner's audit |
 
+**Round 4 wave 7 (lane B, B3): `BLADE_JOIN_AGG` is DEFAULT ON.** Under the harness's
+`--print checksum,input_checksum` the relation `matched` is no longer an output, so
+join-aggregate v1 never stores it: the default blade-cpp arm is now a **checksum-only
+computation** for `matched` (README section 1.5) -- the CSR build, the counting pass and each
+fold's probe walk run, the relation buffer does not exist (measured at N 40,009 x M 20,011:
+peak working set 21.6 -> 6.4 MB, time unchanged). The STORED-relation arm the audit above
+describes is `BLADE_JOIN_AGG=0`; until the harness carries it as a variant arm
+(`blade-cpp@stored`, kernel.json `variants`) and the runner re-audits, the comparison table's
+blade-cpp row is not the audited stored arm (gap row G215).
+
 No audited arm lost a store, so none is "checksum-only"; the expert / NEW and natural / NEW
 ratios below compare store-audited arms. The OLD arm (`BLADE_HASH_JOIN=0`, the six passes) was
 NOT audited, so **OLD / NEW = 108x is EXCLUDED from the audited ratios** (it is a compiler

@@ -1,0 +1,22 @@
+// TEST: An inline computed map forces its kernel capture under its own name
+// Gap G199 (Codex diff review round 3): `method_for(x) <@> k |> compute`,
+// the same map as a tuple-value member, and a fold over it all evaluate the
+// map here, which forces the deferred map d its kernel captures under its own
+// name -- even when every read of d folds to a constant (extents) -- so the
+// later write to x does not reach d.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(x) <@> lambda(v) -> v + Float64(extents(d)) |> compute
+let d2 = method_for(x) <@> lambda(v) -> v * 3.0
+let t = (method_for(x) <@> lambda(v) -> v + Float64(extents(d2)), 0.0)
+let d3 = method_for(x) <@> lambda(v) -> v * 4.0
+let s = reduce(method_for(x) <@> lambda(v) -> v + Float64(extents(d3)), (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+let w2 = d2(0)
+let w3 = d3(0)
+// EXPECT: s = 15.0
+// EXPECT: w = 2.0
+// EXPECT: w2 = 3.0
+// EXPECT: w3 = 4.0

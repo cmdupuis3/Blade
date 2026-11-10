@@ -260,14 +260,15 @@ let foldMapElideEnabled () = gateOn "BLADE_FOLD_MAP_ELIDE"
 /// runs and a group it would have fused records DECLINED ("disabled by
 /// BLADE_SIBLING_MAPS"). Unset = on.
 let siblingMapsEnabled () = gateOn "BLADE_SIBLING_MAPS"
-/// BLADE_SIBLING_MAPS=streamed (round 4 wave 4, E1 / G106; OPT-IN under the
-/// stop rule -- the second review of the moved-streamed-read class found
-/// allocation-failure ordering): also the SibHaloStream kind, one segment run
-/// loop for halo stencils over one streamed Zarr variable. A knob mirror.
+/// The SibHaloStream kind (round 4 wave 4, E1 / G106): one segment run loop
+/// for halo stencils over one streamed Zarr variable. DEFAULT ON since round 4
+/// wave 7 (lane c: a fresh class-closure round under R0 found no member;
+/// measured on PM37's two FIRs). `BLADE_SIBLING_MAPS=nostream` = the old
+/// default (resident groups only; a knob mirror); `streamed` reads as on.
 let siblingMapsStreamedEnabled () =
     match System.Environment.GetEnvironmentVariable "BLADE_SIBLING_MAPS" with
-    | null -> false
-    | v -> v.Trim().ToLowerInvariant() = "streamed"
+    | null -> true
+    | v -> v.Trim().ToLowerInvariant() <> "nostream"
 /// BLADE_CALL_ELIDE=0|off keeps every call as a call (`elideCallsModule`, the
 /// P4 entry): the admission still runs and a call it would have jointly
 /// lowered records `call-elision` DECLINED ("disabled by BLADE_CALL_ELIDE").
@@ -333,7 +334,7 @@ let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE
 /// against its predecessor as well as against no optimizer at all (the
 /// all-off comparison alone never runs the predecessor). Each gate here is
 /// also in `optimizerGates`.
-let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal"); ("BLADE_SINK_STREAM", "always"); ("BLADE_JOIN_AGG", "1"); ("BLADE_SIBLING_FOLDS", "strict"); ("BLADE_SIBLING_FOLDS", "top"); ("BLADE_COMPUTE_ELIDE", "chain"); ("BLADE_MODE_PRODUCT_DEST", "1"); ("BLADE_HALO_CACHE", "stencil"); ("BLADE_SIBLING_MAPS", "streamed"); ("BLADE_DECOMPACT_FOLD", "body"); ("BLADE_AD_CHECKPOINT", "3"); ("BLADE_STREAM_GROUP_AGG", "1"); ("BLADE_AD_REPLAY_PRUNE", "1") ]
+let optimizerGateMirrors : (string * string) list = [ ("BLADE_COMPACTION_FUSION", "b4"); ("BLADE_COMPACTION_FUSION", "gather"); ("BLADE_COMPACTION_FUSION", "unshared"); ("BLADE_EPILOGUE_LEGS", "1"); ("BLADE_POOL_REUSE", "literal"); ("BLADE_SINK_STREAM", "always"); ("BLADE_SIBLING_FOLDS", "strict"); ("BLADE_SIBLING_FOLDS", "top"); ("BLADE_COMPUTE_ELIDE", "chain"); ("BLADE_MODE_PRODUCT_DEST", "1"); ("BLADE_HALO_CACHE", "stencil"); ("BLADE_SIBLING_MAPS", "nostream"); ("BLADE_DECOMPACT_FOLD", "top"); ("BLADE_AD_CHECKPOINT", "3"); ("BLADE_STREAM_GROUP_AGG", "1"); ("BLADE_AD_REPLAY_PRUNE", "1") ]
 
 /// The decline reason for a LICENSED row prodsum (B2r applies only where
 /// the build keeps the serial association). `lanes` RESERVES the opt-in
@@ -700,6 +701,93 @@ let private poolReuseElemBytes (t: IRType) : int64 option =
     | IRTScalar ETBool -> Some 1L
     | _ -> None
 
+// (moved ahead of the scratch-reuse planner in round 4 wave 7, lane c, gap
+// G220: its liveness and assignment scans read type-carried expressions too)
+/// The extent expressions a TYPE carries (its index records' extents, a tagged
+/// index's anonymous extent, nested types' extents): what the generic child
+/// walk (`childrenOf`) never enters.
+let rec irTypeExtentExprs (t: IRType) : IRExpr list =
+    match t with
+    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> []
+    | IRTTuple ts -> List.collect irTypeExtentExprs ts
+    | IRTLoop l -> List.collect irTypeExtentExprs l.ArrayTypes @ (l.KernelType |> Option.map irTypeExtentExprs |> Option.defaultValue [])
+    | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> irTypeExtentExprs t
+    | IRTIdxTagged (t, tag) -> irTypeExtentExprs t @ (match tag with IRefAnon (_, e) -> [ e ] | _ -> [])
+    | IRTDist (_, t, axes) -> irTypeExtentExprs t @ (axes |> List.map (fun ix -> ix.Extent))
+    | IRTGroupKeys (a, b, _) -> [ a.Extent; b.Extent ]
+    | IRTArrow (slots, r, _) ->
+        (slots |> List.collect (function SIdx ix | SIdxVirt ix -> [ ix.Extent ] | SVal st -> irTypeExtentExprs st)) @ irTypeExtentExprs r
+
+let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
+    (at.IndexTypes |> List.map (fun ix -> ix.Extent)) @ irTypeExtentExprs at.ElemType
+
+/// Every type and index expression embedded in the nodes of `e` -- a
+/// variable's or call's type, an array literal's, an apply's output, operand
+/// and shared index types, a range's index records, an `ungroup`'s source
+/// index records -- as extent expressions; and, recursively, those embedded
+/// in the extracted extents themselves, to COMPLETION (types are finite
+/// trees; each extent object is expanded once, by reference, which also keeps
+/// it linear on a type shared by many nodes). Each extent object is returned
+/// once.
+let embeddedExtentExprs (e: IRExpr) : IRExpr list =
+    let acc = ResizeArray<IRExpr>()
+    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+    let rec visit (depth: int) (root: IRExpr) =
+        let found = ResizeArray<IRExpr>()
+        let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
+        let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
+            | IRApplyCombinator info ->
+                addTy info.OutputType
+                for at in info.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx info.SharedIndexTypes
+                addIx info.KernelTDims
+            | IRComposeApply info -> addTy info.OutputType
+            | IRMethodFor mf ->
+                for at in mf.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
+                addIx mf.SharedIndexTypes
+            | IRRange (ixs, _) -> addIx ixs
+            | IRVirtualReverse ix -> addIx [ ix ]
+            // the source index records `childrenOf` does not hand out
+            | IRUngroup (_, src) -> addIx [ src ]
+            | IRUngroupRows (_, _, src) -> addIx [ src ]
+            | IRUngroupGrid (_, srcs, _) -> addIx srcs
+            // EXHAUSTIVE (no wildcard; PM35's constructor table): every other
+            // constructor carries no type and no index record -- its
+            // expressions are children the walk above already visits. A new
+            // IRExpr variant is classified here, not defaulted
+            // (OptimizeTests `rec_fold_ring_constructor_table_walkers` pins
+            // every type-carrying field against this function).
+            | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _ | IRCurry _ | IRTuple _ | IRComplex _
+            | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _
+            | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _ | IRBeginPoolScope _ | IRReleasePools _
+            | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _
+            | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _
+            | IRCompute _ | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _
+            | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
+            | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
+            | IRSegmentsGrid _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
+            | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+            | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _
+            | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRHaloUnhash _ | IRArity _ | IRNth
+            | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
+            | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _
+            | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> ()) root
+        for x in found do
+            // COMPLETE (gap G89, lane-D review): every extent is expanded
+            // once, by reference -- extents are subterms of finite type
+            // trees, so this terminates without a depth bound (the old bound
+            // of 8 let a write nested deeper slip past every client: the
+            // never-written closure, the foreign-reference census).
+            if seen.Add x then
+                acc.Add x
+                visit (depth + 1) x
+    visit 0 e
+    List.ofSeq acc
+
 /// The reusable shape of a dense pool: (bare element type, literal extents).
 let private densePoolShape (ty: IRType) : (IRType * int64 list) option =
     match ty with
@@ -777,7 +865,9 @@ let planPoolReuse (modul: IRModule) : unit =
         let refsOf (e: IRExpr) : Set<IRId> =
             let mutable acc = Set.empty
             let work = System.Collections.Generic.Stack<IRId>()
-            for r in collectVarRefsIR e do work.Push r
+            // G220: an expression a type carries (a range bound) reads too
+            for x in e :: embeddedExtentExprs e do
+                for r in collectVarRefsIR x do work.Push r
             while work.Count > 0 do
                 let id = work.Pop()
                 if not (Set.contains id acc) then
@@ -786,7 +876,9 @@ let planPoolReuse (modul: IRModule) : unit =
                      | Some g -> for c in g.Captures do work.Push c.Id
                      | None -> ())
                     (match Map.tryFind id letValues with
-                     | Some dv when deferred dv -> for r in collectVarRefsIR dv do work.Push r
+                     | Some dv when deferred dv ->
+                         for x in dv :: embeddedExtentExprs dv do
+                             for r in collectVarRefsIR x do work.Push r
                      | _ -> ())
             acc
         let n = lets.Length
@@ -797,13 +889,16 @@ let planPoolReuse (modul: IRModule) : unit =
         // or an indexed target reads), anywhere in the body.
         let assignedAnywhere =
             let mutable s = Set.empty
-            iterIRExpr (fun e ->
+            let note (root: IRExpr) =
+             iterIRExpr (fun e ->
                 match e with
                 | IRAssign (t, rhs) ->
                     (match t with LVVar tid -> s <- Set.add tid s | _ -> ())
                     s <- Set.union s (collectVarRefsIR rhs)
                     (match t with LVVar _ -> () | _ -> s <- Set.union s (collectVarRefsIR t))
-                | _ -> ()) f.Body
+                | _ -> ()) root
+            // G220: an assignment hidden in a type-carried expression counts
+            for root in f.Body :: embeddedExtentExprs f.Body do note root
             s
         // PM60: an IMMUTABLE array -- a parameter of this function or a let of
         // its own body, never named by an assignment (an array's extents never
@@ -890,7 +985,8 @@ let planPoolReuse (modul: IRModule) : unit =
             // assignment anywhere names it.
             let assignedIds =
                 let mutable s = Set.empty
-                for (_, v) in positions do
+                for (_, v0) in positions do
+                  for v in v0 :: embeddedExtentExprs v0 do
                     iterIRExpr (fun e ->
                         match e with
                         | IRAssign (t, rhs) ->
@@ -905,10 +1001,13 @@ let planPoolReuse (modul: IRModule) : unit =
             // scalar only READS it.
             let callsCallable (v: IRExpr) =
                 let mutable found = false
-                iterIRExpr (fun e ->
-                    match e with
-                    | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs -> found <- true
-                    | _ -> ()) v
+                // G220 (Codex diff review): a call inside a type-carried
+                // expression (a range bound) may retain the donor too
+                for root in v :: embeddedExtentExprs v do
+                    iterIRExpr (fun e ->
+                        match e with
+                        | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs -> found <- true
+                        | _ -> ()) root
                 found
             let unaliased (k: int) (a: IRId) =
                 not (Set.contains a assignedIds)
@@ -1252,90 +1351,6 @@ let private isDeferredForm (e: IRExpr) : bool =
     | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
-/// The extent expressions a TYPE carries (its index records' extents, a tagged
-/// index's anonymous extent, nested types' extents): what the generic child
-/// walk (`childrenOf`) never enters.
-let rec irTypeExtentExprs (t: IRType) : IRExpr list =
-    match t with
-    | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> []
-    | IRTTuple ts -> List.collect irTypeExtentExprs ts
-    | IRTLoop l -> List.collect irTypeExtentExprs l.ArrayTypes @ (l.KernelType |> Option.map irTypeExtentExprs |> Option.defaultValue [])
-    | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> irTypeExtentExprs t
-    | IRTIdxTagged (t, tag) -> irTypeExtentExprs t @ (match tag with IRefAnon (_, e) -> [ e ] | _ -> [])
-    | IRTDist (_, t, axes) -> irTypeExtentExprs t @ (axes |> List.map (fun ix -> ix.Extent))
-    | IRTGroupKeys (a, b, _) -> [ a.Extent; b.Extent ]
-    | IRTArrow (slots, r, _) ->
-        (slots |> List.collect (function SIdx ix | SIdxVirt ix -> [ ix.Extent ] | SVal st -> irTypeExtentExprs st)) @ irTypeExtentExprs r
-
-let private arrayTypeExtentExprs (at: IRArrayType) : IRExpr list =
-    (at.IndexTypes |> List.map (fun ix -> ix.Extent)) @ irTypeExtentExprs at.ElemType
-
-/// Every type and index expression embedded in the nodes of `e` -- a
-/// variable's or call's type, an array literal's, an apply's output, operand
-/// and shared index types, a range's index records, an `ungroup`'s source
-/// index records -- as extent expressions; and, recursively, those embedded
-/// in the extracted extents themselves, to COMPLETION (types are finite
-/// trees; each extent object is expanded once, by reference, which also keeps
-/// it linear on a type shared by many nodes). Each extent object is returned
-/// once.
-let embeddedExtentExprs (e: IRExpr) : IRExpr list =
-    let acc = ResizeArray<IRExpr>()
-    let seen = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
-    let rec visit (depth: int) (root: IRExpr) =
-        let found = ResizeArray<IRExpr>()
-        let addTy (t: IRType) = found.AddRange(irTypeExtentExprs t)
-        let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
-        iterIRExpr (fun n ->
-            match n with
-            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
-            | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
-            | IRApplyCombinator info ->
-                addTy info.OutputType
-                for at in info.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
-                addIx info.SharedIndexTypes
-                addIx info.KernelTDims
-            | IRComposeApply info -> addTy info.OutputType
-            | IRMethodFor mf ->
-                for at in mf.ArrayTypes do found.AddRange(arrayTypeExtentExprs at)
-                addIx mf.SharedIndexTypes
-            | IRRange (ixs, _) -> addIx ixs
-            | IRVirtualReverse ix -> addIx [ ix ]
-            // the source index records `childrenOf` does not hand out
-            | IRUngroup (_, src) -> addIx [ src ]
-            | IRUngroupRows (_, _, src) -> addIx [ src ]
-            | IRUngroupGrid (_, srcs, _) -> addIx srcs
-            // EXHAUSTIVE (no wildcard; PM35's constructor table): every other
-            // constructor carries no type and no index record -- its
-            // expressions are children the walk above already visits. A new
-            // IRExpr variant is classified here, not defaulted
-            // (OptimizeTests `rec_fold_ring_constructor_table_walkers` pins
-            // every type-carrying field against this function).
-            | IRLit _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _ | IRCurry _ | IRTuple _ | IRComplex _
-            | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _
-            | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _ | IRBeginPoolScope _ | IRReleasePools _
-            | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _
-            | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRFunctorMap _ | IRPure _
-            | IRCompute _ | IRReynolds _ | IRGuard _ | IRSequence _ | IRReplicate _ | IRMask _
-            | IRIntersect _ | IRUnion _ | IRUnique _ | IRContains _ | IRDisplayEmit _ | IRDisplayJson _
-            | IRDisplayNum _ | IRDisplayStr _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _
-            | IRSegmentsGrid _ | IRGroupSizes _ | IRSort _ | IRReduce _ | IRReduceCompute _ | IRProdSum _
-            | IRZip _ | IRAlign _ | IRStack _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
-            | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _
-            | IRReverse _ | IRShift _ | IRDiag _ | IRJoin _ | IRSubset _ | IRHaloUnhash _ | IRArity _ | IRNth
-            | IRRank _ | IRPolyIndex _ | IRPolyTail _ | IRExtent _ | IRRaggedLookup _ | IRCompoundMask _
-            | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRAssign _ | IRForRange _
-            | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ -> ()) root
-        for x in found do
-            // COMPLETE (gap G89, lane-D review): every extent is expanded
-            // once, by reference -- extents are subterms of finite type
-            // trees, so this terminates without a depth bound (the old bound
-            // of 8 let a write nested deeper slip past every client: the
-            // never-written closure, the foreign-reference census).
-            if seen.Add x then
-                acc.Add x
-                visit (depth + 1) x
-    visit 0 e
-    List.ofSeq acc
 
 /// THE WRITE ANALYSIS (gaps G41 / G43; exprMayWriteWith / callableMayWriteWith): does evaluating `root` write storage
 /// that another evaluation can observe? Shared by codegen's reorder licence
@@ -4491,13 +4506,9 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
     let lifetimeBarrier = scheduleHasLifetimeBarrierIn programFuncs modul
     let facts = cseFactsOf funcs
     let payloadWrites b = bindingPayload modul b |> List.exists (fun e -> (facts e).MayWrite || writes e)
-    // Same separators/default as CodeGenState.printSelection, which compiles
-    // later. Empty/unset observes every named top-level mask and selection.
-    let selectedNames =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> Set.empty
-        | s -> s.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-               |> Array.map (fun n -> n.Trim()) |> Array.filter ((<>) "") |> Set.ofArray
+    // The shared print selection (Blade.PrintSelection, gap G200). Empty /
+    // unset observes every named top-level mask and selection.
+    let selectedNames = Blade.PrintSelection.names () |> Option.defaultValue Set.empty
     let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
     let roots = compactionRoots allCallables modul
     let arr = List.toArray modul.Bindings
@@ -4658,7 +4669,7 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                 if not enabled then decline "disabled by BLADE_COMPACTION_FUSION (legacy mirrors keep their original storage)"
                 elif not (Blade.Toolchain.fpReproEnabled ()) && legsLicensed then
                     decline "requires the reproducible serial fold graph (BLADE_FP_REPRO=1): the selected terminal is ONE guarded ascending chain per fold, while a licensed build folds the stored compound with its K-lane tree (blade_fold::sum<double, 8>) -- a different association; v1 does not trade the licensed tree for the pool it saves (gap G108 (3): the build-independent arm is unmeasured)"
-                elif selectedNames.IsEmpty || selectedNames.Contains k.Name || selectedNames.Contains y.Name then
+                elif selectedNames.IsEmpty || Blade.PrintSelection.mayName selectedNames k.Name || Blade.PrintSelection.mayName selectedNames y.Name then
                     decline "the mask or selected array is printed (requires an explicit print selection excluding both)"
                 elif not (selectedNames |> Set.forall (fun n -> arr |> Array.exists (fun b -> b.Name = n))) then
                     decline "the print selection is not confined to this module's known binding names"
@@ -10495,6 +10506,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     // wholly-deferred tuple's projection and a let chain ending deferred,
     // which the node census above misses, for the leg totality audits.
     let classifiedDeferred = widenDeferredOpen modul (funcs |> Map.toSeq |> Seq.map snd) (fun _ -> false)
+    // the fail-closed variant (an unseen id -- another module binding -- is
+    // deferred), read by the extent arm of the leg totality judge only
+    let closedDeferred = widenDeferred modul (funcs |> Map.toSeq |> Seq.map snd) (fun _ -> false)
     // the top-level payload resolver, built ONCE (it indexes every binding;
     // per statement it made the top-level region quadratic)
     let topPayloadOf = intervalPayloadOf modul
@@ -10570,7 +10584,14 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         | IRLet (_, v, b) -> tot v && tot b
         | IRTuple es -> es |> List.forall tot
         | IRTupleProj (x, _, _) -> tot x
-        | IRExtent (IRVar _, _) -> true
+        // round 4 wave 7 (lane c, Codex 18a2f03d, G107): the interpreter FORCES a
+        // deferred value to read its extent (the compiled lanes read the static
+        // extent), so an extent read of a deferred map moved with a leg would move
+        // that force (and its failure) ahead of an intervening one
+        // (Codex 27945c90: an IMPORTED deferred map is unseen by the open
+        // classifier -- the CLOSED one answers deferred for an id this module
+        // and its callables do not bind)
+        | IRExtent (IRVar (id, _), _) -> not (deferred.Contains id) && not (classifiedDeferred id) && not (closedDeferred id)
         | IRApp (IRVar (fid, _), args, _) ->
             args |> List.forall tot
             && (match Map.tryFind fid funcs with
@@ -12957,16 +12978,16 @@ module CallElideProgram =
 /// ("disabled by BLADE_DECOMPACT_FOLD"). Unset = on.
 let decompactFoldEnabled () = gateOn "BLADE_DECOMPACT_FOLD"
 
-/// The FUNCTION-BODY arm (gap G123, round 4 wave 5) is OPT-IN:
-/// `BLADE_DECOMPACT_FOLD=body`. By the wave stop rule: its second Codex
-/// review found a second member of the parameter-storage class (the LLVM
-/// lane inlines a tuple-returning callee over a still-deferred argument,
-/// after the capturing-callee member of round 1), so the default build keeps
-/// the per-call buffer and records why. Read per call.
+/// The FUNCTION-BODY arm (gap G123, round 4 wave 5; body lets G167, wave 6)
+/// is DEFAULT ON since round 4 wave 7 (lane c: the fourth class-closure round
+/// of the parameter-storage class found no member after the capturing-callee,
+/// tuple-returning and cross-module `>>=` members; measured on three mat-vec
+/// calls at n = 1201). `BLADE_DECOMPACT_FOLD=top` = the old default (the
+/// top-level arms only; a knob mirror); `body` reads as on. Read per call.
 let decompactFoldBodyEnabled () =
     match System.Environment.GetEnvironmentVariable "BLADE_DECOMPACT_FOLD" with
-    | null -> false
-    | v -> v.Trim().ToLowerInvariant() = "body"
+    | null -> true
+    | v -> v.Trim().ToLowerInvariant() <> "top"
 
 /// The statement a decompaction row fold / mat-vec is judged at (gap G123,
 /// round 4 wave 5: a module binding, or a function body's let / return):
@@ -13391,7 +13412,7 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
         let region = if System.String.IsNullOrEmpty f.SourceName then f.Name else f.SourceName
         let paramsById = f.Params |> List.map (fun p -> (p.VarId, p)) |> Map.ofList
         let direct = directCallsOnly f
-        let bodyOptIn = "the function-body arm is opt-in (BLADE_DECOMPACT_FOLD=body): three review rounds each found a member of the parameter-storage class (gap G123: a capturing callee, a tuple-returning callee, another module naming the function as a value)"
+        let bodyOptIn = "the function-body arm is disabled by BLADE_DECOMPACT_FOLD=top (the pre-wave-7 default: the top-level arms only)"
         let paramLocate (id: IRId) =
             match Map.tryFind id paramsById with
             | Some p ->
@@ -13737,7 +13758,7 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
         | Some sel ->
             match Map.tryFind xid bindingById with
             | Some b ->
-                not (sel.Contains b.Name)
+                not (Blade.PrintSelection.mayName sel b.Name)
                 && (bindingSideOperands modul xid).IsEmpty
                 && not (modul.ProviderReads.ContainsKey xid) && not (modul.ProviderWrites.ContainsKey xid)
             | None -> false
@@ -14138,13 +14159,7 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
             | _ -> b)
     // ---- top level under a print selection (P3 remainder, item 2) -----------
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let bindings'' =
         match printSelection with
         | Some sel when singleModule ->
@@ -14294,21 +14309,36 @@ let recordCallElision (subject: string) (outcome: Blade.Effects.DecisionOutcome)
 
 /// Callables named as a VALUE anywhere in the program: more IRVar mentions
 /// than call heads, counted over every module's binding payloads (side-table
-/// operands included) and every function body, each once.
+/// operands included) and every function body, each once -- and (round 4
+/// wave 7, lane c, the G123 class-closure round's hardening) over every
+/// extent expression a type carries in them (`embeddedExtentExprs`) and in
+/// each function's declared parameter / return types: a `>>=` continuation
+/// hidden in a range extent (`extents(0..Int64(floor((p >>= rowsum) |>
+/// compute)))`) is a value reference too. Heads and mentions are counted by
+/// the same visitor on the same roots, so a direct call inside an extent
+/// stays balanced.
 let programValueRefs (modules: IRModule list) : Set<IRId> =
     let fids = modules |> List.collect (fun m -> m.Functions |> List.map (fun f -> f.Id)) |> Set.ofList
     let heads = System.Collections.Generic.Dictionary<IRId, int>()
     let vars = System.Collections.Generic.Dictionary<IRId, int>()
     let bump (d: System.Collections.Generic.Dictionary<IRId, int>) (id: IRId) =
         d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 1)
-    let count (e: IRExpr) =
+    let countOne (e: IRExpr) =
         iterIRExpr (fun n ->
             match n with
             | IRApp (IRVar (f, _), _, _) -> bump heads f
             | IRVar (f, _) when fids.Contains f -> bump vars f
             | _ -> ()) e
+    let count (e: IRExpr) =
+        countOne e
+        for x in embeddedExtentExprs e do countOne x
+    let countType (t: IRType) =
+        for x in irTypeExtentExprs t do count x
     for m in modules do
-        for f in m.Functions do count f.Body
+        for f in m.Functions do
+            count f.Body
+            for p in f.Params do countType p.Type
+            countType f.RetType
         for b in m.Bindings do
             for p in bindingPayload m b do count p
     vars |> Seq.filter (fun kv -> kv.Value > (match heads.TryGetValue kv.Key with | true, n -> n | _ -> 0))
@@ -16157,13 +16187,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     let printSelection =
         if not singleModule then None
         else
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     // a type whose extents name the binding (a run-time extent read) is a reader too
     let typeNames (cid: IRId) (t: IRType) =
         match stripUnits t with
@@ -16202,7 +16226,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
                         let multiTxt = if singleModule then "" else "; a multi-module program has none"
                         recordTransposeNF cb.Name (Blade.Effects.Declined $"`{cb.Name}` is kept: every top-level binding is printed (no print selection, BLADE_PRINT / --print, excludes it{multiTxt})") [ ev ]
                         decided <- decided.Add cid
-                    | [], Some sel when sel.Contains cb.Name ->
+                    | [], Some sel when Blade.PrintSelection.mayName sel cb.Name ->
                         recordTransposeNF cb.Name (Blade.Effects.Declined $"`{cb.Name}` is kept: the print selection names it") [ ev ]
                         decided <- decided.Add cid
                     | [], Some _ ->
@@ -17003,13 +17027,7 @@ let planStreamGroupFold (programFuncs: IRCallable list) (foreignRefs: Set<IRId>)
     let arr = List.toArray modul.Bindings
     let byId = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let refsOf (x: IRId) (e: IRExpr) =
         let mutable n = 0
         iterIRExpr (fun m -> match m with IRVar (id, _) when id = x -> n <- n + 1 | _ -> ()) e
@@ -17099,7 +17117,7 @@ let planStreamGroupFold (programFuncs: IRCallable list) (foreignRefs: Set<IRId>)
                 let maxRun = runs |> List.map (fun (a, b) -> b - a) |> List.fold max 0L
                 match printSelection with
                 | None -> Error $"`{gb.Name}` is printed (no print selection: printing reads every cell of the grouped value)"
-                | Some sel when sel.Contains gb.Name -> Error $"`{gb.Name}` is printed (the print selection names it)"
+                | Some sel when Blade.PrintSelection.mayName sel gb.Name -> Error $"`{gb.Name}` is printed (the print selection names it)"
                 | Some _ when not singleModule -> Error "a multi-module program (v1 plans a single module)"
                 | Some _ ->
                 if foreignRefs.Contains gb.Id then Error $"another module names `{gb.Name}`"
@@ -17224,13 +17242,7 @@ let planStreamMaskReplay (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
     let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
     let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let payloadWrites (b: IRBinding) =
         let ps = bindingPayload modul b
         let exprs = ps @ (ps |> List.collect embeddedExtentExprs) @ irTypeExtentExprs b.Type
@@ -17254,7 +17266,7 @@ let planStreamMaskReplay (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                     | _ ->
                     match printSelection with
                     | None -> Error $"`{kb.Name}` is printed (no print selection: printing reads every cell of the mask)"
-                    | Some sel when sel.Contains kb.Name -> Error $"`{kb.Name}` is printed (the print selection names it)"
+                    | Some sel when Blade.PrintSelection.mayName sel kb.Name -> Error $"`{kb.Name}` is printed (the print selection names it)"
                     | Some _ when not singleModule -> Error "a multi-module program (v1 plans a single module)"
                     | Some _ ->
                     if foreignRefs.Contains kb.Id then Error $"another module names `{kb.Name}`"
@@ -17395,13 +17407,7 @@ let recordKeyedProjection (subject: string) (outcome: Blade.Effects.DecisionOutc
 
 let planKeyedCellProjection (foreignRefs: Set<IRId>) (singleModule: bool) (modul: IRModule) : unit =
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     for b in modul.Bindings do
         match Map.tryFind b.Id modul.ProviderReads with
         | Some spec when not spec.Streamed && spec.Provider = "zarr" && spec.MaskName.IsNone && spec.Window.IsNone
@@ -17451,7 +17457,7 @@ let planKeyedCellProjection (foreignRefs: Set<IRId>) (singleModule: bool) (modul
             let decision : Result<string list, string> =
                 match printSelection with
                 | None -> Error $"`{b.Name}` is printed (no print selection: printing reads every cell)"
-                | Some sel when sel.Contains b.Name -> Error $"`{b.Name}` is printed (the print selection names it)"
+                | Some sel when Blade.PrintSelection.mayName sel b.Name -> Error $"`{b.Name}` is printed (the print selection names it)"
                 | Some _ when not singleModule -> Error "a multi-module program (v1 plans a single module)"
                 | Some _ ->
                 if foreignRefs.Contains b.Id then Error $"another module names `{b.Name}`"
@@ -17606,13 +17612,7 @@ let planProviderSinkStream (programFuncs: IRCallable list) (foreignRefs: Set<IRI
     let hasCuda = callables |> List.exists (fun f -> f.IsCudaKernel)
     let hasMpi = callables |> List.exists (fun f -> f.IsMpiParallel)
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let tileCacheOn =
         match Blade.Toolchain.envSwitch "BLADE_TILE_CACHE" with
         | Blade.Toolchain.SwitchUnset | Blade.Toolchain.SwitchOff -> false
@@ -17745,7 +17745,7 @@ let planProviderSinkStream (programFuncs: IRCallable list) (foreignRefs: Set<IRI
                 | None ->
                 match printSelection with
                 | None -> fail $"`{y.Name}` is printed (every top-level binding prints unless a print selection, BLADE_PRINT / --print, excludes it)"
-                | Some sel when sel.Contains y.Name -> fail $"the print selection names `{y.Name}`"
+                | Some sel when Blade.PrintSelection.mayName sel y.Name -> fail $"the print selection names `{y.Name}`"
                 | Some _ ->
                 // every party the moved producer reads is checked too: a plan that
                 // leaves an operand unstored at its own site would leave the
@@ -17921,13 +17921,7 @@ let planAssemblyDest (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
     let hasCuda = callables |> List.exists (fun f -> f.IsCudaKernel)
     let hasMpi = callables |> List.exists (fun f -> f.IsMpiParallel)
     let printSelection =
-        match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-        | null -> None
-        | v ->
-            let names =
-                v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-            if names.Length = 0 then None else Some (Set.ofArray names)
+        Blade.PrintSelection.names ()
     let tileCacheOn =
         match Blade.Toolchain.envSwitch "BLADE_TILE_CACHE" with
         | Blade.Toolchain.SwitchUnset | Blade.Toolchain.SwitchOff -> false
@@ -18103,12 +18097,16 @@ let planAssemblyDest (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
                     let printed =
                         match pos with
                         | Choice1Of2 _ -> None
-                        | Choice2Of2 _ when yName.StartsWith "__" -> None
                         | Choice2Of2 _ ->
+                            // an explicit selection first: it may name an
+                            // internal `__` binding, which then prints (gap
+                            // G200); without one, an internal name does not
+                            // print (`__expr<N>` does: PrintSelection.isInternal)
                             match printSelection with
-                            | None -> Some $"`{yName}` is printed (every top-level binding prints unless a print selection, BLADE_PRINT / --print, excludes it)"
-                            | Some sel when sel.Contains yName -> Some $"the print selection names `{yName}`"
+                            | Some sel when Blade.PrintSelection.mayName sel yName -> Some $"the print selection names `{yName}`"
                             | Some _ -> None
+                            | None when Blade.PrintSelection.isInternal yName -> None
+                            | None -> Some $"`{yName}` is printed (every top-level binding prints unless a print selection, BLADE_PRINT / --print, excludes it)"
                     match printed with
                     | Some why -> fail why
                     | None ->
@@ -18842,7 +18840,7 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                                   elif spec.AllowMissing || spec.Window.IsSome || spec.MaskName.IsSome || spec.MaskType.IsSome then
                                       Some (Error "an input is a masked, windowed or raw streamed read (off the uniform cursor route)")
                                   elif not (siblingMapsStreamedEnabled ()) then
-                                      Some (Error "a streamed source: the shared segment run loop is OPT-IN (BLADE_SIBLING_MAPS=streamed; a later member's output allocation then precedes the moved read, so an allocation failure (BL8005) can overtake a read failure)")
+                                      Some (Error "a streamed source: the shared segment run loop is disabled by BLADE_SIBLING_MAPS=nostream (the pre-wave-7 default: one run loop per binding)")
                                   else Some (Ok (SibHaloStream (h.Inner, baseN, src), h.Start, m, inputs, ompOf k, k))
                               | _ -> Some (Error "the window reads go to a streamed source and another array (v1 shares one streamed source)")
                           else
@@ -19060,18 +19058,14 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
     if singleModule && modul.Bindings.Length >= 2 then
         let stmts = modul.Bindings |> List.map (fun b -> (b.Id, b.Name, b.Value)) |> Array.ofList
         let printSel =
-            match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-            | null -> None
-            | v ->
-                let ns = v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries) |> Array.map (fun s -> s.Trim()) |> Array.filter (fun s -> s <> "")
-                if ns.Length = 0 then None else Some (Set.ofArray ns)
+            Blade.PrintSelection.names ()
         let byId = modul.Bindings |> List.map (fun b -> (b.Id, b.Name)) |> Map.ofList
         let laterReaders (id: IRId) (lastIdx: int) =
             // a top-level binding is printed at the end unless a print
             // selection leaves it out
             (match printSel, Map.tryFind id byId with
              | None, Some _ -> true
-             | Some sel, Some nm -> sel.Contains nm
+             | Some sel, Some nm -> Blade.PrintSelection.mayName sel nm
              | _ -> false)
             || [ lastIdx + 1 .. stmts.Length - 1 ] |> List.exists (fun j ->
                 let (sid, _, sv) = stmts.[j]
@@ -19294,6 +19288,17 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
         | None ->
         if pinfo.Arrays |> List.exists (function IRVar (id, _) -> Set.contains id deferredIds | IRRange _ -> false | _ -> true) then
             decline $"an operand of `{pName}` is not a stored array or a range (a deeper chain declines)"
+        // Round 4 wave 7 (lane B, the B3 class-closure round, Codex): a RANGE
+        // operand of RUN-TIME extent (`method_for(0..n) <@> ..` with n a
+        // variable) has its descriptor built where p is forced; the fused
+        // nest read an undeclared `__range0` (invalid C++). Only a range of
+        // literal extents and offset is admitted.
+        elif pinfo.Arrays |> List.exists (function
+                                             | IRRange (ixs, off) ->
+                                                 (ixs |> List.exists (fun ix -> match ix.Extent with IRLit (IRLitInt _) -> false | _ -> true))
+                                                 || (match off with None | Some (IRLit (IRLitInt _)) -> false | Some _ -> true)
+                                             | _ -> false) then
+            decline $"a range operand of `{pName}` has a run-time extent or offset (its descriptor is built where `{pName}` is forced)"
         // Round 4 wave 6 (the class-closure round): POSITIVE storage evidence
         // for every array operand of p -- a binding of THIS module proved
         // stored at its own site through its alias chain (storedArrayProof).

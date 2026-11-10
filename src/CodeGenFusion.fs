@@ -1070,7 +1070,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
             | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
-            | IRRange _ -> $"__range{i}"
+            | IRRange _ -> reduceRangeName i arr
             | IRVirtualReverse _ -> $"__rev{i}"
             | _ -> $"arr{i}")
     if infos |> List.exists (_.Arrays.IsEmpty) then

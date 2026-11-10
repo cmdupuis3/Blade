@@ -753,10 +753,16 @@ let runCliSmokeTests () : TH.BlockResult =
                     + "let h = method_for(g) <@> lambda(v: Float64) -> v * 0.25 + 1.0\n"
                     + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> h(i, j), radd, 0.5), radd, 0.0)\n")
                 let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_unforced.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 reports the LLVM emitter's own scatter refusal for an unforced source"
+                // Round 4 wave 7 (lane B, G199): the kernel CAPTURES the
+                // deferred h, and a kernel capture of a deferred module map is
+                // forced (stored) before the fold in the LLVM lane too, as the
+                // C++ lane forces it (collectDeferredKernelCaptures): the walk
+                // then reads a stored pool and BOTH lanes take the scatter (it
+                // used to stay a producer in this lane only, which declined)
+                recordCase "cli: `plan` under BLADE_LLVM=1 scatters a captured deferred source once it is forced, as the C++ lane does"
                     (code = 0 && out.Contains "lane: LLVM"
-                     && out.Contains "ordered orbit scatter not taken: the compact array is an unforced computation, not a stored pool (LLVM lane"
-                     && not (out.Contains "applied [fold form: ordered orbit scatter"))
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5"
+                     && not (out.Contains "the compact array is an unforced computation, not a stored pool (LLVM lane"))
                     (out + err)
                 File.WriteAllText(Path.Combine(dir, "scatter_f32.blade"),
                     "type Var = Idx<5>\ntype Obs = Idx<3>\n"
@@ -5972,8 +5978,9 @@ and internal dispatchTestClean (rest: string list) : int =
         if failed = 0 then 0 else 1
     | [ "instance-guards" ] | [ "instanceguards" ] ->
         // Which caret-parameter reads carry a BL8006 guard: the array
-        // instance at a named axis does, a proven position and an anonymous
-        // caller do not. Pure lowering + codegen, no toolchain.
+        // instance at a named axis does, a proven position does not, and an
+        // anonymous slot is proven or checked like a named one (G192 (1), both
+        // lanes' emission). Pure lowering + codegen, no toolchain.
         let failed = (Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "access" ] ->

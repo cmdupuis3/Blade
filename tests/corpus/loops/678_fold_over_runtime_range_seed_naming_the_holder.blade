@@ -1,0 +1,18 @@
+// TEST: A seed whose string spells the range holder still runs before the bound
+// ============================================================================
+// Gap G201, Codex diff review of the holder: the holder declaration was
+// placed before the first emitted line MENTIONING its name, and a string
+// literal in the seed may spell it -- the bound then ran before the seed
+// (m = 21). The holder is anchored on the loop-entry bound declaration
+// itself: the seed records 1, then the bound 2, m = 12, as the interpreter.
+// ============================================================================
+function mark(a: mut Array<Int64 like Idx<1>>, digit: Int64) -> Int64 = {
+    a(0) = a(0) * 10 + digit
+    3
+}
+function seed(a: mut Array<Int64 like Idx<1>>, label: String) -> Int64 = mark(a, 1)
+function probe(a: mut Array<Int64 like Idx<1>>) -> Int64 = reduce(method_for(0..mark(a, 2)) <@> lambda(k) -> k, (+), seed(a, "__range0_r1073741825."))
+let mut m: Array<Int64 like Idx<1>> = [0]
+let p = probe(m)
+// EXPECT: m = [12]
+// EXPECT: p = 6

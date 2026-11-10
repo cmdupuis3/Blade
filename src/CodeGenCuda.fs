@@ -116,6 +116,18 @@ let internal deviceVariableIntPow (expr: IRExpr) : bool =
     go expr
     hit
 
+/// A run-time constraint check (a subscript guard, a checked cast) anywhere in
+/// the body: its panic is a host `blade_rt::panic` with no device form.
+let internal deviceConstraintCheck (expr: IRExpr) : bool =
+    let mutable hit = false
+    let rec go (e: IRExpr) =
+        if hit then () else
+        match e with
+        | IRConstraintCheck _ -> hit <- true
+        | ExprShape (kids, _) -> kids |> List.iter go
+    go expr
+    hit
+
 /// Why this kernel body cannot be rendered into the .cu as one device
 /// expression, given `declared` -- the ids the `__global__` itself binds (the
 /// peeled operand reads, plus any forwarded captures). `None` means it can.
@@ -129,6 +141,8 @@ let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body
         Some "a kernel-local array materialization"
     elif deviceVariableIntPow body then
         Some "an integer `^` with a non-literal exponent (its negative-exponent panic, BL8013, has no device form)"
+    elif deviceConstraintCheck body then
+        Some "a run-time check (its panic -- a BL8006 subscript guard, formalism 3.10 -- has no device form)"
     else
         match deviceFreeVarIds body |> Set.toList |> List.filter (fun id -> not (Set.contains id declared)) with
         | id :: _ -> Some ($"the captured value '{(spell id)}'")

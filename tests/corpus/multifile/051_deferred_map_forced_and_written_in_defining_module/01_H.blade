@@ -1,0 +1,11 @@
+// TEST: A deferred map forced and its input written in the defining module
+// MODULE: H
+// Gap G199: H forces d (k = d(1)) and writes x(1) itself; Main then reads
+// H.e, a map over d bound before the force, and d. Both read the snapshot.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let e = method_for(d) <@> lambda(v) -> v + 1.0
+let k = d(1)
+x(1) = 10.0
+// EXPECT: H.k = 4.0

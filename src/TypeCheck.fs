@@ -97,12 +97,76 @@ let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileErr
 /// `range<I>` / `0..n` feeds kernel parameter k; a single multi-slot
 /// `range<Y, X>` feeds all of them. Collected BEFORE zonk because a kernel
 /// lambda can be zonked (at its own `let`) before the apply that feeds it.
-let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+let rec rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+    fst (rangeFedLambdaParamsWithBounds modul)
+
+/// The same walk, also answering each range-fed parameter's STATIC value
+/// bounds `[lo, hi)` when the range has them (`range<I>` over a static extent
+/// n: [0, n); `lo..hi` over two integer literals: [lo, hi)) -- what the guard
+/// of an ANONYMOUS slot accepts as proof (G192 (1): an anonymous slot carries
+/// no nominal tag, so the only proven positions are literals and the values
+/// of a range whose bounds lie inside the slot's static extent).
+and rangeFedLambdaParamsWithBounds (modul: TypedModule)
+        : System.Collections.Generic.HashSet<IRId> * System.Collections.Generic.Dictionary<IRId, int64 * int64> =
     let fed = System.Collections.Generic.HashSet<IRId>()
+    let bounds = System.Collections.Generic.Dictionary<IRId, int64 * int64>()
     let isRange (a: TypedExpr) =
         match a.Kind with
         | TExprRange _ | TExprDotDot _ -> true
         | _ -> false
+    let litInt (e: TypedExpr) =
+        match e.Kind with
+        | TExprLit (Blade.Ast.LitInt v) -> Some v
+        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+        | _ -> None
+    let staticBounds (a: TypedExpr) (slot: int) =
+        match a.Kind with
+        | TExprRange ixs when slot < ixs.Length ->
+            let ix = ixs.[slot]
+            match ix.Tag |> Option.bind haloAccessOfTag with
+            // A dense HALO window parameter: the positions its in-reach reads
+            // `w(o)` produce, [0, M + Shrink) over a shrunk extent M -- the
+            // window's own demand, tied to THIS parameter (Codex diff review
+            // round 2 of G192 (1): two anonymous halos may share a tag).
+            | Some h when not h.IsCompound ->
+                tryEvalIntIR ix.Extent |> Option.map (fun m -> haloDemand h (0L, m))
+            | Some _ -> None
+            | None ->
+            if ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1 then
+                tryEvalIntIR ix.Extent |> Option.map (fun n -> (0L, n))
+            else None
+        | TExprDotDot (lo, hi) ->
+            (match litInt lo, litInt hi with
+             | Some l, Some h -> Some (l, h)
+             | _ -> None)
+        | _ -> None
+    // A bound proves a parameter only when EVERY occurrence of its lambda is a
+    // kernel some range with static bounds feeds (Codex diff review of G192
+    // (1): a let-bound lambda applied over `0..3` and also called `k(5)`, or
+    // fed by data, must not inherit the range's proof). Per lambda (keyed by
+    // its first parameter): every occurrence, the kernel occurrences, and per
+    // parameter the union of its feeds (None once one feed has no bounds).
+    let lambdaOcc = System.Collections.Generic.Dictionary<IRId, int>()
+    let kernelOcc = System.Collections.Generic.Dictionary<IRId, int>()
+    let lambdaOf = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let feeds = System.Collections.Generic.Dictionary<IRId, (int64 * int64) option>()
+    let bump (d: System.Collections.Generic.Dictionary<IRId, int>) k =
+        d.[k] <- (match d.TryGetValue k with | true, n -> n + 1 | _ -> 1)
+    let noteFeed (pid: IRId) (b: (int64 * int64) option) =
+        feeds.[pid] <-
+            match feeds.TryGetValue pid, b with
+            | (true, None), _ | _, None -> None
+            | (true, Some (l0, h0)), Some (l, h) -> Some (min l0 l, max h0 h)
+            | _, Some lh -> Some lh
+    let kernelUse (li: TypedLambdaInfo) =
+        match li.Params with
+        | p0 :: _ ->
+            bump kernelOcc p0.VarId
+            for p in li.Params do lambdaOf.[p.VarId] <- p0.VarId
+        | [] -> ()
+    let feed (p: TypedParam) (a: TypedExpr) (slot: int) =
+        fed.Add p.VarId |> ignore
+        noteFeed p.VarId (staticBounds a slot)
     let rec walk (e: TypedExpr) =
         (match e.Kind with
          | TExprApply info when not info.IsComposeApply ->
@@ -113,27 +177,51 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
                      | _ -> [ a ])
              let ps =
                  match info.Kernel.Kind with
-                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> li.Params
+                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> kernelUse li; li.Params
                  | _ -> []
+             // A REYNOLDS kernel is applied to every permutation of its
+             // operands, so each parameter may receive ANY operand: its bounds
+             // are the union over all of them (Codex diff review round 3 of
+             // G192 (1): `reynolds(lambda(i, j) -> v(i))` over `0..3, 0..5`).
+             let permuted = match info.Kernel.Kind with TExprReynolds _ -> true | _ -> false
              match operands with
-             | [ { Kind = TExprRange ixs } ] when ixs.Length > 1 && ixs.Length = ps.Length ->
-                 for p in ps do fed.Add p.VarId |> ignore
+             | [ { Kind = TExprRange ixs } as r ] when ixs.Length > 1 && ixs.Length = ps.Length ->
+                 if permuted then
+                     for p in ps do ixs |> List.iteri (fun k _ -> feed p r k)
+                 else ps |> List.iteri (fun k p -> feed p r k)
              | _ when operands.Length = ps.Length ->
-                 List.iter2 (fun (p: TypedParam) a -> if isRange a then fed.Add p.VarId |> ignore) ps operands
-             | _ -> ()
+                 if permuted then
+                     for p in ps do
+                         for a in operands do
+                             if isRange a then feed p a 0 else noteFeed p.VarId None
+                 else
+                     List.iter2 (fun (p: TypedParam) a -> if isRange a then feed p a 0 else noteFeed p.VarId None) ps operands
+             | _ -> for p in ps do noteFeed p.VarId None
          // `sort(range<I>, lambda(i) -> ..)` / `sort(lo..hi, ..)` (round 4
          // wave 4 D1): the key sees the range's own positions, exactly as a
          // map kernel over that range does -- a single-slot range only (a
          // `lo..hi` from a literal 0: an offset range's values are not
          // positions of its own axis).
-         | TExprSort ({ Kind = TExprRange [ _ ] }, { Kind = TExprLambda li })
-         | TExprSort ({ Kind = TExprDotDot ({ Kind = TExprLit (Blade.Ast.LitInt 0L) }, _) }, { Kind = TExprLambda li }) ->
-             for p in li.Params do fed.Add p.VarId |> ignore
+         | TExprSort (({ Kind = TExprRange [ _ ] } as r), { Kind = TExprLambda li })
+         | TExprSort (({ Kind = TExprDotDot ({ Kind = TExprLit (Blade.Ast.LitInt 0L) }, _) } as r), { Kind = TExprLambda li }) ->
+             kernelUse li
+             for p in li.Params do feed p r 0
+         | TExprLambda li ->
+             (match li.Params with
+              | p0 :: _ -> bump lambdaOcc p0.VarId
+              | [] -> ())
          | _ -> ())
         for c in typedExprChildren e do walk c
     for d in modul.Decls do
         for e in declExprs d do walk e
-    fed
+    for KeyValue (pid, b) in feeds do
+        match b, lambdaOf.TryGetValue pid with
+        | Some lh, (true, l0) ->
+            let all = match lambdaOcc.TryGetValue l0 with | true, n -> n | _ -> 0
+            let asKernel = match kernelOcc.TryGetValue l0 with | true, n -> n | _ -> 0
+            if all = asKernel then bounds.[pid] <- lh
+        | _ -> ()
+    (fed, bounds)
 
 /// LET-POLYMORPHISM FOR A LAMBDA'S ARROW PARAMETER (formalism 4.3).
 ///
@@ -163,6 +251,14 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
 ///   * no variable the lambda captures is ever assigned: a lambda captures at
 ///     its creation, a declaration reads the module binding when called.
 /// Anything else stays a lambda, exactly as before.
+/// The let-bound lambdas `instantiateLetLambdaKernels` spliced at a kernel use
+/// (gap G205), by their binding PATTERN object: such a lambda was used as a
+/// VALUE in the source, so it keeps the lambda semantics (its unit judgment
+/// defers to the use, `generalizeArrowLetLambdas` does not turn it into a
+/// generic declaration) even when the splice removed its last value use
+/// (Codex diff review round 3: `log(x / scale)` over metres, BL3006).
+let private splicedLambdaBindings = System.Runtime.CompilerServices.ConditionalWeakTable<Pattern, obj>()
+
 let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl> list =
     let mapPre = Blade.Unfold.mapExprPre
     // Every expression a declaration holds, with the names its own binders
@@ -215,7 +311,8 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
     let arr = List.toArray decls
     arr |> Array.mapi (fun i ld ->
         match ld.Value with
-        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone ->
+        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone
+                         && (let mutable o = null in not (splicedLambdaBindings.TryGetValue(b.Pattern, &o))) ->
             match b.Pattern.Kind, b.Value.Kind with
             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, None, body)
                     when not parms.IsEmpty
@@ -247,6 +344,223 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
             | _ -> ld
         | _ -> ld)
     |> List.ofArray
+
+/// A LET-BOUND LAMBDA VALUE IN KERNEL POSITION IS INSTANTIATED PER USE (gap
+/// G205; G172 (b), G114). The checker resolves a kernel `inc` through its
+/// binding to the ONE typed lambda and unifies that lambda's parameters with
+/// the element (`inferApply`), so its first kernel use fixed its types for
+/// every later one: `method_for(a32) <@> inc` then `method_for(a64) <@> inc`
+/// was BL3001, and a literal partner (`x + 1.0`) never saw the operand's
+/// width (the G110 / G114 seeding reads a lambda WRITTEN at the use). A call
+/// `inc(f)` instantiates per call; a kernel use now does too: the source
+/// lambda is spliced at each KERNEL position -- the right operand of `<@>`,
+/// `object_for(..)`, a fold kernel `reduce(xs, ..)`, `reynolds(..)`, a sort
+/// key, a mask predicate -- exactly as if it were written there, so it is
+/// typed afresh per use (fresh parameter ids and type variables, the same
+/// captured bindings) and stays INLINE (no eta call, no std::function per
+/// cell). The binding itself is kept for its other uses (pipeline fusion
+/// already splices a let-bound stage the same way, Grad.fuseProgram).
+///
+/// Admission (fail closed; anything else keeps today's resolve-at-apply):
+///   * a top-level `let NAME = lambda(...) -> body` (not `mut`, no type
+///     annotation on the binding, not self-referencing), NAME never assigned;
+///   * no free name of the lambda is ever assigned anywhere in the module (a
+///     lambda captures at its creation, a spliced copy reads at its use);
+///   * HYGIENE: in the using declaration, neither NAME nor any free name of
+///     the lambda is bound by ANY binder (its parameters, lets, match / for /
+///     let-rec binders, lambda parameters) -- so every name of the spliced
+///     copy denotes what it denoted at the definition (a top-level name is
+///     unique per module, BL2009).
+/// Only uses in the SAME module are spliced. A stored former (`let o =
+/// object_for(inc)`) is one value: spliced once, still ONE instance for
+/// every application of `o` (gap G205 remainder).
+let private instantiateLetLambdaKernels (imports: ImportDecl list) (decls: Located<Decl> list) : Located<Decl> list =
+    let mapPre = Blade.Unfold.mapExprPre
+    let rootName (e: Expr) =
+        let rec go (e: Expr) =
+            match e.Kind with
+            | ExprKind.ExprVar n -> Some n
+            | ExprKind.ExprApp (f, _) -> go f
+            | ExprKind.ExprField (x, _) | ExprKind.ExprTupleIndex (x, _) | ExprKind.ExprTyped (x, _) -> go x
+            | _ -> None
+        go e
+    let scopesOf (d: Decl) : Expr list =
+        let fnScopes (f: FunctionDecl) = f.Body :: (f.Params |> List.choose (_.Default))
+        match d with
+        | DeclLet b | DeclStatic b -> [ b.Value ]
+        | DeclFunction f -> fnScopes f
+        | DeclImpl impl -> impl.Methods |> List.collect fnScopes
+        | DeclType (TyDeclStruct (_, _, _, cs, _)) | DeclType (TyDeclMutualGroup (_, cs)) -> cs
+        | DeclType _ | DeclInterface _ | DeclUnit _ | DeclImport _ -> []
+    // every name the module ASSIGNS (`x = ..`, `A(i) = ..`, `p.f = ..`)
+    let assigned =
+        let acc = System.Collections.Generic.HashSet<string>()
+        let rec stmts (ss: Stmt list) =
+            for s in ss do
+                match unwrapStmt s with
+                | StmtAssign (l, _, _) -> rootName l |> Option.iter (acc.Add >> ignore)
+                | StmtForIn (_, _, body) -> stmts body
+                | _ -> ()
+        for d in decls do
+            for e in scopesOf d.Value do
+                mapPre (fun x ->
+                    (match x.Kind with
+                     | ExprKind.ExprAssign (l, _) -> rootName l |> Option.iter (acc.Add >> ignore)
+                     | ExprKind.ExprBlock (ss, _) -> stmts ss
+                     | _ -> ())
+                    None) e |> ignore
+        acc
+    // every name any binder of declaration `d` binds (a superset is safe)
+    let bindersOf (d: Decl) : System.Collections.Generic.HashSet<string> =
+        let acc = System.Collections.Generic.HashSet<string>()
+        (match d with
+         | DeclFunction f -> for p in f.Params do acc.Add p.Name |> ignore
+         | DeclImpl impl -> for m in impl.Methods do for p in m.Params do acc.Add p.Name |> ignore
+         | _ -> ())
+        let rec stmts (ss: Stmt list) =
+            for s in ss do
+                match unwrapStmt s with
+                | StmtLet b -> for n in patternNames b.Pattern do acc.Add n |> ignore
+                | StmtForIn (v, _, body) -> acc.Add v |> ignore; stmts body
+                | _ -> ()
+        for e in scopesOf d do
+            mapPre (fun x ->
+                (match x.Kind with
+                 | ExprKind.ExprLambda (ps, _, _) -> for p in ps do acc.Add p.Name |> ignore
+                 | ExprKind.ExprLet (b, _) -> for n in patternNames b.Pattern do acc.Add n |> ignore
+                 | ExprKind.ExprMatch (_, cases) -> for c in cases do for n in patternNames c.Pattern do acc.Add n |> ignore
+                 | ExprKind.ExprBlock (ss, _) -> stmts ss
+                 | ExprKind.ExprRecArray def ->
+                     acc.Add def.Name |> ignore
+                     acc.Add def.PrefixVar |> ignore
+                     acc.Add def.StepVar |> ignore
+                     (match def.SeedArm with Some (v, _) -> acc.Add v |> ignore | None -> ())
+                 | _ -> ())
+                None) e |> ignore
+        acc
+    // the names a top-level declaration INTRODUCES (a later one shadows an
+    // earlier binding or import of the same name)
+    let introduces (d: Decl) : string list =
+        match d with
+        | DeclLet b | DeclStatic b -> patternNames b.Pattern
+        | DeclFunction f -> [ f.Name ]
+        | DeclImpl impl -> impl.Methods |> List.map (_.Name)
+        | DeclInterface i -> [ i.Name ]
+        | DeclUnit u -> [ u.Name ]
+        | DeclType (TyDeclAlias (n, _, _)) -> [ n ]
+        | DeclType (TyDeclSum (n, _, vs)) -> n :: (vs |> List.map (_.Name))
+        | DeclType (TyDeclStruct (n, _, _, _, _)) -> [ n ]
+        | DeclType (TyDeclMutualGroup (ms, _)) -> ms |> List.map fst
+        | DeclImport (qn, ImportSelective ids) -> ids @ [ String.concat "." qn ]
+        | DeclImport (qn, ImportQualified alias) ->
+            (match alias with Some a -> [ a ] | None -> []) @ [ String.concat "." qn; List.last qn ]
+    // a TYPE, unit or import declaration can change what an ANNOTATION of
+    // the lambda (`lambda(x: T)`) means; the free-name walk does not see
+    // annotations, so such a declaration ends every earlier candidate's reach
+    let typeLevel (d: Decl) =
+        match d with
+        | DeclType _ | DeclUnit _ | DeclImport _ | DeclInterface _ -> true
+        | _ -> false
+    // same-module functions with a DEFAULT argument: a call that omits it
+    // elaborates the default expression at the call site, a dependency the
+    // free-name walk does not see -- a lambda calling one is not spliced
+    // (a let-bound lambda with a default too; an IMPORTED callee's defaults
+    // are not visible here, so a lambda naming any imported name is not
+    // spliced, and a module importing names wholesale is left as it is)
+    let withDefaults =
+        decls |> List.choose (fun ld ->
+            match ld.Value with
+            | DeclFunction f when f.Params |> List.exists (fun p -> p.Default.IsSome) -> Some f.Name
+            | DeclLet b | DeclStatic b ->
+                (match b.Pattern.Kind, b.Value.Kind with
+                 | PatternKind.PatVar n, ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Default.IsSome) -> Some n
+                 | _ -> None)
+            | _ -> None)
+        |> Set.ofList
+    let importsAll =
+        imports |> List.exists (fun i ->
+            match i.Items with
+            | None -> true
+            | Some items -> items |> List.exists (function ImportHiding _ -> true | ImportName _ -> false))
+    let imported =
+        (imports |> List.collect (fun i ->
+            (match i.Alias with Some a -> [ a ] | None -> [])
+            @ (match i.Items with
+               | Some items -> items |> List.choose (function ImportName n -> Some n | ImportHiding _ -> None)
+               | None -> [])
+            @ [ String.concat "." i.Module; List.last i.Module ]))
+        @ (decls |> List.collect (fun ld ->
+            match ld.Value with
+            | DeclImport _ -> introduces ld.Value
+            | _ -> []))
+        |> Set.ofList
+    let arr = List.toArray decls
+    // CANDIDATES are processed in declaration order over the REWRITTEN
+    // declarations, so a candidate spliced into a later candidate's body is
+    // already expanded when that one is spliced (any nesting depth).
+    let cur = Array.copy arr
+    // (index, name, every name the source depends on, the source)
+    let live = System.Collections.Generic.List<int * string * Set<string> * Expr * Pattern>()
+    for j in 0 .. arr.Length - 1 do
+        // a declaration that introduces a name a live candidate depends on
+        // (or any type-level declaration) ends that candidate's reach,
+        // including at this declaration itself
+        let intro = introduces arr.[j].Value |> Set.ofList
+        live.RemoveAll(fun (_, _, names, _, _) ->
+            typeLevel arr.[j].Value || not (Set.isEmpty (Set.intersect names intro))) |> ignore
+        if live.Count > 0 then
+            let binders = bindersOf arr.[j].Value
+            let here =
+                live
+                |> Seq.filter (fun (_, _, names, _, _) -> not (names |> Set.exists binders.Contains))
+                |> Seq.map (fun (_, name, _, src, pat) -> (name, (src, pat)))
+                |> Map.ofSeq
+            if not here.IsEmpty then
+                let splice (k: Expr) : Expr option =
+                    match k.Kind with
+                    | ExprKind.ExprVar n ->
+                        Map.tryFind n here |> Option.map (fun (src, pat) ->
+                            (try splicedLambdaBindings.AddOrUpdate(pat, box true) with _ -> ())
+                            { src with Span = k.Span })
+                    | _ -> None
+                let rec rw (x: Expr) : Expr = mapPre f x
+                and f (x: Expr) : Expr option =
+                    let re k = Some (inheritSpan x k)
+                    let kern (k: Expr) = match splice k with Some s -> s | None -> rw k
+                    match x.Kind with
+                    | ExprKind.ExprBinOp (m, OpApply, l, r) when (splice r).IsSome -> re (ExprBinOp (m, OpApply, rw l, kern r))
+                    | ExprKind.ExprObjectFor k when (splice k).IsSome -> re (ExprObjectFor (kern k))
+                    | ExprKind.ExprReduce (a, k, init, ax) when (splice k).IsSome ->
+                        re (ExprReduce (rw a, kern k, Option.map rw init, ax))
+                    | ExprKind.ExprReynolds (k, anti) when (splice k).IsSome -> re (ExprReynolds (kern k, anti))
+                    | ExprKind.ExprSort (a, k) when (splice k).IsSome -> re (ExprSort (rw a, kern k))
+                    | ExprKind.ExprMask (a, p) when (splice p).IsSome -> re (ExprMask (rw a, kern p))
+                    | _ -> None
+                let rwFn (fd: FunctionDecl) =
+                    { fd with Body = rw fd.Body
+                              Params = fd.Params |> List.map (fun p -> { p with Default = Option.map rw p.Default }) }
+                let v =
+                    match cur.[j].Value with
+                    | DeclLet b -> DeclLet { b with Value = rw b.Value }
+                    | DeclStatic b -> DeclStatic { b with Value = rw b.Value }
+                    | DeclFunction fd -> DeclFunction (rwFn fd)
+                    | DeclImpl impl -> DeclImpl { impl with Methods = impl.Methods |> List.map rwFn }
+                    | other -> other
+                cur.[j] <- { cur.[j] with Value = v }
+        // this declaration as a candidate, its (rewritten) source
+        match cur.[j].Value with
+        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone ->
+            (match b.Pattern.Kind, b.Value.Kind with
+             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, _, _) when not parms.IsEmpty ->
+                 let free = collectFreeVars Set.empty b.Value
+                 if not (importsAll || free.Contains name || assigned.Contains name
+                         || (free |> Set.exists assigned.Contains)
+                         || (free |> Set.exists withDefaults.Contains)
+                         || (free |> Set.exists imported.Contains)) then
+                     live.Add((j, name, Set.add name free, b.Value, b.Pattern))
+             | _ -> ())
+        | _ -> ()
+    List.ofArray cur
 
 /// THE NEVER-WRITTEN PROOF OF STORED ALIASES, the checker's half
 /// (docs/plans/plan-identity-transpose-compute.md 2.1 second step, 2.6;
@@ -439,7 +753,7 @@ let private storedAliasWriteProof (decls: Located<Decl> list) (imports: ImportDe
                 + "; no other module imports this one")
 
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
-    let modul = { modul with Decls = generalizeArrowLetLambdas modul.Decls }
+    let modul = { modul with Decls = generalizeArrowLetLambdas (instantiateLetLambdaKernels modul.Imports modul.Decls) }
     // The never-written proof of top-level stored aliases (plan 2.1 second
     // step): over the WHOLE module's surface, before any declaration is
     // checked (TypeCheckSupport.recordStoredAliasMember reads it).
@@ -797,12 +1111,15 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let enumKeyErrorSink = System.Collections.Generic.List<Span * string>()
     let zonked =
         let saved = subscriptGuardCtx.Value
+        let rangeFedSet, rangeFedBounds = rangeFedLambdaParamsWithBounds typedModule
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
                    Positions = System.Collections.Generic.HashSet<IRId>()
                    DataVars = System.Collections.Generic.HashSet<IRId>()
                    EnumKeyErrors = enumKeyErrorSink
-                   RangeFedParams = rangeFedLambdaParams typedModule
+                   RangeFedParams = rangeFedSet
+                   RangeFedBounds = rangeFedBounds
+                   CoordVars = System.Collections.Generic.HashSet<IRId>()
                    Retargets = currentEnv.ArrowRetargets
                    Subscripts = currentEnv.ArrowSubscripts
                    GroupOuter = fun id ->
@@ -1184,6 +1501,9 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     // function-body `let p = o1 >>@ o2` / `f <$> c` / `c1 @>> c2` emit at
     // all. Shapes it declines fall through to the IRComposeApply path
     // unchanged. Runs BEFORE grad expansion so AD inherits fused bodies.
+    // G205: a let-bound lambda value is spliced at each KERNEL use (typed per
+    // use, inline), ahead of fusion, which reads the same surface
+    let program = { program with Modules = program.Modules |> List.map (fun m -> { m with Decls = instantiateLetLambdaKernels m.Imports m.Decls }) }
     let program = Blade.Grad.fuseProgram program
     match Blade.Grad.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["grad expansion"]))
