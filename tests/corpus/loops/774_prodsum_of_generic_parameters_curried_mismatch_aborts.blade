@@ -1,0 +1,9 @@
+// TEST: Prodsum Over Generic Parameters Of A Curried Call Checks Their Extents (aborts)
+// Gap G265 (f) (round 4 wave 9 lane d; wave-end review F3): the partial application h binds a 3-cell
+// array, the call passes a 2-cell one; prodsum compares its parameter operands at run time.
+// ABORT: BL8011
+function dot(a: T^1, b: T^1) -> Float64 = prodsum(a, b)
+let x3 = Float64([1.0, 2.0, 3.0])
+let y2 = Float64([4.0, 5.0])
+let h = dot(x3)
+let r = h(y2)

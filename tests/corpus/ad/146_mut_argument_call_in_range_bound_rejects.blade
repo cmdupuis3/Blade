@@ -1,0 +1,19 @@
+// TEST: A Mut-Argument Call Inside A Range Bound Is Judged (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C, C2; Codex design review 5f64f352, probe
+// C): a call carried by a TYPE -- the bound of `0..touch(g, alias)` -- was
+// outside the scans of the mut-argument rule; `alias` shares g, so the call
+// is refused like the same call anywhere else (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+function touch(y: mut A, z: A) -> Int64 = {
+    y(0) = z(0)
+    2
+}
+let mut g: A = [2.0, 3.0]
+let alias = identity(g)
+let r = reduce(0..touch(g, alias), (+), 0)
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter
+// REJECT-AT: lower

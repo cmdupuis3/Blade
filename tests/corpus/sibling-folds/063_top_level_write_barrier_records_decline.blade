@@ -1,0 +1,17 @@
+// TEST: A write barrier between two top-level folds keeps both folds as written
+// ============================================================================
+// Round 4 wave 9 (lane A, A4: the fresh class-closure round of
+// BLADE_SIBLING_FOLDS=top, Codex 0d750baf, gap G107 member 4): the element
+// write `x(0) = 10.0` between `a` and `b` is a barrier, so the two folds are
+// not joined (correct), but under `top` the region recorded NO decision. It
+// now records the decline once two folds were candidates (`blade test
+// optimize`'s decision_sibling_folds_top_barrier_records_decline).
+// ============================================================================
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let a = prodsum(x, x)
+x(0) = 10.0
+let b = reduce(x, (+))
+// EXPECT: a = 14.0
+// EXPECT: b = 15.0
+// EXPECT: x = [10.0, 2.0, 3.0]

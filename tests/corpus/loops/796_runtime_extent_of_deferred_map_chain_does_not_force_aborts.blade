@@ -1,0 +1,14 @@
+// TEST: a run-time extent of a chain of deferred maps evaluates nothing (aborts)
+// Gap G234, round 4 wave 9: the chain twin of loops/794 -- d2 maps the
+// deferred map d, which maps the compound c; the extent of d2 is read from the
+// end of the chain (the compound cardinality) without evaluating d2 or d
+// (d divides by zero), so the program fails later, at the NaN cast, in every
+// lane.
+let iv: Array<Int64 like Idx<4>> = [1, 0, 2, -1]
+let c = compound(iv, mask(iv, lambda(v) -> v >= 0))
+let d = method_for(c) <@> lambda(v) -> Float64(100 / v)
+let d2 = method_for(d) <@> lambda(v) -> v + 1.0
+let fz: Float64 = 0.0
+let n = extents(d2)
+let fail = Int64(floor(fz / fz))
+// ABORT: BL8014

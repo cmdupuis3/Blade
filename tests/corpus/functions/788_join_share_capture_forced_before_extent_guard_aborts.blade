@@ -1,0 +1,18 @@
+// TEST: A Join Share Capture Is Forced Before The Extent Guard (aborts)
+// Gap G249 (round 4 wave 9 lane d; Codex diff review round 1): the shared producer d captures the
+// deferred cap, which the join prelude forces under its own name (leg kernels, then share kernels,
+// then fold kernels) before any guard: the modulo by zero precedes the a / b extent mismatch. The
+// C++ lane used to leave cap undeclared (BL9002).
+// ABORT: integer modulo by zero
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let z: Int64 = 0
+let cap = method_for(x) <@> lambda(v) -> v % z
+let d = method_for(zip(a, b)) <@> lambda(u, v) -> u - v + Float64(cap(0))
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let q = method_for(d) <@> lambda(v) -> v + 2.0
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))

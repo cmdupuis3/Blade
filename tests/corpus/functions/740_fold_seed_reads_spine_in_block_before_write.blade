@@ -1,0 +1,13 @@
+// TEST: Fold Seed Reads Spine In Block Before Write
+// Gap G248 residual, round 4 wave 9 (B2): the seed reads a cell of the fold
+// own spine p (inside a let of a block seed) and then writes x, an input of
+// p. A seed cell read forces p under its own name at the fold operand
+// position (G214 / G248), so the fold reads that snapshot: (2 + 4 + 6) + 2 =
+// 14.0. Every lane used to fold a fresh walk of p over the written x (32.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(p, (+), { let t = p(0); x(0) = 10.0; t })
+let w = p(0)
+// EXPECT: p = [2.0, 4.0, 6.0]
+// EXPECT: s = 14.0
+// EXPECT: w = 2.0

@@ -1,0 +1,11 @@
+// TEST: A Kernel-Local Array Rebound Under A Branch Frees Its Pools Every Trip
+// Gap G245 (a) (round 4 wave 9 lane d): the rebinding runs on the trips with k > 0 only (39 of
+// 40: 6.0 each), the others keep the zero literal; every trip frees what it allocated.
+// EXPECT: total = 234.0
+type C = Idx<3>
+type Trips = Idx<40>
+let total = reduce(method_for(range<Trips>) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    if k > 0 then { out = [1.0, 2.0, 3.0]; 1.0 } else 0.0
+    reduce(out, (+))
+}, (+))

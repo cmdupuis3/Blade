@@ -1,0 +1,24 @@
+// TEST: A Mut Argument Read By A Callback Capturing A Local View Is Refused (rejects)
+// ============================================================================
+// Gap G240 (4), round 4 wave 9 (lane C, C2): only MODULE bindings were
+// followed as by-name reads, so a callback lambda capturing a LOCAL view
+// (`let row = m(0)`) of the array passed as the `mut` argument was accepted --
+// the callee's write showed through the callback (interpreter and C++ r =
+// 9.0). A captured local is now a by-name read of the callee: refused
+// (BL4005, every lane).
+// ============================================================================
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function bump(y: mut M, cb: Float64 -> Float64) -> Float64 = {
+    y(0, 0) = 9.0
+    cb(1.0)
+}
+function outer() -> Float64 = {
+    let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+    let row = m(0)
+    let rd = lambda(t: Float64) -> t * row(0)
+    bump(m, rd)
+}
+let r = outer()
+// ERROR: BL4005
+// ERROR-CONTAINS: which the callee reads by name
+// REJECT-AT: lower

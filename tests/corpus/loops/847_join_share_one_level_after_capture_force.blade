@@ -1,0 +1,13 @@
+// TEST: A Join Share Over A Captured Map Is One Level Of Sharing
+// Gap G244 (round 4 wave 9 lane d; Codex diff review): p kernel captures e, so the capture prelude
+// stores e (it prints) before the shares are judged: the share f then reads a stored map, one level,
+// in every lane.
+// EXPECT: e = [2, 3, 4]
+// EXPECT: s = 21
+// EXPECT: t = 12
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 2, 3]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + 1
+let p = method_for(f) <@> lambda(a) -> a + Int64(extents(e))
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(f, (+)))

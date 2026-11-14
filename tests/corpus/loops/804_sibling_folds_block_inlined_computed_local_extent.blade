@@ -1,0 +1,22 @@
+// TEST: Sibling Folds In A Block Join A Leg Reading An Inlined Computed Local Extent
+// ============================================================================
+// Gap G219, round 4 wave 9 (lane C, C5): the sibling-fold pass inlines a
+// pure-total helper one level under FRESH ids; its leg totality judge read
+// the module-wide fail-closed deferred classifier, built before the inline,
+// so the inlined `let y = .. |> compute` looked like an imported (unseen)
+// binder and the seed `Float64(extents(y))` declined the join (two
+// traversals, the same value). The region's inlined lets now join the
+// classifier's census: the legs join (blade test optimize pins the record).
+// ============================================================================
+type I = Idx<5>
+type A = Array<Float64 like I>
+let x: A = [1.0, 2.0, 3.0, 4.0, 5.0]
+function helper(a: A) -> Float64 = {
+    let y = method_for(a) <@> lambda(v: Float64) -> v * 2.0 |> compute
+    reduce(a, (+), Float64(extents(y)))
+}
+let r = {
+    let s: Float64 = 1.0
+    (prodsum(x, x) + s, helper(x))
+}
+// EXPECT: r = (56.0, 20.0)

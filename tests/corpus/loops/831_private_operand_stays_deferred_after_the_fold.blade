@@ -1,0 +1,14 @@
+// TEST: A Private Operand Stays Deferred After Its Fold
+// Gap G243 (round 4 wave 9 lane d; Codex design review): the fold evaluated e privately, so the
+// later read e(0) forces e then, under its own name, after the d write (the interpreter and the
+// LLVM lane read a value memoized during the fold: w = 2).
+// EXPECT: e = [10, 3, 4, 5, 6]
+// EXPECT: s = 50
+// EXPECT: w = 10
+type I = Idx<5>
+let mut d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + 2
+let s = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a + b, (+))
+d((0 : I)) = 9
+let w = e(0)

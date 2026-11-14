@@ -1,0 +1,16 @@
+// TEST: AD A Helper Substituted Into The Body Reading A Reserved Spelling Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 review round 4, Codex 5a8b7b7d): the reserved
+// name gate read the NORMALIZED body, and `pure(helper(x)) |> compute`
+// substitutes `helper`'s body later (kernelCallBody), so its read of the
+// module binding `__g_x` passed and the synthesized cotangent shadowed it:
+// r = (21.0, 0.0) for (21.0, 7.0). The gate now reads the bodies of the user
+// functions the body names, transitively (BL5500, rename the binding).
+// ============================================================================
+let __g_x = Float64(7.0)
+function helper(p: Float64) -> Float64 = p * __g_x
+function f(x: Float64) -> Float64 = pure(helper(x)) |> compute
+let r = ad.grad(f)(Float64(3.0))
+// ERROR: BL5500
+// ERROR-CONTAINS: a name spelled like a reserved AD name

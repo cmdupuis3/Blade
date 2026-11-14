@@ -1,0 +1,19 @@
+// TEST: A Composition With A Mut Stage Held In A Tuple Is Refused (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C, C2; Codex diff review 5f64f352 finding
+// 1): a composition is admitted only BOUND (a binding's or a let's whole
+// value) or APPLIED, where its first stage is judged; built inline as a
+// tuple member with a mut stage it is a value use -- refused (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+function poke(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    1.0
+}
+function scalar_id(x: Float64) -> Float64 = x
+let ks = (object_for(poke) >>@ object_for(scalar_id), 0)
+// ERROR: BL4005
+// ERROR-CONTAINS: a composition whose stage has a mut parameter
+// REJECT-AT: lower

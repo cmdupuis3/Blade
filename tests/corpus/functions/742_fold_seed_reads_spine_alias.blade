@@ -1,0 +1,15 @@
+// TEST: Fold Seed Reads Spine Alias
+// Gap G248 residual, round 4 wave 9 (B2, the fable second look): the seed
+// reads the spine p through its top-level alias p2. The read forces the alias
+// class under its own names (p and p2 print), the fold reads the snapshot,
+// and the later write to x changes neither w nor the prints.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let p2 = p
+let s = reduce(p, (+), p2(0))
+x(0) = 10.0
+let w = p(0)
+// EXPECT: p = [2.0, 4.0, 6.0]
+// EXPECT: p2 = [2.0, 4.0, 6.0]
+// EXPECT: s = 14.0
+// EXPECT: w = 2.0

@@ -1,0 +1,13 @@
+// TEST: AD A jvp Body Reading A Module Binding Spelled Like A Tangent Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 diff review, Codex 5a8b7b7d): the forward
+// tangent of `x` is `__t_x`, which shadowed the module binding `__t_x` the
+// body reads -- (6.0, 4.0) for (21.0, 14.0). The reserved-name gate now
+// covers the names the body reads (BL5501, the jvp code).
+// ============================================================================
+let __t_x = Float64(7.0)
+function f(x: Float64) -> Float64 = x * __t_x
+let r = ad.jvp(f)(Float64(3.0), Float64(2.0))
+// ERROR: BL5501
+// ERROR-CONTAINS: a name spelled like a reserved AD name

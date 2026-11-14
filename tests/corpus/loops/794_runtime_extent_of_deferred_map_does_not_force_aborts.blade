@@ -1,0 +1,13 @@
+// TEST: a run-time extent of a deferred map evaluates nothing (aborts)
+// Gap G234, round 4 wave 9 (the G218 rule, formalism 10.2): extents(d) of the
+// deferred map d over the compound c is read from its operand (the compound
+// cardinality) without evaluating d, so d's division by zero never runs and
+// the program fails later, at the NaN cast (BL8014). The C++ lane and the
+// interpreter used to force d at n (BL8013); the LLVM lane read the operand.
+let iv: Array<Int64 like Idx<4>> = [1, 0, 2, -1]
+let c = compound(iv, mask(iv, lambda(v) -> v >= 0))
+let d = method_for(c) <@> lambda(v) -> Float64(100 / v)
+let fz: Float64 = 0.0
+let n = extents(d)
+let fail = Int64(floor(fz / fz))
+// ABORT: BL8014

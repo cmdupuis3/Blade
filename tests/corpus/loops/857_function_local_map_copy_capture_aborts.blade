@@ -1,0 +1,17 @@
+// TEST: a function-body copy of a local map whose kernel captures a module map (aborts)
+// Gap G235 (b), round 4 wave 9: the body-local map p captures d and is copied
+// (p |> compute) before the fold.
+// A function body evaluates a deferred module map privately, per call (G75);
+// a kernel capture of it is a forcing use where the kernel is formed, so d
+// (a division by zero at cell 1) fails in every lane. The LLVM lane used to
+// skip the capture in a function body and complete.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function local_q() -> Int64 = {
+    let p = method_for(x) <@> lambda(v) -> v + extents(d)
+    let c = p |> compute
+    reduce(c, (+), 0)
+}
+let s = local_q()
+// ABORT: BL8013
+// ABORT: .blade:8

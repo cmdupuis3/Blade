@@ -1,0 +1,20 @@
+// TEST: A Mut Argument Beside A Callback Capturing An Unrelated Local
+// ============================================================================
+// Gap G240 (4), round 4 wave 9 (lane C, C2): the admitted twin of
+// index-types/600 -- the callback captures a view of ANOTHER local array,
+// which shares nothing with the `mut` argument: accepted, every lane.
+// ============================================================================
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function bump(y: mut M, cb: Float64 -> Float64) -> Float64 = {
+    y(0, 0) = 9.0
+    cb(1.0) + y(0, 0)
+}
+function outer() -> Float64 = {
+    let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+    let other: M = [[5.0, 6.0], [7.0, 8.0]]
+    let row = other(0)
+    let rd = lambda(t: Float64) -> t * row(0)
+    bump(m, rd)
+}
+let r = outer()
+// EXPECT: r = 14.0

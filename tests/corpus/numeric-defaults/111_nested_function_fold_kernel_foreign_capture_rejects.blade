@@ -1,0 +1,14 @@
+// TEST: A Nested Function Folding With A Foreign-Capture Kernel Is Refused (rejects)
+// Gap G247 (round 4 wave 9 lane d): the fold twin of numeric-defaults/109 (C++ 60.0, LLVM 12.0).
+// ERROR: BL7004
+// ERROR-CONTAINS: a binding of an enclosing function
+// REJECT-AT: lower
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+function outer() -> Float64 = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * scale
+    function apply(scale: Float64, a: Array<Float64 like I>) -> Float64 = reduce(method_for(a) <@> f, (+))
+    apply(10.0, a64)
+}
+let r = outer()

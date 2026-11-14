@@ -631,6 +631,29 @@ let markUnseeded (e: TypedExpr) : TypedExpr = { e with Span = unseededSeedSpan }
 /// Is this typed expression a marked unseeded-fold seed?
 let isUnseededSeed (e: TypedExpr) : bool = e.Span = unseededSeedSpan
 
+/// THE KEPT SPINE NAME (gap G235 (a), formalism 10.2 / G214). A fused fold
+/// `reduce(p, k, s)` over a named deferred map p normally splices p's RESOLVED
+/// producer into the terminal, so the fold re-walks p's inputs. When a capture
+/// of the fold kernel forces p under its own name before the traversal (a
+/// captured map of p, an alias of p, p itself), the traversal must read that
+/// SNAPSHOT -- a seed that writes an input of p runs after the force. The
+/// checker then keeps the spine's NAME as the terminal's child, wrapped in a
+/// `TExprCompute` carrying THIS span (no source expression has it: line 0, a
+/// file name no path has), and Lowering lowers exactly such a child to
+/// `IRReduceCompute (IRVar p, ..)`, whose fused-terminal path in every lane runs
+/// the ordered capture prelude and then folds the stored spine. The decision
+/// rides on the FOLD NODE itself (spans survive zonking, as the unseeded mark
+/// does): an earlier side table keyed on the spine occurrence's (binder, span)
+/// could confuse two folds over one p whose synthesized nodes share a span
+/// (Ast.setSynthSpan; wave-end fable review). The wrapper is never a value:
+/// nothing but Lowering's TExprReduce arm reads it.
+let keptSpineSpan : Span =
+    { StartLine = 0; StartCol = -235; EndLine = 0; EndCol = -235; File = Some "<kept fold spine>" }
+
+/// Mark a fold's spine variable as KEPT (the child of the fused terminal).
+let markKeptSpine (spine: TypedExpr) : TypedExpr =
+    { Kind = TExprCompute spine; Type = spine.Type; Span = keptSpineSpan }
+
 /// Create a typed variable reference
 let mkVar name varId identity ty = 
     mkTyped (TExprVar (name, varId, identity)) ty

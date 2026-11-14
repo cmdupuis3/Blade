@@ -2061,7 +2061,12 @@ let private generatedNameSuffix (suffix: string) : bool =
 let installUserNameRenames (bindingNames: string list) : unit =
     let names =
         bindingNames
-        |> List.filter (fun n -> not (n.StartsWith "_"))   // `__` internals, `_(` tuple temps
+        // `__` internals and `_(` tuple temps stay out; a SINGLE-underscore
+        // user name (`_g`, `_a`) is an ordinary binding whose generated names
+        // (`_g__win`, `_a_extents`) a user binding may spell too (round 4 wave
+        // 9, lane A, A4, Codex 0219820a: `let _g__sga_n = 42` beside a grouping
+        // `_g` redeclared the generated count)
+        |> List.filter (fun n -> not (n.StartsWith "__") && not (n.StartsWith "_("))
         |> List.map baseCppName
         |> Set.ofList
     let atRisk =

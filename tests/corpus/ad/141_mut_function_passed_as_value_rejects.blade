@@ -1,0 +1,21 @@
+// TEST: A Function With A Mut Parameter Passed As A Value Is Refused (rejects)
+// ============================================================================
+// Gap G250 (1), round 4 wave 9 (lane C, C2; Codex design review 5f64f352,
+// option (a)): a function type carries no `mut`, so handing `bump` (a mut
+// parameter) to a function-typed parameter ERASED its write permission: the
+// call `h(b, b)` inside `apply` was never judged, and the interpreter printed
+// r = 18.0 and wrote the IMMUTABLE xs (the direct `bump(xs, xs)` is BL4005).
+// A callable with a mut parameter may appear only as a direct call head, a
+// `let` alias of one, or a judged map kernel: anywhere else BL4005, every lane.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+function apply(h: (A, A) -> Float64, b: A) -> Float64 = h(b, b)
+let xs: A = [2.0, 3.0]
+let r = apply(bump, xs)
+// ERROR: BL4005
+// ERROR-CONTAINS: has a mut parameter and is used here as a VALUE
+// REJECT-AT: lower

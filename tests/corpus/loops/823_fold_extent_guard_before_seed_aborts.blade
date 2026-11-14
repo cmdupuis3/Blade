@@ -1,0 +1,14 @@
+// TEST: The Fold Extent Guard Runs Before The Seed (aborts)
+// Gap G249 (round 4 wave 9 lane d): a and b are dense arrays whose extents (5 and 3) are known only at run
+// time, so the checker cannot refuse their co-iteration; the walk is bounded by the first operand.
+// The guard belongs to the operand stage (G207: the operands, then the seed), so the mismatch is
+// reported ahead of the seed 7 % z (integer modulo by zero) in every lane.
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let z: Int64 = 0
+let s = reduce(method_for(zip(a, b)) <@> lambda(p, q) -> p - q, (+), Float64(7 % z))

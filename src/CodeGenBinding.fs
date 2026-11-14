@@ -2169,10 +2169,20 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // wrappers into the kernel body; for compose-apply that
         // doesn't apply (no single kernel slot), so we use the
         // stage-on-stage form instead.
+        // G242, round 4 wave 9: every STAGE kernel runs when the composition
+        // is applied, so a deferred binding a stage kernel captures is forced
+        // here, before the traversal, in stage order -- the capture prelude
+        // of the canonical arm above (it used to reach the stage's lifted
+        // lambda as an undeclared name, BL9002)
+        let (capForceCode, ctx) =
+            composeStagesForcedAtPrelude ctx info.Composition
+            |> List.collect (collectDeferredKernelCaptures ctx)
+            |> List.distinct
+            |> forceDeferredBindingIds ctx builder ($"{name}__cap")
         if functorWrappers.IsEmpty then
             let (code, ctx') = genComposeApply ctx name info info.OutputType builder
             let ctx'' = addVarName binding.Id name ctx'
-            (code, ctx'')
+            (capForceCode @ code, ctx'')
         else
             let s1Name = $"{name}__wrap_s1"
             let s1Id = builder.FreshId()
@@ -2188,7 +2198,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let finalInfo = applyFunctorWrappers baseInfo restWrappers
             let code2 = genApplyCombinator ctx1' name finalInfo builder
             let ctx2 = addVarName binding.Id name ctx1'
-            (code1 @ [""] @ code2, ctx2)
+            (capForceCode @ code1 @ [""] @ code2, ctx2)
     
     | IRComposeMeth (left, right) ->
         // @>> : sequential composition -- compute left, feed result to right's kernel
@@ -6736,18 +6746,44 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
             when not (reduceRangeHolders.Value.ContainsKey arr)
                  && ix.IxKind = IxKPlain && ix.Rank = 1
                  && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true)
-                 && (tryEvalIntIR ix.Extent).IsNone
-                 && offset |> Option.forall (fun o -> (tryEvalIntIR o).IsSome)
+                 && ((tryEvalIntIR ix.Extent).IsNone
+                     // G209: a RUN-TIME START (`lo..n`) too -- only a scalar
+                     // PARAMETER of the enclosing function (immutable: caching it
+                     // once equals the interpreter's per-cell read; a start that
+                     // reads mutable state or calls keeps the old route, Codex)
+                     || offset |> Option.exists (fun o -> (tryEvalIntIR o).IsNone))
+                 && offset |> Option.forall (fun o ->
+                        (tryEvalIntIR o).IsSome
+                        || (match o with
+                            // ... never reassigned anywhere (a `__`-prefixed parameter
+                            // escapes the front end's assignment check; Codex)
+                            | IRVar (oid, oty) -> Set.contains oid ctx.ParamIds && (match stripUnits oty with IRTScalar _ -> true | _ -> false)
+                                                  && not (Set.contains oid (reboundVarIdsCell ()).Value)
+                            | _ -> false))
                  && valuesInScope ix.Extent ->
             let rname = $"__range0_r{binding.Id}"
-            let offStr = offset |> Option.bind tryEvalIntIR |> Option.map string |> Option.defaultValue "0"
+            let runtimeOffset = offset |> Option.exists (fun o -> (tryEvalIntIR o).IsNone)
+            let offStr =
+                match offset with
+                | Some o -> (match tryEvalIntIR o with Some n -> string n | None -> exprToCppCtx ctx o)
+                | None -> "0"
             let ext = $"[&]() {{ const int64_t __e = (int64_t)({exprToCppCtx ctx ix.Extent}); return __e < 0 ? (size_t)0 : (size_t)__e; }}()"
             let decl = $"const struct {{ size_t extents[1]; int64_t offset; }} {rname} = {{ {{ {ext} }}, (int64_t)({offStr}) }};"
-            Some (arr, rname, decl)
+            // a run-time start is read per cell from the holder (the map
+            // emitter's rule: the element binding renders its offset without
+            // the scope's names), the start evaluated once, with the extent
+            let (arr', compExpr') =
+                if not runtimeOffset then (arr, compExpr)
+                else
+                    let a2 = IRRange ([ ix ], Some (IRParam ($"{rname}.offset", 0, IRTScalar ETInt64)))
+                    match compExpr with
+                    | IRApplyCombinator info -> (a2, IRApplyCombinator { info with Arrays = [ a2 ] })
+                    | _ -> (arr, compExpr)
+            Some (arr', compExpr', rname, decl)
         | _ -> None
     match holder with
     | None -> genReduceComputeBindingUnheld ctx binding builder compExpr kernelExpr seedExpr
-    | Some (arr, rname, decl) ->
+    | Some (arr, compExpr, rname, decl) ->
         reduceRangeHolders.Value.[arr] <- rname
         try
             let (code, ctx') = genReduceComputeBindingUnheld ctx binding builder compExpr kernelExpr seedExpr
@@ -7089,8 +7125,30 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
             leaves compExpr |> List.collect (function
                 | IRApplyCombinator info -> [ info.Kernel ]
                 | _ -> [])
+        // a JOIN SHARE's kernel (a deferred operand slot of a leg, evaluated
+        // per cell in the joint nest, never materialized): its deferred
+        // captures are forced in the prelude too, after the leg kernels, in
+        // first-use order (Codex diff review of G249: they were never forced
+        // -- an undeclared C++ name). A fold's PRIVATE operand forces its own
+        // captures when it is materialized, so only the join encoding.
+        let shareKernels =
+            match kernelExpr, seedExpr with
+            | IRTuple ks, IRTuple ss when ks.Length = ss.Length && ks.Length >= 2 ->
+                leaves compExpr
+                |> List.collect (function
+                    | IRApplyCombinator info ->
+                        info.Arrays |> List.choose (function
+                            | IRVar (sid, _) ->
+                                (match Map.tryFind sid ctx.DeferredComputations with
+                                 | Some (IRApplyCombinator di) -> Some (sid, di.Kernel)
+                                 | _ -> None)
+                            | _ -> None)
+                    | _ -> [])
+                |> List.distinctBy fst
+                |> List.map snd
+            | _ -> []
         let foldKernels = match kernelExpr with IRTuple ks -> ks | k -> [ k ]
-        (leafKernels @ foldKernels)
+        (leafKernels @ shareKernels @ foldKernels)
         |> List.collect (collectDeferredKernelCaptures ctx)
         |> List.distinct
         // G214 (the user decision of 2026-11-13, formalism 10.2): a kernel
@@ -7142,7 +7200,13 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
     let seedReadsSpine =
         collectDeferredPositionalReads ctx seedExpr |> List.exists (fun id -> List.contains id spineIds)
     let (capForceLines, ctx) = deferredCaptureIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__cap")
-    let spineCaptured = seedReadsSpine || spineIds |> List.exists (fun id -> not (Map.containsKey id ctx.DeferredComputations))
+    // a KEPT SPINE NAME (G235 (a), TypedAst.markKeptSpine) already stored
+    // on entry (an earlier statement forced it) folds the stored array too
+    let rootStored =
+        match compExpr with
+        | IRVar (id, _) -> not (Map.containsKey id ctx.DeferredComputations)
+        | _ -> false
+    let spineCaptured = rootStored || seedReadsSpine || spineIds |> List.exists (fun id -> not (Map.containsKey id ctx.DeferredComputations))
     let prelude = prelude @ capForceLines
     let fname = bindingCppName binding
     if spineCaptured then
@@ -7187,6 +7251,29 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
                 let (code, c1) = forceDeferredBindingIds accCtx builder ($"{fname}__seed") [ id ]
                 (c1, accLines @ code, accPriv)
             else
+            // G243 / G214 (Codex design review of G243): this operand's map
+            // KERNEL capturing an EARLIER private operand is a capture, which
+            // forces that binding once under its own name (a snapshot): it was
+            // read as a private temporary only because it had left the
+            // deferred map. Restored and forced here, before this operand is
+            // materialized (the interpreter forces a map's captures when it
+            // forms its kernel); it is no longer private.
+            let capturedEarlier =
+                match Map.tryFind id ctx.DeferredComputations with
+                | Some (IRApplyCombinator di) ->
+                    collectDeferredKernelCaptures ctx di.Kernel |> List.filter (fun pid -> List.contains pid accPriv)
+                | _ -> []
+            let (accCtx, accLines, accPriv) =
+                capturedEarlier |> List.fold (fun (c0: CodeGenContext, ls, priv) pid ->
+                    let c0 =
+                        { c0 with
+                            DeferredComputations = Map.add pid ctx.DeferredComputations.[pid] c0.DeferredComputations
+                            VarNames =
+                                match Map.tryFind pid ctx.VarNames with
+                                | Some n -> Map.add pid n c0.VarNames
+                                | None -> Map.remove pid c0.VarNames }
+                    let (code, c1) = forceDeferredBindingIds c0 builder ($"{fname}__cap") [ pid ]
+                    (c1, ls @ code, priv |> List.filter (fun x -> x <> pid))) (accCtx, accLines, accPriv)
             let ty = inferExprType accCtx.DeferredComputations.[id]
             let tmp = $"{fname}__in{id}"
             let matBinding = { Id = id; Name = tmp; Type = ty; Value = IRCompute (IRVar (id, ty)); IsConst = true; IsMutable = false }
@@ -7194,8 +7281,124 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
             ({ c1 with DeferredComputations = Map.remove id c1.DeferredComputations }, accLines @ code, accPriv @ [ id ])) (ctx, [], [])
     // the remaining cell reads of the seed (not operands): under their own
     // names, after the operands (the seed is evaluated after them)
+    // G249: THE CO-ITERATION EXTENT GUARDS of the fold (BL8011), after the
+    // operands and captures are forced and before the seed (the operands are
+    // the fold's first stage; G207's order) -- so before the first cell,
+    // whatever form the fold takes below (the dot dispatch, Path B, lanes, a
+    // fused tree, a join). Three parts, every one over STORED records only (a
+    // deferred cell is never evaluated here):
+    //   * each leg's own co-iteration (coIterationGuardLines, the map's guard);
+    //   * each SHARE -- a deferred operand slot of a leg, a join share read per
+    //     cell -- its own co-iteration, and the leg slot read through it is
+    //     REPOINTED at the share's leading source array (genReduceJoinCore's
+    //     repoint: the nest takes that level's bound from it);
+    //   * ACROSS the shared traversal: every leg and share walks the joint
+    //     nest the first leg bounds, so each level's extent must equal the
+    //     first leg's (two unary legs of different run-time extents).
+    let guardLines =
+        let rec resolve e =
+            match e with
+            | IRVar (id, _) ->
+                (match Map.tryFind id ctxForced.DeferredComputations with
+                 | Some d -> resolve d
+                 | None -> e)
+            | _ -> e
+        let rec leafInfos e =
+            match resolve e with
+            | IRFusion (l, r) -> leafInfos l @ leafInfos r
+            | IRApplyCombinator info -> [ info ]
+            | _ -> []
+        let ind = indentStr ctxForced
+        let deferredApply (e: IRExpr) =
+            match e with
+            | IRVar (id, _) ->
+                (match Map.tryFind id ctxForced.DeferredComputations with
+                 | Some (IRApplyCombinator di) -> Some (id, di)
+                 | _ -> None)
+            | _ -> None
+        let storedVar (e: IRExpr) =
+            match e with
+            | IRVar (id, _) ->
+                not (Map.containsKey id ctxForced.DeferredComputations)
+                && (match Map.tryFind id ctxForced.VarNames with
+                    | Some n -> not (Map.containsKey n ctxForced.StreamedArrays)
+                    | None -> false)
+            | _ -> false
+        // a deferred slot repointed at its share's leading source array
+        let repointed (info: ApplyInfo) =
+            let arrays =
+                info.Arrays |> List.map (fun a ->
+                    match deferredApply a with
+                    | Some (_, di) -> (match di.Arrays with h :: _ -> h | [] -> a)
+                    | None -> a)
+            let types =
+                info.ArrayTypes |> List.mapi (fun pos t ->
+                    match List.tryItem pos info.Arrays |> Option.bind deferredApply with
+                    | Some (_, di) -> (match di.ArrayTypes with dt :: _ -> dt | [] -> t)
+                    | None -> t)
+            { info with Arrays = arrays; ArrayTypes = types }
+        let leaves = leafInfos compExpr
+        let shares =
+            leaves
+            |> List.collect (fun info -> info.Arrays |> List.choose deferredApply)
+            |> List.fold (fun acc (id, di) -> if acc |> List.exists (fun (i, _) -> i = id) then acc else acc @ [ (id, di) ]) []
+            |> List.map snd
+        let units = (leaves |> List.map repointed) @ (shares |> List.map repointed)
+        let built =
+            units |> List.map (fun info ->
+                let names =
+                    info.Arrays |> List.mapi (fun i arr ->
+                        match arr with
+                        | IRVar (id, _) -> Map.tryFind id ctxForced.VarNames |> Option.defaultValue ($"arr{i}")
+                        | _ -> $"arr{i}")
+                let stored (pos: int) = List.tryItem pos info.Arrays |> Option.map storedVar |> Option.defaultValue false
+                (info, buildLoopNestCodeGen info names "__g249" (IRBuilder()), stored))
+        let own = built |> List.collect (fun (info, cg, stored) -> coIterationGuardLines ctxForced ind info cg.Bindings stored)
+        // the extent of each level as the nest bounds it: a literal, or the
+        // first STORED real element's record; None when neither is known
+        let levelExtents (info: ApplyInfo, cg: LoopNestCodeGen, stored: int -> bool) =
+            cg.Bindings |> List.map (fun b ->
+                match b.FusedRank with
+                | Some _ -> None
+                | None ->
+                let isParam (pos: int) =
+                    match List.tryItem pos info.Arrays with
+                    | Some (IRVar (id, _)) -> Set.contains id ctxForced.ParamIds
+                    | _ -> false
+                match b.Elements |> List.tryFind (fun e -> (match e.Virtual with RealArray -> true | _ -> false)) with
+                | Some e0 when stored e0.ArrayPosition
+                               && (match List.tryItem e0.ArrayPosition info.ArrayTypes with
+                                   | Some at -> at.IndexTypes |> List.forall (fun ix -> match ix with IxDense | IxSymmetryLike -> true | _ -> false)
+                                   | None -> false) ->
+                    let lit =
+                        if isParam e0.ArrayPosition then None
+                        else List.tryItem e0.ArrayPosition info.ArrayTypes |> Option.bind (fun at -> literalExtentOfArray at e0.DimIndex)
+                    Some (lit, $"(int64_t)({e0.ArrayName}.extents[{e0.DimIndex}])", e0.ArrayName)
+                | Some _ -> None
+                | None ->
+                    match tryEvalIntIR b.Extent with
+                    | Some n -> Some (Some n, $"{n}LL", $"{n}")
+                    | None -> None)
+        let cross =
+            match built with
+            | first :: rest when not rest.IsEmpty ->
+                let ext0 = levelExtents first
+                rest |> List.collect (fun u ->
+                    let ext = levelExtents u
+                    if ext.Length <> ext0.Length then []
+                    else
+                        List.zip ext0 ext |> List.mapi (fun k pair -> (k, pair)) |> List.collect (fun (k, pair) ->
+                            match pair with
+                            | Some (l0, t0, n0), Some (l, t, n) when not (l0.IsSome && l0 = l) && t0 <> t ->
+                                [ $"{ind}if ({t} != {t0}) {{"
+                                  $"{ind}    std::cerr << \"Blade runtime: a fold traversal over '{n0}' and '{n}' needs equal extents on level {k}, but they are \" << {t0} << \" and \" << {t} << \" -- the shared walk is bounded by the first leg\" << std::endl;"
+                                  $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
+                                  $"{ind}}}" ]
+                            | _ -> []))
+            | _ -> []
+        own @ cross
     let (seedForceLines, ctxForced) = seedReads |> forceDeferredBindingIds ctxForced builder ($"{fname}__seed")
-    let forceLines = forceLines @ seedForceLines
+    let forceLines = forceLines @ guardLines @ seedForceLines
     if not deferredOperandIds.IsEmpty then
         let nm (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue (string id)
         let named = deferredOperandIds |> List.filter (fun id -> not (List.contains id privateIds))
@@ -7858,7 +8061,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         | _ -> $"arr{i}")
                 let foldCg (info: ApplyInfo) (accName: string) =
                     // S2 routing, same rule as the single-kernel site.
-                    let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) accName builder)
+                    let cg =
+                        routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) accName builder)
                     // G41: a WRITING fold kernel is never reorder-licensed
                     // (foldReorderLicensed), so no Path B plan is made; the
                     // nest's marker names that, not the generic reason.

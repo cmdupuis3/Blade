@@ -1,0 +1,13 @@
+// TEST: Fold Spine Forced By Captured Tuple Projection
+// Gap G235 (a), round 4 wave 9 (Codex design review): p2 = pair[0] is a
+// top-level projection of a wholly deferred tuple, an alias of its member p
+// (formalism 10.2, G111). The fold kernel capture of p2 forces p, so the fold
+// reads the snapshot after the seed writes x: 21.0.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let pair = (p, p)
+let p2 = pair[0]
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(p2)), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0

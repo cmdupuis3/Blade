@@ -152,6 +152,14 @@ and InterpState = {
     /// count: the compiled lanes force its captures at the enclosing
     /// statement, which at module level prints.
     mutable FunctionCallDepth: int
+    /// The PRIVATE operands of the fold being evaluated (gap G243;
+    /// Loops.resolveFusedArraySource), by binding id: a later private operand
+    /// whose map reads an EARLIER one reads its private value -- the C++ lane's
+    /// `<fold>__in<id>` temporary -- so it is neither re-evaluated nor forced
+    /// under its own name (it stays deferred and does not print). Saved and
+    /// cleared per fold. Kernel CAPTURES are unaffected: a capture forces under
+    /// its own name (G214, the user decision of 2026-11-13).
+    mutable PrivateOperandVals: Map<IRId, BladeArray>
 }
 
 /// The header's fixed frame-store size (cpp/blade_runtime.hpp: `Frame stack[64]`).
@@ -196,7 +204,8 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
             | _ -> ()
         d
       ForcedDeferred = HashSet<IRId>()
-      FunctionCallDepth = 0 }
+      FunctionCallDepth = 0
+      PrivateOperandVals = Map.empty }
 
 // Shadow call stack push/pop + panic-time capture, mirroring blade_runtime.hpp.
 // Push at Blade function-body entry, pop on normal exit. On a panic the frames

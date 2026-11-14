@@ -1,0 +1,19 @@
+// TEST: An Unfused Pipeline Stage Forwards Its Deferred Capture
+// ============================================================================
+// Gap G242, round 4 wave 9 (lane C, C3; Codex diff review 5f64f352 round 2):
+// a pipeline whose second stage is a BLOCK-BODIED named function is not
+// fused into one kernel, so it reaches the staged emitter (genComposeApply's
+// two-sweep path). The first stage's capture of the deferred map `delayed`
+// is forced before the traversal, and the stage call forwards it: it used to
+// call the lifted two-argument kernel with one argument (BL9002).
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+function finish(v: Int64) -> Int64 = {
+    let q = v + 1
+    q
+}
+let k = object_for(lambda(v: Int64) -> v + delayed(0)) >>@ object_for(finish)
+let ys = k <@> backing |> compute
+// EXPECT: ys = [7, 9]

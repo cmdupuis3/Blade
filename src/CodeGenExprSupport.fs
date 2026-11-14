@@ -1264,6 +1264,30 @@ let reboundVarIdsCell () : Set<IRId> ref =
         fresh
     else v
 
+/// The PARAMETER ids of the program's source functions (lifted kernel lambdas
+/// excluded: their parameters are cells of the operands they peel). Shape
+/// monomorphization copies one argument's literal extent onto another
+/// parameter, so a parameter's literal extent is not a statement about the
+/// runtime array (the co-iteration guards compare such operands at run time;
+/// prodsum's guard reads this set -- the wave-end review of G249). Installed
+/// by CodeGen's program entries beside reboundVarIds.
+let internal functionParamIdsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+let functionParamIdsCell () : Set<IRId> ref =
+    let v = functionParamIdsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        functionParamIdsStorage.Value <- fresh
+        fresh
+    else v
+
+let computeFunctionParamIds (modul: IRModule) : Set<IRId> =
+    modul.Functions
+    |> List.filter (fun f -> not (f.Name.StartsWith "__lambda"))
+    |> List.collect (fun f -> f.Params |> List.map (fun p -> p.VarId))
+    |> Set.ofList
+
 /// Every binding id some assignment REBINDS: the root of an assignment
 /// target, unless the target lies inside an element of an array (a store into
 /// cells a copied wrapper shares). A struct field write rebinds its root --

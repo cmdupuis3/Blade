@@ -976,6 +976,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         let probe = { ctx with VarNames = currentNames; DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
         let positional = collectDeferredPositionalReads probe value
         let captured = System.Collections.Generic.List<IRId>()
+        let operands = System.Collections.Generic.List<IRId>()
         let seenCallables = System.Collections.Generic.HashSet<IRId>()
         // only a callable the statement APPLIES (a map / fold kernel, a
         // called function, a callable handed to a call): binding a lambda or
@@ -1003,6 +1004,10 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 note info.Kernel
                 (match info.Loop with IRObjectFor oi -> note oi.Kernel | _ -> ())
                 childrenOf e |> List.iter walk
+            // an APPLIED composition runs every stage kernel (gap G242)
+            | IRComposeApply info ->
+                composeStagesForcedAtPrelude probe info.Composition |> List.iter note
+                info.InputArrays |> List.iter walk
             | _ -> childrenOf e |> List.iter walk
         // a statement that only BINDS a callable (`let unused = lambda ..`,
         // flattened into a bare reference here) evaluates none of its
@@ -1010,7 +1015,61 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         (match value with
          | IRVar _ -> ()
          | _ -> walk value)
-        (positional @ List.ofSeq captured) |> List.distinct
+        // A deferred map that is an OPERAND of a MATERIALIZED map -- the
+        // statement's whole value, `method_for(d) <@> k |> compute` (or an
+        // applied composition over d) -- is read by name by the body's map
+        // emitter: forced for THIS statement, before the kernel captures (the
+        // map's own order: inputs, then captures). Gap G256 / G239 member: the
+        // statement used to read the holder an EARLIER statement had filled (a
+        // stale snapshot after a write of its input) or, with no earlier force,
+        // an undeclared name. A fold or a join over a map of d is NOT this
+        // consumer: fold / join consumers keep their existing prelude
+        // behaviour; the remaining operand / capture order divergence there is
+        // tracked under G239 (Codex diff review 5f64f352 rounds 3-4).
+        let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
+        (match stripC value with
+         | IRApplyCombinator info ->
+             for a in info.Arrays do
+                 match a with
+                 | IRVar (aid, _) when Map.containsKey aid currentDeferred && not (operands.Contains aid) -> operands.Add aid
+                 | _ -> ()
+         | IRComposeApply info ->
+             for a in info.InputArrays do
+                 match a with
+                 | IRVar (aid, _) when Map.containsKey aid currentDeferred && not (operands.Contains aid) -> operands.Add aid
+                 | _ -> ()
+         | _ -> ())
+        // G246: the STRUCTURAL SOURCE of a range index the statement builds --
+        // the keys of a `range<SparseIdx<keys>>`, the mask of a
+        // `range<CompoundIdx<m>>` -- that is a module deferred map is read BY
+        // NAME by the range driver's index build: forced with the captures and
+        // after them (genComputeBinding's G225 order at module level)
+        // ... only of a range that is EVALUATED: an unapplied loop object
+        // (`let unused = method_for(range<SparseIdx<keys>>)`) builds no index
+        // (the walk's boundaries above; Codex diff review)
+        let structural =
+            let acc = System.Collections.Generic.List<IRId>()
+            let noteRange (ixs: IRIndexType list) =
+                for ix in ixs do
+                    match ix.Extent with
+                    | IRSparseKeys (SkRuntime (IRVar (kid, _))) when Map.containsKey kid currentDeferred && not (acc.Contains kid) -> acc.Add kid
+                    | IRCompoundMask (IRVar (mid, _)) when Map.containsKey mid currentDeferred && not (acc.Contains mid) -> acc.Add mid
+                    | _ -> ()
+            let rec scan (e: IRExpr) =
+                match e with
+                | IRObjectFor _ | IRMethodFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ -> ()
+                | IRApplyCombinator info ->
+                    for a in info.Arrays do
+                        match a with
+                        | IRRange (ixs, _) -> noteRange ixs
+                        | _ -> scan a
+                | IRRange (ixs, _) -> noteRange ixs
+                | _ -> childrenOf e |> List.iter scan
+            (match value with
+             | IRVar _ -> ()
+             | _ -> scan value)
+            List.ofSeq acc
+        (List.ofSeq operands @ positional @ List.ofSeq captured @ structural) |> List.distinct
     let emitBodyLet (id: IRId, value: IRExpr) : string list =
         let ids = moduleDeferredReadsOf value
         if List.isEmpty ids then emitBodyLetCore ctx currentDeferred (id, value) else
@@ -2277,7 +2336,10 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         let paramIds = funcDef.Params |> List.map (_.VarId) |> Set.ofList
         let captureIds = funcDef.Captures |> List.map (_.Id) |> Set.ofList
         let bound = Set.unionMany [paramIds; captureIds; funcIds]
-        let spelled = Set.difference (collectVarRefsIR funcDef.Body) bound
+        // G246: a name a TYPE in the body carries (the keys of a
+        // range<SparseIdx<keys>>, a CompoundIdx mask) is read there too
+        let bodyRefs = Set.union (collectVarRefsIR funcDef.Body) (Blade.Optimize.embeddedExtentExprs funcDef.Body |> List.map collectVarRefsIR |> Set.unionMany)
+        let spelled = Set.difference bodyRefs bound
         // Subtract `bound` AFTER the fold, never inside it: a self-recursive
         // lifted callable names itself, and a callee whose captures are all
         // params of THIS function is already satisfied here. Both would
@@ -2411,7 +2473,8 @@ let private computeModuleCaptureHoistIds
             Set.union
                 (f.Params |> List.map (_.VarId) |> Set.ofList)
                 (f.Captures |> List.map (_.Id) |> Set.ofList)
-        collectVarRefsIR f.Body
+        // G246: names carried by the body's types (range keys / masks) too
+        Set.union (collectVarRefsIR f.Body) (Blade.Optimize.embeddedExtentExprs f.Body |> List.map collectVarRefsIR |> Set.unionMany)
         |> Set.toList
         |> List.collect (fun rid ->
             if rid = f.Id then []
@@ -2709,6 +2772,7 @@ let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpoo
     freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
+    freshCell functionParamIdsStorage (computeFunctionParamIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
@@ -2864,6 +2928,7 @@ let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivat
     freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
+    freshCell functionParamIdsStorage (computeFunctionParamIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()

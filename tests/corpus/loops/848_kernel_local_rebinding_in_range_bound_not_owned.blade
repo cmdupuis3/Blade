@@ -1,0 +1,14 @@
+// TEST: A Kernel-Block Rebinding Hidden In A Range Bound Keeps The Block From Owning The Pool
+// Gap G245 (round 4 wave 9 lane d; Codex diff review round 2): `out = x` inside a range bound is a
+// use the ownership audit must see (it repoints out at x, which the block-end free would release):
+// the block does not own out. 1.0 + 3.0 per trip; x is intact afterwards.
+// EXPECT: total = 8.0
+// EXPECT: after = 6.0
+type C = Idx<3>
+let x: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    let n = extents(0..{ out = x; 3 })
+    out(0) + Float64(n)
+}, (+))
+let after = reduce(x, (+))

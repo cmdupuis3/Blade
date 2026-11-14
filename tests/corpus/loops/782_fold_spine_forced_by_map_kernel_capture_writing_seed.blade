@@ -1,0 +1,13 @@
+// TEST: Fold Spine Forced By Map Kernel Capture Writing Seed
+// Gap G235 (a), round 4 wave 9: the fold kernel captures q, whose own KERNEL
+// captures the spine p. Forcing q forces its capture p under its own name, so
+// the fold reads the snapshot of p after the seed writes x (21.0; every lane
+// printed 39.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + p(0)
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: q = [3.0, 4.0, 5.0]
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0

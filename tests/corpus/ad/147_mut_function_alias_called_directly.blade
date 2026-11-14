@@ -1,0 +1,18 @@
+// TEST: A Let Alias Of A Mut-Parameter Function Called Directly
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C, C2): the admitted twin of ad/141 -- a
+// `let` alias of a function with a mut parameter, called directly, is the
+// judged direct call (resolution follows the alias): accepted, every lane.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+let h = bump
+let xs: A = [2.0, 3.0]
+let mut ys: A = [0.0, 0.0]
+let r = h(xs, ys)
+// EXPECT: xs = [2.0, 3.0]
+// EXPECT: ys = [9.0, 0.0]
+// EXPECT: r = 11.0

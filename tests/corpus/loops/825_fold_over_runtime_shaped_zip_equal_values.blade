@@ -1,0 +1,14 @@
+// TEST: Folds Over Run-Time-Shaped Operands Of Equal Extent Pass The Guard
+// Gap G249 (round 4 wave 9 lane d): the passing twin of loops/820 and 822 -- a and c both have 5 cells.
+// EXPECT: s = 35.0
+// EXPECT: t = 0.0
+// EXPECT: u = 10.0
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let c = Float64(0..extents(ca)) |> compute
+let s = reduce(method_for(zip(a, c)) <@> lambda(p, q) -> p * q + 1.0, (+))
+let (t, u) = object_for(<&!>) <@> (reduce(method_for(zip(a, c)) <@> lambda(p, q) -> p - q, (+)), reduce(a, (+)))

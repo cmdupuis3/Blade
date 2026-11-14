@@ -1,0 +1,16 @@
+// TEST: A Bound Loop Object With A Mut Kernel Held In A Tuple Is Refused (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C; wave-end fable review F5): a bound loop
+// object whose kernel has a mut parameter may be applied, never passed on:
+// held in a tuple it is a value use (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function poke(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    y(0)
+}
+let K = object_for(poke)
+let ks = (K, 0)
+// ERROR: BL4005
+// ERROR-CONTAINS: a composition whose stage has a mut parameter
+// REJECT-AT: lower

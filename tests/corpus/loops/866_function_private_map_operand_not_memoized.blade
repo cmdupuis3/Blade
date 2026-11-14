@@ -1,0 +1,16 @@
+// TEST: Function Private Map Operand Not Memoized
+// Gap G257, round 4 wave 9 (Codex diff review round 2; pre-existing): inside
+// a function body the map a takes the deferred module map d as an operand;
+// that evaluation is private (G75) and is never stored under the module name,
+// so the later read d(0) after the write to x evaluates d over the current x:
+// 11 * 100 + 1 = 1101 in every lane (the interpreter memoized it: 1110).
+let mut x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let z = d(1)
+    let a = method_for(d) <@> lambda(v) -> v + 1
+    x(0) = 10
+    a(0) * 100 + d(0)
+}
+let s = f()
+// EXPECT: s = 1101

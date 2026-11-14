@@ -1,0 +1,13 @@
+// TEST: A Kernel-Block Rebinding Literal A Closure Captures Is Not Freed By The Move
+// Gap G245 (round 4 wave 9 lane d; Codex diff review): read_rhs captures rhs, so rhs is not an
+// admitted rebinding literal (its pool would be freed by the copy move while the closure still
+// reads it): the block keeps the rebinding. 6.0 + 1.0 per trip.
+// EXPECT: total = 14.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    let rhs: Array<Float64 like C> = [1.0, 2.0, 3.0]
+    let read_rhs = lambda() -> rhs(0)
+    out = rhs
+    reduce(out, (+)) + read_rhs()
+}, (+))

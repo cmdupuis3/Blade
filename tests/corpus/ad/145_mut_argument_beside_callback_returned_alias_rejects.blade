@@ -1,0 +1,23 @@
+// TEST: A Mut Argument Beside An Array A Callback Returned Is Refused (rejects)
+// ============================================================================
+// Gap G240 / G250, round 4 wave 9 (lane C, C2; Codex design review 5f64f352,
+// probe E): `via(get)` returns whatever its callback returns -- here the
+// module array g itself -- but the storage walk read a call through a
+// function value as returning only its arguments, so `alias` looked fresh and
+// `bump(g, alias)` was accepted. A storage-holding result of a call through a
+// function value (or of a callee whose return summary is unknown) is now
+// UNKNOWN beside a mut argument: refused fail closed (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+let mut g: A = [2.0, 3.0]
+function bump(y: mut A, z: A) -> Float64 = {
+    y(0) = 9.0
+    z(0)
+}
+function get(t: Float64) -> A = g
+function via(cb: Float64 -> A) -> A = cb(1.0)
+let alias = via(get)
+let r = bump(g, alias)
+// ERROR: BL4005
+// ERROR-CONTAINS: could not be traced
+// REJECT-AT: lower

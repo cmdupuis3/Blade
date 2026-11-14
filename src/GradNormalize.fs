@@ -996,7 +996,7 @@ and internal inlineCall (fname: string) (ctx: Ctx) (depth: int)
     let fd = ctx.Decls.[callee]
     checkInlinable fname fd args.Length |> Result.bind (fun () ->
     normalizeBody fname ctx (depth + 1) fd |> Result.bind (fun (calleeStmts, calleeFinal) ->
-        let tag = fresh ctx "__in"
+        let tag = freshTag ctx "__in"
         // Param binding: plain-var arguments bind by RENAMING the callee
         // param to the caller's variable (no let) -- this is what routes
         // array cotangents straight to the caller's d-buffers and avoids

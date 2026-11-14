@@ -1,0 +1,14 @@
+// TEST: A Join Leg Zipping A Share With A Stored Operand Checks The Share Source (aborts)
+// Gap G249 (round 4 wave 9 lane d): a and b are dense arrays whose extents (5 and 3) are known only at run
+// time, so the checker cannot refuse their co-iteration; the walk is bounded by the first operand.
+// The share d is read per cell from its source a, which must have b extent (Codex design review).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let d = method_for(a) <@> lambda(v) -> v + 1.0
+let p = method_for(zip(d, b)) <@> lambda(u, v) -> u - v
+let (s, t) = object_for(<&!>) <@> (reduce(d, (+)), reduce(p, (+)))

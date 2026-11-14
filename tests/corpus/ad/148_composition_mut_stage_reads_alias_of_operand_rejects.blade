@@ -1,0 +1,25 @@
+// TEST: A Composition Whose Mut Stage Reads An Alias Of Its Operand Is Refused (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C, C2; Codex design review 5f64f352, probe
+// D): an applied COMPOSITION runs its first stage on the applied array's
+// rows; `poke` writes its row through a `mut` parameter and reads `view`, an
+// alias of the same m. The application was never judged; it is now judged
+// like a call of its first stage: refused (BL4005, every lane). A
+// composition whose stage reads nothing the operand holds stays accepted
+// (index-types/555).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function identity_m(a: M) -> M = a
+let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+let view = identity_m(m)
+function poke(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    view(0, 0)
+}
+function scalar_id(x: Float64) -> Float64 = x
+let k = object_for(poke) >>@ object_for(scalar_id)
+let r = k <@> m |> compute
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter
+// REJECT-AT: lower

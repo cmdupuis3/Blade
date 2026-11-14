@@ -1,0 +1,11 @@
+// TEST: Fold Seed Writes Then Reads Spine
+// Gap G248 residual, round 4 wave 9 (B2): the seed WRITES x and then reads a
+// cell of the spine p. The spine is forced at the fold operand position,
+// before the seed runs (the G214 chosen rule), so both the seed read and the
+// fold read the snapshot [2, 4, 6]: 12 + 2 = 14.0.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(p, (+), { x(0) = 10.0; p(0) })
+let w = p(0)
+// EXPECT: s = 14.0
+// EXPECT: w = 2.0

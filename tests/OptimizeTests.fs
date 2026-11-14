@@ -11353,6 +11353,9 @@ let private sfStoredExtentControlSrc =
 let private g214Head =
     "let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
     + "let d = method_for(x) <@> lambda(v) -> v * 2.0\n"
+let private g235Head =
+    "let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+    + "let p = method_for(x) <@> lambda(v) -> v * 2.0\n"
 let private wave8DeferredCaptureForceCases () : bool list =
     [ codegenDecisionCase "decision_deferred_capture_force_private_kept"
           (g214Head + "let p = method_for(d) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
@@ -11363,7 +11366,23 @@ let private wave8DeferredCaptureForceCases () : bool list =
           (g214Head + "let p = method_for(d) <@> lambda(v) -> v + Float64(extents(d))\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
           "deferred-capture-force"
           (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "forced once under their own names"))
-          "applied: the kernel captures d, so d is forced once under its own name (G214)" ]
+          "applied: the kernel captures d, so d is forced once under its own name (G214)"
+      // G235 (a), round 4 wave 9: a captured map of the spine forces it, so the
+      // fold keeps the spine NAME and folds its snapshot (the checker record)
+      codegenDecisionCase "decision_deferred_capture_force_kept_spine_name"
+          (g235Head + "let q = method_for(p) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; Float64(0) })\nlet w = p(0)\n")
+          "deferred-capture-force"
+          (fun d -> d.Subject = "p" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "snapshot"))
+          "applied: the captured q forces the spine p, the fold reads its snapshot (G235)"
+      // ... and the twin whose kernel captures nothing reaching p keeps the
+      // fused fresh walk of p's producer (no kept-spine record)
+      (let name = "decision_deferred_capture_force_no_capture_keeps_fused_walk"
+       match codegenDecisionsOf (g235Head + "let s = reduce(p, lambda(a, b) -> a + b, { x(0) = 10.0; Float64(0) })\nlet w = p(0)\n") with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           match ds |> List.tryFind (fun d -> d.Rule = "deferred-capture-force" && d.Subject = "p") with
+           | Some d -> resultLine Fail name ($"kept the spine name with nothing forcing it: {Blade.Effects.Decisions.render d}"); false
+           | None -> resultLine Pass name "no capture reaches p: the fold keeps the fused walk of its producer"; true) ]
 
 let private wave7SiblingFoldCases () : bool list =
     let joinedIn (subject: string -> bool) (ds: Blade.Effects.Decision list) =
@@ -11462,7 +11481,127 @@ let private wave7SiblingFoldCases () : bool list =
            if joinedIn (fun s -> s.Contains "stats") ds then resultLine Pass name "control: an extent read of a COMPUTED d still joins"; true
            else
                let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
-               resultLine Fail name ($"the control did not join: {seen}"); false) ]
+               resultLine Fail name ($"the control did not join: {seen}"); false)
+      // Gap G219 (round 4 wave 9, lane C, C5): a leg of an INLINED helper
+      // whose seed reads extents(y) of the helper's own computed local (a
+      // fresh id after the inline) joins: the region's inlined lets are in
+      // the closed classifier's census (functions/778). The control: the
+      // same seed over a deferred MODULE map stays apart (functions/779).
+      (let name = "decision_sibling_folds_inlined_computed_local_extent_joined"
+       match (try Ok (System.IO.File.ReadAllText "tests/corpus/functions/778_sibling_folds_inlined_computed_local_extent.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail name e; false
+       | Ok src ->
+           match decisionsOf src with
+           | Error e -> resultLine Fail name e; false
+           | Ok ds ->
+               if joinedIn (fun s -> s = "f") ds then resultLine Pass name "an inlined helper's leg reading extents of its own computed local joins (G219)"; true
+               else
+                   let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                   resultLine Fail name ($"the inlined computed-local leg did not join: {seen}"); false)
+      (let name = "decision_sibling_folds_inlined_deferred_module_extent_not_joined"
+       match (try Ok (System.IO.File.ReadAllText "tests/corpus/functions/779_sibling_folds_deferred_module_extent_declines.blade") with ex -> Error ex.Message) with
+       | Error e -> resultLine Fail name e; false
+       | Ok src ->
+           match decisionsOf src with
+           | Error e -> resultLine Fail name e; false
+           | Ok ds ->
+               if joinedIn (fun s -> s = "f") ds then
+                   let seen = ds |> List.filter (fun d -> d.Rule = "sibling-folds") |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                   resultLine Fail name ($"joined over a deferred module extent read: {seen}"); false
+               else resultLine Pass name "control: an inlined leg reading extents of a deferred MODULE map stays apart"; true) ]
+
+/// Round 4 wave 9 (lane A, A4): the fresh class-closure round of
+/// BLADE_SIBLING_FOLDS=top (Codex 0d750baf, gap G107) found four members --
+/// a kernel capturing an ALIAS of a deferred map (corpus sibling-folds/061),
+/// a carrier spelled like a user binding (062), a barrier decline that left
+/// no record (063), and a session memo adopting a carrier whose id shifted.
+let private wave9SiblingFoldTopCases () : bool list =
+    let corpus (f: string) = System.IO.File.ReadAllText(System.IO.Path.Combine("tests", "corpus", "sibling-folds", f))
+    let sf (ds: Blade.Effects.Decision list) = ds |> List.filter (fun d -> d.Rule = "sibling-folds" && d.Subject = "top level")
+    let show (ds: Blade.Effects.Decision list) =
+        match ds |> List.map Blade.Effects.Decisions.render |> String.concat " | " with "" -> "no decisions" | s -> s
+    [ (let name = "decision_sibling_folds_top_deferred_alias_kernel_not_joined"
+       match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> decisionsOf (corpus "061_top_level_deferred_alias_captured_by_kernel.blade")) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if sf ds |> List.exists applied then resultLine Fail name ($"joined over a captured deferred alias: {show (sf ds)}"); false
+           elif (sf ds).IsEmpty then resultLine Fail name "no top-level decline was recorded (the rejected leg must leave a record)"; false
+           else resultLine Pass name ($"not joined, the decline recorded: {show (sf ds)}"); true)
+      (let name = "decision_sibling_folds_top_carrier_name_unique"
+       match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> lower (corpus "062_top_level_carrier_name_beside_user_binding.blade")) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ir ->
+           let names = ir.Modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Name))
+           let dups = names |> List.countBy id |> List.filter (fun (_, k) -> k > 1) |> List.map fst
+           let user = ([ 30 .. 45 ] |> List.map (fun k -> $"__sfj{k}")) @ [ "__sfj33_0" ] |> Set.ofList
+           let carriers = names |> List.filter (fun n -> n.StartsWith "__sfj" && not (user.Contains n))
+           if not dups.IsEmpty then resultLine Fail name ($"""duplicate binding names: {String.concat ", " dups}"""); false
+           elif carriers.IsEmpty then resultLine Fail name ($"""no top-level join carrier (bindings: {String.concat ", " names})"""); false
+           elif not (carriers |> List.exists (fun n -> System.Text.RegularExpressions.Regex.IsMatch(n, @"^__sfj\d+r\d+$"))) then
+               resultLine Fail name ($"""no carrier was renamed past a user spelling (carriers: {String.concat ", " carriers}); the witness no longer covers the carrier ids"""); false
+           else resultLine Pass name ($"""every binding name is unique; the carriers {String.concat ", " carriers} skip the user spellings"""); true)
+      (let name = "decision_sibling_folds_top_barrier_records_decline"
+       match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> decisionsOf (corpus "063_top_level_write_barrier_records_decline.blade")) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           let mine = sf ds
+           if not mine.IsEmpty && mine |> List.forall (fun d -> not (applied d)) then
+               resultLine Pass name ($"the barrier decline is recorded: {show mine}"); true
+           else resultLine Fail name ($"wanted a recorded top-level decline; saw {show mine}"); false)
+      (let name = "sibling_folds_top_session_memo_carrier_not_adopted"
+       let prefix = "type I = Idx<3>\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\nlet a = prodsum(x, x)\nlet b = reduce(x, (+))\n"
+       let run (src: string) (memo: Blade.Interp.Run.SessionMemo) =
+           withGate "BLADE_SIBLING_FOLDS" "top" (fun () ->
+               match Blade.Interp.Repl.lowerSession None false src with
+               | Error e -> Error e
+               | Ok lowered ->
+                   match Blade.Interp.Repl.evalSessionMemo lowered "memo" memo None with
+                   | Blade.Interp.Repl.InterpDone r, m -> Ok (r.Stdout, m)
+                   | Blade.Interp.Repl.InterpFellShort why, _ -> Error why)
+       match run prefix Blade.Interp.Run.emptyMemo with
+       | Error e -> resultLine Fail name e; false
+       | Ok (_, memo) ->
+           match run (prefix + "let c = prodsum(x, x)\n") memo with
+           | Error e -> resultLine Fail name e; false
+           | Ok (out, _) ->
+               if out.Contains "c = 14.0" then
+                   resultLine Pass name "the appended fold reads its own carrier (c = 14.0), not a memoized one"; true
+               else resultLine Fail name ($"wanted c = 14.0; the session printed: {out.Trim()}"); false)
+      // the diff review of the m11 fix (Codex 0d750baf): the alias resolved
+      // to an IMPORTED deferred map, which the open classifier cannot see --
+      // now fail closed (the foreign-id arm of sfTotal)
+      (let name = "decision_sibling_folds_top_imported_deferred_alias_not_joined"
+       let sources =
+           [ ("Lib", "module Lib\ntype I = Idx<3>\nlet iv: Array<Int64 like I> = [1, 0, 2]\nlet d = method_for(iv) <@> lambda(v) -> Float64(100 / v)\n")
+             ("Main", "module Main\nfrom Lib import I, d\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\nlet y = d\nlet fz: Float64 = 0.0\n"
+                      + "let a = prodsum(x, x)\nlet fail = Int64(floor(fz / fz))\n"
+                      + "let b = reduce(x, lambda(acc, v) -> { let unused = y; acc + v }, 0.0)\n") ]
+       match withGate "BLADE_SIBLING_FOLDS" "top" (fun () -> decisionsOfMulti sources) with
+       | Error e -> resultLine Fail name e; false
+       | Ok ds ->
+           if sf ds |> List.exists applied then resultLine Fail name ($"joined over an imported deferred alias: {show (sf ds)}"); false
+           elif (sf ds).IsEmpty then resultLine Fail name "no top-level decline was recorded (the rejected leg must leave a record)"; false
+           else resultLine Pass name ($"not joined over the IMPORTED deferred alias, the decline recorded: {show (sf ds)}"); true)
+      // BLADE_COMPUTE_ELIDE=chain (the wave-9 class-closure round, Codex
+      // a8651902): a module holding a CUDA kernel is skipped, and each
+      // candidate chain now records why; the CUDA-free twin applies
+      (let name = "decision_compute_elision_chain_cuda_module_records_decline"
+       let chainSrc =
+           "type I = Idx<3>\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+           + "let p3 = method_for(x) <@> lambda(v) -> v * 2.0\n"
+           + "let q3 = method_for(p3) <@> lambda(v) -> v * v\n"
+           + "let r3 = reduce(q3, (+), 0.0)\n"
+       let cudaSrc = chainSrc + "\nfunction gpu(v: Float64) where cuda -> Float64 = v + 1.0\n"
+       let chainRecords src =
+           withGate "BLADE_COMPUTE_ELIDE" "chain" (fun () -> decisionsOf src)
+           |> Result.map (List.filter (fun d -> d.Rule = "compute-elision" && d.Subject.Contains "q3"))
+       match chainRecords cudaSrc, chainRecords chainSrc with
+       | Error e, _ | _, Error e -> resultLine Fail name e; false
+       | Ok withCuda, Ok plain ->
+           let cudaOk = not withCuda.IsEmpty && withCuda |> List.forall (fun d -> declinedMentioning "holds a CUDA kernel" d)
+           let plainOk = plain |> List.exists applied
+           if cudaOk && plainOk then resultLine Pass name "the CUDA module records the chain decline; the CUDA-free twin applies"; true
+           else resultLine Fail name ($"cuda: {show withCuda}; plain: {show plain}"); false) ]
 
 let private wave6ClassClosureCases () : bool list =
     let topCase =
@@ -13837,6 +13976,7 @@ let runOptimizeTests () =
           yield! decompactRowFoldCases ()
           yield! wave6ClassClosureCases ()
           yield! wave7SiblingFoldCases ()
+          yield! wave9SiblingFoldTopCases ()
           yield! wave8DeferredCaptureForceCases ()
           yield! ceRemainderCases ()
           yield! g98DeferredValueCases ()

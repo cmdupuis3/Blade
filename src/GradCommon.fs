@@ -278,9 +278,49 @@ type internal Ctx = {
     PackMemo: System.Collections.Generic.Dictionary<string * int, Expr>
 }
 
+/// Every identifier the program being synthesized spells (references and
+/// binders, all modules -- NOT the names `fresh` mints: the counters restart per module, so recording them would renumber a second module that spells nothing (Codex 5a8b7b7d)): installed
+/// per program, per flow, by `Grad.fuseProgram` and `Grad.expand`
+/// (`Grad.programIdentifiers`; null = no program installed, the old
+/// numbering). A minted name must never equal one of them, or a
+/// synthesized binding would capture a user binding of the same spelling --
+/// `let __ck4: A = [2.0]` read by a differentiated step was shadowed by the
+/// checkpoint buffer `__ck4` (round 4 wave 9 class-closure review, Codex
+/// continuation 5a8b7b7d: value 15131 full tape, 677 checkpointed).
+/// LAZY: computed on the first `fresh` of the program, so a program that
+/// mints nothing pays nothing.
+let internal mintedTaken : System.Threading.AsyncLocal<Lazy<System.Collections.Generic.HashSet<string>>> =
+    new System.Threading.AsyncLocal<Lazy<System.Collections.Generic.HashSet<string>>>()
+
+/// A fresh synthesized name: `prefix` plus the next counter value, skipping
+/// every value whose spelling the program already uses (hygiene: a name the
+/// user wrote is never minted, so no synthesized binder shadows a user one
+/// and no user binder shadows a synthesized one). A program that uses no
+/// such spelling gets exactly the names it got before (the counter sees the same values).
 let internal fresh (ctx: Ctx) (prefix: string) : string =
+    let taken = match mintedTaken.Value with null -> null | l -> l.Force ()
     ctx.Fresh.Value <- ctx.Fresh.Value + 1
-    $"{prefix}{ctx.Fresh.Value}"
+    if isNull taken then $"{prefix}{ctx.Fresh.Value}"
+    else
+        while taken.Contains $"{prefix}{ctx.Fresh.Value}" do
+            ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        let n = $"{prefix}{ctx.Fresh.Value}"
+        n
+
+/// A fresh TAG that later names extend with `_<suffix>` (the inliner's
+/// `__in<N>_<local>`): like `fresh`, and also skipping every value some
+/// spelled name already extends (`__in5_spare` written by the user keeps the
+/// tag `__in5` from being minted).
+let internal freshTag (ctx: Ctx) (prefix: string) : string =
+    let taken = match mintedTaken.Value with null -> null | l -> l.Force ()
+    if isNull taken then fresh ctx prefix
+    else
+        let clashes (t: string) = taken.Contains t || taken |> Seq.exists (fun n -> n.StartsWith (t + "_"))
+        ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        while clashes $"{prefix}{ctx.Fresh.Value}" do
+            ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        let n = $"{prefix}{ctx.Fresh.Value}"
+        n
 
 /// The VALUES of the visible module bindings (pipeline fusion's environment).
 let internal moduleLetValues (ctx: Ctx) : Map<string, Expr> =

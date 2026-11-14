@@ -1,0 +1,10 @@
+// TEST: A Join Over A One-Level Share Folds Per Cell
+// Gap G244 (round 4 wave 9 lane d): the passing twin of loops/834 -- the share e reads only the
+// stored d, so the join shares it per cell in every lane.
+// EXPECT: s = 301
+// EXPECT: t = 291
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(e) <@> lambda(a) -> a + 1
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(e, (+)))

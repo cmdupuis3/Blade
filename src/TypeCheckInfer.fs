@@ -2886,7 +2886,147 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 || (parallelCalleeWriteError env [] r).IsSome
              | _ -> false)
         | _ -> false
+    // ---- Keep the spine's NAME when a capture forces it (gap G235 (a)) -----
+    // A capture of the fold kernel forces a deferred binding ONCE under its own
+    // name before the traversal (formalism 10.2, G214); when that force reaches
+    // the spine p -- the kernel captures p, an alias of p, a top-level
+    // projection of a wholly deferred tuple holding p, or a map whose operand or
+    // kernel capture reaches p -- the traversal must fold p's SNAPSHOT, not a
+    // fresh walk of p's producer (a seed that writes an input of p runs after
+    // the force: `reduce(p, lambda(a, b) -> a + b + Float64(extents(q)),
+    // { x(0) = 10.0; 0.0 })` with q over p folded the written x). The terminal
+    // then keeps the spine VARIABLE as its child (TypedAst.markKeptSpine, Lowering:
+    // `IRReduceCompute (IRVar p, ..)`), and each lane's fused-terminal prelude
+    // forces leaf then fold kernel captures in order and folds the stored p.
+    // NARROW by design: a mark where p is NOT forced by name would make the
+    // fold force p itself (a new print line), while a missed member keeps the
+    // fresh walk every lane agrees on. Not followed: choices, fallbacks,
+    // guards, tuple values (copies, G213), named function kernels (a function
+    // body reads a module map privately, G75), seed reads (staged, G235).
+    // Module level and top-level blocks only; a rank-1 scalar-element spine
+    // (a rank >= 2 or fusion-tree spine is G233); not a parallel fold kernel.
+    let keepSpineName () : bool =
+        if env.InCallableBody || foldKernelIsParallel () then false else
+        match tArr.Kind with
+        | TExprVar (_, spineVid0, _) ->
+            let blockLocal = blockLocalVids ()
+            let valueOf (name: string) (vid: IRId) : TypedExpr option =
+                match lookupVar name env with
+                | Some info when info.VarId = vid -> info.TypedValue
+                | _ -> None
+            // the spine's alias chain (`reduce(p2, ..)`, `let p2 = p`): one class
+            let rec chain (fuel: int) (name: string) (vid: IRId) (acc: Set<IRId>) =
+                let acc = acc.Add vid
+                if fuel <= 0 || blockLocal.Contains vid then (acc, None) else
+                match valueOf name vid with
+                | Some v ->
+                    (match v.Kind with
+                     | TExprVar (n2, v2, _) -> chain (fuel - 1) n2 v2 acc
+                     | _ -> (acc, Some v))
+                | None -> (acc, None)
+            let spineName = match tArr.Kind with TExprVar (n, _, _) -> n | _ -> ""
+            match chain 64 spineName spineVid0 Set.empty with
+            // the root must BE the map binding: through an alias root
+            // (`reduce(p2, ..)`, `let p2 = p`) the lanes relate the root to the
+            // forced source differently (Codex diff review round 2) -- the
+            // fresh walk every lane agrees on is kept
+            | spineSet, Some _ when spineSet.Count > 1 -> false
+            | spineSet, Some v ->
+                let spineOk =
+                    match v.Kind with
+                    | TExprApply info when not info.IsComposeApply ->
+                        (match env.Subst.Resolve info.OutputType with
+                         | ArrayElem arr ->
+                            (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = 1
+                            && arr.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
+                            && (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                                | IRTScalar _ -> true
+                                | _ -> false)
+                         | _ -> false)
+                    | _ -> false
+                if not spineOk then false else
+                let visited = System.Collections.Generic.HashSet<IRId>()
+                let rec reachesVar (name: string) (vid: IRId) : bool =
+                    if spineSet.Contains vid then true
+                    elif not (visited.Add vid) || blockLocal.Contains vid then false
+                    else
+                        match valueOf name vid with
+                        | Some value -> reachesValue value
+                        | None -> false
+                and reachesValue (value: TypedExpr) : bool =
+                    match value.Kind with
+                    | TExprVar (n, vid, _) -> reachesVar n vid
+                    | TExprApply info when not info.IsComposeApply ->
+                        (info.Arrays |> List.exists (fun a ->
+                            match a.Kind with
+                            | TExprVar (n, vid, _) -> reachesVar n vid
+                            | _ -> false))
+                        || kernelReaches info.Kernel
+                    // a BLOCK-valued binding defers exactly when its final
+                    // value does (IRLift's let chain): judged by that value
+                    | TExprBlock (stmts, Some final)
+                        when stmts |> List.forall (function TStmtLet _ -> true | _ -> false) ->
+                        reachesValue final
+                    // a top-level projection of a WHOLLY deferred tuple is an
+                    // alias of its member (formalism 10.2, gap G111)
+                    | TExprTupleIndex (t, { Kind = TExprLit (LitInt k) }) ->
+                        (match (resolveTypedExprDeep env t).Kind with
+                         | TExprTuple es when int k >= 0 && int k < es.Length
+                                              && es |> List.forall (fun m ->
+                                                     match m.Kind with
+                                                     | TExprVar _ ->
+                                                        (match (resolveTypedExprDeep env m).Kind with
+                                                         | TExprApply mi -> not mi.IsComposeApply
+                                                         | _ -> false)
+                                                     | _ -> false) ->
+                            (match es.[int k].Kind with
+                             | TExprVar (n, vid, _) -> reachesVar n vid
+                             | _ -> false)
+                         | _ -> false)
+                    | _ -> false
+                and kernelReaches (k: TypedExpr) : bool =
+                    // through callable aliases (`let k2 = k`, Codex diff review)
+                    match (resolveTypedExprDeep env k).Kind with
+                    | TExprLambda li -> li.Captures |> List.exists (fun cv -> reachesVar cv.Name cv.VarId)
+                    | _ -> false
+                // G248 residual (round 4 wave 9, B2): the SEED reads a cell of
+                // the spine (or of an alias in its chain) in an UNCONDITIONAL
+                // position -- `{ let t = p(0); x(0) = 10.0; t }` -- which forces
+                // the spine under its own name at the fold's operand position
+                // (the G214 chosen rule), so the fold reads that snapshot. Only
+                // when the fold kernel captures nothing (no capture prelude to
+                // order against the seed force: the C++ statement pre-pass
+                // forces seed reads first, the interpreter the captures first).
+                // Not walked: `if` / `match` arms, the right operand of && / ||,
+                // lambda bodies (a read there is a capture, formed later).
+                let seedReadsSpine () =
+                    let kernelCaptureFree =
+                        match (resolveTypedExprDeep env tKernel).Kind with
+                        | TExprLambda li -> li.Captures.IsEmpty
+                        | TExprSection _ -> true
+                        | _ -> false
+                    // the ROOT itself only (the interpreter's operand-position
+                    // force reads the seed's read ids against the root)
+                    let isSpine (e: TypedExpr) =
+                        match e.Kind with
+                        | TExprVar (_, vid, _) -> vid = spineVid0
+                        | _ -> false
+                    let rec walk (e: TypedExpr) : bool =
+                        match e.Kind with
+                        | TExprIndex (a, _, _) when isSpine a -> true
+                        | TExprApp (f, _) when isSpine f -> true
+                        | TExprLambda _ -> false
+                        | TExprIf (cnd, _, _) -> walk cnd
+                        | TExprMatch (s, _) -> walk s
+                        | TExprBinOp (_, (OpAnd | OpOr), l, _) -> walk l
+                        | _ -> typedExprChildren e |> List.exists walk
+                    kernelCaptureFree
+                    && (match tInitOpt with Some s -> walk s | None -> false)
+                kernelReaches tKernel || seedReadsSpine ()
+            | _ -> false
+        | _ -> false
     if alreadyMaterializedLet () || namedWritingProducer () then None else
+    let keepSpine = keepSpineName ()
     match collect tArr with
     | None -> None
     | Some leavesR when anonymousUnwrap
@@ -3023,6 +3163,17 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
             seed |> Result.map (fun tSeed ->
             let rebuilt =
                 match leaves with
+                | [_] when keepSpine && not anonymousUnwrap ->
+                    // G235 (a): the spine's NAME, marked on the fold node
+                    // itself for Lowering (TypedAst.markKeptSpine)
+                    (match tArr.Kind with
+                     | TExprVar (n, _, _) ->
+                        Blade.Effects.Decisions.record
+                            { Blade.Effects.Rule = "deferred-capture-force"; Version = 1; Span = tArr.Span; Subject = n
+                              Outcome = Blade.Effects.Applied
+                              Evidence = [ $"a capture of the fold kernel or a cell read of the seed forces the spine `{n}` under its own name before the traversal: the fold reads that snapshot, not a fresh walk of its producer (G235, G248)" ] }
+                     | _ -> ())
+                    markKeptSpine tArr
                 | [one] -> one
                 | first :: rest ->
                     rest |> List.fold (fun acc leaf ->

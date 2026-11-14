@@ -1,0 +1,12 @@
+// TEST: An Unapplied Sparse Range Loop Object In A Function Forces No Keys
+// Gap G246 (round 4 wave 9 lane d; Codex diff review): the loop object is never applied, so its
+// keys (which would divide by zero) are never evaluated in any lane.
+// EXPECT: r = 7
+type I = Idx<1>
+let d: Array<Int64 like I> = [0]
+let keys = method_for(d) <@> lambda(a) -> 100 / a
+function f() -> Int64 = {
+    let unused = method_for(range<SparseIdx<keys>>)
+    7
+}
+let r = f()

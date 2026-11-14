@@ -193,8 +193,20 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<I
                 modul.Bindings |> List.tryFind (fun r ->
                     (Blade.Optimize.irTypeExtentExprs r.Type @ (Blade.Optimize.bindingPayload modul r |> List.collect Blade.Optimize.embeddedExtentExprs))
                     |> List.exists refsG)
+            // the arm's emitted names (`__sga<id>_state` / `_first` / `_k`,
+            // `<g>__sga_n`) are not allocated against the user's: a binding or
+            // function spelled with `__sga` (`let __sga14_state = 42`, or
+            // `let _g__sga_n = 42` beside a grouping `_g`, which the user-name
+            // rename skips as `_`-prefixed) redeclared one in main and g++
+            // refused the program (round 4 wave 9, lane A, A4, Codex 0219820a)
+            // -- fail closed: such a module keeps the pool form
+            let sgaSpelled =
+                (modul.Bindings |> List.map (fun x -> x.Name))
+                @ (modul.Functions |> List.collect (fun f -> [ f.Name; f.SourceName ]))
+                |> List.tryFind (fun n -> not (isNull n) && n.Contains "__sga")
             let why =
                 if not enabled then Some "disabled by BLADE_STREAM_GROUP_AGG"
+                elif sgaSpelled.IsSome then Some $"a binding or function of the module is spelled with `__sga` (`{sgaSpelled.Value}`), a name the state form would emit beside it"
                 elif elemEt.IsNone then Some "the streamed values are not a rank-1 scalar variable"
                 elif selection.IsNone then Some "g is printed (no print selection excludes it): its rows are an output"
                 elif Blade.PrintSelection.mayName selection.Value gname then Some "the print selection names g: its rows are an output"

@@ -1056,7 +1056,12 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
 /// params already include the previous round's `__t_*` names -- `tName`
 /// must stay injective against them or the second round's tangent of `x`
 /// would collide with the first round's tangent parameter `__t_x`.
-let internal tangentPrefix = ref "__t_"
+/// PER FLOW (gap G193's FlowCell; round 4 wave 9, lane A, A3 review round 6,
+/// Codex 5a8b7b7d): a process-global ref let two concurrent expansions
+/// overwrite each other's prefix, re-opening the composition capture the
+/// prefix choice avoids (`__t1_x` read by f: (15, 10, 25, 0) for
+/// (21, 14, 35, 0) when another program expanded at the same time).
+let internal tangentPrefix = FlowCell<string>(fun () -> "__t_")
 let internal tName (n: string) = tangentPrefix.Value + n
 
 /// Zero-folding expression builders. Folding `0.0` operands away matters
@@ -2391,12 +2396,87 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
     // A TRUSTED source -- one this pass itself synthesized, in a composition
     // chain -- binds reserved names by construction and skips the gate.
     let reservedName (n: string) =
-        n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
+        n = "__primal" || n = "__seed" || n.StartsWith "__g_" || n.StartsWith "__t_"
     let allNames = (fd.Params |> List.map _.Name) @ boundNames stmts
     onNames allNames
+    // ...and a name the body READS: a MODULE binding spelled like a reserved
+    // name (`let __g_x = 7.0` read by `f(x) = x * __g_x`) was shadowed by the
+    // synthesized cotangent -- (21.0, 0.0) for (21.0, 7.0), every lane (round
+    // 4 wave 9, lane A, A3 diff review, Codex 5a8b7b7d; also `__primal`,
+    // `__t_x` under ad.jvp and the vjp seed `__seed`)
+    let readNames =
+        let rec ofStmts (ss: NStmt list) =
+            ss |> List.fold (fun acc s ->
+                match s with
+                | NLet (_, _, e) -> Set.union acc (allVarsDeep e)
+                | NAssign (l, r) -> Set.union acc (Set.union (allVarsDeep l) (allVarsDeep r))
+                | NFor (_, lo, hi, b) -> Set.unionMany [ acc; allVarsDeep lo; allVarsDeep hi; ofStmts b ]) Set.empty
+        let direct = Set.union (ofStmts stmts) (allVarsDeep finalE)
+        // ...TRANSITIVELY through the user functions it names: a helper body
+        // substituted later (pure(helper(x)) |> compute, kernelCallBody)
+        // carries its own reads past this gate (Codex 5a8b7b7d round 4:
+        // helper(p) = p * __g_x gave (21.0, 0.0) for (21.0, 7.0))
+        let rec close (seen: Set<string>) (frontier: string list) (acc: Set<string>) =
+            match frontier with
+            | [] -> acc
+            | n :: rest when seen.Contains n -> close seen rest acc
+            | n :: rest ->
+                match Map.tryFind n ctx.Decls with
+                | Some d ->
+                    let rs =
+                        (d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body))
+                    close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
+                | None -> close (seen.Add n) rest acc
+        close Set.empty (Set.toList direct) direct
+    // the SURFACE body's reads (before any expansion binds plumbing), closed
+    // over the user functions it names the same way
+    let surfaceReads =
+        let direct = fd.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep fd.Body)
+        let rec close (seen: Set<string>) (frontier: string list) (acc: Set<string>) =
+            match frontier with
+            | [] -> acc
+            | n :: rest when seen.Contains n -> close seen rest acc
+            | n :: rest ->
+                match Map.tryFind n ctx.Decls with
+                | Some d ->
+                    let rs = d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body)
+                    close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
+                | None -> close (seen.Add n) rest acc
+        close Set.empty (Set.toList direct) direct
+    // the sort expansion's deterministic plumbing (__sx_<s>, __sp_<s>,
+    // __si_<s>, __spk; GradExpand.expandSort) shadowed a MODULE binding of
+    // that spelling the body reads (let __sp_s = [7.0, 9.0] read beside
+    // sort(a, ..) bound to s: jvp (1.0, 5.0) for (7.0, 35.0), Codex 5a8b7b7d
+    // round 4): a read of such a spelling in the SURFACE body (or a helper it
+    // names) is refused -- the plumbing exists only after the expansion
+    let plumbingName (n: string) =
+        n = "__spk" || n.StartsWith "__sx_" || n.StartsWith "__sp_" || n.StartsWith "__si_"
     match (if skipReservedGate then None else allNames |> List.tryFind reservedName) with
     | Some n ->
-        err fname $"binding or parameter '{n}' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it"
+        err fname $"binding or parameter '{n}' collides with a reserved AD name (`__g_*`, `__t_*`, `__primal` and `__seed` are synthesized by the transform and would shadow it); rename it"
+    | None ->
+    match (if skipReservedGate then None else readNames |> Seq.tryFind reservedName) with
+    | Some n ->
+        err fname $"the function reads '{n}', a name spelled like a reserved AD name (`__g_*`, `__t_*`, `__primal` and `__seed` are synthesized by the transform and would shadow it); rename the binding"
+    | None ->
+    match (if skipReservedGate then None else surfaceReads |> Seq.tryFind plumbingName) with
+    | Some n ->
+        err fname $"the function reads '{n}', a name spelled like the sort expansion's synthesized plumbing (`__sx_*`, `__sp_*`, `__si_*`, `__spk`), which would shadow it; rename the binding"
+    | None ->
+    // ...and a BINDER of that spelling anywhere in the source program: the
+    // expansion REUSES plumbing it finds bound (composition re-enters its own
+    // output), so a user `let __sp_s = sort(indices, ..)` was taken for the
+    // permutation of `s` -- jvp (1.0, 3.0) for (1.0, 5.0) (Codex 5a8b7b7d
+    // round 7). The census is the SOURCE program (Grad.programIdentifiers),
+    // which spells no plumbing unless the user wrote it; a trusted
+    // (composition) source skips the gate
+    let spelledPlumbing =
+        match mintedTaken.Value with
+        | null -> None
+        | l -> l.Force() |> Seq.tryFind plumbingName
+    match (if skipReservedGate then None else spelledPlumbing) with
+    | Some n ->
+        err fname $"the program binds or reads '{n}', a name spelled like the sort expansion's synthesized plumbing (`__sx_*`, `__sp_*`, `__si_*`, `__spk`), which the expansion would take for its own; rename it"
     | None ->
     // validate every expression in the fragment
     let sweepFinal = sweepFinalOf finalE

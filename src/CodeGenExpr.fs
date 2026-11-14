@@ -120,6 +120,120 @@ let isBindOnceCompactRead (inferTy: IRExpr -> IRType) (e: IRExpr) : bool =
         | _ -> false
     | _ -> false
 
+/// GAP G245 (a): KERNEL-LOCAL ARRAY OWNERSHIP inside an expression block. A
+/// kernel block's materialized let (`let mut out = [0.0, 0.0, 0.0]` inside a
+/// lambda body, rendered as an IIFE by renderLetExpr) used to DROP its
+/// allocation descriptors -- the pool leaked once per evaluation -- and a
+/// REBINDING `out = [1.0, 2.0, 3.0]` (lifted to `let t = [..]; out = t`)
+/// repointed the wrapper, leaking the old pool too. When the let's every use
+/// is IN PLACE (a full element read or write, an extent, a fold / prodsum
+/// operand) or a whole-array assignment of an ADMITTED fresh literal (same
+/// shape, read once, by that assignment), and the block's value holds no
+/// storage, nothing can hold the pool after the block: the rebinding copies
+/// the literal's cells into the pool the let owns and frees the literal (no
+/// view or alias of the old storage exists to tell a copy from a rebinding,
+/// the G227 decision), and the block frees the pool at its end. Every other
+/// shape keeps the leak (gap G245's remainder). The map: an admitted literal
+/// R -> its target T and the cell count; the frees of R, recorded when R's own
+/// let materializes.
+let private kernelMovesStorage = System.Threading.AsyncLocal<Map<IRId, IRId * int64>>()
+let private kernelMoves () : Map<IRId, IRId * int64> =
+    let v = kernelMovesStorage.Value
+    if isNull (box v) then Map.empty else v
+let private kernelMoveFreesStorage = System.Threading.AsyncLocal<Map<IRId, string list>>()
+let private kernelMoveFrees () : Map<IRId, string list> =
+    let v = kernelMoveFreesStorage.Value
+    if isNull (box v) then Map.empty else v
+
+/// The free statements of a block-local materialization (the descriptors
+/// registerMaterializedAllocs turns into scope-exit frees); None for a kind
+/// this path does not free.
+let private materializedFreeLines (m: MaterializedAlloc) : string list option =
+    match m with
+    | MatPool (n, elem, rank, symm, None, ownedExtents) ->
+        Some ([ $"deallocate<typename promote<{elem}, {rank}>::type, {symm}>({n}.data, {n}.extents);" ]
+              @ (match ownedExtents with Some ex -> [ $"delete[] {ex};" ] | None -> []))
+    | MatRawData (n, owned) ->
+        Some ([ $"delete[] {n}.data;" ] @ (match owned with Some ex -> [ $"delete[] {ex};" ] | None -> []))
+    | _ -> None
+
+/// The static cell count of a dense plain array literal (rank 1 or 2).
+let private literalCells (value: IRExpr) : (int * int64) option =
+    match value with
+    | IRArrayLit (_, at) when at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+                              && (at.IndexTypes.Length = 1 || at.IndexTypes.Length = 2) ->
+        let exts = at.IndexTypes |> List.map (fun ix -> Blade.IRPrint.tryEvalIntIR ix.Extent)
+        if exts |> List.forall Option.isSome then Some (exts.Length, exts |> List.fold (fun acc e -> acc * e.Value) 1L)
+        else None
+    | _ -> None
+
+/// G245 (a): the admission of a kernel-block let `id = value` in `body` (see
+/// kernelMovesStorage): Some (the admitted rebinding literals) when every use of
+/// `id` is in place or an admitted rebinding, the value is a dense plain array
+/// literal and the block's value holds no storage.
+let private kernelOwnedLet (id: IRId) (value: IRExpr) (body: IRExpr) : IRId list option =
+    match literalCells value with
+    | None -> None
+    | Some (rank, cells) ->
+    let bodyNoStorage =
+        not (isUnitExpr body)
+        && (try Blade.Optimize.holdsNoStorage (inferExprType body) with _ -> false)
+    if not bodyNoStorage then None
+    else
+    // candidate rebinding literals: lets in the body, same rank and cells
+    let candidates = System.Collections.Generic.HashSet<IRId>()
+    iterIRExpr (fun n ->
+        match n with
+        | IRLet (r, rv, _) when (match literalCells rv with Some (rk, c) -> rk = rank && c = cells | None -> false) ->
+            candidates.Add r |> ignore
+        | _ -> ()) body
+    let refCount = System.Collections.Generic.Dictionary<IRId, int>()
+    // every name a callable the block names CAPTURES (a closure may read a
+    // literal after the move freed it, Codex diff review) and every name a
+    // TYPE in the block carries counts as a reference too
+    let captured = System.Collections.Generic.HashSet<IRId>()
+    for root in body :: Blade.Optimize.embeddedExtentExprs body do
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (v, _) ->
+                refCount.[v] <- (match refCount.TryGetValue v with | true, k -> k + 1 | _ -> 1)
+                (match resolveCallable n with
+                 | Some c -> for cap in c.Captures do captured.Add cap.Id |> ignore
+                 | None -> ())
+            | _ -> ()) root
+    if captured.Contains id then None else
+    let admitted = System.Collections.Generic.HashSet<IRId>()
+    let mutable ok = true
+    let isId (e: IRExpr) = match e with IRVar (v, _) -> v = id | _ -> false
+    let rec walk (e: IRExpr) =
+        match e with
+        | IRVar (v, _) when v = id -> ok <- false
+        | IRVar (v, _) ->
+            // a callable that captures the let could hold it
+            (match resolveCallable e with
+             | Some c when c.Captures |> List.exists (fun cap -> cap.Id = id) -> ok <- false
+             | _ -> ())
+        | IRAssign (LVVar t, IRVar (r, _)) when t = id ->
+            if candidates.Contains r && not (captured.Contains r)
+               && (match refCount.TryGetValue r with | true, 1 -> true | _ -> false) then admitted.Add r |> ignore
+            else ok <- false
+        | IRAssign (LVVar t, _) when t = id -> ok <- false
+        | IRAssign (LVIndex (b, idxs), v) when isId b -> List.iter walk idxs; walk v
+        | IRIndex (b, idxs, _) when isId b ->
+            (match stripUnits (inferExprType e) with
+             | IRTScalar _ -> List.iter walk idxs
+             | _ -> ok <- false)
+        | IRExtent (b, _) when isId b -> ()
+        | IRReduce (a, k, i) when isId a -> walk k; Option.iter walk i
+        | IRProdSum args when args |> List.exists isId -> args |> List.filter (isId >> not) |> List.iter walk
+        | ExprShape (kids, _) -> List.iter walk kids
+    walk body
+    // the uses hidden in a TYPE the block carries (a range bound `0..{ out = x; 3 }`)
+    // are uses too: a rebinding there would make the end free release borrowed
+    // storage (Codex diff review round 2)
+    for x in Blade.Optimize.embeddedExtentExprs body do walk x
+    if ok then Some (List.ofSeq admitted) else None
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -407,170 +521,206 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // (and leaked) on every access. Bind it once and free it.
         bindInlineGathers subst names false args (fun args' -> exprToCppCore subst names (IRProdSum args'))
     | IRProdSum args ->
-        // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
-        // rendered as an IIFE so it composes in any expression position --
-        // most importantly inside method_for kernels, where the moment
-        // formers' fiber kernels land. Bound comes from the first operand
-        // (TypeCheck rejects provably mismatched static extents), through the
-        // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
-        // gives GCC its trip count instead of an opaque pointer load.
-        let argStrs = args |> List.map (exprToCppCore subst names)
-        let headTy = inferExprType (List.head args)
-        let elemStr =
-            match headTy with
-            | ArrayElem at -> elemTypeToCpp at.ElemType
-            | t -> elemTypeToCpp t
-        let product = argStrs |> List.map (fun a -> $"{a}[__pt]") |> String.concat " * "
-        // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
-        // its length inline as `.len` and has no `.extents` at all -- the same
-        // rule mask / reduce / extents already apply. Reached by the grouped
-        // co-iteration `method_for(zip(ga, gb)) <@> lambda(ra, rb) ->
-        // prodsum(ra, rb)`, where every operand is such a row.
-        let prodSumBound (ty: IRType) (nameStr: string) =
-            match ty with
-            | ArrayElem a when isRaggedRowType a -> $"{nameStr}.len"
-            | _ -> literalOrRuntimeExtent ty nameStr 0
-        let serialBound = prodSumBound headTy (List.head argStrs)
-        let serialForm =
-            $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
-        if not (fpReassocEnabled ()) then
-            recordFoldForm "" "serial (repro)" "prodsum"
-            serialForm
-        else
-            // The default build (BLADE_FP_REPRO unset): the same summation,
-            // reassociated. `prodsum`'s summation IS a builtin `+`, so the
-            // licence class is the one `foldKernelBuiltinOp` grants outright --
-            // an intrinsic has no where-clause to carry one, and needs none.
-            //
-            // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
-            // an already-parallel nest (the comm-triangular covariance loop),
-            // where a `parallel for` would nest teams. `omp simd` is a SIMD
-            // construct, creates no team, and is legal exactly there.
-            //
-            // Operands are re-spelled ~3K times by the lane form. A plain
-            // identifier (the peeled row / array name that reaches here in
-            // practice) is repeated verbatim, which keeps any BLADE_RESTRICT
-            // qualification on the pointer it names; anything else is bound
-            // once to an `auto&&` alias so a compound operand expression is
-            // evaluated exactly once, as it is today.
-            let isPlainName (s: string) =
+        // G249: THE CO-ITERATION EXTENT GUARD of prodsum (BL8011). The walk
+        // below is bounded by the FIRST operand; an operand whose extent is
+        // known only at run time (a row of a run-time-shaped array, a
+        // `|> compute` over `0..extents(c)`) used to be read past its end.
+        // Every later operand is compared with the first once, before the
+        // first product, unless both extents are the same literal. Plain-name
+        // operands only (the IIFE below re-spells each operand; an operand
+        // EXPRESSION is evaluated once by its own alias there): gap G265.
+        let prodGuard =
+            let isPlainOperand (s: string) =
                 s.Length > 0
                 && (System.Char.IsLetter s.[0] || s.[0] = '_')
                 && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
-            let needAlias = argStrs |> List.exists (isPlainName >> not)
-            let opNames =
-                if needAlias then argStrs |> List.mapi (fun i _ -> $"__pa{i}")
-                else argStrs
-            let aliasDecls =
-                if not needAlias then []
-                else List.map2 (fun n s -> $"auto&& {n} = {s};") opNames argStrs
-            let prodAt (i: string) =
-                opNames |> List.map (fun a -> $"{a}[{i}]") |> String.concat " * "
-            let boundOn = prodSumBound headTy (List.head opNames)
-            // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
-            // admits it (`simdReducibleElem`), the K-lane chains otherwise.
-            //
-            // MEASURED over every shape that reaches this site (ST,
-            // OMP_NUM_THREADS=1, medians over 3 processes x 5 reps, round-robin;
-            // `bench\blade` and `bench\sym` full config, this machine):
-            //
-            //   gemv row fiber, 3001 x 2999, 2 streams
-            //       serial 7.16 ms   8 lanes 7.44 ms (0.96x)   simd 2.76 ms (2.60x)
-            //   comoment2, 201 x 10007, 2 streams
-            //       serial  163 ms   8 lanes 43.6 ms (3.74x)   simd 53.2 ms (3.07x)
-            //   comoment3, 61 x 2003, 3 streams
-            //       serial 59.3 ms   5 lanes 32.9 ms (1.80x)   simd 17.6 ms (3.36x)
-            //
-            // simd is the site's form because it wins the site, not because it
-            // wins everywhere: comoment2 genuinely prefers the lanes by 1.22x,
-            // and that is given up on purpose. What buys it back is that the
-            // lanes are worth NOTHING at the gemv fiber (0.96x -- the SLP
-            // permute storm documented in `genReduceComputeBinding`) and only
-            // half as much at three streams, so across the site simd is 2.99x
-            // geometric mean against the lanes' 1.86x, and it never regresses.
-            //
-            // NOTE the two 2-stream shapes DISAGREE (gemv wants simd, comoment2
-            // wants lanes), which is what rules out splitting this site by
-            // operand count: the stream count does not predict the winner, so a
-            // per-arity rule here would be a fit to two points, not a principle.
-            // `laneCountForStreams` still governs the fallback arm below (and
-            // Path B's chunked fold), which is why the arity-aware count
-            // survives the change.
-            // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
-            // G26). The simd form below hands GCC ONE accumulator, which it
-            // vectorizes to one ymm and never interleaves, so the loop-carried
-            // add caps the fold at 1.33 lanes/cycle however many FMA units sit
-            // idle. blade_fold_lanes.hpp spells the fold with K independent
-            // vector accumulators in a FIXED, documented tree (the raw-bit
-            // test `blade test fold-lanes` pins it against a scalar model), one
-            // load per element for a self-dot (`prodsum(row, row)`: the two
-            // operand spellings are textually one array). Admitted: 1..3
-            // operands, each a plain rank-1 array (dense or a ragged row --
-            // both carry `.data`; compound / sparse keep their own reads) over
-            // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
-            let vecForm =
-                if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
-                else
-                    let plainRank1 (ty: IRType) =
-                        match ty with
-                        | ArrayElem at ->
-                            arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
-                            && elemTypeToCpp at.ElemType = elemStr
-                        | _ -> false
-                    if not (args |> List.forall (inferExprType >> plainRank1)) then None
-                    else foldVecKind argStrs
-            match vecForm with
-            | Some (kind, ops) ->
-                let k = foldVecLanes kind
-                (foldLanesUsedCell ()).Value <- true
-                recordFoldForm "" (foldVecLabel kind k) "prodsum"
-                // A compound operand expression is bound once (evaluated exactly
-                // once, as every arm here does); a plain name is used as is.
-                let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
-                let vecAliases =
+            let strs = args |> List.map (exprToCppCore subst names)
+            if args.Length < 2 || not (strs |> List.forall isPlainOperand) then ""
+            else
+            let boundOf (e: IRExpr) (s: string) =
+                match inferExprType e with
+                | ArrayElem a when isRaggedRowType a -> (None, $"{s}.len")
+                | ArrayElem a when arrayRank a >= 1 && not (isCompoundArrayType a) && not (isSparseArrayType a) ->
+                    (literalExtentOfArray a 0, $"{s}.extents[0]")
+                | _ -> (None, "")
+            // a FUNCTION PARAMETER's literal extent is not trusted (shape
+            // monomorphization copies one argument's extent onto another, the
+            // co-iteration guards' rule; wave-end review of G249)
+            let isParam (e: IRExpr) = match e with IRVar (id, _) -> Set.contains id (functionParamIdsCell ()).Value | _ -> false
+            let bounds = List.map2 (fun e s -> let (l, b) = boundOf e s in ((if isParam e then None else l), b)) args strs
+            let (lit0, b0) = List.head bounds
+            if b0 = "" then "" else
+            bounds |> List.tail |> List.choose (fun (lit, b) ->
+                if b = "" || b = b0 || (lit.IsSome && lit = lit0) then None
+                else Some $"if ((int64_t)({b}) != (int64_t)({b0})) blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});")
+            |> String.concat " "
+        let rendered =
+            // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
+            // rendered as an IIFE so it composes in any expression position --
+            // most importantly inside method_for kernels, where the moment
+            // formers' fiber kernels land. Bound comes from the first operand
+            // (TypeCheck rejects provably mismatched static extents), through the
+            // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
+            // gives GCC its trip count instead of an opaque pointer load.
+            let argStrs = args |> List.map (exprToCppCore subst names)
+            let headTy = inferExprType (List.head args)
+            let elemStr =
+                match headTy with
+                | ArrayElem at -> elemTypeToCpp at.ElemType
+                | t -> elemTypeToCpp t
+            let product = argStrs |> List.map (fun a -> $"{a}[__pt]") |> String.concat " * "
+            // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
+            // its length inline as `.len` and has no `.extents` at all -- the same
+            // rule mask / reduce / extents already apply. Reached by the grouped
+            // co-iteration `method_for(zip(ga, gb)) <@> lambda(ra, rb) ->
+            // prodsum(ra, rb)`, where every operand is such a row.
+            let prodSumBound (ty: IRType) (nameStr: string) =
+                match ty with
+                | ArrayElem a when isRaggedRowType a -> $"{nameStr}.len"
+                | _ -> literalOrRuntimeExtent ty nameStr 0
+            let serialBound = prodSumBound headTy (List.head argStrs)
+            let serialForm =
+                $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
+            if not (fpReassocEnabled ()) then
+                recordFoldForm "" "serial (repro)" "prodsum"
+                serialForm
+            else
+                // The default build (BLADE_FP_REPRO unset): the same summation,
+                // reassociated. `prodsum`'s summation IS a builtin `+`, so the
+                // licence class is the one `foldKernelBuiltinOp` grants outright --
+                // an intrinsic has no where-clause to carry one, and needs none.
+                //
+                // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
+                // an already-parallel nest (the comm-triangular covariance loop),
+                // where a `parallel for` would nest teams. `omp simd` is a SIMD
+                // construct, creates no team, and is legal exactly there.
+                //
+                // Operands are re-spelled ~3K times by the lane form. A plain
+                // identifier (the peeled row / array name that reaches here in
+                // practice) is repeated verbatim, which keeps any BLADE_RESTRICT
+                // qualification on the pointer it names; anything else is bound
+                // once to an `auto&&` alias so a compound operand expression is
+                // evaluated exactly once, as it is today.
+                let isPlainName (s: string) =
+                    s.Length > 0
+                    && (System.Char.IsLetter s.[0] || s.[0] = '_')
+                    && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+                let needAlias = argStrs |> List.exists (isPlainName >> not)
+                let opNames =
+                    if needAlias then argStrs |> List.mapi (fun i _ -> $"__pa{i}")
+                    else argStrs
+                let aliasDecls =
                     if not needAlias then []
-                    else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
-                let call =
-                    foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
-                        (prodSumBound headTy (List.head vecNames))
-                if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
-                else call
-            | None ->
-            if simdReducibleElem elemStr then
-                recordFoldForm "" "simd-reduction" "prodsum"
-                let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
+                    else List.map2 (fun n s -> $"auto&& {n} = {s};") opNames argStrs
+                let prodAt (i: string) =
+                    opNames |> List.map (fun a -> $"{a}[{i}]") |> String.concat " * "
+                let boundOn = prodSumBound headTy (List.head opNames)
+                // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
+                // admits it (`simdReducibleElem`), the K-lane chains otherwise.
+                //
+                // MEASURED over every shape that reaches this site (ST,
+                // OMP_NUM_THREADS=1, medians over 3 processes x 5 reps, round-robin;
+                // `bench\blade` and `bench\sym` full config, this machine):
+                //
+                //   gemv row fiber, 3001 x 2999, 2 streams
+                //       serial 7.16 ms   8 lanes 7.44 ms (0.96x)   simd 2.76 ms (2.60x)
+                //   comoment2, 201 x 10007, 2 streams
+                //       serial  163 ms   8 lanes 43.6 ms (3.74x)   simd 53.2 ms (3.07x)
+                //   comoment3, 61 x 2003, 3 streams
+                //       serial 59.3 ms   5 lanes 32.9 ms (1.80x)   simd 17.6 ms (3.36x)
+                //
+                // simd is the site's form because it wins the site, not because it
+                // wins everywhere: comoment2 genuinely prefers the lanes by 1.22x,
+                // and that is given up on purpose. What buys it back is that the
+                // lanes are worth NOTHING at the gemv fiber (0.96x -- the SLP
+                // permute storm documented in `genReduceComputeBinding`) and only
+                // half as much at three streams, so across the site simd is 2.99x
+                // geometric mean against the lanes' 1.86x, and it never regresses.
+                //
+                // NOTE the two 2-stream shapes DISAGREE (gemv wants simd, comoment2
+                // wants lanes), which is what rules out splitting this site by
+                // operand count: the stream count does not predict the winner, so a
+                // per-arity rule here would be a fit to two points, not a principle.
+                // `laneCountForStreams` still governs the fallback arm below (and
+                // Path B's chunked fold), which is why the arity-aware count
+                // survives the change.
+                // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
+                // G26). The simd form below hands GCC ONE accumulator, which it
+                // vectorizes to one ymm and never interleaves, so the loop-carried
+                // add caps the fold at 1.33 lanes/cycle however many FMA units sit
+                // idle. blade_fold_lanes.hpp spells the fold with K independent
+                // vector accumulators in a FIXED, documented tree (the raw-bit
+                // test `blade test fold-lanes` pins it against a scalar model), one
+                // load per element for a self-dot (`prodsum(row, row)`: the two
+                // operand spellings are textually one array). Admitted: 1..3
+                // operands, each a plain rank-1 array (dense or a ragged row --
+                // both carry `.data`; compound / sparse keep their own reads) over
+                // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
+                let vecForm =
+                    if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
+                    else
+                        let plainRank1 (ty: IRType) =
+                            match ty with
+                            | ArrayElem at ->
+                                arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
+                                && elemTypeToCpp at.ElemType = elemStr
+                            | _ -> false
+                        if not (args |> List.forall (inferExprType >> plainRank1)) then None
+                        else foldVecKind argStrs
+                match vecForm with
+                | Some (kind, ops) ->
+                    let k = foldVecLanes kind
+                    (foldLanesUsedCell ()).Value <- true
+                    recordFoldForm "" (foldVecLabel kind k) "prodsum"
+                    // A compound operand expression is bound once (evaluated exactly
+                    // once, as every arm here does); a plain name is used as is.
+                    let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
+                    let vecAliases =
+                        if not needAlias then []
+                        else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
+                    let call =
+                        foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
+                            (prodSumBound headTy (List.head vecNames))
+                    if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
+                    else call
+                | None ->
+                if simdReducibleElem elemStr then
+                    recordFoldForm "" "simd-reduction" "prodsum"
+                    let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
+                    let body =
+                        aliasDecls
+                        @ [ $"const size_t __pn = {boundOn};"
+                            $"{elemStr} __ps = 0;" ]
+                        @ simdStmts
+                        @ [ "return __ps;" ]
+                    $$"""[&]() { {{(String.concat " " body)}} }()"""
+                else
+                // ARITY-AWARE lane count. One lane iteration of an L-operand
+                // prodsum keeps L loaded values plus its accumulator live, so the
+                // register budget the 8 lanes were measured against is spent L
+                // times over: 8 lanes on the THREE-operand form (the comoment3
+                // fiber kernel) measured 2.2-2.7x SLOWER than the serial chain
+                // while the same 8 lanes helped the two-operand form. The budget
+                // rule in `laneCountForStreams` is what reconciles those two
+                // measurements; the operand count IS the stream count here.
+                let kLanes = laneCountForStreams (List.length argStrs)
+                recordFoldForm "" $"K-lanes({kLanes})" "prodsum"
+                let (laneStmts, resultLane) =
+                    fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
+                        (fun acc rhs -> $"{acc} += {rhs};")
+                let shortFallback =
+                    // Below K elements there is nothing to interleave, so this is
+                    // the serial chain verbatim -- same seed (the additive
+                    // identity), same ascending order, hence the same double.
+                    $"""if (__pn < (size_t){kLanes}) {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) {{ __ps += {(prodAt "__pt")}; }} return __ps; }}"""
                 let body =
                     aliasDecls
-                    @ [ $"const size_t __pn = {boundOn};"
-                        $"{elemStr} __ps = 0;" ]
-                    @ simdStmts
-                    @ [ "return __ps;" ]
+                    @ [ $"const size_t __pn = {boundOn};"; shortFallback ]
+                    @ laneStmts
+                    @ [ $"return {resultLane};" ]
                 $$"""[&]() { {{(String.concat " " body)}} }()"""
-            else
-            // ARITY-AWARE lane count. One lane iteration of an L-operand
-            // prodsum keeps L loaded values plus its accumulator live, so the
-            // register budget the 8 lanes were measured against is spent L
-            // times over: 8 lanes on the THREE-operand form (the comoment3
-            // fiber kernel) measured 2.2-2.7x SLOWER than the serial chain
-            // while the same 8 lanes helped the two-operand form. The budget
-            // rule in `laneCountForStreams` is what reconciles those two
-            // measurements; the operand count IS the stream count here.
-            let kLanes = laneCountForStreams (List.length argStrs)
-            recordFoldForm "" $"K-lanes({kLanes})" "prodsum"
-            let (laneStmts, resultLane) =
-                fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
-                    (fun acc rhs -> $"{acc} += {rhs};")
-            let shortFallback =
-                // Below K elements there is nothing to interleave, so this is
-                // the serial chain verbatim -- same seed (the additive
-                // identity), same ascending order, hence the same double.
-                $"""if (__pn < (size_t){kLanes}) {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) {{ __ps += {(prodAt "__pt")}; }} return __ps; }}"""
-            let body =
-                aliasDecls
-                @ [ $"const size_t __pn = {boundOn};"; shortFallback ]
-                @ laneStmts
-                @ [ $"return {resultLane};" ]
-            $$"""[&]() { {{(String.concat " " body)}} }()"""
+        if prodGuard = "" then rendered
+        else $"([&]() {{ {prodGuard} return {rendered}; }}())"
     | IRDisplayEmit (head, quoted, dataExpr, metaTail, None) ->
         // One display-frame line on stdout (docs/display-frames.md), answering
         // bool. The head / quoting flag / meta tail are elaboration-time
@@ -792,6 +942,16 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // into the pool the mut has always owned, which leaves the RHS temp
         // iteration-owned (its own scope frees it). `pool_base` is rank-generic
         // -- at rank 1 the leaf arm just returns `&data[0]`, i.e. `data` itself.
+        // G245 (a): an admitted kernel-block rebinding copies the literal's
+        // cells into the pool the block's let owns, then frees the literal
+        match target, value with
+        | LVVar tid, IRVar (rid, _) when (match Map.tryFind rid (kernelMoves ()) with Some (t, _) -> t = tid | None -> false)
+                                        && (kernelMoveFrees ()).ContainsKey rid ->
+            let (_, n) = (kernelMoves ()).[rid]
+            let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
+            let frees = (kernelMoveFrees ()).[rid] |> String.concat " "
+            $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data)); {frees.TrimEnd(';')}"
+        | _ ->
         match copyInPlaceAssign target value with
         | Some (_, rid, n) ->
             let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
@@ -1903,8 +2063,34 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         // Expression position: the materialization is spliced into an IIFE, so
         // there is no statement scope whose exit could carry a free. Drop the
         // descriptors (unchanged pre-existing leak).
-        | Some (preludeStmts, _) ->
+        | Some (preludeStmts, allocs) ->
             let prelude = preludeStmts |> String.concat " "
+            // G245 (a): an admitted rebinding literal records its frees for the
+            // assignment that consumes it (kernelMovesStorage)
+            if (kernelMoves ()).ContainsKey id then
+                (match allocs |> List.map materializedFreeLines with
+                 | [ Some fl ] -> kernelMoveFreesStorage.Value <- Map.add id fl (kernelMoveFrees ())
+                 | _ -> ())
+            // G245 (a): a let this block OWNS is freed at the block's end
+            let owned =
+                match allocs |> List.map materializedFreeLines, kernelOwnedLet id value body with
+                | [ Some fl ], Some admitted
+                    when admitted |> List.forall (fun r -> not ((kernelMoves ()).ContainsKey r)) ->
+                    Some (fl, admitted)
+                | _ -> None
+            match owned with
+            | Some (frees, admitted) ->
+                let cells = match literalCells value with Some (_, c) -> c | None -> 0L
+                let saved = kernelMoves ()
+                let savedFrees = kernelMoveFrees ()
+                kernelMovesStorage.Value <- admitted |> List.fold (fun m r -> Map.add r (id, cells) m) saved
+                let bodyStr =
+                    try exprToCppCore subst names' body
+                    finally
+                        kernelMovesStorage.Value <- saved
+                        kernelMoveFreesStorage.Value <- savedFrees
+                $$"""([&]() { {{prelude}} auto __r{{id}} = {{bodyStr}}; {{(String.concat " " frees)}} return __r{{id}}; }())"""
+            | None ->
             // a statement body (an assignment of the materialized value, gap
             // G227) is RENDERED, never dropped as a no-op
             if isUnitValue body then
@@ -1992,7 +2178,15 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
                 match materializeInlineForm subst names ($"__v{letId}") (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
                 // Inline statement TEXT for an enclosing IIFE -- same
                 // no-scope-exit situation as renderLetExpr above; drop.
-                | Some (prelude, _) -> (prelude |> String.concat " ", "")
+                | Some (prelude, allocs) ->
+                    // G245 (a): an admitted rebinding literal bound in statement
+                    // position records its frees for the assignment that consumes
+                    // it, as renderLetExpr's expression arm does
+                    if (kernelMoves ()).ContainsKey letId then
+                        (match allocs |> List.map materializedFreeLines with
+                         | [ Some fl ] -> kernelMoveFreesStorage.Value <- Map.add letId fl (kernelMoveFrees ())
+                         | _ -> ())
+                    (prelude |> String.concat " ", "")
                 | None ->
                     // G46: an assignable let of an existing dense array copies
                     match kernelLetCopy subst names letId value body with
@@ -2249,6 +2443,39 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
             ],
             [MatRawData (varName, ownedExtents)]
         )
+    // A RANK-2 ARRAY LITERAL inside a kernel block (gap G245 (b): `let mut m:
+    // Array<Float64 like R, C> = [[1.0, 2.0], [3.0, 4.0]]`, and the literal a
+    // rebinding `m = [[..]]` lifts to a let): a dense pool of the literal's
+    // static shape (the IRUninit arm's allocation), filled row by row in
+    // source order -- each cell converted to the element type, as
+    // genArrayLiteral does. A rebinding takes the new pool; a view of the old
+    // storage keeps it (the G227 decision).
+    | IRArrayLit (rows, arrTy) when arrTy.IndexTypes.Length = 2
+                                   && arrTy.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1)
+                                   && not rows.IsEmpty
+                                   && rows |> List.forall (function
+                                        | IRArrayLit (cells, _) -> cells |> List.forall (fun c -> not c.IsIRArrayLit)
+                                        | _ -> false) ->
+        let cellsOf = rows |> List.map (function IRArrayLit (cells, _) -> cells | _ -> [])
+        let nr = cellsOf.Length
+        let nc = cellsOf.Head.Length
+        let exts = arrTy.IndexTypes |> List.map (fun ix -> Blade.IRPrint.tryEvalIntIR ix.Extent)
+        if nc = 0 || cellsOf |> List.exists (fun r -> r.Length <> nc)
+           || exts <> [ Some (int64 nr); Some (int64 nc) ] then None
+        else
+        let elemStr = elemTypeToCpp arrTy.ElemType
+        let extentsName = $"{varName}_extents"
+        let (extentDecl, ownedExtents) =
+            emitExtentsTable "" extentsName 2 [ (string nr, true); (string nc, true) ]
+        let allocDecl =
+            arrayAlloc { Ind = ""; Elem = elemStr; Rank = 2; Name = varName
+                         Symm = "nullptr"; Strict = None; Extents = extentsName }
+        let fills =
+            cellsOf |> List.mapi (fun i cells ->
+                cells |> List.mapi (fun j c -> $"{varName}[{i}][{j}] = ({elemStr})({exprToCppCore subst names c});"))
+            |> List.concat
+        Some (extentDecl @ [ allocDecl ] @ fills,
+              [MatPool (varName, elemStr, 2, "nullptr", None, ownedExtents)])
     | _ -> None
 
 

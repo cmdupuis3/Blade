@@ -1,0 +1,25 @@
+// TEST: A Body Pipeline Over A Deferred Map Re-Forces It Per Statement
+// ============================================================================
+// Gap G256 / G239, round 4 wave 9 (lane C, C1; Codex diff review 5f64f352
+// round 3): the composition twin of functions/760 -- an UNFUSED pipeline (a
+// block-bodied stage) applied in a function body to a deferred module map
+// forces it for that statement, after the body wrote its input: s = 3 (d(0)
+// is 10 / 10 = 1 after the write, the stages add 1 twice); the C++ lane read
+// the earlier statement's holder (10 / 1 = 10, s = 12).
+// ============================================================================
+type A = Array<Int64 like Idx<3>>
+let mut x: A = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function inc(v: Int64) -> Int64 = {
+    let q = v + 1
+    q
+}
+let pipeline = object_for(lambda(v: Int64) -> v + 1) >>@ object_for(inc)
+function f() -> Int64 = {
+    let z = d(1)
+    x(0) = 10
+    let a = pipeline <@> d |> compute
+    a(0) + z * 0
+}
+let s = f()
+// EXPECT: s = 3

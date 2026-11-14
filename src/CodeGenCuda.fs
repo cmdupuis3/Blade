@@ -2415,6 +2415,89 @@ let buildCompactRowEpilogue (plan: Blade.Optimize.CompactRowPlan) (producer: Loo
                OnDeclined = (fun () -> plan.DeclinedCpp.Value <- true) }
     | _ -> decline "the producer is not a rank-2 nest"
 
+/// THE CO-ITERATION EXTENT GUARD (BL8011; the runtime half of TypeCheck's
+/// extent agreement, BL3016/coIterClash), shared by the MAP emitter
+/// (genApplyCombinator) and the FUSED FOLD terminal (genReduceComputeBinding,
+/// gap G249). A co-iteration level is bounded by its FIRST operand's extent
+/// and peels EVERY operand at that level, so a shorter later operand is read
+/// past its end. The checker compares literal extents at the call site, but
+/// inside a function over `T^k` parameters the extents are the caller's, and
+/// an operand built at run time (`Float64(0..extents(c)) |> compute`, a
+/// compound's cardinality) has none to compare. One comparison per (level,
+/// later operand), emitted ONCE before the nest, only for REAL arrays whose
+/// records are dense or symmetry-packed (`Array<T, R>` with `.extents`; a
+/// range is bounded by its own record, a compound/ragged operand has no
+/// `.extents`). `realAt pos` = the operand at `pos` is a stored C++ array
+/// under its element binding's name (the fold passes false for an operand
+/// still deferred -- a join share, read per cell, not by name).
+///
+/// WHEN LITERALS ARE TRUSTED: two equal literals on NON-parameter arrays are
+/// the checker's business and the allocation's truth, so the guard is skipped
+/// there. A PARAMETER's literal is not a statement about the runtime array --
+/// shape monomorphization pins a `T^k` parameter from one argument and the
+/// body's unification copies it onto the other -- so a parameter operand is
+/// always compared at runtime. Mirrored by the interpreter's
+/// coIterationGuard, which reads runtime extents anyway.
+let coIterationGuardLines (ctx: CodeGenContext) (ind: string) (info: ApplyInfo)
+                          (bindings: LoopIndexBinding list) (realAt: int -> bool) : string list =
+    let isParamOperand (pos: int) =
+        match List.tryItem pos info.Arrays with
+        | Some (IRVar (id, _)) -> Set.contains id ctx.ParamIds
+        | _ -> false
+    let hasExtents (pos: int) =
+        realAt pos
+        && (match List.tryItem pos info.ArrayTypes with
+            | Some at -> at.IndexTypes |> List.forall (fun ix -> match ix with IxDense | IxSymmetryLike -> true | _ -> false)
+            | None -> false)
+    // A rank-1 COMPOUND level (`method_for(zip(a, b))` over two compounds:
+    // one level whose extent is the first operand's cardinality) compares the
+    // cardinalities instead -- a compound has no `.extents` (G249).
+    let isCompoundOperand (pos: int) =
+        realAt pos
+        && (match List.tryItem pos info.ArrayTypes with
+            | Some at -> (match at.IndexTypes with [ ix ] -> ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic | _ -> false)
+            | None -> false)
+    bindings
+    |> List.collect (fun b ->
+        match b.FusedRank, b.Elements with
+        | None, e0 :: rest when not rest.IsEmpty
+                                && (match b.Extent with IRCompoundMask _ -> true | _ -> false)
+                                && (match e0.Virtual with RealArray -> true | _ -> false)
+                                && isCompoundOperand e0.ArrayPosition ->
+            rest |> List.collect (fun e ->
+                match e.Virtual with
+                | RealArray when isCompoundOperand e.ArrayPosition && e.ArrayName <> e0.ArrayName ->
+                    [ $$"""{{ind}}if ((int64_t)({{e.ArrayName}}.idx->cardinality) != (int64_t)({{e0.ArrayName}}.idx->cardinality)) {"""
+                      $"{ind}    std::cerr << \"Blade runtime: co-iteration over the compounds '{e0.ArrayName}' and '{e.ArrayName}' needs equal cardinalities, but '{e0.ArrayName}' has \" << {e0.ArrayName}.idx->cardinality << \" and '{e.ArrayName}' has \" << {e.ArrayName}.idx->cardinality << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
+                      $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
+                      $"{ind}}}" ]
+                | _ -> [])
+        | None, e0 :: rest when not rest.IsEmpty
+                                && (match e0.Virtual with RealArray -> true | _ -> false)
+                                && hasExtents e0.ArrayPosition ->
+            let litOf (e: ElementBinding) =
+                match List.tryItem e.ArrayPosition info.ArrayTypes with
+                | Some at -> literalExtentOfArray at e.DimIndex
+                | None -> None
+            let lit0 = litOf e0
+            let param0 = isParamOperand e0.ArrayPosition
+            let boundText =
+                match lit0 with
+                | Some n when not param0 -> $"{n}LL"
+                | _ -> $"(int64_t)({e0.ArrayName}.extents[{e0.DimIndex}])"
+            rest |> List.collect (fun e ->
+                let trusted =
+                    not param0 && not (isParamOperand e.ArrayPosition)
+                    && lit0.IsSome && litOf e = lit0
+                match e.Virtual with
+                | RealArray when hasExtents e.ArrayPosition && not trusted ->
+                    [ $$"""{{ind}}if ((int64_t)({{e.ArrayName}}.extents[{{e.DimIndex}}]) != {{boundText}}) {"""
+                      $"{ind}    std::cerr << \"Blade runtime: co-iteration over '{e0.ArrayName}' and '{e.ArrayName}' needs equal extents on axis {e.DimIndex}, but '{e0.ArrayName}' has \" << {e0.ArrayName}.extents[{e0.DimIndex}] << \" and '{e.ArrayName}' has \" << {e.ArrayName}.extents[{e.DimIndex}] << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
+                      $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
+                      $"{ind}}}" ]
+                | _ -> [])
+        | _ -> [])
+
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
     recordApplyStructure name info
@@ -3689,66 +3772,9 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                     { codeGen with KernelExpr = IRApp (IRVar (rk.Callable.Id, IRTUnit), args, rk.Callable.RetType) }
                 | None -> codeGen
 
-        // CO-ITERATION EXTENT GUARD (BL8011; the runtime half of TypeCheck's
-        // extent agreement, BL3016/coIterClash). A co-iteration level is
-        // bounded by its FIRST operand's extent and peels EVERY operand at
-        // that level, so a shorter later operand is read past its end. The
-        // checker compares literal extents at the call site, but inside a
-        // function over `T^k` parameters the extents are the caller's, and
-        // a curried call (`f(a)(b)`, `let h = f(a); h(b)`) or an inner-axis
-        // disagreement (`T^2 + T^2` with equal leading extents) reached the
-        // nest unchecked -- `[5, 7, <garbage>]` for a 3-vector plus a
-        // 2-vector. One comparison per (level, later operand), emitted ONCE
-        // before the nest, only for REAL arrays whose records are dense or
-        // symmetry-packed (`Array<T, R>` with `.extents`; a range is bounded
-        // by its own record, a compound/ragged operand has no `.extents`).
-        //
-        // WHEN LITERALS ARE TRUSTED: two equal literals on NON-parameter
-        // arrays are the checker's business and the allocation's truth, so
-        // the guard is skipped there (no emitted-text change for the common
-        // fully-static nest). A PARAMETER's literal is not a statement about
-        // the runtime array -- shape monomorphization pins a `T^k` parameter
-        // from one argument and the body's unification copies it onto the
-        // other (`f_HM_..._e3` typed `b` at 3 while the call passed 2), so a
-        // parameter operand is always compared at runtime. Mirrored by the
-        // interpreter's materializeApply, which reads runtime extents anyway.
-        (let isParamOperand (pos: int) =
-            match List.tryItem pos info.Arrays with
-            | Some (IRVar (id, _)) -> Set.contains id ctx.ParamIds
-            | _ -> false
-         let hasExtents (pos: int) =
-            match List.tryItem pos info.ArrayTypes with
-            | Some at -> at.IndexTypes |> List.forall (fun ix -> match ix with IxDense | IxSymmetryLike -> true | _ -> false)
-            | None -> false
-         let guardLines =
-            codeGen.Bindings
-            |> List.collect (fun b ->
-                match b.FusedRank, b.Elements with
-                | None, e0 :: rest when not rest.IsEmpty
-                                        && (match e0.Virtual with RealArray -> true | _ -> false)
-                                        && hasExtents e0.ArrayPosition ->
-                    let litOf (e: ElementBinding) =
-                        match List.tryItem e.ArrayPosition info.ArrayTypes with
-                        | Some at -> literalExtentOfArray at e.DimIndex
-                        | None -> None
-                    let lit0 = litOf e0
-                    let param0 = isParamOperand e0.ArrayPosition
-                    let boundText =
-                        match lit0 with
-                        | Some n when not param0 -> $"{n}LL"
-                        | _ -> $"(int64_t)({e0.ArrayName}.extents[{e0.DimIndex}])"
-                    rest |> List.collect (fun e ->
-                        let trusted =
-                            not param0 && not (isParamOperand e.ArrayPosition)
-                            && lit0.IsSome && litOf e = lit0
-                        match e.Virtual with
-                        | RealArray when hasExtents e.ArrayPosition && not trusted ->
-                            [ $$"""{{ind}}if ((int64_t)({{e.ArrayName}}.extents[{{e.DimIndex}}]) != {{boundText}}) {"""
-                              $"{ind}    std::cerr << \"Blade runtime: co-iteration over '{e0.ArrayName}' and '{e.ArrayName}' needs equal extents on axis {e.DimIndex}, but '{e0.ArrayName}' has \" << {e0.ArrayName}.extents[{e0.DimIndex}] << \" and '{e.ArrayName}' has \" << {e.ArrayName}.extents[{e.DimIndex}] << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
-                              $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
-                              $"{ind}}}" ]
-                        | _ -> [])
-                | _ -> [])
+        // CO-ITERATION EXTENT GUARD (BL8011): coIterationGuardLines, shared with
+        // the fused fold terminal (gap G249).
+        (let guardLines = coIterationGuardLines ctx ind info codeGen.Bindings (fun _ -> true)
          if not guardLines.IsEmpty then preCode <- preCode @ guardLines)
 
         // STENCIL OVER SEGMENTS (docs/plans/structural/07 §2.3): a halo map

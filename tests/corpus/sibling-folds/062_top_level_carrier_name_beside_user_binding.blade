@@ -1,0 +1,36 @@
+// TEST: Top-level join carriers never take a name a user binding spells
+// ============================================================================
+// Round 4 wave 9 (lane A, A4: the fresh class-closure round of
+// BLADE_SIBLING_FOLDS=top, Codex 0d750baf, gap G107 member 3): the carrier of
+// a top-level join was named `__sfj<id>` unchecked, so a user binding of that
+// spelling printed twice under `--print` and the C++ lane declared it twice.
+// The carrier now skips every name the module binds. The user bindings below
+// cover the ids a carrier of this program can take; under `top` (the
+// `blade test opt-diff` mirror, and `blade test optimize`'s
+// decision_sibling_folds_top_carrier_name_unique) every value prints once.
+// ============================================================================
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let __sfj30 = 30.0
+let __sfj31 = 31.0
+let __sfj32 = 32.0
+let __sfj33 = 33.0
+let __sfj34 = 34.0
+let __sfj35 = 35.0
+let __sfj36 = 36.0
+let __sfj37 = 37.0
+let __sfj38 = 38.0
+let __sfj39 = 39.0
+let __sfj40 = 40.0
+let __sfj41 = 41.0
+let __sfj42 = 42.0
+let __sfj43 = 43.0
+let __sfj44 = 44.0
+let __sfj45 = 45.0
+let a = reduce(x, (+))
+let b = prodsum(x, x)
+let __sfj33_0 = 0.5
+let witness = __sfj33 + __sfj45 + __sfj33_0
+// EXPECT: a = 6.0
+// EXPECT: b = 14.0
+// EXPECT: witness = 78.5

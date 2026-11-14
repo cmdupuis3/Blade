@@ -1,0 +1,12 @@
+// TEST: A Fused Tree Reads A Private Operand Of Another Leg Privately
+// Gap G243 (round 4 wave 9 lane d): e (an operand of leg p) is a private value when f (an operand
+// of leg q) is materialized, so e does not print (the LLVM lane printed it).
+// EXPECT: s = 20
+// EXPECT: t = 30
+type I = Idx<5>
+let mut d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + 2
+let p = method_for(e) <@> lambda(a) -> a
+let q = method_for(f) <@> lambda(a) -> a
+let (s, t) = reduce(p <&!> q, (+))

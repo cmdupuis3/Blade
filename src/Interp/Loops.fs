@@ -239,6 +239,28 @@ let private gateInputs (info: ApplyInfo) : unit =
     if info.ArrayTypes |> List.exists (fun at -> at.IndexTypes |> List.exists (gatedInputIndex at)) then
         raise (InterpUnsupported "apply over ragged/grouped/compound input (M2.7)")
 
+/// THE CO-ITERATION EXTENT GUARD (BL8011) -- the interpreter twin of
+/// CodeGenCuda.coIterationGuardLines, shared by the dense MAP arm and every
+/// FOLD leg (gap G249): every REAL operand peeled at a co-iteration level must
+/// have the level's extent (the first operand's) on the axis it is peeled
+/// along, or the walk reads the shorter one past its end. Checked ONCE, after
+/// the operands are resolved and the captures forced, before the first cell
+/// (a fold: before its seed -- the operands are the fold's first stage).
+let private coIterationGuard (bindings: LoopIndexBinding list) (inputs: Dictionary<int, ArraySource>)
+                             (levelExtent: LoopIndexBinding -> int64 option) : unit =
+    for b in bindings do
+        match b.FusedRank, b.Elements with
+        | None, e0 :: rest when not rest.IsEmpty && (match e0.Virtual with RealArray -> true | _ -> false) ->
+          match levelExtent b with
+          | None -> ()
+          | Some bound ->
+            for e in rest do
+                match e.Virtual, inputs.TryGetValue e.ArrayPosition with
+                | RealArray, (true, SReal a) when e.DimIndex < a.Extents.Length && a.Extents.[e.DimIndex] <> bound ->
+                    raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+                | _ -> ()
+        | _ -> ()
+
 // Binary fold resolution (reduce kernels / choice sections lower to callables).
 
 /// The fold kernel of a `reduce` / `<&!>` leg, as a binary closure.
@@ -411,9 +433,24 @@ and private forceKernelDeferredCaptures (st: InterpState) (env: Env) (anyDeferre
 /// compound / sparse / halo / row-peel / grouped / wreath / compound-value
 /// maps used to force a captured map at its first read, so a failure at an
 /// earlier cell won there and not in the compiled lanes.
+/// The named operands of an apply that are NOT a deferred cell any more (stored,
+/// or forced under their own name): a capture of one of them needs no force.
+/// An operand resolved PRIVATELY for a fold (G243: its cell is still deferred)
+/// is not among them -- a capture of it forces it under its own name (G214,
+/// Codex diff review).
+and private storedOperandIds (env: Env) (info: ApplyInfo) : Set<IRId> =
+    info.Arrays
+    |> List.choose (function
+        | IRVar (id, _) ->
+            (match envTryFind env id with
+             | Some cell -> (match cell.V with VDeferred _ -> None | _ -> Some id)
+             | None -> Some id)
+        | _ -> None)
+    |> Set.ofList
+
 and private forceArmCaptures (st: InterpState) (env: Env) (info: ApplyInfo) : unit =
     forceKernelDeferredCaptures st env true [ info.Kernel ]
-        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
+        (storedOperandIds env info)
 
 // ----------------------------------------------------------------------------
 // resolveComputation (CodeGen.fs:7480) in value space: peel IRCompute /
@@ -1064,7 +1101,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         | IRVar _ -> inputs.[i] <- resolveArraySource st env arr
         | _ -> ())
     forceKernelDeferredCaptures st env true [ info.Kernel ]
-        (info.Arrays |> List.choose (function IRVar (id, _) -> Some id | _ -> None) |> Set.ofList)
+        (storedOperandIds env info)
     // G207 (i): a RUNTIME range operand's extent is evaluated at its operand
     // position among the inline forms, ONCE per application (the compiled
     // lanes' operand order: `method_for(0..(100 / z), mask(d, ..))` divides
@@ -1161,16 +1198,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     // operand peeled at a co-iteration level must have the level's extent
     // (the first operand's) on the axis it is peeled along, or the walk
     // reads the shorter one past its end.
-    for b in cg.Bindings do
-        match b.FusedRank, b.Elements with
-        | None, e0 :: rest when not rest.IsEmpty && (match e0.Virtual with RealArray -> true | _ -> false) ->
-            let bound = levelExtent b
-            for e in rest do
-                match e.Virtual, inputs.TryGetValue e.ArrayPosition with
-                | RealArray, (true, SReal a) when a.Extents.[e.DimIndex] <> bound ->
-                    raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
-                | _ -> ()
-        | _ -> ()
+    coIterationGuard cg.Bindings inputs (levelExtent >> Some)
     match cg.OutputType with
     | IRTScalar et ->
         let acc = { V = zeroOfElem et }
@@ -1978,6 +2006,15 @@ and private materializeCompoundValueMap (st: InterpState) (env: Env) (info: Appl
     for o in operands do
         if o.TrailingStride <> 1L then
             raise (InterpUnsupported "compound-value map with trailing dims (only the rank-1 compact view is interpreted)")
+    // G249: co-iterated compounds of DIFFERENT cardinality are the
+    // co-iteration extent mismatch (BL8011), the compiled lanes' guard over
+    // `idx->cardinality`, checked after the kernel captures (forced by the
+    // compiled genComputeBinding before the map) and before the first cell
+    forceArmCaptures st env info
+    for o in operands do
+        if o.Cardinality <> cv.Cardinality then
+            raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+    for o in operands do
         // Co-iterated operands must be cells of ONE compound: the same
         // present tuples in the same order (a shared index, or an equal mask).
         if not (obj.ReferenceEquals(o.Table, cv.Table)) && o.Mask <> cv.Mask then
@@ -1990,8 +2027,8 @@ and private materializeCompoundValueMap (st: InterpState) (env: Env) (info: Appl
         match info.OutputType with
         | ArrayElem a -> a
         | _ -> raise (InterpUnsupported "compound-value map: output is not an array type")
-    // G173 (2): the kernel's deferred captures, after the inputs, before the first cell
-    forceArmCaptures st env info
+    // G173 (2): the kernel's deferred captures, after the inputs, before the
+    // first cell -- forced above, ahead of the G249 cardinality guard
     let caps = bindCallCaptures st env callable
     let denses = operands |> List.map A.compoundToDense
     let n = int cv.Cardinality
@@ -2074,9 +2111,18 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
             // array (4.1 compound-operand path; sparse in key order).
             | VCompound cv -> SReal (A.compoundToDense cv)
             | VSparse sv -> SReal (A.sparseToDense sv)
-            | VDeferred _ as d ->
+            // G243: an EARLIER private operand of the fold being evaluated,
+            // read by a later one: its private value (the C++ temporary),
+            // never forced under its own name
+            | VDeferred _ when st.PrivateOperandVals.ContainsKey id -> SReal st.PrivateOperandVals.[id]
+            | VDeferred (dexpr, _) as d ->
                 let fv = force st env d
-                cell.V <- fv   // memoize once (a second consumer sees the array)
+                // memoize once (a second consumer sees the array) -- except a
+                // MODULE map read inside a function call: its evaluation there
+                // is private, per reading statement, never stored under the
+                // module name (G75; gap G257: `force` already skips the memo)
+                if not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
+                    cell.V <- fv
                 (match fv with
                  | VArray a -> SReal a
                  | VCompound cv -> SReal (A.compoundToDense cv)
@@ -2395,12 +2441,19 @@ let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) :
         (match envTryFind env id with
          | Some cell ->
              (match cell.V with
+              | VDeferred _ when st.PrivateOperandVals.ContainsKey id -> SReal st.PrivateOperandVals.[id]
               | VDeferred (dexpr, denv) ->
-                  (match forceExpr st denv dexpr with
-                   | VArray a -> SReal a
-                   | VCompound cv -> SReal (A.compoundToDense cv)
-                   | VSparse sv -> SReal (A.sparseToDense sv)
-                   | _ -> raise (InterpUnsupported "deferred array input did not force to an array"))
+                  // G243: recorded as this fold's private value, so a later
+                  // private operand reading it reads this value (the C++
+                  // temporary) instead of forcing it under its own name
+                  let a =
+                      match forceExpr st denv dexpr with
+                      | VArray a -> a
+                      | VCompound cv -> A.compoundToDense cv
+                      | VSparse sv -> A.sparseToDense sv
+                      | _ -> raise (InterpUnsupported "deferred array input did not force to an array")
+                  st.PrivateOperandVals <- Map.add id a st.PrivateOperandVals
+                  SReal a
               | _ -> resolveArraySource st env arr)
          | None -> resolveArraySource st env arr)
     | _ -> resolveArraySource st env arr
@@ -2412,6 +2465,14 @@ let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) :
 /// interact). Single leaf = scalar; fusion tree = a structured tuple
 /// mirroring the tree shape (same rationale as forceTreeShaped).
 let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seedReadIds: Set<IRId>) (seedF: unit -> Value) : Value =
+    // G243: this fold's private operands are its own (a fold nested in a
+    // kernel opens its own scope; the enclosing fold's are restored after)
+    let saved = st.PrivateOperandVals
+    st.PrivateOperandVals <- Map.empty
+    try forceReduceComputeBody st env comp kernel seedReadIds seedF
+    finally st.PrivateOperandVals <- saved
+
+and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (kernel: IRExpr) (seedReadIds: Set<IRId>) (seedF: unit -> Value) : Value =
     // G207: the SEED is evaluated where the compiled lanes initialize the
     // accumulators -- after the capture prelude and (one leg) the deferred
     // operand forcing, before the traversal; once (memoized)
@@ -2437,6 +2498,16 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
             peelCompLets body
         | _ -> e
     let comp = peelCompLets comp
+    // a KEPT SPINE NAME the SEED reads by cell (G248 residual, round 4 wave 9;
+    // TypedAst.markKeptSpine): forced under its own name at the operand
+    // position, before the seed runs -- the compiled lanes' statement
+    // pre-pass -- so the fold reads that snapshot (storedRoot below)
+    (match comp with
+     | IRVar (id, _) when seedReadIds.Contains id ->
+         (match envTryFind env id with
+          | Some cell when cell.V.IsVDeferred -> force st env (Core.evalExpr st env comp) |> ignore
+          | _ -> ())
+     | _ -> ())
     let rec resolveDeferred e =
         match e with
         | IRVar (id, _) -> (match envTryFind env id with Some cell -> (match cell.V with VDeferred (e2, _) -> resolveDeferred e2 | _ -> e) | None -> e)
@@ -2446,6 +2517,21 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
         | IRFusion (l, r) -> collect l @ collect r
         | other -> [ other ]
     let leaves = collect comp
+    // a KEPT SPINE NAME (gap G235 (a), TypedAst.markKeptSpine) already
+    // stored on entry (an earlier statement forced it): the fold kernel's
+    // captures, then the stored snapshot folded (the C++ rootStored route)
+    let storedRoot =
+        match comp, leaves, kernel with
+        | IRVar _, [ IRVar _ ], IRTuple _ -> false
+        | IRVar _, [ IRVar _ ], _ -> true
+        | _ -> false
+    if storedRoot then
+        forceKernelDeferredCaptures st env false [ kernel ] Set.empty
+        match force st env (Core.evalExpr st env comp) with
+        | VArray a when a.Extents.Length = 1 ->
+            A.reduceArray a (resolveBinaryFold st env kernel) (Some (seedL.Force()))
+        | _ -> raise (InterpUnsupported "reduce over a stored spine that is not one rank-1 array (gap G233)")
+    else
     let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
     if infos.IsEmpty || infos.Length <> leaves.Length then
         raise (InterpUnsupported "reduce over a deferred computation with non-apply leaves")
@@ -2519,6 +2605,9 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
                     match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
+            // G249: the leg's co-iteration extent guard, after its operands
+            // and before its seed (the compiled lanes' order)
+            coIterationGuard cg.Bindings inputs (levelExtent >> Some)
             let acc = { V = seedOf () }
             started ()
             interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
@@ -2740,8 +2829,28 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     // the traversal's operands, or its own spine, is forced under its own
     // name here too (a snapshot): nothing is excluded. The operand then reads
     // the memoized array; a captured spine is folded from its snapshot below.
+    // A JOIN SHARE's kernel (a deferred operand slot of a leg) too, after the
+    // leg kernels, in first-use order -- CodeGenBinding's prelude (G249 diff
+    // review: a share capture was never forced)
     (let foldKernels = match kernel with IRTuple ks -> ks | k -> [ k ]
-     forceKernelDeferredCaptures st env false ((infos |> List.map (_.Kernel)) @ foldKernels) Set.empty)
+     let shareKernels =
+        if not isJoinEncoding then []
+        else
+            infos
+            |> List.collect (fun info -> info.Arrays |> List.choose (function IRVar (id, _) -> directApply id |> Option.map (fun di -> (id, di.Kernel)) | _ -> None))
+            |> List.distinctBy fst
+            |> List.map snd
+     forceKernelDeferredCaptures st env false ((infos |> List.map (_.Kernel)) @ shareKernels @ foldKernels) Set.empty)
+    // G244 (after the capture prelude: a capture may have stored the map the
+    // share reads -- the C++ order; Codex diff review): a JOIN SHARE that itself reads a deferred map
+    // is refused by the C++ lane (genReduceJoinCore: one level of sharing,
+    // BL7004 at codegen); the per-cell form of a nested share is not built
+    // (gap G244), so the interpreter does not evaluate it either -- the same
+    // share set (shareOrderIds is CodeGenBinding's rule), the same refusal
+    if isJoinEncoding then
+        for (sid, di) in shareOrderIds () do
+            if di.Arrays |> List.exists (function IRVar (aid, _) -> (directApply aid).IsSome | _ -> false) then
+                raise (InterpUnsupported $"reduction join: the shared deferred operand {sid} reads another deferred computation; only one level of sharing is supported (gap G244)")
     let leavesAfter = collect comp
     if leavesAfter |> List.exists (function IRApplyCombinator _ -> false | _ -> true) then
         // a captured SPINE was forced by the prelude: fold the stored snapshot
@@ -2764,6 +2873,7 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
             // fused TREE (`reduce(p <&!> q, ..)`) first forces every leg's
             // named deferred operand, as the compiled prelude does, and then
             // initializes the seed (Codex review round 2)
+            let privateVals = Dictionary<IRId, BladeArray>()
             if not isJoinEncoding then
                 for info in infos do
                     for arr in info.Arrays do
@@ -2771,8 +2881,84 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
                         // an operand the seed reads is forced under its
                         // own name here, before the seed (G214, Codex round 2)
                         | IRVar (id, _) when seedReadIds.Contains id -> force st env (Core.evalExpr st env arr) |> ignore
-                        | IRVar _ -> resolveFusedArraySource st env arr |> ignore
+                        | IRVar (id, _) ->
+                            (match resolveFusedArraySource st env arr with
+                             | SReal a -> privateVals.[id] <- a
+                             | _ -> ())
                         | _ -> ()
+            // G249: THE FOLD'S CO-ITERATION EXTENT GUARDS (BL8011), before
+            // the seeds -- the compiled prelude's order: the operands, the
+            // guards, then the accumulators. Over STORED arrays only (a
+            // deferred cell is never evaluated here): every leg's own
+            // co-iteration; every SHARE (a deferred operand slot, read per
+            // cell) its own, the leg slot read through it taken from the
+            // share's leading source array; and ACROSS the shared traversal,
+            // each level's extent against the first leg's.
+            (let storedOf (e: IRExpr) : BladeArray option =
+                match e with
+                | IRVar (id, _) ->
+                    (match envTryFind env id with
+                     | Some cell ->
+                         (match cell.V with
+                          | VArray a -> Some a
+                          | _ -> (match privateVals.TryGetValue id with | true, a -> Some a | _ -> None))
+                     | None -> None)
+                | _ -> None
+             let deferredSlot (e: IRExpr) : (IRId * ApplyInfo) option =
+                match e with
+                | IRVar (id, _) when not (privateVals.ContainsKey id) -> directApply id |> Option.map (fun di -> (id, di))
+                | _ -> None
+             let repointed (info: ApplyInfo) =
+                { info with
+                    Arrays = info.Arrays |> List.map (fun a ->
+                        match deferredSlot a with
+                        | Some (_, di) -> (match di.Arrays with h :: _ -> h | [] -> a)
+                        | None -> a) }
+             let shares =
+                infos
+                |> List.collect (fun info -> info.Arrays |> List.choose deferredSlot)
+                |> List.distinctBy fst
+                |> List.map snd
+             let units =
+                (infos @ shares)
+                |> List.filter (fun info -> (domainLeaf info).IsNone)
+                |> List.map (fun info ->
+                    let info = repointed info
+                    let cg = buildLoopNestCodeGen info (info.Arrays |> List.mapi (fun i _ -> $"a{i}")) "acc" st.Builder
+                    let stored = Dictionary<int, ArraySource>()
+                    info.Arrays |> List.iteri (fun i arr ->
+                        match storedOf arr with
+                        | Some a -> stored.[i] <- SReal a
+                        | None -> ())
+                    (cg, stored))
+             let firstExtent (stored: Dictionary<int, ArraySource>) (b: LoopIndexBinding) =
+                match b.FusedRank with
+                | Some _ -> None
+                | None ->
+                match b.Elements |> List.tryFind (fun e -> (match e.Virtual with RealArray -> true | _ -> false)) with
+                | Some e0 ->
+                    (match stored.TryGetValue e0.ArrayPosition with
+                     | true, SReal a when e0.DimIndex < a.Extents.Length -> Some a.Extents.[e0.DimIndex]
+                     | _ -> None)
+                | None -> (match b.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
+             for (cg, stored) in units do
+                 coIterationGuard cg.Bindings stored (fun b ->
+                     match b.Elements with
+                     | e0 :: _ -> (match stored.TryGetValue e0.ArrayPosition with
+                                   | true, SReal a when e0.DimIndex < a.Extents.Length -> Some a.Extents.[e0.DimIndex]
+                                   | _ -> None)
+                     | [] -> None)
+             match units with
+             | (cg0, s0) :: rest ->
+                 let ext0 = cg0.Bindings |> List.map (firstExtent s0)
+                 for (cg, s) in rest do
+                     let ext = cg.Bindings |> List.map (firstExtent s)
+                     if ext.Length = ext0.Length then
+                         List.iter2 (fun (a: int64 option) (b: int64 option) ->
+                             match a, b with
+                             | Some x, Some y when x <> y -> raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+                             | _ -> ()) ext0 ext
+             | [] -> ())
             seedL.Force() |> ignore
             match jointTraversal () with
             | Some vs -> vs
@@ -2947,6 +3133,14 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         forceReduceCompute st env comp kernel seedReadIds (fun () -> Core.evalExpr st env seedExpr)
     | IRProdSum args ->
         let arrs = args |> List.map (fun e -> match force st env (Core.evalExpr st env e) with VArray a -> a | _ -> raise (InterpUnsupported "prodsum over non-array"))
+        // G249: the co-iteration extent guard (BL8011), the compiled IIFE's
+        // twin -- every operand has the first one's extent, before the first product
+        (match arrs with
+         | first :: rest when first.Extents.Length >= 1 ->
+             for a in rest do
+                 if a.Extents.Length >= 1 && a.Extents.[0] <> first.Extents.[0] then
+                     raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+         | _ -> ())
         A.prodSum arrs
 
     // -- group_by(vals, gk): gather each CSR group's values into a ragged array
@@ -3122,15 +3316,23 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // A mask over an ALL-DIMS compound (`mask(J, p)`, G128) keeps J's
         // compound index: a Bool compound over J's present cells in lex
         // order, the C++ lane's `Compound<bool, R>` sharing J's index.
+        // the operand forced by this probe, kept for the dense path below: a
+        // private module map is not memoized (G258) and must not be evaluated
+        // a second time for the same mask (Codex round 4)
+        let mutable forcedHere : Value option = None
         let compoundSrc =
             match arrExpr with
             | IRVar (id, _) ->
                 (match envTryFind env id with
                  | Some cell ->
                      (match cell.V with
-                      | VDeferred _ as d ->
+                      | VDeferred (dexpr, _) as d ->
                           let fv = force st env d
-                          cell.V <- fv   // memoize, as resolveArraySource does
+                          // memoize, as resolveArraySource does -- never a module
+                          // map forced inside a function call (G75, gap G257)
+                          if not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
+                              cell.V <- fv
+                          forcedHere <- Some fv
                           (match fv with VCompound cv -> Some cv | _ -> None)
                       | VCompound cv -> Some cv
                       | _ -> None)
@@ -3146,7 +3348,10 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             let ixs = match typeOf expr with ArrayElem t -> t.IndexTypes | _ -> cv.IndexTypes
             VCompound { cv with ElemType = IRTScalar ETBool; IndexTypes = ixs; Data = bits.Data }
         | _ ->
-        let a = forceInputArray st env arrExpr
+        let a =
+            match forcedHere with
+            | Some (VArray fa) -> fa
+            | _ -> forceInputArray st env arrExpr
         VArray (A.maskPresence a (resolveUnaryKernel st env predExpr))
     | IRSort (arrExpr, keyExpr) ->
         let a = forceInputArray st env arrExpr

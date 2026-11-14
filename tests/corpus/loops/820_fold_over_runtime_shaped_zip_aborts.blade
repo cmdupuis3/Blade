@@ -1,0 +1,13 @@
+// TEST: A Fold Over A Zip Of Run-Time-Shaped Operands Checks Their Extents (aborts)
+// Gap G249 (round 4 wave 9 lane d): a and b are dense arrays whose extents (5 and 3) are known only at run
+// time, so the checker cannot refuse their co-iteration; the walk is bounded by the first operand.
+// The fused fold terminal reports BL8011 before its first cell, as the map does (it read b past its
+// end in the C++ lane; the interpreter had no fold guard; the LLVM lane refuses run-time extents).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let s = reduce(method_for(zip(a, b)) <@> lambda(p, q) -> p * q + 1.0, (+))

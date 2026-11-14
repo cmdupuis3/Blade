@@ -1,0 +1,23 @@
+// TEST: A Pipeline Stage Capture After A Possibly-Failing Stage Is Refused (rejects)
+// ============================================================================
+// Gap G242, round 4 wave 9 (lane C; wave-end fable review F4): the first
+// stage `first` may fail (an integer division), so the SECOND stage's capture
+// of the deferred map `delayed` cannot be forced ahead of the first stage's
+// traversal (the interpreter runs the stages as successive traversals, each
+// capture forced at its own stage's start). The C++ lane has no per-stage
+// capture prelude: it used to emit the stage's lifted kernel naming the
+// still-deferred map (a g++ rejection, BL9002); it now refuses on the
+// backend-refusal channel (BL7004). The interpreter runs it.
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> v + delayed(0))
+let ys = k <@> backing |> compute
+// ERROR-CONTAINS: is not forced before the pipeline runs
+// WARN-CODEGEN: is not forced before the pipeline runs
+// REJECT-AT: codegen

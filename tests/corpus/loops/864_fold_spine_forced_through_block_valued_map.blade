@@ -1,0 +1,12 @@
+// TEST: Fold Spine Forced Through Block Valued Map
+// Gap G235 (a), round 4 wave 9 (Codex diff review round 1): the captured qq is
+// a block-valued binding whose final value is a deferred map of the spine p;
+// forcing it forces p, so the fold reads the snapshot after the seed writes
+// x: 21.0.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let qq = { let z: Float64 = 0.0; method_for(p) <@> lambda(v) -> v + 1.0 + z }
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(qq)), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0

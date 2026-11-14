@@ -2161,6 +2161,14 @@ let widenDeferred (modul: IRModule) (callables: IRCallable seq) (own: IRId -> bo
     // binding: the pass's own answer (Codex review of G98, round 1)
     fun (id: IRId) -> own id || (id >= 0 && classify id)
 
+/// `widenDeferred` whose census also covers `extraRoots` (a region a pass
+/// judges, e.g. its inlined call bodies under fresh ids: gap G219) -- an id
+/// those roots bind is classified by its value; an id bound nowhere stays
+/// deferred (fail closed).
+let widenDeferredWith (modul: IRModule) (callables: IRCallable seq) (extraRoots: IRExpr seq) (own: IRId -> bool) : IRId -> bool =
+    let classify = programDeferredId modul callables extraRoots
+    fun (id: IRId) -> own id || (id >= 0 && classify id)
+
 /// The OPEN variant (an unseen id answers false): for a pass whose kernels
 /// may name ids minted after its census (the sibling-fold pass judges an
 /// inlined region whose binders are fresh) and whose own whitelist refuses
@@ -2758,7 +2766,12 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                 | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ | IRZero _ | IRUnseededSeed _ | IRUninit _
                 | IRLet _ | IRMatch _ | IRForRange _ | IRAssign _ | IRBreakIf _ | IRReplayRow _ | IRConstraintCheck _ -> ok <- false
                 | _ -> ()) e
-        ok
+        // G209: an expression a TYPE carries -- a range bound `0..g(v)` --
+        // runs too: a kernel parameter read there makes `e` vary per cell
+        // (it was hoisted, leaving the parameter free in the hoisted copy)
+        ok && (embeddedExtentExprs e |> List.forall (fun x ->
+            Set.isEmpty (Set.difference (collectVarRefsIR x) (Set.ofSeq captureIds))
+            || (collectVarRefsIR x |> Set.forall (fun id -> captureIds.Contains id || Map.containsKey id funcs))))
     // G97 (round 4 wave 4): a direct call of a module / program function that
     // returns a plain dense array (`prep(A)`) -- the one array-valued form the
     // pass hoists (its arguments' invariance is `closedOver`'s judgment).
@@ -10710,6 +10723,16 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     // the fail-closed variant (an unseen id -- another module binding -- is
     // deferred), read by the extent arm of the leg totality judge only
     let closedDeferred = widenDeferred modul (funcs |> Map.toSeq |> Seq.map snd) (fun _ -> false)
+    // the closed classifier of the region being judged (G219: its census
+    // includes the region's inlined lets); the module-wide one between regions
+    let regionClosed : (IRId -> bool) ref = ref closedDeferred
+    // ids minted from here on (a tentatively inlined region's fresh binders)
+    // are this pass's own; an id below the limit that the closed classifier
+    // calls deferred MAY be deferred -- an imported deferred binding, or any
+    // pre-census id the classifier cannot see (an imported STORED binding
+    // too: a conservative decline, Codex 0d750baf round 3)
+    let censusLimit = builder.CurrentId()
+    let foreignDeferred (id: IRId) = id < censusLimit && closedDeferred id
     // the top-level payload resolver, built ONCE (it indexes every binding;
     // per statement it made the top-level region quadratic)
     let topPayloadOf = intervalPayloadOf modul
@@ -10769,7 +10792,18 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         match e with
         | IRLit _ -> true
         | IRVar (id, t) ->
+            // a read of a deferred value FORCES it, so it is not total for a
+            // moved leg -- through an ALIAS of one too (`let y = d` read in a
+            // kernel: round 4 wave 9, lane A, A4, Codex 0d750baf member 2,
+            // BL8013 moved ahead of an intervening BL8014), and by the
+            // program classifier (an imported or let-chained deferred value)
             not (Map.containsKey id funcs) && not (isFunctionTyped t) && not (deferred.Contains id)
+            && not (deferred.Contains (resolveAlias 64 id)) && not (classifiedDeferred id)
+            && not (classifiedDeferred (resolveAlias 64 id))
+            // an IMPORTED deferred map read through an alias (let y = d, d
+            // from another module: Codex 0d750baf diff review) -- the open
+            // classifier cannot see its producer; fail closed
+            && not (foreignDeferred id) && not (foreignDeferred (resolveAlias 64 id))
             && (match t with IRTLoop _ | IRTComputation _ -> false | _ -> true)
         | IRBinOp (_, (IRDiv | IRMod as op), l, r, _) ->
             tot l && tot r
@@ -10792,7 +10826,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // (Codex 27945c90: an IMPORTED deferred map is unseen by the open
         // classifier -- the CLOSED one answers deferred for an id this module
         // and its callables do not bind)
-        | IRExtent (IRVar (id, _), _) -> not (deferred.Contains id) && not (classifiedDeferred id) && not (closedDeferred id)
+        | IRExtent (IRVar (id, _), _) -> not (deferred.Contains id) && not (classifiedDeferred id) && not (regionClosed.Value id)
         | IRApp (IRVar (fid, _), args, _) ->
             args |> List.forall tot
             && (match Map.tryFind fid funcs with
@@ -11059,8 +11093,24 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     lets |> List.iteri (fun j (id, lv) -> units.Add { Key = SfInl (i, ord, j); Binder = Some id; Value = lv })
                 units.Add { Key = SfOrig i; Binder = binder; Value = v' })
             List.ofSeq units
+        regionClosed.Value <- closedDeferred
         let tentative = buildUnits (fun _ -> true) |> Array.ofList
         for u in tentative do noteIdentityNames u.Value
+        // G219, round 4 wave 9: the region as the pass sees it (its inlined
+        // call bodies under FRESH ids) joins the closed classifier's census,
+        // so a just-inlined `let y = .. |> compute` is judged stored, not an
+        // unseen (imported) binder; an id bound nowhere stays deferred
+        // (rebuilt only for a region that INLINED something: a region with no
+        // fresh binder is judged by the module-wide census, so the cost is one
+        // census per inlining region, Codex diff review 5f64f352 finding 6)
+        if tentative |> Array.exists (fun u -> match u.Key with SfInl _ -> true | SfOrig _ -> false) then
+            regionClosed.Value <-
+                widenDeferredWith modul (funcs |> Map.toSeq |> Seq.map snd)
+                    (tentative |> Seq.map (fun u ->
+                        match u.Binder with
+                        | Some id -> IRLet (id, u.Value, IRLit IRLitUnit)
+                        | None -> u.Value))
+                    (fun _ -> false)
 
         // Fold candidates in unconditional positions.
         let found = ResizeArray<int * int * IRExpr>()
@@ -11645,7 +11695,12 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                 anyGroupRecord <- true
                 record Blade.Effects.Applied (evidenceOf true g legs dups @ extra)
                 applied.Add((g, legs, idx))
-        if not anyGroupRecord && not topLevel.Value then
+        // the TOP-LEVEL region records its decline too once two folds were
+        // candidates were FOUND -- admitted or rejected at admission (round 4
+        // wave 9, lane A, A4, Codex 0d750baf member 4 and its diff review: a
+        // write barrier, or a leg rejected as not total, left no record); a
+        // module with fewer candidates stays silent, as before
+        if not anyGroupRecord && (not topLevel.Value || Seq.length found >= 2) then
             let reasons = (List.ofSeq rejected) @ refusals
             match reasons with
             | [] ->
@@ -12166,6 +12221,25 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                 let byId = bindings' |> List.map (fun b -> (b.Id, b)) |> Map.ofList
                 let (lets, _) = unrollSpine out
                 let pendingNew = ResizeArray<IRId>()
+                // a carrier's name never equals a name the module already
+                // binds (a user `let __sfj18 = 42.0` beside the carrier
+                // `__sfj18` printed twice under `--print __sfj18` and emitted
+                // two C++ declarations: round 4 wave 9, lane A, A4, Codex
+                // 0d750baf member 3)
+                let occupied =
+                    System.Collections.Generic.HashSet<string>(
+                        (bindings' |> List.map (fun b -> b.Name))
+                        @ (modul.Functions |> List.collect (fun f -> [ f.Name; f.SourceName ])))
+                // (nor one a binding EXTENDS with `_`: the emitter names the
+                // join legs `<carrier>_0`, `<carrier>_1`, ...)
+                let carrierName (id: IRId) =
+                    let clashes (n: string) = occupied.Contains n || occupied |> Seq.exists (fun o -> not (isNull o) && o.StartsWith (n + "_"))
+                    let rec pick (k: int) =
+                        let n = if k = 0 then $"__sfj{id}" else $"__sfj{id}r{k}"
+                        if clashes n then pick (k + 1) else n
+                    let n = pick 0
+                    occupied.Add n |> ignore
+                    n
                 let mapped =
                     lets |> List.map (fun (id, v) ->
                         match Map.tryFind id byId with
@@ -12175,7 +12249,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                             if opaque b then b else { b with Value = v }
                         | None ->
                             pendingNew.Add id
-                            { Id = id; Name = $"__sfj{id}"; Type = typeOf v; Value = v; IsConst = false; IsMutable = false })
+                            { Id = id; Name = carrierName id; Type = typeOf v; Value = v; IsConst = false; IsMutable = false })
                 mapped
     let modul =
         if topOrigins.Count = 0 then modul
@@ -19347,8 +19421,12 @@ let deferredChainEnabled () : bool =
     | null -> false
     | v -> v.Trim().ToLowerInvariant() = "chain"
 let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRModule) : IRModule =
-    if modul.Functions |> List.exists (fun f -> f.IsCudaKernel) then modul else
-    let own = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    // a module holding a CUDA kernel is skipped (v1), but each candidate chain
+    // RECORDS that decline (round 4 wave 9, lane A, A4: the class-closure round
+    // of BLADE_COMPUTE_ELIDE=chain, Codex a8651902 -- an unused `where cuda`
+    // function made an eligible chain vanish from `blade plan` with no record)
+    let hasCuda = modul.Functions |> List.exists (fun f -> f.IsCudaKernel)
+    let own =modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let funcs = programFuncs |> List.fold (fun m f -> if Map.containsKey f.Id m then m else Map.add f.Id f m) own
     let resolve (k: IRExpr) = resolveCallableIn funcs k
     let localCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
@@ -19469,7 +19547,9 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
             recordComputeElision subj (Blade.Effects.Declined $"deferred chain to fold: {why}") []
             v
         let chainIds = Set.ofList ([ p; hostId ] @ (qId |> Option.toList))
-        if not (Blade.Toolchain.envFlag "BLADE_FUSION" true) then
+        if hasCuda then
+            decline "the module holds a CUDA kernel (v1 leaves every deferred chain of such a module as written)"
+        elif not (Blade.Toolchain.envFlag "BLADE_FUSION" true) then
             decline "elementwise fusion, the rewrite's realization, is disabled (BLADE_FUSION)"
         elif qinfo.Arrays.Length > 1 && not qinfo.IsCoIteration then
             decline $"`{qName}` is an outer product (v1 splices into a map or a co-iteration only)"

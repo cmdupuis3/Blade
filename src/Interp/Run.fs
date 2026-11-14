@@ -540,7 +540,14 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
           // means, and why it is not `=`).
           let framesBefore = Blade.Display.Frame.emitted ()
           let producedBefore = Blade.Display.Frame.producedCount ()
-          match Map.tryFind b.Name memoIn.Values with
+          // A binding an optimizer pass SYNTHESIZED (filed in
+          // DerivedFuncOrigins: the top-level sibling-fold carriers `__sfj<id>`)
+          // is never adopted from the memo: its name derives from an IR id, so
+          // after a later cell shifts the ids the same name may hold another
+          // computation (round 4 wave 9, lane A, A4, Codex 0d750baf member 1:
+          // `c = 6.0` for 14.0).
+          let synthesized = Map.containsKey b.Id m.DerivedFuncOrigins
+          match (if synthesized then None else Map.tryFind b.Name memoIn.Values) with
           | Some (cachedTy, cachedV) when memoTypeAgrees cachedTy b.Type
                                           && (not (Set.contains b.Name memoIn.FrameEmitters)
                                               || Map.containsKey b.Name memoIn.Frames) ->
@@ -673,7 +680,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // extending keeps its whole prefix warm.
     let outValues =
         program.Modules
-        |> List.collect _.Bindings
+        |> List.collect (fun m -> m.Bindings |> List.filter (fun b -> not (Map.containsKey b.Id m.DerivedFuncOrigins)))
         |> List.fold (fun acc b ->
             match envTryFind root b.Id with
             | Some cell when memoizableValue cell.V

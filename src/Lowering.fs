@@ -1097,6 +1097,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
          | (TExprApply _ | TExprFusion _), Some seed ->
             IRReduceCompute (lowerTypedExpr env array, lowerTypedExpr env kernel,
                              lowerTypedExpr env seed)
+         // The KEPT SPINE NAME (gap G235 (a), TypedAst.markKeptSpine): the
+         // checker kept the spine variable (the marked wrapper's child) because
+         // a capture of the fold kernel or a seed cell read forces it under its
+         // own name; the fused terminal folds that snapshot.
+         | TExprCompute ({ Kind = TExprVar _ } as spine), Some seed when array.Span = keptSpineSpan ->
+            IRReduceCompute (lowerTypedExpr env spine, lowerTypedExpr env kernel,
+                             lowerTypedExpr env seed)
          | _ ->
             let srcIR = lowerTypedExpr env array
             let kernelIR = lowerTypedExpr env kernel
@@ -3280,6 +3287,69 @@ let mapModuleExecutablePayloads (body: IRExpr -> IRExpr) (side: IRExpr -> IRExpr
         CompoundInits = m.CompoundInits |> Map.map (fun _ (d, k) -> (side d, side k))
         SparseInits = m.SparseInits |> Map.map (fun _ e -> side e) }
 
+/// THE SHAPE OF A DEFERRED MAP, READ FROM ITS OPERANDS (gap G234; formalism
+/// 10.2, the G218 rule): an EXTENT read of a deferred map evaluates nothing --
+/// a static extent is a literal of its type, and a RUN-TIME extent (a map over
+/// a compound) is the extent of the operand it maps cell for cell. The C++
+/// lane and the interpreter forced the map to read
+/// `d.idx->cardinality` / its stored extents (BL8013 at d); the LLVM lane read
+/// the operand's (the agreed outcome). One rewrite before the lane split, over
+/// MAIN-LEVEL code (module binding values; kernels are lifted callables, never
+/// inside a binding value, so a capture that reads only `extents(d)` inside a
+/// kernel still forces d, G214): `extents(d, k)` of a deferred ELEMENTWISE map
+/// (one operand, or a zip co-iteration: every kernel input and the output a
+/// cell, no Reynolds, an unsymmetric output of the operand's rank) whose
+/// extent at k is not static becomes `extents(o, k)` of its first operand o,
+/// through deferred aliases and chains of such maps, when o is a STORED binding
+/// (not deferred). Anything else keeps the force (a range with a run-time
+/// bound, a projection of a deferred tuple, a block value: staged, G234).
+let resolveDeferredExtentsModule (modul: IRModule) : IRModule =
+    let values = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for b in modul.Bindings do values.[b.Id] <- b.Value
+    let deferred = computeDeferredIds modul.Bindings
+    let shapeOf (e: IRExpr) =
+        match stripUnits (typeOf e) with
+        | ArrayElem at -> Some at
+        | _ -> None
+    let staticAt (e: IRExpr) (dim: int) =
+        match shapeOf e with
+        | Some at when dim >= 0 && dim < at.IndexTypes.Length -> (tryEvalIntIR at.IndexTypes.[dim].Extent).IsSome
+        | _ -> false
+    let sameShape (a: IRExpr) (b: IRExpr) =
+        match shapeOf a, shapeOf b with
+        | Some x, Some y ->
+            x.IndexTypes.Length = y.IndexTypes.Length
+            && (x.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = (y.IndexTypes |> List.sumBy (fun ix -> ix.Rank))
+            && x.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
+        | _ -> false
+    let rec source (seen: Set<IRId>) (e: IRExpr) : IRExpr option =
+        match e with
+        | IRVar (id, _) when deferred.Contains id && not (seen.Contains id) ->
+            (match values.TryGetValue id with
+             | true, (IRVar _ as alias) -> source (seen.Add id) alias
+             | true, IRApplyCombinator info
+                when (info.Arrays.Length = 1 || info.IsCoIteration)
+                     && not info.Arrays.IsEmpty
+                     && info.KernelInputRanks |> List.forall ((=) 0)
+                     && info.KernelOutputRank = 0
+                     && not info.HasReynolds
+                     && sameShape e info.Arrays.Head ->
+                (match info.Arrays.Head with
+                 | IRVar (oid, _) as op when deferred.Contains oid -> source (seen.Add id) op
+                 | IRVar _ as op -> Some op
+                 | _ -> None)
+             | _ -> None)
+        | _ -> None
+    let rec rewrite (e: IRExpr) : IRExpr =
+        match e with
+        | IRExtent ((IRVar _ as a), dim) when not (staticAt a dim) ->
+            (match source Set.empty a with
+             | Some o -> IRExtent (o, dim)
+             | None -> e)
+        | ExprShape ([], _) -> e
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map rewrite)
+    { modul with Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+
 /// THE UNSEEDED-SEED RESOLUTION (gap G74): every `IRUnseededSeed` of the
 /// module's EXECUTABLE payloads (`moduleExecutablePayloads`: bodies, binding
 /// values and side tables) becomes an ordinary seed, after monomorphization
@@ -3506,6 +3576,59 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
                 raise (Blade.Diagnostics.BladeDiagnosticException
                         (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
                             "a parallel kernel (`where omp` / cuda) writes storage captured from outside it -- through a local view or alias (a `let` bound to, or rebound to, a slice or element view of a captured array) or through a callback it calls (a function-valued parameter whose argument writes, or one that cannot be resolved): its cells run concurrently, so the store is a data race. Write through a fresh local array, pass a callback that writes nothing outside itself, or return the value and fold it."))
+/// GAP G247: a kernel APPLIED inside a function whose callable captures a
+/// binding of ANOTHER function's body that this function does not receive --
+/// `function outer() = { let scale = 2.0; let f = lambda(x) -> x * scale;
+/// function apply(scale: Float64, a) = { method_for(a) <@> f |> compute }; ..}`
+/// -- had no meaning the lanes shared: the C++ lane inlined f and read
+/// apply's same-named parameter (or named an undeclared `scale`), the
+/// interpreter could not resolve the capture, the LLVM lane computed it. The
+/// capture is not forwarded into the nested function (its lifted signature
+/// carries the closure, not what the closure captured), so until that
+/// forwarding exists the shape is refused here, BL7004, in every lane
+/// (fail closed; the forwarding is the open part of gap G247). A capture is
+/// FOREIGN to a function when some other function's body binds it (a let or
+/// a parameter) and this one neither binds it nor receives it as a parameter
+/// or a capture; a capture bound nowhere known is not judged.
+let private refuseForeignKernelCaptures (modules: IRModule list) : unit =
+    let funcs = modules |> List.collect (fun m -> m.Functions)
+    // THIS program's callables, through let aliases (programWriteContext's
+    // resolver; never the ambient analysis context, which a fresh process
+    // leaves empty and a previous compilation leaves stale -- Codex diff review)
+    let (_, _, _, _, resolve, _) = programWriteContext modules
+    let owners = System.Collections.Generic.Dictionary<IRId, Set<IRId>>()
+    let own (id: IRId) (fid: IRId) =
+        owners.[id] <- (match owners.TryGetValue id with | true, s -> Set.add fid s | _ -> Set.singleton fid)
+    for f in funcs do
+        for p in f.Params do own p.VarId f.Id
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, _, _) -> own id f.Id
+            | IRForRange (vid, _, _, _) -> own vid f.Id
+            | _ -> ()) f.Body
+    for f in funcs do
+        let received =
+            Set.union (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                      (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)
+        iterIRExpr (fun n ->
+            match n with
+            | IRApplyCombinator info ->
+                // a `reynolds(f)` wrapper is peeled first (resolveKernel's rule)
+                (match resolve (fst (IR.peelReynolds info.Kernel)) with
+                 | Some kf ->
+                     for c in kf.Captures do
+                         match owners.TryGetValue c.Id with
+                         | true, s when not (s.Contains f.Id) && not (received.Contains c.Id) ->
+                             let span =
+                                 let sp = IR.declSpanOf f.SourceName
+                                 if sp <> Blade.Ast.noSpan then sp else IR.declSpanOf f.Name
+                             raise (Blade.Diagnostics.BladeDiagnosticException
+                                     (Blade.Diagnostics.Codes.backendRefusal span
+                                         ($"'{f.SourceName}': a kernel it applies is a closure that captures `{c.Name}`, a binding of an enclosing function which '{f.SourceName}' does not receive (a nested function receives the closure, not what the closure captured; gap G247) -- pass `{c.Name}` to '{f.SourceName}' as a parameter, or apply the kernel in the function that defines it")))
+                         | _ -> ()
+                 | None -> ())
+            | _ -> ()) f.Body
+
 /// Two shapes the lanes cannot give ONE meaning, refused here so every lane
 /// (C++, LLVM, the interpreter -- all lower through this pass) reports the
 /// same diagnostic (round 3 wave 4, W4-1; formalism 10.2). COMPLETE rather
@@ -3612,6 +3735,19 @@ let private refuseAliasedMutArgumentsWith
     // reads are unknown, so the call is refused fail closed (wave-8 fable
     // review: the closure route of G190 (c))
     let readsCache = System.Collections.Generic.Dictionary<IRId, Set<IRId> * bool>()
+    // an expression with the expressions its TYPES carry (range bounds,
+    // extents: G250 / Codex probe C, `reduce(0..touch(g, alias), (+), 0)`),
+    // which every read and call scan of this rule walks too
+    let rootsWithExtents (e: IRExpr) (extra: IRExpr list) : IRExpr list =
+        let es = e :: extra
+        es @ (es |> List.collect Optimize.embeddedExtentExprs)
+    // G240 (4), round 4 wave 9: a LOCAL binder a callable the callee runs
+    // captures (a view `let row = m(0)` or a deferred map `let d = ..` of a
+    // top-level block, captured by a callback lambda) is a by-name read too:
+    // its storage is followed like a module binding's (its type from the
+    // capture record or the reference)
+    let localTypes = System.Collections.Generic.Dictionary<IRId, IRType>()
+    let localNames = System.Collections.Generic.Dictionary<IRId, string>()
     let calleeReadsT (c: IRCallable) : Set<IRId> * bool =
         match readsCache.TryGetValue c.Id with
         | true, s -> s
@@ -3637,8 +3773,17 @@ let private refuseAliasedMutArgumentsWith
             // (Codex diff review round 2)
             let rec visit (g: IRCallable) =
                 if visited.Add g.Id then
-                    for r in Set.union (collectVarRefsIR g.Body) (g.Captures |> List.map (fun ci -> ci.Id) |> Set.ofList) do
+                    // the body AND the expressions its types carry (a range
+                    // bound, a parameter's extent: G250 / Codex probe C)
+                    let roots = rootsWithExtents g.Body (g.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)))
+                    for r in Set.union (roots |> List.map collectVarRefsIR |> Set.unionMany) (g.Captures |> List.map (fun ci -> ci.Id) |> Set.ofList) do
                         if moduleIds.Contains r then acc.Add r |> ignore
+                    // a captured LOCAL (G240 (4)) is a read of it by name
+                    for ci in g.Captures do
+                        if not (moduleIds.Contains ci.Id) && not (funcs.ContainsKey ci.Id) then
+                            acc.Add ci.Id |> ignore
+                            localTypes.[ci.Id] <- ci.Type
+                            localNames.[ci.Id] <- ci.Name
                     // EVERY callable reference may execute (a call head, a
                     // kernel, a sort key, a callable argument: Codex diff
                     // review round 3), except the value of a `let` that only
@@ -3647,11 +3792,50 @@ let private refuseAliasedMutArgumentsWith
                     let ownParamIds = g.Params |> List.map (fun p -> p.VarId) |> Set.ofList
                     let rec walk (e: IRExpr) =
                         match e with
-                        | IRLet (_, (IRVar _ as v), b) when (resolve v).IsSome -> walk b
-                        | IRVar _ ->
+                        // (binding a function value, resolved or not, runs nothing)
+                        | IRLet (_, (IRVar _ as v), b) when (resolve v).IsSome || maybeFunction v -> walk b
+                        // ... nor does binding or STORING one held in an aggregate:
+                        // `let f = ks[0]`, `out(0) = f` (an array of closures written,
+                        // functions/545, 549) -- its later application is judged where
+                        // it is applied
+                        | IRLet (_, ((IRTupleProj (a, _, _) | IRFieldAccess (a, _)) as v), b) when maybeFunction v -> walk a; walk b
+                        | IRLet (_, (IRIndex (a, idxs, _) as v), b) when maybeFunction v -> walk a; List.iter walk idxs; walk b
+                        | IRAssign (t, v) ->
+                            (match t with
+                             | IRIndex (a, idxs, _) -> walk a; List.iter walk idxs
+                             | IRTupleProj (a, _, _) | IRFieldAccess (a, _) -> walk a
+                             | _ -> walk t)
+                            (match v with
+                             | IRVar _ | IRTupleProj _ | IRFieldAccess _ | IRIndex _ when (resolve v).IsNone && maybeFunction v ->
+                                 childrenOf v |> List.iter walk
+                             | _ -> walk v)
+                        | IRVar (vid, _) ->
                             (match resolve e with
                              | Some h -> visit h
-                             | None -> ())
+                             | None ->
+                                 // G240 (3-kernel), round 4 wave 9: a function
+                                 // value no resolution reaches standing in a
+                                 // KERNEL slot -- a sort key, a fold kernel, a
+                                 // mask predicate, any callable position that is
+                                 // no call head (`sort(y, kf)`, `reduce(y, kf2, s)`)
+                                 // -- runs too, with unknown reads (fail closed);
+                                 // this body's own parameters are judged at
+                                 // its call sites
+                                 if not (ownParamIds.Contains vid) && maybeFunction e then
+                                     untracedRead.Value <- true)
+                        // ... and a function value held in an AGGREGATE or a
+                        // FIELD in such a slot (`sort(y, ks[0])`, `holder.cb`,
+                        // an array of closures `fns(0)`): untraced too (G250 /
+                        // Codex probe B)
+                        // (a field of unknown type fails closed, as maybeFunction
+                        // does: Codex diff review 5f64f352 finding 5)
+                        | IRTupleProj _ | IRFieldAccess _ | IRIndex _ when
+                                (resolve e).IsNone
+                                && (match e with
+                                    | IRFieldAccess _ -> maybeFunction e
+                                    | _ -> (try (match stripUnits (typeOf e) with FuncElem _ -> true | _ -> false) with _ -> false)) ->
+                            untracedRead.Value <- true
+                            childrenOf e |> List.iter walk
                         | IRApp (f, args, _) ->
                             // a function value no resolution reaches handed ON
                             // to another call (`apply(kf, 1.0)` inside the
@@ -3675,7 +3859,7 @@ let private refuseAliasedMutArgumentsWith
                              | _ -> ())
                             childrenOf e |> List.iter walk
                         | _ -> childrenOf e |> List.iter walk
-                    walk g.Body
+                    roots |> List.iter walk
             visit c
             let s = (Set.ofSeq acc, untracedRead.Value)
             readsCache.[c.Id] <- s
@@ -3683,41 +3867,67 @@ let private refuseAliasedMutArgumentsWith
     let calleeReads (c: IRCallable) : Set<IRId> = fst (calleeReadsT c)
     // the binders whose storage a READ of module binding `id` may touch: its
     // own storage, and, for a DEFERRED map, everything its evaluation reads
-    let rec readStorageFrom (visited: System.Collections.Generic.HashSet<IRId>) (id: IRId) : Set<IRId> option =
+    let rec readStorageFrom (visited: System.Collections.Generic.HashSet<IRId>) (owner: IRCallable option) (id: IRId) : Set<IRId> option =
         if not (visited.Add id) then Some Set.empty
         else
-            match bindingById.TryFind id with
-            | None -> Some (Set.singleton id)
-            | Some b ->
-                let own = storageOf 48 None (IRVar (id, b.Type))
-                let viaEvaluation =
-                    if not (deferred.Contains id) then Some Set.empty
-                    else
-                        let refs = collectVarRefsIR b.Value
-                        let viaCallables =
-                            refs |> Set.toList |> List.collect (fun r ->
-                                match Map.tryFind r funcs with
-                                | Some c -> (c.Captures |> List.map (fun ci -> ci.Id)) @ Set.toList (calleeReads c)
-                                | None -> [])
-                        // a kernel of the map applying an untraceable function
-                        // value: unknown reads (fail closed)
-                        let kernelUntraced =
-                            refs |> Set.exists (fun r ->
-                                match Map.tryFind r funcs with
-                                | Some c -> snd (calleeReadsT c)
-                                | None -> false)
-                        if kernelUntraced then None else
-                        Set.union refs (Set.ofList viaCallables)
-                        |> Set.intersect moduleIds
-                        |> Set.toList
-                        |> List.fold (fun acc d ->
-                            match acc, readStorageFrom visited d with
-                            | Some a, Some s -> Some (Set.union a s)
-                            | _ -> None) (Some Set.empty)
+            // the binders the EVALUATION of a deferred value `v` reads
+            // (module binders and the locals it names), transitively
+            let viaEvaluationOf (v0: IRExpr) =
+                let v = IRSequence (rootsWithExtents v0 [])
+                let refs = collectVarRefsIR v
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (rid, rty) when not (moduleIds.Contains rid) && not (funcs.ContainsKey rid) && not (localTypes.ContainsKey rid) ->
+                        localTypes.[rid] <- rty
+                    | _ -> ()) v
+                let viaCallables =
+                    refs |> Set.toList |> List.collect (fun r ->
+                        match Map.tryFind r funcs with
+                        | Some c -> (c.Captures |> List.map (fun ci -> ci.Id)) @ Set.toList (calleeReads c)
+                        | None -> [])
+                // a kernel of the map applying an untraceable function
+                // value: unknown reads (fail closed)
+                let kernelUntraced =
+                    refs |> Set.exists (fun r ->
+                        match Map.tryFind r funcs with
+                        | Some c -> snd (calleeReadsT c)
+                        | None -> false)
+                if kernelUntraced then None else
+                Set.union refs (Set.ofList viaCallables)
+                |> Set.filter (fun d -> moduleIds.Contains d || localTypes.ContainsKey d)
+                |> Set.toList
+                |> List.fold (fun acc d ->
+                    match acc, readStorageFrom visited owner d with
+                    | Some a, Some s -> Some (Set.union a s)
+                    | _ -> None) (Some Set.empty)
+            let combine own viaEvaluation =
                 match own, viaEvaluation with
                 | Some a, Some v -> Some (Set.union a v)
                 | _ -> None
-    let readStorage (id: IRId) = readStorageFrom (System.Collections.Generic.HashSet<IRId>()) id
+            match bindingById.TryFind id with
+            | Some b ->
+                let own = storageOf 48 None (IRVar (id, b.Type))
+                combine own (if deferred.Contains id then viaEvaluationOf b.Value else Some Set.empty)
+            | None ->
+                match localTypes.TryGetValue id with
+                | true, ty ->
+                    let own = storageOf 48 owner (IRVar (id, ty))
+                    let viaEvaluation =
+                        if not (deferred.Contains id) then Some Set.empty
+                        else
+                            match lets.TryGetValue id with
+                            | true, v -> viaEvaluationOf v
+                            | _ -> Some Set.empty
+                    combine own viaEvaluation
+                | _ -> Some (Set.singleton id)
+    let readStorage (owner: IRCallable option) (id: IRId) = readStorageFrom (System.Collections.Generic.HashSet<IRId>()) owner id
+    let readerName (id: IRId) =
+        match bindingById.TryFind id with
+        | Some b -> b.Name
+        | None ->
+            match localNames.TryGetValue id with
+            | true, n -> n
+            | _ -> "<local>"
     // every binder counts, a tuple / struct CARRIER too: an inline array
     // member of a tuple has no identity but its carrier's (Codex diff review
     // round 2), so two components of one tuple are judged one storage (a
@@ -3727,6 +3937,9 @@ let private refuseAliasedMutArgumentsWith
         match bindingById.TryFind id with
         | Some b -> $"'{b.Name}'"
         | None -> "a local array"
+    // the first binder `a` and `b` share, the one the refusal names
+    let sharedOf (a: Set<IRId>) (b: Set<IRId>) : IRId option =
+        a |> Seq.tryFind (fun x -> b.Contains x)
     let calleeName (c: IRCallable) =
         let n = if System.String.IsNullOrEmpty c.SourceName then c.Name else c.SourceName
         if n.EndsWith "__grad" then $"'{n}' (ad.grad({n.Substring(0, n.Length - 6)}))"
@@ -3740,6 +3953,149 @@ let private refuseAliasedMutArgumentsWith
     let remedy = "Pass a separate array: bind a copy (`let mut c = <it>`) and pass c to one of them."
     let untracedRead (span: Blade.Ast.Span) (c: IRCallable) (i: int) =
         refuse span ($"function {calleeName c}: argument {i + 1} is passed to a mut parameter, but the callee applies a function value whose reads could not be traced (a closure held by a binding, an aggregate element, a callback no resolution reaches): it may read the argument's storage mid-call (fail closed). {remedy}")
+    // a site's roots: its value / body, the expressions the types it names
+    // carry, and its parameters' types
+    let siteRoots (owner: IRCallable option) (root: IRExpr) =
+        rootsWithExtents root (match owner with Some f -> f.Params |> List.map (fun p -> IRVar (p.VarId, p.Type)) | None -> [])
+    // G250 (1)-(3), round 4 wave 9 (Codex design review 5f64f352, option (a)):
+    // a callable with a mut parameter used as a VALUE erases its write
+    // permission -- a function type has no `mut`, so `apply(bump, xs)` (with
+    // `function apply(h: (A, A) -> Float64, b: A) = h(b, b)`) wrote the
+    // immutable xs through h unjudged, and so did a derivative held in a tuple
+    // or a field or handed to a wrapper. Such a callable may appear only as a
+    // DIRECT call head (the judged call), as a `let` alias of one, or as the
+    // resolved kernel of a map application this rule judges (with the same
+    // callable in that application's canonical object_for loop); anywhere else
+    // -- a call argument, a tuple / array / struct member, a returned value, a
+    // composition stage, an object_for outside a judged application -- is BL4005.
+    let isMutCallable (e: IRExpr) =
+        match resolve e with
+        | Some c -> not (List.isEmpty (positionsOf c))
+        | None -> false
+    // a composition value, through let / binding aliases
+    let rec compositionOf (seen: Set<IRId>) (e: IRExpr) : IRExpr option =
+        match e with
+        | IRComposeObj _ | IRObjectFor _ -> Some e
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match lets.TryGetValue id with
+             | true, v -> compositionOf (seen.Add id) v
+             | _ ->
+                 match bindingById.TryFind id with
+                 | Some b -> compositionOf (seen.Add id) b.Value
+                 | None -> None)
+        | _ -> None
+    let rec stagesOf (e: IRExpr) : IRExpr list =
+        match e with
+        | IRComposeObj (l, r) -> stagesOf l @ stagesOf r
+        | IRObjectFor oi -> [ oi.Kernel ]
+        | _ -> []
+    let compositionHasMutStage (e: IRExpr) =
+        match compositionOf Set.empty e with
+        | Some c -> stagesOf c |> List.exists isMutCallable
+        | None -> false
+    // the callable a kernel reference runs, for the bound-loop-object identity
+    // test only: a wrapper whose body's TAIL (after its let prefix) is a call of
+    // a resolved function on its own parameters, in order, forwards to that
+    // function; any other callable is its own target. The application's full
+    // body is still judged by the read analysis.
+    let forwardTarget (k: IRExpr) : IRId option =
+        match resolve k with
+        | Some c ->
+            let rec peel (x: IRExpr) = match x with IRLet (_, _, b) -> peel b | IRCompute y -> peel y | x -> x
+            match peel c.Body with
+            | IRApp (f, args, _) when args.Length = c.Params.Length
+                                      && List.forall2 (fun (a: IRExpr) (p: IRParam) ->
+                                             match a with
+                                             | IRVar (vid, _) -> vid = p.VarId
+                                             | IRParam (nm, _, _) -> nm = p.Name
+                                             | _ -> false) args c.Params ->
+                (match resolve f with
+                 | Some g -> Some g.Id
+                 | None -> Some c.Id)
+            | _ -> Some c.Id
+        | None -> None
+    for (span, owner, root) in sites do
+        let mutValue (e: IRExpr) =
+            let c = (resolve e).Value
+            refuse span ($"function {calleeName c} has a mut parameter and is used here as a VALUE (an argument, a tuple / array / struct member, a returned value, a composition stage): a function type carries no `mut`, so a call through it would write its argument unjudged (formalism: a mut argument may not share storage with what the callee reads). Call it directly (`{calleeName c}(..)` with its arguments), or bind the array it writes with `let mut` and pass a function without a mut parameter.")
+        let rec scanV (e: IRExpr) =
+            match e with
+            | IRApp (f, args, _) ->
+                (match f with
+                 | IRVar _ when (resolve f).IsSome -> ()
+                 | _ -> scanV f)
+                args |> List.iter scanV
+            | IRLet (_, (IRVar _ as v), b) when isMutCallable v -> scanV b
+            | IRApplyCombinator info ->
+                let kc = resolve info.Kernel
+                let kId = kc |> Option.map (fun c -> c.Id)
+                // the canonical loop's kernel: the judged kernel itself, or the
+                // callable an ETA wrapper kernel calls directly
+                let etaTarget =
+                    kc |> Option.bind (fun c ->
+                        let rec peel (x: IRExpr) = match x with IRLet (_, _, b) -> peel b | IRCompute y -> peel y | x -> x
+                        match peel c.Body with
+                        | IRApp (f, _, _) -> resolve f |> Option.map (fun g -> g.Id)
+                        | _ -> None)
+                for ch in childrenOf e do
+                    if obj.ReferenceEquals(ch, info.Kernel) && kId.IsSome then ()
+                    elif obj.ReferenceEquals(ch, info.Loop) then
+                        match info.Loop with
+                        | IRObjectFor oi when kId.IsSome
+                                              && (let lk = resolve oi.Kernel |> Option.map (fun c -> c.Id)
+                                                  lk = kId || (lk.IsSome && lk = etaTarget)) ->
+                            for ch2 in childrenOf info.Loop do
+                                if not (obj.ReferenceEquals(ch2, oi.Kernel)) then scanV ch2
+                        // a BOUND loop object applied by name (`K <@> xs` with
+                        // `let K = object_for(poke)`): the same judged kernel
+                        // (the binding and the application each lift their OWN
+                        // eta wrapper of poke: compared by their verified
+                        // forwarding targets, Codex diff review 5f64f352 round 6)
+                        | IRVar _ when kId.IsSome
+                                       && (match compositionOf Set.empty info.Loop with
+                                           | Some (IRObjectFor oi) ->
+                                               let lk = resolve oi.Kernel |> Option.map (fun c -> c.Id)
+                                               lk = kId || (lk.IsSome && lk = etaTarget)
+                                               || (let t = forwardTarget oi.Kernel in t.IsSome && t = forwardTarget info.Kernel)
+                                           | _ -> false) -> ()
+                        | _ -> scanV ch
+                    else scanV ch
+            // a COMPOSITION's stage kernel (`object_for(poke) >>@ ..`): the
+            // stages run where the composition is APPLIED, and that
+            // application (IRComposeApply) is judged below with its first
+            // stage as the callee (index-types/555); the composition itself
+            // may be bound and applied, never passed elsewhere
+            // a composition is admitted only BOUND (a binding's or a let's
+            // whole value) or APPLIED; built inline anywhere else (a tuple
+            // member, an argument) with a mut stage it is a value use
+            | IRLet (_, (IRComposeObj _ as v), b) -> scanComp v; scanV b
+            // a bound bare LOOP OBJECT (`let K = object_for(poke)`) is a one-stage
+            // composition: its application judges its kernel (fable review of
+            // wave 9, F5)
+            | IRLet (_, (IRObjectFor _ as v), b) -> scanComp v; scanV b
+            | IRComposeObj _ when compositionHasMutStage e ->
+                refuse span "a composition whose stage has a mut parameter is used here as a VALUE (an argument, a tuple member, a returned value): its writes would run where it is applied, unjudged. Bind it (`let K = ..`) and apply it directly (`K <@> arrays`)."
+            | IRComposeApply info ->
+                (match info.Composition with
+                 | IRVar _ -> ()
+                 | c -> scanComp c)
+                info.InputArrays |> List.iter scanV
+            | IRVar _ when isMutCallable e -> mutValue e
+            | IRVar _ when compositionHasMutStage e -> refuse span "a composition whose stage has a mut parameter is used here as a VALUE (an argument, a tuple member, a returned value): its writes would run where it is applied, unjudged. Apply it directly (`K <@> arrays`)."
+            | _ -> childrenOf e |> List.iter scanV
+        and scanComp (e: IRExpr) =
+            match e with
+            | IRComposeObj (l, r) -> scanComp l; scanComp r
+            | IRObjectFor oi when isMutCallable oi.Kernel -> ()
+            | e -> scanV e
+        // a module binding whose whole value is such a callable is an alias
+        // (a MODULE binding only: a function body returning it is a value use,
+        // Codex diff review 5f64f352 finding 1); a binding whose whole value
+        // is a composition is the bound composition
+        match owner, root with
+        | None, IRVar _ when isMutCallable root || compositionHasMutStage root -> ()
+        | None, (IRComposeObj _ | IRObjectFor _) -> scanComp root
+        | _ -> siteRoots owner root |> List.iter scanV
     for (span, owner, root) in sites do
         iterIRExpr (fun n ->
             // a call, or a MAP whose kernel has mut parameters: each kernel
@@ -3760,6 +4116,17 @@ let private refuseAliasedMutArgumentsWith
                          // mut parameter's storage is not traced here (fail
                          // closed; wave-8 fable review)
                          refuse span ($"function {calleeName k}: a map applies it with a mut parameter, but its operands do not line up one to one with its parameters (a multi-slot range supplies several), so the storage the mut parameter receives could not be traced (fail closed). Iterate the operand itself (`method_for(A) <@> ..`) or pass a separate array.")
+                     | _ -> None)
+                // an APPLIED composition (G250): its FIRST stage receives the
+                // applied arrays (a later stage reads the fresh intermediate)
+                | IRComposeApply info ->
+                    (match compositionOf Set.empty info.Composition |> Option.map stagesOf with
+                     | Some (k0 :: _) ->
+                         (match resolve k0 with
+                          | Some k when k.Params.Length = info.InputArrays.Length -> Some (k0, info.InputArrays)
+                          | Some k when not (List.isEmpty (positionsOf k)) ->
+                              refuse span ($"function {calleeName k}: a composition applies it with a mut parameter, but the applied arrays do not line up one to one with its parameters, so the storage the mut parameter receives could not be traced (fail closed).")
+                          | _ -> None)
                      | _ -> None)
                 | _ -> None
             match call with
@@ -3788,33 +4155,39 @@ let private refuseAliasedMutArgumentsWith
                                           | _ -> false) with _ -> false)))
                      for i in positionsOf c do
                          if i < args.Length && exprHoldsStorage args.[i] then
+                             // (spanned at the declaration: per-argument spans
+                             // need call-site provenance, G240 (1), staged)
+                             let aspan = span
                              match storageOf 48 owner args.[i] with
-                             | None -> untraced span c i
+                             | None -> untraced aspan c i
                              | Some si ->
                                  let si = si |> Set.filter isStorageId
-                                 if not si.IsEmpty && readsUntraced then untracedRead span c i
+                                 if not si.IsEmpty && readsUntraced then untracedRead aspan c i
                                  if not si.IsEmpty then
                                      args |> List.iteri (fun j other ->
                                          if j <> i && exprHoldsStorage other then
                                              match storageOf 48 owner other with
                                              | None -> untraced span c j
                                              | Some sj ->
-                                                 let shared = Set.intersect si (sj |> Set.filter isStorageId)
-                                                 if not shared.IsEmpty then
-                                                     refuse span ($"function {calleeName c}: argument {i + 1} is passed to a mut parameter, but its storage also reaches the callee through argument {j + 1} (both may share the storage of {nameOfBinder shared.MinimumElement}) -- the callee's writes through the parameter would be visible through its own reads mid-call. {remedy}"))
+                                                 match sharedOf si (sj |> Set.filter isStorageId) with
+                                                 | Some sh ->
+                                                     refuse aspan ($"function {calleeName c}: argument {i + 1} is passed to a mut parameter, but its storage also reaches the callee through argument {j + 1} (both may share the storage of {nameOfBinder sh}) -- the callee's writes through the parameter would be visible through its own reads mid-call. {remedy}")
+                                                 | None -> ())
                                      for r in reads do
-                                         match readStorage r with
-                                         | None -> untraced span c i
+                                         match readStorage owner r with
+                                         | None -> untraced aspan c i
                                          | Some rs ->
-                                             let shared = Set.intersect si (rs |> Set.filter isStorageId)
-                                             if not shared.IsEmpty then
+                                             match sharedOf si (rs |> Set.filter isStorageId) with
+                                             | Some sh ->
+                                                 let rn = readerName r
                                                  let how =
-                                                     if r = shared.MinimumElement then $"'{bindingById.[r].Name}', which the callee reads by name"
-                                                     elif deferred.Contains r then $"'{bindingById.[r].Name}', which the callee reads by name -- a deferred map whose evaluation reads the storage of {nameOfBinder shared.MinimumElement}"
-                                                     else $"'{bindingById.[r].Name}', which the callee reads by name and which shares the storage of {nameOfBinder shared.MinimumElement}"
-                                                 refuse span ($"function {calleeName c}: argument {i + 1} is passed to a mut parameter, but its storage also reaches the callee through {how} -- the callee's writes through the parameter would be visible through its own reads mid-call. {remedy}")
+                                                     if r = sh then $"'{rn}', which the callee reads by name"
+                                                     elif deferred.Contains r then $"'{rn}', which the callee reads by name -- a deferred map whose evaluation reads the storage of {nameOfBinder sh}"
+                                                     else $"'{rn}', which the callee reads by name and which shares the storage of {nameOfBinder sh}"
+                                                 refuse aspan ($"function {calleeName c}: argument {i + 1} is passed to a mut parameter, but its storage also reaches the callee through {how} -- the callee's writes through the parameter would be visible through its own reads mid-call. {remedy}")
+                                             | None -> ()
                  | None -> ())
-            | _ -> ()) root
+            | _ -> ()) (IRSequence (siteRoots owner root))
 
 let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit =
     let (funcs, lets, mutableLets, _chaseAlias, resolve, _facts) = programWriteContext modules
@@ -3973,7 +4346,16 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         | IRTNamed _ | IRTComputation _ -> true
         | t -> isArrayTy t
     let exprHoldsStorage (e: IRExpr) = try holdsStorage (typeOf e) with _ -> false
-    let returnSummaries = System.Collections.Generic.Dictionary<IRId, (Set<int> * Set<IRId>) option>()
+    // G240 / G250, round 4 wave 9: the STRICT MODE of the mut-argument judgment
+    // (only there: the write fixpoint keeps its reading). In strict mode the
+    // walk follows the storage-holding ELEMENTS of an array literal (a fresh
+    // container does not stop propagation through what it holds, G250 (4)), and
+    // a storage-holding call result whose head does not resolve, or whose
+    // callee's return summary is unknown, is UNKNOWN (None) instead of the
+    // callee's arguments (a callback returning an existing array: G250 /
+    // Codex probe E). Return summaries are cached per mode.
+    let strictMode = ref false
+    let returnSummaries = System.Collections.Generic.Dictionary<bool * IRId, (Set<int> * Set<IRId>) option>()
     let rec storageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (e: IRExpr) : Set<IRId> option =
         if fuel <= 0 then None
         else
@@ -4040,6 +4422,21 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // untraced) keeps the conservative reading: every argument.
             | IRApp (f, args, _) ->
                 let conservative () = all ((if exprHoldsStorage f then [ f ] else []) @ (args |> List.filter exprHoldsStorage))
+                // STRICT MODE (G250 / Codex probe E): a storage-holding result of
+                // a call through a FUNCTION VALUE (a closure binder, a callback
+                // parameter, an aggregate element) may be any array its closure
+                // reaches -- not only its arguments -- and an unknown return
+                // summary is unknown: None
+                let strictUnknown () = strictMode.Value && exprHoldsStorage e
+                // unknown BY DEFAULT (Codex diff review 5f64f352 finding 2: a
+                // call-valued head `factory(g)(1.0)`): only an intrinsic /
+                // constructor head (an IRParam that is no parameter of the
+                // owner) and an APPLIED ARRAY (`row(1)`, a read) keep the
+                // argument reading
+                let functionValueHead =
+                    match f with
+                    | IRParam (nm, _, _) -> (match owner with Some c -> c.Params |> List.exists (fun p -> p.Name = nm) | None -> false)
+                    | _ -> not (try isArrayTy (typeOf f) with _ -> false)
                 (match resolve f with
                  | Some c ->
                      (match calleeReturnSummary c with
@@ -4049,8 +4446,8 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                               |> List.filter (fun (i, a) -> positions.Contains i && exprHoldsStorage a)
                               |> List.map snd
                           all picked |> Option.map (Set.union others)
-                      | None -> conservative ())
-                 | None -> conservative ())
+                      | None -> if strictUnknown () then None else conservative ())
+                 | None -> if strictUnknown () && functionValueHead then None else conservative ())
             | IRTupleCons (h, t) -> all [ h; t ]
             | IRTupleDecons t -> all [ t ]
             // a match VALUE: every case body along the path, as an if's
@@ -4082,6 +4479,10 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // deferred binder anyway) -- followed
             | IRPure a | IRGuard (_, a) | IRBind (a, _) -> storageAt seen (fuel - 1) owner path a
             | IRChoice (l, r) | IRFallback (l, r) -> allAt path [ l; r ]
+            // STRICT MODE (G250 (4)): an array literal is a fresh container,
+            // but what its ELEMENTS hold (a tuple member `(identity(backing),
+            // 0)`, an array row) is followed -- fail closed
+            | IRArrayLit (es, _) when strictMode.Value -> all (es |> List.filter exprHoldsStorage)
             // FRESH: a computed value (the result's own new cells) or no
             // storage at all
             | IRLit _ | IRArrayLit _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
@@ -4111,10 +4512,11 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // array, a capture, a callee-local let), from its body's own storage walk;
     // None while it is being computed (recursion) or when the walk runs out.
     and calleeReturnSummary (c: IRCallable) : (Set<int> * Set<IRId>) option =
-        match returnSummaries.TryGetValue c.Id with
+        let key = (strictMode.Value, c.Id)
+        match returnSummaries.TryGetValue key with
         | true, s -> s
         | _ ->
-            returnSummaries.[c.Id] <- None
+            returnSummaries.[key] <- None
             let s =
                 if not (exprHoldsStorage c.Body) then Some (Set.empty, Set.empty)
                 else
@@ -4132,10 +4534,16 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                         let others = ids |> Set.filter (fun id -> not (paramIds.ContainsKey id) && not (ownLets.Contains id))
                         Some (positions, others)
                     | None -> None
-            returnSummaries.[c.Id] <- s
+            returnSummaries.[key] <- s
             s
     let storageOf (fuel: int) (owner: IRCallable option) (e: IRExpr) =
         storageAt (System.Collections.Generic.HashSet<IRId * (int * bool) list>()) fuel owner [] e
+    // the STRICT walk of the mut-argument rule (G240 / G250)
+    let storageOfStrict (fuel: int) (owner: IRCallable option) (e: IRExpr) =
+        let saved = strictMode.Value
+        strictMode.Value <- true
+        try storageOf fuel owner e
+        finally strictMode.Value <- saved
     let written = System.Collections.Generic.HashSet<IRId>()
     let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
     let changed = ref true
@@ -4201,7 +4609,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // parameter, a compound / sparse operand: Codex diff review round 2)
     let sideSites = sidePayloads |> List.map (fun (b, e) -> (IR.declSpanOf b.Name, None, e))
     let origins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
-    refuseAliasedMutArgumentsWith origins allBindings allFuncs funcs lets deferred resolve storageOf exprHoldsStorage (sites @ sideSites)
+    refuseAliasedMutArgumentsWith origins allBindings allFuncs funcs lets deferred resolve storageOfStrict exprHoldsStorage (sites @ sideSites)
     // ---- if values over computed arrays -----------------------------------------
     let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
     // The deferred binders a piece of an arm READS: its references plus the
@@ -4778,6 +5186,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let allFuncs = irModules |> List.collect (fun m -> m.Functions)
         irModules |> List.map (forceEffectfulModuleLets allFuncs)
     refuseWritingJoinLegs irModules
+    refuseForeignKernelCaptures irModules
     refuseDeferredWritesAndUnorderedIfs irModules
 
     // Every struct the program declares, for `zero` at a struct type
@@ -4842,6 +5251,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // every unseeded fold's seed by its EFFECTIVE route (gap G74), before any
         // optimizer pass reads a seed (the repro twins of gap G80 are in place)
         let irModule = resolveUnseededSeedsModule (foldedProgramFuncs.Force()) irModule
+        // an extent read of a deferred map reads its operand's shape (gap G234)
+        let irModule = resolveDeferredExtentsModule irModule
         // Every id another module names: the transpose normal form's and the
         // read-only alias plan's never-written closure treats such a name as
         // unjudged (Blade.Optimize.aliasWriteClosure). This is also PM19's and

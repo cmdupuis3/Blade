@@ -299,6 +299,18 @@ let private adBodyWhere : WhereClause option =
     Some { Commutativity = []; Antisymmetry = []; Parallel = []; Repro = false; TDims = []
            Custom = [ ("__ad_body", []) ] }
 
+/// Does the program being expanded SPELL `n` anywhere (a binding, a
+/// parameter, a read)? A synthesized derivative `f__grad` / `f__vjp` /
+/// `f__jvp` is referenced by name at the request site, where a program
+/// binding of that spelling would shadow it (round 4 wave 9, lane A, A3
+/// review round 5, Codex 5a8b7b7d: a local `let f__grad = lambda(..)` made
+/// `ad.grad(f)(x)` return its value, (100.0, 200.0) for (9.0, 6.0)).
+/// Top-level duplicates are BL2009.
+let private programSpells (n: string) : bool =
+    match mintedTaken.Value with
+    | null -> false
+    | l -> l.Force().Contains n
+
 /// `synthesize` builds `f__grad` (scalar loss, seed 1.0). With `vjp = true`
 /// it builds `f__vjp` for an ARRAY-valued `f` (plan-fortran-killer-2 section
 /// 6.3, the reverse half of a matrix-free linearization): the body's value
@@ -333,6 +345,8 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // user function of that name would silently shadow one of them.
     (if Map.containsKey (fname + suffix) ctx.Decls then
         err fname $"a function named '{fname}{suffix}' already exists in this module; {modeName} would synthesize a colliding declaration -- rename it"
+     elif programSpells (fname + suffix) then
+        err fname $"the program spells '{fname}{suffix}' (a local binding, a parameter or a read): ad.{modeName}(f) is rewritten to that name, which the program's own binding would shadow at the call site -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
     if float32Mention ctx fd then
@@ -628,6 +642,8 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
         isFloatTy t || (match t with TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> true | _ -> false)
     (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
         err fname $"a function named '{fname}{jvpSuffix}' already exists in this module; jvp would synthesize a colliding declaration -- rename it"
+     elif programSpells (fname + jvpSuffix) then
+        err fname $"the program spells '{fname}{jvpSuffix}' (a local binding, a parameter or a read): ad.jvp(f) is rewritten to that name, which the program's own binding would shadow at the call site -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
     if float32Mention ctx fd then
@@ -665,11 +681,20 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
         |> List.reduce add
     // Pick the first depth-indexed tangent prefix no existing name uses
     // (composition rounds each get their own; see tangentPrefix).
+    // ...and no name the PROGRAM spells (round 4 wave 9, lane A, A3 review
+    // round 3, Codex 5a8b7b7d: a module binding `__t1_x` read by `f` passed
+    // the gate of the first round and became the second round's tangent
+    // parameter -- `ad.jvp(ad.jvp(f))` printed (15, 10, 25, 0) for
+    // (21, 14, 35, 0); the trusted second round skips the gate)
     let pickTangentPrefix (allNames: string list) =
+        let spelled = match mintedTaken.Value with null -> null | l -> l.Force ()
+        let used (cand: string) =
+            allNames |> List.exists (fun n -> n.StartsWith cand)
+            || (not (isNull spelled) && spelled |> Seq.exists (fun n -> n.StartsWith cand))
         tangentPrefix.Value <-
             (let rec pick k =
                 let cand = if k = 0 then "__t_" else $"__t{k}_"
-                if allNames |> List.exists (fun n -> n.StartsWith cand) then pick (k + 1) else cand
+                if used cand then pick (k + 1) else cand
              pick 0)
     prepareForSweeps ctx fd surrogateOf pickTangentPrefix trusted |> Result.bind (fun prep ->
     let stmts = prep.Stmts
@@ -1046,6 +1071,118 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         d :: mine
                     | _ -> [d]))))
 
+/// Every identifier a program spells -- each reference (`allVarsDeep`, which
+/// is exhaustive over the expression grammar) and each BINDER (function
+/// names and parameters, let / static patterns, lambda parameters, match
+/// patterns, block lets, for-in variables, recursive-array names and step /
+/// prefix variables), in every module. The hygiene set of `fresh` (round 4
+/// wave 9, the class-closure review of ad-checkpoint: a synthesized name must
+/// never equal one the user wrote). Over-collecting is harmless (a skipped
+/// counter value); missing a name is the capture, so the binder walk visits
+/// every child the reference walk does.
+let programIdentifiers (program: Program) : System.Collections.Generic.HashSet<string> =
+    let acc = System.Collections.Generic.HashSet<string>()
+    let addAll (s: Set<string>) = for n in s do acc.Add n |> ignore
+    // a pattern's binders AND the expressions its guards carry
+    let rec pat (p: Pattern) : unit =
+        for n in patternBoundNames p do acc.Add n |> ignore
+        match p.Kind with
+        | PatternKind.PatGuarded (sub, g) -> pat sub; addAll (allVarsDeep g); binders g
+        | PatternKind.PatTuple ps -> List.iter pat ps
+        | PatternKind.PatCons (a, b) -> pat a; pat b
+        | PatternKind.PatStruct (_, fields) -> fields |> List.iter (snd >> pat)
+        | PatternKind.PatVariant (_, sub) -> Option.iter pat sub
+        | PatternKind.PatTyped (sub, _) -> pat sub
+        | PatternKind.PatWildcard | PatternKind.PatLit _ | PatternKind.PatVar _ -> ()
+    and binders (e: Expr) : unit =
+        let each (es: Expr list) = List.iter binders es
+        let opt (o: Expr option) = Option.iter binders o
+        match e.Kind with
+        | ExprKind.ExprLambda (ps, _, b) ->
+            for p in ps do
+                acc.Add p.Name |> ignore
+                opt p.Default
+            binders b
+        | ExprKind.ExprLet (bnd, b) ->
+            pat bnd.Pattern
+            binders bnd.Value; binders b
+        | ExprKind.ExprMatch (s, cases) ->
+            binders s
+            for c in cases do
+                pat c.Pattern
+                opt c.Guard; binders c.Body
+        | ExprKind.ExprBlock (ss, fe) -> List.iter stmt ss; opt fe
+        | ExprKind.ExprRecArray d ->
+            acc.Add d.Name |> ignore; acc.Add d.PrefixVar |> ignore; acc.Add d.StepVar |> ignore
+            (match d.SeedArm with Some (n, se) -> acc.Add n |> ignore; binders se | None -> ())
+            binders d.SliceExpr; opt d.Guard
+        | ExprKind.ExprBinOp (_, _, l, r) -> each [ l; r ]
+        | ExprKind.ExprUnaryOp (_, i) -> binders i
+        | ExprKind.ExprApp (f, args) -> binders f; each args
+        | ExprKind.ExprTupleIndex (t, i) -> each [ t; i ]
+        | ExprKind.ExprField (t, _) -> binders t
+        | ExprKind.ExprIf (c, t, f) -> each [ c; t; f ]
+        | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+        | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+        | ExprKind.ExprGroupKeys es -> each es
+        | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> each es
+        | ExprKind.ExprObjectFor k -> binders k
+        | ExprKind.ExprDotDot (l, h) -> each [ l; h ]
+        | ExprKind.ExprHalo (_, o) -> binders o
+        | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+        | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+        | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+        | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+        | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> binders i
+        | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+        | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+        | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+        | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+        | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+        | ExprKind.ExprAssign (l, r) -> each [ l; r ]
+        | ExprKind.ExprGramApply (a, b, x) -> each [ a; b; x ]
+        | ExprKind.ExprReduce (a, k, i, ax) -> each [ a; k ]; opt i; opt ax
+        | ExprKind.ExprStruct (_, fields, spread) -> fields |> List.iter (snd >> binders); opt spread
+        | ExprKind.ExprFor (src, _, k) ->
+            (match src with
+             | ForArrays (es, inc) -> each es; opt inc
+             | ForKernel k2 -> binders k2)
+            opt k
+        | ExprKind.ExprQualified parts -> for n in parts do acc.Add n |> ignore
+        | ExprKind.ExprArity n -> acc.Add n |> ignore
+        | ExprKind.ExprLit _ | ExprKind.ExprWildcard
+        | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+        | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
+        | ExprKind.ExprVar _ -> ()
+    and stmt (s: Stmt) : unit =
+        match s with
+        | StmtSpanned (inner, _) -> stmt inner
+        | StmtLet b ->
+            pat b.Pattern
+            binders b.Value
+        | StmtExpr ex -> binders ex
+        | StmtAssign (l, _, r) -> binders l; binders r
+        | StmtForIn (v, r, body) -> acc.Add v |> ignore; binders r; List.iter stmt body
+    let expr (e: Expr) = addAll (allVarsDeep e); binders e
+    let func (fd: FunctionDecl) =
+        acc.Add fd.Name |> ignore
+        for p in fd.Params do
+            acc.Add p.Name |> ignore
+            Option.iter expr p.Default
+        expr fd.Body
+    for m in program.Modules do
+        for d in m.Decls do
+            match d.Value with
+            | DeclFunction fd -> func fd
+            | DeclImpl im -> List.iter func im.Methods
+            | DeclLet b | DeclStatic b ->
+                pat b.Pattern
+                expr b.Value
+            | DeclImport (_, ImportSelective names) -> for n in names do acc.Add n |> ignore
+            | DeclImport (_, ImportQualified (Some a)) -> acc.Add a |> ignore
+            | DeclImport _ | DeclType _ | DeclInterface _ | DeclUnit _ -> ()
+    acc
+
 /// C7 generalized: the SAME pipeline fusion the AD path runs, applied to
 /// EVERY program.
 ///
@@ -1067,6 +1204,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 /// Declines are SILENT here, unlike in differentiated code: a shape fusion
 /// will not touch is one the existing IRComposeApply path still handles.
 let fuseProgram (program: Program) : Program =
+    // the hygiene set of `fresh` for this program (see programIdentifiers)
+    mintedTaken.Value <- lazy (programIdentifiers program)
     let fuseModule (m: ModuleDecl) : ModuleDecl =
         let typeAliases =
             m.Decls |> List.collect (fun d ->
@@ -1166,6 +1305,10 @@ let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic lis
     Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     // Per-program synthesis state (gap G193): a fresh one for this flow.
     installProgramState ()
+    tangentPrefix.Reset ()
+    // The hygiene set of `fresh`: every identifier the program spells (round
+    // 4 wave 9: a synthesized name never captures a user binding).
+    mintedTaken.Value <- lazy (programIdentifiers program)
     let result =
         expandStr program
         |> Result.mapError (fun msg ->

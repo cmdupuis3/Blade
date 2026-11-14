@@ -1,0 +1,12 @@
+// TEST: An Enclosing Function Applying Its Own Kernel Closure Reads Its Capture
+// Gap G247 (round 4 wave 9 lane d): the admitted control -- outer itself applies f (it binds
+// scale), so nothing is refused: 2.0 per unit cell.
+// EXPECT: r = [2.0, 4.0, 6.0]
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+function outer(scale: Float64) -> Array<Float64 like I> = {
+    let k: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * k
+    method_for(a64) <@> f |> compute
+}
+let r = outer(10.0)

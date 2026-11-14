@@ -1,0 +1,18 @@
+// TEST: A Join Share Capture Is Forced Under Its Own Name
+// Gap G249 (round 4 wave 9 lane d): the equal-extent control of functions/788 -- cap prints (a
+// capture forces under its own name, G214), the shares fold per cell.
+// EXPECT: cap = [2, 4, 6, 8, 10, 12]
+// EXPECT: s = 15.0
+// EXPECT: t = 20.0
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let c = Float64(0..extents(ca)) |> compute
+let cap = method_for(x) <@> lambda(v) -> v * 2
+let d = method_for(zip(a, c)) <@> lambda(u, v) -> u - v + Float64(cap(0))
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let q = method_for(d) <@> lambda(v) -> v + 2.0
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))

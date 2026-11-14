@@ -226,6 +226,29 @@ let runOwnedMoveTests () : BlockResult =
             if asan.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {asan}")
             elif [ plain; asan ] |> List.exists (fun t -> not (t.Contains "result = 119.0" && t.Contains "saved = [8.0, 10.0, 12.0]")) then fail name ($"values: {plain}")
             else pass name (String.concat " | " rs + "; ASan clean"))
+    // ---- loops/837-839: a kernel-block let owns its pool (gap G245 (a)) ------
+    // The block frees the pool at its end and a rebinding copies the literal in
+    // and frees it: the outstanding blocks at 40 trips equal those at 4 (no
+    // knob: a leak fix). The values are pinned by the corpus files.
+    for (rel, want40, want4) in [ ("loops/837_kernel_local_array_rebinding_frees_per_trip.blade", "total = 1020.0", "total = 30.0")
+                                  ("loops/838_kernel_local_rank2_rebinding_frees_per_trip.blade", "total = 760.0", "total = 76.0")
+                                  ("loops/839_kernel_local_array_conditional_rebinding_frees.blade", "total = 234.0", "total = 18.0") ] do
+        let name = $"""{rel.Substring(0, rel.IndexOf('_'))} (G245): a kernel-block let frees its pools every trip (ASan, 40 vs 4 trips)"""
+        match corpusSrc rel with
+        | None -> fail name "corpus file not found"
+        | Some src ->
+        let src4 = src.Replace("type Trips = Idx<40>", "type Trips = Idx<4>")
+        match run src true "", run src4 true "" with
+        | Error e, _ | _, Error e when unavailable e -> skip name e
+        | Error e, _ | _, Error e -> fail name e
+        | Ok t40, Ok t4 ->
+            if t40.Contains "ERROR: AddressSanitizer" || t4.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t40} {t4}")
+            elif not (t40.Contains want40 && t4.Contains want4) then fail name ($"values: {t40} | {t4}")
+            else
+            match blocks t40, blocks t4 with
+            | Some b40, Some b4 when b40 = b4 -> pass name ($"outstanding blocks {b40} at 40 trips = {b4} at 4; ASan clean")
+            | Some b40, Some b4 -> fail name ($"outstanding blocks {b40} at 40 trips vs {b4} at 4: a per-trip pool survives")
+            | _ -> fail name ($"no census line: {t40}")
     (let name = "BLADE_OWNED_MOVE=0: every candidate declines, the emission keeps the pointer move"
      match corpusSrc "memfree/050_owned_move_function_reassign.blade" with
      | None -> fail name "corpus file not found"

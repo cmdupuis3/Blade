@@ -2441,15 +2441,19 @@ evaluated where a FORCING USE reads it: a positional read, a capture by a
 kernel, an eager array operation (`sort`, the set operations, `group_by`,
 ...), a call argument, or `|> compute`. An EXTENT or RANK read (`extents(g)`, `rank(g)`, a range bound
 `0..extents(g)`) is not a forcing use: it reads the static shape the map's
-type carries and evaluates nothing (gap G218; a map whose extent is known only
-at run time is still forced there, gap G234) -- but a kernel that captures `g`
+type carries and evaluates nothing (gap G218; a cell-for-cell map whose extent
+is known only at run time -- a map over a compound, a co-iteration, a chain of
+such maps -- reads it from its first operand, gap G234; any other
+run-time-shaped map, a range with a run-time bound among them, is still forced
+there) -- but a kernel that captures `g`
 and reads only `extents(g)` still captures it (below). A capture also forces a
 map that the same traversal reads as an operand or folds as its own spine,
 once, under its own name: the traversal then reads that snapshot (gap G214).
 A CAPTURE is made when its kernel is
 formed for a traversal -- a map, a fold, a join -- so the captured map is
-forced before that traversal's FIRST cell, captures of the join's leg kernels
-and then its fold kernels in order, even when the kernel reads it only at a
+forced before that traversal's FIRST cell, captures of the join's leg kernels,
+then of its shared producers' kernels (first-use order; gap G249,
+`functions/788`), then of its fold kernels, in order, even when the kernel reads it only at a
 later cell or never: its failure precedes every failure of the traversal's
 cells (gap G115, `loops/660`-`662`, `665` through a deferred alias, `666` a guard, every lane). A fold, a map or a join over it FUSES
 instead and forces nothing, and a member of a tuple value evaluates a COPY
@@ -2621,7 +2625,7 @@ binding, after the block's statements); a binding's tuple value that the C++
 lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
 compute / deferred member -- the emitter's own judgment) is one region per
 leaf, left to right.
-A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239, staged): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude -- and there the evaluation COUNT is observable too, when the body writes an INPUT of the map between two forcing uses (a module array written by name, or by a callee, inside a loop step). The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
 compute`) evaluates g's computation without forcing it or making it print,
 and counts as an operation that may fail. Force anything else before the `if`
 (`let v = g |> compute`, or a statement that reads it) and read the value in

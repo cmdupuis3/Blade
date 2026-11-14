@@ -1,0 +1,20 @@
+// TEST: A Mut Argument Read Through An Array Literal Element Is Refused (rejects)
+// ============================================================================
+// Gap G250 (4), round 4 wave 9 (lane C, C2): an array literal is a fresh
+// container, but its ELEMENTS keep what they hold -- `[(identity(backing),
+// 0)]` holds backing's storage -- so a callee reading `tuples` reads the
+// mut argument `backing` mid-call. The storage walk treated the literal as
+// fresh and accepted the call; refused (BL4005, every lane).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+let mut backing: A = [2.0, 3.0]
+let tuples = [(identity(backing), 0)]
+function bump(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    tuples(0)[0](0)
+}
+let r = bump(backing)
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter
+// REJECT-AT: lower

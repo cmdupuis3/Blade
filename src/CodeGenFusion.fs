@@ -782,6 +782,65 @@ let rec unrollLetChain (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
 ///
 /// Does NOT register `name` in the returned context -- that's the caller's
 /// responsibility (typically a `let`-binding handler calling `addVarName`).
+/// The STAGE KERNELS of an applied composition (`(object_for(k1) >>@
+/// object_for(k2) >>@ ..) <@> A`), in stage order, the composition resolved
+/// through deferred bindings and let-bound object leaves (gap G242, round 4
+/// wave 9): applying the composition runs every stage kernel, so each one's
+/// deferred captures must be forced before the traversal, as a canonical
+/// map's kernel captures are (genComputeBinding's capture prelude, G115).
+let composeStageKernels (ctx: CodeGenContext) (composition: IRExpr) : IRExpr list =
+    let rec resolveDeferred (seen: Set<IRId>) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred (seen.Add id) d
+             | None ->
+                 match Map.tryFind id ctx.ObjectLoopBindings with
+                 | Some d -> resolveDeferred (seen.Add id) d
+                 | None -> e)
+        | _ -> e
+    let rec stages (e: IRExpr) =
+        match resolveDeferred Set.empty e with
+        | IRComposeObj (l, r) -> stages l @ stages r
+        | IRObjectFor o -> [ o.Kernel ]
+        | _ -> []
+    stages composition
+
+/// The stage kernels whose deferred captures an APPLIED composition forces in
+/// its prelude, before its traversal (gap G242): the interpreter runs the
+/// stages as successive traversals, each capture forced at its own stage's
+/// start (G115), so a later stage's capture may move to the prelude only when
+/// every EARLIER stage kernel is closed-total (Blade.IRTotality: nothing the
+/// earlier stages run can fail first, Codex diff review 5f64f352 finding 3).
+/// A capture of a stage after a possibly-failing one is not forced here (the
+/// program keeps today's emission; recorded in G242).
+let composeStagesForcedAtPrelude (ctx: CodeGenContext) (composition: IRExpr) : IRExpr list =
+    let isD (id: IRId) = ctx.DeferredComputations.ContainsKey id
+    let dOf (id: IRId) = Map.tryFind id ctx.DeferredComputations
+    let total (k: IRExpr) =
+        match resolveCallable k with
+        | Some kc -> (match Blade.IRTotality.auditCallable resolveCallable dOf isD kc [] with Ok () -> true | Error _ -> false)
+        | None -> false
+    let rec pick (prefixTotal: bool) (ks: IRExpr list) =
+        match ks with
+        | [] -> []
+        | k :: rest -> (if prefixTotal then [ k ] else []) @ pick (prefixTotal && total k) rest
+    pick true (composeStageKernels ctx composition)
+
+/// The deferred bindings a stage kernel of an applied composition captures
+/// that are STILL deferred where the composition is emitted -- a later
+/// stage's capture after a possibly-failing stage (composeStagesForcedAtPrelude
+/// leaves it unforced), or a consumer with no capture prelude: the stage's
+/// lifted kernel would forward an undeclared name (BL9002), so genComposeApply
+/// refuses instead (fable review of wave 9, F4; gap G242).
+let composeUnforcedStageCaptures (ctx: CodeGenContext) (composition: IRExpr) : string list =
+    composeStageKernels ctx composition
+    |> List.collect (fun k ->
+        match resolveCallable k with
+        | Some c -> c.Captures |> List.filter (fun ci -> Map.containsKey ci.Id ctx.DeferredComputations) |> List.map (fun ci -> ci.Name)
+        | None -> [])
+    |> List.distinct
+
 let genComposeApply
     (ctx: CodeGenContext)
     (name: string)
@@ -805,6 +864,15 @@ let genComposeApply
                 | None -> e
         | _ -> e
     let resolvedComposition = resolveDeferred info.Composition
+    match composeUnforcedStageCaptures ctx info.Composition with
+    | (_ :: _) as unforced ->
+        let names = unforced |> List.map (fun n -> $"`{n}`") |> String.concat ", "
+        (codegenError ctx ind
+            ($"a pipeline stage captures the deferred map {names}, which is not forced before the pipeline runs: \
+a stage after a stage that may fail cannot have it forced ahead of that stage's traversal, and this lane has no \
+per-stage capture prelude for it (gap G242). Force it first (`let m = <it> |> compute`) and capture `m`, \
+or make the earlier stages' kernels total"), ctx)
+    | [] ->
     match resolvedComposition with
     | IRComposeObj (obj1, obj2) ->
         let rObj1 = resolveDeferred obj1
@@ -916,16 +984,22 @@ let genComposeApply
             // problem because it inlines the wrapper's body; the same is
             // done here for the one shape a wrapper has, a call of the named
             // function on the parameter, by calling that function directly.
-            let directName (kn: string) (k: IRExpr) : string =
+            // (the callee's CAPTURES are forwarded after the cell, as every
+            // other call of a lifted callable forwards them -- gap G242,
+            // Codex diff review 5f64f352 round 2: `__lambda_20(backing[__i0])`
+            // called a two-argument lifted kernel with one argument)
+            let directName (kn: string) (k: IRExpr) : string * string list =
+                let withCaps (name: string) (callee: IRCallable) = (name, captureForwardArgs ctx.VarNames callee.Captures)
                 match resolveCallable k with
                 | Some c ->
                     (match c.Params, c.Body with
-                     | [ p ], IRApp (IRVar (fid, _), [ IRVar (pid, _) ], _) when pid = p.VarId ->
-                         (match Map.tryFind fid ctx.VarNames with
-                          | Some fname -> fname
-                          | None -> kn)
-                     | _ -> kn)
-                | None -> kn
+                     | [ p ], IRApp ((IRVar (fid, _) as f), [ IRVar (pid, _) ], _) when pid = p.VarId ->
+                         (match Map.tryFind fid ctx.VarNames, resolveCallable f with
+                          | Some fname, Some callee -> withCaps fname callee
+                          | Some fname, None -> (fname, [])
+                          | None, _ -> withCaps kn c)
+                     | _ -> withCaps kn c)
+                | None -> (kn, [])
             //
             // EACH STAGE'S STORE CARRIES THAT STAGE'S RESULT TYPE, and the
             // sweep covers EVERY axis. Both used to be borrowed from the
@@ -953,7 +1027,7 @@ let genComposeApply
             /// `for` over every axis of `src`, applying `kn` cell by cell into
             /// `dst`. Axis 0 takes the shared literal-or-runtime bound; the
             /// inner axes read the source's own runtime extents.
-            let stageSweep (src: string) (dst: string) (kn: string) : string list =
+            let stageSweep (src: string) (dst: string) (kn: string, caps: string list) : string list =
                 let pad (d: int) = String.replicate d "    "
                 let subs = [ for d in 0 .. arrRank - 1 -> $"[__i{d}]" ] |> String.concat ""
                 let opens =
@@ -966,7 +1040,8 @@ let genComposeApply
                     [ for d in arrRank - 1 .. -1 .. 0 ->
                         let p = pad d
                         $"{ind}{p}}}" ]
-                opens @ [ $"{ind}{bodyPad}{dst}{subs} = {kn}({src}{subs});" ] @ closes
+                let call = String.concat ", " ($"{src}{subs}" :: caps) |> sprintf "%s(%s)" kn
+                opens @ [ $"{ind}{bodyPad}{dst}{subs} = {call};" ] @ closes
             let s1Name = $"{name}__s1"
             let s1Code =
                 [ $"{ind}const size_t* {s1Name}_extents = {arrName}.extents;"

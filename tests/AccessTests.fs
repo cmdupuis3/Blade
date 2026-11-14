@@ -747,7 +747,8 @@ let private ckCorpusPins () : bool list =
         [ "047_recarray_tape_100001_zero_fill.blade", Ok "segments of K = 317 steps"
           "048_recarray_checkpoint_5001_rows.blade", Ok "71 segments of K = 71 steps"
           "049_recarray_checkpoint_snapshots_array_parameter.blade", Ok "replay-input snapshot: w -> "
-          "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole" ]
+          "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole"
+          "108_recarray_checkpoint_snapshots_module_identity_result.blade", Error "a tape of 5 cells (<= 4096) is kept whole" ]
     // unset: the opt-in decline (wave 5, the stop rule)
     let unset =
         [ "048_recarray_checkpoint_5001_rows.blade", Error "opt-in (BLADE_AD_CHECKPOINT=1)" ]
@@ -762,7 +763,24 @@ let private ckCorpusPins () : bool list =
           // is refused, G190 (c), BL4005 -- ad/050, 052, 053, 060-067 and 075
           // are now that refusal's witnesses, pinned by the corpus)
           "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", Ok "replay-input snapshot: forcing -> "
-          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction" ]
+          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction"
+          // the FRESH-BUFFER twins (round 4 wave 9, lane A, A1) of the
+          // witnesses the G190 (c) refusal turned into (rejects) files: the
+          // same step, the gradient buffer a fresh array, each decision of
+          // the replay-input admission guarded again -- the snapshots of
+          // ad/050, 052, 060, 061 and the declines of ad/053, 062-067, 075
+          "108_recarray_checkpoint_snapshots_module_identity_result.blade", Ok "replay-input snapshot: forcing -> "
+          "109_recarray_checkpoint_snapshots_local_alias_fresh_buffer.blade", Ok "replay-input snapshot: local_forcing -> "
+          "110_recarray_checkpoint_declines_destructured_component_fresh_buffer.blade", Error "the module value 'hidden' records no value"
+          "111_recarray_checkpoint_snapshots_parameter_default_fresh_buffer.blade", Ok "replay-input snapshot: forcing -> "
+          "112_recarray_checkpoint_snapshots_user_function_named_like_intrinsic_fresh_buffer.blade", Ok "replay-input snapshot: forcing -> "
+          "113_recarray_checkpoint_declines_tuple_parameter_fresh_buffer.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
+          "114_recarray_checkpoint_declines_row_view_named_like_intrinsic_fresh_buffer.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
+          "115_recarray_checkpoint_declines_unannotated_call_result_fresh_buffer.blade", Error "the call of 'make' does not return a plain dense array"
+          "116_recarray_checkpoint_declines_literal_of_subscripts_fresh_buffer.blade", Error "the step reads 'vals', which the replay cannot snapshot: an array literal element is not a proved scalar"
+          "117_recarray_checkpoint_declines_literal_of_tuples_fresh_buffer.blade", Error "the step reads 'tuples', which the replay cannot snapshot: an array literal element is not a proved scalar"
+          "118_recarray_checkpoint_declines_step_value_may_fail_fresh_buffer.blade", Error "the step value may fail"
+          "119_recarray_checkpoint_declines_uneven_nested_literal_fresh_buffer.blade", Error "not rectangular" ]
     // decision-only shapes (gap G190): a deferred module map read inside a
     // differentiated function (it compiles in every lane since round 4 wave 8,
     // G190 (b): its run is pinned by corpus ad/084). (The ragged array literal over a leading
@@ -875,12 +893,141 @@ let private replayPrunePins () : bool list =
                     && not (System.Text.RegularExpressions.Regex.IsMatch(targets, @"_q\b"))
                 if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
                 ok ]
+    // the TRAP witnesses' fresh-buffer twins (round 4 wave 9, lane A, A1):
+    // ad/056, 058, 068 and 071 needed a gradient buffer sharing the primal
+    // input to trap in the replay, which G190 (c) refuses since round 4 wave
+    // 8 (BL4005), so the trapping-statement rules lost their witnesses. Each
+    // twin keeps the dead statement that MAY fail (`unused`: an integer
+    // division, a checked ascription, lgamma, a call through a local
+    // function value) beside a trap-free dead `spare`: under the opt-in the
+    // prune drops `spare` and keeps `unused` (the values are pinned by the
+    // corpus and compared by `blade test opt-diff ad`)
+    @ [ for file, what in [ "121_replay_prune_keeps_integer_division_fresh_buffer.blade", "an integer division"
+                            "122_replay_prune_keeps_checked_ascription_fresh_buffer.blade", "a checked ascription"
+                            "123_replay_prune_keeps_dead_lgamma_fresh_buffer.blade", "lgamma"
+                            "124_replay_prune_keeps_call_through_local_function_fresh_buffer.blade", "a call through a local function value" ] do
+        let name = $"ad_replay_prune_keeps_trap: ad/{file.Substring(0, 3)} keeps the dead {what} (unused), drops spare"
+        match corpusSource file with
+        | Error e -> resultLine Fail name e; yield false
+        | Ok src ->
+            match decisions (Some "1") src with
+            | Error e -> resultLine Fail name e; yield false
+            | Ok ds ->
+                let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let targets =
+                    ds |> List.filter (fun d -> d.Outcome = Blade.Effects.Applied)
+                       |> List.collect (fun d -> d.Evidence)
+                       |> List.filter (fun e -> e.Contains "replayed statements dropped")
+                       |> String.concat " "
+                let ok =
+                    System.Text.RegularExpressions.Regex.IsMatch(targets, @"_spare\b")
+                    && not (System.Text.RegularExpressions.Regex.IsMatch(targets, @"_unused\b"))
+                if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
+                yield ok ]
+    // ad/120 (round 4 wave 9, A1): the fresh-buffer twin of ad/046 -- the
+    // gather fuse declines a primal-reading stencil statically, whatever
+    // the buffer (ad/046 itself is the G190 (c) refusal witness)
+    @ [ let name = "ad_gather_fuse_declines: ad/120 a primal-reading tap keeps the per-tap passes"
+        match corpusSource "120_gather_fuse_declines_primal_read_fresh_buffer.blade" with
+        | Error e -> resultLine Fail name e; false
+        | Ok src ->
+            Blade.Effects.Decisions.start ()
+            let r =
+                try
+                    match lower src with
+                    | Error e -> Error ($"lower: {e}")
+                    | Ok _ -> Ok (Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "ad-gather-fuse"))
+                with ex -> Error ($"lower raised: {ex.Message}")
+            Blade.Effects.Decisions.drain () |> ignore
+            match r with
+            | Error e -> resultLine Fail name e; false
+            | Ok ds ->
+                let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+                let ok =
+                    ds.Length = 1
+                    && (match ds.Head.Outcome with
+                        | Blade.Effects.Declined why -> why.Contains "a tap reads storage or may fail"
+                        | _ -> false)
+                if ok then resultLine Pass name seen else resultLine Fail name $"saw {seen}"
+                ok ]
 
-/// Corpus witnesses whose gradient buffers alias the arrays the step reads:
-/// each checkpointed arm against the full tape, raw bits.
+/// Corpus witnesses whose step reads an array beside a gradient buffer: each
+/// checkpointed arm against the full tape, raw bits. Since round 4 wave 8
+/// the buffers are FRESH (a buffer sharing what the step reads is refused,
+/// G190 (c)); ad/108-118 are the fresh-buffer twins of the snapshot
+/// witnesses (round 4 wave 9, lane A, A1).
 let private ckCorpusDifferential () : (string * (string * Result<string, string>) list) list =
     [ "049_recarray_checkpoint_snapshots_array_parameter.blade", [ "auto", Ok "replay-input snapshot: w -> "; "2", Ok "replay-input snapshot: w -> " ]
-      "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", [ "2", Ok "replay-input snapshot: forcing -> " ] ]
+      "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "108_recarray_checkpoint_snapshots_module_identity_result.blade", [ "2", Ok "replay-input snapshot: forcing -> "; "3", Ok "replay-input snapshot: forcing -> " ]
+      "109_recarray_checkpoint_snapshots_local_alias_fresh_buffer.blade", [ "2", Ok "replay-input snapshot: local_forcing -> " ]
+      "111_recarray_checkpoint_snapshots_parameter_default_fresh_buffer.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "112_recarray_checkpoint_snapshots_user_function_named_like_intrinsic_fresh_buffer.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
+      "113_recarray_checkpoint_declines_tuple_parameter_fresh_buffer.blade", [ "2", Error "which the replay cannot snapshot" ]
+      "114_recarray_checkpoint_declines_row_view_named_like_intrinsic_fresh_buffer.blade", [ "2", Error "which the replay cannot snapshot" ]
+      "118_recarray_checkpoint_declines_step_value_may_fail_fresh_buffer.blade", [ "2", Error "the step value may fail" ]
+      // synthesized-name hygiene (round 4 wave 9, A3 class-closure review):
+      // a module array spelled like the checkpoint buffer (`__ck4`) is not
+      // captured by it, at forced intervals and under the auto arm
+      "126_recarray_checkpoint_buffer_does_not_capture_user_name.blade", [ "2", Ok "segments of K = 2 steps"; "3", Ok "segments of K = 3 steps" ]
+      "127_recarray_checkpoint_auto_does_not_capture_user_name.blade", [ "auto", Ok "71 segments of K = 71 steps" ] ]
+
+/// Gap G250 (round 4 wave 9, lane A, A2): programs the G190 (c) rule still
+/// ACCEPTS although the gradient buffer shares storage the checkpointed step
+/// reads -- the derivative called through a function-typed parameter whose
+/// type omits `mut` (an unresolved head the rule does not judge). The
+/// replay-input snapshot is what keeps the checkpointed gradient equal to
+/// the full tape on them, so each is run raw-bit against it; once the rule
+/// refuses the shape (BL4005, the G190 (c) / G240 owner) the case passes as
+/// refused instead.
+let private ckHoleTail = """function f(x: Float64, w: A) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * prefix(n - 1) + forcing(0)
+    s(4) + w(0)
+}
+function call_twice(h: (Float64, A, A) -> (Float64, Float64), b: A) -> (Float64, Float64) = h(Float64(1.0), b, b)
+"""
+
+let private ckHoleSources : (string * string * (string * Result<string, string>) list) list =
+    let head = "import ad as ad\ntype A = Array<Float64 like Idx<1>>\nfunction identity(a: A) -> A = a\n"
+    let snap (x: string) = Ok ("replay-input snapshot: " + x + " -> ")
+    let immutableLiteral =
+        head + "let forcing: A = [2.0]\n" + ckHoleTail + "let (value, dx) = call_twice(ad.grad(f), forcing)\n"
+    let moduleIdentityAlias =
+        head + "let mut backing: A = [2.0]\nlet forcing = identity(backing)\n" + ckHoleTail
+        + "let (value, dx) = call_twice(ad.grad(f), backing)\n"
+    let arrayParameter =
+        head + ckHoleTail.Replace("+ forcing(0)", "+ w(0)") + "let mut wv: A = [2.0]\nlet (value, dx) = call_twice(ad.grad(f), wv)\n"
+    let localAlias =
+        head + "let forcing: A = [2.0]\n"
+        + ckHoleTail.Replace("    let rec s", "    let local_forcing = forcing\n    let rec s").Replace("+ forcing(0)", "+ local_forcing(0)")
+        + "let (value, dx) = call_twice(ad.grad(f), forcing)\n"
+    let wrapper =
+        head + "let forcing: A = [2.0]\n" + ckHoleTail
+        + "function wrapper(x: Float64, w: A, dw: mut A) -> (Float64, Float64) = ad.grad(f)(x, w, dw)\n"
+        + "let (value, dx) = call_twice(wrapper, forcing)\n"
+    [ ("immutable_literal", immutableLiteral, [ ("2", snap "forcing"); ("3", snap "forcing") ])
+      ("module_identity_alias", moduleIdentityAlias, [ ("2", snap "forcing") ])
+      ("array_parameter", arrayParameter, [ ("2", snap "w") ])
+      ("local_alias", localAlias, [ ("2", snap "local_forcing") ])
+      ("wrapper", wrapper, [ ("2", snap "forcing") ]) ]
+
+let private ckHoleCases () : bool option list =
+    [ for (nm, src, arms) in ckHoleSources do
+        let name = "ad_checkpoint_hole_" + nm
+        match lower src with
+        // any BL4005 mut-argument refusal (the code where the error string
+        // carries it; `lower` returns a lowering diagnostic's message alone,
+        // and every G190 (c) message names the mut parameter: wave 8's "is
+        // passed to a mut parameter", wave 9 lane C's "has a mut parameter
+        // and is used here as a VALUE")
+        | Error e when e.Contains "BL4005" || e.Contains "mut parameter" ->
+            resultLine Pass name $"refused at lowering (G190 (c) now judges the shape): {e}"; yield Some true
+        | Error e -> resultLine Fail name ("lower: " + e); yield Some false
+        | Ok _ -> yield! ckDifferential name src arms ]
 
 let private ckCases () : bool option list =
     if not Build.capabilities.Value.HasGpp then
@@ -913,6 +1060,7 @@ let private ckCases () : bool option list =
                match corpusSource file with
                | Error e -> resultLine Fail ("ad_checkpoint_snapshot: " + file) e; [ Some false ]
                | Ok src -> ckDifferential ("ad_checkpoint_snapshot_" + file.Substring(0, 3)) src arms))
+        @ ckHoleCases ()
 
 /// Gap G193: the AD pipeline's restored let annotations (G187) and its mode
 /// are PER PROGRAM (GradCommon.FlowCell over AsyncLocal), not process
@@ -970,6 +1118,32 @@ let private synthSpanPerProgram () : bool =
         else resultLine Fail name $"task 1 node at line {a.Result}, task 2 at line {b.Result}"; false
     with ex -> resultLine Fail name ex.Message; false
 
+/// Round 4 wave 9 (lane A, A3 review round 6, Codex 5a8b7b7d): the jvp
+/// tangent-name prefix (`GradSweeps.tangentPrefix`) is PER FLOW like the G193
+/// state -- two syntheses choosing different prefixes in parallel tasks, a
+/// barrier between the choice and the use, each reads its own prefix (the
+/// process-global ref let one program's second-round prefix leak into
+/// another's: a captured module binding, (15, 10, 25, 0) for (21, 14, 35, 0)).
+let private tangentPrefixPerProgram () : bool =
+    let name = "ad_tangent_prefix_per_program: two parallel syntheses keep their own tangent prefix"
+    let barrier = new System.Threading.Barrier(2)
+    let run (prefix: string) =
+        System.Threading.Tasks.Task.Run(fun () ->
+            GradSweeps.tangentPrefix.Value <- prefix
+            barrier.SignalAndWait(30000) |> ignore
+            let mine = GradSweeps.tName "x"
+            barrier.SignalAndWait(30000) |> ignore
+            mine)
+    try
+        let a = run "__t_"
+        let b = run "__t2_"
+        if not (System.Threading.Tasks.Task.WaitAll([| a :> System.Threading.Tasks.Task; b :> System.Threading.Tasks.Task |], 30000)) then
+            resultLine Fail name "the two tasks did not finish within 30 s"; false
+        elif a.Result = "__t_x" && b.Result = "__t2_x" then
+            resultLine Pass name "each task named its tangent with its own prefix"; true
+        else resultLine Fail name $"task 1 named {a.Result}, task 2 {b.Result}"; false
+    with ex -> resultLine Fail name ex.Message; false
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
@@ -977,7 +1151,8 @@ let runAccessTests () =
           routeEmission ()
           computedOffsetDeclines ()
           gradStatePerProgram ()
-          synthSpanPerProgram () ]
+          synthSpanPerProgram ()
+          tangentPrefixPerProgram () ]
         @ g78Pins ()
     let zeroFill = zeroFillCases |> List.collect zeroFillCase
     let diffs =

@@ -1,0 +1,22 @@
+// TEST: AD Recursive Array, The Auto Checkpoint Over 5001 Rows Does Not Capture A Module Array Spelled Like Its Buffer
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`, opt-in): the AUTO arm (BLADE_AD_CHECKPOINT=1:
+// a 5001-cell tape, K = 71) of ad/126 (round 4 wave 9, lane A, A3). The
+// module array `__ck4` the step reads was shadowed by the checkpoint buffer:
+// value 5001.0 checkpointed against 10001.0 on the full tape. Now the
+// buffer's name skips every spelling the program uses.
+// s(n) = 1 + 2 n; value = s(5000) = 10001, ds(5000)/dx = 1.
+// ============================================================================
+let __ck4: Array<Float64 like Idx<1>> = [2.0]
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) + __ck4(0)
+    s(5000)
+}
+let (value, dx) = ad.grad(f)(Float64(1.0))
+// EXPECT: value = 10001.0
+// EXPECT: dx = 1.0

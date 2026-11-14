@@ -1,0 +1,13 @@
+// TEST: Function Kernel Captures Of Module Maps Values
+// Gap G235 (b), round 4 wave 9, the value twin of loops/851-852: inside a
+// function body the fold kernel and the fused leaf kernel capture the module
+// deferred map d and read its cells; the private per-call evaluation of d
+// (G75) gives the same values in every lane, and d never prints.
+let x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = { reduce(x, lambda(a, b) -> a + b + d(1), 0) }
+function g() -> Int64 = reduce(method_for(x) <@> lambda(v) -> v + d(0), (+), 0)
+let s = f()
+let t = g()
+// EXPECT: s = 21
+// EXPECT: t = 36

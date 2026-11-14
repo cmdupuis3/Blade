@@ -1483,6 +1483,30 @@ let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
                       && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") && refusals.IsEmpty)
                      (String.concat "\n" (recs @ refusals))
          finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
+        // round 4 wave 9 lane A (A4, the class-closure round of
+        // stream-group-aggregate, Codex 0219820a): the state form's emitted
+        // names (`__sga<id>_state`, `<g>__sga_n`) were not allocated against
+        // the user's -- a binding spelled `__sga14_state` redeclared one and
+        // g++ refused the program; a module spelling `__sga` now keeps the pool
+        (let src = (keyed "stream") + "\nlet __sga14_state = 42\nlet q = __sga14_state + 1\n"
+         let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+         try
+             Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+             Environment.SetEnvironmentVariable("BLADE_PRINT", "sums,q")
+             Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+             Blade.Effects.Decisions.start ()
+             let lowered = lower src
+             let recs = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-aggregate") |> List.map Blade.Effects.Decisions.render
+             match lowered with
+             | Error e -> check "stream-group-aggregate: a module spelling `__sga` declines (lowers)" false e
+             | Ok ir ->
+                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_sga_name_hygiene"
+                 let refusals = CodeGen.takeCodegenRefusalDiagnostics cppCode |> List.map string
+                 check "stream-group-aggregate: a binding spelled `__sga14_state` keeps the pool form (no redeclaration)"
+                     (recs |> List.exists (fun r -> r.Contains "declined" && r.Contains "spelled with `__sga`")
+                      && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") && refusals.IsEmpty)
+                     (String.concat "\n" (recs @ refusals))
+         finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
         // G200 (round 4 wave 7 lane B): the print selection is QUALIFIED for an
         // imported module (`Lib.g`), the plan runs before qualification on `g`.
         // The shared resolver (Blade.PrintSelection) matches an entry by its

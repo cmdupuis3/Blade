@@ -1,0 +1,29 @@
+// TEST: AD Recursive Array, Checkpoints Decline A Snapshot Beside A Step Value That May Fail, Fresh Buffer
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: the fresh-buffer twin of
+// ad/067 (round 4 wave 9, lane A, A1). The step value `lgamma(forcing(0))`
+// may fail (BL8008 on a non-positive argument) and the step reads a
+// snapshot target, so the full tape runs (`blade test access` pins "the step
+// value may fail"). The buffer is fresh -- one sharing `forcing` is refused
+// since round 4 wave 8 (G190 (c), ad/067) -- so nothing moves the argument:
+// lgamma(2) = 0, s = [1, 1, 1, 1, 1], value = 1 - 2 * 4, ds4/dx = 2^4.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+let src: A = [2.0]
+let forcing = identity(src)
+function f(x: Float64, w: A) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * prefix(n - 1) + lgamma(forcing(0))
+    s(4) - 2.0 * w(0)
+}
+let w0: A = [4.0]
+let mut dw: A = [0.0]
+let (value, dx) = ad.grad(f)(Float64(1.0), w0, dw)
+// EXPECT: value = -7.0
+// EXPECT: dx = 16.0
+// EXPECT: dw = [-2.0]

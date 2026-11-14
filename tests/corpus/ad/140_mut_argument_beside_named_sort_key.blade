@@ -1,0 +1,17 @@
+// TEST: A Mut Argument Beside A Named Function Sort Key
+// ============================================================================
+// Gap G240 (3-kernel), round 4 wave 9 (lane C, C2): the admitted twin of
+// ad/136 -- a sort key that RESOLVES (a named function reading nothing the
+// mut argument holds) is traced, so the call is accepted, every lane.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+let mut g: A = [2.0, 0.0]
+function key(t: Float64) -> Float64 = 0.0 - t
+function bump(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    let s = sort(y, key)
+    s(0)
+}
+let r = bump(g)
+// EXPECT: g = [4.0, 0.0]
+// EXPECT: r = 4.0

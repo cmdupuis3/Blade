@@ -1,0 +1,14 @@
+// TEST: A Private Operand Captured By A Later Operand Kernel Is Forced Under Its Own Name
+// Gap G243 / G214 (round 4 wave 9 lane d; Codex design review): f kernel reads extents(e), a
+// CAPTURE, which forces e once under its own name (a snapshot) -- also when e is an earlier private
+// operand of the same fold: the later d write is not seen through e (the C++ lane re-evaluated e).
+// EXPECT: e = [2, 3, 4]
+// EXPECT: s = 24
+// EXPECT: w = 2
+type I = Idx<3>
+let mut d: Array<Int64 like I> = [1, 2, 3]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(d) <@> lambda(a) -> a + Int64(extents(e))
+let s = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a + b, (+))
+d((0 : I)) = 9
+let w = e(0)

@@ -1,0 +1,14 @@
+// TEST: A Pipeline Stage Captured Deferred Map That Fails (aborts)
+// ============================================================================
+// Gap G242, round 4 wave 9 (lane C, C3): an APPLIED PIPELINE runs every stage
+// kernel, so a deferred map a stage kernel captures is forced before the
+// traversal, in stage order -- the capture prelude a canonical map's kernel
+// gets (G115). The C++ lane never forced it (the composition was not
+// descended): `delayed` reached the stage's lifted lambda undeclared, BL9002.
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [0, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+let pipeline = object_for(lambda(v: Int64) -> v * delayed(1)) >>@ object_for(lambda(v: Int64) -> v + 1)
+let ys = pipeline <@> backing |> compute
+// ABORT: integer division by zero

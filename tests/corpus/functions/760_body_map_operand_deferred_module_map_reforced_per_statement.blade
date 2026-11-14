@@ -1,0 +1,20 @@
+// TEST: A Body Map Over A Deferred Module Map Re-Forces It Per Statement
+// ============================================================================
+// Gap G256 (lane B, round 4 wave 9; a G239 member at statement granularity),
+// fixed by lane C (C1): a deferred module map read as the OPERAND of a map in
+// a function body is forced for THAT statement. The C++ lane read the holder
+// an EARLIER statement of the body had filled (`let z = d(1)`), a snapshot
+// taken before `x(0) = 10` wrote d's input: s = 11 for the interpreter's 2.
+// A function-body force is private and per reading statement (G75 / G190
+// (b)); the holder is never carried to a later statement.
+// ============================================================================
+let mut x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let z = d(1)
+    x(0) = 10
+    let a = method_for(d) <@> lambda(v) -> v + 1
+    a(0) + z * 0
+}
+let s = f()
+// EXPECT: s = 2

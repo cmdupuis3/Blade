@@ -1,0 +1,17 @@
+// TEST: Fold Spine Forced By Captured Map Writing Seed
+// Gap G235 (a), round 4 wave 9: the fold kernel captures q, a deferred map of
+// the fold own spine p, so the capture forces q and, as its input, p ONCE
+// under its own name (a snapshot, G214) before the traversal. The seed then
+// writes x, an input of p: the fold reads the snapshot [2, 4, 6] (21.0). Every
+// lane used to fold a fresh walk of p over the written x (39.0): the checker
+// spliced p producer into the fold, which lost the name to read back.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(p) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: p = [2.0, 4.0, 6.0]
+// EXPECT: q = [3.0, 5.0, 7.0]
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0
+// EXPECT: x = [10.0, 2.0, 3.0]
