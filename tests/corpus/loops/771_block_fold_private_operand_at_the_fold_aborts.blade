@@ -1,0 +1,16 @@
+// TEST: A Fold In A Block Forces Its Private Operand At The Fold, Not Before The Block (aborts)
+// Gap G207 (iii) (round 4 wave 8 lane d; Codex diff review round 3): the
+// private operand `e` of the fold is evaluated where the fold is, after the
+// earlier statement of the block (integer modulo by zero), not hoisted ahead
+// of it (integer division by zero).
+// ABORT: integer modulo by zero
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 0, 2]
+let z: Int64 = 0
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(e) <@> lambda(a) -> a + 1
+let s = {
+    let x = 7 % z
+    let t = reduce(p, (+), 0)
+    x + t
+}

@@ -1,5 +1,9 @@
-// TEST: AD Recursive Array, Checkpoints Decline A Step Reading A Closure Over The Gradient Buffer
+// TEST: AD Recursive Array, Checkpoints Decline A Step Reading A Closure Over The Gradient Buffer (rejects)
 import ad as ad
+// ROUND 4 WAVE 8 (G190 (c), lead decision): the gradient buffer here shares
+// storage with an array the derivative reads (identity(..) beside the
+// buffer, or a module alias of it), which is now REFUSED at lowering in every
+// lane (BL4005); the program stays as the refusal witness of its shape.
 // ============================================================================
 // PM40 (rule `ad-checkpoint v1`, opt-in) DECLINES: `forcing` is a closure
 // returned by `factory`, capturing the gradient buffer `backing`; a copy of
@@ -22,5 +26,6 @@ function f(x: Float64, w: A) -> Float64 = {
     s(4) + w(0)
 }
 let (value, dx) = ad.grad(f)(Float64(1.0), identity(backing), backing)
-// EXPECT: value = 15133.0
-// EXPECT: dx = 64944.0
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but
+// REJECT-AT: lower

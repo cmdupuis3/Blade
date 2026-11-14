@@ -1,0 +1,12 @@
+// TEST: A Single Fold Forces Its Private Operand Before The Seed (aborts)
+// Gap G207 (iii) (round 4 wave 8 lane d; Codex design review probe A): one
+// leaf over a map of the deferred `e`. The private operand `e` is evaluated
+// whole before the seed `7 % z` and before the leaf kernel's own modulo at
+// cell 1: integer division by zero (e at cell 7), in every lane.
+// ABORT: integer division by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let z: Int64 = 0
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(e) <@> lambda(a) -> 7 % (a - 50)
+let s = reduce(p, (+), 7 % z)

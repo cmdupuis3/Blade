@@ -1,0 +1,23 @@
+// TEST: A retaining scalar call keeps its inline sparse gather alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221, the ninth member found by the Codex design
+// review d71e628b): `keep(F((0, _)))` binds the inline partial sparse read in
+// an IIFE and tore it down right after the call -- but `keep` stores a closure
+// over its argument in `sink`, so the later `sink(0)(1.0)` read a freed
+// gather. A consumer that may retain (Optimize.retentionAnalyzer) now leaves
+// the gather to the retainer.
+// ============================================================================
+type E = Idx<4>
+type One = Idx<1>
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]
+let F = sparse(flat, K)
+let mut sink: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> 0.0 * k]
+function keep(a: T^1) -> Int64 = {
+    sink(0) = lambda(k: Float64) -> reduce(a, (+)) * k
+    3
+}
+let n = keep(F((0, _)))
+let result = sink(0)(1.0)
+// EXPECT: n = 3
+// EXPECT: result = 6.0

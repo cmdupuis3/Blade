@@ -1,0 +1,27 @@
+// TEST: A Mut Argument Read By A Callback Argument The Callee Runs Is Refused (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; lead decision): a `mut` ARGUMENT
+// -- an ad.grad / ad.vjp gradient buffer and an ordinary `mut` parameter
+// alike -- may NOT share storage with anything the callee READS: another
+// array argument, or a module binding the callee reads by name (a module
+// alias such as `let forcing = identity(g)`, a deferred map over it), judged
+// by storage provenance and refused at lowering with BL4005 in every lane.
+// The callee's writes through the parameter would be visible through its own
+// reads mid-call; the lanes disagreed (c9: a silently wrong gradient, 20 for
+// 8, in both compiled lanes). No run-time check, one rule for AD buffers and
+// ordinary mut parameters.
+// ============================================================================
+// Codex diff review round 2: a callable ARGUMENT runs inside the callee.
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+let mut a: A = [2.0, 3.0]
+let view = identity(a)
+function read_a() -> Float64 = view(0)
+function f(cb, y: mut A) -> Float64 = {
+    y(0) = 4.0
+    cb()
+}
+let result = f(read_a, a)
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

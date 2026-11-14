@@ -1,0 +1,21 @@
+// TEST: A retained tuple member keeps its array alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m3, the tuple): the argument is a
+// tuple holding the caller local y; `keep_pair` stores its first member.
+// ============================================================================
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep_pair(t: (Array<Float64 like I>, Int64)) -> Int64 = {
+    saved = t[0]
+    t[1] + 3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = keep_pair((y, Int64(0)))
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + saved(0) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 23.0
+// EXPECT: saved = [2.0, 4.0, 6.0]

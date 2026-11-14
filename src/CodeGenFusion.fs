@@ -1631,6 +1631,16 @@ let isDeferredWrapperOperand (ctx: CodeGenContext) (e: IRExpr) : bool =
 /// Only positional reads whose base is a deferred IRVar are collected; bare
 /// combinator/loop-object children are NOT descended (they force/absorb their
 /// own inputs), so a nested still-deferred binding is never eagerly forced.
+/// An extent read `extents(a)` at `dim` whose value the TYPE carries as a
+/// static literal: renderExtentExpr emits that literal and names nothing, so
+/// the read is no forcing use of a deferred `a` (gap G218, the user decision
+/// of 2026-11-13; formalism 10.2). A runtime extent still reads the array by
+/// name (gap G234).
+let extentIsStatic (a: IRExpr) (dim: int) : bool =
+    match inferExprType a with
+    | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length -> (tryEvalIntIR at.IndexTypes.[dim].Extent).IsSome
+    | _ -> false
+
 let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId list =
     let ordered = System.Collections.Generic.List<IRId>()
     let seen = System.Collections.Generic.HashSet<IRId>()
@@ -1642,7 +1652,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
     let rec walk (e: IRExpr) =
         match e with
         | IRIndex (a, idxs, _) -> note a; walk a; List.iter walk idxs
-        | IRExtent (a, _) -> note a; walk a
+        | IRExtent (a, dim) -> (if not (extentIsStatic a dim) then note a); walk a
         | IRContains (a, v) -> note a; walk a; walk v
         // Statement / block forms. An assignment RHS that is a whole deferred
         // array (`x = A`) renders A by name, so note it like a positional read.
@@ -1692,6 +1702,17 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         // the reduce emitters resolve a deferred MAP inline, but a choice /
         // fallback has no fold form, so it is forced like a positional read.
         | IRReduce (a, k, initOpt) ->
+            // a FOLD KERNEL capture of a deferred map is a forcing use too
+            // (gap G237: a fold in EXPRESSION position, `1.0 + reduce(x,
+            // lambda(a, b) -> a + b + d(1), 0.0)`, forwarded an undeclared d)
+            (match resolveKernel k with
+             | Some rk ->
+                 for cap in rk.Callable.Captures do
+                     match Map.tryFind cap.Id ctx.DeferredComputations with
+                     | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRChoice _ | IRFallback _ | IRVar _) ->
+                         if seen.Add cap.Id then ordered.Add cap.Id
+                     | _ -> ()
+             | None -> ())
             if isDeferredWrapperOperand ctx a then note a
             walk a; walk k; Option.iter walk initOpt
         | IRReduceCompute (comp, k, init) -> walk comp; walk k; walk init

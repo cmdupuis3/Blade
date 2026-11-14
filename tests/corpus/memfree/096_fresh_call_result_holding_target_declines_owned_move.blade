@@ -1,0 +1,24 @@
+// TEST: A fresh call result holding the target declines the owned move
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, contents provenance through a
+// call; found by the Codex diff review d71e628b round 4): `wrap(y)` returns a
+// FRESH array of boxes, but its cell names y; the owned move `y = w` freed
+// y's pool before `boxes(0).a` was read. A call result whose cells can hold
+// storage is not a transient read of its argument.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+struct Box {
+    a: Array<Float64 like I>
+}
+function wrap(a: Array<Float64 like I>) -> Array<Box like One> = [Box { a = a }]
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let mut y = x * 2.0 |> compute
+    let boxes = wrap(y)
+    let w = x * 5.0 |> compute
+    y = w
+    reduce(boxes(0).a, (+)) + reduce(y, (+))
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 42.0

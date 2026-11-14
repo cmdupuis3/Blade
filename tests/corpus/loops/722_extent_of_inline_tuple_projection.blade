@@ -1,0 +1,9 @@
+// TEST: Extent Of Inline Tuple Projection
+// Gap G218 (round 4 wave 8, Codex diff review round 1): the extent of an
+// inline projection of a wholly deferred tuple reads the member type, not its
+// cells: d (which fails at cell 1) is never evaluated.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let t = (d, d)
+let n = extents(t[0])
+// EXPECT: n = 3

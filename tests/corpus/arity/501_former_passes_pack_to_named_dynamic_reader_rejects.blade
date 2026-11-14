@@ -1,0 +1,16 @@
+// TEST: a pack former whose kernel passes its pack to a named function is refused (rejects)
+// Gap G223 (round 4 wave 8 lane d): the kernel names the pack only as an
+// argument of `pick`, so the former stayed rolled and kept a pack the
+// specialization had replaced by scalar parameters (an IR-validation
+// failure, BL6001, a dangling VarId). Unrolling it would need the range
+// proved to be this pack index, which an opaque extent cannot show (Codex
+// diff review round 3): refused at lowering.
+// ERROR: BL7004
+// ERROR-CONTAINS: names the pack as a value
+// REJECT-AT: lower
+function pick(p: Poly<Float64>, j: Int64) -> Float64 = p[j]
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> pick(args, k) |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

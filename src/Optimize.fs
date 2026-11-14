@@ -819,7 +819,12 @@ let private runtimeDenseShape (ty: IRType) : (IRType * int) option =
 /// planner cannot see what a callee hands back.
 let private isFreshForm (e: IRExpr) : bool = isFreshPoolFormWith (fun _ -> false) e
 
-let planPoolReuse (modul: IRModule) : unit =
+/// `mayRetain` (gap G221: Optimize.scheduleMayRetainIn over the program, its
+/// scope-local and private-cell sets): a position that may RETAIN storage it
+/// names never leaves a donor unaliased -- a retaining ROW KERNEL
+/// (`method_for(y) <@> keep`) or a call through an unresolved head is no
+/// ordinary IRApp of a declared callable, so `callsCallable` alone missed it.
+let planPoolReuse (mayRetain: Set<IRId> -> Set<IRId> -> IRExpr -> bool) (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let rec unroll (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match e with
@@ -999,7 +1004,31 @@ let planPoolReuse (modul: IRModule) : unit =
             // retain it (hand it back, or alias it into a module-level mut),
             // whatever the call's own type; a fresh-pool form or a call-free
             // scalar only READS it.
+            let scopeLocals = lets |> List.map fst |> Set.ofList
+            let wholeRebound =
+                let mutable s = Set.empty
+                for root in f.Body :: embeddedExtentExprs f.Body do
+                    iterIRExpr (fun e -> match e with IRAssign (LVVar tid, _) -> s <- Set.add tid s | _ -> ()) root
+                s
+            let scopePrivates =
+                lets
+                |> List.filter (fun (id, v) -> isFreshForm v && not (wholeRebound.Contains id))
+                |> List.map fst |> Set.ofList
+            // gap G221 (contents provenance; Codex diff review d71e628b round
+            // 3): a fresh pool whose CELLS can hold storage (`[Box { a = y }]`)
+            // keeps a reference to what it names -- it reads the donor into a
+            // second holder, not transiently
+            let plainContents (v: IRExpr) =
+                let scalarish (t: IRType) =
+                    match stripUnits t with
+                    | IRTScalar _ | IRTIdxTagged _ | IRTUnit -> true
+                    | _ -> false
+                match typeOf v with
+                | ArrayElem at -> scalarish at.ElemType
+                | t -> scalarish t
             let callsCallable (v: IRExpr) =
+                if mayRetain scopeLocals scopePrivates v then true
+                else
                 let mutable found = false
                 // G220 (Codex diff review): a call inside a type-carried
                 // expression (a range bound) may retain the donor too
@@ -1016,7 +1045,7 @@ let planPoolReuse (modul: IRModule) : unit =
                     || not (Set.contains a refsAt.[p])
                     || (match positions.[p] with
                         | (Some _, pv) when deferred pv -> true      // reads attributed to its consumers
-                        | (_, pv) -> not (callsCallable pv) && (isFreshForm pv || scalarValued pv)))
+                        | (_, pv) -> not (callsCallable pv) && ((isFreshForm pv && plainContents pv) || scalarValued pv)))
             // Greedy in program order. `pools`: root position -> members
             // (positions) sharing its storage; `owner`: position -> root.
             let pools = System.Collections.Generic.Dictionary<int, int list>()
@@ -1352,6 +1381,39 @@ let private isDeferredForm (e: IRExpr) : bool =
     | _ -> false
 
 
+/// The deferred computation a read of the OUTER let `id` runs (none when the
+/// let holds a stored value): followed through let aliases, tuple projections,
+/// array views and every deferred wrapper until a materialization boundary
+/// (`|> compute`, a stored value). Shared by the write analysis and the
+/// retention analysis (gap G221).
+let private outerDeferredValue (facts: WriteFacts) (id: IRId) : IRExpr option =
+    let rec chase (seen: Set<IRId>) (x: IRExpr) =
+        match x with
+        | IRVar (j, _) when not (seen.Contains j) ->
+            (match facts.OuterLet j with
+             | Some v -> chase (seen.Add j) v
+             | None -> None)
+        // a projection of a deferred pack runs the pack
+        | IRTupleProj (b, _, _) -> chase seen b
+        // an array VIEW (partial index `m(i)`, slice,
+        // shift, reverse, curry) of a deferred value is
+        // virtual too: reading it runs the producer
+        // (EmitLlvm rowView keeps AVirt / AVirtFlat).
+        // An explicit `|> compute` stays the boundary.
+        | IRIndex (b, _, _) | IRSlice (b, _, _, _) | IRShift (b, _, _, _)
+        | IRReverse (b, _) | IRCurry (b, _, _) when not (try holdsNoStorage (typeOf x) with _ -> true) ->
+            chase seen b
+        | IRTuple es ->
+            // every component is chased by the SAME
+            // rules (names, projections, views,
+            // deferred forms); a stored component
+            // (evaluated at its let) drops out
+            let live = es |> List.choose (chase seen)
+            if live.IsEmpty then None else Some (IRTuple live)
+        | v when isDeferredForm v -> Some v
+        | _ -> None
+    facts.OuterLet id |> Option.bind (chase (Set.singleton id))
+
 /// THE WRITE ANALYSIS (gaps G41 / G43; exprMayWriteWith / callableMayWriteWith): does evaluating `root` write storage
 /// that another evaluation can observe? Shared by codegen's reorder licence
 /// (CodeGenExprSupport.callableMayWrite / exprMayWrite: a writing kernel or
@@ -1575,32 +1637,7 @@ let private writeAnalyzer (facts: WriteFacts) =
                              if facts.UnknownIsWrite then add { writeNone with External = true }
                          elif not (locals.ContainsKey id) && not (paramIdx.ContainsKey id) && walkedLets.Add id then
                              // a named deferred computation runs where it is read
-                             let rec chase (seen: Set<IRId>) (x: IRExpr) =
-                                 match x with
-                                 | IRVar (j, _) when not (seen.Contains j) ->
-                                     (match facts.OuterLet j with
-                                      | Some v -> chase (seen.Add j) v
-                                      | None -> None)
-                                 // a projection of a deferred pack runs the pack
-                                 | IRTupleProj (b, _, _) -> chase seen b
-                                 // an array VIEW (partial index `m(i)`, slice,
-                                 // shift, reverse, curry) of a deferred value is
-                                 // virtual too: reading it runs the producer
-                                 // (EmitLlvm rowView keeps AVirt / AVirtFlat).
-                                 // An explicit `|> compute` stays the boundary.
-                                 | IRIndex (b, _, _) | IRSlice (b, _, _, _) | IRShift (b, _, _, _)
-                                 | IRReverse (b, _) | IRCurry (b, _, _) when not (try holdsNoStorage (typeOf x) with _ -> true) ->
-                                     chase seen b
-                                 | IRTuple es ->
-                                     // every component is chased by the SAME
-                                     // rules (names, projections, views,
-                                     // deferred forms); a stored component
-                                     // (evaluated at its let) drops out
-                                     let live = es |> List.choose (chase seen)
-                                     if live.IsEmpty then None else Some (IRTuple live)
-                                 | v when isDeferredForm v -> Some v
-                                 | _ -> None
-                             match facts.OuterLet id |> Option.bind (chase (Set.singleton id)) with
+                             match outerDeferredValue facts id with
                              | Some deferred -> visit deferred
                              | None -> ()
                 | IRParam (_, _, t) when isFunctionTyped t -> if facts.UnknownIsWrite then add { writeNone with External = true }
@@ -1890,6 +1927,156 @@ let callableMayWriteWith (facts: WriteFacts) (c: IRCallable) : bool =
     let s = summaryOf c
     s.External || not s.Params.IsEmpty
 
+/// THE RETENTION ANALYSIS (gap G221): may evaluating a callable (or a
+/// statement) leave a REFERENCE to storage it was handed -- an argument, an
+/// operand cell, a capture -- in storage that outlives the evaluation? A
+/// boolean per callable (any retention anywhere = it may retain every
+/// argument), over the same WriteFacts as the write analysis (callees,
+/// callbacks, outer deferred lets) and over the extents the body's types
+/// carry. Fail closed. True when the walk meets:
+///   * a WHOLE assignment `t = v` of a storage-bearing value whose target is
+///     not a let of the walked body nor one of its parameters (a module mut,
+///     an enclosing `let mut` a nested function captured; m1 m2 m6);
+///   * ANY element / field / projection store of a storage-bearing value --
+///     no destination is proved private (Codex design review d71e628b: a fresh
+///     container's field or element may itself point into caller storage, and
+///     the generic store emitter assigns the wrapper);
+///   * a call whose head resolves to a callable that may retain, a callback
+///     whose candidates may, or ANY unresolved head given a storage-bearing
+///     argument (`handlers(0)(y)`);
+///   * a callable REFERENCE (a kernel slot, a callable passed on) that may
+///     retain, an unresolved function-typed name;
+///   * a named outer deferred computation read here whose kernels may retain.
+/// Recursion: the least fixpoint from "retains nothing" (summaries computed
+/// during an unfinished iteration are dropped, as in the write analysis).
+let private retentionAnalyzer (facts: WriteFacts) =
+    let summaries = System.Collections.Generic.Dictionary<IRId, bool>()
+    let carries (e: IRExpr) = not (try holdsNoStorage (typeOf e) with _ -> false)
+    let rec retainsOf (c: IRCallable) : bool =
+        match summaries.TryGetValue c.Id with
+        | true, s -> s
+        | _ ->
+            let locals0 =
+                (c.Params |> List.map (fun p -> p.VarId)) |> Set.ofList
+            let names0 = c.Params |> List.map (fun p -> p.Name) |> Set.ofList
+            let rec iterate (current: bool) (round: int) =
+                summaries.[c.Id] <- current
+                let before = System.Collections.Generic.HashSet<IRId>(summaries.Keys)
+                let s = current || walk locals0 names0 Set.empty c.Body
+                let dropNew () =
+                    for k in List.ofSeq summaries.Keys do
+                        if k <> c.Id && not (before.Contains k) then summaries.Remove k |> ignore
+                if s = current then s
+                elif round >= 64 then
+                    dropNew ()
+                    true
+                else
+                    dropNew ()
+                    iterate s (round + 1)
+            let s = iterate false 0
+            summaries.[c.Id] <- s
+            s
+    /// `outer`: ids that count as LOCAL to the walk besides the lets it binds
+    /// (a callable's parameters; a scope's own lets when a statement is judged).
+    and walk (outer: Set<IRId>) (outerNames: Set<string>) (outerPrivate: Set<IRId>) (body: IRExpr) : bool =
+        let locals = System.Collections.Generic.HashSet<IRId>(outer)
+        let walkedLets = System.Collections.Generic.HashSet<IRId>()
+        let roots = body :: embeddedExtentExprs body
+        // PRIVATE roots: a let whose initializer is an EAGER fresh pool (a
+        // materialized map, an array literal) and that is never whole-rebound
+        // -- a store DIRECTLY into one of its cells (`out(i) = v`, one subscript
+        // step on the name itself) lands in storage the walk owns; whether that
+        // storage then escapes is the escape analysis's question, not a
+        // retention of v. Any deeper path (`cells(0).slots(0) = v`) or a view
+        // (`let slot = out(0)`) is not private.
+        let fresh = System.Collections.Generic.HashSet<IRId>(outerPrivate)
+        let rebound = System.Collections.Generic.HashSet<IRId>()
+        for r in roots do
+            iterIRExpr (fun n ->
+                match n with
+                | IRLet (id, v, _) ->
+                    locals.Add id |> ignore
+                    if isFreshPoolFormWith (fun _ -> false) v then fresh.Add id |> ignore
+                | IRAssign (IRVar (id, _), _) -> rebound.Add id |> ignore
+                | _ -> ()) r
+        let privateRoot (id: IRId) = fresh.Contains id && not (rebound.Contains id)
+        let mutable found = false
+        let rec visit (e: IRExpr) =
+            if not found then
+                match e with
+                | IRReplayRow (_, row) -> visit row
+                | IRAssign (target, value) ->
+                    (match target with
+                     | IRVar (id, _) when locals.Contains id -> ()
+                     | IRParam (nm, _, _) when outerNames.Contains nm -> ()
+                     | IRIndex (IRVar (id, _), _, _) when privateRoot id -> ()
+                     | _ -> if carries value then found <- true)
+                    visitChildren target
+                    visit value
+                | IRApp (f, args, _) ->
+                    let storageArg = args |> List.exists carries
+                    let rec callAt (seenCb: Set<IRId>) (h: IRExpr) =
+                        match facts.Resolve h with
+                        | Some c -> if retainsOf c then found <- true
+                        | None ->
+                            match h with
+                            | IRVar (cid, _) when (facts.Callbacks cid).IsSome ->
+                                if not (seenCb.Contains cid) then
+                                    for cand in (facts.Callbacks cid).Value do callAt (seenCb.Add cid) cand
+                            | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> visit h
+                            | _ -> if storageArg then found <- true
+                    callAt Set.empty f
+                    // the HEAD expression is evaluated too (`handlers(keep(y))
+                    // (1.0)`: a retaining call inside an indexed head; Codex
+                    // diff review d71e628b round 2) -- a bare name or a
+                    // combinator head was judged by callAt above
+                    (match f with
+                     | IRVar _ | IRParam _ | IRObjectFor _ | IRMethodFor _ | IRCompose _ | IRComposeObj _ | IRComposeMeth _ -> ()
+                     | _ -> visit f)
+                    args |> List.iter visit
+                | IRVar (id, vty) ->
+                    let rec kernelRef (seenCb: Set<IRId>) (h: IRExpr) : bool =
+                        match facts.Resolve h with
+                        | Some c ->
+                            if retainsOf c then found <- true
+                            true
+                        | None ->
+                            match h with
+                            | IRVar (cid, _) when (facts.Callbacks cid).IsSome ->
+                                if not (seenCb.Contains cid) then
+                                    for cand in (facts.Callbacks cid).Value do
+                                        if not (kernelRef (seenCb.Add cid) cand) then found <- true
+                                true
+                            | _ -> false
+                    if kernelRef Set.empty e then ()
+                    elif isFunctionTyped vty then found <- true
+                    elif not (locals.Contains id) && walkedLets.Add id then
+                        match outerDeferredValue facts id with
+                        | Some deferred -> visit deferred
+                        | None -> ()
+                | IRParam (_, _, t) when isFunctionTyped t -> found <- true
+                | other -> visitChildren other
+        and visitChildren (e: IRExpr) =
+            let (ExprShape (children, _)) = e
+            children |> List.iter visit
+        for r in roots do visit r
+        found
+    (retainsOf, walk)
+
+/// May a call of `c` retain a reference to storage it was handed (G221)?
+let callableMayRetainWith (facts: WriteFacts) (c: IRCallable) : bool =
+    let (retainsOf, _) = retentionAnalyzer facts
+    retainsOf c
+
+/// A checker over statements, sharing one summary table: may evaluating
+/// `root` leave a reference to storage it reads in storage that outlives it?
+/// `locals` are the ids whose whole rebinding is local (the scope's own lets).
+/// `privates` are the scope lets whose cells a direct store may fill without
+/// retaining the stored value (eager fresh pools never whole-rebound).
+let retentionCheckerWith (facts: WriteFacts) : Set<IRId> -> Set<IRId> -> IRExpr -> bool =
+    let (_, walk) = retentionAnalyzer facts
+    fun (locals: Set<IRId>) (privates: Set<IRId>) (root: IRExpr) -> walk locals Set.empty privates root
+
 /// The operands a module SIDE TABLE executes at binding `id`'s own site: a
 /// `compound(dense, mask)`'s two operands, a `sparse(values, keys)`'s values,
 /// a random fill's key / parameters / weights / address (or `fill_random`'s
@@ -2035,6 +2222,12 @@ and scheduleMayWriteWithCallbacksIn (programFuncs: IRCallable list) (modul: IRMo
     scheduleMayWriteWith true programFuncs modul
 
 and scheduleMayWriteWith (withCallbacks: bool) (programFuncs: IRCallable list) (modul: IRModule) : IRExpr -> bool =
+    let facts = scheduleFactsWith withCallbacks programFuncs modul
+    fun (e: IRExpr) -> exprMayWriteWith facts e
+
+/// The write facts of `scheduleMayWriteWith` (one module instance), shared
+/// with the retention predicate (gap G221).
+and scheduleFactsWith (withCallbacks: bool) (programFuncs: IRCallable list) (modul: IRModule) : WriteFacts =
     let funcs =
         (programFuncs @ modul.Functions) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let lets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
@@ -2075,19 +2268,27 @@ and scheduleMayWriteWith (withCallbacks: bool) (programFuncs: IRCallable list) (
           CopiedLet = copied
           UnknownIsWrite = true
           Callbacks = (fun _ -> None) }
-    let facts =
-        if not withCallbacks then facts
-        else
-            let table =
-                callbackTable resolve (programFuncs @ modul.Functions) (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
-            { facts with
-                Callbacks = (fun id ->
-                    match Map.tryFind id table with
-                    | Some args when not args.IsEmpty -> Some args
-                    | _ -> None) }
-    fun (e: IRExpr) -> exprMayWriteWith facts e
+    if not withCallbacks then facts
+    else
+        let table =
+            callbackTable resolve (programFuncs @ modul.Functions) (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
+        { facts with
+            Callbacks = (fun id ->
+                match Map.tryFind id table with
+                | Some args when not args.IsEmpty -> Some args
+                | _ -> None) }
 
 let scheduleMayWrite (modul: IRModule) : IRExpr -> bool = scheduleMayWriteIn [] modul
+
+/// THE RETENTION PREDICATE over a module (gap G221; retentionAnalyzer with
+/// the scheduling write facts and the callback table): may evaluating `e`
+/// leave a reference to storage it reads in storage that outlives it? Every
+/// consumer of FRESHNESS that hands a pool to someone else (scratch reuse's
+/// donor, ...) asks it: `locals` = the scope lets whose whole rebinding is
+/// local, `privates` = those whose cells a direct store fills privately (see
+/// retentionCheckerWith).
+let scheduleMayRetainIn (programFuncs: IRCallable list) (modul: IRModule) : Set<IRId> -> Set<IRId> -> IRExpr -> bool =
+    retentionCheckerWith (scheduleFactsWith true programFuncs modul)
 
 /// A resource boundary reached directly or through a callable is a motion
 /// barrier without being a source write. Every downstream schedule planner

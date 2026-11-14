@@ -1,0 +1,21 @@
+// TEST: A fresh container holding a pool keeps it off scratch reuse
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, contents provenance; found by
+// the Codex diff review d71e628b round 3): y looked dead after
+// `[Box { a = y }]`, a fresh pool, so z took y's pool and overwrote the
+// values the box still reads (60.0 instead of 42.0).
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+struct Box {
+    a: Array<Float64 like I>
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let boxes: Array<Box like One> = [Box { a = y }]
+    let z = x * 5.0 |> compute
+    reduce(boxes(0).a, (+)) + reduce(z, (+))
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 42.0

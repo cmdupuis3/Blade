@@ -1,0 +1,7 @@
+// TEST: a pack read at an index that folds in the specialization still compiles
+// Gap G223 (round 4 wave 8 lane d): the refusal of a run-time pack subscript
+// fires only on an index the specialization cannot fold: `p[arity(p) - 1]`
+// is the last element.
+// EXPECT: r = 30.0
+function last(p: Poly<Float64>) -> Float64 = p[arity(p) - 1]
+let r = last(10.0, 20.0, 30.0)

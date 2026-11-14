@@ -1,0 +1,22 @@
+// TEST: A fold returning a struct that holds an array keeps the array
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 m7, the aggregate form; found by the Codex
+// diff review d71e628b round 2): a fold over an array of structs returns one
+// of its cells, a Box whose field is y -- a fold result is a fresh form, but
+// its storage is the operand's, so it may not stop escape propagation.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+struct Box {
+    a: Array<Float64 like I>
+}
+function g(x: Array<Float64 like I>) -> Box = {
+    let y = x * 2.0 |> compute
+    let boxes: Array<Box like One> = [Box { a = y }]
+    let b = reduce(boxes, lambda(p, q) -> p)
+    b
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let b = g(x)
+let result = reduce(b.a, (+))
+// EXPECT: result = 12.0

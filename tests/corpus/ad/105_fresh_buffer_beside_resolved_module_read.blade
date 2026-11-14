@@ -1,0 +1,16 @@
+// TEST: AD A Fresh Gradient Buffer Beside A Callee Reading A Module Array Through A Resolved Function
+import ad as ad
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C; wave-8 fable review): the accepted
+// twin of ad/103 -- a fresh buffer, the callee reading the module array by
+// name through a resolved function.
+// ============================================================================
+
+type A = Array<Float64 like Idx<2>>
+let g: A = [2.0, 0.0]
+function k(x: Float64) -> Float64 = x * g(0)
+function f(x: Float64, w: A) -> Float64 = k(x) * k(x) + 3.0 * w(0)
+let w0: A = [1.0, 1.0]
+let mut dw: A = [0.0, 0.0]
+let r = ad.grad(f)(Float64(1.0), w0, dw)
+// EXPECT: r = (7.0, 8.0)

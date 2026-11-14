@@ -1,0 +1,11 @@
+// TEST: a fold leaf kernel capturing a deferred guard forces it (aborts)
+// Gap G214 / G218 (round 4 wave 8, Codex diff review round 1): the map kernel
+// captures q = guard(true, d), read only through extents. A capture of a
+// deferred guard is a forcing use like a capture of a map, so d's division
+// by zero fails before the fold (it used to fail only through the
+// interpreter extent force).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let q = guard(true, d)
+let s = reduce(method_for(x) <@> lambda(v) -> v + extents(q), (+), 0)
+// ABORT: BL8013

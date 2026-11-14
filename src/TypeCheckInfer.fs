@@ -2576,6 +2576,22 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         | Some (tag, ext) -> inferIndexCast env e annoTy tag ext
         | None ->
         checkExpr env annoTy e |> Result.bind (fun tE ->
+          // G190 (a): an EXPRESSION ascription to an opaque RaggedIdx<_> of a
+          // non-ragged value hides its dense provenance exactly as a let
+          // ascription would (Codex diff review of C3)
+          // (components of a TUPLE ascription too: Codex diff review round 2)
+          let rec hides (a: IRType) (v: IRType) =
+              match IR.stripUnits (env.Subst.Resolve a), IR.stripUnits (env.Subst.Resolve v) with
+              | ArrayElem aa, ArrayElem va ->
+                  (match aa.IndexTypes, va.IndexTypes with
+                   | ax :: _, vx :: _ -> ax.IxKind = IxKRaggedOpaque && not (isRaggedRowKind vx.IxKind)
+                   | _ -> false)
+              | IRTTuple ats, IRTTuple vts when ats.Length = vts.Length -> List.exists2 hides ats vts
+              | _ -> false
+          match hides annoTy tE.Type with
+          | true when not e.Kind.IsExprArrayLit ->
+              Error (EnumKeyObserved "a dense array ascribed an opaque `RaggedIdx<_>` type: that form is the type of a row PEELED from a ragged parent, and a dense array has no ragged parent to stand for (formalism 4.4). Pass a row of a ragged array (`R(0)` for `R: Array<T like Idx<n>, RaggedIdx<lens>>`), or keep the dense type.")
+          | _ ->
             let tE = { tE with Type = annoTy }
             // A BOUNDED annotation (`-1.0 : Salinity`, Salinity =
             // Float64<psu, min=0.0>) asserts the bound exactly as a `let`
@@ -14143,6 +14159,15 @@ and internal indexCastTarget (env: TypeEnv) (annoTy: IRType) : (string * int64 o
         (match lookupTypeDef tag env with
          | Some (TDIEnumIdx _) -> None
          | _ -> Some (tag, ext))
+    // G208 (3): an ANONYMOUS index ascription `(e : Idx<3>)` is the same cast
+    // into an index space: a literal is range-checked at compile time, a
+    // computed integer gets the checked conversion (an anonymous tag is never
+    // proof, so it used to make `(5 : Idx<3>)` an unchecked position).
+    // (A run-time extent keeps the old unification: G208 (2)'s class.)
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefAnon (_, extE)) ->
+        (match Blade.IRPrint.tryEvalIntIR extE with
+         | Some n -> Some ($"Idx<{n}>", Some n)
+         | None -> None)
     | _ -> None
 
 /// `(e : I)` for a named integer index type I -- the cast into an index
@@ -14893,6 +14918,26 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
                 checkExpr { env with UnitTarget = Some dst } (IR.stripUnits annotTy) binding.Value
                 |> Result.bind (convertScaleTo env "assignment" dst)
         checkedValue |> Result.bind (fun tv ->
+            // G190 (a), the ASCRIPTION boundary (Codex design review of C3):
+            // `let r: Array<T like RaggedIdx<_>> = d` over a DENSE `d` would
+            // hide the dense provenance from the call-boundary refusal (Zonk,
+            // TExprApp) behind the annotation installed just below. The opaque
+            // form is the type of a row PEELED from a ragged parent; a value
+            // that is not a ragged row cannot take it. An array literal is
+            // left to the literal refusal (Zonk, TExprArrayLit).
+            // (tuple components too: Codex diff review round 2)
+            let rec hides (a: IRType) (v: IRType) =
+                match IR.stripUnits (env.Subst.Resolve a), IR.stripUnits (env.Subst.Resolve v) with
+                | ArrayElem aa, ArrayElem va ->
+                    (match aa.IndexTypes, va.IndexTypes with
+                     | ax :: _, vx :: _ -> ax.IxKind = IxKRaggedOpaque && not (isRaggedRowKind vx.IxKind)
+                     | _ -> false)
+                | IRTTuple ats, IRTTuple vts when ats.Length = vts.Length -> List.exists2 hides ats vts
+                | _ -> false
+            match hides annotTy tv.Type, binding.Value.Kind with
+            | true, kind when not kind.IsExprArrayLit ->
+                Error (EnumKeyObserved "a dense array bound to an opaque `RaggedIdx<_>` annotation: that form is the type of a row PEELED from a ragged parent, and a dense array has no ragged parent to stand for (formalism 4.4). Bind a row of a ragged array (`R(0)` for `R: Array<T like Idx<n>, RaggedIdx<lens>>`), or annotate the binding dense (`Array<T like Idx<k>>`).")
+            | _ ->
             // Prefer the annotation as the canonical type -- it can be more
             // specific than what the value synthesized to.
             rejectEscapedWildcard { tv with Type = annotTy })

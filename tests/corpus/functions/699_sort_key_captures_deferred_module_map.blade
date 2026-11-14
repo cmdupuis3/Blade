@@ -1,0 +1,15 @@
+// TEST: A Body Sort Key Capturing A Deferred Module Map
+// ============================================================================
+// Gap G190 (b), round 4 wave 8 (lane C, C1; Codex diff review round 2): the
+// statement pre-pass forces the captures of EVERY callable a statement
+// evaluates -- a sort key included (`'delayed' was not declared`, BL9002).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let backing: A = [4.0]
+let delayed = method_for(backing) <@> lambda(e) -> 8.0 / e
+function f(x: Float64) -> A = {
+    let ys = sort(backing, lambda(e) -> e * x * delayed(0))
+    ys
+}
+let r = f(Float64(3.0))
+// EXPECT: r = [4.0]

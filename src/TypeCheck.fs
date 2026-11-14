@@ -1284,6 +1284,8 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
     // (mutable ResizeArray, not a Map), so all module-scope warnings
     // accumulate here.
     let warnings = env.Warnings |> Seq.toList
+    // G190 (c): the declared `mut` positions, for lowering's storage check
+    Blade.Types.MutParamTable.publish env.MutParamPositions
     ({ Modules = List.rev modules }, env.Builder, allErrors, warnings)
 
 // 13. Public Entry Point

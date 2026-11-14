@@ -533,6 +533,20 @@ let coerceScalarTo (ty: IRType) (v: Value) : Value =
     | Some ETComplex128, VComplex64 (r, i) -> VComplex (float r, float i)
     | _ -> v
 
+/// THE EXTENT OF A DEFERRED ARRAY WITHOUT EVALUATING IT (gap G218, the user
+/// decision of 2026-11-13; formalism 10.2: a deferred value is evaluated where
+/// its CELLS are read). `v` is the operand's unforced value: a VDeferred whose
+/// type carries a static extent at `dim` answers it (the compiled lanes'
+/// renderExtentExpr literal); anything else -- a stored array, a runtime
+/// extent (gap G234) -- answers None and the caller forces as before.
+let deferredStaticExtent (v: Value) (arrExpr: IRExpr) (dim: int) : int64 option =
+    match v with
+    | VDeferred _ ->
+        (match stripUnits (typeOf arrExpr) with
+         | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length -> Blade.IRPrint.tryEvalIntIR at.IndexTypes.[dim].Extent
+         | _ -> None)
+    | _ -> None
+
 // The evaluator.
 
 /// Evaluate an IR expression to a runtime value. One step charged per entry;
@@ -755,7 +769,18 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRTupleProj (e, i, isFlat) ->
         let v = evalExpr st env e
-        if isFlat then projectFlat v i else projectStruct v i
+        match v with
+        // A projection of a wholly DEFERRED tuple (a module `let pair =
+        // (delayed, delayed)` read inside a function body: G190 (d), round 4
+        // wave 8) reads ONE member -- that member's own value, still deferred
+        // where it is -- as the compiled lanes resolve it; it used to project
+        // the suspension itself (BL8003 "tuple projection index out of range").
+        | VDeferred (IRTuple es, denv) when not isFlat && i >= 0 && i < es.Length ->
+            evalExpr st denv es.[i]
+        | VDeferred _ ->
+            let v' = forceValue st env v
+            if isFlat then projectFlat v' i else projectStruct v' i
+        | _ -> if isFlat then projectFlat v i else projectStruct v i
 
     | IRTupleCons (head, tail) ->
         let h = evalExpr st env head
@@ -841,7 +866,12 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // Rank is static in CodeGen (from the type). Scalars are rank 0; a
         // concrete array reports its loop-level count. A deferred input is forced
         // first (via the backend) so an unmaterialized array still ranks.
-        (match forceValue st env (evalExpr st env arr) with
+        // G218: the rank of a DEFERRED array is its type's, nothing evaluated
+        let v0 = evalExpr st env arr
+        match v0, typeOf arr with
+        | VDeferred _, ArrayElem at -> VInt (int64 (at.IndexTypes |> List.sumBy (_.Rank)))
+        | _ ->
+        (match forceValue st env v0 with
          | v when (N.scalarElem v).IsSome -> VInt 0L
          | VArray ba -> VInt (int64 ba.Extents.Length)
          | _ -> raise (InterpUnsupported "IRRank"))
@@ -1088,7 +1118,25 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //      is the compact index's cardinality (popcount), the `extents(f)`
     //      overload for compounds (genExtentExpr, CodeGen.fs:2127).
     | IRExtent (arrExpr, dim) ->
-        (match forceValue st env (evalExpr st env arrExpr) with
+        // G218 (the user decision of 2026-11-13): an extent read of a DEFERRED
+        // map reads its static shape without evaluating it -- what both
+        // compiled lanes render (renderExtentExpr: a literal from the type);
+        // a runtime-shaped deferred map is still forced (gap G234)
+        // an inline tuple projection (`extents(t[0])` over a wholly deferred
+        // tuple) answers from its type BEFORE projecting: projecting would
+        // force the member (Codex diff review round 1); a projection is pure
+        let projStatic =
+            match arrExpr with
+            | IRTupleProj _ -> deferredStaticExtent (VDeferred (arrExpr, env)) arrExpr dim
+            | _ -> None
+        match projStatic with
+        | Some n -> VInt n
+        | None ->
+        let v0 = evalExpr st env arrExpr
+        match deferredStaticExtent v0 arrExpr dim with
+        | Some n -> VInt n
+        | None ->
+        (match forceValue st env v0 with
          | VArray ba when dim >= 0 && dim < ba.Extents.Length -> VInt ba.Extents.[dim]
          | VCompound cv -> VInt cv.Cardinality
          | VSparse sv -> VInt sv.Cardinality
@@ -1320,7 +1368,17 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
         // (the second Codex look of W4-3, NEW 4)
         inlineHoist || System.String.IsNullOrEmpty n || n = "lambda" || n.StartsWith "(" || n.Contains " in "
     let result =
-        try evalExpr st frame callable.Body
+        try
+            let r = evalExpr st frame callable.Body
+            // A function body hands its caller a VALUE: a returned deferred
+            // ARRAY (a projected member of a module tuple: G190 (d), round 4
+            // wave 8) is forced HERE, while the force is still private
+            // (FunctionCallDepth > 0), never at the caller as a module force
+            // that would register and print the map (Codex diff review).
+            match r with
+            | VDeferred (e, _) when isFunctionBody && (try (match stripUnits (typeOf e) with ArrayElem _ -> true | _ -> false) with _ -> false) ->
+                forceValue st frame r
+            | r -> r
         with
         | InterpPanic (code, msg, None, 0) when not anonymous ->
             let s = Blade.IR.declSpanOf callable.Name

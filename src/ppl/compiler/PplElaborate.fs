@@ -4528,7 +4528,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 acc |> Result.bind (fun ds ->
                     match d.Value with
                     | DeclFunction fd ->
-                        Blade.Ast.synthSpan <- d.Span
+                        Blade.Ast.setSynthSpan (d.Span)
                         rewriteBodyFormers active ctx fd.Name fd.Body
                         |> Result.map (fun b -> ds @ [ { d with Value = DeclFunction { fd with Body = b } } ])
                     | _ -> Ok (ds @ [d]))) (Ok [])
@@ -4544,7 +4544,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             rest |> List.fold (fun acc d ->
                 acc |> Result.bind (fun (ds, dists, mstates) ->
                     // Stamp the user decl's span so every syn-built (former-generated) node attributes to this decl's line.
-                    Blade.Ast.synthSpan <- d.Span
+                    Blade.Ast.setSynthSpan (d.Span)
                     match d.Value with
                     // moments(d, k) on a DIST binding: reconstruction (kappa->mu, Wick under closure), dispatched by registry
                     // membership, ahead of the data-array form.
@@ -4764,7 +4764,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// Boundary: string-errored internals -> coded diagnostics. The span is the ambient synthSpan -- stamped per-decl by expandStr,
 /// so a mid-elaboration failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5100" (Blade.Diagnostics.Codes.phaseOfCode "BL5100") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL5100" (Blade.Diagnostics.Codes.phaseOfCode "BL5100") (Blade.Ast.synthSpan ()) msg ])

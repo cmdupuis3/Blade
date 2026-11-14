@@ -445,7 +445,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let mapped =
                 declsNoImport |> List.fold (fun acc d ->
                     acc |> Result.bind (fun out ->
-                        Blade.Ast.synthSpan <- d.Span
+                        Blade.Ast.setSynthSpan (d.Span)
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
@@ -480,7 +480,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 
 /// Boundary: string-errored internals -> coded diagnostics (BL5600).
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5600" (Blade.Diagnostics.Codes.phaseOfCode "BL5600") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL5600" (Blade.Diagnostics.Codes.phaseOfCode "BL5600") (Blade.Ast.synthSpan ()) msg ])

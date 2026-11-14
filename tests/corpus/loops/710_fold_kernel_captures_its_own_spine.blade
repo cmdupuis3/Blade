@@ -1,0 +1,15 @@
+// TEST: Fold Kernel Captures Its Own Spine
+// Gap G214 (round 4 wave 8): the fold kernel captures p, the deferred map the
+// fold itself consumes. The capture forces p once under its own name (it
+// prints) and the fold reads that stored snapshot. The C++ lane raised an
+// internal error (BL9001) on this shape.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(p)), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: p = [3.0, 5.0, 7.0]
+// EXPECT: s = 24.0
+// EXPECT: w = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

@@ -1,0 +1,12 @@
+// TEST: Join Leg Over Two Slot Shares Fails Before Either Share (aborts)
+// Gap G207 (1) (round 4 wave 8 lane d; Codex design review probe C): leg 0
+// co-iterates two shared slots. Per cell the shares e(i), f(i) run first, then
+// the leg: p fails at cell 1 (integer modulo by zero), before f at cell 2
+// (integer division by zero) and e at cell 7.
+// ABORT: integer modulo by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let f = method_for(d) <@> lambda(a) -> 200 / (a - 3)
+let p = method_for(zip(e, f)) <@> lambda(a, b) -> 7 % (a - 50) + b
+let (s, t, u) = object_for(<&!>) <@> (reduce(p, (+)), reduce(e, (+)), reduce(f, (+)))

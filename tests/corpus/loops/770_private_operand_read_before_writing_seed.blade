@@ -1,0 +1,16 @@
+// TEST: A Fold Reads Its Private Operand Before A Seed That Writes Its Input
+// Gap G207 (iii) (round 4 wave 8 lane d; Codex diff review round 2): the seed
+// `change(d)` writes `d`; the private operand `e` over `d` is evaluated
+// before the seed (the C++ prelude, the interpreter), so the fold reads the
+// old cells: (2 + 1) + (3 + 1) + (4 + 1). The LLVM lane keeps a total private
+// operand fused only when nothing ahead of the cells may write.
+// EXPECT: s = 12
+type I = Idx<3>
+function change(a: mut Array<Int64 like I>) -> Int64 = {
+    a((0 : I)) = 9
+    0
+}
+let mut d: Array<Int64 like I> = [1, 2, 3]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let p = method_for(e) <@> lambda(a) -> a + 1
+let s = reduce(p, (+), change(d))

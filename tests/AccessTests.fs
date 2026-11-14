@@ -674,8 +674,9 @@ let dw0 = dw(0)
 let dw2 = dw(2)
 """
 
-/// The aliased-buffer recurrence the snapshot witnesses share (`forcing`
-/// bound by the program prefix).
+/// The recurrence the snapshot witnesses share (`forcing` bound by the
+/// program prefix). Fresh buffers since round 4 wave 8: a buffer aliasing an
+/// array the derivative reads is refused (G190 (c), BL4005).
 let private ckAliasTail = """function f(x: Float64, w: A) -> Float64 = {
     let rec s: Array<Float64 like Idx<5>> =
         match s with
@@ -684,7 +685,9 @@ let private ckAliasTail = """function f(x: Float64, w: A) -> Float64 = {
         | prefix :: n -> prefix :: prefix(n - 1) * prefix(n - 1) + forcing(0)
     s(4) + w(0)
 }
-let (value, dx) = ad.grad(f)(Float64(1.0), identity(backing), backing)
+let w0: A = [4.0]
+let mut dw: A = [0.0]
+let (value, dx) = ad.grad(f)(Float64(1.0), w0, dw)
 """
 
 let private ckDecisions (src: string) (knob: string option) : Result<Blade.Effects.Decision list, string> =
@@ -744,8 +747,7 @@ let private ckCorpusPins () : bool list =
         [ "047_recarray_tape_100001_zero_fill.blade", Ok "segments of K = 317 steps"
           "048_recarray_checkpoint_5001_rows.blade", Ok "71 segments of K = 71 steps"
           "049_recarray_checkpoint_snapshots_array_parameter.blade", Ok "replay-input snapshot: w -> "
-          "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole"
-          "050_recarray_checkpoint_snapshots_aliased_module_array.blade", Error "a tape of 5 cells (<= 4096) is kept whole" ]
+          "035_recarray_logistic_grad.blade", Error "a tape of 4 cells (<= 4096) is kept whole" ]
     // unset: the opt-in decline (wave 5, the stop rule)
     let unset =
         [ "048_recarray_checkpoint_5001_rows.blade", Error "opt-in (BLADE_AD_CHECKPOINT=1)" ]
@@ -754,36 +756,16 @@ let private ckCorpusPins () : bool list =
     // SNAPSHOTTED (round 4 wave 6, gap G162), anything else declines
     let forced =
         [ "028_recarray_carry_final_257.blade", Ok "replay-input snapshot: w -> "
-          "050_recarray_checkpoint_snapshots_aliased_module_array.blade", Ok "replay-input snapshot: forcing -> "
           "035_recarray_logistic_grad.blade", Ok "2 segments of K = 2 steps (the last 1)"
           // Codex round 2 (wave 5): a fresh array a later mut binding
-          // aliases, a local alias, a destructured component
+          // aliases (since round 4 wave 8 a PROVED COPY: an aliasing buffer
+          // is refused, G190 (c), BL4005 -- ad/050, 052, 053, 060-067 and 075
+          // are now that refusal's witnesses, pinned by the corpus)
           "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", Ok "replay-input snapshot: forcing -> "
-          "052_recarray_checkpoint_snapshots_local_alias.blade", Ok "replay-input snapshot: local_forcing -> "
-          "053_recarray_checkpoint_declines_destructured_alias.blade", Error "the module value 'hidden' records no value"
-          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction"
-          // Codex round 3 (wave 5): a parameter default, a user function
-          // shadowing an intrinsic -- now snapshotted
-          "060_recarray_checkpoint_snapshots_parameter_default_alias.blade", Ok "replay-input snapshot: forcing -> "
-          "061_recarray_checkpoint_snapshots_user_function_shadowing_intrinsic.blade", Ok "replay-input snapshot: forcing -> "
-          // Codex design review of the snapshot (wave 6): a tuple parameter,
-          // a value shadowing an intrinsic, a closure, a ragged array, and a
-          // deferred map with a division
-          "062_recarray_checkpoint_declines_tuple_parameter.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
-          "063_recarray_checkpoint_declines_value_shadowing_intrinsic.blade", Error "the step reads 'forcing', which the replay cannot snapshot: its value is not a stored form"
-          "064_recarray_checkpoint_declines_closure_result.blade", Error "the call of 'factory' does not return a plain dense array"
-          // Codex class-closure review of the snapshot (wave 6 round 1):
-          // literals of closures / tuples copied shallowly, a step value
-          // the full tape re-evaluates live
-          "065_recarray_checkpoint_declines_literal_of_closures.blade", Error "an array literal element is not a proved scalar"
-          "066_recarray_checkpoint_declines_literal_of_tuples.blade", Error "an array literal element is not a proved scalar"
-          "067_recarray_checkpoint_declines_trapping_step_value.blade", Error "the step value may fail"
-          // the class-closure review under R0 (wave 6 round 2): an uneven
-          // nested literal is ragged storage a copy shares
-          "075_recarray_checkpoint_declines_uneven_nested_literal.blade", Error "not rectangular" ]
-    // decision-only shapes whose programs do not compile in a lane today for
-    // reasons outside this rule (gap G190): a deferred module map read inside
-    // a differentiated function. (The ragged array literal over a leading
+          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction" ]
+    // decision-only shapes (gap G190): a deferred module map read inside a
+    // differentiated function (it compiles in every lane since round 4 wave 8,
+    // G190 (b): its run is pinned by corpus ad/084). (The ragged array literal over a leading
     // `RaggedIdx<_>` is refused at lowering since wave 7, G190 (a):
     // corpus index-types/579.)
     let inlineForced : (string * Result<string, string> * string) list =
@@ -898,13 +880,7 @@ let private replayPrunePins () : bool list =
 /// each checkpointed arm against the full tape, raw bits.
 let private ckCorpusDifferential () : (string * (string * Result<string, string>) list) list =
     [ "049_recarray_checkpoint_snapshots_array_parameter.blade", [ "auto", Ok "replay-input snapshot: w -> "; "2", Ok "replay-input snapshot: w -> " ]
-      "050_recarray_checkpoint_snapshots_aliased_module_array.blade", [ "2", Ok "replay-input snapshot: forcing -> "; "3", Ok "replay-input snapshot: forcing -> " ]
-      "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
-      "052_recarray_checkpoint_snapshots_local_alias.blade", [ "2", Ok "replay-input snapshot: local_forcing -> " ]
-      "060_recarray_checkpoint_snapshots_parameter_default_alias.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
-      "061_recarray_checkpoint_snapshots_user_function_shadowing_intrinsic.blade", [ "2", Ok "replay-input snapshot: forcing -> " ]
-      "062_recarray_checkpoint_declines_tuple_parameter.blade", [ "2", Error "which the replay cannot snapshot" ]
-      "063_recarray_checkpoint_declines_value_shadowing_intrinsic.blade", [ "2", Error "which the replay cannot snapshot" ] ]
+      "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", [ "2", Ok "replay-input snapshot: forcing -> " ] ]
 
 let private ckCases () : bool option list =
     if not Build.capabilities.Value.HasGpp then
@@ -971,13 +947,37 @@ let private gradStatePerProgram () : bool =
         | ra, rb -> resultLine Fail name $"task 1 read {ra}, task 2 read {rb}"; false
     with ex -> resultLine Fail name ex.Message; false
 
+/// Gap G208 (4): `Ast.synthSpan`, the ambient span every synthesized AST node
+/// takes (`syn`), is PER FLOW (AsyncLocal), like the G193 state above: two
+/// syntheses stamping different declaration spans in parallel tasks, a
+/// barrier between the stamp and the build, each build carries its own span.
+let private synthSpanPerProgram () : bool =
+    let name = "ad_synth_span_per_program: two parallel syntheses stamp their own spans (G208 (4))"
+    let barrier = new System.Threading.Barrier(2)
+    let run (line: int) =
+        System.Threading.Tasks.Task.Run(fun () ->
+            Blade.Ast.setSynthSpan { Blade.Ast.noSpan with StartLine = line; EndLine = line }
+            barrier.SignalAndWait()
+            let e = Blade.Ast.syn (Blade.Ast.ExprLit (Blade.Ast.LitInt 1L))
+            barrier.SignalAndWait()
+            e.Span.StartLine)
+    try
+        let a = run 11
+        let b = run 22
+        System.Threading.Tasks.Task.WaitAll([| a :> System.Threading.Tasks.Task; b :> System.Threading.Tasks.Task |], 30000) |> ignore
+        if a.Result = 11 && b.Result = 22 then
+            resultLine Pass name "each task's synthesized node took its own declaration span"; true
+        else resultLine Fail name $"task 1 node at line {a.Result}, task 2 at line {b.Result}"; false
+    with ex -> resultLine Fail name ex.Message; false
+
 let runAccessTests () =
     printHeader "Blade-DSL: Halo Access Tests"
     let pins =
         [ recordPins ()
           routeEmission ()
           computedOffsetDeclines ()
-          gradStatePerProgram () ]
+          gradStatePerProgram ()
+          synthSpanPerProgram () ]
         @ g78Pins ()
     let zeroFill = zeroFillCases |> List.collect zeroFillCase
     let diffs =

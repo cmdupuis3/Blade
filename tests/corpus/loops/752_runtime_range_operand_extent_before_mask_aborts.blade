@@ -1,0 +1,12 @@
+// TEST: A Runtime Range Operand Evaluates Its Extent In Operand Order (aborts)
+// Gap G207 (i) (round 4 wave 8 lane d): `0..(100 / z)` is the FIRST operand,
+// the mask the second; the compiled lane evaluates the range extent first
+// (integer division by zero) and the mask predicate after it (integer modulo
+// by zero at d = 3). The interpreter kept the range virtual and evaluated its
+// extent at the nest, after the mask; it now evaluates it at its operand
+// position, once. (The LLVM lane refuses a runtime loop extent, recorded.)
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let z: Int64 = 0
+let m = method_for(0..(100 / z), mask(d, lambda(a) -> 200 % (a - 3) > 0)) <@> lambda(i, b) -> i + b |> compute

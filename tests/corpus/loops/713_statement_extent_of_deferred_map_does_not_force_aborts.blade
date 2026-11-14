@@ -1,0 +1,13 @@
+// TEST: a statement-level extent read of a deferred map evaluates nothing (aborts)
+// Gap G218 (round 4 wave 8, the user decision of 2026-11-13): extents(d)
+// reads the static shape of the deferred map d without evaluating it
+// (formalism 10.2: a deferred value is evaluated where its CELLS are read),
+// so d's division by zero never runs and the program fails later, at the
+// NaN cast. The interpreter and the C++ lane used to force d at n (BL8013).
+type I = Idx<3>
+let iv: Array<Int64 like I> = [1, 0, 2]
+let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)
+let fz: Float64 = 0.0
+let n = extents(d)
+let fail = Int64(floor(fz / fz))
+// ABORT: BL8014

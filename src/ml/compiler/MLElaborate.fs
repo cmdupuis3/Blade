@@ -1962,7 +1962,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                 acc |> Result.bind (fun out ->
                     // Stamp the user decl's span so every syn-built node
                     // attributes to this declaration's source line.
-                    Blade.Ast.synthSpan <- d.Span
+                    Blade.Ast.setSynthSpan (d.Span)
                     let mapped =
                         match d.Value with
                         | DeclFunction fd ->
@@ -2122,10 +2122,10 @@ let private expandStr (program: Program) : Result<Program, ExpandFailure> =
 /// (BL5000 generic / BL4007 Schur) is rendered faithfully. Equiv-judgment
 /// failures carry their own expression-precise diagnostics (BL4008).
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun failure ->
         match failure with
         | Choice1Of2 err ->
-            [ Blade.Diagnostics.mkError err.Code (Blade.Diagnostics.Codes.phaseOfCode err.Code) Blade.Ast.synthSpan err.Msg ]
+            [ Blade.Diagnostics.mkError err.Code (Blade.Diagnostics.Codes.phaseOfCode err.Code) (Blade.Ast.synthSpan ()) err.Msg ]
         | Choice2Of2 ds -> ds)

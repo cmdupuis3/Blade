@@ -834,11 +834,20 @@ let inheritPatSpan (src: Pattern) (kind: PatternKind) : Pattern = { Kind = kind;
 /// Ambient span for synthesized AST: elaborators (ml/ppl/math/rand/spectra/
 /// grad) build many nodes on behalf of ONE user declaration. The expansion
 /// entry stamps that decl's span here; `syn`/`synPat` read it, so builder
-/// helpers stay span-free. Elaboration is single-threaded (typeCheck
-/// pipeline), so a plain mutable is safe.
-let mutable synthSpan : Span = noSpan
-let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan }
-let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan }
+/// helpers stay span-free. PER FLOW (gap G208 (4), the G193 class): it used
+/// to be a process-global mutable, so two syntheses running concurrently in
+/// one host (an MCP / IDE server, BLADE_TEST_FSHARP_PARALLEL) could stamp
+/// each other's spans; an AsyncLocal is the house pattern (GradCommon.FlowCell
+/// for errMode / letAnnotations, CallElideProgram). A flow that never set it
+/// reads noSpan.
+let private synthSpanStorage = System.Threading.AsyncLocal<Span option>()
+let synthSpan () : Span =
+    match synthSpanStorage.Value with
+    | Some s -> s
+    | None -> noSpan
+let setSynthSpan (s: Span) : unit = synthSpanStorage.Value <- Some s
+let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan () }
+let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan () }
 
 /// The comparison a field bound's UPPER endpoint desugars to: `<` for the
 /// half-open `in lo .. hi` spelling, `<=` for the inclusive `max=` spelling.

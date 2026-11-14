@@ -1,0 +1,13 @@
+// TEST: Fold Leaf Value Capture Of Its Operand Snapshot
+// Gap G214 (round 4 wave 8): the leaf kernel reads a CELL of its own deferred
+// operand d. The capture forces d once under its own name (a snapshot), so
+// the write to x after the fold is not seen by w or the print of d.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + d(1)
+let s = reduce(p, (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 24.0
+// EXPECT: w = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

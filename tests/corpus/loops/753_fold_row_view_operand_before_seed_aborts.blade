@@ -1,0 +1,14 @@
+// TEST: A Fold Over An Inline Row View Evaluates The View Before The Seed (aborts)
+// Gap G207 (ii) (round 4 wave 8 lane d): the operand `d(j)` (j out of range,
+// BL8006) is evaluated before the seed `7 % z` (integer modulo by zero), as
+// the LLVM lane and the interpreter do. The C++ lane seeded the accumulator
+// first and re-evaluated the view inside the loop, once per cell; it now
+// binds the view once, before the seed.
+// ABORT: index out of bounds
+// WARN: BL4003
+type I = Idx<3>
+type J = Idx<4>
+let d: Array<Int64 like I, J> = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+let z: Int64 = 0
+let j: Int64 = 5
+let s = reduce(d(j), (+), 7 % z)

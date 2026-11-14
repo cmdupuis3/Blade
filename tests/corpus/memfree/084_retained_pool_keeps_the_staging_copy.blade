@@ -1,0 +1,25 @@
+// TEST: A retained pool keeps the staging copy of an assignable alias
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, staging-copy elision):
+// `let mut z = y` may alias y's pool instead of copying it when nothing else
+// names that storage (canAliasStagingLet) -- but `keep(y)` stored y in the
+// module mut `saved`, so the write `z(0) = 100.0` landed in saved's storage.
+// A statement that may retain the source now keeps the copy.
+// ============================================================================
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = keep(y)
+    let mut z = y
+    z(0) = 100.0
+    reduce(z, (+)) + saved(0) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 115.0
+// EXPECT: saved = [2.0, 4.0, 6.0]

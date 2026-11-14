@@ -1,0 +1,10 @@
+// TEST: A Compound Range Map Forces Its Uncaptured Deferred Mask After Its Captures (aborts)
+// Gap G225 (round 4 wave 8 lane d): the CompoundIdx twin of loops/760 -- the
+// mask is a deferred Bool map the kernel does not capture (a C++ BL9002);
+// forced after the captures: `g` first, integer division by zero.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 0, 5]
+let m = method_for(d) <@> lambda(a) -> 200 % a > 0
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<CompoundIdx<m>>) <@> lambda(i) -> if i > 4 then g(0) else i |> compute

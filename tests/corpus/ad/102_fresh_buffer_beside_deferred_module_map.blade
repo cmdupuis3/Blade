@@ -1,0 +1,26 @@
+// TEST: AD A Fresh Gradient Buffer Beside A Deferred Module Map The Callee Reads
+import ad as ad
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; lead decision): a `mut` ARGUMENT
+// -- an ad.grad / ad.vjp gradient buffer and an ordinary `mut` parameter
+// alike -- may NOT share storage with anything the callee READS: another
+// array argument, or a module binding the callee reads by name (a module
+// alias such as `let forcing = identity(g)`, a deferred map over it), judged
+// by storage provenance and refused at lowering with BL4005 in every lane.
+// The callee's writes through the parameter would be visible through its own
+// reads mid-call; the lanes disagreed (c9: a silently wrong gradient, 20 for
+// 8, in both compiled lanes). No run-time check, one rule for AD buffers and
+// ordinary mut parameters.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+let g: A = [2.0, 0.0]
+let forcing = identity(g)
+let delayed = method_for(forcing) <@> lambda(v) -> v * 2.0
+function k(x: Float64) -> Float64 = x * delayed(0)
+function f(x: Float64, w: A) -> Float64 = k(x) * k(x) + 3.0 * w(0)
+let w0: A = [1.0, 1.0]
+let mut dw: A = [0.0, 0.0]
+let r = ad.grad(f)(Float64(1.0), w0, dw)
+// EXPECT: r = (19.0, 32.0)
+// EXPECT: dw = [3.0, 0.0]

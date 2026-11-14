@@ -1505,7 +1505,29 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                 if not isTarget && needsBoundArray f' args'' then
                     (boundArrayRead f' args'' (zt expr.Type) (fun a xs -> TExprApp (a, xs))).Kind
                 else TExprApp (f', guardSubscripts f' args'')
-            | _ -> TExprApp (f', guardIndexArgs f' args')
+            | fty ->
+                // G190 (a), the ARGUMENT case: a parameter whose leading slot
+                // is an OPAQUE RaggedIdx (`a: Array<T like RaggedIdx<_>>`, a
+                // row peeled from a ragged parent) receiving an argument whose
+                // own type is NOT ragged there -- a dense literal `f([2.0])`,
+                // directly or through a let, a tuple component, a block --
+                // has no row to stand for: the interpreter read it as a plain
+                // array, the C++ lane could not convert it (BL9002). Refused
+                // like the literal itself (BL4003, index-types/579-581).
+                (match subscriptGuardCtx.Value, IR.stripUnits fty with
+                 | Some ctx, FuncElem (ps, _) ->
+                     let leadingKind (t: IRType) =
+                         match IR.stripUnits t with
+                         | ArrayElem at -> (match at.IndexTypes with ix :: _ -> Some ix.IxKind | [] -> None)
+                         | _ -> None
+                     List.zip (List.truncate args'.Length ps) (List.truncate ps.Length args')
+                     |> List.iter (fun (p, a) ->
+                         match leadingKind (zt p), leadingKind a.Type with
+                         | Some IxKRaggedOpaque, Some k when not (isRaggedRowKind k) ->
+                             ctx.EnumKeyErrors.Add((a.Span, "a dense array passed to a parameter whose leading slot is an opaque `RaggedIdx<_>`: that form is the type of a row PEELED from a ragged parent, and a dense array (an array literal, here) has no ragged parent to stand for (formalism 4.4). Pass a row of a ragged array (`R(0)` for `R: Array<T like Idx<n>, RaggedIdx<lens>>`), or declare the parameter dense (`Array<T like Idx<k>>`, or `T^1`)."))
+                         | _ -> ())
+                 | _ -> ())
+                TExprApp (f', guardIndexArgs f' args')
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
         // A CURRIED read of a grouped value, `grouped(i)(j)`, is judged as the
@@ -1605,6 +1627,30 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             TExprObjectFor { info with Kernel = z info.Kernel }
         | TExprApply info ->
             noteDataKernelParams subst info
+            // G190 (a), the KERNEL boundary (Codex design review of C3): a
+            // kernel parameter whose leading slot is an opaque RaggedIdx<_>
+            // receiving a per-iteration operand slice that is NOT a ragged row
+            // (a dense matrix's row, `object_for(f) <@> [2.0]`'s whole dense
+            // operand) is the argument case at a loop: refused the same way.
+            // The slice is the operand's trailing slots after the iterated
+            // ones (operand rank - parameter rank).
+            (match subscriptGuardCtx.Value, IR.stripUnits (zt info.Kernel.Type) with
+             | Some ctx, FuncElem (ps, _) when ps.Length = info.ArrayTypes.Length && ps.Length = info.Arrays.Length ->
+                 List.zip3 ps info.ArrayTypes info.Arrays
+                 |> List.iter (fun (p, at, a) ->
+                     match IR.stripUnits (zt p) with
+                     | ArrayElem pat ->
+                         (match pat.IndexTypes with
+                          | pix :: _ when pix.IxKind = IxKRaggedOpaque ->
+                              let pr = pat.IndexTypes.Length
+                              let ar = at.IndexTypes.Length
+                              if ar >= pr then
+                                  let slot = at.IndexTypes.[ar - pr]
+                                  if not (isRaggedRowKind slot.IxKind) then
+                                      ctx.EnumKeyErrors.Add((a.Span, "a dense array slice reaches a kernel parameter whose leading slot is an opaque `RaggedIdx<_>`: that form is the type of a row PEELED from a ragged parent, and a dense slice has no ragged parent to stand for (formalism 4.4). Iterate a ragged array (`Array<T like Idx<n>, RaggedIdx<lens>>`), or declare the parameter dense (`Array<T like Idx<k>>`, or `T^1`)."))
+                          | _ -> ())
+                     | _ -> ())
+             | _ -> ())
             TExprApply { info with
                             Loop = z info.Loop
                             Kernel = z info.Kernel

@@ -1,5 +1,9 @@
-// TEST: AD Replay Prune Keeps A Replayed Statement That May Trap (aborts)
+// TEST: AD Replay Prune Keeps A Replayed Statement That May Trap (rejects)
 import ad as ad
+// ROUND 4 WAVE 8 (G190 (c), lead decision): the gradient buffer here shares
+// storage with an array the derivative reads (identity(..) beside the
+// buffer, or a module alias of it), which is now REFUSED at lowering in every
+// lane (BL4005); the program stays as the refusal witness of its shape.
 // ============================================================================
 // ad-replay-prune v1 KEEPS the replayed `let unused = 1 / Int64(..)`: its
 // value is dead, but it can FAIL, and the gradient buffer `a` (the same
@@ -21,4 +25,6 @@ function f(a: A) -> Float64 = {
 }
 let mut a: A = [2.0]
 let r = ad.grad(f)(identity(a), a)
-// ABORT: BL8013
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

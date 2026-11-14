@@ -1,0 +1,22 @@
+// TEST: A callee that stores only a scalar does not keep the caller local
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221, the twin): `tally` writes a module mut,
+// but only a SCALAR folded from its argument -- it retains nothing, so f still
+// frees y at its exit (blade test optimize pins the emitted free).
+// ============================================================================
+type I = Idx<3>
+let mut total: Float64 = 0.0
+function tally(a: Array<Float64 like I>) -> Int64 = {
+    total = reduce(a, (+))
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = tally(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + total + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 33.0
+// EXPECT: total = 12.0

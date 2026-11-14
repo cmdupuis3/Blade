@@ -1,0 +1,23 @@
+// TEST: A nested function storing its argument in an enclosing let mut keeps the pool alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m2): `keep` assigns its argument to
+// `saved`, an enclosing `let mut` it captures; `worker` called it on its own
+// local y and the C++ lane freed y at worker's exit while `saved` named it.
+// ============================================================================
+type I = Idx<3>
+function outer(x: Array<Float64 like I>) -> Float64 = {
+    let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+    function keep(a: Array<Float64 like I>) -> Int64 = {
+        saved = a
+        Int64(3)
+    }
+    function worker(a: Array<Float64 like I>) -> Int64 = {
+        let y = a * 2.0 |> compute
+        keep(y)
+    }
+    let n = worker(x)
+    saved(0) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = outer(x)
+// EXPECT: result = 5.0

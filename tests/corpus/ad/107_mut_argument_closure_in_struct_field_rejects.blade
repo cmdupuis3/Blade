@@ -1,0 +1,21 @@
+// TEST: A Mut Argument Read By A Closure In A Struct Field Is Refused (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C; Codex review of the fable fix): a
+// closure over the mut argument reaching the callee through ANOTHER route --
+// handed on to a helper that invokes it, or held in a struct field -- is an
+// untraceable read: BL4005 fail closed (the interpreter printed 4.0, reading
+// the buffer the callee had just written).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+struct Holder { cb: (Float64 -> Float64) }
+let holder = Holder { cb = factory(g) }
+function f(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    holder.cb(1.0)
+}
+let result = f(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

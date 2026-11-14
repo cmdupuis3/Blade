@@ -533,7 +533,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     for d in m.Decls do
         // Ground literals folded during staged-static classification take this
         // decl's span (staticValueToExpr / uvalueToExpr read the ambient).
-        Blade.Ast.synthSpan <- d.Span
+        Blade.Ast.setSynthSpan (d.Span)
         match d.Value with
         | DeclStatic (({ Pattern = { Kind = PatternKind.PatVar name } } as b))
             when not (Map.containsKey name senv.Values) && not (isLambdaValued b.Value) ->
@@ -575,7 +575,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     let rewritten =
         m.Decls |> List.map (fun d ->
             // Spliced ground literals in this decl take its span (ambient).
-            Blade.Ast.synthSpan <- d.Span
+            Blade.Ast.setSynthSpan (d.Span)
             let line = d.Span.StartLine
             let value' =
                 match d.Value with
@@ -638,7 +638,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             match d.Value with
             | DeclFunction fd when fd.IsStatic && ctx.Inlined.Contains fd.Name && not (referencedElsewhere fd.Name) -> false
             | _ -> true)
-    Blade.Ast.synthSpan <- noSpan
+    Blade.Ast.setSynthSpan (noSpan)
     { m with Decls = decls' }
 
 /// The pass entry point -- same shape as the other elaborators. Modules
@@ -661,7 +661,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL4002" (Blade.Diagnostics.Codes.phaseOfCode "BL4002") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL4002" (Blade.Diagnostics.Codes.phaseOfCode "BL4002") (Blade.Ast.synthSpan ()) msg ])

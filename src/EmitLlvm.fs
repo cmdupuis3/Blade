@@ -1067,6 +1067,12 @@ and private Ctx =
       mutable DeferredModule: Dictionary<IRId, int>
       /// True while emitting an out-of-line function body (false in main).
       mutable InFunction: bool
+      /// > 0 while an INLINED named function body is emitted in main (a
+      /// tuple-returning or capturing callee, withCalleeDecl): the C++ lane
+      /// CALLS that function, so a module deferred map its body forces is
+      /// forced privately per call and never prints (G75) -- not a main
+      /// force (gap G238)
+      mutable InlinedCallee: int
       /// `c.Body` index where the current TOP-LEVEL statement of main began,
       /// or -1 anywhere else. Forcing a deferred module binding is hoisted to
       /// this point (see materializeExpr).
@@ -1296,6 +1302,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
       ModuleNames = Map.empty
       DeferredModule = Dictionary()
       InFunction = false
+      InlinedCallee = 0
       StmtStart = -1
       StmtSlots = Dictionary()
       LiveParams = Dictionary()
@@ -1615,7 +1622,7 @@ let private collectPositionalReadsLl (isDeferred: IRId -> bool) (isWrapper: IREx
     let rec walk (e: IRExpr) =
         match e with
         | IRIndex (a, idxs, _) -> note a; walk a; List.iter walk idxs
-        | IRExtent (a, _) -> note a; walk a
+        | IRExtent (a, dim) -> (if not (Blade.CodeGenFusion.extentIsStatic a dim) then note a); walk a
         | IRContains (a, v) -> note a; walk a; walk v
         | IRLet (_, v, b) -> walk v; walk b
         | IRForRange (_, lo, hi, body) -> walk lo; walk hi; walk body
@@ -4027,8 +4034,13 @@ and private withCalleeDecl<'T> (c: Ctx) (cl: IRCallable) (body: unit -> 'T) : 'T
         (let s = Blade.IR.declSpanOf cl.Name
          if s.StartLine > 0 then s else Blade.IR.declSpanOf cl.SourceName)
     c.DeclName <- (if String.IsNullOrEmpty cl.SourceName then cl.Name else cl.SourceName)
+    // only a NAMED function call is private (G75); a capturing LAMBDA keeps
+    // its capture semantics -- a named snapshot (Codex round 3)
+    let named = not (cl.Name.StartsWith "__lambda")
+    if named then c.InlinedCallee <- c.InlinedCallee + 1
     try body ()
     finally
+        if named then c.InlinedCallee <- c.InlinedCallee - 1
         c.DeclSpan <- savedSpan
         c.DeclName <- savedName
 
@@ -7390,6 +7402,18 @@ and private forceHoistable (c: Ctx) (id: IRId) : bool =
            | _ -> true)
 
 and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
+    match e with
+    // inside an INLINED callee body (gap G238) a module deferred map is
+    // evaluated PRIVATELY, per call (G75: the C++ lane calls the function):
+    // no hoist, no slot upgrade (a later call re-reads the current inputs),
+    // no print; its captures are still evaluated first
+    | IRVar (id, _) when c.InlinedCallee > 0 && not c.InFunction && c.BindingValues.ContainsKey id
+                         && (match c.ArrSlots.TryGetValue id with
+                             | true, { Src = (AVirt _ | AVirtFlat _) } -> true
+                             | _ -> false) ->
+        markNamedInWith c false (Some id) c.BindingValues.[id]
+        materialize c (emitArr c e)
+    | _ ->
     // The producer object this name held BEFORE the force: a deferred alias
     // (`let g2 = g`) is bound to the SAME ArrVal as its source (classifyValue
     // of the alias returns the source's slot), so reference equality is the
@@ -7467,6 +7491,10 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
                 let nm = defaultArg (Map.tryFind id c.ModuleNames) (string id)
                 refuse ($"a force of the deferred module binding '{nm}' that cannot be hoisted after a slot was re-pointed inline in the same statement (its pool may not dominate its readers; gap G199)")
             if not c.InFunction && c.BindingValues.ContainsKey id then markForcedChildren c id
+            // a LOCAL deferred let stored here (a block-local alias `let q =
+            // p` stores p): its prerequisites -- the captures its kernels
+            // reach -- are forced first (gap G216)
+            else consumePrereqs c e
             materialize c (emitArr c e)
         | _ -> materialize c (emitArr c e)
     (match e with
@@ -7589,7 +7617,15 @@ and private forceCopyInputs (c: Ctx) (e: IRExpr) : unit =
                          | Some (IRTuple es) -> es
                          | _ -> []
                      for m in membersOf (Set.singleton id) id do forceCopyInputs c m)
-        | IRVar _ -> ()
+        // a BLOCK-LOCAL deferred let copied (`{ let p = ..; p |> compute }`):
+        // its prerequisites are forced where it is consumed (gap G216: it
+        // was skipped, so a failing capture of p disappeared)
+        | IRVar _ -> consumePrereqs c e
+        // an INLINE choice copied: each operand is a copy in turn (Codex
+        // round 4: `(p <|> p) <|> x` lost d, p's input)
+        | IRChoice (l, r) | IRFallback (l, r) ->
+            forceCopyInputs c l
+            forceCopyInputs c r
         // an INLINE computation evaluated here (`map |> compute`, a tuple
         // member, Codex round 3): its deferred inputs and the captures of its
         // kernels are forced under their own names, as genComputeBinding does
@@ -7668,7 +7704,14 @@ and private refreshProducers (c: Ctx) (hoisted: bool) : unit =
       finally c.RefreshBusy <- false
 
 and private markForced (c: Ctx) (id: IRId) : unit =
-    if c.Forced.Add id then
+    // inside an INLINED callee body the force is the call's own, private
+    // (G75, gap G238): no print, no snapshot; its captures are still
+    // evaluated (the capture-only walk)
+    if c.InlinedCallee > 0 && not c.InFunction then
+        match Map.tryFind id c.BindingValues with
+        | Some v -> markNamedInWith c false (Some id) v
+        | None -> ()
+    elif c.Forced.Add id then
         markForcedChildren c id
         persistForced c id
 
@@ -7698,7 +7741,15 @@ and private markForced (c: Ctx) (id: IRId) : unit =
 /// positional read inside the kernel then reads the same pool); elsewhere
 /// marked as before (persistForced decides).
 and private forceCapture (c: Ctx) (id: IRId) : unit =
-    if not c.InFunction && c.BindingValues.ContainsKey id then
+    // inside an INLINED named callee the capture is EVALUATED privately
+    // (the C++ call evaluates it per call; gap G238, Codex round 3: marking
+    // alone evaluated nothing, so an extents-only capture lost its failure)
+    if c.InlinedCallee > 0 && not c.InFunction && c.BindingValues.ContainsKey id
+       && (match c.ArrSlots.TryGetValue id with
+           | true, { Src = (AVirt _ | AVirtFlat _) } -> true
+           | _ -> false) then
+        materializeExpr c (IRVar (id, typeOf c.BindingValues.[id])) |> ignore
+    elif not c.InFunction && c.InlinedCallee = 0 && c.BindingValues.ContainsKey id then
         match c.ArrSlots.TryGetValue id with
         | true, { Src = (AVirt _ | AVirtFlat _) } when forceHoistable c id ->
             materializeExpr c (IRVar (id, typeOf c.BindingValues.[id])) |> ignore
@@ -7760,6 +7811,33 @@ and private markNamedInWith (c: Ctx) (markInputs: bool) (self: IRId option) (v: 
         // llvm lane used to mark g here once v itself was forced (a
         // positional read of v), printing g there only.
         | IRCompute (IRVar _) -> ()
+        // a CHOICE / FALLBACK evaluates its operands as COPIES (gap G213):
+        // storing `c = p <|> p` does not force p under its own name in the
+        // C++ lane or the interpreter, so p does not print; only the
+        // captures its operands reach are forced (the capture-only walk)
+        | IRChoice (l, r) | IRFallback (l, r) when markInputs ->
+            // a copy forces the copied map's INPUTS under their names (G199,
+            // forceCopyInputs; Codex round 3: `c = p <|> p` stores d, p's
+            // input), not the copied map itself
+            forceCopyInputs c l
+            // ORDER (Codex round 6): where the copies' inputs are persisted
+            // (a program that assigns), the LEFT operand is evaluated -- a
+            // private copy, its slot untouched -- before the RIGHT operand's
+            // inputs are stored, so a failing left operand fails first, as
+            // in the C++ lane (left copy, then right copy) and the base
+            // (which persisted the left operand itself). Later hoists land
+            // after it. Without assignments nothing is persisted and the
+            // choice stays lazy (pre-existing, G236).
+            (match e, l with
+             | (IRChoice _ | IRFallback _), IRVar (oid, _) when c.Facts.AnyAssignment && not c.InFunction && c.InlinedCallee = 0
+                                             && c.BindingValues.ContainsKey oid ->
+                 (match c.ArrSlots.TryGetValue oid with
+                  | true, ({ Src = (AVirt _ | AVirtFlat _) } as a) ->
+                      materialize c a |> ignore
+                      if c.StmtStart >= 0 then c.StmtStart <- max c.StmtStart c.Body.Count
+                  | _ -> ())
+             | _ -> ())
+            forceCopyInputs c r
         | IRApplyCombinator info ->
             // When this map's kernel captures a deferred map that will be
             // EVALUATED here (forceCapture), its deferred inputs are
@@ -7794,6 +7872,12 @@ and private markNamedInWith (c: Ctx) (markInputs: bool) (self: IRId option) (v: 
             | IRVar (src, _) when not markInputs && notSelf src && c.ArrSlots.ContainsKey src && visited.Add src ->
                 (match c.ArrSlots.TryGetValue src, Map.tryFind src c.BindingValues with
                  | (true, { Src = (AVirt _ | AVirtFlat _) }), Some sv -> walk sv
+                 // a LOCAL deferred let reached through a local alias
+                 // (`let q = p`; gap G216): its value is in DeferredLetValues
+                 | (true, { Src = (AVirt _ | AVirtFlat _) }), None ->
+                     (match c.DeferredLetValues.TryGetValue src with
+                      | true, sv -> walk sv
+                      | _ -> ())
                  | _ -> ())
             // A KERNEL that captures a deferred map is a forcing use of
             // it (the C++ lane's collectDeferredKernelCaptures, forced
@@ -8738,6 +8822,20 @@ and private objectForApply (c: Ctx) (objInfo: ObjectForInfo) (args: IRExpr list)
 /// compares against. No reassociation, licensed or not: FMF arrives with the
 /// fact layer, not here.
 and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : Val =
+    // G214 (Codex diff review round 1): a fold KERNEL capture of a deferred
+    // module map is a forcing use before the traversal, in every program
+    // (the C++ genReduceBinding prelude) -- a capture read only through a
+    // static extent never ran, so its failure (BL8013) disappeared
+    if not c.InFunction then
+        for k in (match kernelExpr with IRTuple ks -> ks | k -> [ k ]) do
+            match resolveKernel k with
+            | Some rk ->
+                for cap in rk.Callable.Captures do
+                    if c.BindingValues.ContainsKey cap.Id then
+                        match c.ArrSlots.TryGetValue cap.Id with
+                        | true, { Src = (AVirt _ | AVirtFlat _) } -> forceCapture c cap.Id
+                        | _ -> ()
+            | None -> ()
     // G41: an ordinary fold consumes its operand too -- a virtual producer
     // (a choice / guard over a writing map, a named deferred map read inside
     // an inlined kernel) runs inside this fold, so its writes keep the fold's
@@ -9824,7 +9922,7 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
 /// are marked and stored here (markForcedChildren / persistForced), before
 /// the fold is emitted. A join (tuple kernel and seed) forces no operand, as
 /// in the C++ lane; an id the leaf walk passes through stays deferred.
-and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : unit =
+and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : (IRId * ArrVal) list =
     let isJoin =
         match kernelExpr, initExpr with
         | IRTuple ks, IRTuple ss -> ks.Length = ss.Length && ks.Length >= 2
@@ -9853,11 +9951,18 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
             match deferredValue id with
             | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
             | _ -> false
+        // a captured guard / choice / fallback is a capture too (G214, the
+        // C++ isMap filter; Codex diff review round 1) -- never an operand
+        let isCaptureValue (id: IRId) =
+            isMapValue id
+            || (match deferredValue id with
+                | Some (IRGuard _ | IRChoice _ | IRFallback _) -> true
+                | _ -> false)
         // a CAPTURE is a deferred map reached through any chain of deferred
         // aliases or projections of a wholly deferred tuple (the C++ filter
         // follows them; Codex round 5)
         let rec isMapCapture (seen: Set<IRId>) (id: IRId) =
-            isMapValue id
+            isCaptureValue id
             || (match deferredValue id with
                 | Some (IRVar (r, _)) when not (seen.Contains r) -> isMapCapture (seen.Add r) r
                 | Some (IRTupleProj (IRVar (t, _), k, _)) when not (seen.Contains t) ->
@@ -9890,9 +9995,10 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
         // names ahead of the private operands): every capture of a leaf map
         // kernel and of the fold kernel(s) -- resolved through a Reynolds
         // wrapper as the C++ resolveKernel does (Codex round 4) -- that is a
-        // still-deferred map, neither a private operand nor on the leaf walk
-        // spine (the C++ filters, Codex round 4: a capture that is also a
-        // private operand stays private)
+        // still-deferred map not on the leaf walk spine -- a capture that is
+        // ALSO a private operand is forced under its own name (gap G214, the
+        // user decision of 2026-11-13: a capture forces once, a snapshot;
+        // the C++ lane follows the same rule since round 4 wave 8)
         let leafKernels =
             leaves compExpr |> List.collect (function
                 | IRApplyCombinator info -> [ info.Kernel ]
@@ -9903,14 +10009,68 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
             | Some rk ->
                 for cap in rk.Callable.Captures do
                     if c.BindingValues.ContainsKey cap.Id
-                       && not (List.contains cap.Id operandIds)
                        && not (onSpine cap.Id compExpr)
                        && isMapCapture (Set.singleton cap.Id) cap.Id then
                         forceCapture c cap.Id
             | None -> ()
         // in EVERY program (Codex round 8): the children walk forces the
-        // captures; only the snapshot of marked inputs is assignment-gated
-        operandIds |> List.iter (markForcedChildren c)
+        // captures; only the snapshot of marked inputs is assignment-gated.
+        // G207 (iii): then each private operand ITSELF, operand by operand
+        // (its inputs, then its cells), into a private pool the fold reads --
+        // the C++ prelude's temporary (genReduceComputeBinding's forceLines),
+        // evaluated BEFORE the seeds, so `reduce(p <&!> q, (+), 7 % z)` over a
+        // `p` reading a failing deferred `g` fails in `g` as the C++ lane and
+        // the interpreter do (it used to seed first and read `g` fused per
+        // cell). The slot is restored after the fold (no print obligation).
+        // The slots are re-pointed only after the LAST operand: a re-pointed
+        // statement slot would make forceHoistable decline a later operand
+        // capture force (Codex diff review round 1).
+        // An operand PROVED TOTAL (IRTotality, the deferred-value predicate
+        // of this lane: a slot not yet pooled) cannot fail, so where it is
+        // evaluated is unobservable: it stays fused into the fold (no pool;
+        // memfree/060, 065 keep their per-application row pools).
+        let isDeferredId (x: IRId) =
+            match c.ArrSlots.TryGetValue x with
+            | true, { Src = APool _ } -> false
+            | true, _ -> true
+            | _ -> false
+        // ... and only while nothing evaluated ahead of the fold's cells (the
+        // seeds, the fold kernels) may WRITE what the operand reads: a total
+        // operand fused past a writing seed would read the written cells
+        // (Codex diff review round 2: `reduce(p, (+), change(d))`)
+        let seedsWrite =
+            // the consuming leaf maps too (FoldOperandWrites, Codex round 4)
+            c.FoldOperandWrites
+            || Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues initExpr
+            || Blade.CodeGenExprSupport.exprMayWriteIn c.BindingValues kernelExpr
+        let provedTotal (id: IRId) =
+            not seedsWrite &&
+            match Map.tryFind id c.BindingValues with
+            | Some (IRApplyCombinator info) ->
+                Blade.IRTotality.auditApply resolveCallable (fun x -> Map.tryFind x c.BindingValues) isDeferredId info = Ok ()
+            | _ -> false
+        // The private pool is evaluated HERE, at the fold's own evaluation
+        // point (never hoisted: a hoist would cross earlier statements of a
+        // block and branch conditions -- Codex diff review round 3). A
+        // capture a LATER operand forces hoists to the start of main's
+        // statement (materializeExpr), i.e. AHEAD of an earlier operand's
+        // inline pool: the C++ order (operand by operand, loops/757) cannot be
+        // kept, so that shape is refused (recorded; the C++ lane takes it).
+        let mutable inlineBefore = false
+        let pooled =
+            operandIds |> List.choose (fun id ->
+                let start = c.StmtStart
+                markForcedChildren c id
+                if inlineBefore && c.StmtStart <> start then
+                    refuse "a fold whose later private operand forces a capture that hoists ahead of an earlier private operand evaluated in place (the C++ lane forces them operand by operand; gap G207)"
+                match c.ArrSlots.TryGetValue id with
+                | true, ({ Src = (AVirt _ | AVirtFlat _) } as a) when not (provedTotal id) ->
+                    inlineBefore <- true
+                    Some (id, a, materialize c a)
+                | _ -> None)
+        for (id, _, p) in pooled do c.ArrSlots.[id] <- p
+        pooled |> List.map (fun (id, a, _) -> (id, a))
+    else []
 
 /// THE TUPLE-STATE FOLD (gap G103, round 4 wave 4): `reduce(method_for(zip(
 /// xs, ys)) <@> lambda(b, y) -> (s, 1.0, y), merge, (seed0, seed1, seed2))`
@@ -9991,7 +10151,30 @@ and private tryTupleStateFold (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
     | _ -> None
 
 and private emitReduceComputeCore (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
-    forcePrivateOperandInputs c compExpr kernelExpr initExpr
+    let saved = forcePrivateOperandInputs c compExpr kernelExpr initExpr
+    if saved.IsEmpty then emitReduceComputeBody c compExpr kernelExpr initExpr
+    else
+        // a leaf whose producer was built over a now-pooled private operand
+        // is REBUILT from its value (a producer closure holds its operands'
+        // ArrVals from its own binding), so it reads the pool
+        let priv = saved |> List.map fst |> Set.ofList
+        let rec resolveLeaf (seen: Set<IRId>) (e: IRExpr) =
+            match e with
+            | IRVar (id, _) when not (seen.Contains id) ->
+                (match c.ArrSlots.TryGetValue id, Map.tryFind id c.BindingValues with
+                 | (true, { Src = (AVirt _ | AVirtFlat _) }), Some v -> resolveLeaf (seen.Add id) v
+                 | _ -> None)
+            | IRApplyCombinator info when info.Arrays |> List.exists (function IRVar (a, _) -> priv.Contains a | _ -> false) -> Some e
+            | _ -> None
+        let rec rebuild (e: IRExpr) =
+            match e with
+            | IRFusion (l, r) -> IRFusion (rebuild l, rebuild r)
+            | _ -> defaultArg (resolveLeaf Set.empty e) e
+        try emitReduceComputeBody c (rebuild compExpr) kernelExpr initExpr
+        finally
+            for (id, a) in saved do c.ArrSlots.[id] <- a
+
+and private emitReduceComputeBody (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr) : Val list =
     match tryTupleStateFold c compExpr kernelExpr initExpr with
     | Some vs -> vs
     | None ->

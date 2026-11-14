@@ -1,0 +1,23 @@
+// TEST: AD A Gradient Buffer Captured By A Closure The Callee Applies Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; wave-8 fable review): a callee
+// that APPLIES a function value no resolution reaches -- a closure held by a
+// module let (`let kf = factory(g)`), an element of an array of closures --
+// has unknown reads, so a `mut` argument beside it is refused FAIL CLOSED
+// (BL4005, every lane): the closure here captures the gradient buffer `g`
+// and the compiled lanes printed a wrong gradient (20 for 8). Only callees
+// with mut parameters are judged, so an ordinary program applying closures
+// is untouched.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf = factory(g)
+function k(x: Float64) -> Float64 = kf(x)
+function f(x: Float64, w: A) -> Float64 = k(x) * k(x) + 3.0 * w(0)
+let w0: A = [1.0, 1.0]
+let r = ad.grad(f)(Float64(1.0), w0, g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

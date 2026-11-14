@@ -1656,3 +1656,20 @@ module LiteralDefaults =
             else abs (float32 f) >= 1.17549435e-38f
         | ETFloat64 -> true
         | _ -> false
+
+
+/// G190 (c), round 4 wave 8: the DECLARED `mut` parameter positions of every
+/// callable the type checker saw (TypeEnv.MutParamPositions, keyed by the
+/// function's binder id -- the IRCallable id lowering gives it), published by
+/// checkProgram for the lowering pass that refuses a `mut` argument sharing
+/// storage with anything the callee reads (Lowering.refuseAliasedMutArguments).
+/// Per flow (AsyncLocal, the house pattern): a host checking two programs at
+/// once keeps two tables. An unpublished flow answers no positions.
+module MutParamTable =
+    let private slot = System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<IRId, int list>>()
+    let publish (d: System.Collections.Generic.Dictionary<IRId, int list>) : unit =
+        slot.Value <- System.Collections.Generic.Dictionary<IRId, int list>(d)
+    let positions (id: IRId) : int list =
+        match slot.Value with
+        | null -> []
+        | d -> match d.TryGetValue id with | true, l -> l | _ -> []

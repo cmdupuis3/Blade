@@ -1,0 +1,12 @@
+// TEST: A Function Returning An Anonymous Range
+// ============================================================================
+// Gap G190 (e), round 4 wave 8 (lane C, C2): a body RETURNING a bare range
+// had no C++ rendering (BL7001 "no rule for IRRange in expression position");
+// the range is now bound to a let and returned as a fresh pool, the cells the
+// interpreter returns.
+// ============================================================================
+function make(n: Int64) = 0..n
+let r = make(Int64(3))
+let s = reduce(make(Int64(4)), (+))
+// EXPECT: r = [0, 1, 2]
+// EXPECT: s = 6

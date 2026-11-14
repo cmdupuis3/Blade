@@ -1,0 +1,25 @@
+// TEST: A struct field store retains the argument
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m5): `box.a = a` stores the array
+// argument in a field of a module struct.
+// ============================================================================
+type I = Idx<3>
+struct Box {
+    a: Array<Float64 like I>
+}
+let mut box = Box { a = [0.0, 0.0, 0.0] }
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    box.a = a
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = keep(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let s = f(x)
+let result = reduce(box.a, (+))
+// EXPECT: s = 21.0
+// EXPECT: result = 12.0

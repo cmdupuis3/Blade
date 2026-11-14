@@ -1,0 +1,15 @@
+// TEST: A Kernel Lambda Reads The Binding Visible At Its Definition, Not A Shadowing Parameter
+// Gap G224 (round 4 wave 8 lane d): `f` captures the module `scale`; used
+// as a kernel inside `apply`, whose PARAMETER is also named `scale`, the
+// inlined kernel spelled its capture by C++ name and read the parameter in
+// the C++ lane (r = [10.0, 20.0, 30.0]). Every lane now reads the module
+// binding: the parameter is spelled `scale__p<id>` in the C++ text.
+// EXPECT: r = [2.0, 4.0, 6.0]
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let scale: Float64 = 2.0
+let f = lambda(x) -> x * scale
+function apply(scale: Float64, a: Array<Float64 like I>) -> Array<Float64 like I> = {
+    method_for(a) <@> f |> compute
+}
+let r = apply(10.0, a64)

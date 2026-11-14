@@ -1,0 +1,12 @@
+// TEST: Fold Seed Prodsum Reads Operand Before Its Write
+// Gap G214 (round 4 wave 8, Codex diff review round 2): the seed writes x and
+// then reads the fold operand d through prodsum. An operand the seed reads is
+// forced under its own name at its OPERAND position, before the seed runs, in
+// every lane: prodsum(d, x) reads the snapshot [2, 4, 6] against the written x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p, (+), { x(0) = 10.0; prodsum(d, x) })
+let w = d(0)
+// EXPECT: s = 61.0
+// EXPECT: w = 2.0

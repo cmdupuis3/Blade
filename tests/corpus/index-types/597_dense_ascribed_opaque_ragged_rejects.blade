@@ -1,0 +1,17 @@
+// TEST: A dense array ascribed an opaque RaggedIdx type is refused (rejects)
+// ============================================================================
+// Gap G190 (a), the ARGUMENT case (round 4 wave 8, lane C, C3): the opaque
+// `RaggedIdx<_>` is the type of a row PEELED from a ragged parent. A dense
+// array reaching a parameter of that type -- a call argument, a kernel
+// parameter fed a dense slice, an ascription -- has no ragged parent to stand
+// for: the interpreter read it as a plain array and printed a value, the C++
+// lane could not convert it (BL9002 at g++). Refused at lowering in every
+// lane with BL4003, like the literal itself (index-types/579-581).
+// ============================================================================
+function f(a: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(a, (+))
+let d = [Float64(2.0)]
+let r: Array<Float64 like RaggedIdx<_>> = d
+let s = f(r)
+// ERROR: BL4003 @ 12:43
+// ERROR-CONTAINS: a dense array bound to an opaque
+// REJECT-AT: lower

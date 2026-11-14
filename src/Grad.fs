@@ -986,7 +986,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                             // Stamp the ambient synthesis span with the
                             // ROOT source decl's span (composition chains
                             // inherit it) before building the derivative.
-                            Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue Blade.Ast.synthSpan)
+                            Blade.Ast.setSynthSpan ((Map.tryFind fname funcSpans |> Option.defaultValue (Blade.Ast.synthSpan ())))
                             let ctx2 = ctxFor fname
                             // A synthesized source is trusted: it binds
                             // reserved names by construction, and the
@@ -1014,7 +1014,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match synthResult with
             | Error e -> Error e
             | Ok () ->
-                Blade.Ast.synthSpan <- noSpan
+                Blade.Ast.setSynthSpan (noSpan)
                 // Splice each synthesized decl after its ROOT source decl,
                 // in synthesis order (f, f__grad, f__grad__jvp, ...).
                 let rootOf (synthName: string) =
@@ -1163,7 +1163,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     // Per-program synthesis state (gap G193): a fresh one for this flow.
     installProgramState ()
     let result =
@@ -1180,8 +1180,8 @@ let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic lis
                 if isPack then "BL5502"
                 elif msg.StartsWith "jvp" then "BL5501"
                 else "BL5500"   // grad's and vjp's (the seeded reverse mode shares grad's subset and code)
-            [ Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) Blade.Ast.synthSpan msg ])
+            [ Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) (Blade.Ast.synthSpan ()) msg ])
     // Reset AFTER the diagnostic is built (the span is the failing decl's),
     // so no stamp leaks into later passes.
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     result

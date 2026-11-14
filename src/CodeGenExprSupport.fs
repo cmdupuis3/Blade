@@ -1937,6 +1937,22 @@ let exprMayWriteIn (deferred: Map<IRId, IRExpr>) (body: IRExpr) : bool =
 
 let exprMayWrite (body: IRExpr) : bool = exprMayWriteIn Map.empty body
 
+/// THE RETENTION FACTS (gap G221; Blade.Optimize.retentionAnalyzer): may a call
+/// of this callable leave a reference to storage it was handed in storage that
+/// outlives the call? Same write facts as callableMayWrite.
+let callableMayRetain (callable: IRCallable) : bool =
+    Blade.Optimize.callableMayRetainWith (codegenWriteFacts Map.empty) callable
+
+/// One checker (one summary table) for a scope's statements: `locals` are the
+/// scope's own lets (a whole rebinding of one is local), `privates` the lets
+/// whose cells a direct store fills privately.
+let retentionChecker () : Set<IRId> -> Set<IRId> -> IRExpr -> bool =
+    Blade.Optimize.retentionCheckerWith (codegenWriteFacts Map.empty)
+
+/// May evaluating this expression (a consumer an emitter frees a temporary
+/// after) retain a reference to storage it reads? Fail closed.
+let exprMayRetain (e: IRExpr) : bool = retentionChecker () Set.empty Set.empty e
+
 /// Does this fold kernel demand REPRODUCIBLE evaluation? True when the
 /// callable itself is a `where repro` function, or when it is the
 /// eta-expanded wrapper around one (`lambda(a, b) -> f(a, b)` -- the shape a

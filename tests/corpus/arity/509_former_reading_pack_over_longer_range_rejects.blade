@@ -1,0 +1,11 @@
+// TEST: a pack former over a range longer than the pack that reads the pack is refused (rejects)
+// Gap G223 (round 4 wave 8 lane d; Codex diff review round 2): the same
+// shape rule for the kernel own `args[k]`: `0..4` over three elements.
+// ERROR: BL7004
+// ERROR-CONTAINS: not the pack index
+// REJECT-AT: lower
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let terms = method_for(0..4) <@> lambda(k) -> args[k] |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

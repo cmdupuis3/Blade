@@ -1,0 +1,12 @@
+// TEST: A Sparse Range Map Over Uncaptured Deferred Keys Keeps Its Values
+// Gap G225 (round 4 wave 8 lane d): the value twin of loops/760 -- the keys
+// 10 .. 50 are forced (and print, a forced binding), the kernel reads `g`:
+// 10 + 20 + 30 + 40 + 100.
+// EXPECT: keys = [10, 20, 30, 40, 50]
+// EXPECT: t = 200
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let keys = method_for(d) <@> lambda(a) -> a * 10
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> if i > 40 then g(0) else i |> compute
+let t = reduce(s, (+))

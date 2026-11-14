@@ -1,0 +1,32 @@
+// TEST: A retaining call inside a let rec step block keeps its pool
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221; found by the Codex diff review d71e628b
+// round 2): `keep(y)` inside the recursion's step block retains y, but the
+// loop scope's allocations are stamped with the enclosing STATEMENT's owner
+// id, so pinning y's own name spared nothing and the iteration freed it.
+// A retaining statement now pins its own owner id too.
+// ============================================================================
+type I = Idx<3>
+type Step = Idx<2>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    Int64(1)
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let rec xs: Array<Float64 like Step, I> =
+        match xs with
+        | zero -> zero
+        | zero :: s -> zero :: x
+        | prefix :: n -> prefix :: {
+            let y = x * 2.0 |> compute
+            let k = keep(y)
+            y + Float64(k) |> compute
+        }
+    reduce(xs(1), (+))
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let n = f(x)
+let result = reduce(saved, (+))
+// EXPECT: n = 15.0
+// EXPECT: result = 12.0

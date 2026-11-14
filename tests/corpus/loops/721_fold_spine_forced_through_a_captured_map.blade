@@ -1,0 +1,13 @@
+// TEST: Fold Spine Forced Through A Captured Map
+// Gap G214 (round 4 wave 8, Codex diff review round 1): the fold kernel
+// captures q, a deferred map of the fold own spine p. Forcing q forces p
+// under its own name first, so the fold reads that stored snapshot of p.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(p) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), 0.0)
+x(0) = 10.0
+let w = p(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0
+// EXPECT: q = [3.0, 5.0, 7.0]

@@ -1,0 +1,14 @@
+// TEST: A Fused-Tree Fold Forces Its Private Operand Before The Seed (aborts)
+// Gap G207 (iii) (round 4 wave 8 lane d): `p` reads the deferred `g`, which
+// the fold materializes privately before it initializes the seed `7 % z` --
+// the C++ prelude and the interpreter report g (integer division by zero).
+// The LLVM lane used to seed first (integer modulo by zero) and read g fused
+// per cell; it now materializes g into a private pool first.
+// ABORT: integer division by zero
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 0, 2]
+let z: Int64 = 0
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(g) <@> lambda(a) -> a + 1
+let q = method_for(d) <@> lambda(a) -> a + 2
+let (s, t) = reduce(p <&!> q, (+), 7 % z)

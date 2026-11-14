@@ -1,0 +1,13 @@
+// TEST: Join Traversal Over Named Maps Of Shared Slots Keeps Its Values
+// Gap G207 (1) (round 4 wave 8 lane d): the joint traversal the interpreter
+// now runs for a join with shares -- a leg over a named map of the shared
+// `e`, a seeded leg over `e` itself, a prodsum reading `e` as a slot -- folds
+// the same cells, from the same seeds, as the compiled lanes.
+// EXPECT: s1 = 301
+// EXPECT: s2 = 296
+// EXPECT: s3 = 988
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(e) <@> lambda(a) -> a + 1
+let (s1, s2, s3) = object_for(<&!>) <@> (reduce(p, (+)), reduce(e, (+), 5), prodsum(e, d))

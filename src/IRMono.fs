@@ -3866,9 +3866,39 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                         if packSlot.IsNone then
                             if hidden lam.Body || (reachable |> List.exists (fun d -> dynamicRead false d.Body)) then refuseNested ()
                             if dynamicRead false lam.Body then refuseKernelIndirect ()
+                            // G223: a ROLLED kernel naming the pack as a value
+                            // (an argument of a named function, `pick(args,
+                            // k)`) kept a pack the specialization no longer
+                            // has (BL6001, a dangling VarId); unrolling it
+                            // would need the range proved to be THIS pack's
+                            // index, which an opaque extent cannot show
+                            // (Codex diff review round 3) -- refused
+                            if not (Set.isEmpty (Set.intersect (collectVarRefsIR lam.Body) packIds)) then
+                                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                    $"'{func.SourceName}': a pack former's kernel names the pack as a value (an argument of a named function) without reading it by the ordinal; the former is unrolled per pack element only when the kernel reads `args[k]`, so the kernel would keep a pack the specialization no longer has (gap G223). Read the element in the kernel (`args[k]`) and pass it instead.")))
                         match packSlot with
                         | Some slotIdx ->
                             let n = aritiesArr.[slotIdx]
+                            // G223 (Codex diff review round 2): the copies are
+                            // one per PACK element, so the former's range must
+                            // be the pack's own index -- zero-based, of the
+                            // pack's arity (the opaque placeholder an
+                            // `Idx<arity(args)>` range carries, or a literal
+                            // equal to it). A range of another extent or start
+                            // (`0..2` over three elements) would change the
+                            // former's shape: refused.
+                            (match info.Arrays with
+                             | [ IRRange ([ ix ], off) ] ->
+                                 let offOk = match off with None | Some (IRLit (IRLitInt 0L)) -> true | _ -> false
+                                 let extOk =
+                                     match ix.Extent with
+                                     | IRLit (IRLitInt m) -> m = int64 n
+                                     | IRParam _ | IRArity _ -> true
+                                     | _ -> false
+                                 if not (offOk && extOk) then
+                                     raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                         $"'{func.SourceName}': a pack former over a range that is not the pack index (another extent or a nonzero start) reads the pack; it is unrolled into one copy per pack element, which would change its shape (gap G223). Iterate `range<Idx<arity(args)>>`.")))
+                             | _ -> ())
                             // Element type + index-type shape from the former's
                             // deduced OutputType arrow; the extent is replaced
                             // with the (now literal) pack size.
@@ -3954,7 +3984,12 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                             // own `args[k]`; any other dynamic pack subscript --
                             // in the kernel through a local value, or in a lambda
                             // it reaches -- would survive the specialization
-                            if dynamicRead true lam.Body then refuseKernelIndirect ()
+                            // G223: the kernel's own dynamic reads are judged on
+                            // the REWRITTEN per-element bodies below (after the
+                            // ordinal is a literal and a static index folded),
+                            // so a real tuple read by the ordinal (`t[k]`) and
+                            // `args[k + 0]` compile; only the reachable lambdas
+                            // are judged here
                             if reachable |> List.exists (fun d -> dynamicRead false d.Body) then refuseNested ()
                             let renameSites (fresh: Map<IRId, IRId>) (e: IRExpr) =
                                 match e with
@@ -4013,6 +4048,17 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                                     IRMatch (s, cases |> List.map (fun c -> { c with Pattern = renamePat c.Pattern }))
                                                 | _ -> e) lam.Body
                                         mapIRExpr rewrite substituted ]
+                            // THE INVARIANT (G223, Codex design review): no
+                            // rewritten copy may still name the pack -- a
+                            // dynamic subscript the fold could not resolve, a
+                            // local alias or tuple holding it, a literal read
+                            // through such an alias; each would be a dangling
+                            // VarId at validation
+                            if elems |> List.exists (fun el ->
+                                   let known = aliasesIn packIds el
+                                   not (Set.isEmpty (Set.intersect (collectVarRefsIR el) packIds))
+                                   || readsPack known el) then
+                                refuseKernelIndirect ()
                             Some (IRArrayLit (elems, arrTy))
                         | None -> None
                     | _ -> None
@@ -4104,6 +4150,24 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                      | None -> e)
                 | _ -> e) expr
         let newBody = unrollPackFormers newBody
+        // G223 (round 4 wave 8 lane d): a DYNAMIC subscript of the pack whose
+        // index this specialization cannot resolve to a literal (`function
+        // pick(p: Poly<Float64>, j: Int64) = p[j]`) was left as-is over a pack
+        // parameter the specialization replaced by scalar parameters -- a
+        // dangling VarId at IR validation (BL6001), at top level and through
+        // a former alike. Refused at lowering (fail closed); a select chain
+        // over a homogeneous pack is the staged alternative (gap G223).
+        (let pids =
+            Set.union
+                (aliasInfo |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                (polyIndices |> List.map (fun pi -> func.Params.[pi].VarId) |> Set.ofList)
+         iterIRExpr (fun e ->
+            match e with
+            | IRPolyIndex (b, idx) when (match idx with IRLit _ -> false | _ -> true)
+                                       && not (Set.isEmpty (Set.intersect (collectVarRefsIR b) pids)) ->
+                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                    $"'{func.SourceName}': a pack is subscripted by an index that is not known in this specialization (a pack read `p[j]` with a run-time `j`); a pack is specialized into scalar parameters, so only a literal or a former ordinal can select an element (gap G223). Index the pack with a literal, or iterate it with a pack former.")))
+            | _ -> ()) newBody)
 
         let declaredRetType =
             match func.RetType with

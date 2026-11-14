@@ -1,0 +1,15 @@
+// TEST: an unrolled pack former reading the pack through a local alias is refused (rejects)
+// Gap G223 (round 4 wave 8 lane d): the copies are checked AFTER the rewrite
+// -- a local alias of the pack survives it even when its read is a literal,
+// and would be a dangling VarId; refused at lowering.
+// ERROR: BL7004
+// ERROR-CONTAINS: through a local value
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let p = args
+        p[0] + args[k]
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

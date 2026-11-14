@@ -1,0 +1,14 @@
+// TEST: Fold Seed Cell Read Of The Operand Snapshot
+// Gap G214 (round 4 wave 8): the SEED reads a cell of the deferred map d the
+// leaf reads as its operand. A cell read forces d under its own name
+// (formalism 10.2), at the operand position, so w reads the snapshot after
+// the write to x. The C++ lane used to let the seed read the private copy.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p, (+), d(1))
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 19.0
+// EXPECT: w = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

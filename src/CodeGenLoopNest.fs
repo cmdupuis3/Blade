@@ -5031,7 +5031,24 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                                  | IRTScalar _ | IRTUnitAnnotated (IRTScalar _, _) -> 1
                                  | _ -> 0)
                             | _ -> 0)
-                    rebinds || refs > cellAccesses
+                    // gap G221 (Codex diff review d71e628b round 5): a callable
+                    // named here that CAPTURES r (transitively) may export it
+                    // (`function keep(k) = { saved.a = y; k }` then `keep(0)`):
+                    // a second holder the reference census cannot see
+                    let captured =
+                        let rec capturesR (seen: Set<IRId>) (id: IRId) =
+                            not (seen.Contains id)
+                            && (match resolveCallable (IRVar (id, IRTUnit)) with
+                                | Some c ->
+                                    c.Captures |> List.exists (fun cap -> cap.Id = rid || capturesR (seen.Add id) cap.Id)
+                                | None -> false)
+                        subs |> List.exists (fun e -> match e with IRVar (i, _) -> capturesR Set.empty i | _ -> false)
+                    // ... but only when the let may RETAIN through it (the
+                    // retention facts follow the capturing callable's body and
+                    // a closure handed to a storing callee): a pure local
+                    // reader (`let n = read(0)`) dies with the frame and keeps
+                    // the producer fresh (Codex diff review round 6)
+                    rebinds || (captured && exprMayRetain v) || refs > cellAccesses
                 let otherUses =
                     lets |> List.filter (fun (id, v) -> id <> rid && aliasingUse v)
                 if boundToLifted && List.isEmpty otherUses then FreshPool else NotFresh
@@ -5120,8 +5137,22 @@ let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (
     let scopeIds = scopeLets |> List.map fst |> Set.ofList
     // G220 (Codex diff review): a read inside a type-carried expression (a
     // range bound the C++ lane evaluates) is a read too
+    // Gap G221 (Codex diff review d71e628b round 4): a CALLABLE named here
+    // reads its captures whenever it runs -- a closure built before the alias
+    // (`let read = lambda(k) -> reduce(boxes(k).a, (+))`) observes the source
+    // after it -- so the reads close over captures, transitively.
     let refsWithExtents (e: IRExpr) =
-        (e :: Blade.Optimize.embeddedExtentExprs e) |> List.map collectVarRefsIR |> Set.unionMany
+        let direct = (e :: Blade.Optimize.embeddedExtentExprs e) |> List.map collectVarRefsIR |> Set.unionMany
+        let rec close (acc: Set<IRId>) (work: IRId list) =
+            match work with
+            | [] -> acc
+            | id :: rest ->
+                match resolveCallable (IRVar (id, IRTUnit)) with
+                | Some c ->
+                    let fresh = c.Captures |> List.map (_.Id) |> List.filter (fun x -> not (acc.Contains x))
+                    close (Set.union acc (Set.ofList fresh)) (fresh @ rest)
+                | None -> close acc rest
+        close direct (Set.toList direct)
     let derived =
         let rec grow (acc: Set<IRId>) =
             let acc' =
@@ -5161,8 +5192,20 @@ let canAliasStagingLet (scopeLets: (IRId * IRExpr) list) (selfId: IRId option) (
         |> List.exists (fun (id, v) ->
             Some id <> selfId
             && (match v with IRVar (vid, _) -> vid = srcId | _ -> false))
+    // (5) gap G221 (m8): no statement of the scope that may RETAIN storage it
+    // names (a call storing its argument in a module mut, a retaining kernel;
+    // Blade.Optimize.retentionAnalyzer) names the source or a let derived from
+    // it -- the retainer would share the pool a write through the alias
+    // lands in (`let n = keep(y); let mut z = y; z(0) = 100.0` rewrote saved)
+    let retainedElsewhere =
+        let retains = retentionChecker ()
+        let privates = Set.empty
+        ((scopeLets |> List.filter (fun (id, _) -> Some id <> selfId) |> List.map snd) @ tailExprs)
+        |> List.exists (fun e ->
+            not (Set.isEmpty (Set.intersect (refsWithExtents e) derived))
+            && retains scopeIds privates e)
     Set.contains srcId scopeIds && srcOwnsPool && not assignLeaksSrc && not rivalAlias
-    && not readAfterAlias
+    && not readAfterAlias && not retainedElsewhere
 
 // Whole-array mut reassignment as copy-into-place.
 //
@@ -5462,6 +5505,7 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
         | None -> false
     // The allowlist over `tid`'s occurrences in its home: Some why at the
     // first occurrence that could alias its pool.
+    let retainsStmt = retentionChecker ()
     let aliasingUse (tid: IRId) (admittedR: Set<IRId>) (h: int) : string option =
         let mutable why : string option = None
         let flag (s: string) = if why.IsNone then why <- Some s
@@ -5477,6 +5521,23 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
              | _ -> ())
             let (ExprShape (kids, _)) = e
             for k in kids do insideFresh k
+        // gap G221 (m8): a materialized value whose kernel may RETAIN what it
+        // reads (`method_for(T) <@> keep |> compute`, keep storing its row)
+        // leaves a second holder of T's pool (judged once per value, one
+        // shared checker)
+        // ... and a materialized value whose CELLS can hold storage
+        // (`[Box { a = T }]`) keeps a reference to T's pool in its contents
+        // (Codex diff review d71e628b round 3)
+        let contentsHoldStorage (e: IRExpr) =
+            match stripUnits (inferExprType e) with
+            | ArrayElem at -> not (Blade.Optimize.holdsNoStorage at.ElemType)
+            | t -> not (Blade.Optimize.holdsNoStorage t)
+        let insideFreshTop (e: IRExpr) =
+            if mentions e && retainsStmt Set.empty Set.empty e then
+                flag "it is read inside a computed map whose kernel may retain it (gap G221)"
+            elif mentions e && contentsHoldStorage e then
+                flag "it is named by a fresh value whose cells can hold storage (gap G221: contents provenance)"
+            insideFresh e
         let rec go (e: IRExpr) =
             let blessed (c: IRExpr) = if not (isT c) then go c
             match e with
@@ -5495,13 +5556,16 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
             | IRReduceCompute (c, k, i) -> blessed c; go k; go i
             | IRProdSum args -> List.iter blessed args
             // (3)
-            | IRLet (_, v, body) when isMaterializedFreshArray v -> insideFresh v; go body
+            | IRLet (_, v, body) when isMaterializedFreshArray v -> insideFreshTop v; go body
             // (4) a write-free call whose result cannot alias its arguments
             | IRApp (f, args, ty) when args |> List.exists isT ->
+                // gap G221 (Codex diff review d71e628b round 4): a FreshPool
+                // result owns its outer pool, but cells that can hold storage
+                // (`wrap(y) = [Box { a = y }]`) may still name T
                 let resultOk =
                     match ty with
                     | IRTScalar _ -> true
-                    | _ -> freshReturnOf f = FreshPool && denseOwnedType (inferExprType e)
+                    | _ -> freshReturnOf f = FreshPool && denseOwnedType (inferExprType e) && not (contentsHoldStorage e)
                 if not (callWriteFree f) then flag "it is an argument of a call that may write"
                 elif not resultOk then flag "it is an argument of a call whose result may alias it"
                 else
@@ -5525,7 +5589,7 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
             | IRVar (id, _) when id = tid && (h > 0 || bound) -> ()
             | e -> go e
         for e in homeExprs h do
-            if h = 0 && isMaterializedFreshArray e then insideFresh e else goTail false e
+            if h = 0 && isMaterializedFreshArray e then insideFreshTop e else goTail false e
         why
     assigns
     |> Seq.groupBy (fun (_, tid, _, _) -> tid)
@@ -5921,15 +5985,59 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
     // is flattened and handed to a provider writer emitted elsewhere.
     let providerSeeds =
         ctx.ProviderWrites |> Map.toList |> List.map (fun (_, spec) -> spec.SourceId)
+    // Seed 4 -- RETENTION (gap G221). A statement that may leave a reference
+    // to storage it reads in storage outliving the scope -- a call whose
+    // callee stores its argument in a module mut or a captured outer `let
+    // mut`, a kernel that does, an unresolved head given an array, a store of
+    // a storage-bearing value anywhere but straight into a cell of one of the
+    // scope's own fresh pools (Blade.Optimize.retentionAnalyzer, the shared
+    // write facts, fail closed) -- pins EVERY binding the statement names,
+    // the complete argument expressions of every invocation form (views,
+    // tuples, kernel operands, compositions) and the extents its types carry.
+    // Coarse on purpose: a retaining statement is rare, and the pinned pool
+    // is then owned by the retainer (a leak, never a use after free).
+    let retentionSeeds =
+        let scopeIds = scopeLets |> List.map fst |> Set.ofList
+        let rebound =
+            subs |> List.choose (fun e -> match e with IRAssign (LVVar t, _) -> Some t | _ -> None) |> Set.ofList
+        let privates =
+            scopeLets
+            |> List.filter (fun (id, v) -> isFreshPoolForm v && not (rebound.Contains id))
+            |> List.map fst |> Set.ofList
+        let retains = retentionChecker ()
+        // the statement's OWN let id too: allocations made while a statement
+        // renders (its nested lets' included) are stamped with that owner
+        // (setAllocOwner), so pinning only the nested names spared nothing
+        // (Codex diff review d71e628b round 2: a retaining call inside a let
+        // rec step block)
+        ((scopeLets |> List.map (fun (id, v) -> (Some id, v))) @ (retRoots |> List.map (fun r -> (None, r))))
+        |> List.collect (fun (owner, root) ->
+            if retains scopeIds privates root then
+                Option.toList owner
+                @ (allSubExprsWithExtents root |> List.choose (fun e -> match e with IRVar (id, _) -> Some id | _ -> None))
+            else [])
     // Function-scope return seed. A scalar/unit return provably cannot carry
     // array storage, so it contributes nothing -- without that narrowing
     // `return reduce(B, +)` would pin every `|> compute` temporary in the helper
     // and the whole feature would be inert inside functions. The two LIFTED
     // return forms are skipped too: they are handled by suppressing the `__retN`
     // NAME at the splice point, and seeding their inputs would defeat the point.
+    // CONTENTS PROVENANCE (gap G221 m7): a fresh pool whose ELEMENTS can hold
+    // storage (closures, structs or tuples holding arrays) is fresh as an
+    // allocation, but its cells may name other storage (`[wrap(y)]`: a closure
+    // over y). It stops no propagation, and returning it pins what it names.
+    // (A fold may return a STRUCT or tuple holding an array, `reduce(boxes,
+    // lambda(a, b) -> a)`: its storage is an operand's, not fresh -- Codex
+    // diff review d71e628b round 2.)
+    let contentsCarry (v: IRExpr) =
+        match stripUnits (inferExprType v) with
+        | ArrayElem at -> not (Blade.Optimize.holdsNoStorage at.ElemType)
+        | t -> not (Blade.Optimize.holdsNoStorage t)
     let retSeeds =
         match kind with
         | LoopScope | FuncScope None -> []
+        | FuncScope (Some retExpr) when contentsCarry retExpr ->
+            collectVarRefsIR retExpr |> Set.toList
         | FuncScope (Some retExpr) ->
             match retExpr with
             | IRCompute (IRApplyCombinator _) | IRArrayLit _ -> []
@@ -5982,7 +6090,7 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
     let rec propagate (acc: Set<IRId>) =
         let acc' =
             scopeLets |> List.fold (fun s (id, value) ->
-                if Set.contains id s && not (isFreshPoolForm value) && not (scalarValued value)
+                if Set.contains id s && not (isFreshPoolForm value && not (contentsCarry value)) && not (scalarValued value)
                 then Set.union s (collectVarRefsIR value)
                 else s) acc
         // Scratch reuse: an escaping reuser's storage IS its donor's, so the
@@ -5991,7 +6099,7 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
             Blade.Types.PoolReuseTable.donors ()
             |> Map.fold (fun s reuser donor -> if Set.contains reuser s then Set.add donor s else s) acc'
         if acc'' = acc then acc else propagate acc''
-    propagate (Set.ofList (assignSeeds @ captureSeeds @ providerSeeds @ retSeeds))
+    propagate (Set.ofList (assignSeeds @ captureSeeds @ providerSeeds @ retSeeds @ retentionSeeds))
 
 /// Hoist FreshPool-returning calls out of ARGUMENT position into fresh lets.
 /// `g(f(x))` evaluates f's fresh array as a C++ temporary no let ever names,
@@ -6533,6 +6641,12 @@ let renderOwnedMove (tName: string) (rName: string) (staticShape: bool) : string
         $"{tName} = {rName}"
     match find tName, find rName with
     | Some (tFrame, ta), Some (_, ra) ->
+        // (gap G221: a target a retaining statement or a storage-holding
+        // fresh value names is declined by the planner,
+        // computeOwnedMoveAssigns. frame.Escapes is deliberately NOT read
+        // here: it also holds the RETURN's pins, and a returned target's
+        // superseded pools must still be freed -- memfree/051; Codex diff
+        // review d71e628b round 3)
         let spared = match tFrame with Some f -> Set.contains tName f.SuppressNames | None -> false
         match densePool ta, densePool ra with
         // EXTENTS TABLES (fable review): T's own table is never touched here
@@ -6565,8 +6679,21 @@ let releaseInlinePools (ind: string) (names: Map<IRId, string>) (pools: IRExpr l
                 | ArrayElem at when arrayRank at = 1 -> elemTypeToCpp at.ElemType
                 | _ -> failwith "IRReleasePools: only owned rank-one dense pools are supported"
             let lines = freeAllocNow ind n $"deallocate<typename promote<{elem}, 1>::type, nullptr>({n}.data, {n}.extents);"
-            if lines.IsEmpty then
+            // gap G221 (Codex design review d71e628b): a pool the frame's
+            // escape analysis PINS (a retaining statement names it) is
+            // deliberately kept -- the retainer owns it; only a pool no frame
+            // registered at all is a compiler error
+            let pinned () =
+                (allocScopeStackCell ()).Value
+                |> List.exists (fun f ->
+                    f.Allocs |> List.exists (fun a ->
+                        trackedAllocName a = n
+                        && (match trackedAllocOwner a with Some oid -> Set.contains oid f.Escapes | None -> false)))
+            if lines.IsEmpty && pinned () then
+                [ $"{ind}// lifetime region `{call}` closes here; its pool `{n}` is RETAINED (gap G221: a statement of the scope may keep a reference to it)" ]
+            elif lines.IsEmpty then
                 failwith $"IRReleasePools: pool {n} is not owned by the current allocation frame"
+            else
             $"{ind}// lifetime region `{call}` (an inlined call or an early release) closes here; its pool `{n}` is released at that return boundary" :: lines
         | _ -> failwith "IRReleasePools: an owned pool must be a binding reference")
 

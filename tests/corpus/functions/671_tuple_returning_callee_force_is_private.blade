@@ -1,0 +1,12 @@
+// TEST: Tuple Returning Callee Force Is Private
+// Gap G238 (round 4 wave 8): a function body reads a module deferred map; the
+// read forces it privately per call (G75) and it never prints. The LLVM lane
+// expands a tuple-returning call in place in main and treated that read as a
+// main force: it printed delayed (every ad.grad derivative call hit this).
+type A = Array<Float64 like Idx<2>>
+let g: A = [2.0, 0.0]
+let delayed = method_for(g) <@> lambda(v) -> v * 2.0
+function h(x: Float64) -> (Float64, Float64) = (x * delayed(0), x)
+let r = h(Float64(1.0))
+// EXPECT: g = [2.0, 0.0]
+// EXPECT: r = (4.0, 1.0)

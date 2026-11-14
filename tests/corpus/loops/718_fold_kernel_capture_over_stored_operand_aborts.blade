@@ -1,0 +1,10 @@
+// TEST: a fold kernel capture over a stored operand is forced before the fold (aborts)
+// Gap G214 / G218 (round 4 wave 8, Codex diff review round 1): the fold over
+// the STORED x has a kernel that captures the deferred d, read only through
+// extents. The capture is a forcing use before the traversal in every lane,
+// so d's division by zero fails there (the C++ lane forwarded an undeclared d,
+// BL9002; the LLVM lane completed with s = 13).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let s = reduce(x, lambda(a, b) -> a + b + extents(d), 0)
+// ABORT: BL8013

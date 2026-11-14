@@ -1,0 +1,11 @@
+// TEST: A Kernel-Local Array Rebound By A Plain Statement Is Not Dropped
+// Gap G227 (round 4 wave 8 lane d; Codex design review): the rebinding as a
+// statement of its own (a unit let in the lowered block) is rendered, not
+// elided as a no-op: 6.0 per cell.
+// EXPECT: total = 12.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    out = [1.0, 2.0, 3.0]
+    reduce(out, (+))
+}, (+))

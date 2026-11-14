@@ -1,0 +1,13 @@
+// TEST: Fold Kernel Capture Of The Leaf Operand Snapshot
+// Gap G214 (round 4 wave 8): the FOLD kernel (not the map) captures the
+// deferred map d that the leaf reads as its operand. The capture forces d
+// once under its own name, so w reads the snapshot after the write to x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + d(1), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 27.0
+// EXPECT: w = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

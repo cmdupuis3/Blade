@@ -227,6 +227,9 @@ let rec private genFuncBodyScoped
     // without being one); the join's emitter resolves the operand through this
     // map to inline it as a shared per-iteration local.
     let mutable currentDeferred = ctx.DeferredComputations
+    // the deferred-alias records that go with currentDeferred (a projection
+    // of a deferred tuple: G190 (b))
+    let mutable currentAliasOf = ctx.DeferredAliasOf
     // Ids S2 deliberately left unforced: bound to a bare combinator and read
     // ONLY as a join operand. Computed over the whole body at once, because
     // the accounting that makes the exemption safe is global.
@@ -283,7 +286,7 @@ let rec private genFuncBodyScoped
             | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
                 Set.add rid read
             | _ -> read
-    let emitBodyLet (id: IRId, value: IRExpr) : string list =
+    let emitBodyLetCore (ctx: CodeGenContext) (stmtDeferred: Map<IRId, IRExpr>) (id: IRId, value: IRExpr) : string list =
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
@@ -503,7 +506,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // on its nested type.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
                                      GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred
+                                     DeferredComputations = stmtDeferred
                                      TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
@@ -811,7 +814,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // before is rerouted. `currentDeferred` so a projection of a
             // deferred tuple this body bound (gap G58) resolves to its member.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred; TupleChildren = currentTupleChildren }
+                                     DeferredComputations = stmtDeferred; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = true; IsMutable = false
@@ -819,6 +822,16 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
+            // G190 (b): a projection of a DEFERRED tuple binds a deferred
+            // member (genTupleProjBinding records it, emitting a comment); keep
+            // that record, or a later statement reading the member names an
+            // undeclared `__v<id>` (`let member = pair[0]; member(0)` over a
+            // module `let pair = (delayed, delayed)`, Codex design review).
+            (match Map.tryFind id ctxAfter.DeferredComputations with
+             | Some v ->
+                 currentDeferred <- Map.add id v currentDeferred
+                 currentAliasOf <- ctxAfter.DeferredAliasOf
+             | None -> ())
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _
         | IRStack _ | IRJoin _ ->
@@ -868,7 +881,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // that can force, since its caller receives a VALUE.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
                                      GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred
+                                     DeferredComputations = stmtDeferred
                                      TupleChildren = currentTupleChildren }
             let forced = forceDeferringForm v
             let tempBinding = {
@@ -937,6 +950,92 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
     // Sibling maps (Optimize.planSiblingMaps): each let renders inside the
     // group protocol -- the first member preflights the group, the last
     // flushes any stash its apply never reached (CodeGenLoopNest).
+    // G190 (b): THE STATEMENT PRE-PASS OF A BODY'S PRIVATE FORCES. A module
+    // deferred map (still in the function-entry ctx.DeferredComputations) that
+    // a body statement names BY NAME -- a positional read anywhere in it
+    // (collectDeferredPositionalReads: a scalar let `forcing(0) * x`, a loop
+    // step, a fold seed), or a CAPTURE of a callable the statement references
+    // (a map kernel `lambda(i) -> x * forcing(0)`, whose lifted body takes the
+    // capture by reference) -- is forced HERE, at the body's scope, before the
+    // statement, and the statement renders with it stored (dropped from its
+    // deferred maps, its holder in VarNames). Re-forced per reading statement:
+    // a function-body force is private and re-evaluated (G75, the
+    // interpreter's FunctionCallDepth arm), so a later statement never reads
+    // a holder an earlier one filled (two statements of one call may see
+    // different inputs); the holder of each re-force is fresh
+    // (bodyForceHolderName). The arms that force by themselves (the loop and
+    // return pre-passes, genComputeBinding's capture prelude) used to do so
+    // only for SOME statements, each under the module name, and their ctx was
+    // dropped: a scalar let or a body map left `forcing` undeclared, and the
+    // forward and reverse sweeps of a derivative declared it twice. The order
+    // is the existing pre-pass order (the force runs before the statement,
+    // not at the read inside it): the C++ / interpreter divergence inside
+    // callable bodies stays OPEN under G60 / G77 (formalism 10.2).
+    let moduleDeferredReadsOf (value: IRExpr) : IRId list =
+        if Map.isEmpty currentDeferred then [] else
+        let probe = { ctx with VarNames = currentNames; DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+        let positional = collectDeferredPositionalReads probe value
+        let captured = System.Collections.Generic.List<IRId>()
+        let seenCallables = System.Collections.Generic.HashSet<IRId>()
+        // only a callable the statement APPLIES (a map / fold kernel, a
+        // called function, a callable handed to a call): binding a lambda or
+        // building an unapplied loop object evaluates none of its captures
+        // (Codex design review round 2: `let unused = object_for(lambda ..)`
+        // must not force the deferred map its kernel captures)
+        let note (k: IRExpr) =
+            match resolveKernel k with
+            | Some rk when seenCallables.Add rk.Callable.Id ->
+                for cap in rk.Callable.Captures do
+                    if Map.containsKey cap.Id currentDeferred && not (captured.Contains cap.Id) then
+                        captured.Add cap.Id
+            | _ -> ()
+        // every callable REFERENCE the statement evaluates may run (a call
+        // head, a map / fold kernel, a sort key, a callable argument: Codex
+        // diff review round 2), except the value of a `let` that only binds a
+        // callable and an unapplied loop object
+        let rec walk (e: IRExpr) =
+            match e with
+            | IRObjectFor _ | IRMethodFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ -> ()
+            | IRLet (_, IRVar _, b) -> walk b
+            | IRVar _ -> note e
+            | IRApplyCombinator info ->
+                // its Loop child may be an applied object_for: its kernel runs
+                note info.Kernel
+                (match info.Loop with IRObjectFor oi -> note oi.Kernel | _ -> ())
+                childrenOf e |> List.iter walk
+            | _ -> childrenOf e |> List.iter walk
+        // a statement that only BINDS a callable (`let unused = lambda ..`,
+        // flattened into a bare reference here) evaluates none of its
+        // captures (Codex diff review round 3)
+        (match value with
+         | IRVar _ -> ()
+         | _ -> walk value)
+        (positional @ List.ofSeq captured) |> List.distinct
+    let emitBodyLet (id: IRId, value: IRExpr) : string list =
+        let ids = moduleDeferredReadsOf value
+        if List.isEmpty ids then emitBodyLetCore ctx currentDeferred (id, value) else
+        setAllocOwner (Some id)
+        let forceCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                                  DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+        let (preCode, ctxF) = forceDeferredBindingIds forceCtx builder $"__v{id}__def" ids
+        let forcedNow =
+            currentDeferred |> Map.toList |> List.map fst
+            |> List.filter (fun i -> not (Map.containsKey i ctxF.DeferredComputations))
+        let saved = forcedNow |> List.map (fun i -> (i, Map.tryFind i currentNames))
+        for i in forcedNow do
+            match Map.tryFind i ctxF.VarNames with
+            | Some n -> currentNames <- Map.add i n currentNames
+            | None -> ()
+        let stmtCtx = { ctx with DeferredComputations = forcedNow |> List.fold (fun d i -> Map.remove i d) ctx.DeferredComputations
+                                 DeferredAliasOf = ctxF.DeferredAliasOf }
+        let stmtDeferred = ctxF.DeferredComputations
+        let lines = emitBodyLetCore stmtCtx stmtDeferred (id, value)
+        // the holder is this statement's: a later statement re-forces
+        for (i, old) in saved do
+            match old with
+            | Some n -> currentNames <- Map.add i n currentNames
+            | None -> currentNames <- Map.remove i currentNames
+        preCode @ lines
     let stmts = lets |> List.collect (fun (id, value) ->
         siblingArmBegin id $"__v{id}" siblingPreflight
         let lines = emitBodyLet (id, value)
@@ -1047,7 +1146,18 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = $"__ret{builder.FreshId()}"
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            // G190 (b): the statement pre-pass for a RETURNED map (Codex diff
+            // review: its kernel's capture of a deferred module map was never
+            // forced -- `'delayed' was not declared`)
+            let (retForce, ctxF) =
+                forceDeferredBindingIds
+                    { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                               DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+                    builder "__retdef" (moduleDeferredReadsOf retExpr)
+            let stmts = stmts @ retForce
+            let bodyCtx = { ctx with VarNames = ctxF.VarNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                                     DeferredComputations = ctx.DeferredComputations |> Map.filter (fun k _ -> Map.containsKey k ctxF.DeferredComputations)
+                                     DeferredAliasOf = ctxF.DeferredAliasOf }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // Scratch reuse at the RETURN position: the returned value takes
             // its donor's pool, which leaves with it, so the donor's scope
@@ -1228,10 +1338,19 @@ or return a scalar and materialize at the call site"
             // unprinted, re-evaluated per call, exactly as a body-local map
             // kernel's capture of it is (formalism 10.2). It used to reach
             // the return as an undeclared `lazy` (BL9002).
+            // G190 (b): the capture half of the statement pre-pass too.
             let (retForce, retCtx) =
-                forceDeferredPositionalReads
-                    { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-                    builder "__retdef" retExpr
+                forceDeferredBindingIds
+                    { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                               DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+                    builder "__retdef"
+                    // a returned deferred member of this body (a projection
+                    // of a deferred module tuple) is forced too: the return
+                    // hands the caller a value (Codex diff review)
+                    ((moduleDeferredReadsOf retExpr)
+                     @ (match retExpr with
+                        | IRVar (rid, _) when Map.containsKey rid currentDeferred && not (Map.containsKey rid ctx.DeferredComputations) -> [ rid ]
+                        | _ -> []))
             let stmts = stmts @ retForce
             let currentNames = retCtx.VarNames
             let retStr = exprToCpp currentNames retExpr
@@ -1454,12 +1573,34 @@ and internal genFuncBodyWith (ctx: CodeGenContext) (builder: IRBuilder) (names: 
             hv @ [(id, v')])
     let (retHoist, retExpr) = hoistFreshPoolCallArgs builder retExpr
     let lets = lets @ retHoist
+    // G190 (e): a body RETURNING a bare range (`function make(n: Int64) =
+    // 0..n`) had no rendering (BL7001, "no rule for IRRange in expression
+    // position"); a let of one is statement-shaped and handled (the IRRange
+    // arm of genFuncBodyScoped), so the range is bound to a let and that is
+    // returned -- the same cells, a fresh pool that leaves with the value.
+    let (lets, retExpr) =
+        match retExpr with
+        | IRRange (ixs, _) | IRCompute (IRRange (ixs, _)) ->
+            let tmp = builder.FreshId()
+            // the materialized cells' ARRAY type (a range's own expression
+            // type reads as its element), so the return takes the array arm
+            // and the escape analysis lets the pool leave with the value
+            let arrTy = mkArrayArrow ixs (IRTScalar ETInt64) None
+            (lets @ [ (tmp, retExpr) ], IRVar (tmp, arrTy))
+        | _ -> (lets, retExpr)
     let escapes =
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
     pushAllocScope SFunc escapes
+    // G190 (b): this body's private forces of module deferred maps declare
+    // their holders in ONE C++ scope; track the names so a re-force renames.
+    let forceNames = bodyForceNamesCell ()
+    let forceNamesBefore = forceNames.Value
+    forceNames.Value <- System.Collections.Generic.HashSet<string>() :: forceNamesBefore
     try genFuncBodyScoped ctx builder names indent sameCell lets retExpr
-    finally truncateAllocScopeStack allocDepth
+    finally
+        forceNames.Value <- forceNamesBefore
+        truncateAllocScopeStack allocDepth
 
 // Shadow-stack frames: emission markers and panic-reachability resolution
 //
@@ -1712,6 +1853,42 @@ let private captureParamDecls (caps: CaptureInfo list) : (string * string) list 
         | _ -> ($"{(irTypeToCpp cap.Type)}&", cap.Name)
     (caps |> List.map one) @ gkSidecarParams caps
 
+/// The C++ names of a function's PARAMETERS (gap G224). A parameter is
+/// spelled by its source name unless that name is also the C++ name of a
+/// DIFFERENT binding the body reads -- directly, or as a capture of a
+/// callable it names (a resolve-at-apply kernel lambda `lambda(x) -> x *
+/// scale` inlined into `function apply(scale: Float64, ..)`, or a default
+/// argument such a lambda elaborates): the inlined kernel spells its capture
+/// by NAME, so the parameter shadowed the module binding and the C++ lane
+/// read the parameter where the LLVM lane and the interpreter read the
+/// binding visible at the lambda's definition. Such a parameter is renamed
+/// `<name>__p<id>`, so every reference resolves by binding identity.
+let private paramCppNames (ctx: CodeGenContext) (funcDef: IRFuncDef) : Map<IRId, string> =
+    let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+    let pnames = funcDef.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let clashing = ctx.VarNames |> Map.filter (fun id n -> pnames.Contains n && not (paramIds.Contains id))
+    let plain = funcDef.Params |> List.map (fun p -> (p.VarId, p.Name)) |> Map.ofList
+    if clashing.IsEmpty then plain else
+    let refs = System.Collections.Generic.HashSet<IRId>()
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec walk (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (id, _) ->
+                refs.Add id |> ignore
+                (match resolveCallable n with
+                 | Some cl when seen.Add cl.Id ->
+                     for cap in cl.Captures do refs.Add cap.Id |> ignore
+                     walk cl.Body
+                 | _ -> ())
+            | _ -> ()) e
+    walk funcDef.Body
+    funcDef.Params
+    |> List.map (fun p ->
+        let shadows = clashing |> Map.exists (fun id n -> n = p.Name && refs.Contains id)
+        (p.VarId, (if shadows then $"{p.Name}__p{p.VarId}" else p.Name)))
+    |> Map.ofList
+
 let rec genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     // A body the closed-form domain cell loops reach renders `Float64(x)` of
     // an Int64 as the vectorizable split; every other body the plain cast
@@ -1729,7 +1906,8 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
         match ty with
         | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {name}"
         | _ -> $"{(irTypeToCpp ty)} {name}"
-    let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
+    let pnames = paramCppNames ctx funcDef
+    let regularParams = funcDef.Params |> List.map (fun p -> paramStr pnames.[p.VarId] p.Type)
     // Captures are appended after the regular params (captureParamDecls).
     let captureParams = captureParamDecls funcDef.Captures |> List.map (fun (t, n) -> $"{t} {n}")
     let paramList = (regularParams @ captureParams) |> String.concat ", "
@@ -1746,7 +1924,7 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
     // C++ name the signature declared.
     let bodyNames =
         funcDef.Params
-        |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+        |> List.fold (fun m p -> Map.add p.VarId pnames.[p.VarId] m) ctx.VarNames
     let bodyNames =
         withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
 
@@ -1906,12 +2084,13 @@ and private genFuncDefAsLambdaCore (ctx: CodeGenContext) (builder: IRBuilder) (f
     let ind = indentStr ctx
 
     // Array params are wrappers; same approach as genFuncDef.
+    let pnames = paramCppNames ctx funcDef
     let paramList =
         funcDef.Params
         |> List.map (fun p ->
             match p.Type with
-            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
-            | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
+            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {pnames.[p.VarId]}"
+            | _ -> $"{(irTypeToCpp p.Type)} {pnames.[p.VarId]}")
         |> String.concat ", "
 
     let retType =
@@ -1935,7 +2114,7 @@ and private genFuncDefAsLambdaCore (ctx: CodeGenContext) (builder: IRBuilder) (f
         else
             (if paramList = "" then [] else [ paramList ]) @ (captureDecls |> List.map (fun (t, n) -> $"{t} {n}"))
             |> String.concat ", "
-    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId pnames.[p.VarId] m) ctx.VarNames
     // Parity with genFuncDef (which folds captures in alongside params): the
     // body's IRVar references to captures resolve to the declared names.
     let bodyNames = withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
@@ -2252,6 +2431,37 @@ let private computeModuleCaptureHoistIds
                         Set.contains cid moduleBindingIds && not (Set.contains cid nameable))
                 | None -> []))
     |> Set.ofList
+    // G190 (b), (d): a demanded DEFERRED module map is forced privately INSIDE
+    // the namespace-scope body that reads it (genFuncBodyScoped's statement
+    // pre-pass), so its producer runs there and spells ITS inputs -- the
+    // module bindings its value and its kernels' captures name -- which must
+    // be nameable at namespace scope too, transitively (a deferred map over
+    // another deferred map). `let delayed = method_for(forcing) <@> ..` read
+    // by such a body left `forcing` a main() local (BL9002 at g++).
+    |> fun demanded ->
+        let byBinding = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+        let isDeferredForm (v: IRExpr) =
+            match v with
+            | IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRChoice _ | IRFallback _
+            | IRParallel _ | IRFusion _ | IRBind _ | IRZip _ | IRVar _ | IRTuple _ -> true
+            | _ -> false
+        let inputsOf (b: IRBinding) =
+            let refs = collectVarRefsIR b.Value
+            let kernelCaps =
+                refs |> Set.toList |> List.collect (fun r ->
+                    match Map.tryFind r byId with
+                    | Some c -> c.Captures |> List.map (_.Id)
+                    | None -> [])
+            Set.union refs (Set.ofList kernelCaps) |> Set.intersect moduleBindingIds
+        let rec grow (acc: Set<IRId>) (frontier: Set<IRId>) =
+            let next =
+                frontier |> Set.fold (fun s id ->
+                    match Map.tryFind id byBinding with
+                    | Some b when isDeferredForm b.Value -> Set.union s (inputsOf b)
+                    | _ -> s) Set.empty
+            let fresh = Set.difference next acc
+            if Set.isEmpty fresh then acc else grow (Set.union acc fresh) fresh
+        grow demanded demanded
 
 /// Emit one module-level binding, promoting its DECLARATION to namespace scope
 /// when `hoistIds` demands it and the emitted shape allows the split (see

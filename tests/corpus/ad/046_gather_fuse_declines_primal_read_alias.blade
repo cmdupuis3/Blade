@@ -1,5 +1,9 @@
-// TEST: AD Gather Fuse Declines Primal Read Alias
+// TEST: AD Gather Fuse Declines Primal Read Alias (rejects)
 import ad as ad
+// ROUND 4 WAVE 8 (G190 (c), lead decision): the gradient buffer here shares
+// storage with an array the derivative reads (identity(..) beside the
+// buffer, or a module alias of it), which is now REFUSED at lowering in every
+// lane (BL4005); the program stays as the refusal witness of its shape.
 // ============================================================================
 // `ad-gather-fuse` DECLINES a stencil whose taps read the PRIMAL (a product of
 // neighbours): a caller may pass the primal and its gradient buffer as ONE
@@ -20,5 +24,6 @@ function identity(x: Array<Float64 like H>) -> Array<Float64 like H> = x
 
 let mut a: Array<Float64 like H> = [1.0, 2.0, 3.0, 4.0]
 let z = ad.grad(f)(identity(a), a)
-// EXPECT: z = 20.0
-// EXPECT: a = [4.0, 9.0, 16.0, 10.0]
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

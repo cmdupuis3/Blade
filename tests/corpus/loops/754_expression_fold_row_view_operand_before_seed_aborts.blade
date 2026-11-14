@@ -1,0 +1,12 @@
+// TEST: An Expression-Position Fold Over A Row View Evaluates The View First (aborts)
+// Gap G207 (ii) (round 4 wave 8 lane d; Codex design review probe H): the
+// expression twin of loops/753 -- the fold inside arithmetic binds its row
+// view once, before the seed, in the C++ lane too.
+// ABORT: index out of bounds
+// WARN: BL4003
+type I = Idx<3>
+type J = Idx<4>
+let d: Array<Int64 like I, J> = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+let z: Int64 = 0
+let j: Int64 = 5
+let s = 1 + reduce(d(j), (+), 7 % z)

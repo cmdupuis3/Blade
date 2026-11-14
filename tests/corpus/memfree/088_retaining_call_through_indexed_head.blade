@@ -1,0 +1,24 @@
+// TEST: A retaining call through an indexed head keeps the argument alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221, the indirect-head member found by the
+// Codex design review d71e628b): `handlers(0)(y)` calls `keep` through an
+// array of functions -- an unresolved head given an array is "may retain".
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    3
+}
+let handlers: Array<(Array<Float64 like I> -> Int64) like One> = [keep]
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = handlers(0)(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + saved(0) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 23.0
+// EXPECT: saved = [2.0, 4.0, 6.0]

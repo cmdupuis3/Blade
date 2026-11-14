@@ -1,0 +1,13 @@
+// TEST: Tuple Returning Callee Rereads After Write
+// Gap G238 (round 4 wave 8): the private per-call force of a module deferred
+// map inside a function body is NOT a snapshot: the second call, after the
+// write to g, reads the current g (the LLVM lane stored the first call cells
+// in the module slot: r2 = (4.0, 1.0)).
+let mut g: Array<Float64 like Idx<2>> = [2.0, 0.0]
+let delayed = method_for(g) <@> lambda(v) -> v * 2.0
+function h(x: Float64) -> (Float64, Float64) = (x * delayed(0), x)
+let r = h(Float64(1.0))
+g(0) = 5.0
+let r2 = h(Float64(1.0))
+// EXPECT: r = (4.0, 1.0)
+// EXPECT: r2 = (10.0, 1.0)

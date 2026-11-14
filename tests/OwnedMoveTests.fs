@@ -206,6 +206,26 @@ let runOwnedMoveTests () : BlockResult =
          if asan.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {asan}")
          elif [ plain; asan ] |> List.exists (fun t -> not (t.Contains "s = 50.0" && t.Contains "s2 = 70.0")) then fail name ($"values: {plain}")
          else pass name "ASan clean; s = 50.0, s2 = 70.0")    // ---- the knob ------------------------------------------------------------
+    // ---- memfree/086: a retained target declines (gap G221 m8) --------------
+    (let name = "memfree/086 (G221): a target a retaining row kernel names declines the move; ASan clean, values"
+     match corpusSrc "memfree/086_retained_pool_declines_the_owned_move.blade" with
+     | None -> fail name "corpus file not found"
+     | Some src ->
+     match emit src with
+     | Error e -> fail name e
+     | Ok (_, ds) ->
+        let rs = records ds |> List.map outcomeText
+        if not (rs |> List.exists (fun r -> r.StartsWith "declined -- it is read inside a computed map whose kernel may retain it")) then
+            fail name (sprintf "records %A" rs)
+        else
+        match run src false "", run src true "" with
+        | Error e, _ -> fail name e
+        | _, Error e when unavailable e -> skip name e
+        | _, Error e -> fail name e
+        | Ok plain, Ok asan ->
+            if asan.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {asan}")
+            elif [ plain; asan ] |> List.exists (fun t -> not (t.Contains "result = 119.0" && t.Contains "saved = [8.0, 10.0, 12.0]")) then fail name ($"values: {plain}")
+            else pass name (String.concat " | " rs + "; ASan clean"))
     (let name = "BLADE_OWNED_MOVE=0: every candidate declines, the emission keeps the pointer move"
      match corpusSrc "memfree/050_owned_move_function_reassign.blade" with
      | None -> fail name "corpus file not found"

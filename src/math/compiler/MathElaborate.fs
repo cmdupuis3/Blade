@@ -616,7 +616,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         // Stamp the user decl's span so every syn-built node
                         // (generated function bodies + synthesized call sites)
                         // attributes to this declaration's source line.
-                        Blade.Ast.synthSpan <- d.Span
+                        Blade.Ast.setSynthSpan (d.Span)
                         let mapped =
                             match d.Value with
                             | DeclFunction fd ->
@@ -658,7 +658,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5200" (Blade.Diagnostics.Codes.phaseOfCode "BL5200") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL5200" (Blade.Diagnostics.Codes.phaseOfCode "BL5200") (Blade.Ast.synthSpan ()) msg ])

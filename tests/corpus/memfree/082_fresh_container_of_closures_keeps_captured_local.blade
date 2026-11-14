@@ -1,0 +1,19 @@
+// TEST: A returned array of closures keeps the local its closures capture
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m7): `build` returns a FRESH array
+// literal whose element is a closure over its local y. The fresh outer
+// allocation used to stop escape propagation (no return seed for an array
+// literal), so y was freed at build's exit and `fs(0)(1.0)` read a freed
+// pool. A fresh pool whose ELEMENTS can hold storage now pins what it names.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+function wrap(a: Array<Float64 like I>) -> (Float64 -> Float64) = lambda(k: Float64) -> reduce(a, (+)) * k
+function build(x: Array<Float64 like I>) -> Array<(Float64 -> Float64) like One> = {
+    let y = x * 2.0 |> compute
+    [wrap(y)]
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let fs = build(x)
+let result = fs(0)(1.0)
+// EXPECT: result = 12.0

@@ -1,0 +1,13 @@
+// TEST: Fold Seed Extent Keeps Private Operand
+// Gap G214 / G218 (round 4 wave 8, Codex design review): the SEED reads only
+// the extent of the deferred operand d, which is no forcing use, so the fold
+// keeps evaluating d privately: d stays deferred and the read w after the
+// write to x evaluates it over the new x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p, (+), Float64(extents(d)))
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 18.0
+// EXPECT: w = 20.0

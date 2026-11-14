@@ -1,8 +1,11 @@
-// TEST: Tuple Member And Extent Force Their Inputs
+// TEST: Tuple Member Forces Its Inputs While Extent Reads Do Not
 // Gap G199: a tuple VALUE evaluates its deferred member as a copy, which
-// forces the member inputs (d) under their own names; extents(e) and a
-// wholly deferred tuple member are forcing reads of their maps too. Every
-// later read sees the cells of that force, not the written x.
+// forces the member inputs (d) under their own names, so z reads the cells
+// of that force, not the written x. extents(e) is NOT a forcing read (gap
+// G218, the user decision of 2026-11-13: an extent read of a deferred map
+// reads its static shape) and td is a wholly deferred tuple, so e is first
+// forced by the read a(0), after the write: ze sees the written x (the old
+// pin, 3.0, encoded the extent force).
 let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let d = method_for(x) <@> lambda(v) -> v * 2.0
 let p = method_for(d) <@> lambda(v) -> v + 1.0
@@ -16,4 +19,4 @@ let a = td[0]
 let ze = a(0)
 // EXPECT: n = 3
 // EXPECT: z = 2.0
-// EXPECT: ze = 3.0
+// EXPECT: ze = 30.0

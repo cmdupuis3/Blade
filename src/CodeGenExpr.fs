@@ -82,6 +82,22 @@ let (|InlineArrayCall|_|) (value: IRExpr) : unit option =
          | _ -> None)
     | _ -> None
 
+/// An inline PARTIAL subscript -- a row VIEW `d(j)` of a stored array -- as a
+/// fold's operand (gap G207 (ii)). A consumer that spells its operand per
+/// element read re-evaluated the view (and its BL8006 subscript check) per
+/// cell, AFTER the accumulator was seeded, so a failing seed beat an
+/// out-of-range row; the LLVM lane and the interpreter evaluate the view
+/// first (operand before seed). Bound once at the fold's own evaluation point,
+/// as a borrowed view descriptor (no copy, nothing to free). A partial sparse
+/// read keeps its gather arm (GatherTeardown).
+let (|InlineRowView|_|) (value: IRExpr) : unit option =
+    match value with
+    | IRIndex ((IRVar _ | IRParam _), _, _) when (partialSparseGatherTeardown value).IsNone ->
+        (match stripUnits (inferExprType value) with
+         | ArrayElem _ -> Some ()
+         | _ -> None)
+    | _ -> None
+
 /// Is `e` a canonicalizing compact read worth binding once when it is BOTH
 /// operands of a binary operator (`t(i, j, k) * t(i, j, k)`)? A full-cover
 /// read of a compact-group array whose array and coordinates are plain
@@ -145,7 +161,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
              && (match stripUnits (inferExprType expr) with
                  | IRTScalar _ | IRTIdxTagged _ -> true
                  | _ -> false) ->
-        bindInlineGathers subst names children (fun cs -> exprToCppCore subst names (rebuild cs))
+        bindInlineGathers subst names (exprMayRetain expr) children (fun cs -> exprToCppCore subst names (rebuild cs))
     | IRVar (id, _) ->
         // A reference to a lifted callable WITH captures cannot stand bare
         // in value position: the lifted C++ function carries trailing
@@ -389,7 +405,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // A partial sparse read as an operand: the loop below spells each
         // operand once per element, so an inline gather would be re-gathered
         // (and leaked) on every access. Bind it once and free it.
-        bindInlineGathers subst names args (fun args' -> exprToCppCore subst names (IRProdSum args'))
+        bindInlineGathers subst names false args (fun args' -> exprToCppCore subst names (IRProdSum args'))
     | IRProdSum args ->
         // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
         // rendered as an IIFE so it composes in any expression position --
@@ -1462,7 +1478,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     | IRVar (mid, _) when initExpr.IsNone && (Blade.Optimize.CompactionTable.tryFoldMap mid).IsSome ->
         renderCompactionFold names (Blade.Optimize.CompactionTable.tryFoldMap mid).Value kernelExpr
     | GatherTeardown _ ->
-        bindInlineGathers subst names [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
+        bindInlineGathers subst names (exprMayRetain (IRReduce (arrExpr, kernelExpr, initExpr))) [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
     // An inline ARRAY-RETURNING CALL as the operand (`1.0 + reduce(prep(A),
     // (+))`, a kernel body folding `prep(x)`): the fold below spells its
     // operand at every element read, the bound and the guard, so the call ran
@@ -1470,7 +1486,12 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // fold's own evaluation point (operand before seed, the interpreter's
     // order), fold the binding, free a caller-owned pool after the fold.
     | InlineArrayCall _ ->
-        bindInlineArrayCall subst names arrExpr (fun op -> renderReduceExpr subst names op kernelExpr initExpr)
+        bindInlineArrayCall subst names (exprMayRetain (IRReduce (arrExpr, kernelExpr, initExpr))) arrExpr (fun op -> renderReduceExpr subst names op kernelExpr initExpr)
+    // An inline ROW VIEW (`reduce(d(j), (+), s)`, gap G207 (ii)): bound once
+    // before the seed (bindInlineArrayCall frees only a call's pool; the
+    // retention flag is passed for the same reason as the call arm, G221).
+    | InlineRowView _ ->
+        bindInlineArrayCall subst names (exprMayRetain (IRReduce (arrExpr, kernelExpr, initExpr))) arrExpr (fun op -> renderReduceExpr subst names op kernelExpr initExpr)
     | _ ->
     // Inline reduction as an IIFE (mirrors genBinding's loop, wrapped in
     // `[&]() { ... }()` for expression context: kernel bodies, arithmetic).
@@ -1684,7 +1705,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
 /// freed. The consumer's result is a scalar, never a view into the binding,
 /// so the free cannot dangle. The IIFE sits where the fold sat, so the call
 /// is evaluated exactly once, at the fold's own point in evaluation order.
-and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (call: IRExpr) (render: IRExpr -> string) : string =
+and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (retains: bool) (call: IRExpr) (render: IRExpr -> string) : string =
     let fnv (t: string) =
         let mutable h = 2166136261u
         for c in t do
@@ -1694,10 +1715,13 @@ and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (call: IREx
     let ty = inferExprType call
     let cname = "__rcall" + fnv text
     let inner = render (IRParam (cname, 0, ty))
+    // gap G221: a consumer that may RETAIN the binding (a fold kernel storing
+    // its row) leaves it to the retainer -- no free (a leak, never a dangle)
     let free =
         match call, stripUnits ty with
         | IRApp (f, _, _), ArrayElem at
-            when freshReturnOf f = FreshPool
+            when not retains
+                 && freshReturnOf f = FreshPool
                  && isFreeableDenseArrayType at
                  && classifyOutputStorage ty = AllocDense
                  && not (hasRealSymmetry (buildSymmVec ty)) ->
@@ -1716,7 +1740,7 @@ and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (call: IREx
 /// the gather, so the free cannot dangle. The binding's name is a hash of the
 /// gather's own text: deterministic, and distinct gathers in one IIFE (or a
 /// nested one) cannot collide; an identical operand repeated is bound once.
-and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (operands: IRExpr list) (render: IRExpr list -> string) : string =
+and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (retains: bool) (operands: IRExpr list) (render: IRExpr list -> string) : string =
     let fnv (t: string) =
         let mutable h = 2166136261u
         for c in t do
@@ -1734,7 +1758,12 @@ and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (operands: IR
     if List.isEmpty binds then render operands
     else
         let decls = binds |> List.map (fun (n, t, _) -> $"auto {n} = {t};") |> String.concat " "
+        // gap G221 (Codex design review d71e628b, the ninth member): a consumer
+        // that may RETAIN a gather (`keep(F((0, _)))` storing its argument)
+        // leaves it to the retainer -- no teardown (a leak, never a dangle)
         let frees =
+            if retains then ""
+            else
             binds |> List.rev
             |> List.map (fun (n, _, r) -> $"nested_array_utilities::{r}({n});") |> String.concat " "
         let inner = render (bound |> List.map snd)
@@ -1826,7 +1855,10 @@ and kernelLetCopy (subst: SubstMap) (names: Map<IRId, string>) (id: IRId) (value
 and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : string =
     // For inline let expressions, we need statement context
     let names' = Map.add id ($"__v{id}") names
-    if isUnitExpr value then
+    // a let CHAIN ending in a statement is a statement too (gap G227: the
+    // lift pass binds an array literal assigned inside a kernel block --
+    // `{ out = [1.0, 2.0, 3.0]; 1.0 }` -- as `let t = [..]; out = t`)
+    if isUnitValue value then
         // Unit-valued binding. lowerTypedBlock sequences STATEMENTS
         // (assignments, for-in loops) through dummy lets, so a unit value
         // here is normally a side-effecting statement, not dead code. Render
@@ -1837,11 +1869,15 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         let stmtPrelude = renderUnitStmts subst names value
         if stmtPrelude = "" then
             // Genuinely effect-free (unit literal).
-            if isUnitExpr body then
-                "((void)0)"
+            if isUnitValue body then
+                // a statement tail (an assignment, a loop) is rendered, never
+                // dropped (gap G227, Codex design review)
+                (match renderUnitStmts subst names' body with
+                 | "" -> "((void)0)"
+                 | stmts -> $$"""([&]() { {{stmts}} }())""")
             else
                 exprToCppCore subst names' body
-        elif isUnitExpr body then
+        elif isUnitValue body then
             // Effectful value, unit body: whole let is a void expression.
             let bodyStmts = renderUnitStmts subst names' body
             let stmts = [stmtPrelude; bodyStmts] |> List.filter (fun s -> s <> "") |> String.concat " "
@@ -1868,18 +1904,20 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         // there is no statement scope whose exit could carry a free. Drop the
         // descriptors (unchanged pre-existing leak).
         | Some (preludeStmts, _) ->
-            let bodyStr =
-                if isUnitExpr body then "((void)0)"
-                else exprToCppCore subst names' body
             let prelude = preludeStmts |> String.concat " "
-            $$"""([&]() { {{prelude}} return {{bodyStr}}; }())"""
+            // a statement body (an assignment of the materialized value, gap
+            // G227) is RENDERED, never dropped as a no-op
+            if isUnitValue body then
+                $$"""([&]() { {{prelude}} {{(renderUnitStmts subst names' body)}} }())"""
+            else
+                $$"""([&]() { {{prelude}} return {{(exprToCppCore subst names' body)}}; }())"""
         | None ->
         match kernelLetCopy subst names id value body with
         | Some (copyStmts, frees) ->
             // G46: a private deep copy of an existing dense array
             let prelude = copyStmts |> String.concat " "
             let fr = frees |> String.concat " "
-            if isUnitExpr body then
+            if isUnitValue body then
                 $$"""([&]() { {{prelude}} {{(renderUnitStmts subst names' body)}} {{fr}} }())"""
             elif frees.IsEmpty then
                 $$"""([&]() { {{prelude}} return {{(exprToCppCore subst names' body)}}; }())"""
@@ -1890,7 +1928,7 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
             match body with
             | IRLit IRLitUnit ->
                 $$"""([&]() { auto __v{{id}} = {{valStr}}; }())"""
-            | b when isUnitExpr b ->
+            | b when isUnitValue b ->
                 // Unit-typed but effectful tail (assignment / for-in as the
                 // block's last statement): emit its statement form rather
                 // than a `return` of a statement expression.
@@ -1946,7 +1984,7 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // mirroring renderLetExpr's expression-position handling.
         let names' = Map.add letId ($"__v{letId}") names
         let (valueStmt, frees) =
-            if isUnitExpr value then
+            if isUnitValue value then
                 (renderUnitStmts subst names value, "")
             else
                 // Lazy for the same reason as renderLetExpr's site above: this
@@ -1979,7 +2017,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
     // `extents(S((k, _)))` inline: one gather, bound and freed (it leaked).
     match arr with
     | GatherTeardown _ ->
-        bindInlineGathers subst names [ arr ] (fun ops -> renderExtentExpr subst names (List.head ops) dim)
+        bindInlineGathers subst names false [ arr ] (fun ops -> renderExtentExpr subst names (List.head ops) dim)
     // GROUP i's LENGTH, `extents(grouped(i))` (G1): read off the offsets the
     // grouped value's extents table carries (emitGroupedExtentsTable) -- the
     // row view is a bare pointer with no length of its own.

@@ -1,0 +1,21 @@
+// TEST: A Mut Argument Read By A Closure In An Array Literal Is Refused (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; wave-8 fable review): a callee
+// that APPLIES an element of an array of closures (`fns(0)(x)`) has unknown
+// reads; the closure captures the `mut` argument `g`, so the call is refused
+// FAIL CLOSED (BL4005, every lane). (The ad.grad form of this program is
+// refused earlier by grad itself, BL5500: an applied array element is no
+// named call.) Only callees with mut parameters are judged.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let fns = [factory(g)]
+function f(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    fns(0)(1.0)
+}
+let result = f(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

@@ -1,0 +1,41 @@
+// TEST: A producer that exports its return through a nested capture declines owned moves
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221; found by the Codex diff review d71e628b
+// round 5): the same exporting producer as memfree/098 at either end of an
+// owned move -- as the TARGET (`let mut y = prep(x); y = w` freed the pool
+// saved.a names) and as the SOURCE (`y = prep(x)` moved it into y, freed at
+// g's exit). Both moves now decline: prep is NotFresh.
+// ============================================================================
+type I = Idx<3>
+struct Box {
+    a: Array<Float64 like I>
+}
+let mut saved = Box { a = [0.0, 0.0, 0.0] }
+function prep(x: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let y = x * 2.0 |> compute
+    function keep(k: Int64) -> Int64 = {
+        saved.a = y
+        k
+    }
+    let n = keep(0)
+    y
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let mut y = prep(x)
+    let w = x * 5.0 |> compute
+    y = w
+    reduce(y, (+)) + reduce(saved.a, (+))
+}
+function g(x: Array<Float64 like I>) -> Float64 = {
+    let mut y = x * 5.0 |> compute
+    let w = prep(x)
+    y = w
+    reduce(y, (+))
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let r1 = f(x)
+let r2 = g(x)
+let r3 = reduce(saved.a, (+))
+// EXPECT: r1 = 42.0
+// EXPECT: r2 = 12.0
+// EXPECT: r3 = 12.0

@@ -1,0 +1,13 @@
+// TEST: Choice Operand Stays Deferred
+// Gap G213 (round 4 wave 8): the choice c = d <|> x is stored by the fold
+// over it, but its operand d is evaluated as a copy: d stays deferred, so the
+// read z after the write to x evaluates d over the written x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let c = d <|> x
+let w = reduce(c, (+), 0.0)
+x(0) = 10.0
+let z = d(0)
+// EXPECT: c = [2.0, 4.0, 6.0]
+// EXPECT: w = 12.0
+// EXPECT: z = 20.0

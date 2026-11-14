@@ -286,7 +286,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         declsNoImport |> List.fold (fun acc d ->
             acc |> Result.bind (fun out ->
                 // Stamp the user decl's span so every syn-built node attributes to this declaration's source line.
-                Blade.Ast.synthSpan <- d.Span
+                Blade.Ast.setSynthSpan (d.Span)
                 let mapped =
                     match d.Value with
                     | DeclFunction fd ->
@@ -316,7 +316,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// -- reusing a sibling's code would render a display failure under that
 /// sibling's phase name (Diagnostics.Codes.phaseOfCode).
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5700" (Blade.Diagnostics.Codes.phaseOfCode "BL5700") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL5700" (Blade.Diagnostics.Codes.phaseOfCode "BL5700") (Blade.Ast.synthSpan ()) msg ])

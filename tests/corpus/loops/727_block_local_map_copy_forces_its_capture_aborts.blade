@@ -1,0 +1,9 @@
+// TEST: a copied block-local map forces its kernel capture (aborts)
+// Gap G216 (round 4 wave 8): the block-local map p captures the failing
+// deferred d (read only through extents) and is consumed as a copy. The
+// capture is forced where p is consumed, so d fails (BL8013) in every lane
+// (the LLVM lane printed [4, 3, 6]).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let z = { let p = method_for(x) <@> lambda(v) -> v + extents(d); p |> compute }
+// ABORT: BL8013

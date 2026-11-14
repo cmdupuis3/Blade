@@ -1,0 +1,32 @@
+// TEST: A producer that exports its return through a nested capture keeps the staging copy
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221; found by the Codex diff review d71e628b
+// round 5): `prep` returns y after a nested function that CAPTURES y stored
+// it in `saved.a`; the fresh-return census did not see the capture, so prep
+// was FreshPool and `let mut z = y` aliased the pool saved still names
+// (210.0 instead of 112.0). A callable capturing the returned let now demotes
+// the producer to NotFresh.
+// ============================================================================
+type I = Idx<3>
+struct Box {
+    a: Array<Float64 like I>
+}
+let mut saved = Box { a = [0.0, 0.0, 0.0] }
+function prep(x: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let y = x * 2.0 |> compute
+    function keep(k: Int64) -> Int64 = {
+        saved.a = y
+        k
+    }
+    let n = keep(0)
+    y
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = prep(x)
+    let mut z = y
+    z(0) = 100.0
+    reduce(z, (+)) + saved.a(0)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 112.0

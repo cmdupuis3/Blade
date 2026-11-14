@@ -1,0 +1,16 @@
+// TEST: A Later Private Operand Still Forces Its Captures Before The Seed (aborts)
+// Gap G207 (iii) (round 4 wave 8 lane d; Codex diff review round 1): the
+// first private operand `e` succeeds; the second, `f`, captures `h`, which
+// is forced whole (integer division by zero at cell 2) before the seed
+// `7 % z`. The LLVM lane re-pointed the first operand slot before forcing
+// the second operand captures, so the capture force was declined and the
+// seed failed first.
+// ABORT: integer division by zero
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 2, 3]
+let z: Int64 = 0
+let e = method_for(d) <@> lambda(a) -> a + 1
+let h = method_for(d) <@> lambda(a) -> 100 / (a - 3)
+let f = method_for(d) <@> lambda(a) -> a + h(0)
+let p = method_for(zip(e, f)) <@> lambda(a, b) -> a + b
+let s = reduce(p, (+), 7 % z)

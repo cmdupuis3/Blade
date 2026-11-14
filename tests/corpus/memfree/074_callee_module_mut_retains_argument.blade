@@ -1,0 +1,25 @@
+// TEST: A callee storing its argument in a module mut keeps the caller local alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m1): `keep` stores its array
+// argument in the module mut `saved`; f called it on its local y and the C++
+// lane freed y at f's scope exit, so printing `saved` read a freed pool
+// (AddressSanitizer heap-use-after-free). The retention facts
+// (Optimize.retentionAnalyzer) now pin every binding a retaining statement
+// names: y is owned by `saved` from the call on.
+// ============================================================================
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let mut y = x * 2.0 |> compute
+    let n = keep(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + saved(0) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 23.0
+// EXPECT: saved = [2.0, 4.0, 6.0]

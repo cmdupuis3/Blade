@@ -2439,7 +2439,14 @@ deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
 map (one that writes nothing, so it keeps the deferred reading above) is
 evaluated where a FORCING USE reads it: a positional read, a capture by a
 kernel, an eager array operation (`sort`, the set operations, `group_by`,
-...), a call argument, or `|> compute`. A CAPTURE is made when its kernel is
+...), a call argument, or `|> compute`. An EXTENT or RANK read (`extents(g)`, `rank(g)`, a range bound
+`0..extents(g)`) is not a forcing use: it reads the static shape the map's
+type carries and evaluates nothing (gap G218; a map whose extent is known only
+at run time is still forced there, gap G234) -- but a kernel that captures `g`
+and reads only `extents(g)` still captures it (below). A capture also forces a
+map that the same traversal reads as an operand or folds as its own spine,
+once, under its own name: the traversal then reads that snapshot (gap G214).
+A CAPTURE is made when its kernel is
 formed for a traversal -- a map, a fold, a join -- so the captured map is
 forced before that traversal's FIRST cell, captures of the join's leg kernels
 and then its fold kernels in order, even when the kernel reads it only at a

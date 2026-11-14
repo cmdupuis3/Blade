@@ -294,6 +294,69 @@ let private rowFoldRk4Emission () =
             resultLine Fail name ($"expected no post-recursion fold in kernel; got found={start >= 0} postFold={postFold}")
             false
 
+/// Gap G221: the scope-exit frees of `f` around a call of a RETAINING callee
+/// (keep stores its argument in a module mut: y is pinned, only z is freed)
+/// and of a NON-retaining twin (tally stores a scalar: both y and z are
+/// freed) -- the fix is "do not free what a retainer holds", never "free
+/// nothing". corpus memfree/074 and memfree/089.
+let private retentionFreeCases () : bool list =
+    let src (callee: string) (body: string) (useExpr: string) =
+        "type I = Idx<3>\n"
+        + "let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]\n"
+        + "let mut total: Float64 = 0.0\n"
+        + $"function {callee}(a: Array<Float64 like I>) -> Int64 = {{\n    {body}\n    3\n}}\n"
+        + "function f(x: Array<Float64 like I>) -> Float64 = {\n"
+        + "    let y = x * 2.0 |> compute\n"
+        + $"    let n = {callee}(y)\n"
+        + "    let z = x * 3.0 |> compute\n"
+        + $"    reduce(z, (+)) + {useExpr} + Float64(n)\n"
+        + "}\n"
+        + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+        + "let result = f(x)\n"
+    let case (name: string) (s: string) (expected: int) (what: string) =
+        match cppOfSource name s with
+        | Error e -> resultLine Fail name e; false
+        | Ok cpp ->
+            // f is a main-local lambda when it captures, a free function otherwise
+            let lam = cpp.IndexOf "> f = [&](Array<double, 1> x) -> double {"
+            let fn = cpp.IndexOf "double f(Array<double, 1> x) {"
+            let (start, close) = if lam >= 0 then (lam, "\n    };") else (fn, "\n}\n")
+            let body = if start < 0 then "" else cpp.Substring(start, cpp.IndexOf(close, start) - start)
+            let frees = System.Text.RegularExpressions.Regex.Matches(body, @"deallocate<typename promote<double, 1>").Count
+            if start >= 0 && frees = expected then resultLine Pass name what; true
+            else resultLine Fail name ($"expected {expected} frees in f; got found={start >= 0} frees={frees}"); false
+    // the fresh-return facts (Codex diff review d71e628b rounds 5-6): a
+    // producer whose nested function captures and STORES its returned let is
+    // NotFresh (f keeps prep's result: no free), one whose capturing lambda
+    // is a pure local reader stays FreshPool (f frees it)
+    let prepSrc (inner: string) (call: string) =
+        "type I = Idx<3>\n"
+        + "struct Box {\n    a: Array<Float64 like I>\n}\n"
+        + "let mut saved = Box { a = [0.0, 0.0, 0.0] }\n"
+        + "function prep(x: Array<Float64 like I>) -> Array<Float64 like I> = {\n"
+        + "    let y = x * 2.0 |> compute\n"
+        + inner
+        + $"    let n = {call}\n"
+        + "    y(0) = Float64(n) + 1.0\n"
+        + "    y\n"
+        + "}\n"
+        + "function f(x: Array<Float64 like I>) -> Float64 = {\n"
+        + "    let y = prep(x)\n"
+        + "    reduce(y, (+))\n"
+        + "}\n"
+        + "let x: Array<Float64 like I> = [1.0, 2.0, 3.0]\n"
+        + "let result = f(x)\n"
+    [ case "retention_pins_argument_of_retaining_callee" (src "keep" "saved = a" "saved(0)") 1
+          "f frees z only: y is held by `saved` after keep(y)"
+      case "retention_non_retaining_callee_keeps_the_free" (src "tally" "total = reduce(a, (+))" "total") 2
+          "f frees y and z: tally stores only a scalar"
+      case "fresh_return_exporting_capture_keeps_the_result"
+          (prepSrc "    function keep(k: Int64) -> Int64 = {\n        saved.a = y\n        k\n    }\n" "keep(0)") 0
+          "f keeps prep's result: a nested function of prep stores it in saved.a"
+      case "fresh_return_pure_local_reader_keeps_the_free"
+          (prepSrc "    let read = lambda(k: Int64) -> Int64(floor(y((k : I))))\n" "read(0)") 1
+          "f frees prep's result: prep's capturing lambda only reads it" ]
+
 /// The emission half of the pin: in the fused kernel no call to `step`, no
 /// slice copy and no per-step free remain -- one scalar chain per cell
 /// stored into the trajectory row.
@@ -11283,6 +11346,25 @@ let private sfStoredExtentControlSrc =
     + "}\n"
     + "let r = stats(0.0)\n"
 
+// Round 4 wave 8 (lane b, gap G214): the C++ fold over a deferred operand
+// keeps its PRIVATE evaluation only where nothing else names the operand
+// (corpus loops/711); a kernel capture forces it under its own name instead
+// (loops/705). Both recorded under `deferred-capture-force`.
+let private g214Head =
+    "let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
+    + "let d = method_for(x) <@> lambda(v) -> v * 2.0\n"
+let private wave8DeferredCaptureForceCases () : bool list =
+    [ codegenDecisionCase "decision_deferred_capture_force_private_kept"
+          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
+          "deferred-capture-force"
+          (fun d -> d.Subject = "s" && not (applied d))
+          "declined: no kernel, seed or alias names d, so the fold evaluates it privately"
+      codegenDecisionCase "decision_deferred_capture_force_capture_applies"
+          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + Float64(extents(d))\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
+          "deferred-capture-force"
+          (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "forced once under their own names"))
+          "applied: the kernel captures d, so d is forced once under its own name (G214)" ]
+
 let private wave7SiblingFoldCases () : bool list =
     let joinedIn (subject: string -> bool) (ds: Blade.Effects.Decision list) =
         ds |> List.exists (fun d -> d.Rule = "sibling-folds" && subject d.Subject && applied d)
@@ -11325,6 +11407,27 @@ let private wave7SiblingFoldCases () : bool list =
           "pool-reuse"
           (fun d -> d.Subject = "f" && declinedMentioning "no candidate pool is both dead and unaliased" d)
           "declined: a call in a range bound that may retain y keeps z off y's pool"
+      // G221 m8 (memfree/085): a LAMBDA row kernel that retains its row is a
+      // callable reference, not an IRApp -- the retention facts keep z off y
+      decisionCase "decision_pool_reuse_retaining_lambda_kernel_declined"
+          ("type R = Idx<2>\n"
+           + "type I = Idx<3>\n"
+           + "let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]\n"
+           + "function keep(a: Array<Float64 like I>) -> Int64 = {\n"
+           + "    saved = a\n"
+           + "    3\n"
+           + "}\n"
+           + "function f(x: Array<Float64 like R, I>) -> Float64 = {\n"
+           + "    let y = x * 2.0 |> compute\n"
+           + "    let ns = method_for(y) <@> lambda(r) -> keep(r) + 1 |> compute\n"
+           + "    let z = x * 3.0 |> compute\n"
+           + "    reduce(z, (+), axes = 2) + saved(0) + Float64(reduce(ns, (+)))\n"
+           + "}\n"
+           + "let x: Array<Float64 like R, I> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n"
+           + "let result = f(x)\n")
+          "pool-reuse"
+          (fun d -> d.Subject = "f" && declinedMentioning "no candidate pool is both dead and unaliased" d)
+          "declined: a lambda row kernel that may retain y keeps z off y's pool"
       (let name = "decision_sibling_folds_body_imported_deferred_extent_not_joined"
        let sources =
            [ ("Lib", "module Lib\ntype I = Idx<3>\nlet iv: Array<Int64 like I> = [1, 0, 2]\nlet d = method_for(iv) <@> lambda(v) -> Float64(100 / v)\n")
@@ -13397,6 +13500,7 @@ let runOptimizeTests () =
           decisionCase "decision_row_fold_declined_while" rowFoldWhileSrc "row-fold-fusion"
               (declinedMentioning "freeze") "declined: a while-guarded recursion rewrites rows after the loop"
           rowFoldRk4Emission ()
+          yield! retentionFreeCases ()
           // Recursive-array windowing (rec-window): each corpus witness's
           // decision, and the ring's emission both ways.
           yield! recWindowCorpusCases ()
@@ -13733,6 +13837,7 @@ let runOptimizeTests () =
           yield! decompactRowFoldCases ()
           yield! wave6ClassClosureCases ()
           yield! wave7SiblingFoldCases ()
+          yield! wave8DeferredCaptureForceCases ()
           yield! ceRemainderCases ()
           yield! g98DeferredValueCases ()
           // Fold-of-map elision (BLADE_FOLD_MAP_ELIDE): the PM12 centering temporary.

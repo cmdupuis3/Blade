@@ -396,6 +396,27 @@ let forcedDeferredIdsCell () : Set<int> ref =
         fresh
     else v
 
+/// The holder names a FUNCTION BODY's private forces of module deferred maps
+/// (gap G75) have declared so far, innermost body on top (G190 (b)). A body
+/// forces such a map once per reading STATEMENT (the statement pre-pass of
+/// genFuncBodyScoped and genForRangeBinding), each force at the body's own
+/// scope, so a second force of the same map -- an ad.grad derivative's forward
+/// and reverse sweep, two scalar lets -- used to redeclare `forcing` /
+/// `forcing_extents` in one C++ scope. forceDeferredArrayInput consults the
+/// top set: a name already declared there takes a fresh `__bfh<id>_<name>`
+/// holder. Empty stack = main's top level (forces there are memoized and
+/// never repeat). Reset per program assembly.
+let internal bodyForceNamesStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.HashSet<string> list ref>()
+
+let bodyForceNamesCell () : System.Collections.Generic.HashSet<string> list ref =
+    let v = bodyForceNamesStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        bodyForceNamesStorage.Value <- fresh
+        fresh
+    else v
+
 /// main()'s FLAT tuples: the module-level ctx.TupleChildren genModule /
 /// genModuleSplit end with (C++ name -> the flat leaf names). Every fusion /
 /// join emitter builds ONE flat `std::make_tuple(t_0, t_1, t_2)` while the
@@ -1776,6 +1797,7 @@ let resetProgramStateCells () : unit =
     freshCell externalSortUsedStorage false
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
+    freshCell bodyForceNamesStorage []
     freshCell moduleTupleChildrenStorage Map.empty
     freshCell flatTupleIdsStorage Set.empty
     cudaKernelDefsStorage.Value <- DeclCollector()
@@ -1909,6 +1931,14 @@ let isUnitExpr (expr: IRExpr) : bool =
     | IRAssign _ -> true
     | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ -> true
     | _ -> false
+
+/// isUnitExpr through a let CHAIN: `let t = [..]; out = t` is a statement
+/// (gap G227: the lift pass binds an array literal assigned inside a kernel
+/// block this way; rendered as a value it became `auto x = void`, BL9002).
+let rec isUnitValue (expr: IRExpr) : bool =
+    match expr with
+    | IRLet (_, _, body) -> isUnitValue body
+    | _ -> isUnitExpr expr
 
 let emptyContext () = {
     VarNames = Map.empty

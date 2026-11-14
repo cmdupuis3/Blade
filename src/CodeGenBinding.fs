@@ -2117,6 +2117,27 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let (capForceCode, ctx) =
             collectDeferredKernelCaptures ctx info'.Kernel
             |> forceDeferredBindingIds ctx builder ($"{name}__cap")
+        // THE STRUCTURAL SOURCE of a range index (gap G225): the KEYS of a
+        // `range<SparseIdx<keys>>` / the MASK of a `range<CompoundIdx<m>>`
+        // that is a still-deferred map is read BY NAME by the range driver's
+        // index build, so it is materialized (under its own name, as a capture
+        // is) before the nest -- after the kernel captures, the interpreter's
+        // order (G207 (2): captures in capture order, then the keys / mask).
+        // It used to reach the driver undeclared (BL9002).
+        let (srcForceCode, ctx) =
+            info'.Arrays
+            |> List.collect (function
+                | IRRange (ixs, _) ->
+                    ixs |> List.choose (fun ix ->
+                        match ix.Extent with
+                        | IRSparseKeys (SkRuntime (IRVar (kid, _))) -> Some kid
+                        | IRCompoundMask (IRVar (mid, _)) -> Some mid
+                        | _ -> None)
+                | _ -> [])
+            |> List.distinct
+            |> List.filter (fun id -> Map.containsKey id ctx.DeferredComputations)
+            |> forceDeferredBindingIds ctx builder ($"{name}__src")
+        let capForceCode = capForceCode @ srcForceCode
         // Hot-row fold scheduling: hand the plan to the apply emitter by the
         // output's NAME, for the duration of this one emission (the
         // function-body twin is CodeGen's IRCompute(IRApplyCombinator) arm).
@@ -4153,6 +4174,25 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
 /// rendering. `tmpBase` names the synthetic temporary when the input is an
 /// inline computation (and is the fallback name for a deferred binding
 /// missing from VarNames); pass a distinct base per input slot.
+/// The C++ holder name of a force of a deferred binding (G190 (b)): inside a
+/// function body (bodyForceNamesCell non-empty) a name an earlier force of
+/// THIS body already declared takes a fresh holder, so a map the body
+/// re-evaluates per reading statement (G75) never redeclares its holder; the
+/// first force keeps the plain name, a re-force takes `__bfh<id>_<name>`. At
+/// main's top level the name is kept.
+and bodyForceHolderName (builder: IRBuilder) (name: string) : string =
+    match (bodyForceNamesCell ()).Value with
+    | top :: _ ->
+        // a compiler-reserved `__bfh<id>_` stem: the bare `<name>__p<id>`
+        // could be a user parameter's spelling (Codex design review round 2)
+        let rec fresh () =
+            let n = $"__bfh{builder.FreshId()}_{name}"
+            if top.Contains n then fresh () else n
+        let chosen = if top.Contains name then fresh () else name
+        top.Add chosen |> ignore
+        chosen
+    | [] -> name
+
 and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (expr: IRExpr) : string list * CodeGenContext * IRExpr =
     match expr with
     | IRVar (srcId, ty) when Map.containsKey srcId ctx.DeferredComputations
@@ -4167,7 +4207,7 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
         // top level both join the auto-print list, as the interpreter's force
         // and the llvm lane's markForced record them.
         let rootId = ctx.DeferredAliasOf.[srcId]
-        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase
+        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase |> bodyForceHolderName builder
         let (rootCode, ctxR, _) = forceDeferredArrayInput ctx builder ($"{tmpBase}__src") (IRVar (rootId, ty))
         let ctxR = { ctxR with DeferredComputations = Map.remove srcId ctxR.DeferredComputations
                                DeferredAliasOf = Map.remove srcId ctxR.DeferredAliasOf }
@@ -4182,7 +4222,7 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
         // from the deferred map: later consumers (including a second
         // rearrangement over the same binding) must see the materialized
         // array, not re-force it into a C++ redefinition.
-        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase
+        let srcName = Map.tryFind srcId ctx.VarNames |> Option.defaultValue tmpBase |> bodyForceHolderName builder
         let matBinding = { Id = srcId; Name = srcName; Type = ty; Value = IRCompute (IRVar (srcId, ty)); IsConst = true; IsMutable = false }
         let (code, ctx1) = genBinding ctx matBinding builder
         let ctx1 = { ctx1 with DeferredComputations = Map.remove srcId ctx1.DeferredComputations }
@@ -6080,6 +6120,25 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
 
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
+    // A FOLD KERNEL CAPTURE of a deferred map over a STORED operand
+    // (`reduce(x, lambda(a, b) -> a + b + d(1), 0.0)`) is a forcing use made
+    // before the traversal, under the map's own name (formalism 10.2, gap
+    // G214; Codex diff review round 1): the kernel forwards `d` by name, and
+    // `d` was only a deferred comment (BL9002), its failure never evaluated
+    // once the interpreter stopped forcing on an extent read (G218).
+    let capIds =
+        (match kernelExpr with IRTuple ks -> ks | k -> [ k ])
+        |> List.collect (collectDeferredKernelCaptures ctx)
+        |> List.distinct
+        |> List.filter (fun id ->
+            match Map.tryFind id ctx.DeferredComputations with
+            | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRChoice _ | IRFallback _ | IRVar _) -> true
+            | _ -> false)
+    let (capLines, ctx) = capIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__fcap")
+    let (code, ctx') = genReduceBindingInner ctx binding builder arrExpr kernelExpr initExpr
+    (capLines @ code, ctx')
+
+and genReduceBindingInner (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
     // sort-terminal v1 (D5 / G127): the sort fed this fold in sorted order
     match Blade.OptimizeSort.SortTerminalTable.tryFold binding.Id |> Option.bind (fun tp -> tp.Fed.Value) with
     | Some acc ->
@@ -6130,7 +6189,11 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         let gatherLine = $"{ind}auto {gname} = {exprToCppCtx ctx arrExpr};"
         let (lines, ctx') =
             genReduceBinding ctx binding builder (IRParam (gname, 0, inferExprType arrExpr)) kernelExpr initExpr
-        ([ gatherLine ] @ lines @ [ $"{ind}nested_array_utilities::{routine}({gname});" ], ctx')
+        // gap G221: a fold kernel that may RETAIN the gather keeps it alive
+        let teardown =
+            if exprMayRetain (IRReduce (arrExpr, kernelExpr, initExpr)) then []
+            else [ $"{ind}nested_array_utilities::{routine}({gname});" ]
+        ([ gatherLine ] @ lines @ teardown, ctx')
     // An inline ARRAY-RETURNING CALL as the operand: the fold below spells its
     // operand at every element read, so the call ran n + 1 times and leaked
     // every pool. Bind it once right before the fold (operand before seed, the
@@ -6148,12 +6211,25 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
             match arrExpr, stripUnits ty with
             | IRApp (f, _, _), ArrayElem at
                 when freshReturnOf f = FreshPool
+                     && not (exprMayRetain (IRReduce (arrExpr, kernelExpr, initExpr)))
                      && isFreeableDenseArrayType at
                      && classifyOutputStorage ty = AllocDense
                      && not (hasRealSymmetry (buildSymmVec ty)) ->
                 [ $"{ind}deallocate<typename promote<{elemTypeToCpp at.ElemType}, {arrayRank at}>::type, nullptr>({cname}.data, {cname}.extents);" ]
             | _ -> []
         ([ callLine ] @ lines @ free, ctx')
+    // An inline ROW VIEW as the operand (`reduce(d(j), (+), 7 % z)`, gap G207
+    // (ii)): the fold below re-evaluated the view -- and its BL8006 subscript
+    // check -- at every element read, after the seed. Bound once before the
+    // seed (operand before seed, the LLVM lane's and the interpreter's order),
+    // a borrowed view: nothing to free.
+    | InlineRowView _, _ ->
+        let ind = indentStr ctx
+        let vname = (bindingCppName binding) + "__view"
+        let ty = inferExprType arrExpr
+        let viewLine = $"{ind}auto {vname} = {exprToCppCtx ctx arrExpr};"
+        let (lines, ctx') = genReduceBinding ctx binding builder (IRParam (vname, 0, ty)) kernelExpr initExpr
+        ([ viewLine ] @ lines, ctx')
     // Compaction fusion (B4a/c): the fold of a planned `y * y` reads `y`'s
     // compact buffer (CodeGenExpr.renderCompactionFold); its map let emitted
     // only a comment.
@@ -6926,6 +7002,20 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
         match kernelExpr, seedExpr with
         | IRTuple ks, IRTuple ss -> ks.Length = ss.Length && ks.Length >= 2
         | _ -> false
+    let rec dResolve (dc: Map<IRId, IRExpr>) e =
+        match e with
+        | IRVar (id, _) -> (match Map.tryFind id dc with Some d -> dResolve dc d | None -> e)
+        | _ -> e
+    let rec dLeaves (dc: Map<IRId, IRExpr>) e =
+        match dResolve dc e with
+        | IRFusion (l, r) -> dLeaves dc l @ dLeaves dc r
+        | other -> [ other ]
+    let rec dOnSpine (dc: Map<IRId, IRExpr>) (id: IRId) e =
+        match e with
+        | IRVar (vid, _) when vid = id -> true
+        | IRVar (vid, _) -> (match Map.tryFind vid dc with Some d -> dOnSpine dc id d | None -> false)
+        | IRFusion (l, r) -> dOnSpine dc id l || dOnSpine dc id r
+        | _ -> false
     let deferredOperandIds =
         if isJoin then [] else
         let rec resolve e =
@@ -7003,9 +7093,14 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
         (leafKernels @ foldKernels)
         |> List.collect (collectDeferredKernelCaptures ctx)
         |> List.distinct
+        // G214 (the user decision of 2026-11-13, formalism 10.2): a kernel
+        // CAPTURE of a deferred binding forces it ONCE under its own name --
+        // also when the fold reads the same binding as a private OPERAND or
+        // as its own spine. The private evaluation below is an optimization
+        // kept only where nothing else names the operand; it used to win, so
+        // `x(0) = 10.0; let w = d(0)` after the fold re-evaluated d (20.0
+        // where the interpreter's snapshot reads 2.0).
         |> List.filter (fun id ->
-            not (List.contains id deferredOperandIds)
-            && not (onSpine id compExpr)
             // a map -- or, in a FUNCTION BODY (a nested scope: the force
             // there is block-scoped and never prints), a name bound to one
             // through a chain of deferred references: a projection of a
@@ -7017,22 +7112,101 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
             // of forceDeferredArrayInput, the member under its own name
             // first, then the projection as its copy -- both print, the
             // alias-class rule the interpreter applies.
-            && (let rec isMap (seen: Set<IRId>) (id: IRId) =
-                    match Map.tryFind id ctx.DeferredComputations with
-                    | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
-                    | Some (IRVar (r, _)) when (ctx.Indent > 0 || Map.containsKey id ctx.DeferredAliasOf)
-                                              && not (seen.Contains r) -> isMap (seen.Add r) r
-                    | _ -> false
-                isMap (Set.singleton id) id))
+            let rec isMap (seen: Set<IRId>) (id: IRId) =
+                match Map.tryFind id ctx.DeferredComputations with
+                | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _) -> true
+                // a captured deferred GUARD / CHOICE / FALLBACK is a capture
+                // too (G214 / G218, Codex diff review round 1: it used to be
+                // evaluated only by the interpreter's extent force)
+                | Some (IRGuard _ | IRChoice _ | IRFallback _) -> true
+                | Some (IRVar (r, _)) when (ctx.Indent > 0 || Map.containsKey id ctx.DeferredAliasOf)
+                                          && not (seen.Contains r) -> isMap (seen.Add r) r
+                | _ -> false
+            isMap (Set.singleton id) id)
+    // A captured SPINE binding (the fold's own operand named by a kernel,
+    // `reduce(p, lambda(a, b) -> a + b + Float64(extents(p)), 0.0)`; it was a
+    // BL9001 ICE): forced under its own name with the other captures, then
+    // the fold reads the stored snapshot (genReduceBinding: a full fold for a
+    // rank-1 operand; a deeper one is a recorded backend limit, gap G233).
+    // (a spine binding forced INDIRECTLY counts too: a captured map of the
+    // spine forces it as its input, Codex diff review round 1)
+    let spineIds =
+        let rec go (e: IRExpr) =
+            match e with
+            | IRVar (vid, _) -> vid :: (match Map.tryFind vid ctx.DeferredComputations with Some d -> go d | None -> [])
+            | IRFusion (l, r) -> go l @ go r
+            | _ -> []
+        go compExpr |> List.filter (fun id -> Map.containsKey id ctx.DeferredComputations)
+    // a SEED reading a cell of the spine forces it under its own name too
+    // (gap G248: `reduce(p, (+), p(0))`), so the fold reads its snapshot
+    let seedReadsSpine =
+        collectDeferredPositionalReads ctx seedExpr |> List.exists (fun id -> List.contains id spineIds)
     let (capForceLines, ctx) = deferredCaptureIds |> forceDeferredBindingIds ctx builder ($"{bindingCppName binding}__cap")
+    let spineCaptured = seedReadsSpine || spineIds |> List.exists (fun id -> not (Map.containsKey id ctx.DeferredComputations))
     let prelude = prelude @ capForceLines
-    let (ctxForced, forceLines) =
-        deferredOperandIds |> List.fold (fun (accCtx: CodeGenContext, accLines) id ->
+    let fname = bindingCppName binding
+    if spineCaptured then
+        let (spineForce, ctxS, stored) =
+            match compExpr with
+            | IRVar _ -> forceDeferredArrayInput ctx builder ($"{fname}__spine") compExpr
+            | _ -> ([], ctx, compExpr)
+        let leavesNow = dLeaves ctxS.DeferredComputations stored
+        match stored, leavesNow with
+        | IRVar (sid, sty), [ IRVar _ ] when not (Map.containsKey sid ctxS.DeferredComputations)
+                                          && (match sty with ArrayElem at -> at.IndexTypes |> List.sumBy (fun ix -> ix.Rank) = 1 | _ -> false) ->
+            recordCodegenDecision "deferred-capture-force" fname Blade.Effects.Applied
+                [ $"the fold operand `{Map.tryFind sid ctxS.VarNames |> Option.defaultValue (string sid)}` is captured by a kernel: forced once under its own name (a snapshot, G214), the fold reads the stored array" ]
+            let (foldCode, ctxF) = genReduceBinding ctxS binding builder stored kernelExpr (Some seedExpr)
+            (prelude @ spineForce @ foldCode, ctxF)
+        | _ ->
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
+                        ($"the fold `{fname}` over a deferred computation whose kernel captures the computation itself is built only for a single rank-1 operand (gap G233)")))
+    else
+    // the bindings the SEED reads by cell (`reduce(p, (+), d(1))`): a cell
+    // read forces under its own name (formalism 10.2) -- an extent read does
+    // not (G218) -- so an operand the seed reads is evaluated under its own
+    // name AT ITS OPERAND POSITION (the interpreter's order: operands, then
+    // the seed), never through the private temporary
+    let seedReads = collectDeferredPositionalReads ctx seedExpr
+    // through deferred ALIASES: a seed reading `e(1)`, `e = d`, reads d's
+    // cells (Codex diff review round 1: forcing e copied the private temp)
+    let seedReadClosure =
+        let rec chain (seen: Set<IRId>) (id: IRId) =
+            id :: (match Map.tryFind id ctx.DeferredAliasOf, Map.tryFind id ctx.DeferredComputations with
+                   | Some r, _ when not (seen.Contains r) -> chain (seen.Add r) r
+                   | _, Some (IRVar (r, _)) when not (seen.Contains r) -> chain (seen.Add r) r
+                   | _ -> [])
+        seedReads |> List.collect (fun id -> chain (Set.singleton id) id)
+    let (ctxForced, forceLines, privateIds) =
+        deferredOperandIds |> List.fold (fun (accCtx: CodeGenContext, accLines, accPriv) id ->
+            // a capture force above may have materialized it already (an
+            // operand of a captured map; Codex design review, G214)
+            if not (Map.containsKey id accCtx.DeferredComputations) then (accCtx, accLines, accPriv)
+            elif List.contains id seedReadClosure then
+                let (code, c1) = forceDeferredBindingIds accCtx builder ($"{fname}__seed") [ id ]
+                (c1, accLines @ code, accPriv)
+            else
             let ty = inferExprType accCtx.DeferredComputations.[id]
-            let tmp = $"{bindingCppName binding}__in{id}"
+            let tmp = $"{fname}__in{id}"
             let matBinding = { Id = id; Name = tmp; Type = ty; Value = IRCompute (IRVar (id, ty)); IsConst = true; IsMutable = false }
             let (code, c1) = genBinding accCtx matBinding builder
-            ({ c1 with DeferredComputations = Map.remove id c1.DeferredComputations }, accLines @ code)) (ctx, [])
+            ({ c1 with DeferredComputations = Map.remove id c1.DeferredComputations }, accLines @ code, accPriv @ [ id ])) (ctx, [], [])
+    // the remaining cell reads of the seed (not operands): under their own
+    // names, after the operands (the seed is evaluated after them)
+    let (seedForceLines, ctxForced) = seedReads |> forceDeferredBindingIds ctxForced builder ($"{fname}__seed")
+    let forceLines = forceLines @ seedForceLines
+    if not deferredOperandIds.IsEmpty then
+        let nm (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue (string id)
+        let named = deferredOperandIds |> List.filter (fun id -> not (List.contains id privateIds))
+        recordCodegenDecision "deferred-capture-force" fname
+            (if named.IsEmpty then Blade.Effects.Declined ("no kernel, seed or alias names the deferred operand(s) " + (privateIds |> List.map nm |> String.concat ", ") + ": evaluated privately for the fold (not printed, still deferred after it)")
+             else Blade.Effects.Applied)
+            [ if not named.IsEmpty then
+                  yield "forced once under their own names (a snapshot, G214): " + (named |> List.map nm |> String.concat ", ") + " -- a kernel captures them or the seed reads their cells"
+              if not privateIds.IsEmpty && not named.IsEmpty then
+                  yield "evaluated privately: " + (privateIds |> List.map nm |> String.concat ", ") ]
+    let deferredOperandIds = privateIds
     let (code, outCtx) = genReduceComputeBindingCore ctxForced binding builder compExpr kernelExpr seedExpr
     let outCtx =
         deferredOperandIds |> List.fold (fun (c: CodeGenContext) id ->
