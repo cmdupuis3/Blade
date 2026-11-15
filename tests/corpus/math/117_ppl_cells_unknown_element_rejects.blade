@@ -1,0 +1,13 @@
+// TEST: Math refuses a ppl former's output with no known element type (rejects)
+// #62: a cross comoment block elaborates to a literal of computed cells, so
+// neither its cells' shape nor its element type is static (the checker infers them);
+// the refusal names the annotation that fixes it (math/118 is the twin).
+// ERROR: BL5200
+// ERROR-CONTAINS: are not statically known
+import math as m
+import ppl as ppl
+type T = Idx<4>
+let X: Array<Float64 like Idx<2>, T> = [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 1.0]]
+let Y: Array<Float64 like Idx<2>, T> = [[0.5, 1.5, 1.0, 3.0], [4.0, 3.0, 2.0, 1.0]]
+let C = ppl.comoments(X, Y)
+let (U, sv, V) = m.svd(C)

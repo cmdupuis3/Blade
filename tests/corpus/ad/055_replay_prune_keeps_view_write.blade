@@ -15,7 +15,7 @@ function touch(x: Float64, d: D) -> Float64 = {
     x
 }
 function f(x: Float64) -> Float64 = {
-    let d: D = [[1, 1]]
+    let mut d: D = [[1, 1]]   // `mut`: the kernel lambda lends d to `touch`, which writes it through a view -- a captured binding is writable only as `let mut` (D9, formalism 2.7)
     let t = x * Float64(d(0, 1))
     let ys = method_for(range<Idx<2>>)
         <@> lambda(i) -> touch(x, d) |> compute

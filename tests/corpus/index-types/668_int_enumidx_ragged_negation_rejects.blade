@@ -1,0 +1,12 @@
+// TEST: Negating a ragged array of R values is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a ragged array
+// ============================================================================
+// R3 (Codex review of the lead round): whole-array negation over ragged
+// storage allocates a rectangle and reads past the extent table (its Int64
+// twin does the same), so a ragged array of keys is refused.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let rg: Array<R like Idx<2>, RaggedIdx<_>> = [[100], [200, 300]]
+let n = -rg

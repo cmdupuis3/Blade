@@ -1,0 +1,13 @@
+// TEST: a block lambda applied at two types is generic in those two types
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. This was BL3001 at the second call
+// (the parameter was fixed Int32 by the first).
+function f() -> Float32 = {
+    let idl = lambda(x) -> x
+    let a = idl(1)
+    idl(2.0) + Float32(a)
+}
+let r = f()
+// EXPECT: r = 3.0

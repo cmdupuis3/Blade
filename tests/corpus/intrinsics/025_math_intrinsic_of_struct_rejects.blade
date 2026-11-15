@@ -1,0 +1,12 @@
+// TEST: a math intrinsic of a struct (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4): `sin(true)` was already BL3007, but a
+// struct operand type-checked on master 1e6a871a. Every non-number is refused
+// alike.
+// ============================================================================
+struct P {
+    a: Float64
+}
+let p = P { a = 1.0 }
+let q = sin(p)
+// ERROR: BL3007

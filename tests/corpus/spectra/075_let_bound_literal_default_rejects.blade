@@ -1,0 +1,8 @@
+// TEST: Spectra refuses a let-bound float literal: its elements default to Float32 (rejects)
+// #62: the literal's shape is syntactic but its width is its default
+// (formalism 2.4), so the refusal says so and names the annotation.
+// ERROR: BL5400
+// ERROR-CONTAINS: defaults to Float32
+import spectra as sp
+let x = [1.0, 2.0, 3.0, 4.0]
+let X = sp.fft(x)

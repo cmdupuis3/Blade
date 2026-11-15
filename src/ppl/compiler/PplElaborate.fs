@@ -23,11 +23,14 @@
 ///                       (exact for central pair comoments).
 ///
 /// A moment-formed array must be a module-level `let`/`let static` with a
-/// compile-time shape: either an Array annotation (`Array<Elem like I1, ...,
-/// Ik, SampleIdx>`) with statically resolving index extents, or -- for
-/// COMPUTED arrays -- an un-annotated `method_for(range<...>) <@> kernel
-/// [|> compute]` RHS whose iteration space is the shape (one axis per dense
-/// range slot, halo slots shrunk to their interior; see computedShapeOf).
+/// compile-time shape, which the shared oracle Blade.ElabShapes answers: an
+/// Array annotation (`Array<Elem like I1, ..., Ik, SampleIdx>`) with
+/// statically resolving index extents; a COMPUTED array -- an un-annotated
+/// `method_for(range<...>) <@> kernel [|> compute]` RHS whose iteration space
+/// is the shape (one axis per dense range slot, halo slots shrunk to their
+/// interior; ElabShapes.computedAxes), read as Float64; the result of an
+/// elaborated call (`let (U, S, V) = m.svd(A)`); or an alias / destructured
+/// component of one. An un-annotated literal (its default width) is not one.
 module Blade.Ppl.Elaborate
 
 open Blade.Ast
@@ -235,93 +238,12 @@ let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
 
 // Module context: array annotations, alias resolution, static extents
 
-/// Array annotations in scope: name -> (element TypeExpr, index TypeExprs); only annotated bindings participate, formers never infer a shape.
-let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclLet b | DeclStatic b ->
-            match b.Pattern, b.Type with
-            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
-            | _ -> acc
-        | _ -> acc) Map.empty
+// The shape queries are the shared oracle's (Blade.ElabShapes, deep-review #62): one alias table, one extent resolver.
+let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> = Blade.ElabShapes.collectAliases decls
 
-let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
-        | _ -> acc) Map.empty
-
-/// Resolve an index TypeExpr to its static extent, following alias chains.
-let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (ty: TypeExpr) : int option =
-    match ty with
-    | TyIdx extent ->
-        match evalExpr statics maxSteps extent with
-        | Ok (SVInt n) -> Some (int n)
-        | _ -> None
-    | TyNamed (name, []) ->
-        match Map.tryFind name aliases with
-        | Some body -> resolveExtent aliases statics body
-        // Not a source alias: a provider axis path, registered by TypeEnv during checking, so the extent comes from store metadata.
-        | None -> providerIndexExtent statics name
-    | _ -> None
-
-/// Shape inference for COMPUTED source arrays: an un-annotated module-level `let A = method_for(range<...>) <@> kernel
-/// [|> compute]` has no declared TyArray, but its iteration space IS its shape -- one axis per range slot, halo slots shrunk
-/// to their interior (interior = n - (hi - lo)). Unresolvable slots return None; element type Float64.
-let private computedShapeOf (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (value: Expr) : (TypeExpr * TypeExpr list) option =
-    // Interior extents of one halo slot: flat offsets -> [n - reach]; nested per-axis form -> one shrunk extent per axis.
-    let haloExtents (innerTy: TypeExpr) (offsetsExpr: Expr) : int list option =
-        resolveExtent aliases statics innerTy |> Option.bind (fun n ->
-            let asInt = function SVInt v -> Some (int v) | _ -> None
-            let shrunk (offs: int list) =
-                if List.isEmpty offs then None
-                else
-                    let lo = min 0 (List.min offs)
-                    let hi = max 0 (List.max offs)
-                    Some (n - (hi - lo))
-            match evalExpr statics maxSteps offsetsExpr with
-            | Ok (SVInt v) -> shrunk [int v] |> Option.map List.singleton
-            | Ok (SVTuple vs) when not vs.IsEmpty ->
-                let flat = vs |> List.map asInt
-                if List.forall Option.isSome flat then
-                    // Flat form: one axis.
-                    shrunk (flat |> List.map Option.get) |> Option.map List.singleton
-                else
-                    // Nested per-axis form: every entry a non-empty int array.
-                    let perAxis =
-                        vs |> List.map (function
-                            | SVTuple xs ->
-                                let os = xs |> List.map asInt
-                                if List.forall Option.isSome os && not os.IsEmpty
-                                then shrunk (os |> List.map Option.get) else None
-                            | _ -> None)
-                    if List.forall Option.isSome perAxis
-                    then Some (perAxis |> List.map Option.get) else None
-            | _ -> None)
-    let slotExtents (ty: TypeExpr) : int list option =
-        match ty with
-        | TyHalo (inner, offs) -> haloExtents inner offs
-        | _ -> resolveExtent aliases statics ty |> Option.map List.singleton
-    // Unwrap |> compute and walk down the <@> application to the loop source.
-    let rec sourceOf (e: Expr) : Expr option =
-        match e.Kind with
-        | ExprKind.ExprCompute inner -> sourceOf inner
-        | ExprKind.ExprBinOp (_, OpApply, l, _) -> sourceOf l
-        | ExprKind.ExprMethodFor [src] -> Some src
-        | _ -> None
-    sourceOf value |> Option.bind (fun src ->
-        let slots =
-            match src.Kind with
-            | ExprKind.ExprRange idxTys -> Some idxTys
-            | ExprKind.ExprHalo (inner, offs) -> Some [TyHalo (inner, offs)]
-            | _ -> None
-        slots |> Option.bind (fun tys ->
-            if List.isEmpty tys then None else
-            let exts = tys |> List.map slotExtents
-            if List.forall Option.isSome exts then
-                let idxs = exts |> List.collect Option.get |> List.map (fun n -> TyIdx (iLit n))
-                Some (TyNamed ("Float64", []), idxs)
-            else None))
+/// Resolve an index TypeExpr to its static extent, following alias chains (Blade.ElabShapes.resolveExtent).
+let private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (ty: TypeExpr) : int option =
+    Blade.ElabShapes.resolveExtent aliases statics ty
 
 // Misplaced-use detection: formers are decl-RHS only.
 let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
@@ -499,7 +421,7 @@ let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
 let private arrayShape (ctx: Ctx) (what: string) (name: string) : Result<TypeExpr * TypeExpr list * TypeExpr * int, string> =
     match Map.tryFind name ctx.Arrays with
     | None ->
-        Error $"{what}: '{name}' must be a module-level let with an Array<Elem like ..., SampleIdx> annotation (the formers read the declared shape)"
+        Error $"{what}: '{name}' must be a module-level array with a static shape -- an Array<Elem like ..., SampleIdx> annotation, a computed range map, or the result of an elaborated call (the formers read the shape at compile time)"
     | Some (_, idxs) when idxs.Length < 2 ->
         Error $"{what}: '{name}' needs at least one variable axis plus the sample axis (Array<Elem like VarIdx, SampleIdx>); a lone sample axis has no comoment structure"
     | Some (elem, idxs) ->
@@ -4308,7 +4230,7 @@ let private stripDecl (aliases: Set<string>) (d: Located<Decl>) : Located<Decl> 
         | other -> other
     { d with Value = value }
 
-let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+let private expandModuleCore (modules: ModuleDecl list) (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     // User definitions shadow the formers entirely (same rule as ML ops and the math intrinsics).
     let declNames =
         decls |> List.choose (fun d ->
@@ -4428,18 +4350,24 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         | Some e -> Error e
         | None ->
         let aliases = collectAliases rest
-        // Inferred shapes for UN-annotated computed arrays (method_for over range/halo slots) seed the map; explicit
-        // annotations and struct-field aliases override them.
-        let inferredArrays =
+        // The formers' source arrays: every module-level value the shared oracle (Blade.ElabShapes) shapes as an array
+        // -- an annotation, a computed range map (read as Float64, the formers' assumption), the result of an elaborated
+        // call (`let (U, S, V) = m.svd(A)`, a math call answered by math's registered shapes although math elaborates
+        // after this pass), an alias or destructured component of one. A literal's DEFAULT width is not a former source:
+        // an un-annotated literal stays refused, as before. Struct-field aliases override.
+        let sharedArrays =
+            let env = Blade.ElabShapes.moduleEnv modules rest statics (fun _ -> None)
             rest |> List.fold (fun acc d ->
                 match d.Value with
                 | DeclLet b | DeclStatic b ->
-                    match b.Pattern, b.Type with
-                    | { Kind = PatternKind.PatVar name }, None ->
-                        match computedShapeOf aliases statics b.Value with
-                        | Some shape -> Map.add name shape acc
-                        | None -> acc
-                    | _ -> acc
+                    Blade.ElabShapes.patternNames b.Pattern |> List.fold (fun a name ->
+                        match env.Values name with
+                        | Some (Ok (Blade.ElabShapes.VArray s)) ->
+                            match s.Elem with
+                            | Blade.ElabShapes.ElemDeclared t -> Map.add name (t, s.Idxs) a
+                            | Blade.ElabShapes.ElemComputed _ -> Map.add name (tyFloat64, s.Idxs) a
+                            | _ -> a
+                        | _ -> a) acc
                 | _ -> acc) Map.empty
         // Pre-scan: dist-over-chain wrappers. Pass 2 synthesizes an
         // Idx<1> x Idx<n> wrapper for `dist(chain, r)` over an mh/hmc chain
@@ -4476,8 +4404,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     |> Option.map (fun n -> ($"__ppl_dist_{dName}_chain", (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)])))
                 | _ -> None)
         let arrays =
-            collectArrays rest
-            |> Map.fold (fun acc k s -> Map.add k s acc) inferredArrays
+            sharedArrays
             |> fun annotated -> aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) annotated
             |> fun withAliases -> distChainWraps |> List.fold (fun acc (k, s) -> Map.add k s acc) withAliases
         // Pre-scan: the maximal multiset size each source array needs across
@@ -4735,14 +4662,14 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
 /// Import-gated wrapper. With no `import ppl` in the module, PPL elaboration is a no-op -- bare former names are left unbound.
 /// With an alias in scope, the qualified surface (`ppl.moments(...)`, `ppl.cumulant(...)`) is normalized to the internal
 /// forms the core passes and the checker recognize. The `import ppl` decl itself is consumed here.
-let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+let private expandModule (modules: ModuleDecl list) (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     pplAliasesOf decls |> Result.bind (fun aliases ->
         if Set.isEmpty aliases then Ok decls
         else
             decls
             |> List.filter (not << isPplImport)
             |> List.map (stripDecl aliases)
-            |> expandModuleCore)
+            |> expandModuleCore modules)
 
 /// Entry point: elaborate PPL formers across a program. Runs after ML-op elaboration and before grad expansion, so grad()
 /// differentiates the generated pipelines as plain Blade source.
@@ -4757,9 +4684,16 @@ let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
-            expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
+            expandModule program.Modules m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// The ppl surface for the shared shape oracle (Blade.ElabShapes): a former's output shape is not reported to the passes
+/// that run before ppl (sgs), so such an operand is refused there with the annotation that fixes it. The passes after
+/// ppl (math, spectra) read the former's elaborated binding. Idempotent; TypeCheck runs it before the first pass.
+let registerShapes () =
+    Blade.ElabShapes.registerDomain "ppl" (fun _ _ op _ ->
+        Error $"a ppl.{op} result's shape is not reported to the elaborators that run before ppl; annotate the binding it is bound to (`let m: Array<Float64 like ...> = ppl.{op}(...)`)")
 
 /// Boundary: string-errored internals -> coded diagnostics. The span is the ambient synthSpan -- stamped per-decl by expandStr,
 /// so a mid-elaboration failure points at the offending declaration.

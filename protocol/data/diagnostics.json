@@ -367,13 +367,15 @@
     "BL3017": {
       "title": "group_keys result escapes its binding",
       "explanation": "A `group_keys` result is NAME-KEYED, not a value. Codegen stores the whole CSR grouping (offsets + permutation) in locals suffixed off the BINDING name -- `gk__ngroups`, `gk__offsets`, `gk__perm` -- and gives the binding itself only an opaque sentinel, so `group_by` recovers the grouping by re-deriving those symbols from the name its grouping argument resolves to. That makes exactly two positions legal: the `let` that names the call, and a `group_by` grouping slot written as that name. Aliasing it, putting it in a tuple or struct, passing it as an argument, returning it, or writing the call inline all leave the grouping behind, and used to reach g++ as undeclared `gk2__offsets`-style symbols.",
-      "fix": "Bind the keys once (`let gk = group_keys(...)`) and hand that same `gk` straight to each `group_by` -- one binding may feed any number of them, which is how grouped co-iteration is spelled. A function that needs a grouping should take the KEY ARRAY and do both halves itself; results travel freely once `group_by` has produced an ordinary array.",
+      "fix": "Bind the keys once (`let gk = group_keys(...)`) and hand that same `gk` straight to each `group_by` -- one binding may feed any number of them, which is how grouped co-iteration is spelled. A function that needs a grouping should take the KEY ARRAY and do both halves itself, and return what it computes FROM the groups (a per-group fold is an ordinary array): a GROUPED value -- a `group_by` result, a per-group map of one, or one of its rows -- carries the same name-keyed row lengths and is refused as a function's (or, whole, a lambda's) return value too.",
       "examples": [
         "tests/corpus/sql-group-by/035_groupby_gk_aliased_rejects.blade",
         "tests/corpus/sql-group-by/036_groupby_gk_tupled_rejects.blade",
         "tests/corpus/sql-group-by/037_groupby_gk_as_parameter_rejects.blade",
         "tests/corpus/sql-group-by/038_groupby_gk_inline_rejects.blade",
-        "tests/corpus/sql-group-by/039_groupby_gk_returned_rejects.blade"
+        "tests/corpus/sql-group-by/039_groupby_gk_returned_rejects.blade",
+        "tests/corpus/sql-group-by/077_groupby_result_returned_rejects.blade",
+        "tests/corpus/sql-group-by/078_groupby_row_returned_rejects.blade"
       ],
       "docs": [
         "docs/features/sql.md"
@@ -650,7 +652,7 @@
         "tests/corpus/diagnostics/007_immutable_static_assign.blade",
         "tests/corpus/functions/020_mut_scalar_param_rejected.blade",
         "tests/corpus/mutability-errors/014_reduction_join_legs_share_writing_map_rejects.blade",
-        "tests/corpus/functions/086_mut_param_whole_array_assign_rejects.blade",
+        "tests/corpus/functions/851_mut_param_whole_array_assign_rejects.blade",
         "tests/corpus/functions/089_mut_arg_plain_let_rejects.blade",
         "tests/corpus/functions/093_mut_arg_partial_application_rejects.blade",
         "tests/corpus/functions/337_returned_closure_over_reassigned_local_rejects.blade"
@@ -891,12 +893,12 @@
     },
     "BL5400": {
       "title": "spectra elaboration error",
-      "explanation": "The `spectra` elaborator refused a construct: an unknown op, an op used without its import, or a transform in a position it cannot occupy (an inline FFT where the pipeline needs a materialized stage, for instance).",
-      "fix": "Read the message for the op's placement rule; materializing the operand with `|> compute` resolves the inline cases.",
+      "explanation": "The `spectra` elaborator refused a construct: an unknown op, an op used without its import, or an operand it cannot specialize to -- one with no static shape (a generic parameter, a call of a function with no annotated return) or the wrong element type (an FFT of a complex spectrum, a let-bound float literal that defaults to Float32).",
+      "fix": "Read the message: it names the operand and why it has no usable static shape. Annotate the binding (`let x: Array<Float64 like Idx<n>> = ...`) or ascribe the argument; the results of other elaborated calls need no annotation.",
       "examples": [
         "tests/corpus/spectra/002_gating_selective_import.blade",
         "tests/corpus/spectra/003_unknown_op.blade",
-        "tests/corpus/spectra/017_fft_inline_rejects.blade"
+        "tests/corpus/spectra/074_fft_of_spectrum_rejects.blade"
       ],
       "docs": []
     },
@@ -906,7 +908,7 @@
       "fix": "Differentiate a function the elaborator knows, avoid overwriting values that live across the tape, and replace non-differentiable intrinsics in the differentiated path.",
       "examples": [
         "tests/corpus/ad/007_overwrite_rejected.blade",
-        "tests/corpus/ad/008_grad_of_unknown_rejected.blade",
+        "tests/corpus/ad/152_grad_of_unknown_rejected.blade",
         "tests/corpus/ad/014_digamma_not_differentiable_rejects.blade"
       ],
       "docs": [

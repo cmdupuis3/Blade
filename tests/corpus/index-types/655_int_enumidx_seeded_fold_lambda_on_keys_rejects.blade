@@ -1,0 +1,12 @@
+// TEST: A seeded fold whose lambda computes on R elements meets an Int64 accumulator (rejects)
+// ERROR: BL3001
+// ============================================================================
+// R3, a refusal that stays (the base refused it the same way): the fold's
+// kernel adds a value of R to an Int64 accumulator, and the fold's element
+// and accumulator types disagree. Fold the keys -- `reduce(Int64(codes),
+// lambda(acc, c) -> acc + c, 0)` -- or use the section, `reduce(codes, (+),
+// 0)` (index-types/634).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let sl = reduce(codes, lambda(acc, c) -> acc + c, 0)

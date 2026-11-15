@@ -1,0 +1,10 @@
+// TEST: a Bool compared with a number (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14:
+// "true is a boolean and is not compatible without type casting"): arithmetic
+// is defined on numbers only, so the type checker refuses it before either
+// lane runs. On master 1e6a871a this printed `t = true`: a
+// comparison converts nothing either (two Bools still compare).
+// ============================================================================
+let t = true == 1
+// ERROR: BL3001

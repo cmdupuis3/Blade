@@ -1128,6 +1128,9 @@ and convertStatic (target: Blade.Types.ElemType) (v: StaticValue) : Result<Stati
     let f2i (lo: float) (hi: float) (x: float) (mk: float -> StaticValue) =
         if x >= lo && x < hi then Ok (mk x)
         else Error "Static evaluation: float-to-integer conversion of NaN or an out-of-range value"
+    // A Bool converts to 1 / 0 (formalism 2.4): the Int32 1 / 0, as every
+    // lane's cast of a Bool computes it.
+    let v = match v with SVBool b -> SVInt32 (if b then 1 else 0) | _ -> v
     match target, v with
     | Blade.Types.ETFloat32, SVFloat32 _ -> Ok v
     | Blade.Types.ETFloat32, SVFloat f -> Ok (SVFloat32 (float32 f))

@@ -3631,7 +3631,9 @@ let private intEnumKeyedPrint (modul: IRModule) (b: IRBinding) (lines: string li
     | Some keys when not lines.IsEmpty ->
         let v = System.Text.RegularExpressions.Regex.Escape (sanitizeCppName b.Name)
         let scalarRe = System.Text.RegularExpressions.Regex($@"<< blade_rt::pv\(({v})\) << endl;")
-        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({v}(\[[^\]]+\])+)\);")
+        // (`<v>.data[i]`: a COMPOUND array's compact buffer, its present cells
+        // -- R3: it printed the positions.)
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({v}(\.data)?(\[[^\]]+\])+)\);")
         let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
         let body =
             lines |> List.map (fun l ->
@@ -4661,6 +4663,7 @@ let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (
                 CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
                 SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
                 MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+                LetMutBinders = modules |> List.fold (fun acc m -> Set.union acc m.LetMutBinders) Set.empty
                 // Ids are module-global (one builder), so the
                 // union preserves every copy's origin key.
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty

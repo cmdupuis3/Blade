@@ -19,7 +19,7 @@ function k(x: Float64, d: D, sin: A) -> Float64 = {
     x
 }
 function f(x: Float64) -> Float64 = {
-    let d: D = [[0]]
+    let mut d: D = [[0]]   // `mut`: the kernel lambda lends d to `k`, which writes it through a view -- a captured binding is writable only as `let mut` (D9, formalism 2.7)
     let sin: A = [10, 20, 30]
     let ys = method_for(range<Idx<2>>)
         <@> lambda(i) -> k(x, d, sin) |> compute

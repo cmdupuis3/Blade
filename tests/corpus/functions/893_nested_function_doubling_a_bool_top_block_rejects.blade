@@ -1,0 +1,13 @@
+// TEST: a nested function doubling a Bool in a top-level block (rejects)
+// ============================================================================
+// R10 remainder: a NESTED generic function's own obligations (GONumericOperand)
+// are judged at each call of it, with a span. They were recorded into the
+// enclosing declaration's list only, so a Bool instance reached the
+// post-monomorphization IRValidate backstop, which has no source span. A named local
+// function in a top-level block.
+// ============================================================================
+let r = {
+    function dbl(x) = x + x
+    dbl(true)
+}
+// ERROR: BL3001 @ 10:9

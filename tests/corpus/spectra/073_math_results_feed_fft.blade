@@ -1,0 +1,17 @@
+// TEST: Spectra transforms of math results (eigenvalues, a solve)
+// #62: spectra elaborates after math, so it reads the routines math
+// generated (their signatures) and the solve marker's registered shape.
+// fft(lam)(0) is the sum of the eigenvalues, the trace of S (7.0).
+import math as m
+import spectra as sp
+let S: Array<Float64 like Idx<4>, Idx<4>> = [[2.0, 1.0, 0.0, 0.0], [1.0, 2.0, 1.0, 0.0], [0.0, 1.0, 2.0, 1.0], [0.0, 0.0, 1.0, 1.0]]
+let (Q, lam) = m.eigh(S)
+let L = sp.fft(lam)
+let tr = real(L(0))
+// EXPECT: tr = 7.0
+let b: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let pw = sp.power(m.solve(S, b))
+let xs: Array<Float64 like Idx<4>> = m.solve(S, b)
+let pt = sp.power(xs)
+let d = pw(1) - pt(1)
+// EXPECT: d = 0.0

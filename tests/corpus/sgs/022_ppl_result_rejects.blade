@@ -1,0 +1,10 @@
+// TEST: SGS refuses a ppl former's result it cannot shape, naming the fix (rejects)
+// #62: sgs elaborates before ppl and a former's output shape is not
+// reported to it, so the refusal names the annotation on the former's binding.
+// ERROR: BL5600
+// ERROR-CONTAINS: is not reported to the elaborators that run before ppl
+import sgs as sgs
+import ppl as ppl
+let A: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 1.0]]
+let M = ppl.moments(A, 2)
+let G = sgs.box_filter(M, 2)

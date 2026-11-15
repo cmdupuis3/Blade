@@ -4538,7 +4538,7 @@ let runLlvmRuntimeShimTests () : BlockResult =
 let private mustNativeFixtures : (string * string) list =
     [ "index-types", "544_whole_array_kernel_over_dense_is_call.blade"
       "symmetry", "144_packed_comm_contraction_direct_call_accepted.blade"
-      "symmetry", "146_zero_level_compact_application_is_call.blade"
+      "symmetry", "174_zero_level_compact_application_is_call.blade"
       // A top-level compute forces its deferred operands (formalism 10.2):
       // the alias class prints natively (wave 3 B, goal 1).
       "symmetry", "147_deferred_alias_chain_packed.blade"

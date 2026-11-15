@@ -136,7 +136,11 @@ let private dispatchInner (args: string[]) : int =
                 let dir =
                     try Some (System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f))
                     with _ -> None
-                Blade.ProviderRegistry.SourceBase.within dir body
+                // ...and these five whole-program verbs are the ones that share
+                // one hidden raw read among a module's masked reads of one
+                // variable (ProviderDesugar.withRawReadSharing; every other
+                // entry point -- sessions, IDE, tests -- keeps one per binding).
+                Blade.ProviderRegistry.SourceBase.within dir (fun () -> Blade.ProviderDesugar.withRawReadSharing body)
             // The private-spool GRANT (BLADE_PRIVATE_SPOOL, env-only, read
             // per call): parsed HERE, by the verbs that emit, and threaded as
             // explicit options -- no other caller of the C++ back end sees it.

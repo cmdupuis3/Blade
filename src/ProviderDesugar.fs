@@ -507,6 +507,23 @@ let rawReadVerb = "read<raw>"
 
 let private presentVerbs = set [ "read_present"; "present" ]
 
+/// RAW-READ SHARING (deep review R8) is ON only inside a WHOLE-PROGRAM verb --
+/// `blade run` / `compile` / `emit` / `plan` / `check`, which wrap their
+/// compilation in `withRawReadSharing` (Cli.fs) -- and OFF everywhere else by
+/// default (fail closed): a session (REPL, notebook, IDE or MCP evaluation)
+/// recompiles its accumulated source and adopts earlier cells' values from a
+/// memo, so a later cell sharing an earlier cell's raw read would see that
+/// cell's snapshot instead of reading the store itself, as it does today; a
+/// host nobody enumerated keeps today's one read per masked binding.
+let private rawSharing = System.Threading.AsyncLocal<bool>()
+
+/// Run `f` with raw-read sharing ON (the whole-program verbs). Restores the
+/// previous state.
+let withRawReadSharing (f: unit -> 'a) : 'a =
+    let prior = rawSharing.Value
+    rawSharing.Value <- true
+    try f () finally rawSharing.Value <- prior
+
 /// The presence predicate as Blade AST over the variable `x`: the negation
 /// of ProviderRegistry.isMissing, conjunct by conjunct. `y - y == 0.0` is
 /// "finite" (false for NaN and for +-Inf) in every lane.
@@ -592,6 +609,28 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
     if aliases.IsEmpty || not (m.Decls |> List.exists anyDecl) then m else
     // store binding -> (provider, path), left to right as for checkouts.
     let stores : Map<string, string * string> ref = ref Map.empty
+    // ONE hidden raw read per (provider, path, variable) (deep review R8):
+    // both masked forms of a variable, or one form bound twice, read the
+    // same `__present_raw_<first>` binding, at the FIRST site in source
+    // order. The second raw read would read the same store at a later
+    // statement; it can only see other data, or fail where the first did
+    // not, if something between the two WRITES the store -- so any
+    // declaration naming a provider verb other than a pure read clears the
+    // table (fail closed: a write to ANY store, or an unknown verb, keeps
+    // the later sites' own reads).
+    let sharedRaw = System.Collections.Generic.Dictionary<string * string * string, string>()
+    let pureVerbs = set [ "load"; "read"; "stream"; "read_present"; "present"; "read_window"; "load_compound"; rawReadVerb ]
+    let rec mayWriteStore (e: Expr) =
+        (match e.Kind with
+         | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, verb) when aliases.ContainsKey alias -> not (pureVerbs.Contains verb)
+         | _ -> false)
+        || (allChildren e |> List.exists mayWriteStore)
+    let clearIfWrites (d: Located<Decl>) =
+        let writes =
+            match d.Value with
+            | DeclLet b | DeclStatic b -> mayWriteStore b.Value
+            | _ -> false
+        if writes then sharedRaw.Clear()
     let reportMisplaced (e: Expr) =
         let rec walk (x: Expr) =
             (match x.Kind with
@@ -603,6 +642,7 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
         walk e
     let decls' =
         m.Decls |> List.collect (fun (d: Located<Decl>) ->
+            clearIfWrites d
             let record (b: Binding) =
                 for n in patternBoundNames b.Pattern do
                     stores.Value <- Map.remove n stores.Value
@@ -637,7 +677,12 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
                             | None -> Blade.ProviderRegistry.noMissingRule
                         let sp = b.Value.Span
                         let mk k = mkExpr sp k
-                        let rawName = $"__present_raw_{t}"
+                        let key = (pname, path, varName)
+                        let earlier =
+                            if not rawSharing.Value then None
+                            else match sharedRaw.TryGetValue key with | true, n -> Some n | _ -> None
+                        let rawName = earlier |> Option.defaultValue $"__present_raw_{t}"
+                        if earlier.IsNone && rawSharing.Value then sharedRaw.[key] <- rawName
                         let maskName = $"__present_mask_{t}"
                         let rawValue =
                             mk (ExprKind.ExprApp (mkExpr headE.Span (ExprKind.ExprField (aliasE, rawReadVerb)), [ view ]))
@@ -656,13 +701,15 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
                                   Value = value }
                             { d with Value = DeclLet nb }
                         record b
+                        // The raw read itself only at the first site of its key.
+                        let rawLet = if earlier.IsSome then [] else [ letOf rawName rawValue None ]
                         if verb = "present" then
-                            [ letOf rawName rawValue None
-                              { d with Value = DeclLet { b with Value = maskValue } } ]
+                            rawLet
+                            @ [ { d with Value = DeclLet { b with Value = maskValue } } ]
                         else
-                            [ letOf rawName rawValue None
-                              letOf maskName maskValue None
-                              { d with Value = DeclLet { b with Value = mk (ExprKind.ExprCompound (mk (ExprKind.ExprVar rawName), mk (ExprKind.ExprVar maskName))) } } ])
+                            rawLet
+                            @ [ letOf maskName maskValue None
+                                { d with Value = DeclLet { b with Value = mk (ExprKind.ExprCompound (mk (ExprKind.ExprVar rawName), mk (ExprKind.ExprVar maskName))) } } ])
                  | _ ->
                     reportMisplaced b.Value
                     record b

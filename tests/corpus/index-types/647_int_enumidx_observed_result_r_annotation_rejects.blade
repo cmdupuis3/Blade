@@ -1,0 +1,13 @@
+// TEST: An R annotation on an observing generic's result meets an Int64 array (rejects)
+// ERROR: BL3001
+// ============================================================================
+// R3, the visible consequence: the callee observes its argument, so it is
+// handed (and returns) Int64 keys, and an `Array<R like ..>` annotation on the
+// result is a type mismatch -- exactly as for any Int64 array
+// (index-types/648, unchanged). The base accepted this program and sorted the
+// POSITIONS.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function srt(x: T^1) = sort(x, lambda(e) -> e)
+let r: Array<R like Idx<3>> = srt(codes)

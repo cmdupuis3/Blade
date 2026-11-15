@@ -1,0 +1,10 @@
+// TEST: logical not of an integer kernel parameter (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this type-checked;
+// the parameter is open while the body is typed (the post-zonk sweep refuses it).
+// ============================================================================
+let xs = [1, 0, 2]
+let t = method_for(xs) <@> lambda(v) -> !v |> compute
+// ERROR: BL3001

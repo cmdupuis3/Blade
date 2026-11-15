@@ -1,0 +1,12 @@
+// TEST: A module-qualified struct pattern that names no struct (rejects)
+// MODULE: Main
+// ERROR: BL3004
+// ERROR-CONTAINS: pattern 'U.Wrong { ... }': no struct named 'U.Wrong' is imported
+// A qualified struct pattern names an imported (so already declared) struct;
+// an unknown one used to read as an empty field table, skip the nominal check
+// and bind `a` from whatever the scrutinee was (Codex review of R1).
+module Main
+import U
+let p = U.P { a = 3.0 }
+let z = match p with
+    | U.Wrong { a } -> a

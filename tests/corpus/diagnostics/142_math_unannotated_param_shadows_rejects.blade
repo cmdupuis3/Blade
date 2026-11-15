@@ -1,0 +1,9 @@
+// TEST: Math op on an unannotated parameter that shadows a module array (rejects)
+// #62: every binder enters the lexical scope, shaped or not, so an
+// unannotated parameter named like a module-level array SHADOWS it instead
+// of silently borrowing its extents.
+// ERROR: BL5200
+// ERROR-CONTAINS: it is an unannotated parameter
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+function sq(A) = m.matmul(A, A)

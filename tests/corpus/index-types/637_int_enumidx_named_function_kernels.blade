@@ -1,0 +1,17 @@
+// TEST: A named function used as a kernel over R values meets keys
+// ============================================================================
+// R3: the kernel's eta wrapper is typed with its parameter seeded R, so the
+// call inside it hands a GENERIC function the key (an Int64 instance), and a
+// function declared over R the value (`r * 2` observes the key there). The
+// base refused the generic kernel (BL4003).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function inc(c: T) = c + 1
+let d = method_for(codes) <@> inc |> compute
+// EXPECT: d = [101, 201, 301]
+let e = object_for(inc) <@> codes |> compute
+// EXPECT: e = [101, 201, 301]
+function wt(r: Nat<R>) -> Int64 = r * 2
+let f = method_for(codes) <@> wt |> compute
+// EXPECT: f = [200, 400, 600]

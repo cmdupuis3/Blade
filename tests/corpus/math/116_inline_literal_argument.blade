@@ -1,0 +1,11 @@
+// TEST: Math inline array-literal argument of a synthesized op takes the routine's Float64
+// #62: an inline literal argument's width is fixed by its context: the
+// elaborator ascribes it Array<Float64 like Idx<..>, ..>, the type the
+// generated svd routine takes, so it needs no staging binding. A let-bound
+// literal keeps its Float32 default and is refused (math/018); a MARKER op
+// (matmul, solve, lu) takes no inline literal operand (diagnostics/143).
+// The squared singular values sum to the squared Frobenius norm, 9 + 16 + 25.
+import math as m
+let (U, sv, V) = m.svd([[3.0, 0.0], [4.0, 5.0]])
+let fro = sv(0) * sv(0) + sv(1) * sv(1)
+// EXPECT: fro = 50.0

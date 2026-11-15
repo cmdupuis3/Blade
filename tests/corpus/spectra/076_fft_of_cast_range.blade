@@ -1,0 +1,7 @@
+// TEST: Spectra fft of a cast static range
+// #62: `Float64(0..8)` has a syntactic shape (rank 1, extent 8) and a cast
+// element type. fft(..)(0) is the sum 0 + 1 + ... + 7 = 28.
+import spectra as sp
+let X = sp.fft(Float64(0..8))
+let s0 = real(X(0))
+// EXPECT: s0 = 28.0

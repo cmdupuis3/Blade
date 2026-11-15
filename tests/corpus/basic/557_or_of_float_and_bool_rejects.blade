@@ -1,0 +1,9 @@
+// TEST: logical or of a float and a Bool (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this type-checked.
+// ============================================================================
+let x: Float64 = 0.5
+let t = x || true
+// ERROR: BL3001

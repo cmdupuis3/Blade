@@ -1,0 +1,15 @@
+// TEST: a generic cast instantiated at a Bool
+// ============================================================================
+// A Bool is not a number; it converts EXPLICITLY with a numeric cast (formalism
+// 2.4; the owner's ruling of 2026-11-14): 1 or 0 (1.0 / 0.0), element by element
+// over a Bool array, in every lane (C++, interpreter, LLVM, static evaluation).
+// A generic cast is judged per instance (GOCast): a Bool instance is legal.
+// ============================================================================
+function asnum(x) = Float64(x)
+let a = asnum(true)
+// EXPECT: a = 1.0
+let b = asnum(2)
+// EXPECT: b = 2.0
+function cnt(r: T^1) = reduce(Int64(r), (+))
+let c = cnt([true, true, false])
+// EXPECT: c = 2

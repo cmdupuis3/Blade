@@ -1,0 +1,17 @@
+// TEST: a function writes a module-level plain let through a view held in a tuple
+// ERROR: BL4005 @ 10:1
+// ERROR-CONTAINS: a write reaches `G` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a callable
+// that only CAPTURES a binding writes it only when it was declared `let mut`.
+// The type checker refuses the direct store (048-051, 054); a store that
+// REACHES the binding is refused at lowering, by storage provenance.
+// The view of `G` is held in a tuple and projected back out.
+let G = [[1.0, 2.0], [3.0, 4.0]]
+function w() -> Float32 = {
+    let p = (G(0), 1.0)
+    let t = p[0]
+    t(1) = 9.0
+    t(1)
+}
+let r = w()

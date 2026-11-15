@@ -1,0 +1,11 @@
+// TEST: a generic logical not called with an integer (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this type-checked:
+// each instance is judged at its call (GOBoolOperand).
+// ============================================================================
+function notf(x) = !x
+let a = notf(true)
+let b = notf(1)
+// ERROR: BL3001

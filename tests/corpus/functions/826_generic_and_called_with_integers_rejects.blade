@@ -1,0 +1,10 @@
+// TEST: a generic logical and called with integers (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this type-checked.
+// ============================================================================
+function both(a, b) = a && b
+let x = both(true, false)
+let y = both(1, 2)
+// ERROR: BL3001

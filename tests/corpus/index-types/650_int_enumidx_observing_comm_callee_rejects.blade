@@ -1,0 +1,12 @@
+// TEST: An observing generic with a comm clause is not handed converted copies (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: comm
+// ============================================================================
+// R3, a defect closed: the base computed this prodsum on the POSITIONS. A
+// `comm` clause reads its arguments' identity (one array at two positions
+// licenses symmetric storage), which a converted copy does not keep: refused.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function cov(a: T^1, b: T^1) where comm(a, b) = prodsum(a, b)
+let v = cov(codes, codes)

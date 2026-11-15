@@ -1,5 +1,5 @@
 // TEST: parallel kernel writes one cell of an enclosing mut parameter (rejects)
-// ERROR: BL4005 @ 12:26
+// ERROR: BL4005 @ 12:5
 // ERROR-CONTAINS: Cannot assign to 'a'
 // Gap G41, Codex review W2F-6 (c): every cell of the `where omp` map writes
 // the SAME cell of `fill`'s `mut` parameter `a` -- a race. The front end

@@ -496,6 +496,19 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             // to include the leading type name.
             parseStructExpr name afterName >>= fun e remaining ->
             success { e with Span = rangeSpan tokens remaining } remaining
+        | Some TokDot when not noStructLiteralCtx.Value
+                           && (match afterName with
+                               | _ :: ({ Kind = TokIdent _ } as t) :: brace :: _ ->
+                                   brace.Kind = TokLBrace && brace.Line = t.Line
+                               | _ -> false) ->
+            // A MODULE-QUALIFIED struct construction `U.P { a = 1.0 }` (D11):
+            // the import registers the struct under its scope key `U.P`, so
+            // the name is that key. `a.b {` with the brace on b's line has no
+            // other reading (a statement ends at its line, and the lexer's
+            // newline stripping inside delimiters is why the line is compared).
+            let typeName = match afterName with _ :: { Kind = TokIdent t } :: _ -> t | _ -> ""
+            parseStructExpr (name + "." + typeName) (advance (advance afterName)) >>= fun e remaining ->
+            success { e with Span = rangeSpan tokens remaining } remaining
         | _ ->
             success (mkExpr (headSpan tokens) (ExprVar name)) afterName
 
@@ -1054,6 +1067,26 @@ and parseLetAnnotation (afterPat: Token list) : ParseResult<TypeExpr option> =
 /// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
 /// `parseTopLevelLet`) so they cannot drift.
 and parseLetPattern (tokens: Token list) : ParseResult<Pattern> =
+    parseLetPatternRaw tokens >>= fun pat remaining ->
+    // A MODULE-QUALIFIED pattern name (`U.Red`, `U.Some(x)`, `U.P { a }`,
+    // parsed since the D11 leftovers for match arms) is a constructor or
+    // struct TEST, which only a match arm performs; a `let` would bind it
+    // as a name, or destructure without checking the constructor.
+    let rec qualified (p: Pattern) : Pattern option =
+        match p.Kind with
+        | PatternKind.PatVar n | PatternKind.PatVariant (n, None) when n.Contains "." -> Some p
+        | PatternKind.PatVariant (n, Some _) | PatternKind.PatStruct (n, _) when n.Contains "." -> Some p
+        | PatternKind.PatVariant (_, Some inner) | PatternKind.PatGuarded (inner, _) | PatternKind.PatTyped (inner, _) -> qualified inner
+        | PatternKind.PatTuple ps -> ps |> List.tryPick qualified
+        | PatternKind.PatCons (a, b) -> qualified a |> Option.orElse (qualified b)
+        | PatternKind.PatStruct (_, fields) -> fields |> List.tryPick (snd >> qualified)
+        | _ -> None
+    match qualified pat with
+    | Some q ->
+        errorC "BL1001" "a module-qualified name in a `let` pattern: `<module>.<Name>` names an imported constructor or struct, and testing one is a `match` arm's job (`match v with | U.Red -> ...`); a `let` pattern binds plain names" q.Span.StartLine q.Span.StartCol
+    | None -> success pat remaining
+
+and parseLetPatternRaw (tokens: Token list) : ParseResult<Pattern> =
     parsePattern tokens >>= fun first afterFirst ->
     match peek afterFirst with
     | Some TokComma ->

@@ -1,0 +1,7 @@
+// TEST: Math op on an un-annotated generic parameter (rejects)
+// #62: a generic `T^2` parameter fixes no extents, so the math op has no
+// static shape to specialize to; the message says why and names the fix.
+// ERROR: BL5200
+// ERROR-CONTAINS: generic array type
+import math as m
+function g(A: T^2) = m.matmul(A, A)

@@ -1,0 +1,12 @@
+// TEST: SGS box_filter of a math result (sgs elaborates BEFORE math)
+// #62: sgs meets `m.mode_product(U, R, 0)` in surface form; the math domain's
+// registered shapes answer it, and the value agrees with the annotated twin.
+import sgs as sgs
+import math as m
+let U: Array<Float64 like Idx<3>, Idx<4>, Idx<4>, Idx<4>> = method_for(range<Idx<3>, Idx<4>, Idx<4>, Idx<4>>) <@> lambda(c, i, j, k) -> 0.5 * Float64(c) + Float64(i) * Float64(j) - 0.25 * Float64(k) * Float64(c) |> compute
+let R: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+let F1 = sgs.box_filter(m.mode_product(U, R, 0), 2)
+let UR: Array<Float64 like Idx<3>, Idx<4>, Idx<4>, Idx<4>> = m.mode_product(U, R, 0)
+let F2 = sgs.box_filter(UR, 2)
+let d = (F1(0, 1, 0, 1) - F2(0, 1, 0, 1)) + (F1(2, 1, 1, 1) - F2(2, 1, 1, 1))
+// EXPECT: d = 0.0

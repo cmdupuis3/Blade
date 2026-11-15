@@ -806,6 +806,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     arrowVariantHook.Value <- checkArrowVariant
     // ...and of identity-sensitive declarations' SHARING INSTANCES (plan 2.2).
     sharingVariantHook.Value <- checkSharingVariant
+    // ...and the observer of an array of EnumIdx keys at a generic call (R3).
+    enumKeyArgHook.Value <- Blade.TypeCheckInfer.enumKeyArgTyped
     // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
     // co-iteration, units -- are keyed by binder id, program-unique, and
     // shared by reference across the program's modules: a module's entries
@@ -1043,7 +1045,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // g++. A refusal is located at the application; it is reported only on an
     // otherwise clean module (after an earlier error the heads may be the
     // recovery's fresh variables, and the refusal would be a cascade).
+    // R10's OPEN-ARGUMENT LINKS still pending (top-level code, or an argument
+    // decided after its declaration's end): settled now and again after the
+    // arrow applications below (one may decide a link's argument: a window
+    // read), the links still open then dropped -- all before zonk's default
+    // (TypeCheckSupport.settleOpenArgLinks).
+    let linkErrors0 = settleOpenArgLinks currentEnv false
     let arrowErrors = settleArrowApps currentEnv true
+    let linkErrors = linkErrors0 @ settleOpenArgLinks currentEnv true
+    if List.isEmpty errors then
+        for (span, err) in linkErrors do
+            resetCurrentStmtSpan ()
+            errors <- locateError span currentEnv err :: errors
     if List.isEmpty errors then
         for (span, err) in arrowErrors do
             resetCurrentStmtSpan ()
@@ -1227,12 +1240,114 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let groupKeysErrors =
         zonked.Decls |> List.collect declGroupKeysRoots
                      |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
+    // Grouped values returned out of a callable (R7): structural on the
+    // zonked types, so it runs beside the group_keys sweep. Suppressed when
+    // the module already has errors (an unresolved body type proves nothing).
+    let groupedReturnErrors =
+        if List.isEmpty errors && List.isEmpty groupKeysErrors then
+            zonked.Decls |> List.collect (collectGroupedReturnEscapes currentEnv.Subst)
+        else []
     // Escaping closures that share a reassigned local (collectMutCaptureEscapes):
     // structural, so it runs even when the module already has errors.
     let mutCaptureErrors =
         zonked.Decls |> List.collect declMutCaptureRoots
                      |> List.collect (fun (pos, e) -> collectMutCaptureEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
+    // R10: a NUMBER handed to a one-value callee's open parameter without
+    // binding it (an alias, a section: TypeEnv.NumericMetOpenParams) must not
+    // see that parameter decided NON-numeric by anything later -- a Bool call,
+    // a kernel unification, an `if` merging two lambdas -- or the earlier call
+    // would convert its number. Judged once every unification is done, at the
+    // numeric argument.
+    let numericMetErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors && List.isEmpty mixErrors then
+            currentEnv.NumericMetOpenParams
+            |> Seq.choose (fun kv ->
+                let what =
+                    match currentEnv.Subst.Resolve (IRTInfer kv.Key) |> IR.stripUnits with
+                    | IRTScalar ETBool -> Some "Bool"
+                    | IRTScalar ETString -> Some "String"
+                    | IRTIdxTagged _ -> Some "index value"
+                    | IRTNamed n ->
+                        (match lookupTypeDef n currentEnv with
+                         | Some (TDIStruct _) | Some (TDIVariant _) -> Some (Blade.Types.TypeOrigins.sourceName n)
+                         | _ -> None)
+                    | _ -> None
+                what |> Option.map (fun w ->
+                    ({ Error = TypeMismatchErr (
+                                 $"this argument is a number, and the called function's parameter -- left open by its body -- "
+                                 + $"is decided a {w} by a later use of the same function: the number would be converted, and "
+                                 + "Blade converts nothing implicitly. Annotate the parameter, or use separate functions.")
+                       Span = kv.Value; Context = []; Code = None } : CompileError)))
+            |> Seq.truncate 1 |> List.ofSeq
+        else []
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ groupedReturnErrors @ mutCaptureErrors @ numericMetErrors)
+
+/// BL2009 for a C++ GLOBAL TYPE name two origins define (deep review R1, a
+/// D11 leftover). A provider load's generated types (`<b>__vars`, `<b>__dims`,
+/// `<b>_cols`, one alias per store axis -- env.ProviderEmittedTypes) keep
+/// their spelling in every module; a second definition of one passed check
+/// and died in g++. Every declared TYPE is entered under the name the back
+/// end emits: a main-module or `__` declaration bare, any other module's
+/// `<Module>__<Name>` (so module `t`'s `struct vars` is `t__vars`, as a load
+/// `t`'s vars struct is). Only a STRUCT or a variant TYPE (an `enum` /
+/// `std::variant` name) beside any other type of its name is refused: that is
+/// always a C++ conflict. Two `using` aliases are legal whenever their targets
+/// agree (two loads of one store, a dim beside `type x = Int64` or an alias
+/// chain), which syntax cannot decide, so alias-vs-alias pairs are left alone
+/// (staged, with functions / values and reserved-word sanitization, for a
+/// census of the names the emitter actually writes). Constructors and
+/// functions are not entered (a constructor function beside a struct of its
+/// name is legal C++). The refusal points at the provider load.
+let private providerTypeClashErrors (env: TypeEnv) (program: Program) : CompileError list =
+    // name -> (description, kind): kind `struct`, `type`, or `alias:<target>`
+    let seen = System.Collections.Generic.Dictionary<string, string * string>()
+    let clashes (k1: string) (k2: string) =
+        k1 = "struct" || k1 = "type" || k2 = "struct" || k2 = "type"
+    let moduleCount = program.Modules.Length
+    for (mi, m) in List.indexed program.Modules do
+        let modName = m.Name |> String.concat "."
+        let isMain = Blade.Types.TypeOrigins.isMainModule mi moduleCount || modName = ""
+        let owner = if isMain then "the main module" else $"module '{modName}'"
+        for d in m.Decls do
+            let at = $"{owner}, line {d.Span.StartLine}"
+            let declare (n: string) (kind: string) (what: string) =
+                let emitted =
+                    if isMain || n.StartsWith "__" then n
+                    else (modName + "." + n).Replace(".", "__")
+                if not (seen.ContainsKey emitted) then
+                    seen.[emitted] <- ($"the {what} '{n}' declared in {at}", kind)
+            let enumTarget (values: Expr) =
+                match values.Kind with
+                | ExprKind.ExprArrayLit es when not es.IsEmpty
+                                             && es |> List.forall (fun e -> match e.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false) ->
+                    "alias:string"
+                | ExprKind.ExprArrayLit es
+                    when es |> List.forall (fun e -> match e.Kind with ExprKind.ExprLit (LitInt _) -> true | _ -> false) ->
+                    "alias:int64"
+                | _ -> "alias:?"
+            match d.Value with
+            | DeclType (TyDeclAlias (n, _, body)) ->
+                let kind =
+                    match body with
+                    | TyIdx _ -> "alias:int64"
+                    | TyEnumIdx values -> enumTarget values
+                    | _ -> "alias:?"
+                declare n kind "type"
+            | DeclType (TyDeclStruct (n, _, _, _, _)) -> declare n "struct" "struct"
+            | DeclType (TyDeclSum (n, _, _)) -> declare n "type" "variant type"
+            | DeclType (TyDeclMutualGroup (members, _)) -> for (n, _) in members do declare n "alias:?" "mutual-group type"
+            | _ -> ()
+    let errors = ResizeArray<CompileError>()
+    for (n, kind, binding, modName, span) in env.ProviderEmittedTypes do
+        let site = if modName = "" then "in the main module" else $"in module '{modName}'"
+        let shown = if kind = "struct" then "struct" elif kind = "type" then "type" else "type alias"
+        match seen.TryGetValue n with
+        | true, (other, otherKind) when clashes kind otherKind ->
+            resetCurrentStmtSpan ()
+            errors.Add (locateError span env (ProviderTypeClash (n, shown, binding, site, other)))
+        | true, _ -> ()
+        | _ -> seen.[n] <- ($"the provider load '{binding}' {site}", kind)
+    List.ofSeq errors
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     resetInferSideTables ()
@@ -1280,6 +1395,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
         }
         moduleExports <- Map.add moduleName export moduleExports
     allErrors <- allErrors @ crossModuleDeclErrors env program
+    if List.isEmpty allErrors then allErrors <- providerTypeClashErrors env program
     // env.Warnings is shared by reference across all envWithExports updates
     // (mutable ResizeArray, not a Map), so all module-scope warnings
     // accumulate here.
@@ -1459,6 +1575,13 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     // itself the earliest `resolveStatics` consumer -- and StaticEval's miss
     // would be SILENT ("not foldable"), not an error. No-op, and
     // reference-equal, for programs with no `import icechunk`.
+    // #62: every domain registers its surface ops' result shapes with the shared oracle (Blade.ElabShapes) BEFORE the
+    // first elaboration pass, so a pass that runs before a domain's own (sgs and ppl before math, math before spectra)
+    // reads the shape of that domain's call it meets. Idempotent.
+    Blade.Sgs.Elaborate.registerShapes ()
+    Blade.Ppl.Elaborate.registerShapes ()
+    Blade.Math.Elaborate.registerShapes ()
+    Blade.Spectra.Elaborate.registerShapes ()
     match Blade.ProviderDesugar.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["provider checkout desugar"]))
     | Ok program ->

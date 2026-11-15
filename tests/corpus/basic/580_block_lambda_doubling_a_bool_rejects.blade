@@ -1,0 +1,15 @@
+// TEST: a block lambda doubling a Bool (rejects)
+// ============================================================================
+// R10 remainder (the numbers-only rule, formalism 2.4): a block lambda's
+// parameter its body leaves open is BOUND by a direct call's argument -- a Bool,
+// a String, a struct, a sum-type value, an index value -- as a numeric one always
+// was. It used to stay open, fall to zonk's Float64 default, and the call
+// converted the argument silently. On the base this printed
+// `r = 2.0`.
+// ============================================================================
+let r = {
+    let dbl = lambda(x) -> x + x
+    dbl(true)
+}
+// ERROR: BL3001 @ 10:28
+// ERROR-CONTAINS: arithmetic is defined on numbers only

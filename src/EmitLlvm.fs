@@ -11193,6 +11193,7 @@ let private mergeModules (modules: IRModule list) : IRModule =
           CompoundInits = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
           SparseInits = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
           MutableArrayLets = ms |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+          LetMutBinders = ms |> List.fold (fun acc m -> Set.union acc m.LetMutBinders) Set.empty
           DerivedFuncOrigins = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
           FunctionAliasNames = ms |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty }
 

@@ -1,0 +1,16 @@
+// TEST: an inner binding that shadows a block lambda's name does not stop its generalization
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. The inner block binds and assigns its
+// OWN `idl`; the outer lambda is only ever applied (eligibility is
+// scope-aware: Codex review of the D5 change).
+function f() -> Float32 = {
+    let idl = lambda(x) -> x
+    let a = idl(1)
+    let b = idl(2.0)
+    let c = { let idl = 0; idl = 1; idl }
+    b + Float32(a + c)
+}
+let r = f()
+// EXPECT: r = 4.0

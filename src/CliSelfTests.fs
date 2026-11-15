@@ -839,7 +839,7 @@ let runCliSmokeTests () : TH.BlockResult =
                     (code = 0 && out.Contains "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
                      && not (out.Contains "fold form: antisym tile (shared C core)"))
                     (out + err)
-                // THE ANTISYM ROW GROUPS, EXECUTED (corpus symmetry/132's
+                // THE ANTISYM ROW GROUPS, EXECUTED (corpus symmetry/173's
                 // program -- which the corpus runs under the default G = 1 --
                 // under the cache-budget policy, anti_g=0: row groups of 4, 4
                 // and a ragged 2 at p = 61, n = 401): the same printed values
@@ -5773,6 +5773,17 @@ let internal runCorpusWiringTests () : TH.BlockResult =
             |> List.map (fun (c, hits) -> $"{c} ({hits.Length} files, e.g. {snd hits.Head})")
             |> String.concat "; "
             |> fun s -> s + " -- add it to Diagnostics.Codes.registryEntries, protocol/data/diagnostics.json and regenerate protocol/surface.json")
+    // One test per NUMBER per directory (deep review R6): a citation like
+    // `functions/656` must name one file.
+    let dupNumbers = Blade.Tests.Corpus.duplicateNumbers ()
+    record "no corpus number names two tests in one directory" dupNumbers.IsEmpty
+        (if dupNumbers.IsEmpty then ""
+         else
+            let shown =
+                dupNumbers |> List.truncate 8
+                |> List.map (fun (d, n, names) -> $"""{d}/{n}: {String.concat " | " names}""")
+                |> String.concat "; "
+            $"{dupNumbers.Length} duplicated: {shown} -- renumber one file above the directory's highest number")
     // The pin grammar every lane reads (the compiled run, the interpreter
     // differential, the diff oracles all go through Expect): a NESTED Bool
     // pin -- what a rank-2 comparison prints -- is an assertion, not a

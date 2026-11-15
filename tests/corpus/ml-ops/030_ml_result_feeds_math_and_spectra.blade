@@ -1,0 +1,16 @@
+// TEST: ML op results feed math and spectra ops
+import ml as ml
+import math as m
+import spectra as sp
+// #62: ml elaborates first; its generated routine's signature
+// (Array<Float64 like Idx<2>>) is the shape the later elaborators read.
+// lout = W x with W = [[2, 1], [0, 3]], x = [5, 7] -> [17, 21].
+let static s2 = [(0, 0, 2)]
+let lout = ml.linear(s2, s2, Float64([2.0, 1.0, 0.0, 3.0]), Float64([5.0, 7.0]))
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 0.0], [0.0, 2.0]]
+let x = m.solve(A, lout)
+let x1 = x(1)
+// EXPECT: x1 = 10.5
+let X = sp.fft(lout)
+let s0 = real(X(0))
+// EXPECT: s0 = 38.0

@@ -514,14 +514,14 @@ let runCellEpilogueTests () : BlockResult =
         [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", rel)
           Path.Combine(AppContext.BaseDirectory, "tests", "corpus", rel) ] |> List.tryFind File.Exists
     // (since the round-4 merge the kept inline's fail-closed ownership scope --
-    // round-3 W2-4 rounds 5-7 -- declines 032_lifetime (a tuple-typed callee let)
-    // and 034_lifetime (a user call in the callee): their legs do not ride, so
+    // round-3 W2-4 rounds 5-7 -- declines 064_lifetime (a tuple-typed callee let)
+    // and 066_lifetime (a user call in the callee): their legs do not ride, so
     // they have no gate-on / gate-off raw-bit arm here; `blade test optimize`
     // pins their declines and releases)
     let lifetimePrograms =
-        [ "033_lifetime_cse_equal_caller_map.blade", ["r"]
-          "035_lifetime_function_scalar_return.blade", ["r"]
-          "037_lifetime_scratch_reuse_region.blade", ["r"] ]
+        [ "065_lifetime_cse_equal_caller_map.blade", ["r"]
+          "067_lifetime_function_scalar_return.blade", ["r"]
+          "069_lifetime_scratch_reuse_region.blade", ["r"] ]
         |> List.choose (fun (file, scalars) ->
             match corpusFile ("sibling-folds/" + file) with
             | None -> fail ("inline lifetime witness " + file) "corpus file not found"; None
@@ -638,7 +638,7 @@ let runCellEpilogueTests () : BlockResult =
                           ("sibling-folds/037_input_legs_decline_alias_function_caller_aborts.blade", Some "at driver")
                           ("sibling-folds/041_input_legs_decline_nested_alias_function_caller_aborts.blade", Some "at driver")
                           ("sibling-folds/045_input_legs_decline_user_call_function_caller_aborts.blade", Some "at driver")
-                          ("sibling-folds/036_lifetime_caller_panic.blade", Some "at driver") ] do
+                          ("sibling-folds/068_lifetime_caller_panic.blade", Some "at driver") ] do
       for lane in [ "cpp"; "llvm" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel} {lane}: fault, site and frame equal gate on vs off"
         match corpusFile rel with
@@ -699,11 +699,11 @@ let runCellEpilogueTests () : BlockResult =
                  "sibling-folds/032_input_legs_unused_final_join_atom_return.blade"
                  "sibling-folds/033_input_legs_cse_barrier_function_caller.blade"
                  "sibling-folds/035_input_legs_scratch_reuse_inside_callee.blade"
-                 "sibling-folds/032_lifetime_deleted_final_join.blade"
-                 "sibling-folds/033_lifetime_cse_equal_caller_map.blade"
-                 "sibling-folds/034_lifetime_duplicate_scalar_return.blade"
-                 "sibling-folds/035_lifetime_function_scalar_return.blade"
-                 "sibling-folds/037_lifetime_scratch_reuse_region.blade" ] do
+                 "sibling-folds/064_lifetime_deleted_final_join.blade"
+                 "sibling-folds/065_lifetime_cse_equal_caller_map.blade"
+                 "sibling-folds/066_lifetime_duplicate_scalar_return.blade"
+                 "sibling-folds/067_lifetime_function_scalar_return.blade"
+                 "sibling-folds/069_lifetime_scratch_reuse_region.blade" ] do
         let name = $"{Path.GetFileNameWithoutExtension rel}: return-boundary releases under ASan and with the pool cache"
         match corpusFile rel with
         | None -> fail name "corpus file not found"
@@ -715,8 +715,8 @@ let runCellEpilogueTests () : BlockResult =
         use _c = pinEnv "BLADE_FP_CONTRACT" "off"
         // master's 035_input_legs is the scratch-reuse witness: reuse ON there (the
         // default), off for master's other fixtures. Round 4's `_lifetime_` fixtures
-        // keep the default they were written under (037_lifetime is a reuse witness).
-        // Names are matched WHOLE: a bare "035" also matched 035_lifetime after the
+        // keep the default they were written under (069_lifetime is a reuse witness).
+        // Names are matched WHOLE: a bare "035" also matched 067_lifetime after the
         // round-4 merge.
         let lifetimeFixture = rel.Contains "_lifetime_"
         use _pr = pinEnv "BLADE_POOL_REUSE" (if rel.Contains "035_input_legs" || lifetimeFixture then null else "off")
@@ -760,9 +760,9 @@ let runCellEpilogueTests () : BlockResult =
                     // pools then live to exit (pre-existing): gate-on frees more.
                     // Round 4's `_lifetime_` fixtures keep round 4's rule (the inline
                     // allocates nothing gate-off does not, and frees no less).
-                    // 037_lifetime is round 4's scratch-reuse witness and behaves like
+                    // 069_lifetime is round 4's scratch-reuse witness and behaves like
                     // 035_input_legs: the event-bearing function forgoes its reuse.
-                    if rel.Contains "035_input_legs" || rel.Contains "037_lifetime" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
+                    if rel.Contains "035_input_legs" || rel.Contains "069_lifetime" then a1 = a2 + 1L && f1 = f2 + 1L && o1 = o2
                     elif lifetimeFixture then a1 = a2 && f1 >= f2 && o1 <= o2
                     elif rel.Contains "031_input_legs" || rel.Contains "033_input_legs" then a1 = a2 && f1 = f2 && o1 = o2
                     else a1 = a2 && f1 >= f2 && o1 <= o2
@@ -908,16 +908,16 @@ let runCellEpilogueTests () : BlockResult =
           if t.Contains "ERROR: AddressSanitizer" then fail name ($"ASan reported: {t}")
           elif want |> List.exists (fun w -> not (t.Contains w)) then fail name ($"ASan build values: {t}")
           else pass name ($"""no helper frees its captured `y`; ASan clean; {(census t |> Option.map (fun l -> l.Trim()) |> Option.defaultValue "no census")}"""))
-     // ---- memfree/029-035, functions/545-547: the RETURN classified slot by slot (W4B-C) ----
+     // ---- memfree/029-035, functions/858-860: the RETURN classified slot by slot (W4B-C) ----
      // Each file's `kernel` allocates and frees EXACTLY the pinned pool counts:
      // every pool freed where the captured `y` is read only by a proved-
      // synchronous kernel slot (031 the return-position fold, 035 an
-     // object_for kernel counted once, 547 a fold let followed by a direct read
+     // object_for kernel counted once, 860 a fold let followed by a direct read
      // of `y`); `y` kept where a closure over it escapes (029 a scalar-
      // arithmetic tail store, 030 a tail call, 032 a return fold beside a
      // stored closure, 033 one kernel referenced twice, 034 a writing return
-     // fold kernel, 545 a fold SEED that stores a closure -- each closure
-     // invoked after `kernel` returned) or where the slot is not proved (546
+     // fold kernel, 858 a fold SEED that stores a closure -- each closure
+     // invoked after `kernel` returned) or where the slot is not proved (859
      // one kernel in two object_for folds: two references, `y` pinned, a
      // conservative leak; `t` freed). Plain build: the emission + the pinned
      // values; BLADE_MEMCHECK=1: ASan clean with the same values.
@@ -929,13 +929,13 @@ let runCellEpilogueTests () : BlockResult =
              ("memfree/033_kernel_referenced_twice_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
              ("memfree/034_return_fold_writing_kernel_keeps_capture.blade", "kernel", (1, 0), [ "r = 40.0"; "v = 38.0" ])
              ("memfree/035_object_for_kernel_capture_freed.blade", "kernel", (2, 2), [ "k2 = 180.0"; "k3 = 390.0" ])
-             ("functions/545_fold_seed_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
-             ("functions/546_one_kernel_two_object_for_folds_keeps_capture.blade", "kernel", (2, 1), [ "k2 = 361.0"; "k3 = 781.0" ])
+             ("functions/858_fold_seed_stores_closure_keeps_capture.blade", "kernel", (1, 0), [ "r = 120.0"; "v = 60.0" ])
+             ("functions/859_one_kernel_two_object_for_folds_keeps_capture.blade", "kernel", (2, 1), [ "k2 = 361.0"; "k3 = 781.0" ])
              // (1, 1) since compute elision (BLADE_COMPUTE_ELIDE, plan-identity-
              // transpose-compute P3): `t`'s single pointwise consumer `y` reads
              // its map in place, so the kernel owns ONE pool (`y`), freed once;
              // it was (2, 2) with `t` stored.
-             ("functions/547_fold_let_then_direct_read_of_captured_array.blade", "kernel", (1, 1), [ "k2 = 170.0"; "k3 = 342.0" ])
+             ("functions/860_fold_let_then_direct_read_of_captured_array.blade", "kernel", (1, 1), [ "k2 = 170.0"; "k3 = 342.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kernel", (1, 1), [ "yes = 55.0"; "no = 0.0"; "total = 5300.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kjoin", (1, 1), [ "s = 15.0"; "ss = 55.0"; "total = 5300.0" ])
              ("functions/548_memfree_fold_below_scalar_if_return_freed.blade", "kfma", (1, 1), [ "r = 31.0"; "total = 5300.0" ])

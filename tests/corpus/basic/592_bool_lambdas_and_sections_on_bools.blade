@@ -1,0 +1,29 @@
+// TEST: lambdas and operator sections that take Bools as Bools
+// ============================================================================
+// The accepted twin of basic/580-591 (R10 remainder): a Bool argument binds a
+// callee's open parameter as a Bool -- an alias of a lambda, a lambda applied
+// where it is written, a block-local section -- so logical operators,
+// comparisons and explicit casts keep working on it.
+// ============================================================================
+let a = (lambda(x) -> !x)(true)
+// EXPECT: a = false
+let c = (lambda(x, y) -> x == y)(true, false)
+// EXPECT: c = false
+let d = (lambda(x) -> Float64(x))(true)
+// EXPECT: d = 1.0
+let e = {
+    let op = (&&)
+    op(true, false)
+}
+// EXPECT: e = false
+let f = {
+    let op = (||)
+    op(true, false)
+}
+// EXPECT: f = true
+let g = {
+    let neg = lambda(x) -> !x
+    let alias = neg
+    alias(true)
+}
+// EXPECT: g = false

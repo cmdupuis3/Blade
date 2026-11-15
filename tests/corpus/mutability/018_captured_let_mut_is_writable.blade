@@ -1,0 +1,22 @@
+// TEST: a captured let mut is writable from a function, a kernel and through an index
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a plain
+// `let` is writable in the callable that defines it, nested blocks included.
+// A callable that only CAPTURES it -- a nested function, a lambda, a kernel, a
+// top-level function over a module binding -- writes it only when it was
+// declared `let mut`. These are the accepted twins of
+// mutability-errors/048-050: the same programs with `let mut`.
+let mut x = 1
+function bump() -> Int32 = { x = x + 1; x }
+let r = bump()
+let xs = [1.0, 2.0, 3.0]
+let mut total = 0.0
+let ys = method_for(xs) <@> lambda(v) -> { total = total + v; v } |> compute
+let mut A = [1.0, 2.0]
+function w() -> Float32 = { A(0) = 5.0; A(0) }
+let q = w()
+// EXPECT: x = 2
+// EXPECT: r = 2
+// EXPECT: total = 6.0
+// EXPECT: ys = [1.0, 2.0, 3.0]
+// EXPECT: A = [5.0, 2.0]
+// EXPECT: q = 5.0

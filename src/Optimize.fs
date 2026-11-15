@@ -9433,6 +9433,13 @@ type RecFoldChannel =
     /// MutableArrayLets: the desugar records the let rec binding and its
     /// buffer; the deep copy at the binding site copies the ring, and the
     /// trajectory has no use left after the rewrite -- admitted.
+    /// LetMutBinders (D9): the rec desugar's buffer is a surface `let mut`
+    /// (TypeCheckInfer's bufLet), so its id is there; the ring keeps that id
+    /// (the rewritten `IRLet (bufId, IRUninit ringT, ..)`), and every reader of
+    /// the set runs BEFORE the optimizer (IRMono.monomorphizeModule carries it
+    /// onto pack-unroll copies, Lowering.refuseDeferredWritesAndUnorderedIfs
+    /// judges captured plain lets); after it the set is only unioned into
+    /// merged module records (CodeGen / EmitLlvm), never looked up -- admitted.
     | ChAdmitted
 
 /// Keys: `Owner.Field` (records) / `Owner.Case.Field` (unions), Owner the
@@ -9445,7 +9452,7 @@ let recFoldConstructorTable : (string * RecFoldChannel) list =
       // IRModule
       "IRModule.Types", ChContainer; "IRModule.Functions", ChContainer; "IRModule.Bindings", ChContainer;
       "IRModule.ProviderReads", ChModule; "IRModule.ProviderWrites", ChModule; "IRModule.RandomInits", ChModule;
-      "IRModule.CompoundInits", ChModule; "IRModule.SparseInits", ChModule; "IRModule.MutableArrayLets", ChAdmitted;
+      "IRModule.CompoundInits", ChModule; "IRModule.SparseInits", ChModule; "IRModule.MutableArrayLets", ChAdmitted; "IRModule.LetMutBinders", ChAdmitted;
       "IRModule.DerivedFuncOrigins", ChInert;
       // IRTypeDef
       "IRTypeDef.IRTDAlias.ty", ChModule; "IRTypeDef.IRTDStruct.fields", ChModule;

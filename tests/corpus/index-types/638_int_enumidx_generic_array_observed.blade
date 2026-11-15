@@ -1,0 +1,19 @@
+// TEST: A generic callee that observes its parameter is handed an array of R as keys
+// ============================================================================
+// R3: the scalar rule of index-types/503 one level up -- a generic function
+// whose body computes on its parameter's values gets an array of R values as
+// its KEYS (an Int64 instance). A defect fixed: `x == 100` at an array of R
+// compared each POSITION with 100 (the base computed [false, false, false]).
+// A callee that only passes the values on keeps them as R.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function inc(x: T) = x + 1
+let v = inc(codes)
+// EXPECT: v = [101, 201, 301]
+function is100(x: T) = x == 100
+let h = is100(codes)
+// EXPECT: h = [true, false, false]
+function same(x: T) -> T = x
+let sm = same(codes)
+// EXPECT: sm = [100, 200, 300]

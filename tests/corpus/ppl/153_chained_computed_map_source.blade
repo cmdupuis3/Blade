@@ -1,0 +1,10 @@
+// TEST: PPL former over a chained computed range map (no annotation)
+// #62 regression witness (Codex round 7): the shared oracle follows a chain of
+// applications `method_for(range<..>) <@> f <@> g` down to its range source,
+// as the PPL formers' own computedShapeOf did before the move. A(i, j) =
+// i + j + 1: rows [1, 2, 3, 4] and [2, 3, 4, 5]; pair moments over the
+// sample axis: E[f0 f0] = 7.5, E[f0 f1] = 10, E[f1 f1] = 13.5.
+import ppl as ppl
+let A = method_for(range<Idx<2>, Idx<4>>) <@> (lambda(i, j) -> Float64(i + j)) <@> (lambda(x) -> x + 1.0) |> compute
+let m2 = ppl.moments(A, 2)
+// EXPECT: m2 = [7.5, 10.0, 13.5]

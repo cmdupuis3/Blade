@@ -1,0 +1,9 @@
+// TEST: PPL former refuses a nested call as its source array (rejects)
+// #62: the formers take a NAMED module-level array (they emit row views of
+// it); the steer is to bind the call, whose shape the oracle then reads.
+// ERROR: BL5100
+// ERROR-CONTAINS: moments expects moments(A, k)
+import ppl as ppl
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let M = ppl.moments(m.matmul(A, A), 2)

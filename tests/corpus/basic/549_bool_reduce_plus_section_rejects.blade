@@ -1,0 +1,11 @@
+// TEST: reduce with (+) over a Bool array (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14:
+// "true is a boolean and is not compatible without type casting"): arithmetic
+// is defined on numbers only, so the type checker refuses it before either
+// lane runs. On master 1e6a871a this printed `t = true`,
+// not a count: count with `reduce(Int64(xs), (+))` (basic/553).
+// ============================================================================
+let xs = [true, false]
+let t = reduce(xs, (+))
+// ERROR: BL3001

@@ -1,0 +1,12 @@
+// TEST: A generic prodsum at an array of R multiplies the keys
+// ============================================================================
+// R3, a defect fixed: prodsum in a generic body at an array of R multiplied
+// the POSITIONS (the base computed 5, then read the key table past its end
+// to print it). prodsum marks the parameter observed; the call hands the
+// keys over.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function dot(a: T^1, b: T^1) = prodsum(a, b)
+let v = dot(codes, codes)
+// EXPECT: v = 140000

@@ -1427,6 +1427,10 @@ let evalMath (name: string) (v: Value) : Value =
 /// Value DU has no width-tagged complex case), so the narrowing is applied to
 /// the components exactly where C++ stores complex<float>.
 let private evalCast (loc: SrcLoc) (target: ElemType) (v: Value) : Value =
+    // A Bool converts to 1 / 0 (formalism 2.4, the owner's ruling of
+    // 2026-11-14): exactly the Int32 1 / 0, whatever the target -- C++'s
+    // static_cast of a bool, the LLVM lane's zext / uitofp of an i1.
+    let v = match v with VBool b -> VInt32 (if b then 1 else 0) | _ -> v
     let bad () =
         raise (InterpPanic("BL9001", $"numeric cast to {castNameOf target} on an unsupported operand (typecheck licenses casts, so this is an interpreter bug)", None, 0))
     let asRealF64 () =

@@ -324,6 +324,20 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                     | SRagged (rows, lens, offs) -> SRagged (rows |> Array.map mapStore, lens, offs)
                     | _ -> st
                 VArray { arr with Data = mapStore arr.Data }
+            // R3: a COMPOUND (or sparse) array of R values -- `compound(codes,
+            // keep)` -- prints its present cells' KEYS too (it printed the
+            // positions in both lanes).
+            | None, ArrayElem at, (VCompound _ | VSparse _) when (keysOf at.ElemType).IsSome ->
+                let keys = (keysOf at.ElemType).Value
+                let mapFlat (st: Store) =
+                    match st with
+                    | SInt a -> SInt (a |> Array.map (fun p -> if p >= 0L && p < int64 keys.Length then keys.[int p] else p))
+                    | SInt32 a -> SInt (a |> Array.map (fun p -> if p >= 0 && p < keys.Length then keys.[p] else int64 p))
+                    | _ -> st
+                (match v with
+                 | VCompound cv -> VCompound { cv with Data = mapFlat cv.Data }
+                 | VSparse sv -> VSparse { sv with Data = mapFlat sv.Data }
+                 | _ -> v)
             | None, IRTTuple ts, VTuple vs when ts.Length = vs.Length ->
                 VTuple (Array.map2 (mapValue (fuel - 1)) (List.toArray ts) vs)
             | None, IRTNamed n, VStruct (sn, fs) ->

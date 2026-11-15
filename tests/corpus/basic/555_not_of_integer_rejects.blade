@@ -1,0 +1,9 @@
+// TEST: logical not of an integer (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this printed `t = false`.
+// ============================================================================
+let t = !1
+// ERROR: BL3001
+// ERROR-CONTAINS: a logical operator takes Bools only

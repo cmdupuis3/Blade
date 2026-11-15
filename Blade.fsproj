@@ -328,6 +328,14 @@
          under src/ppl/compiler/; the MomentAlgebra reference project is a
          SEPARATE fsproj at oracles/ppl; core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
+    <!-- The ONE static-shape oracle of the domain elaborators (deep-review #62): every elaborator that specializes a
+         generated routine to its operands' extents (math, spectra, sgs, ppl) asks it for an operand's shape: a
+         declaration, a syntactic form, the result of an earlier elaborated call (each domain registers its surface
+         ops' result shapes, so the answer does not depend on pass order), an alias / destructuring / projection of
+         those, or an imported module binding. Also the shared rewrite walker and program expansion of the three
+         expression-level elaborators. Needs Ast, StaticEval and Diagnostics only; must precede PplElaborate, the
+         first consumer in compile order. -->
+    <Compile Include="src/ElabShapes.fs" />
     <Compile Include="src/ppl/compiler/PplElaborate.fs" />
     <!-- Linear-algebra dispatch classification (Phase 5 of
          docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->

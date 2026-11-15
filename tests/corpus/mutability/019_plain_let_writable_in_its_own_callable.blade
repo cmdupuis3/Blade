@@ -1,0 +1,29 @@
+// TEST: a plain let is writable in its own callable, nested blocks included
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a plain
+// `let` is writable in the callable that defines it, nested blocks included.
+// A callable that only CAPTURES it -- a nested function, a lambda, a kernel, a
+// top-level function over a module binding -- writes it only when it was
+// declared `let mut`. `f` assigns its own `s` directly and
+// from a nested block (a block enters no scope); the module assigns its own
+// `top`; `g` binds its OWN `x`, which shadows the module's and is its to
+// write -- the module's `x` is untouched.
+function f(n: Int32) -> Int32 = {
+    let s = n
+    s = s + 1
+    let t = { s = s + 10; s }
+    t
+}
+let r = f(1)
+let top = 1
+top = top + 1
+let x = 1
+function g() -> Int32 = {
+    let x = 5
+    x = x + 1
+    x
+}
+let r2 = g()
+// EXPECT: r = 12
+// EXPECT: top = 2
+// EXPECT: x = 1
+// EXPECT: r2 = 6

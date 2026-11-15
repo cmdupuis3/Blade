@@ -492,7 +492,7 @@ unification fact (only literal-literal seams are checked); no branch-probability
 and — a corrected premise — **the closed world is a source-level property the emitter
 currently spends**: main-local function references emit as `std::function` locals
 (CodeGen.fs:1241-1333, main-locality decided by `computeMainLocalFuncIds` :1429; corpus
-witnesses functions/023, functions/086). Mutual recursion
+witnesses functions/850, functions/086). Mutual recursion
 is BL4006 ("mutual group violation", Diagnostics.fs:233); BL2001 is "unbound variable" —
 the form mutual recursion *surfaces as* under define-before-use.
 

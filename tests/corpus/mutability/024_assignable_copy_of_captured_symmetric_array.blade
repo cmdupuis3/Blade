@@ -1,0 +1,26 @@
+// TEST: an assignable copy of a captured symmetric array is its own storage
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a `let`
+// whose value is an existing array holds a private copy with the source's
+// storage class -- a packed SymIdx array included, in every lane (loops/517
+// `rs`). A kernel or function writing the copy writes nothing it captured.
+// The storage walk proves only DENSE renames to be copies (the deferred-write
+// and mut-argument rules keep that reading); the capture judgment reads
+// compact renames as copies too, and used to refuse these writes.
+type K = Idx<2>
+type I = Idx<3>
+let x = method_for(range<K>) <@> lambda(k) -> Float64(k) |> compute
+let S = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
+let rs = method_for(range<I>) <@> lambda(i) -> {
+    let mut c = S
+    c((0 : K), (1 : K)) = Float64(i)
+    c((0 : K), (1 : K)) + S((0 : K), (1 : K))
+} |> compute
+function g(v: Float64) -> Float64 = {
+    let c = S
+    c((0 : K), (0 : K)) = v
+    c((0 : K), (0 : K)) + S((1 : K), (1 : K))
+}
+let rg = g(5.0)
+// EXPECT: S = [[0.0, 1.0], [2.0]]
+// EXPECT: rs = [1.0, 2.0, 3.0]
+// EXPECT: rg = 7.0

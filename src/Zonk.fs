@@ -487,7 +487,7 @@ let private guardIndex (a: TypedExpr) (ext: TypedExpr) (what: string) : TypedExp
             let v = mk (TExprVar (name, vid, None)) a.Type
             let tb : TypedBinding = {
                 Name = name; VarId = vid; Type = a.Type
-                Identity = None; IsMutable = false; Value = a
+                Identity = None; IsMutable = false; IsLetMut = false; Value = a
                 SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
             mk (TExprBlock ([ TStmtLet tb; guardOn v ], Some v)) a.Type
         | None ->
@@ -569,7 +569,7 @@ let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
                 |> Option.get
             let tb : TypedBinding = {
                 Name = name; VarId = vid; Type = a.Type
-                Identity = None; IsMutable = false; Value = a
+                Identity = None; IsMutable = false; IsLetMut = false; Value = a
                 SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
             Some (mk (TExprBlock ([ TStmtLet tb; check ], Some ordinal)) intTy)
         | _ -> None
@@ -1080,7 +1080,7 @@ let private groupStorageRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IR
             else
                 let letOf (name: string) (vid: IRId) (ty: IRType) (value: TypedExpr) =
                     TStmtLet { Name = name; VarId = vid; Type = ty
-                               Identity = None; IsMutable = false; Value = value
+                               Identity = None; IsMutable = false; IsLetMut = false; Value = value
                                SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
                 let gvid = ctx.FreshId ()
                 let gv = mkAt i (TExprVar ($"__gi{gvid}", gvid, None)) i1.Type
@@ -1215,7 +1215,7 @@ let private boundArrayRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IRTy
         let v = mkTypedSpan (TExprVar (name, vid, None)) arr.Type arr.Span
         let tb : TypedBinding = {
             Name = name; VarId = vid; Type = arr.Type
-            Identity = None; IsMutable = false; Value = arr
+            Identity = None; IsMutable = false; IsLetMut = false; Value = arr
             SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
         let read = mkTypedSpan (mkRead v (guardSubscriptsPlainAt true v idxs)) nodeTy arr.Span
         mkTypedSpan (TExprBlock ([ TStmtLet tb ], Some read)) nodeTy arr.Span
@@ -1288,6 +1288,35 @@ let private noteDataKernelParams (subst: Subst) (info: TypedApplyInfo) : unit =
         | _ -> ()
     | _ -> ()
 
+/// R3: a LITERAL PATTERN matched against a value of an integer EnumIdx names
+/// one of its KEYS, as a literal typed R does: folded here to the key's
+/// position, the representation the scrutinee is compared in. It was left
+/// as written, so `match codes(0) with | 100 -> ..` compared the position
+/// with 100 (a silent wrong arm). `expected` is the type the enclosing
+/// position gives the pattern (the scrutinee's at the top); a nested
+/// pattern's own (zonked) type takes precedence. A literal that is none of
+/// R's keys stays unfolded and is refused by
+/// TypeCheckValidate.collectUnknownEnumKeys (BL4003).
+let rec private foldEnumKeyPattern (expected: IRType) (pat: TypedPattern) : TypedPattern =
+    let own = if (intEnumKeysOfType pat.Type).IsSome then pat.Type else expected
+    let kind =
+        match pat.Kind with
+        | TPatLit (Blade.Ast.LitInt v) ->
+            (match intEnumKeysOfType own with
+             | Some (_, keys) ->
+                 (match keys |> List.tryFindIndex ((=) v) with
+                  | Some ord -> TPatLit (Blade.Ast.LitInt (int64 ord))
+                  | None -> pat.Kind)
+             | None -> pat.Kind)
+        | TPatTuple ps -> TPatTuple (ps |> List.map (fun p -> foldEnumKeyPattern p.Type p))
+        | TPatCons (h, t) -> TPatCons (foldEnumKeyPattern h.Type h, foldEnumKeyPattern t.Type t)
+        | TPatVariant (tag, payload, isEnum) ->
+            TPatVariant (tag, payload |> Option.map (fun p -> foldEnumKeyPattern p.Type p), isEnum)
+        | TPatStruct (tn, flds) -> TPatStruct (tn, flds |> List.map (fun (n, p) -> (n, foldEnumKeyPattern p.Type p)))
+        | TPatGuarded (p, g) -> TPatGuarded (foldEnumKeyPattern own p, g)
+        | k -> k
+    { pat with Kind = kind }
+
 /// The EDGES of an integer EnumIdx value (D2): it is a key represented as its
 /// position. On the way IN, a literal typed `R` is folded to its key's
 /// position (an unknown key is BL4003 at type checking,
@@ -1326,7 +1355,7 @@ let private intEnumEdges (e: TypedExpr) : TypedExpr =
          | None -> e)
     | TExprBinOp (Blade.Ast.Elementwise, op, l, r) when isR l || isR r ->
         (match op with
-         | Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul | Blade.Ast.OpDiv | Blade.Ast.OpMod ->
+         | Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul | Blade.Ast.OpDiv | Blade.Ast.OpMod | Blade.Ast.OpCaret ->
              // Arithmetic whose RESULT was typed as the EnumIdx itself: the
              // operand was a kernel parameter still open when the body was
              // typed, and the kernel's result, its loop output and its binding
@@ -1344,6 +1373,15 @@ let private intEnumEdges (e: TypedExpr) : TypedExpr =
          | Blade.Ast.OpEq | Blade.Ast.OpNeq | Blade.Ast.OpLt | Blade.Ast.OpLe | Blade.Ast.OpGt | Blade.Ast.OpGe ->
              { e with Kind = TExprBinOp (Blade.Ast.Elementwise, op, observe l, observe r) }
          | _ -> e)
+    // R3: a math intrinsic (`sqrt(c)`, `abs(c)`) over a value of R computes on
+    // its KEY. An operand still open when the intrinsic was typed (a lambda
+    // value's parameter) reaches here as R: observed when the result is not
+    // typed R, refused when it is (abs keeps its operand's type).
+    | TExprUnaryOp ((Blade.Ast.OpMath _) as op, x) when isR x ->
+        if isR e then
+            report e.Span "an intrinsic of a value of an EnumIdx type computes on its KEY, an Int64, but this result was typed as the EnumIdx itself (the operand is a kernel parameter typed before it met it): spell the key, `abs(Int64(c))`"
+            e
+        else { e with Kind = TExprUnaryOp (op, observe x) }
     | TExprUnaryOp (Blade.Ast.OpNeg, x) when isR x && isR e ->
         report e.Span "negating a value of an EnumIdx type computes on its KEY: spell it `-Int64(c)`"
         e
@@ -1392,13 +1430,39 @@ let private intEnumEdges (e: TypedExpr) : TypedExpr =
                                  |> List.exists (fun (p, a) -> (IR.stripUnits p).IsIRTInfer && isR a) ->
              report e.Span "a generic function applied to values of an EnumIdx (here as a kernel) would compute on the positions that represent their keys: spell the key, `lambda(c) -> f(Int64(c))`"
              e
-         | FuncElem (ps, _) when args |> List.exists isR ->
-             let args' =
-                 args |> List.mapi (fun i a ->
-                     match List.tryItem i ps |> Option.map IR.stripUnits with
-                     | Some (IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32)) when isR a -> observe a
-                     | _ -> a)
-             { e with Kind = TExprApp (f, args') }
+         | FuncElem (ps, _) ->
+             // R3 (Codex review round 2): a value of R meeting a NUMERIC
+             // parameter slot is observed -- at the top of an argument, and
+             // inside a TUPLE argument too (`m((codes(0), 1.0))` against
+             // `m(t: (Int32, Float64))` handed the position over). A tuple
+             // VALUE whose R component meets a numeric slot cannot be
+             // observed in place: refused.
+             let numeric (t: IRType) =
+                 match IR.stripUnits t with
+                 | IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32) -> true
+                 | _ -> false
+             let rec observeInto (p: IRType) (a: TypedExpr) : TypedExpr =
+                 match IR.stripUnits p, a.Kind with
+                 | pt, _ when numeric pt && isR a -> observe a
+                 | IRTTuple pts, TExprTuple es when pts.Length = es.Length ->
+                     let es' = List.map2 observeInto pts es
+                     if List.forall2 (fun (x: TypedExpr) y -> obj.ReferenceEquals (x, y)) es es' then a
+                     else { a with Kind = TExprTuple es'; Type = IRTTuple (es' |> List.map (fun x -> x.Type)) }
+                 | IRTTuple _, _ ->
+                     // Any depth (Codex review round 3: a NESTED tuple value
+                     // passed the one-level check).
+                     let rec mismatch (at: IRType) (pt: IRType) =
+                         match IR.stripUnits at, IR.stripUnits pt with
+                         | a', p' when numeric p' && (intEnumKeysOfType a').IsSome -> true
+                         | IRTTuple ats, IRTTuple pts when ats.Length = pts.Length -> List.exists2 mismatch ats pts
+                         | _ -> false
+                     if mismatch a.Type p then
+                         report a.Span "a tuple holding a value of an EnumIdx type meets a numeric component of this parameter: the value is a KEY, represented as its position -- spell the key in the tuple, `(Int64(c), ..)`"
+                     a
+                 | _ -> a
+             let args' = args |> List.mapi (fun i a -> match List.tryItem i ps with Some p -> observeInto p a | None -> a)
+             if List.forall2 (fun (x: TypedExpr) y -> obj.ReferenceEquals (x, y)) args args' then e
+             else { e with Kind = TExprApp (f, args') }
          | _ -> e)
     | _ -> e
 
@@ -1611,7 +1675,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             notePosition vid (zt value.Type) value'
             TExprLet (name, vid, value', z body)
         | TExprMatch (scr, cases) ->
-            TExprMatch (z scr, cases |> List.map (zonkMatchCase subst))
+            let scr' = z scr
+            TExprMatch (scr', cases |> List.map (fun c ->
+                let c' = zonkMatchCase subst c
+                { c' with Pattern = foldEnumKeyPattern scr'.Type c'.Pattern }))
         | TExprLambda info -> TExprLambda (zonkLambdaInfo subst info)
         | TExprStruct (tn, flds) -> TExprStruct (tn, flds |> List.map (fun (n, e) -> (n, z e)))
         | TExprBlock (stmts, final) ->

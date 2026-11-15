@@ -1,0 +1,16 @@
+// TEST: A struct field or tuple member of R type is observed as its key
+// ============================================================================
+// R3: negation (the base refused it, BL4003), an ordering and arithmetic on
+// a component read the key.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+struct Rec { code: Nat<R>, x: Float64 }
+let r = Rec { code = codes(0), x = 1.0 }
+let a = -r.code
+// EXPECT: a = -100
+let b = r.code < 150
+// EXPECT: b = true
+let t = (codes(1), Float64(2.0))
+let c = t[0] * 2
+// EXPECT: c = 400

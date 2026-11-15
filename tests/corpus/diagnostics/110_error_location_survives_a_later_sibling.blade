@@ -1,0 +1,12 @@
+// TEST: Diag Error Location Survives A Later Sibling (diag)
+// ERROR: BL2001 @ 10:10
+// ERROR-CONTAINS: Unbound variable: missing
+// Deep review #48 (2026-11-14): the span is frozen against the error when it
+// is raised. The tuple's second member is checked after the first failed, and
+// used to take the report with it (the refusal pointed at `s.a`).
+struct S {
+    a: Int32
+}
+let s = S { a = 1 }
+let x = (missing,
+ s.a)

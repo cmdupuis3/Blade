@@ -1,0 +1,13 @@
+// TEST: a block lambda whose parameter meets a generic parameter, called with a Bool (rejects)
+// ============================================================================
+// R10 remainder: `dbl`'s parameter stays open (its instance is `outer`'s), so the
+// arithmetic its body deferred on it moves to `outer`'s own parameter
+// (GONumericOperand) and is judged at `outer(true)`, spanned. The base
+// computed `r = 2.0`.
+// ============================================================================
+function outer(b) = {
+    let dbl = lambda(x) -> x + x
+    dbl(b)
+}
+let r = outer(true)
+// ERROR: BL3001 @ 11:15

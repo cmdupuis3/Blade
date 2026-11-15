@@ -1,0 +1,10 @@
+// TEST: prodsum of Bool rows inside a kernel (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: the row's element is open
+// while the kernel body is typed, so the post-zonk sweep judges it (master
+// printed a Bool array).
+// ============================================================================
+let m = [[true, false], [false, true]]
+let r = method_for(m) <@> lambda(row: T^1) -> prodsum(row, row) |> compute
+// ERROR: BL3001

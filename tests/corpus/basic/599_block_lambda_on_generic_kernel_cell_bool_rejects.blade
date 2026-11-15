@@ -1,0 +1,15 @@
+// TEST: a block lambda applied to a kernel cell over a generic array, instantiated at Bool (rejects)
+// ============================================================================
+// R10 remainder: the kernel cell `v` is `outer`'s generic element, so the link
+// between it and `f`'s open parameter is never decided inside the declaration;
+// at the declaration's end the arithmetic `f`'s body deferred on its parameter
+// (`x + x`) moves to that generic variable and is judged per instance --
+// `outer([true, false])` is refused, spanned (functions/895 is the scalar
+// form). No numeric type is bound. The base printed `r = [true, false]`.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    method_for(b) <@> lambda(v) -> f(v) |> compute
+}
+let r = outer([true, false])
+// ERROR: BL3001 @ 13:15

@@ -1,0 +1,17 @@
+// TEST: A tuple holding R travels through a generic: projection and equality stay positions
+// ============================================================================
+// R3: a generic body that only projects a tuple holding a value of R, or
+// compares two such tuples of one type with == / !=, does not observe the
+// value (equal positions are equal keys), so the instance at the tuple keeps
+// it as R. (The first R3 round-2 backstop refused both: Codex review round 3.)
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function second(t: T) -> Float64 = t[1]
+let s = second((codes(0), Float64(1.5)))
+// EXPECT: s = 1.5
+function e(t: T, u: T) -> Bool = t == u
+let a = e((codes(0), 1.0), (codes(1), 1.0))
+// EXPECT: a = false
+let b = e((codes(2), 1.0), (codes(2), 1.0))
+// EXPECT: b = true

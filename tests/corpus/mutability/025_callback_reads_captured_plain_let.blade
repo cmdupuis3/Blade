@@ -1,0 +1,23 @@
+// TEST: a callback applied to a captured plain let reads it and may write its own result
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a call
+// through a FUNCTION VALUE (`h(G)`) can only reach a callable the program uses
+// as a value. When none of those writes a parameter, the call writes nothing
+// it is handed; when none returns (a view of) a parameter, its result is fresh
+// storage. Both used to be read fail-closed -- "an unknown callee may write
+// every array and return any of them" -- and refused these reads of `G`.
+// The refused twins: mutability-errors/060 (a value-used callback writes its
+// parameter), 061 (one returns its parameter).
+let G: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function f(h: (Array<Float64 like Idx<3>>) -> Float64) -> Float64 = {
+    h(G) + 1.0
+}
+let r = f(lambda(a) -> reduce(a, (+)))
+function g(k: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = {
+    let t = k(G)
+    t(0) = 9.0
+    t(0) + G(0)
+}
+let r2 = g(lambda(a) -> a * 2.0)
+// EXPECT: r = 7.0
+// EXPECT: r2 = 10.0
+// EXPECT: G = [1.0, 2.0, 3.0]

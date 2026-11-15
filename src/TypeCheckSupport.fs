@@ -1196,6 +1196,11 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
         | None when env.AmbiguousCtors.ContainsKey name ->
             setCurrentExprSpan pat.Span
             Error (AmbiguousImport ("constructor", name, env.AmbiguousCtors.[name]))
+        | None when name.Contains "." ->
+            // A MODULE-QUALIFIED name (`U.Red`, parsed since D11's R1
+            // leftovers) can only mean a constructor: it is never a binder.
+            setCurrentExprSpan pat.Span
+            Error (PatternErr $"pattern '{name}': a module-qualified name in a pattern must name an imported constructor (`<module>.<Constructor>`, e.g. `U.Red` after `import U`), and '{name}' names none. Check the module alias and the constructor's spelling; a bare constructor (`Red`) also resolves against the scrutinee's variant type.")
         | None ->
             // A Capitalized name that is NOT a constructor, in a match over a
             // variant type, is a misspelled constructor far more often than a
@@ -1327,22 +1332,42 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             Error (unknownConstructorError env srcTag (scrutineeVariantType env expected) false)
 
     | PatternKind.PatStruct (srcTypeName, fieldPats) ->
-        // The struct's identity (D11), as in a struct literal.
-        let typeName =
-            match lookupTypeDef srcTypeName env with
-            | Some (TDIStruct (ident, _, _, _)) -> ident
-            | _ -> srcTypeName
+        // The struct the pattern names, through transparent aliases (`type Q =
+        // P`, a mutual-group member): its identity (D11, as in a struct
+        // literal) and fields. None = not (yet) declared.
+        let rec resolveStruct (fuel: int) (name: string) =
+            if fuel = 0 then None else
+            match lookupTypeDef name env with
+            | Some (TDIStruct (ident, _, fields, _)) -> Some (ident, fields)
+            | Some (TDIAlias (IRTNamed next)) when next <> name -> resolveStruct (fuel - 1) next
+            | _ -> None
+        let declared = resolveStruct 16 srcTypeName
+        match declared with
+        | None when srcTypeName.Contains "." && env.AmbiguousTypes.ContainsKey srcTypeName ->
+            setCurrentExprSpan pat.Span
+            Error (AmbiguousImport ("type", srcTypeName, env.AmbiguousTypes.[srcTypeName]))
+        | None when srcTypeName.Contains "." ->
+            // A MODULE-QUALIFIED struct pattern (`U.P { a }`, deep review R1)
+            // names an imported, hence already declared, struct: an unknown
+            // one is refused rather than matching any value with those fields.
+            // (A bare unknown name keeps the old reading -- a struct declared
+            // later in the module is not in scope yet.)
+            setCurrentExprSpan pat.Span
+            Error (PatternErr $"pattern '{srcTypeName} {{ ... }}': no struct named '{srcTypeName}' is imported. A module-qualified struct pattern names a struct the module declares (`<module>.<Struct>`); check the alias and the spelling.")
+        | _ ->
+        let typeName = match declared with Some (ident, _) -> ident | None -> srcTypeName
         let fieldTypes =
-            match lookupTypeDef typeName env with
-            | Some (TDIStruct (_, _, fields, _)) ->
-                fields |> List.map (fun (n, t) -> (n, t)) |> Map.ofList
-            | _ -> Map.empty
+            match declared with
+            | Some (_, fields) -> fields |> Map.ofList
+            | None -> Map.empty
         // Same nominal rule as the variant arm: a struct pattern names a
         // TYPE, and a value of another struct type with the same field
         // spelling (`A { x = 12 }` against `B { x }`) is not an instance of
         // it. Refused on a concrete disagreement; an open scrutinee is bound.
+        // A DECLARED empty struct (`E {}`) is judged too (it matched any
+        // value: no fields to compare).
         let nominalClash =
-            if Map.isEmpty fieldTypes then None
+            if declared.IsNone then None
             else
                 match env.Subst.Resolve expected with
                 | IRTNamed other when other <> typeName -> Some other
@@ -1350,7 +1375,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
         match nominalClash with
         | Some _ -> Error (PatternTypeMismatch ($"{typeName} {{ ... }}", expected))
         | None ->
-        (if not (Map.isEmpty fieldTypes) then
+        (if declared.IsSome then
             match env.Subst.Resolve expected with
             | IRTInfer _ -> unify env.Subst (IRTNamed typeName) expected |> ignore
             | _ -> ())
@@ -1359,7 +1384,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             checkPattern env fTy fpat |> Result.map (fun tp -> (fname, tp)))
         |> sequenceResults |> Result.map (fun tFields ->
             { Kind = TPatStruct (typeName, tFields)
-              Type = (if Map.isEmpty fieldTypes then expected else IRTNamed typeName)
+              Type = (if declared.IsNone then expected else IRTNamed typeName)
               Bindings = tFields |> List.collect (fun (_, p) -> p.Bindings) })
 
     | PatternKind.PatGuarded (innerPat, _guardExpr) ->
@@ -1903,7 +1928,7 @@ let internal checkedIndexConversion (env: TypeEnv) (tE: TypedExpr) (annoTy: IRTy
     let msg = $"index cast out of range: the value is outside {tag} (0 .. {n - 1L})"
     let tb : TypedBinding = {
         Name = ckName; VarId = ckId; Type = tE.Type
-        Identity = None; IsMutable = false; Value = tE
+        Identity = None; IsMutable = false; IsLetMut = false; Value = tE
         SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
     mk (TExprBlock ([ TStmtLet tb; TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", msg)) IRTUnit) ],
                     Some (mk (TExprVar (ckName, ckId, None)) annoTy)))
@@ -1961,7 +1986,7 @@ let internal enumKeyToPosition (env: TypeEnv) (tag: string) (keys: int64 list) (
         |> Option.get
     let tb : TypedBinding = {
         Name = name; VarId = vid; Type = intTy
-        Identity = None; IsMutable = false; Value = a
+        Identity = None; IsMutable = false; IsLetMut = false; Value = a
         SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
     mk (TExprBlock ([ TStmtLet tb; check ], Some ordinal)) (IRTIdxTagged (intTy, IRefNamed tag))
 
@@ -3111,6 +3136,176 @@ let internal operandMixElem (env: TypeEnv) (t: IRType) : (ElemType * bool) optio
     | IRTInfer v -> env.Subst.GetElemCast v |> Option.map (fun (_, tgt) -> (tgt, false))
     | _ -> None
 
+/// THE NUMBERS-ONLY RULE (formalism 2.4; the user's ruling of 2026-11-14:
+/// "`true` is a boolean and is not compatible without type casting").
+/// Arithmetic is defined on numbers only. What a NON-NUMERIC operand is, for
+/// the rule: a Bool, a String, the unit value, a struct, a sum-type value, a
+/// tuple, a function -- or an array of any of them (`kind` names it, `isArray`
+/// says it is an array's element). None for a number, an index-typed value of
+/// a numeric representation (the nominal index rules judge those), a Dist (its
+/// own refusal), and an operand still OPEN (its variable is judged where it is
+/// decided: the post-zonk sweep for a kernel parameter, the call for a generic
+/// signature variable).
+type internal NonNumericOperand = { NKind: string; NWhat: string; NIsArray: bool }
+
+let rec internal nonNumericOperandOf (env: TypeEnv) (t: IRType) : NonNumericOperand option =
+    let rec classify (fuel: int) (isArray: bool) (t: IRType) =
+        if fuel <= 0 then None else
+        let mk kind what = Some { NKind = kind; NWhat = what; NIsArray = isArray }
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | IRTScalar ETBool -> mk "Bool" "a Bool"
+        | IRTScalar ETString -> mk "String" "a String"
+        | IRTScalar ETUnit -> mk "unit" "the unit value"
+        | IRTScalar _ -> None
+        // A string-keyed index label (`EnumIdx<["x", "y"]>`) is a String.
+        | IRTIdxTagged (_, IRefNamed n)
+                when (match lookupTypeDef n env with
+                      | Some (TDIEnumIdx (_, _, values, _)) ->
+                          not values.IsEmpty && values |> List.forall (function EVString _ -> true | _ -> false)
+                      | _ -> false) ->
+            mk "label" "a String label"
+        | IRTIdxTagged (inner, _) when not isArray -> classify (fuel - 1) false inner
+        | ArrayElem arr when not isArray -> classify (fuel - 1) true arr.ElemType
+        | IRTNamed n ->
+            (match lookupTypeDef n env with
+             | Some (TDIStruct _) -> mk "struct" $"a {Blade.Types.TypeOrigins.sourceName n} struct"
+             | Some (TDIVariant _) -> mk "variant" $"a {Blade.Types.TypeOrigins.sourceName n} value"
+             | _ -> None)
+        | IRTTuple _ -> mk "tuple" "a tuple"
+        | FuncElem _ when not isArray -> mk "function" "a function"
+        | _ -> None
+    classify 4 false t
+
+/// What a KNOWN non-Bool operand is, for the logical operators' mirror of the
+/// numbers-only rule (`1 && 2`, `!1`): a number (or an array of numbers), or a
+/// non-numeric value other than a Bool. None for a Bool (or an array of
+/// Bools: `&&` lifts over masks) and for an operand still open.
+let internal nonBoolOperandOf (env: TypeEnv) (t: IRType) : string option =
+    match operandMixElem env t with
+    | Some (et, isArr) when litClassOf et >= 0 ->
+        let s = ppIRType (IRTScalar et)
+        let art = if s.StartsWith "I" then "an" else "a"
+        Some (if isArr then $"an array of {s} elements" else $"{art} {s}")
+    | _ ->
+        match nonNumericOperandOf env t with
+        | Some n when n.NKind <> "Bool" -> Some n.NWhat
+        | _ -> None
+/// The numbers-only rule over one operator node: `Some (leftIsOffender,
+/// message)` when an arithmetic operator (`+ - * / % ^`, elementwise or
+/// outer) has a non-numeric operand -- `+` between two Strings is
+/// concatenation and stays -- or a COMPARISON meets a non-numeric operand
+/// beside a NUMBER (`true == 1`, `"a" < 2`: a comparison converts nothing
+/// either). Comparisons between two Bools, two Strings, two tuples are
+/// untouched. BL3001 (TypeMismatchErr) at both call sites.
+let internal judgeNonNumericOperand (env: TypeEnv) (op: BinOp) (l: TypedExpr) (r: TypedExpr) : (bool * string) option =
+    let opName =
+        match op with
+        | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/" | OpMod -> "%" | OpCaret -> "^"
+        | OpEq -> "==" | OpNeq -> "!=" | OpLt -> "<" | OpLe -> "<=" | OpGt -> ">" | OpGe -> ">="
+        | OpAnd -> "&&" | OpOr -> "||"
+        | _ -> "this operator"
+    let isArith = match op with OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true | _ -> false
+    let isCmp = match op with OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe -> true | _ -> false
+    let numeric (t: IRType) =
+        match operandMixElem env t with
+        | Some (et, _) -> litClassOf et >= 0
+        | None -> false
+    let cl = nonNumericOperandOf env l.Type
+    let cr = nonNumericOperandOf env r.Type
+    let operandName (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) when not (n.StartsWith "__") -> Some n
+        | _ -> None
+    let advice (n: NonNumericOperand) (e: TypedExpr) =
+        let nm = operandName e |> Option.defaultValue (if n.NIsArray then "m" else "b")
+        match n.NKind with
+        | "Bool" when n.NIsArray ->
+            $"convert it explicitly with a numeric cast -- `Int64({nm})` / `Float64({nm})` is 1 or 0 cell by cell, and `reduce(Int64({nm}), (+))` counts the true cells"
+        | "Bool" -> $"convert it explicitly with a numeric cast -- `Int64({nm})` or `Float64({nm})` is 1 or 0"
+        | "String" -> "`+` joins two Strings; no other arithmetic is defined on a String"
+        | "struct" -> "apply the operator to its fields (`p.a + q.a`)"
+        | "variant" -> "match on it and compute with its payload"
+        | "tuple" -> "apply the operator to its components (`t[0] + u[0]`)"
+        | "function" -> "call it first"
+        | _ -> "compute with a number instead"
+    let describe (n: NonNumericOperand) =
+        if n.NIsArray then $"an array whose elements are {n.NWhat.Substring(n.NWhat.IndexOf ' ' + 1)}s"
+        else n.NWhat
+    let refuse (leftOff: bool) (n: NonNumericOperand) (e: TypedExpr) =
+        Some (leftOff,
+              $"arithmetic is defined on numbers only: `{opName}` meets {describe n}, which is not a number, and "
+              + $"Blade converts nothing implicitly -- {advice n e}.")
+    if isArith then
+        // A String beside an operand still OPEN (a generic parameter, a kernel
+        // parameter) may be concatenation: judged where the operand is decided
+        // (the post-zonk sweep; the IRValidate backstop for a generic instance).
+        let openOperand (t: IRType) =
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTInfer _ -> true
+            | ArrayElem arr -> (IR.stripUnits (env.Subst.Resolve arr.ElemType)).IsIRTInfer
+            | _ -> false
+        let concat =
+            op = OpAdd
+            && (match cl, cr with
+                | Some { NKind = "String" }, Some { NKind = "String" } -> true
+                | Some { NKind = "String" }, None -> openOperand r.Type
+                | None, Some { NKind = "String" } -> openOperand l.Type
+                | _ -> false)
+        if concat then None
+        else
+            match cl, cr with
+            | Some n, _ -> refuse true n l
+            | _, Some n -> refuse false n r
+            | _ -> None
+    elif isCmp then
+        let cmpRefuse (leftOff: bool) (n: NonNumericOperand) (e: TypedExpr) (other: TypedExpr) =
+            let oS =
+                match operandMixElem env other.Type with
+                | Some (et, _) -> ppIRType (IRTScalar et)
+                | None -> "number"
+            let art = if oS.StartsWith "I" then "an" else "a"
+            Some (leftOff,
+                  $"a comparison converts nothing: `{opName}` meets {describe n} and {art} {oS}, and a "
+                  + $"{n.NKind} is not a number -- {advice n e}.")
+        match cl, cr with
+        | Some n, None when numeric r.Type -> cmpRefuse true n l r
+        | None, Some n when numeric l.Type -> cmpRefuse false n r l
+        | _ -> None
+    elif op = OpAnd || op = OpOr then
+        // The rule's mirror (formalism 2.4): a logical operator takes Bools
+        // only, as `if 1 then ..` already refuses a number for its condition.
+        let refuseLogic (leftOff: bool) (what: string) =
+            Some (leftOff,
+                  $"a logical operator takes Bools only: `{opName}` meets {what}, which is not a Bool, and Blade "
+                  + "converts nothing implicitly -- compare it explicitly (`n != 0`).")
+        match nonBoolOperandOf env l.Type, nonBoolOperandOf env r.Type with
+        | Some w, _ -> refuseLogic true w
+        | _, Some w -> refuseLogic false w
+        | _ -> None
+    else None
+
+/// The mirror rule for `!` (formalism 2.4): Some message when the operand is
+/// known not to be a Bool (`!1`).
+let internal judgeNonBoolNot (env: TypeEnv) (operand: TypedExpr) : string option =
+    nonBoolOperandOf env operand.Type
+    |> Option.map (fun what ->
+        $"a logical operator takes Bools only: `!` meets {what}, which is not a Bool, and Blade converts nothing "
+        + "implicitly -- compare it explicitly (`n == 0`).")
+/// The numbers-only rule for a NEGATION (`-x`, `-xs`): Some message when the
+/// operand is not a number.
+let internal judgeNonNumericNegation (env: TypeEnv) (operand: TypedExpr) : string option =
+    match nonNumericOperandOf env operand.Type with
+    | Some n ->
+        let what = if n.NIsArray then $"an array whose elements are {n.NWhat.Substring(n.NWhat.IndexOf ' ' + 1)}s" else n.NWhat
+        let tail =
+            match n.NKind with
+            | "Bool" -> "negate a Bool with `!`, or convert it explicitly first (`-Int64(b)`)"
+            | "struct" -> "negate its fields"
+            | "tuple" -> "negate its components"
+            | _ -> "negate a number instead"
+        Some $"arithmetic is defined on numbers only: `-` meets {what}, which is not a number, and Blade converts nothing implicitly -- {tail}."
+    | None -> None
+
 /// ROUND 6, THE OPERATOR-PARTNER SEAM (formalism 2.4): a literal-only operand
 /// takes the width its partner fixes, within its class, widening or narrowing
 /// (`x64 * 0.1` computes 0.1 as a Float64, `a32 * 1.0` stays Float32, `i32 + 1`
@@ -3448,6 +3643,134 @@ let internal recordGenericMixObligation (env: TypeEnv) (op: BinOp) (tL: TypedExp
         | _ -> ()
     | _ -> ()
 
+/// The numbers-only rule's GENERIC half: an arithmetic operand (or a
+/// comparison operand beside a number) whose element is a signature variable
+/// of the declaration being checked -- `x + 1`, `x + y`, `x < 2` over `x: T`,
+/// a `row: T^1`'s cells -- must be a number at every instance
+/// (GONumericOperand, judged at each call). Nothing outside a generic body.
+let internal recordGenericNumericObligation (env: TypeEnv) (op: BinOp) (tL: TypedExpr) (tR: TypedExpr) : unit =
+    match env.CurrentGenericObligations with
+    | Some acc ->
+        let isArith = match op with OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true | _ -> false
+        let isCmp = match op with OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe -> true | _ -> false
+        let opName =
+            match op with
+            | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/" | OpMod -> "%" | OpCaret -> "^"
+            | OpEq -> "==" | OpNeq -> "!=" | OpLt -> "<" | OpLe -> "<=" | OpGt -> ">" | OpGe -> ">="
+            | _ -> ""
+        let genericElemVar (t: IRType) =
+            let polyVar (u: IRType) =
+                match IR.stripUnits (env.Subst.Resolve u) with
+                | IRTInfer v when env.Subst.IsPolymorphicId v
+                                  && (env.Subst.GetLiteralDefault v).IsNone
+                                  && (env.Subst.GetElemCast v).IsNone -> Some v
+                | _ -> None
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | ArrayElem arr -> polyVar arr.ElemType
+            | u -> polyVar u
+        let numericPartner (te: TypedExpr) =
+            match operandMixElem env te.Type with
+            | Some (et, _) -> litClassOf et >= 0
+            | None -> false
+        if isArith || isCmp then
+            let one (te: TypedExpr) (partner: TypedExpr) =
+                match genericElemVar te.Type with
+                | Some v when isArith || numericPartner partner ->
+                    // `+` with no numeric partner is concatenation at a String
+                    // instance (`a + b` over two Strings), which stays legal.
+                    acc.Add(GONumericOperand (v, opName, op = OpAdd && not (numericPartner partner)))
+                // R3: an ORDERING between two generic values (`a < b`) has no
+                // numeric partner, so no number is demanded -- but it orders the
+                // values, which at an integer EnumIdx instance are KEYS
+                // (GOKeyObserve; `==` / `!=` between two of them stays exact on
+                // the positions, a bijection).
+                | Some v when (match op with OpLt | OpLe | OpGt | OpGe -> true | _ -> false) ->
+                    acc.Add(GOKeyObserve (v, opName))
+                | _ -> ()
+            one tL tR
+            one tR tL
+        elif op = OpAnd || op = OpOr then
+            let nm = if op = OpAnd then "&&" else "||"
+            [ tL; tR ] |> List.iter (fun te ->
+                genericElemVar te.Type |> Option.iter (fun v -> acc.Add(GOBoolOperand (v, nm))))
+    | None -> ()
+
+/// The numbers-only rule's DEFERRED half: an operand that is a plain open
+/// variable (not a declaration's signature variable, not a literal's) -- a
+/// lambda parameter its body leaves open -- has its demand remembered by
+/// variable id (TypeEnv.OpenNumericDemands). A direct call binds the parameter
+/// to a concrete argument and the post-zonk sweep judges it then; a call that
+/// hands it an enclosing generic declaration's variable moves the demand onto
+/// that variable (the call judgment, `openParamDemandTransfer`).
+let internal recordOpenNumericDemand (env: TypeEnv) (opName: string) (stringOk: bool) (te: TypedExpr) : unit =
+    let plainOpen (u: IRType) =
+        match IR.stripUnits (env.Subst.Resolve u) with
+        | IRTInfer v when not (env.Subst.IsPolymorphicId v)
+                          && (env.Subst.GetLiteralDefault v).IsNone
+                          && (env.Subst.GetElemCast v).IsNone -> Some v
+        | _ -> None
+    let v =
+        match IR.stripUnits (env.Subst.Resolve te.Type) with
+        | ArrayElem arr -> plainOpen arr.ElemType
+        | u -> plainOpen u
+    match v with
+    | Some v ->
+        // A later NUMERIC-ONLY demand tightens an earlier String-compatible one
+        // (x + x then x * x): the stricter demand is kept.
+        (match env.OpenNumericDemands.TryGetValue v with
+         | true, (_, true) when not stringOk -> env.OpenNumericDemands.[v] <- (opName, stringOk)
+         | true, _ -> ()
+         | _ -> env.OpenNumericDemands.[v] <- (opName, stringOk))
+    | _ -> ()
+
+/// The deferred demands of one binary operator node (see recordOpenNumericDemand).
+let internal recordOpenNumericDemands (env: TypeEnv) (op: BinOp) (tL: TypedExpr) (tR: TypedExpr) : unit =
+    let isArith = match op with OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true | _ -> false
+    let isCmp = match op with OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe -> true | _ -> false
+    let opName =
+        match op with
+        | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/" | OpMod -> "%" | OpCaret -> "^"
+        | OpEq -> "==" | OpNeq -> "!=" | OpLt -> "<" | OpLe -> "<=" | OpGt -> ">" | OpGe -> ">="
+        | _ -> ""
+    let numericPartner (te: TypedExpr) =
+        match operandMixElem env te.Type with
+        | Some (et, _) -> litClassOf et >= 0
+        | None -> false
+    if isArith || isCmp then
+        let one (te: TypedExpr) (partner: TypedExpr) =
+            if isArith || numericPartner partner then
+                recordOpenNumericDemand env opName (op = OpAdd && not (numericPartner partner)) te
+        one tL tR
+        one tR tL
+
+/// The numbers-only rule's generic half for a NEGATION (`-x` over `x: T`).
+let internal recordGenericNegationObligation (env: TypeEnv) (operand: TypedExpr) : unit =
+    match env.CurrentGenericObligations with
+    | Some acc ->
+        let polyVar (u: IRType) =
+            match IR.stripUnits (env.Subst.Resolve u) with
+            | IRTInfer v when env.Subst.IsPolymorphicId v
+                              && (env.Subst.GetLiteralDefault v).IsNone
+                              && (env.Subst.GetElemCast v).IsNone -> Some v
+            | _ -> None
+        let v =
+            match IR.stripUnits (env.Subst.Resolve operand.Type) with
+            | ArrayElem arr -> polyVar arr.ElemType
+            | u -> polyVar u
+        v |> Option.iter (fun v -> acc.Add(GONumericOperand (v, "-", false)))
+    | None -> ()
+
+/// The mirror's generic half for !x over `x: T`.
+let internal recordGenericNotObligation (env: TypeEnv) (operand: TypedExpr) : unit =
+    match env.CurrentGenericObligations with
+    | Some acc ->
+        match IR.stripUnits (env.Subst.Resolve operand.Type) with
+        | IRTInfer v when env.Subst.IsPolymorphicId v
+                          && (env.Subst.GetLiteralDefault v).IsNone
+                          && (env.Subst.GetElemCast v).IsNone -> acc.Add(GOBoolOperand (v, "!"))
+        | _ -> ()
+    | None -> ()
+
 /// THE MIXING RULE over one typed operator node: `Some (leftIsOffender,
 /// message)` when it would convert an operand implicitly. The arithmetic
 /// operators and comparisons go through `numericMixOffender`; `^` keeps its
@@ -3513,7 +3836,10 @@ let internal castLegality (name: string) (target: ElemType) (src: ElemType) (rou
     let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
     let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
     match src with
-    | ETBool | ETString | ETUnit ->
+    // A Bool converts to 1 / 0 (the owner's ruling of 2026-11-14: a Bool is not a
+    // number, and the numeric cast is the explicit conversion).
+    | ETBool -> None
+    | ETString | ETUnit ->
         Some $"{name}() expects a numeric operand; got {ppIRType (IRTScalar src)}."
     | _ when isComplex src && not (isComplex target) ->
         Some ($"{name}() cannot cast a complex value: project a real component first -- "
@@ -3530,6 +3856,9 @@ let internal genericObligationVar (ob: GenericObligation) : int =
     | GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) | GOElemAgree (v, _, _)
     | GOLiteralFit (v, _, _)
     | GOBroadcastElem (v, _, _, _) | GOPowExponent (v, _) | GOPowBase (v, _) -> v
+    | GONumericOperand (v, _, _) -> v
+    | GOBoolOperand (v, _) -> v
+    | GOKeyObserve (v, _) -> v
 
 /// `^`'s exponent rule (formalism 2.4): the power is typed as the BASE, which
 /// is exact for any integer exponent (repeated squaring in the base's type)
@@ -3552,7 +3881,7 @@ let internal powExponentClash (baseElem: ElemType) (expElem: ElemType) : string 
 /// The GENERIC OBLIGATIONS of a callee (TypeEnv.GenericObligation), judged
 /// against one instance: `instanceOf v` is the concrete element the call
 /// gives declaration variable `v` (None = still open: not judged here).
-let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations: GenericObligation list)
+let internal judgeGenericObligationsCore (env: TypeEnv) (fname: string) (obligations: GenericObligation list)
                                      (instanceOf: int -> ElemType option) : TypeError option =
     let rootOf (vid: int) =
         match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
@@ -3668,6 +3997,38 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                  + $"{ppIRType (IRTScalar src)}: {what}. An integer exponent keeps the base's type; "
                                  + "for a floating power give the base that class (a float literal, `2.0`, or "
                                  + "Float64(...) in the body)."))
+            // A math intrinsic's operand (`sin(x)` over `x: T`): BL3007, as
+            // `sin(true)` is at a concrete call.
+            | GONumericOperand (_, opName, _) when opName.EndsWith "()" ->
+                (match src with
+                 | ETBool | ETString | ETUnit ->
+                     Some (BuiltinArgErr ($"'{fname}' applies {opName} to a value of its generic parameter type, and this "
+                                          + $"call makes that type {ppIRType (IRTScalar src)}: {opName.TrimEnd('(', ')')} expects a "
+                                          + "numeric operand, and Blade converts nothing implicitly. Pass a number."))
+                 | _ -> None)
+            | GONumericOperand (_, opName, stringOk) ->
+                (match src with
+                 | ETBool | ETUnit ->
+                     let srcS = ppIRType (IRTScalar src)
+                     let advice =
+                         if src = ETBool then
+                             "Convert the argument explicitly at the call with a numeric cast -- `Int64(b)` or `Float64(b)` is 1 or 0."
+                         else "Pass a number."
+                     Some (TypeMismatchErr ($"'{fname}' applies `{opName}` to a value of its generic parameter type, and "
+                                            + $"this call makes that type {srcS}: arithmetic is defined on numbers only, "
+                                            + $"a {srcS} is not a number, and Blade converts nothing implicitly. {advice}"))
+                 | ETString when not stringOk ->
+                     Some (TypeMismatchErr ($"'{fname}' applies `{opName}` to a value of its generic parameter type, and "
+                                            + "this call makes that type String: arithmetic is defined on numbers only "
+                                            + "(`+` between two Strings joins them; no other operator applies to a String). "
+                                            + "Pass a number."))
+                 | _ -> None)
+            | GOBoolOperand (_, opName) when src <> ETBool ->
+                Some (TypeMismatchErr ($"'{fname}' applies `{opName}` to a value of its generic parameter type, and "
+                                       + $"this call makes that type {ppIRType (IRTScalar src)}: a logical operator takes Bools only, "
+                                       + "and Blade converts nothing implicitly. Compare the argument explicitly at the call (`n != 0`)."))
+            | GOBoolOperand _ -> None
+            | GOKeyObserve _ -> None
             | GOElemAgree (_, other, opName) ->
                 match rootOf other |> Option.bind instanceOf with
                 | Some src2 when src2 <> src ->
@@ -3688,6 +4049,23 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                        + "implicitly, and a literal's CLASS is its spelling (`1` is an integer, `1.0` a "
                                        + "float). To compute in one type, " + conv))
                 | _ -> None)
+
+/// How many numbers-only refusals (GONumericOperand / GOBoolOperand) a call
+/// judgment has raised in this process -- read by the block-lambda driver
+/// (inferBlock), which reports a generalized check's numbers-only refusal
+/// rather than the as-written check's (R10 remainder).
+let numbersOnlyInstanceRefusals : int ref = ref 0
+
+/// judgeGenericObligationsCore, counting the numbers-only refusals it raises.
+let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations: GenericObligation list)
+                                     (instanceOf: int -> ElemType option) : TypeError option =
+    obligations |> List.tryPick (fun ob ->
+        let r = judgeGenericObligationsCore env fname [ ob ] instanceOf
+        (match r, ob with
+         | Some _, (GONumericOperand _ | GOBoolOperand _) ->
+             numbersOnlyInstanceRefusals.Value <- numbersOnlyInstanceRefusals.Value + 1
+         | _ -> ())
+        r)
 
 /// The element a (resolved) type carries, when it is concrete -- an array's
 /// own element included: a generic obligation on `x: T` judges the ELEMENT an
@@ -3747,9 +4125,38 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys:
                 | GOPowBase (v, _) when isArr (instShape v) -> Some (refuse ())
                 | GOPowExponent (b, e) when isArr (instShape e) && isScalarTy (instShape b) -> Some (refuse ())
                 | _ -> None
+            // The numbers-only rule at an instance with NO ELEMENT CLASS -- a
+            // struct, a sum-type value, a tuple, a function (`outer(lambda(x) ->
+            // x)` into `outer(b) = { let dbl = lambda(x) -> x + x; dbl(b) }`):
+            // judged on the instance's full type, as concreteElemOf cannot.
+            let aggregateNumbersClash (ob: GenericObligation) =
+                match ob with
+                | GONumericOperand (v, opName, _) ->
+                    (match instShape v with
+                     | Some t when (match t with
+                                    | ArrayElem _ -> false
+                                    | IRTTuple _ | FuncElem _ -> true
+                                    | IRTNamed n ->
+                                        (match lookupTypeDef n env with
+                                         | Some (TDIStruct _) | Some (TDIVariant _) -> true
+                                         | _ -> false)
+                                    | _ -> false) ->
+                        numbersOnlyInstanceRefusals.Value <- numbersOnlyInstanceRefusals.Value + 1
+                        if opName.EndsWith "()" then
+                            // A math intrinsic's operand: BL3007, as at a scalar instance.
+                            Some (BuiltinArgErr ($"'{fname}' applies {opName} to a value of its generic parameter type, and this "
+                                                 + $"call makes that type {ppIRType t}: {opName.TrimEnd('(', ')')} expects a numeric "
+                                                 + "operand, and Blade converts nothing implicitly. Pass a number."))
+                        else
+                            Some (TypeMismatchErr ($"'{fname}' applies `{opName}` to a value of its generic parameter type, and "
+                                                   + $"this call makes that type {ppIRType t}: arithmetic is defined on numbers only, "
+                                                   + "and Blade converts nothing implicitly. Pass a number."))
+                     | _ -> None)
+                | _ -> None
             obs |> List.tryPick (fun ob ->
                 judgeGenericObligations env fname [ob] instanceOf
-                |> Option.orElse (powShapeClash ob)
+                |> Option.orElseWith (fun () -> aggregateNumbersClash ob)
+                |> Option.orElseWith (fun () -> powShapeClash ob)
                 |> Option.map (fun e ->
                     let posOf vid =
                         match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
@@ -3882,6 +4289,12 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                      callerVar v |> Option.iter (fun c -> acc.Add(GOLiteralFit (c, o, lit)))
                  | GOBroadcastElem (v, o, p, r) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOBroadcastElem (c, o, p, r)))
+                 | GONumericOperand (v, o, s) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GONumericOperand (c, o, s)))
+                 | GOBoolOperand (v, o) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOBoolOperand (c, o)))
+                 | GOKeyObserve (v, o) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOKeyObserve (c, o)))
                  | GOPowBase (v, b) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOPowBase (c, b)))
                  | GOPowExponent (v, w) ->
@@ -5206,6 +5619,13 @@ let internal sharingInstanceHead (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Typed
 let internal arrowVariantHook : (TypeEnv -> IRId -> Map<int, IRType> -> TypeResult<TypedExpr>) ref =
     ref (fun _ _ _ -> Error (InternalErr "internal: the arrow-instance checker is not installed (TypeCheck.checkModule installs it)"))
 
+/// R3: the typed `Int64(a)` of an array of integer EnumIdx values (each
+/// cell's key; TypeCheckInfer.enumKeyArgTyped), for the call judgment's
+/// observation of such an array at a generic parameter. A forward reference
+/// installed by TypeCheck.checkModule, like arrowVariantHook.
+let internal enumKeyArgHook : (TypeEnv -> TypedExpr -> TypeResult<TypedExpr>) ref =
+    ref (fun _ _ -> Error (InternalErr "internal: the EnumIdx key observer is not installed (TypeCheck.checkModule installs it)"))
+
 /// An array argument's type as an ARRAY INSTANCE's parameter type: the
 /// argument's own type -- its element, index names and extents, so a literal
 /// subscript is judged at compile time against a known extent exactly as in
@@ -5740,6 +6160,122 @@ let internal adaptArrowLiteralArrays (env: TypeEnv) (tFunc: TypedExpr) (tArgs: T
                 | _ -> arg)
         | _ -> tArgs
     | _ -> tArgs
+
+/// R3 (lead review): the STORAGE of an array of integer EnumIdx values, for
+/// the observations that convert a whole array to its keys -- "dense" (every
+/// slot plain and unsymmetric: a stored array, a row view), "compound",
+/// "sparse", "ragged" (RaggedIdx / DepIdx), "grouped" (a group_by result),
+/// "other" (any other index kind), or "" when the type is no array of R
+/// values. Each conversion admits only the storage kinds whose key array
+/// (`Int64(xs)` / the lifted intrinsic) both lanes build; every other kind is
+/// refused before the back end (it used to reach BL7004 / BL9002).
+let internal enumKeyStorageKind (env: TypeEnv) (t: IRType) : string =
+    match IR.stripUnits (env.Subst.Resolve t) with
+    | ArrayElem at ->
+        (match IR.stripUnits (env.Subst.Resolve at.ElemType) with
+         | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when (intEnumKeysOfTag env tag).IsSome ->
+             let kinds = at.IndexTypes |> List.map (fun ix -> ix.IxKind)
+             if kinds |> List.exists (fun k -> k = IxKSparse) then "sparse"
+             elif kinds |> List.exists (fun k -> k = IxKCompound || k = IxKCompoundDynamic) then "compound"
+             elif kinds |> List.exists (fun k -> k = IxKGroupOuter || k = IxKGroupMember) then "grouped"
+             elif kinds |> List.exists (fun k -> match k with IxKRagged | IxKRaggedInline | IxKRaggedOpaque | IxKDep | IxKDepInner | IxKDepOuter -> true | _ -> false) then "ragged"
+             elif at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone) then "dense"
+             else "other"
+         | _ -> "")
+    | _ -> ""
+
+/// The BL4003 refusal for an observation of an array of R values whose
+/// storage `kind` the observation is not built over.
+let internal enumKeyStorageRefusal (what: string) (kind: string) : TypeError =
+    EnumKeyObserved
+        ($"{what} reads the KEYS of an array of EnumIdx values, but this array is stored as a {kind} array, "
+         + $"and this observation of its keys is not built over {kind} storage; "
+         + "a value of an EnumIdx is a key represented as its position, so it is refused rather than "
+         + "computed on the positions.")
+
+/// R3 (the D2 ruling, its array half): an ARRAY of integer EnumIdx values
+/// handed to a GENERIC parameter of a callee whose body OBSERVES that
+/// parameter's values -- any generic obligation filed under the variable
+/// the array instantiates (arithmetic, a comparison beside a number, a cast,
+/// a math intrinsic, a section fold, prodsum: GONumericOperand and its
+/// kin; an ordering or a sort key: GOKeyObserve) -- is handed over as its
+/// KEYS, `Int64(xs)`, so the call's instance is an Int64 one: the scalar rule
+/// beside it, one level up. A callee that only passes the values on (no
+/// obligation) still gets the array as it is, R included, so a program that
+/// typed before keeps its types. Refused (BL4003, fail closed) where handing
+/// over a converted copy would change what the callee may observe of the
+/// argument's identity: a `mut` parameter (its writes alias the caller's
+/// array) or a callee with a `comm` / `anticomm` clause (the arguments'
+/// identity licenses its shared storage).
+let internal observeEnumKeyArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list) (tArgs: TypedExpr list)
+                                     : TypeResult<TypedExpr list> =
+    let isKeyElem (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> (intEnumKeysOfTag env tag).IsSome
+        | _ -> false
+    let isKeyArray (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | ArrayElem at -> isKeyElem at.ElemType
+        | _ -> false
+    if not (tArgs |> List.exists (fun a -> isKeyArray a.Type)) then Ok tArgs
+    else
+    match calleeDeclId env tFunc with
+    | None -> Ok tArgs
+    | Some fid ->
+        let obs = match env.FuncGenericObligations.TryGetValue fid with | true, os -> os | _ -> []
+        if obs.IsEmpty then Ok tArgs
+        else
+        let rootOf (v: int) =
+            match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
+            | IRTInfer r -> Some r
+            | _ -> None
+        let observed = obs |> List.choose (genericObligationVar >> rootOf) |> Set.ofList
+        // The callee's variables this argument instantiates, through its
+        // array shape (the same descent as the obligation judgment's).
+        let rec learn (p: IRType) (a: IRType) (acc: int list) =
+            match IR.stripUnits (env.Subst.Resolve p), IR.stripUnits (env.Subst.Resolve a) with
+            | IRTInfer v, _ -> v :: acc
+            | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType acc
+            | _ -> acc
+        let needs =
+            tArgs |> List.mapi (fun i (a: TypedExpr) ->
+                match List.tryItem i paramTys with
+                | Some p when isKeyArray a.Type ->
+                    learn p a.Type [] |> List.exists (fun v -> observed.Contains v)
+                | _ -> false)
+        if not (List.contains true needs) then Ok tArgs
+        else
+        let fname = match tFunc.Kind with TExprVar (n, _, _) -> n | _ -> "the callee"
+        let mutPositions = match env.MutParamPositions.TryGetValue fid with | true, ps -> ps | _ -> []
+        let hasClause =
+            (match env.FuncCommGroups.TryGetValue fid with | true, cg -> not cg.IsEmpty | _ -> false)
+            || (match env.FuncAntisymGroups.TryGetValue fid with | true, ag -> not ag.IsEmpty | _ -> false)
+        let refuse (a: TypedExpr) (why: string) =
+            if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+            Error (EnumKeyObserved
+                    ($"'{fname}' computes on the values of its generic parameter, and this argument is an array of "
+                     + "EnumIdx values: they are KEYS, represented as their positions, so the call hands it the keys "
+                     + $"(an Int64 copy) -- but {why}. Spell the keys yourself and pass them: "
+                     + "`let ks = Int64(xs)`, then pass `ks`."))
+        List.zip tArgs needs
+        |> List.mapi (fun i (a, n) ->
+            if not n then Ok a
+            elif enumKeyStorageKind env a.Type <> "dense" then
+                if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+                Error (enumKeyStorageRefusal $"The call of '{fname}' (which computes on this parameter's values)"
+                                             (enumKeyStorageKind env a.Type))
+            elif List.contains i mutPositions then
+                refuse a "the parameter is `mut`: its writes would land in the copy, not in the caller's array"
+            elif hasClause then
+                refuse a "its `comm` / `anticomm` clause reads the arguments' identity, which a copy does not keep"
+            else enumKeyArgHook.Value env a)
+        |> List.fold (fun acc r ->
+            match acc, r with
+            | Ok xs, Ok x -> Ok (x :: xs)
+            | Error e, _ -> Error e
+            | _, Error e -> Error e) (Ok [])
+        |> Result.map List.rev
+
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -6203,6 +6739,11 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     when env.Subst.IsPolymorphicId pv && (intEnumKeysOfTag env tag).IsSome ->
                     mkTypedSpan (TExprUnaryOp (OpCast "Int64", a)) (IRTScalar ETInt64) a.Span
                 | _ -> a)
+        // ...and an ARRAY of such values, at a parameter the callee observes
+        // (observeEnumKeyArrayArgs, R3).
+        match observeEnumKeyArrayArgs env tFunc paramTys tArgs with
+        | Error e -> Error e
+        | Ok tArgs ->
         // A SYMBOLIC-RANK PARAMETER (`x: T^k`) whose rank the declaration's
         // body decided (TypeEnv.FuncRankGenericParams) handed an array of
         // ANOTHER rank: the call of the declaration's instance at that array,
@@ -6900,19 +7441,208 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                              | Some { TypedValue = Some { Kind = TExprApp _ }; Scheme = None } -> true
                              | _ -> false)
                         | _ -> false
-                    if lambdaHead then
-                        for (_, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
+                    // THE BACKSTOP (R10; lead ruling 2026-11-15): an argument the
+                    // arm below does not bind -- a tuple, a function value -- must
+                    // never meet a parameter the body left open: that parameter
+                    // falls to zonk's Float64 default and the call converted the
+                    // argument, or g++ refused it (BL9002). Refused here instead,
+                    // at the argument, naming the fix (annotate the parameter).
+                    let openParamRefusal : (int * TypeError) option ref = ref None
+                    // Every callee that is ONE value whose open parameter this call
+                    // may decide -- not a declared function (its variables are
+                    // instantiated per call): a let-bound lambda or section, an
+                    // alias of one, a lambda applied where it is written, a
+                    // residual application (`f(0)(true)`).
+                    // Every callee that is ONE value whose open parameter this call
+                    // may decide: NOT a declared function (its variables are
+                    // instantiated per call; FuncSigVarRange). Judged by the callee's
+                    // TYPE, not its syntax -- a let-bound lambda, an alias chain, a
+                    // section, a lambda applied where written, a residual
+                    // application, a function a block or an `if` produces, a
+                    // function-typed parameter -- since only an open MONOMORPHIC
+                    // parameter variable is ever bound (openMono below).
+                    let lambdaishHead =
+                        lambdaHead
+                        || (match calleeDeclId env tFunc with
+                            | Some fid -> not (env.FuncSigVarRange.ContainsKey fid)
+                            | None -> true)
+                    // The value an alias chain denotes, followed BY BINDER ID
+                    // (TypeEnv.BinderValues for a block let, else the scope's own
+                    // binding when it is still the recorded binder): a later
+                    // binding that shadows a name never redirects the chain.
+                    let rec chaseValue (fuel: int) (n: string) (id: IRId) : TypedExpr option =
+                        if fuel <= 0 then None
+                        else
+                            let v =
+                                match env.BinderValues.TryGetValue id with
+                                | true, tv -> Some tv
+                                | _ ->
+                                    match lookupVar n env with
+                                    | Some vi when vi.VarId = id -> vi.TypedValue
+                                    | _ -> None
+                            match v with
+                            | Some { Kind = TExprVar (n2, id2, _) } when id2 <> id -> chaseValue (fuel - 1) n2 id2
+                            | other -> other
+                    // An OPERATOR SECTION called directly or through aliases
+                    // (`let op = (+)`, `op(true, false)`): judged on its arguments
+                    // here, at the call, exactly as the operator written between
+                    // them would be (the numbers-only rule and its logical mirror).
+                    let sectionOp =
+                        match tFunc.Kind with
+                        | TExprSection op -> Some op
+                        | TExprVar (name, vid, _) ->
+                            (match chaseValue 64 name vid with
+                             | Some { Kind = TExprSection op } -> Some op
+                             | _ -> None)
+                        | _ -> None
+                    (match sectionOp, tArgs with
+                     | Some op, [ a; b ] ->
+                         (match judgeNonNumericOperand env op a b with
+                          | Some (leftOff, msg) -> openParamRefusal.Value <- Some ((if leftOff then 0 else 1), TypeMismatchErr msg)
+                          | None ->
+                              // An operand still open: the same generic and deferred
+                              // demands an infix `a op b` records (`function outer(b) =
+                              // { let op = (+); op(b, b) }` is judged at `outer(true)`).
+                              recordGenericNumericObligation env op a b
+                              recordOpenNumericDemands env op a b)
+                     | _ -> ())
+                    let openMono (pid: int) =
+                        not (env.Subst.IsPolymorphicId pid)
+                        && (env.Subst.GetLiteralDefault pid).IsNone
+                        && not (env.Subst.IsIndexDefault pid)
+                        && (env.Subst.GetArityConstraint pid).IsNone
+                        && (env.Subst.GetRankLowerBound pid).IsNone
+                    if lambdaishHead then
+                        for (i, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
+                            match IR.stripUnits (env.Subst.Resolve pTy), IR.stripUnits (env.Subst.Resolve aTy) with
+                            // THE DEFERRED DEMAND MOVES TO AN ENCLOSING GENERIC VARIABLE:
+                            // `function outer(b) = { let dbl = lambda(x) -> x + x; dbl(b) }`
+                            // -- the parameter stays open (its instance is outer's), so
+                            // the arithmetic its body deferred on it is outer's own
+                            // obligation, judged at `outer(true)` with a span.
+                            | IRTInfer pid, IRTInfer aid
+                                    when openMono pid && env.Subst.IsPolymorphicId aid
+                                         && (env.Subst.GetLiteralDefault aid).IsNone ->
+                                (match env.CurrentGenericObligations with
+                                 | Some acc ->
+                                     for kv in List.ofSeq env.OpenNumericDemands do
+                                         match env.Subst.Resolve (IRTInfer kv.Key) |> IR.stripUnits with
+                                         | IRTInfer r when r = pid ->
+                                             let (opName, stringOk) = kv.Value
+                                             acc.Add(GONumericOperand (aid, opName, stringOk))
+                                         | _ -> ()
+                                 | None -> ())
+                            | _ -> ()
+                    if lambdaishHead then
+                        for (i, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
+                            match IR.stripUnits (env.Subst.Resolve pTy), IR.stripUnits (env.Subst.Resolve aTy) with
+                            | IRTInfer pid, ((IRTTuple _ | FuncElem _) as a)
+                                    when openParamRefusal.Value.IsNone
+                                         && not (match a with ArrayElem _ -> true | _ -> false)
+                                         && not (env.Subst.IsPolymorphicId pid)
+                                         && (env.Subst.GetLiteralDefault pid).IsNone
+                                         && not (env.Subst.IsIndexDefault pid)
+                                         && (env.Subst.GetArityConstraint pid).IsNone
+                                         && (env.Subst.GetRankLowerBound pid).IsNone ->
+                                let what = if a.IsIRTTuple then "a tuple" else "a function value"
+                                openParamRefusal.Value <-
+                                    Some (i, TypeMismatchErr (
+                                            $"argument {i + 1} is {what} ({ppIRType a}), and the called lambda's parameter "
+                                            + "is left open by its body, which was typed before this call as a single value: "
+                                            + "it would be compiled at a default numeric type and the argument converted. "
+                                            + "Annotate the parameter with the argument's type."))
+                            | _ -> ()
+                        for (i, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
                             match IR.stripUnits (env.Subst.Resolve pTy) with
-                            | IRTInfer pid when not (env.Subst.IsPolymorphicId pid)
-                                                && (env.Subst.GetLiteralDefault pid).IsNone
-                                                && not (env.Subst.IsIndexDefault pid)
-                                                && (env.Subst.GetArityConstraint pid).IsNone
-                                                && (env.Subst.GetRankLowerBound pid).IsNone ->
+                            | IRTInfer pid when openMono pid ->
+                                // Bind a NON-NUMERIC scalar -- unless an earlier call of
+                                // this one value already handed the open parameter a
+                                // number without binding it (an alias or a section: the
+                                // literal-width rule leaves those open), where binding
+                                // now would change what that call computed: refused at
+                                // this argument instead.
+                                let bindOrRefuse (s: IRType) (what: string) =
+                                    // (Queried through the substitution: a unification since
+                                    // the numeric call may have merged the recorded variable.)
+                                    let numericMet =
+                                        env.NumericMetOpenParams.Keys |> Seq.exists (fun k ->
+                                            match env.Subst.Resolve (IRTInfer k) |> IR.stripUnits with
+                                            | IRTInfer r -> r = pid
+                                            | _ -> false)
+                                    if numericMet then
+                                        if openParamRefusal.Value.IsNone then
+                                            openParamRefusal.Value <-
+                                                Some (i, TypeMismatchErr (
+                                                        $"argument {i + 1} is {what}, and an earlier call gave this parameter a number: "
+                                                        + "the parameter is left open by the callee's body and is compiled at a default "
+                                                        + "numeric type, so this argument would be converted, and Blade converts nothing "
+                                                        + "implicitly. Annotate the parameter, or convert explicitly with a numeric cast "
+                                                        + "(`Int64(b)`)."))
+                                    else unify env.Subst (IRTInfer pid) s |> ignore
                                 (match IR.stripUnits (env.Subst.Resolve aTy) with
+                                 // (A NUMERIC argument binds only a let-bound lambda's own
+                                 // parameter, as before: the literal-width rule decides the
+                                 // rest -- and the parameter remembers it met a number.)
                                  | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) as s ->
-                                     unify env.Subst (IRTInfer pid) s |> ignore
+                                     if lambdaHead then unify env.Subst (IRTInfer pid) s |> ignore
+                                     elif not (env.NumericMetOpenParams.ContainsKey pid) then env.NumericMetOpenParams.[pid] <- (List.item i tArgs).Span
+                                 // ...and a NON-NUMERIC scalar value (R10, the numbers-only
+                                 // rule): a Bool, a String, a struct or a sum-type value.
+                                 // Left open, the parameter fell to zonk's Float64
+                                 // default and the call converted the argument silently
+                                 // -- `{ let dbl = lambda(x) -> x + x; dbl(true) }` computed
+                                 // 2.0 and `idl(true)` printed 1.0. Bound, the body's
+                                 // arithmetic is judged on the Bool (BL3001, the post-zonk
+                                 // sweep) and a pass-through keeps the Bool.
+                                 | IRTScalar ETBool as s -> bindOrRefuse s "a Bool"
+                                 | IRTScalar ETString as s -> bindOrRefuse s "a String"
+                                 // An index value (an iteration index of a named
+                                 // index type, an EnumIdx key or label) and a count
+                                 // keep their own type too, never a Float64 default.
+                                 | (IRTIdxTagged _ | IRTNat _) as s -> bindOrRefuse s "an index value"
+                                 | IRTNamed n as s
+                                        when (match lookupTypeDef n env with
+                                              | Some (TDIStruct _) | Some (TDIVariant _) -> true
+                                              | _ -> false) ->
+                                     bindOrRefuse s $"a {Blade.Types.TypeOrigins.sourceName n} value"
                                  | IRTInfer aid when (env.Subst.GetLiteralDefault aid).IsSome ->
-                                     unify env.Subst (IRTInfer pid) (IRTInfer aid) |> ignore
+                                     if lambdaHead then unify env.Subst (IRTInfer pid) (IRTInfer aid) |> ignore
+                                     elif not (env.NumericMetOpenParams.ContainsKey pid) then env.NumericMetOpenParams.[pid] <- (List.item i tArgs).Span
+                                 // AN OPEN ARGUMENT MEETS AN OPEN PARAMETER (both plain
+                                 // monomorphic variables: a kernel parameter typed after
+                                 // its body, say): LINKED, not unified -- settled once
+                                 // the argument is decided (settleOpenArgLinks). A
+                                 // NON-number decides the parameter as a direct
+                                 // argument would: `(lambda(x) -> x)(b)` over Bool
+                                 // cells is a Bool lambda, never a Float64 default the
+                                 // cell is converted into. A NUMBER leaves the parameter
+                                 // as it was (its literal-width default, the values the
+                                 // program always computed): unifying them would let a
+                                 // later Int64 cell retype an earlier `g(3.0)` to an
+                                 // integer division.
+                                 // (Not a parameter the body APPLIES -- a pending arrow
+                                 // application on it: that is a function-typed slot the
+                                 // arrow machinery decides, and a halo window handed to it
+                                 // keeps its own refusal, loops/225.)
+                                 | IRTInfer aid when aid <> pid && openMono aid
+                                                     && not (env.PendingArrowApps |> Seq.exists (fun app ->
+                                                             match IR.stripUnits (env.Subst.Resolve app.Head.Type) with
+                                                             | IRTInfer h -> h = pid
+                                                             | _ -> false)) ->
+                                     env.OpenArgLinks.Add((pid, aid, (List.item i tArgs).Span))
+                                     // ...and the parameter's deferred NUMERIC DEMANDS
+                                     // are the argument's too (a non-number it is later
+                                     // given would bind the parameter and meet them),
+                                     // so they reach a generic parameter further out:
+                                     // `let g = lambda(y) -> f(y); g(b)` judges `f`'s
+                                     // `x + x` at `outer(true)`. A demand refuses only
+                                     // a non-number; no numeric type changes.
+                                     for kv in List.ofSeq env.OpenNumericDemands do
+                                         match env.Subst.Resolve (IRTInfer kv.Key) |> IR.stripUnits with
+                                         | IRTInfer r when r = pid ->
+                                             let (opName, stringOk) = kv.Value
+                                             recordOpenNumericDemand env opName stringOk (List.item i tArgs)
+                                         | _ -> ()
                                  | _ -> ())
                             | _ -> ()
                     // A FUNCTION ARGUMENT'S OPEN PARAMETER MEETS ITS DECLARED
@@ -7016,7 +7746,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     | _ -> None)
                             | _ -> [])
                     let clash =
-                        openSlotRefusal.Value |> Option.orElse (
+                        openParamRefusal.Value |> Option.orElse openSlotRefusal.Value |> Option.orElse (
                         appArgPairs pCopies (tArgs |> List.map (_.Type))
                         |> List.tryPick (fun (i, pTy, aTy) ->
                             let arg = List.item i tArgs
@@ -7302,6 +8032,9 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                  // ...and an arrow parameter's refusal (arrowObligationClash),
                  // which already names the argument and what it had to be.
                  | ExtentArgMismatch _ | InvalidCast _ | ImplicitNumericMix _ | ArgTypeMismatch _ | ArgRankMismatch _ -> Error e
+                 // ...and the numbers-only rule's per-instance refusal
+                 // (GONumericOperand), which names the operator and the type.
+                 | TypeMismatchErr _ | BuiltinArgErr _ -> Error e
                  // A generic variable the body settled as a scalar (D1's rank-0
                  // pin): its own sentence names why and what to change.
                  | ScalarPinnedArray got -> Error (ScalarPinnedArray $"{got} (argument {i + 1} of {calleeDesc})")
@@ -7636,7 +8369,7 @@ and internal dischargeArrowApp (env: TypeEnv) (app: ArrowApplication) : TypeResu
     // is emitted with that application as a call or a subscript, never a
     // window read -- refused at the argument (formalism 4.3).
     | IRTIdxTagged (_, IRefNamed tag) when not app.Written && tag.StartsWith haloWinTagPrefix ->
-        Error HaloWindowEscapes
+        Error (HaloWindowEscapes ())
     // A halo window read `w(o)` written in the kernel's own body, typed while
     // the window was open: Lowering owns the read (`w + o`), and its result is
     // the neighbour's POSITION (haloWindowReadType) -- which it meets here, so
@@ -7669,9 +8402,63 @@ let internal settleArrowApps (env: TypeEnv) (all: bool) : (Span * TypeError) lis
     |> List.indexed
     |> List.distinctBy (fun (i, (s, e)) ->
         match e with
-        | HaloWindowEscapes -> (-1, s)
+        | HaloWindowEscapes _ -> (-1, s)
         | _ -> (i, s))
     |> List.map snd
+
+/// R10: settle the OPEN-ARGUMENT LINKS (TypeEnv.OpenArgLinks) whose argument
+/// is decided now (`final`: every one left). A NON-number -- a Bool, a String,
+/// an index value, a struct or sum value -- decides the parameter, as the same
+/// argument written with its type would have at the call; a parameter that
+/// cannot take it (decided a number since) is refused at the argument. A
+/// number, or an argument nothing decided, drops the link: the parameter keeps
+/// exactly what the program always gave it (its default, its values). A
+/// parameter generalized since (a declaration's signature variable) is never
+/// bound here. Settled to a FIXED POINT: a link it binds may decide another
+/// link's argument (`let g = lambda(y) -> f(y)` then `g(b)` over Bool cells:
+/// `y` is decided only by the second link), so the passes repeat while one
+/// settles something; only then does `final` drop the links still open.
+/// Returns the refusals, each at its argument.
+let internal settleOpenArgLinks (env: TypeEnv) (final: bool) : (Span * TypeError) list =
+    let errs = ResizeArray<Span * TypeError>()
+    let rec pass () =
+      let links = List.ofSeq env.OpenArgLinks
+      env.OpenArgLinks.Clear()
+      let mutable progressed = false
+      for (pid, aid, span) in links do
+        let a = IR.stripUnits (env.Subst.Resolve (IRTInfer aid))
+        let nonNumber =
+            match a with
+            | IRTScalar ETBool -> Some "a Bool"
+            | IRTScalar ETString -> Some "a String"
+            | IRTIdxTagged _ | IRTNat _ -> Some "an index value"
+            | IRTNamed n ->
+                (match lookupTypeDef n env with
+                 | Some (TDIStruct _) | Some (TDIVariant _) -> Some $"a {Blade.Types.TypeOrigins.sourceName n} value"
+                 | _ -> None)
+            | _ -> None
+        match a, nonNumber with
+        | IRTInfer _, _ -> env.OpenArgLinks.Add((pid, aid, span))
+        | _, Some what ->
+            progressed <- true
+            let p = env.Subst.Resolve (IRTInfer pid)
+            let bindable =
+                match IR.stripUnits p with
+                | IRTInfer r -> not (env.Subst.IsPolymorphicId r)
+                | _ -> true
+            if bindable then
+                match unify env.Subst (IRTInfer pid) (IRTInfer aid) with
+                | Ok () -> ()
+                | Error _ ->
+                    errs.Add((span, TypeMismatchErr (
+                                $"this argument is {what}, and the called function's parameter -- left open by its body -- "
+                                + $"is {ppIRType (env.Subst.Resolve (IRTInfer pid))}: the argument would be converted, and Blade "
+                                + "converts nothing implicitly. Annotate the parameter, or convert explicitly with a cast.")))
+        | _ -> progressed <- true
+      if progressed && env.OpenArgLinks.Count > 0 then pass ()
+    pass ()
+    if final then env.OpenArgLinks.Clear()
+    List.ofSeq errs
 
 /// The END OF A DECLARATION's body: its pending applications whose head is
 /// still one of its own parameters become that parameter's ARROW OBLIGATIONS
@@ -7679,7 +8466,7 @@ let internal settleArrowApps (env: TypeEnv) (all: bool) : (Span * TypeError) lis
 /// and an open parameter used as its argument stay generic and are judged per
 /// call; every pending application whose head is known now is typed. The
 /// first refusal is returned, with its span stamped for locateError.
-let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: IRType list) : TypeResult<unit> =
+let internal settleDeclArrowAppsCore (env: TypeEnv) (funcVarId: IRId) (paramTypes: IRType list) : TypeResult<unit> =
     let rootOf (t: IRType) =
         match env.Subst.Resolve t with
         | IRTInfer r -> Some r
@@ -7728,8 +8515,42 @@ let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: I
     match settleArrowApps env false with
     | [] -> Ok ()
     | (span, e) :: _ ->
-        setCurrentExprSpan span
+        relocateErrorSpan e span
         Error e
+
+/// R10, at a DECLARATION's end: an open-argument link whose argument has
+/// become one of the declaration's own GENERIC variables (a kernel cell over a
+/// generic array parameter, `method_for(b) <@> lambda(v) -> f(v)`) is never
+/// decided inside the body, so it would be dropped and `f`'s parameter keep its
+/// default. Its parameter's deferred NUMERIC DEMANDS (`x + x`) move to that
+/// variable as generic obligations instead, judged per instance at the call
+/// (`outer([true, false])` is BL3001 there, as functions/895). A demand refuses
+/// only a non-number instance; no type is bound, so no numeric instance changes.
+let internal moveOpenArgDemandsToGenerics (env: TypeEnv) (acc: ResizeArray<GenericObligation>) : unit =
+    for (pid, aid, _) in List.ofSeq env.OpenArgLinks do
+        match IR.stripUnits (env.Subst.Resolve (IRTInfer aid)), IR.stripUnits (env.Subst.Resolve (IRTInfer pid)) with
+        | IRTInfer r, IRTInfer p when env.Subst.IsPolymorphicId r && not (env.Subst.IsPolymorphicId p) ->
+            for kv in List.ofSeq env.OpenNumericDemands do
+                match IR.stripUnits (env.Subst.Resolve (IRTInfer kv.Key)) with
+                | IRTInfer q when q = p ->
+                    let (opName, stringOk) = kv.Value
+                    acc.Add(GONumericOperand (r, opName, stringOk))
+                | _ -> ()
+        | _ -> ()
+
+// (The body's open-argument links around it: a parameter of a lambda in it is
+// decided before the declaration's signature is closed over it -- again after
+// the arrow applications, which may decide a link's argument, a window read.)
+let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: IRType list) : TypeResult<unit> =
+    let links () =
+        match settleOpenArgLinks env false with
+        | (span, e) :: _ ->
+            relocateErrorSpan e span
+            Error e
+        | [] -> Ok ()
+    links ()
+    |> Result.bind (fun () -> settleDeclArrowAppsCore env funcVarId paramTypes)
+    |> Result.bind links
 
 /// THE MODULE-END PASS of array instances (the section note above
 /// arrowVariantHook). A call that handed an arrow parameter a value still OPEN
@@ -7757,7 +8578,7 @@ let internal retargetArrowCalls (env: TypeEnv) (roots: TypedExpr list) : (Span *
                   match r with
                   | Ok t -> env.ArrowRetargets.[e] <- t
                   | Error err ->
-                      let at = currentExprSpan ()
+                      let at = errorOwnSpan err |> Option.defaultWith currentExprSpan
                       errors.Add((if at.StartLine > 0 then at else e.Span), err)
               // A call judged while an argument was still OPEN against a
               // concrete parameter (TypeEnv.OpenCallArgs), the argument known
@@ -7786,7 +8607,7 @@ let internal retargetArrowCalls (env: TypeEnv) (roots: TypedExpr list) : (Span *
                           | _ -> false
                       if not same then env.ArrowRetargets.[e] <- t
                   | Error err ->
-                      let at = currentExprSpan ()
+                      let at = errorOwnSpan err |> Option.defaultWith currentExprSpan
                       errors.Add((if at.StartLine > 0 then at else e.Span), err)
               | None -> ())
          | _ -> ())
@@ -9502,6 +10323,9 @@ let rec internal assignRootName (t: TypedExpr) : string option =
     | TExprVar (name, _, _) -> Some name
     | TExprIndex (b, _, _) -> assignRootName b
     | TExprField (b, _, _) -> assignRootName b
+    // g[0](i) = v: a store through a tuple projection writes the tuple's
+    // member (it used to have no root, so no rule judged it at all).
+    | TExprTupleIndex (b, _) -> assignRootName b
     | _ -> None
 
 /// Whether an assignment target may be written, shared by the two sites that
@@ -9573,6 +10397,48 @@ let internal assignTargetError (env: TypeEnv) (tL: TypedExpr) : TypeError option
                         + "concurrently under `omp`/`cuda`, so the store is a data race. Pass the "
                         + "array as a `mut` parameter (`a: mut Array<...>`), or return the value "
                         + "and bind it outside (a reduction: `reduce`, or a fused `<&!>` fold)."))
+            else
+            // 4. WHO MAY WRITE A PLAIN `let` (deep review D9, the user's ruling
+            //    of 2026-11-14; formalism 2.7). A plain `let` is reassignable
+            //    in its OWN callable, ordinary nested blocks included (a block
+            //    enters no scope). A NESTED function, lambda or kernel -- and a
+            //    top-level function over a module binding -- writes a binding it
+            //    CAPTURES only when that binding was declared `let mut`: the
+            //    declaration then says the state is shared. Whole stores and
+            //    stores through an index, field or projection alike.
+            //    Captured = bound outside this callable: `OuterScope` is the
+            //    snapshot taken at its boundary, read by BINDER ID (a body-
+            //    local binding shadowing the outer name is its own, and a
+            //    local that shadows the name later hides nothing). `__`
+            //    targets never reach here.
+            //    THIS IS THE DIRECT HALF: the target's root IS the captured
+            //    binding. A store that reaches one through a local view, an
+            //    alias, a tuple member, a rebinding or a `mut` argument is the
+            //    storage-provenance walk's (Lowering.refuseDeferredWritesAnd-
+            //    UnorderedIfs: the same rule, judged where every such path is
+            //    already followed, fail closed). Tracing views here was tried
+            //    and leaked member after member (two Codex reviews).
+            //    A DEFERRED map is not this rule's: it has no storage to write
+            //    under either spelling, and lowering refuses the write with
+            //    that reason (formalism 10.2).
+            let isDeferredMap (vid: IRId) (info: VarInfo) =
+                env.DeferredAliasRoots.ContainsKey vid
+                || (match info.TypedValue with
+                    | Some { Kind = TExprApply _ } -> true
+                    | _ -> false)
+            let capturedPlainLet =
+                env.InCallableBody
+                && (match assignRootVar tL with
+                    | Some (_, vid) ->
+                        env.OuterScope |> Map.exists (fun _ outer ->
+                            outer.VarId = vid && outer.Assign = Assignable && not (isDeferredMap vid outer))
+                    | None -> false)
+            if capturedPlainLet then
+                Some (MutAssignRefused (name,
+                        "it is a plain `let` bound outside this function, lambda or kernel, and a "
+                        + "captured binding may be written only when it was declared `let mut`. "
+                        + $"Declare it `let mut {name} = ...`, or return the new value and assign it "
+                        + $"in the scope that defines '{name}'."))
             else
             match lookupVar name env with
             | Some info when info.Assign = ReadOnly ->

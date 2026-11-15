@@ -1,0 +1,15 @@
+// TEST: a later multiplication tightens an earlier concatenation-compatible addition (rejects)
+// ============================================================================
+// R10 remainder: the deferred demands on a lambda's open parameter keep the
+// STRICTER one, so `x * x` after `x + x` refuses a String instance (`+` alone
+// would be concatenation).
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> {
+        let a = x + x
+        x * x
+    }
+    f(b)
+}
+let r = outer("a")
+// ERROR: BL3001 @ 13:15

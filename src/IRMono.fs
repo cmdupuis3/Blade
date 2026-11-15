@@ -1752,17 +1752,20 @@ let adaptFoldOneSeedsModule (modul: IRModule) : IRModule =
 /// specialization substitutes it (`function f(x: T) = x + 1` handed an array
 /// of keys): its arithmetic, negation or cast would compute on positions.
 /// Refused, with the type checker's sentence, before either lane runs.
-let refuseEnumKeyArithModule (modul: IRModule) : unit =
+let refuseEnumKeyArithModule (programTypes: IRTypeDef list) (modul: IRModule) : unit =
+    // EVERY module's declarations (R3, Codex review): a generic declared in an
+    // imported module is specialized there, at a type the CALLER declares.
+    let allTypes = programTypes @ modul.Types
     let intEnumTags =
         let direct =
-            modul.Types |> List.choose (fun td ->
+            allTypes |> List.choose (fun td ->
                 match td with
                 | IRTDEnumIdx (n, _, values)
                     when not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) -> Some n
                 | _ -> None) |> Set.ofList
         let rec close (tags: Set<string>) =
             let more =
-                modul.Types |> List.choose (fun td ->
+                allTypes |> List.choose (fun td ->
                     match td with
                     | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t)) when tags.Contains t && not (tags.Contains n) -> Some n
                     | _ -> None)
@@ -1796,6 +1799,226 @@ let refuseEnumKeyArithModule (modul: IRModule) : unit =
             | _ -> ()
         modul.Functions |> List.iter (fun f -> iterIRExpr check f.Body)
         modul.Bindings |> List.iter (fun b -> iterIRExpr check b.Value)
+        // THE WHITELIST BACKSTOP (R3). A SPECIALIZED body (an HM clone, `_HM`
+        // in its name: a generic declaration, or a generic lambda, substituted
+        // at concrete types) was typed while its values' type was a variable,
+        // so no observation in it was converted to the key. The type checker
+        // hands an observing callee the KEYS (an Int64 instance:
+        // TypeCheckSupport.observeEnumKeyArrayArgs and the scalar rule beside
+        // it); whatever still reaches an instance at the EnumIdx may only
+        // TRAVEL. Every node that consumes a value of an integer EnumIdx (a
+        // scalar of it, or an array of them) in such a body must be one of:
+        //   - a binding, an argument, a return, a tuple / struct / array
+        //     member or component read, an `if` branch, a statement, an
+        //     assignment (the value moves, it is not read);
+        //   - a loop former or map operand, a compute / pure / bind, a
+        //     structural rearrangement (zip, stack, join, transpose, slice,
+        //     curry, subset, reverse), `extents` / rank, a mask / compound /
+        //     grouping / unique source (the values are selected or moved);
+        //   - a SUBSCRIPT of an array whose slot is that same EnumIdx (a
+        //     position addresses the slot directly), or of the all-literal key
+        //     table (the observation the checker already placed);
+        //   - `==` / `!=` between two values of the SAME EnumIdx, and
+        //     contains / intersect / union of two of them: equality of
+        //     positions IS equality of keys (the key table is a bijection);
+        //   - a fold whose kernel is a callable (a specialized kernel is
+        //     judged here as its own body; any other was typed at the
+        //     EnumIdx and observes through the checker's conversions).
+        // Anything else -- arithmetic, an ordering, `==` against a value of
+        // another type, a cast, a negation, an intrinsic, prodsum, a
+        // contraction, a sort by the value itself, a literal pattern, a
+        // display -- would read the positions and is refused, BL4003.
+        let tagOf (t: IRType) =
+            match IR.stripUnits t with
+            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when intEnumTags.Contains tag -> Some tag
+            | _ -> None
+        let structFields =
+            allTypes |> List.choose (function IRTDStruct (n, fs) -> Some (n, fs) | _ -> None) |> List.distinctBy fst |> Map.ofList
+        // The type a node carries, seeing through a tuple component and a
+        // struct field (exprTypeIfKnown answers neither on its own) -- a value
+        // of R inside a tuple or struct handed to a generic parameter reaches
+        // the instance's arithmetic through exactly these.
+        // (Structural first: in a body specialized at a tuple, the node's own
+        // carried type can still be the generic body's defaulted one -- the
+        // component of the SUBSTITUTED tuple type is the instance's.)
+        // The specialized callable's parameter types (the substituted
+        // signature): a reference to a parameter can still carry the generic
+        // body's type.
+        let paramTypes = System.Collections.Generic.Dictionary<IRId, IRType>()
+        let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        let letVisiting = System.Collections.Generic.HashSet<IRId>()
+        let rec typeOf (e: IRExpr) : IRType option =
+            let structural =
+                match e with
+                | IRVar (id, _) when paramTypes.ContainsKey id -> Some paramTypes.[id]
+                // A let-bound local of the body (a match's scrutinee temp):
+                // the type of the value it is bound to, through the same rules.
+                | IRVar (id, _) when letValues.ContainsKey id && letVisiting.Add id ->
+                    let r = typeOf letValues.[id]
+                    letVisiting.Remove id |> ignore
+                    r
+                // `t[0]` over a generic `t: T` (a pack read, or an index the
+                // instance made a tuple's): the component of the instance's tuple.
+                | IRPolyIndex (x, IRLit (IRLitInt i))
+                | IRIndex (x, [ IRLit (IRLitInt i) ], _) when (match typeOf x |> Option.map IR.stripUnits with
+                                                              | Some (IRTTuple _) -> true
+                                                              | _ -> false) ->
+                    (match typeOf x |> Option.map IR.stripUnits with
+                     | Some (IRTTuple ts) -> List.tryItem (int i) ts
+                     | _ -> None)
+                | IRTupleProj (x, i, flat) ->
+                    let rec leaves (t: IRType) =
+                        match IR.stripUnits t with
+                        | IRTTuple ts -> ts |> List.collect leaves
+                        | t -> [ t ]
+                    (match typeOf x |> Option.map IR.stripUnits with
+                     | Some (IRTTuple ts) -> List.tryItem i (if flat then ts |> List.collect leaves else ts)
+                     | _ -> None)
+                | IRFieldAccess (o, fld) ->
+                    (match typeOf o |> Option.map IR.stripUnits with
+                     | Some (IRTNamed sn) ->
+                         Map.tryFind sn structFields
+                         |> Option.bind (List.tryFind (fun (n, _) -> n = fld))
+                         |> Option.map snd
+                     | _ -> None)
+                | _ -> None
+            match structural with
+            | Some t -> Some t
+            | None -> exprTypeIfKnown e
+        let keyTag (e: IRExpr) : string option =
+            match typeOf e with
+            | Some (ArrayElem at) -> tagOf at.ElemType
+            | Some t -> tagOf t
+            | None -> None
+        let refuseIn (fname: string) (span: Blade.Ast.Span) (tag: string) (what: string) =
+            raise (Blade.Diagnostics.BladeDiagnosticException (
+                Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints span
+                    ($"'{fname}' is specialized at the EnumIdx type '{tag}' and uses its values in a way that reads "
+                     + $"their POSITIONS ({what}): a value of an EnumIdx is a KEY, represented as its position. "
+                     + "Spell the keys at the call -- f(Int64(c)), or f(Int64(xs)) for an array -- or in the body.")))
+        let rec hasLitPattern (p: IRPattern) =
+            match p with
+            | IRPatLit _ -> true
+            | IRPatWild | IRPatVar _ | IRPatVariant (_, _, None, _) -> false
+            | IRPatTuple ps -> ps |> List.exists hasLitPattern
+            | IRPatCons (h, t) -> hasLitPattern h || hasLitPattern t
+            | IRPatVariant (_, _, Some q, _) -> hasLitPattern q
+            | IRPatStruct (_, flds) -> flds |> List.exists (snd >> hasLitPattern)
+        // An EnumIdx tag anywhere inside a type (a tuple component, a struct
+        // field, an array element) -- fuel-bounded through struct fields.
+        let rec containsKey (fuel: int) (t: IRType) : string option =
+            if fuel <= 0 then None else
+            match IR.stripUnits t with
+            | ArrayElem at -> containsKey (fuel - 1) at.ElemType
+            | IRTTuple ts -> ts |> List.tryPick (containsKey (fuel - 1))
+            | IRTNamed sn ->
+                Map.tryFind sn structFields
+                |> Option.bind (List.tryPick (fun (_, u) -> containsKey (fuel - 1) u))
+            | u -> tagOf u
+        // A LITERAL pattern at a position of an EnumIdx type inside a matched
+        // value -- `(100, _)` against a tuple whose first component is R
+        // (Codex review round 2: a tuple scrutinee hid the R component from
+        // the scalar check, and the literal compared with the position).
+        // Where the pattern's sub-type cannot be followed, any literal under
+        // a value that contains an EnumIdx counts (fail closed).
+        let rec litAtKey (p: IRPattern) (t: IRType) : string option =
+            match p, IR.stripUnits t with
+            | IRPatLit _, u -> tagOf u
+            | (IRPatWild | IRPatVar _), _ -> None
+            | IRPatTuple ps, IRTTuple ts when ps.Length = ts.Length ->
+                List.zip ps ts |> List.tryPick (fun (q, u) -> litAtKey q u)
+            | IRPatStruct (_, flds), IRTNamed sn when structFields.ContainsKey sn ->
+                let fs = structFields.[sn]
+                flds |> List.tryPick (fun (n, q) ->
+                    match fs |> List.tryFind (fun (fn, _) -> fn = n) with
+                    | Some (_, u) -> litAtKey q u
+                    | None -> if hasLitPattern q then containsKey 8 t else None)
+            | _, u -> if hasLitPattern p then containsKey 8 u else None
+        let checkSpecialized (f: IRCallable) =
+            let fname = f.SourceName
+            paramTypes.Clear()
+            f.Params |> List.iter (fun p -> paramTypes.[p.VarId] <- p.Type)
+            letValues.Clear()
+            iterIRExpr (fun e ->
+                match e with
+                | IRLet (id, v, _) -> letValues.[id] <- v
+                | _ -> ()) f.Body
+            let judge (e: IRExpr) =
+                let (ExprShape (children, _)) = e
+                (match e with
+                 | IRMatch (scr, cases) ->
+                     (match typeOf scr with
+                      | Some st ->
+                          cases |> List.iter (fun c ->
+                              match litAtKey c.Pattern st with
+                              | Some tag -> refuseIn fname Blade.Ast.noSpan tag "a literal pattern compares a position with a key"
+                              | None -> ())
+                      | None -> ())
+                 | _ -> ())
+                // A child that IS a value of R (or an array of them), or an
+                // aggregate CONTAINING one (a tuple, a struct): either may only
+                // travel (round 2: judging only the first let an aggregate's R
+                // component reach an observing node unexamined).
+                let rTagOf (c: IRExpr) =
+                    match keyTag c with
+                    | Some t -> Some t
+                    | None -> typeOf c |> Option.bind (containsKey 8)
+                match children |> List.tryPick (fun c -> rTagOf c |> Option.map (fun t -> (c, t))) with
+                | None -> ()
+                | Some (_, tag) ->
+                    let sameTag (a: IRExpr) (b: IRExpr) =
+                        match keyTag a, keyTag b with
+                        | Some x, Some y -> x = y
+                        | _ -> false
+                    match e with
+                    | IRLet _ | IRApp _ | IRTuple _ | IRStructLit _ | IRArrayLit _ | IRTupleCons _ | IRTupleProj _
+                    | IRTupleDecons _ | IRFieldAccess _ | IRIf _ | IRSequence _ | IRAssign _ | IRCompute _ | IRPure _
+                    | IRBind _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRZip _ | IRExtent _ | IRRank _
+                    | IRMask _ | IRGroupKeys _ | IRGroupBy _ | IRUnique _ | IRStack _ | IRJoin _
+                    | IRTranspose _ | IRSlice _ | IRCurry _ | IRSubset _ | IRReverse _ | IRPolyIndex _ | IRPolyTail _
+                    | IRFusion _ | IRParallel _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRFallback _
+                    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> ()
+                    | IRIndex (arr, idxs, _) ->
+                        let keyTable =
+                            match arr with
+                            | IRArrayLit (elems, _) -> elems |> List.forall (function IRLit (IRLitInt _) -> true | _ -> false)
+                            | _ -> false
+                        let slots =
+                            match exprTypeIfKnown arr with
+                            | Some (ArrayElem at) -> at.IndexTypes |> List.map (fun ix -> ix.Tag)
+                            | _ -> []
+                        idxs |> List.iteri (fun k ix ->
+                            match keyTag ix with
+                            | Some t when not keyTable && List.tryItem k slots <> Some (Some t) ->
+                                refuseIn fname Blade.Ast.noSpan t "a subscript of a slot of another type"
+                            | _ -> ())
+                    | IRBinOp (_, (IREq | IRNeq), l, r, _) when sameTag l r -> ()
+                    // Two aggregates of ONE type (a tuple or struct holding values of R):
+                    // componentwise equality of positions is equality of keys.
+                    | IRBinOp (_, (IREq | IRNeq), l, r, _)
+                        when (match typeOf l, typeOf r with
+                              | Some a, Some b -> IR.stripUnits a = IR.stripUnits b && (keyTag l).IsNone
+                              | _ -> false) -> ()
+                    | IRContains (a, v) when sameTag a v -> ()
+                    | (IRIntersect (a, b) | IRUnion (a, b)) when sameTag a b -> ()
+                    | IRReduce (_, IRVar _, _) | IRReduceCompute (_, IRVar _, _) -> ()
+                    | IRSort (_, key) ->
+                        (match exprTypeIfKnown key with
+                         | Some (FuncElem (_, ret)) when (tagOf ret).IsSome ->
+                             refuseIn fname Blade.Ast.noSpan tag "a sort keyed by the value itself orders the positions"
+                         | _ -> ())
+                    | IRMatch (scr, cases) ->
+                        if (keyTag scr).IsSome && cases |> List.exists (fun c -> hasLitPattern c.Pattern) then
+                            refuseIn fname Blade.Ast.noSpan tag "a literal pattern compares a position with a key"
+                    | IRBinOp (_, op, _, _, loc) ->
+                        let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+                        refuseIn fname span tag $"the operator {op}"
+                    | IRUnaryOp (op, _) -> refuseIn fname Blade.Ast.noSpan tag $"the operation {op}"
+                    | _ ->
+                        let kind = (sprintf "%A" e).Split([| ' '; '\n'; '\r'; '(' |], System.StringSplitOptions.RemoveEmptyEntries).[0]
+                        refuseIn fname Blade.Ast.noSpan tag $"the operation {kind}"
+            iterIRExpr judge f.Body
+        modul.Functions |> List.filter (fun f -> f.Name.Contains "_HM") |> List.iter checkSpecialized
 
 /// Post-monomorphization: FLOAT LITERALS ARE WIDTH-POLYMORPHIC (formalism
 /// 2.4: `a32 * 1.0` stays Float32), and the checker adapts a literal to a
@@ -3381,9 +3604,13 @@ let packHeadLinks (spec: IRFuncDef) : Map<int, IRType> =
 /// `clonesOut` collects the callables a pack former's unroll CLONED per
 /// element (gap G112: a nested lambda capturing the kernel's ordinal or one of
 /// its binders, `rebindThroughClosures`); the caller registers them beside
-/// the specializations.
+/// the specializations. `freshOut` records every binder the unroll FRESHENED
+/// (fresh id -> original id), so the caller can carry the module's per-binder
+/// declarations onto the copies (IRModule.LetMutBinders: a `let mut` copied
+/// per element is still declared `let mut`; deep review D9).
 let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder)
-                       (clonesOut: System.Collections.Generic.List<IRFuncDef>) : IRFuncDef =
+                       (clonesOut: System.Collections.Generic.List<IRFuncDef>)
+                       (freshOut: System.Collections.Generic.Dictionary<IRId, IRId>) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
     if List.isEmpty polyIndices then func  // Not actually poly -- shouldn't happen
     elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
@@ -4008,6 +4235,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                             let elems =
                                 [ for k in 0 .. n - 1 ->
                                     let fresh = bodyLets |> List.map (fun id -> id, builder.FreshId()) |> Map.ofList
+                                    for KeyValue (o, nn) in fresh do freshOut.[nn] <- o
                                     if capturedOwn then
                                         let ordId = builder.FreshId()
                                         let renames =
@@ -4351,6 +4579,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let mutable specMap : Map<IRId * int list, IRFuncDef> = Map.empty
     let packClones = System.Collections.Generic.List<IRFuncDef>()
+    let freshOrigins = System.Collections.Generic.Dictionary<IRId, IRId>()
     let queue = System.Collections.Generic.Queue<IRId * int list>()
     for site in (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct do
         queue.Enqueue site
@@ -4361,7 +4590,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         let (funcId, arity) = queue.Dequeue()
         if not (Map.containsKey (funcId, arity) specMap) then
             let origFunc = polyFuncMap.[funcId]
-            let spec = specializeFunction origFunc arity funcMap builder packClones
+            let spec = specializeFunction origFunc arity funcMap builder packClones freshOrigins
             specMap <- Map.add (funcId, arity) spec specMap
             for site in collectPolyCallSites polyFuncMap spec.Body do
                 if not (Map.containsKey site specMap) then queue.Enqueue site
@@ -4528,9 +4757,19 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                  && capturesPolyPack f
                  && not (Set.contains f.Id referencedIds)))
 
+    // a `let mut` binder freshened per unrolled element stays `let mut`
+    // (followed through repeated freshening: an unrolled copy of a copy)
+    let rec origin (id: IRId) (fuel: int) =
+        match freshOrigins.TryGetValue id with
+        | true, o when fuel > 0 -> origin o (fuel - 1)
+        | _ -> id
+    let letMut =
+        freshOrigins.Keys |> Seq.fold (fun (acc: Set<IRId>) nn ->
+            if modul.LetMutBinders.Contains (origin nn 64) then acc.Add nn else acc) modul.LetMutBinders
     { modul with
         Functions = prunedFuncs
-        Bindings = newBindings }
+        Bindings = newBindings
+        LetMutBinders = letMut }
 
 // Shape monomorphization (docs/plan-cpp-perf-exploitation.md)
 //

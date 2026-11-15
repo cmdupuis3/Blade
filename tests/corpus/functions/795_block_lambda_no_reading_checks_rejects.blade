@@ -1,0 +1,16 @@
+// TEST: a block lambda that checks under neither reading keeps the monomorphic refusal (rejects)
+// ERROR: BL3001 @ 12:17
+// ERROR-CONTAINS: rank mismatch: the parameter expects a rank-1 array
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. `app` subscripts its parameter, so
+// neither reading admits a scalar: the block is checked a third time as
+// written and THAT refusal is reported, word for word.
+function f() -> Float32 = {
+    let app = lambda(c) -> c(0) + 1.0
+    let a = app([5.0, 6.0])
+    let b = app(2.0)
+    a
+}
+let r = f()

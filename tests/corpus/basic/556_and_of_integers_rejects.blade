@@ -1,0 +1,8 @@
+// TEST: logical and of two integers (rejects)
+// ============================================================================
+// The numbers-only rule's mirror (formalism 2.4; lead ruling 2026-11-14): the
+// logical operators take Bools only, as `if 1 then ..` already did (BL3001).
+// On master 1e6a871a this printed `t = true`.
+// ============================================================================
+let t = 1 && 2
+// ERROR: BL3001

@@ -114,7 +114,7 @@ let j = ad.jvp(f)                                          // binding form, free
   the `registryEntries` list (Diagnostics.fs:224-230) **and** a phase arm at
   :296-310 — the match defaults unlisted BL55xx codes to `PhElaborate "ml"`,
   which would mislabel every jvp error. Reject pins carry `// ERROR: BL5501`
-  + `// ERROR-CONTAINS:` (the bare-code-only pins in ad/007/008 are a
+  + `// ERROR-CONTAINS:` (the bare-code-only pins in ad/007/152 are a
   weakness not to inherit).
 
 ## 4. Stage ladder

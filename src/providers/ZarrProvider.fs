@@ -1250,6 +1250,7 @@ let zarrStoreToModuleWith
         CompoundInits = Map.empty
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
+        LetMutBinders = Set.empty
         DerivedFuncOrigins = Map.empty
         FunctionAliasNames = Set.empty
     }

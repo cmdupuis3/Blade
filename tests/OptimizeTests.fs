@@ -5586,15 +5586,15 @@ let private eplTwoPlansOneCall () =
 let private lifetimeFiles =
     // (file, the region in a function, released pools, the fused route) -- since
     // the round-4 merge the kept inline's fail-closed ownership scope (round-3
-    // W2-4 rounds 5-7, the user's decision) declines 032 (a tuple-typed callee
-    // let) and 034 (a user call in the callee): 032 keeps the sibling pass's own
-    // join-driven inline, with its A01 region and no legs; 034 keeps its call.
-    [ "032_lifetime_deleted_final_join.blade", false, 1, false
-      "033_lifetime_cse_equal_caller_map.blade", true, 1, true
-      "034_lifetime_duplicate_scalar_return.blade", true, 0, false
-      "035_lifetime_function_scalar_return.blade", true, 1, true
-      "036_lifetime_caller_panic.blade", true, 1, true
-      "037_lifetime_scratch_reuse_region.blade", true, 2, true ]
+    // W2-4 rounds 5-7, the user's decision) declines 064 (a tuple-typed callee
+    // let) and 066 (a user call in the callee): 064 keeps the sibling pass's own
+    // join-driven inline, with its A01 region and no legs; 066 keeps its call.
+    [ "064_lifetime_deleted_final_join.blade", false, 1, false
+      "065_lifetime_cse_equal_caller_map.blade", true, 1, true
+      "066_lifetime_duplicate_scalar_return.blade", true, 0, false
+      "067_lifetime_function_scalar_return.blade", true, 1, true
+      "068_lifetime_caller_panic.blade", true, 1, true
+      "069_lifetime_scratch_reuse_region.blade", true, 2, true ]
 
 let private lifetimeCppFunction (cpp: string) =
     let m = System.Text.RegularExpressions.Regex.Match(cpp, @"(?s)double driver\([^;{]*\) \{.*?\n\}")
@@ -5617,7 +5617,7 @@ let private eplLifetimeWitnesses () =
                 let body = if inFunction then lifetimeCppFunction cpp else mainBody cpp
                 let boundary = body.IndexOf "is released at that return boundary"
                 let panic = body.IndexOf "blade_rt::idiv64(7L"
-                let panicOrder = not (file.StartsWith "036") || panic > boundary
+                let panicOrder = not (file.StartsWith "068") || panic > boundary
                 match releasesSafe body with
                 | Ok pools when pools.Length = poolCount && body.Contains "__epl_acc_" = fused && panicOrder ->
                     resultLine Pass name ($"""{poolCount} owned pools released once, no later read; fused route {(if fused then "present" else "absent (the A7c decline)")}; caller failure follows cleanup""")
@@ -5628,7 +5628,7 @@ let private eplLifetimeValidatorCases () =
     let run name corrupt (needle: string option) =
         withGate "BLADE_FP_REPRO" "1" (fun () -> withGate "BLADE_OMP_THREADS" "1" (fun () ->
         withGate "BLADE_BLAS" "off" (fun () ->
-            match corpusSource "sibling-folds/033_lifetime_cse_equal_caller_map.blade" |> Result.bind lower with
+            match corpusSource "sibling-folds/065_lifetime_cse_equal_caller_map.blade" |> Result.bind lower with
             | Error e -> resultLine Fail name e; false
             | Ok ir ->
                 let ir' = corrupt ir
@@ -5721,7 +5721,7 @@ let private eplLifetimeValidatorCases () =
 
 let private eplLifetimeBarrierIsNotWrite () =
     let name = "inline_lifetime_resource_barrier_is_not_source_write"
-    match corpusSource "sibling-folds/035_lifetime_function_scalar_return.blade" |> Result.bind lower with
+    match corpusSource "sibling-folds/067_lifetime_function_scalar_return.blade" |> Result.bind lower with
     | Error e -> resultLine Fail name e; false
     | Ok ir ->
         let m = ir.Modules |> List.find (fun m -> m.Functions |> List.exists (fun f -> f.Name = "driver"))
@@ -5733,7 +5733,7 @@ let private eplLifetimeBarrierIsNotWrite () =
 
 let private eplLifetimeKernelRefusal () =
     let name = "inline_lifetime_expression_renderer_declines"
-    match corpusSource "sibling-folds/035_lifetime_function_scalar_return.blade" with
+    match corpusSource "sibling-folds/067_lifetime_function_scalar_return.blade" with
     | Error e -> resultLine Fail name e; false
     | Ok src ->
         let asValue = src + "\nlet held = driver\n"
@@ -6032,7 +6032,7 @@ let private poolReuseGateOffEmitsNoAlias () =
             true
 
 /// PM03 same-cell RETURN in the C++ lane (round 4 A06; the shared
-/// Blade.SameCellReturn certificate, A04's admission). memfree/033 and 037:
+/// Blade.SameCellReturn certificate, A04's admission). memfree/106 and 037:
 /// with BLADE_POOL_REUSE on the function allocates ONE pool (the donor), fills
 /// the return in it through one pointer -- the old cell loaded into a scalar
 /// before its same-index store -- and returns it (no result pool, no
@@ -6128,7 +6128,7 @@ let private sameCellReturnCpp () =
             if ok then resultLine Pass name $"temporaries `{loop.Groups.[2].Value}` / `{loop.Groups.[1].Value}`; cell `{loop.Groups.[6].Value}` = the fresh path's with only the leaf renamed"; true
             else resultLine Fail name (sprintf "applied=%b loop=%b on=[%s] off=[%s]" applied loop.Success (if loop.Success then loop.Groups.[6].Value else "") (if cellOff.Success then cellOff.Groups.[1].Value else "")); false
         | (Error e, _), _ | _, (Error e, _) -> resultLine Fail name e; false
-    [ positive "memfree/033_same_cell_return_owned.blade" "same_cell"
+    [ positive "memfree/106_same_cell_return_owned.blade" "same_cell"
       collision ()
       positive "memfree/037_same_cell_return_cpp_scalar_param_snapshot.blade" "scale_shift"
       decline "memfree/038_same_cell_return_caller_owned_declines.blade" "caller_owned" "not one direct fresh computed local map"
@@ -10507,8 +10507,8 @@ let private ceSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
 
 // G108 (round 4 wave 4): chain-to-fold intermediates.
 let private chainCases () : bool list =
-    let src656 = rcCorpus "656_chain_consumer_names_parameter_twice.blade"
-    let src657 = rcCorpus "657_top_level_deferred_chain_fold.blade"
+    let src656 = rcCorpus "861_chain_consumer_names_parameter_twice.blade"
+    let src657 = rcCorpus "863_top_level_deferred_chain_fold.blade"
     let extentSrc =
         "let mut x = Int64([1, 2, 3])\n"
         + "let p = method_for(x) <@> lambda(v) -> v * 2\n"
@@ -10623,7 +10623,7 @@ let private ceNoRecordFor (name: string) (src: string) (subject: string) =
 // tuple's projection, a let chain -- is not certified total. Compute elision
 // (functions/656: the alias read used to be admitted and its failure moved
 // behind `bad`) and its stored twin (657); the epilogue legs (sibling-folds
-// /049: the leg declines); the partial-row and sparse-wildcard folds, whose
+// /073: the leg declines); the partial-row and sparse-wildcard folds, whose
 // closed-graph rule refused the read already, now name the deferred read.
 let private g98DeferredValueCases () : bool list =
     let read (cat: string) (f: string) = System.IO.File.ReadAllText (System.IO.Path.Combine("tests", "corpus", cat, f))
@@ -10653,7 +10653,7 @@ let private g98DeferredValueCases () : bool list =
           (read "functions" "657_compute_elision_stored_alias_twin_applies.blade") "compute-elision"
           (fun d -> ceSubject "r.x" d && applied d) "applied: the stored twin's producer is total"
       decisionCase "g98_epilogue_legs_deferred_kernel_read_declines"
-          (read "sibling-folds" "049_input_legs_decline_deferred_kernel_read.blade") "sibling-folds"
+          (read "sibling-folds" "073_input_legs_decline_deferred_kernel_read.blade") "sibling-folds"
           (fun d ->
               (match d.Outcome with Blade.Effects.Declined _ -> true | _ -> false)
               && d.Evidence |> List.exists (fun e -> e.Contains "reduce(a, ..): the fold kernel may fail or has effects"))

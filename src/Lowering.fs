@@ -131,6 +131,8 @@ type TypedLowerEnv = {
     /// give such bindings copy, not alias, semantics. Mutable shared state
     /// like LiftedCallables; reset per-module.
     MutableArrayLets: ResizeArray<IRId>
+    /// Binders declared `let mut` (IRModule.LetMutBinders).
+    LetMutBinders: ResizeArray<IRId>
     /// The name of the nearest enclosing binding or function the program
     /// wrote -- what an ANONYMOUS lambda or operator function lowered here
     /// prints as being `in` (IR.anonymousCallableName: `lambda in r`,
@@ -168,6 +170,7 @@ let emptyTypedEnv () : TypedLowerEnv = {
     SparseInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
+    LetMutBinders = ResizeArray<IRId>()
     LambdaScope = None
     InRepro = false
 }
@@ -1488,6 +1491,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
              | ArrayElem _ when binding.IsMutable ->
                  env.MutableArrayLets.Add binding.VarId
              | _ -> ())
+            if binding.IsLetMut then env.LetMutBinders.Add binding.VarId
             let env' = bindTypedVar binding.Name binding.VarId env
             if isSelfBoundLambda then
                 lowerTypedBlock env' rest finalExpr
@@ -2407,7 +2411,16 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     // and mut-let records from a previous module's lowering must not leak into
     // this one.
     let env = { env with LiftedCallables = ResizeArray<IRCallable>()
-                         MutableArrayLets = ResizeArray<IRId>() }
+                         MutableArrayLets = ResizeArray<IRId>()
+                         LetMutBinders = ResizeArray<IRId>() }
+    // The module-level `let mut` binders (block / body lets are recorded as
+    // they are lowered).
+    for d in modul.Decls do
+        match d with
+        | TDeclLet b when b.IsLetMut ->
+            env.LetMutBinders.Add b.VarId
+            for (_, subId, _) in b.SubBindings do env.LetMutBinders.Add subId
+        | _ -> ()
     // Phase 0: Resolve static values/functions from raw declarations
     let mutable currentEnv =
         match rawDecls with
@@ -2777,6 +2790,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         CompoundInits = currentEnv.CompoundInits
         SparseInits = currentEnv.SparseInits
         MutableArrayLets = Set.ofSeq currentEnv.MutableArrayLets
+        LetMutBinders = Set.ofSeq currentEnv.LetMutBinders
         // Nothing is synthesized-from-another at lowering time; the
         // copy-producing passes (shapeMonomorphizeModule) fill this in.
         DerivedFuncOrigins = Map.empty
@@ -3796,7 +3810,7 @@ let private refuseAliasedMutArgumentsWith
                         | IRLet (_, (IRVar _ as v), b) when (resolve v).IsSome || maybeFunction v -> walk b
                         // ... nor does binding or STORING one held in an aggregate:
                         // `let f = ks[0]`, `out(0) = f` (an array of closures written,
-                        // functions/545, 549) -- its later application is judged where
+                        // functions/858, 549) -- its later application is judged where
                         // it is applied
                         | IRLet (_, ((IRTupleProj (a, _, _) | IRFieldAccess (a, _)) as v), b) when maybeFunction v -> walk a; walk b
                         | IRLet (_, (IRIndex (a, idxs, _) as v), b) when maybeFunction v -> walk a; List.iter walk idxs; walk b
@@ -4311,6 +4325,37 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // `let a = Z` that every lane deep-copies: an ASSIGNABLE let (a block /
     // body MutableArrayLets member, or a non-static module binding) of a
     // plain dense array (the copy is dense-only in every lane).
+    // CAPTURE MODE (deep review D9, the rule on who may write a captured
+    // plain `let`; set only by `storageOfCapture` below): a rename of a
+    // COMPACT array (SymIdx / AntisymIdx / Hermitian over plain slots) is a
+    // copy too -- every lane copies it with its storage class (C++
+    // genVarAliasBinding's materializeArrayCopyForm, the LLVM lane's
+    // `copyArr` of any pool rename, the interpreter's deep copy; corpus
+    // loops/517 `rs`). The deferred-write and mut-argument judgments keep the
+    // dense-only reading.
+    let captureMode = ref false
+    // The callables the program uses as VALUES (named anywhere but as the head
+    // of a direct call: an argument, a let, a kernel, a returned closure): the
+    // only ones a call through a FUNCTION VALUE (a callback parameter, a
+    // function-typed name) can reach. Read by the capture judgment only.
+    let valueUsedCallables : IRCallable list =
+        let all = System.Collections.Generic.Dictionary<IRId, int>()
+        let heads = System.Collections.Generic.Dictionary<IRId, int>()
+        let bump (d: System.Collections.Generic.Dictionary<IRId, int>) id =
+            d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 1)
+        let scan (e: IRExpr) =
+            iterIRExpr (fun n ->
+                match n with
+                | IRVar (id, _) when Map.containsKey id funcs -> bump all id
+                | IRApp (IRVar (id, _), _, _) when Map.containsKey id funcs -> bump heads id
+                | _ -> ()) e
+        for b in allBindings do scan b.Value
+        for f in allFuncs do scan f.Body
+        for (_, e) in sidePayloads do scan e
+        allFuncs |> List.filter (fun c ->
+            let n = match all.TryGetValue c.Id with | true, n -> n | _ -> 0
+            let h = match heads.TryGetValue c.Id with | true, n -> n | _ -> 0
+            n > h)
     let isProvedCopy (id: IRId) (v: IRExpr) =
         match v with
         | IRVar (_, ty) ->
@@ -4319,7 +4364,10 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                 || (match bindingById.TryFind id with Some b -> b.IsMutable | None -> false)
             assignable
             && (match stripUnits ty with
-                | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                | ArrayElem at ->
+                    at.IndexTypes |> List.forall (fun ix ->
+                        ix.IxKind = IxKPlain
+                        && (ix.Symmetry = SymNone || (captureMode.Value && ix.Dependencies.IsEmpty)))
                 | _ -> false)
         | _ -> false
     // The binders an array expression's storage may belong to (None: the
@@ -4345,7 +4393,26 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         | IRTTuple ts -> ts |> List.exists holdsStorage
         | IRTNamed _ | IRTComputation _ -> true
         | t -> isArrayTy t
-    let exprHoldsStorage (e: IRExpr) = try holdsStorage (typeOf e) with _ -> false
+    // A VIEW form IR.typeOf leaves untyped (IRTUnit: a curry, a slice, a pack
+    // projection, ...) holds its base's storage: judged structurally, so a
+    // carrier holding one (`(g(0), [5.0, 6.0])` projected by a run-time index)
+    // keeps it (D9 Codex round 3; an untyped view used to read as "no storage").
+    // A NAME whose IR type is untyped for the same reason (`let v = t[k]`, a
+    // run-time pack index) holds what its initializer holds.
+    let rec exprHoldsStorageF (fuel: int) (e: IRExpr) =
+        match e with
+        | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _) | IRShift (a, _, _, _)
+        | IRReverse (a, _) | IRDiag a | IRPolyIndex (a, _) | IRPolyTail (a, _) | IRTupleDecons a ->
+            exprHoldsStorageF fuel a
+        | IRTupleCons (h, tl) -> exprHoldsStorageF fuel h || exprHoldsStorageF fuel tl
+        | IRVar (id, _) ->
+            (try holdsStorage (typeOf e) with _ -> false)
+            || (fuel > 0
+                && (match lets.TryGetValue id with
+                    | true, v -> exprHoldsStorageF (fuel - 1) v
+                    | _ -> false))
+        | _ -> try holdsStorage (typeOf e) with _ -> false
+    let exprHoldsStorage (e: IRExpr) = exprHoldsStorageF 16 e
     // G240 / G250, round 4 wave 9: the STRICT MODE of the mut-argument judgment
     // (only there: the write fixpoint keeps its reading). In strict mode the
     // walk follows the storage-holding ELEMENTS of an array literal (a fresh
@@ -4355,7 +4422,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // callee's arguments (a callback returning an existing array: G250 /
     // Codex probe E). Return summaries are cached per mode.
     let strictMode = ref false
-    let returnSummaries = System.Collections.Generic.Dictionary<bool * IRId, (Set<int> * Set<IRId>) option>()
+    let returnSummaries = System.Collections.Generic.Dictionary<bool * bool * IRId, (Set<int> * Set<IRId>) option>()
     let rec storageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (e: IRExpr) : Set<IRId> option =
         if fuel <= 0 then None
         else
@@ -4368,8 +4435,8 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             match e with
             // a binder already being followed along this path adds nothing new
             // (the walk is a union): a cyclic rebinding ends here, not at fuel
-            | IRVar (id, ty) when (holdsStorage ty || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
-            | IRVar (id, ty) when holdsStorage ty || deferred.Contains id ->
+            | IRVar (id, _) when (exprHoldsStorage e || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
+            | IRVar (id, _) when exprHoldsStorage e || deferred.Contains id ->
                 let viaInit =
                     match lets.TryGetValue id with
                     | true, v when path.IsEmpty && isProvedCopy id v -> Some Set.empty
@@ -4447,7 +4514,31 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                               |> List.map snd
                           all picked |> Option.map (Set.union others)
                       | None -> if strictUnknown () then None else conservative ())
-                 | None -> if strictUnknown () && functionValueHead then None else conservative ())
+                 | None ->
+                     if strictUnknown () && functionValueHead then None
+                     // CAPTURE MODE (D9): a call through a function-valued NAME
+                     // reaches one of the program's value-used callables, so its
+                     // result shares what one of THEIR return summaries says (a
+                     // read-only callback returning fresh cells shares nothing);
+                     // an unknown summary keeps the conservative reading
+                     elif captureMode.Value && functionValueHead && not (exprHoldsStorage f)
+                          && (match f with IRVar _ | IRParam _ -> true | _ -> false) then
+                         let summaries =
+                             valueUsedCallables
+                             |> List.filter (fun c -> c.Params.Length = args.Length)
+                             |> List.map calleeReturnSummary
+                         if summaries |> List.exists Option.isNone then conservative ()
+                         else
+                             summaries |> List.fold (fun acc s ->
+                                 match acc, s with
+                                 | Some a, Some (positions, others) ->
+                                     let picked =
+                                         args |> List.indexed
+                                         |> List.filter (fun (i, a) -> positions.Contains i && exprHoldsStorage a)
+                                         |> List.map snd
+                                     all picked |> Option.map (fun ids -> Set.union a (Set.union ids others))
+                                 | _ -> None) (Some Set.empty)
+                     else conservative ())
             | IRTupleCons (h, t) -> all [ h; t ]
             | IRTupleDecons t -> all [ t ]
             // a match VALUE: every case body along the path, as an if's
@@ -4512,7 +4603,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // array, a capture, a callee-local let), from its body's own storage walk;
     // None while it is being computed (recursion) or when the walk runs out.
     and calleeReturnSummary (c: IRCallable) : (Set<int> * Set<IRId>) option =
-        let key = (strictMode.Value, c.Id)
+        let key = (strictMode.Value, captureMode.Value, c.Id)
         match returnSummaries.TryGetValue key with
         | true, s -> s
         | _ ->
@@ -4544,12 +4635,80 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         strictMode.Value <- true
         try storageOf fuel owner e
         finally strictMode.Value <- saved
+    // the CAPTURE walk of the D9 rule (captureMode above)
+    let storageOfCapture (fuel: int) (owner: IRCallable option) (e: IRExpr) =
+        let saved = captureMode.Value
+        captureMode.Value <- true
+        try storageOf fuel owner e
+        finally captureMode.Value <- saved
+    // ---- WHO MAY WRITE A PLAIN `let`, the STORAGE half (deep review D9, the
+    // user's ruling of 2026-11-14; formalism 2.7) --------------------------------
+    // A function, lambda or kernel writes a binding it only CAPTURES when that
+    // binding was declared `let mut`. The type checker refuses the direct store
+    // (TypeCheckSupport.assignTargetError, rule 4: the target's root IS the
+    // captured binding). A store that REACHES one -- through a local view
+    // (`let t = G(0); t(1) = ..`), an alias, a tuple or struct member, a
+    // rebinding, an `if` value, a callee's `mut` parameter or a callback -- is
+    // judged here, by the walk that already follows every such path for the
+    // deferred-write rule below (fail closed: an untraceable target is refused).
+    // Captured = not a parameter or a `let` of the writing callable itself;
+    // module-level code (no owner) writes its own bindings freely. A deferred
+    // binder is left to the deferred-write refusal, a compiler-made (`__`)
+    // module binding is exempt, and a local `let` is judged only when it holds
+    // an ARRAY. `let mut` is IRModule.LetMutBinders (IsMutable / MutableArrayLets
+    // say assignable, which a plain `let` is too).
+    let letMutBinders = modules |> List.fold (fun acc m -> Set.union acc m.LetMutBinders) Set.empty
+    let ownBinders = System.Collections.Generic.Dictionary<IRId, System.Collections.Generic.HashSet<IRId>>()
+    let ownedBy (c: IRCallable) (id: IRId) : bool =
+        let own =
+            match ownBinders.TryGetValue c.Id with
+            | true, s -> s
+            | _ ->
+                let s = System.Collections.Generic.HashSet<IRId>()
+                for p in c.Params do s.Add p.VarId |> ignore
+                iterIRExpr (fun n -> match n with IRLet (b, _, _) -> s.Add b |> ignore | _ -> ()) c.Body
+                ownBinders.[c.Id] <- s
+                s
+        own.Contains id
+    let capturedPlainLet (owner: IRCallable option) (id: IRId) : string option =
+        match owner with
+        | None -> None
+        | Some c ->
+            if deferred.Contains id || ownedBy c id then None
+            else
+                match bindingById.TryFind id with
+                | Some b ->
+                    if letMutBinders.Contains id || b.Name.StartsWith "__" || not (holdsStorage b.Type) then None
+                    else Some $"`{b.Name}`"
+                | None ->
+                    match lets.TryGetValue id with
+                    | true, v when not (letMutBinders.Contains id) && typeIsArray v ->
+                        Some "an array bound by a plain `let` of an enclosing function or block"
+                    | _ -> None
     let written = System.Collections.Generic.HashSet<IRId>()
     let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
     let changed = ref true
-    let mark (span: Blade.Ast.Span) (owner: IRCallable option) (e: IRExpr) =
+    // `judgeCapture` is false for a whole `v = e` (any `v`: the callable's
+    // own local or a captured `let mut`). That REBINDS the name (the old
+    // array keeps its cells: measured in every lane), so it writes no storage
+    // `v` reached -- the type checker judges the name itself (rule 4); it
+    // still joins the deferred-write fixpoint as before. The capture judgment
+    // reads the CAPTURE walk (compact renames are copies, `storageOfCapture`);
+    // the fixpoint keeps the shared walk. Both are flow-insensitive -- a name
+    // that EVER holds a view of a captured plain `let` is judged as one at
+    // every later store through it.
+    let markWith (judgeCapture: bool) (span: Blade.Ast.Span) (owner: IRCallable option) (e: IRExpr) =
         match storageOf 48 owner e with
         | Some ids ->
+            if judgeCapture then
+                let judged = storageOfCapture 48 owner e |> Option.defaultValue ids
+                for id in judged do
+                    match capturedPlainLet owner id with
+                    | Some what ->
+                        raise (Blade.Diagnostics.BladeDiagnosticException
+                                (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
+                                    ($"a write reaches {what} through a view, an alias or a `mut` argument, from a function, lambda or kernel that only captures it: a captured binding may be written only when it was declared `let mut` (formalism 2.7). Declare it `let mut`, or take a copy first (`let mut c = <it>`) and write the copy.")))
+                    | None -> ()
             for id in ids do
                 if written.Add id then
                     writeSite.[id] <- span
@@ -4558,6 +4717,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             raise (Blade.Diagnostics.BladeDiagnosticException
                     (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
                         "a write whose target's storage could not be traced (through a storage-carrying form the provenance walk does not know, or more than 48 nested view, alias, projection or rebinding steps; a cycle of rebindings is followed once, not counted): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
+    let mark = markWith true
     // Every site, with its owner (the callable whose parameters an IRParam
     // names) and the span a refusal reports.
     let sites =
@@ -4573,7 +4733,9 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             let ownParams = paramNamesOf owner
             iterIRExpr (fun n ->
                 match n with
-                | IRAssign (target, _) -> mark span owner target
+                | IRAssign (target, _) ->
+                    let wholeRebind = match target with IRVar _ -> true | _ -> false
+                    markWith (not wholeRebind) span owner target
                 | IRApp (f, args, _) ->
                     (match resolve f with
                      | Some c ->
@@ -4591,8 +4753,30 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                              | IRParam (nm, _, _) -> ownParams.Contains nm
                              | _ -> true
                          if unknownCallee then
+                             // D9's capture judgment only: an `object_for(k)`
+                             // head (`exp <@> e`) runs k over the arrays' cells,
+                             // so it writes what k writes -- nothing for an
+                             // intrinsic (an IRParam that is no parameter of
+                             // this callable), what a resolved k's parameters
+                             // are written for one. Every argument still joins
+                             // the deferred-write fixpoint, as before.
+                             let judgeArgs =
+                                 match f with
+                                 | IRObjectFor info ->
+                                     (match resolve info.Kernel with
+                                      | Some k -> k.Params |> List.exists (fun p -> written.Contains p.VarId)
+                                      | None ->
+                                          match info.Kernel with
+                                          | IRParam (nm, _, _) -> ownParams.Contains nm
+                                          | _ -> true)
+                                 // a call through a function value writes what one
+                                 // of the program's value-used callables writes:
+                                 // judged only when one of them writes a parameter
+                                 | _ ->
+                                     valueUsedCallables |> List.exists (fun c ->
+                                         c.Params |> List.exists (fun p -> written.Contains p.VarId))
                              // (a tuple / struct carrying arrays too: finding 2)
-                             args |> List.iter (fun a -> if exprHoldsStorage a then mark span owner a))
+                             args |> List.iter (fun a -> if exprHoldsStorage a then markWith judgeArgs span owner a))
                 | IRApplyCombinator info ->
                     (match resolve info.Kernel with
                      | Some k when k.Params |> List.exists (fun p -> written.Contains p.VarId) ->
@@ -5206,6 +5390,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // whole-program, so a twin lives in the module that defines its origin
     let (irModules, reproTwins) = reproFoldUsesProgram irModules env.Builder
     let programFuncs = irModules |> List.collect (fun m -> m.Functions)
+    // Every module's type declarations (the EnumIdx key backstop, R3).
+    let programTypeDefs = irModules |> List.collect (fun m -> m.Types)
     // The same snapshot with constant-scrutinee matches folded, as every module's
     // optimizer folds them first: the unseeded-seed resolution judges writes on
     // the code the emitters will see, imported callables included (gap G74).
@@ -5242,7 +5428,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         let irModule = IRMono.adaptFoldOneSeedsModule irModule
         // ...and a specialization at an integer EnumIdx that computes on its
         // values is refused (keys are represented as positions, D2).
-        IRMono.refuseEnumKeyArithModule irModule
+        IRMono.refuseEnumKeyArithModule programTypeDefs irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
         // Array operators recovered after arity specialization can expose a
         // literal-only scalar base inside a newly minted broadcast kernel.

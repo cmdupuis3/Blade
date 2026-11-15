@@ -27,8 +27,15 @@ and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
         let line, col = currentPos tokens
         errorC "BL1003" (capitalBoolMessage name) line col
 
-    | Some (TokIdent name) ->
-        let afterName = advance tokens
+    | Some (TokIdent first) ->
+        // A MODULE-QUALIFIED constructor or struct pattern (D11): `U.Red`,
+        // `U.Some(x)`, `U.P { a }` name the scope key the import registers
+        // (`U.Red` in VariantTags, `U.P` in TypeDefs). The checker refuses a
+        // qualified name that is no constructor (it never binds a variable).
+        let name, afterName =
+            match advance tokens with
+            | dot :: { Kind = TokIdent second } :: rest when dot.Kind = TokDot -> first + "." + second, rest
+            | rest -> first, rest
         match peek afterName with
         | Some TokLBrace ->
             // Struct pattern: Name { field1, field2: pat }
@@ -41,7 +48,8 @@ and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
         | _ ->
             // Could be a variant without data (like None) or a variable;
             // treated as a variable here, with variant detection at typecheck.
-            success (mkPat (headSpan tokens) (PatVar name)) afterName
+            let span = if name = first then headSpan tokens else rangeSpan tokens afterName
+            success (mkPat span (PatVar name)) afterName
 
     | Some (TokInt v) ->
         success (mkPat (headSpan tokens) (PatLit (LitInt v))) (advance tokens)

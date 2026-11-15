@@ -1,0 +1,9 @@
+// TEST: Math op on a call of a function with no annotated return (rejects)
+// #62: the shape oracle never infers a return from a body; the message
+// names the function and the annotation that fixes it.
+// ERROR: BL5200
+// ERROR-CONTAINS: 'mk' has no annotated return type
+import math as m
+function mk(a: Array<Float64 like Idx<2>, Idx<2>>) = a
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let (U, sv, V) = m.svd(mk(A))

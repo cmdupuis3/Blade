@@ -1,0 +1,14 @@
+// TEST: prodsum over a compound array of R values is refused before the back end (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: built for dense rank-1 operands only
+// ============================================================================
+// R3 (lead review, F2): prodsum over compound storage is not built -- its
+// Int64 twin, `prodsum(Int64(sel), Int64(sel))`, is a g++ rejection (BL9002)
+// on the base too -- so an operand of R keys stored as a compound is refused
+// in the type checker rather than converted into that hole.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+let ps = prodsum(sel, sel)

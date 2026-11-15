@@ -1,0 +1,12 @@
+// TEST: a block lambda applied twice at one type stays monomorphic
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. Two applications at one type: the
+// block checks as written and nothing about it changes.
+function f() -> Float32 = {
+    let sq = lambda(x) -> x * x
+    sq(2.0) + sq(3.0)
+}
+let r = f()
+// EXPECT: r = 13.0

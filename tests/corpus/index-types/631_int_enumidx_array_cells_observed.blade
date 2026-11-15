@@ -1,0 +1,21 @@
+// TEST: Every observation of an array cell of R computes on its key
+// ============================================================================
+// R3: cells of an `Array<R ..>` hold keys (positions inside). Negation, a
+// power, an ordering and the math intrinsics read the key. The base refused
+// the negation (BL4003), the power (BL4003) and `abs` (BL3007), and `sqrt`
+// read the POSITION (the base computed sqrt(1) for `sqrt(codes(0))`).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let a = -codes(0)
+// EXPECT: a = -100
+let b = codes(0) < codes(2)
+// EXPECT: b = true
+let c = codes(1) ^ 2
+// EXPECT: c = 40000
+let r = sqrt(codes(0))
+// EXPECT: r = 10.0
+let ab = abs(codes(2))
+// EXPECT: ab = 300
+let rs = sqrt(codes)
+// EXPECT: rs = [10.0, 14.142135623731, 17.3205080756888]

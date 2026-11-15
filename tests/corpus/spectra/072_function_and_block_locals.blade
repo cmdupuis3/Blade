@@ -1,0 +1,19 @@
+// TEST: Spectra round trip inside a function body and a block
+// #62: a function-local and a block-local binding of an elaborated call feed
+// the next op; the annotated parameter is the body's first shape witness.
+import spectra as sp
+type Sig = Array<Float64 like Idx<8>>
+let x: Sig = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
+function roundtrip_err(s: Sig) -> Float64 = {
+    let S = sp.fft(s)
+    let r = sp.ifft(S)
+    reduce(method_for(range<Idx<8>>) <@> lambda(i) -> (r(i) - s(i)) * (r(i) - s(i)), (+), 0.0)
+}
+let e1 = roundtrip_err(x)
+// EXPECT: e1 = 0.0
+let e2 = {
+    let S = sp.fft(x)
+    let r = sp.ifft(S)
+    r(2) - x(2)
+}
+// EXPECT: e2 = 0.0

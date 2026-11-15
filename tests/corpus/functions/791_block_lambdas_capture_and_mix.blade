@@ -1,0 +1,18 @@
+// TEST: block lambdas that capture, one used at one type and one at two
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. `scale` is applied once (one type:
+// it stays the lambda it was); `twice` is applied to an Int32 and a Float32.
+// Both capture at their creation, as lambdas do.
+function f(k: Float32) -> Float32 = {
+    let scale = lambda(x) -> x * k
+    let a = scale(2.0)
+    let n = 3
+    let twice = lambda(y) -> y + y
+    let b = twice(n)
+    let c = twice(a)
+    c + Float32(b)
+}
+let r = f(1.5)
+// EXPECT: r = 12.0

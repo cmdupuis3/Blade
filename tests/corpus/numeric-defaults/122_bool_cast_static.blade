@@ -1,0 +1,13 @@
+// TEST: a Bool cast folded at compile time
+// ============================================================================
+// A Bool is not a number; it converts EXPLICITLY with a numeric cast (formalism
+// 2.4; the owner's ruling of 2026-11-14): 1 or 0 (1.0 / 0.0), element by element
+// over a Bool array, in every lane (C++, interpreter, LLVM, static evaluation).
+// ============================================================================
+let static on = true
+let static k = Int64(on) + 1
+let r = k
+// EXPECT: r = 2
+let static h = Float64(false)
+let q = h + 0.25
+// EXPECT: q = 0.25

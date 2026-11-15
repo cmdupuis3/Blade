@@ -1,0 +1,13 @@
+// TEST: an alias of a section keeps its operator after the name is shadowed
+// ============================================================================
+// R10 remainder: a callee's alias chain is followed by BINDER, not by name, so the
+// alias of `(&&)` is still `(&&)` after a later `let op = (+)` shadows the name
+// (Codex review round 3: a name walk judged it as `+`).
+// ============================================================================
+let r = {
+    let op = (&&)
+    let alias = op
+    let op = (+)
+    alias(true, false)
+}
+// EXPECT: r = false

@@ -14,7 +14,7 @@ import ad as ad
 // The readout is an inline literal rather than `reduce(z, (+))` because `z` is
 // bound from a CALL result, which grad refuses (BL5500: "reduce source has no
 // statically-known extent in differentiated code"). Reducing an inline literal
-// of its reads is the supported spelling and is what ad/007 already uses.
+// of its reads is the supported spelling and is what ad/151 already uses.
 //
 // HAND DERIVATION.
 //   silu(t)  = t * sig(t),            sig(t) = 1/(1+exp(-t))

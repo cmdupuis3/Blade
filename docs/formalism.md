@@ -106,7 +106,7 @@ intrinsic, shadowable like `abs`/`complex`. Only bit-sized names exist in
 type and cast position: the width-less `Int`, `Float` and `Double` are
 refused with a steer (BL1004), as `True` / `False` are (BL1003). Legal
 conversions: int↔int, int→float, int→complex, float↔float, float→complex,
-complex↔complex, and the identity; units ride through unchanged. Refused
+complex↔complex, bool→any numeric (1 / 0), and the identity; units ride through unchanged. Refused
 (BL3019): a complex source into a real/int target — which real is meant is
 exactly what the cast cannot say; project with `real`/`imag`/`abs`/`arg` —
 and a float source into an int target unless the rounding is visible at the
@@ -141,6 +141,35 @@ judgment covers a variable that is only ever a scalar -- an array's element,
 the `reduce(row, (+))` of a `row: T^1` -- so an Int64 row's sum plus `0.5` is
 refused at the call; a body that means Float64 arithmetic converts first,
 `Float64(reduce(row, (+))) + 0.5`.
+
+**Arithmetic is defined on numbers only** (user ruling 2026-11-14). A Bool
+is not a number, and neither is a String, a struct, a sum-type value, a
+tuple, a function or the unit value: `+ - * / % ^`, the outer forms `[+]`
+`[*]`, negation, compound assignment (`s += b`), a builtin arithmetic fold
+(`reduce(m, (+))`), `prodsum` and the math intrinsics refuse such an operand
+-- or an array of them, a mask included -- in every position, and so does a
+comparison of one with a number (`true == 1`, `"a" < 2`); BL3001 (BL3007 for
+an intrinsic). The one arithmetic operator a non-number takes is `+` between
+two Strings, which joins them; two Bools, two Strings or two tuples still
+compare with each other. A Bool is not a number; convert it explicitly with a
+numeric cast: `Int64(b)` / `Float64(b)` is 1 / 0 (1.0 / 0.0, and `(1.0, 0.0)`
+for a complex target), element by element over a mask (`Float64(m)`), so
+`reduce(Int64(m), (+))` counts a mask's true cells. The logical
+operators mirror the rule: `!`, `&&` and `||` take Bools only (`!1` and
+`1 && 2` are BL3001, as `if 1 then ..` already was). A generic body is judged
+per instance: `function inc(x) = x + 1` refuses `inc(true)` at the call (a
+nested generic function or a block lambda used at several types too), and an
+instance with no element class (a struct, a tuple, a function) is judged on
+its full type. No argument is ever converted through a parameter left open: a
+lambda's parameter its body does not decide takes its call's argument type, a
+Bool, a String, a struct, a sum-type value or an index value included
+(`{ let idl = lambda(x) -> x; idl(true) }` is `true`), so the body's arithmetic
+is judged on it; a tuple or a function argument there is refused at the
+argument (annotate the parameter). An argument still open at the call (a
+kernel's cell) decides the parameter the same way once it is decided a
+non-number; a NUMERIC argument decided only later leaves the parameter to its
+default width (an open finding of R10: a deferred constraint would give it the
+argument's width).
 
 **Arithmetic semantics — one contract, every lane.** The compiled program
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
@@ -435,6 +464,39 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 | `let mut x = e` | yes | yes |
 
 All parameters pass by reference; `mut` on a parameter permits callee mutation.
+
+**Who may write a binding.** "In scope" is the CALLABLE that defines the
+binding -- a function body, a lambda or kernel body, or the module's top
+level -- ordinary nested blocks included (a `{ ... }` block enters no scope).
+There, a `let` of either spelling may be assigned, whole or through an index
+or field. A callable that merely CAPTURES a binding -- a nested function, a
+lambda, a kernel, or a top-level function naming a module binding -- may write
+it only when it was declared `let mut`: the declaration then says the state is
+shared. A write to a captured plain `let` is refused (BL4005, "declare it
+`let mut`, or return the new value"); a PARALLEL body may not write a captured
+binding of either spelling (§5.2). A `let` binding a body makes itself is its
+own, whatever outer name it shadows.
+
+The rule is about STORAGE, not spelling, so it is judged in two places. The
+type checker refuses the direct store, whose target's root is the captured
+binding (`x = ..`, `A(i) = ..`, `p.f = ..`, `g[0](i) = ..`). A store that
+REACHES a captured plain `let` -- through a local view (`let t = G(0)`; a
+partial index is a view, not a copy), a tuple or struct member holding one, a
+rebinding, an `if` value, or a `mut` parameter the local is lent to -- is
+refused at lowering by the storage-provenance walk that also guards deferred
+maps (§10.2), with the same code. That walk is flow-insensitive and fails
+closed: a name that EVER holds a view of a captured plain `let` is judged as
+one at every later store through it, and a target whose storage cannot be
+traced is refused. A whole `v = e` -- of the callable's own local or of a
+captured `let mut` -- rebinds the name and writes nothing (a later store
+through `v` is judged by what `v` then holds); an assignable copy (`let mut c =
+G`, of a dense or a compact array) is its own storage.
+A call through a FUNCTION VALUE (a callback parameter, a function-typed name)
+is judged against every callable the program uses as a value: it may write
+the arrays it is handed when one of them writes a parameter, and its result
+may share what one of them returns -- fail closed, so an unrelated callback
+that writes or returns its parameter makes every such call judged that way.
+
 A `let` (either spelling: both are assignable in their scope) whose value is
 an existing array holds a private DEEP COPY of it, with the source's storage
 class -- an element write through the new name never reaches the source --
@@ -1040,9 +1102,45 @@ type `R` is one of R's keys -- an integer one too: `range<R>` over
 `Array<R like ...>` holds a key. An integer key is represented as its
 POSITION in the key list, so a value of type `R` subscripts an array over `R`
 directly, proven and unguarded, and the key is produced where the value is
-observed: printing, arithmetic (`r + 1` is a key plus one, a plain `Int64`),
+observed: printing (in every storage: dense, compound, grouped, ragged, a
+tuple member or struct field), arithmetic (`r + 1` is a key plus one, a plain `Int64`),
 comparison, a numeric cast, an integer parameter, a subscript into an axis of
-another type. A literal of type `R` must be one of its keys (BL4003). A plain
+another type. EVERY observation produces the key, however the value arrives:
+negation; a fold of an arithmetic section and `prodsum` over an array of R
+keys (`reduce(codes, (+))` adds the keys); a literal match pattern (it names a
+key, as a literal of type `R` does); a lambda value or a named function used
+as the kernel of a map over R keys (it meets keys); a numeric parameter slot,
+at the top of an argument or as a component of a tuple argument; and a GENERIC callee whose
+body observes its parameter's values -- arithmetic, a comparison, a cast, an
+intrinsic, a fold, prodsum, a sort key -- is handed an R value, or an array of
+them, as its keys, `Int64(xs)`, so its instance is an `Int64` one (a callee
+that only passes the values on keeps them as R). So a generic callee that
+observes its argument and also returns it returns `Int64` keys, not values of
+R: the same numbers, but `group_keys` groups them in first-occurrence order
+instead of R's declared order, and an `Array<R like ..>` annotation on the
+result is a type mismatch (BL3001), as for any `Int64` array. Where the key
+cannot be produced the value is refused, BL4003, naming the spelling that
+states the key (`Int64(c)`): a call whose converted copy would change what the
+callee sees of the argument (a `mut` parameter, whose writes would land in the
+copy; a `comm` / `anticomm` callee, whose clause reads the arguments'
+identity), a computation on a value whose R type arrived only after the
+computing body was typed (an unannotated lambda bound in a block), a fold whose
+LAMBDA kernel computes on the values of R (unseeded, its accumulator starts as
+a value of R; seeded with an integer, the accumulator and the elements
+disagree, BL3001 -- fold the keys, `reduce(Int64(xs), ..)`, or use the
+section), a literal pattern that is none of R's keys, a whole-array
+observation of R values in a storage it is not built over (prodsum,
+negation or a call of an observing generic over any but a dense array; an
+intrinsic over a sparse or ragged one; a section fold over a sparse one
+(a compound array's keys are handed to a generic explicitly, `f(Int64(xs))`)
+-- a compound, ragged or grouped section fold folds
+the stored keys, `reduce(Int64(xs), ..)`), and -- the
+backstop -- any use of a value of R inside a body specialized at R (a generic
+callee the call did not hand keys, e.g. one handed a tuple or struct holding
+a value of R) other than travel: binding, passing, returning, a member or
+component, an `if` branch, a loop operand, a selection, a subscript of an axis
+of R itself, and `==` / `!=` against a value of the same R (positions and keys
+are in bijection, so equal positions are equal keys). A literal of type `R` must be one of its keys (BL4003). A plain
 integer or a string subscripting an `EnumIdx` slot is a key looked up among
 R's keys at run time, a key that is none of them stopping with BL8006. The checks
 are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
@@ -1167,7 +1265,16 @@ array it is given (a generic declaration's per-type specializations are named
 the same way). A top-level `let` of a lambda that applies such a parameter IS that declaration
 when nothing can tell them apart -- the program only ever APPLIES it, and it
 has no `mut`, annotation, `where` clause or parameter defaults, and captures no
-binding that is ever assigned -- and is generic likewise. Any other lambda (one
+binding that is ever assigned -- and is generic likewise. A `let` of a lambda
+bound INSIDE A BLOCK is one monomorphic value whenever the block checks that
+way, and is generic only in the types it is actually used at otherwise: when
+its applications do not agree on one type (`let idl = lambda(x) -> x` applied
+to an Int32 and then to a Float32), a lambda the block only ever applies, at
+two or more sites, with no annotation, `where` clause or parameter defaults,
+never assigned and not self-referencing, is checked as a nested `function` is
+-- one body per type it is used at, and no others. A block that checks
+monomorphically is unchanged by this rule, and a block that checks under
+neither reading keeps the monomorphic reading's refusal. Any other lambda (one
 used as a VALUE: a kernel, an argument, an alias) is one body, so its first use
 decides for every later one; an array makes its application a subscript,
 checked the same way. Either way the body reads
@@ -1671,7 +1778,7 @@ same holds when the kernel returns a COMPACT array (a packed `SymIdx` / `Antisym
 value, its first failure and its frames are the direct call's (a user-written lambda kernel is
 called as that lambda, its own frame kept), the operands forced as the call
 forces them -- lowered at typecheck before the §8.4 step 5 refusal, which needs an outer
-iteration dimension (corpus symmetry/146, 148-149).
+iteration dimension (corpus symmetry/174, 176-177).
 
 ### 7.3 Virtual arrays
 
@@ -2242,9 +2349,9 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
    called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
    spellings for the refused shape store a dense cell (the callee ends in `decompact(h, 0)`) or
    write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) ->
-   prodsum(x(g, a), x(g, b))`). Corpus symmetry/142 and 147 (the refusal and its span: a row
-   map, an `object_for` with one outer level), 143 (both spellings), 144 (the direct call), 146
-   (the zero-level application, the direct call's value in every lane), 148-149 (its first failure).
+   prodsum(x(g, a), x(g, b))`). Corpus symmetry/142 and 175 (the refusal and its span: a row
+   map, an `object_for` with one outer level), 143 (both spellings), 144 (the direct call), 174
+   (the zero-level application, the direct call's value in every lane), 176-177 (its first failure).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,
@@ -2571,7 +2678,7 @@ would happen only on the taken arm, which no lane's static print list follows
 to its END, so every lane judges a long chain alike (gap G59: it stopped after
 16 links, and a longer chain met a backend refusal, BL7004, instead of BL6002;
 `tuples/074`-`076`, `073`), and judges a BLOCK-valued initializer (`let p0 = { let n =
-..; (m, m) }`) by its result (`loops/574`, `functions/541`); a chain that revisits a binder is refused. A tuple ALL of
+..; (m, m) }`) by its result (`loops/574`, `functions/854`); a chain that revisits a binder is refused. A tuple ALL of
 whose members are deferred is deferred in a FUNCTION body too: binding it
 evaluates nothing (gap G58, `tuples/068`; the C++ lane named the module map in
 a value tuple, BL9002). A call with an
@@ -2581,7 +2688,7 @@ evaluates EVERY argument left to right the same way, array-valued ones included
 (gap G79: C++ leaves argument evaluation order unspecified, and g++ evaluated
 them right to left) at exactly these sites: the whole value of a module-level
 or top-level-block `let`, the whole value of a function-body `let`, and a
-function's returned value (`tuples/078`-`079`, `functions/542`-`543`,
+function's returned value (`tuples/078`-`079`, `functions/855`-`856`,
 `tuples/073`; in a function body its arguments are bound in
 source order before any fresh-array argument is hoisted). Anywhere else -- a
 call nested inside a larger expression, a call in an `if` arm -- the C++
@@ -2630,7 +2737,7 @@ compute`) evaluates g's computation without forcing it or making it print,
 and counts as an operation that may fail. Force anything else before the `if`
 (`let v = g |> compute`, or a statement that reads it) and read the value in
 the arm. A fold or a map over a deferred map in an arm fuses and forces
-nothing and is admitted (`loops/562`-`568`, `575`, `functions/539`-`540`, `544`, `tuples/068`, `072`, `073`; `loops/564` the ordered tuple's failure). `match` ARMS are not judged (OPEN
+nothing and is admitted (`loops/562`-`568`, `575`, `functions/852`-`853`, `857`, `tuples/068`, `072`, `073`; `loops/564` the ordered tuple's failure). `match` ARMS are not judged (OPEN
 under G77). The first-failure consequence is
 deliberate: a failing member fails at the construction even when the program
 never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at

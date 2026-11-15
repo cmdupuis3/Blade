@@ -1858,6 +1858,11 @@ type IRModule = {
     /// would silently corrupt `Z`. CodeGen/interpreter deep-copy at the
     /// binding site when the id is in this set.
     MutableArrayLets: Set<IRId>
+    /// The binders declared `let mut` (module bindings and block / body lets
+    /// of any type). `IsMutable` and MutableArrayLets say ASSIGNABLE, which a
+    /// plain `let` is too; this is the declaration, read by the rule on who
+    /// may write a captured binding (formalism 2.7; deep review D9).
+    LetMutBinders: Set<IRId>
     /// EMISSION-ORDER PROXY for functions a compiler pass SYNTHESIZED from an
     /// existing one: `derived id -> origin id`. Codegen emits bindings and
     /// functions interleaved in IRId order (a lower id means "written earlier

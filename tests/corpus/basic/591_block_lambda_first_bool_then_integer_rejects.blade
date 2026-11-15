@@ -1,0 +1,13 @@
+// TEST: a block lambda called first with a Bool, then an integer (rejects)
+// ============================================================================
+// R10 remainder: the first call's Bool now decides the lambda's open parameter,
+// so the later integer is refused at its argument. On the base the Bool call
+// converted its argument to the integer the second call decided.
+// ============================================================================
+let r = {
+    let f = lambda(x) -> 42
+    let alias = f
+    let a = f(true)
+    f(2)
+}
+// ERROR: BL3001 @ 10:7

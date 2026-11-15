@@ -434,6 +434,10 @@ and TypedBinding = {
     Type: IRType
     Identity: ArrayIdentity option
     IsMutable: bool
+    /// Declared `let mut` (`IsMutable` is true for a plain `let` too: both
+    /// are assignable in their scope). Read by lowering for the rule on who
+    /// may write a captured binding (formalism 2.7; deep review D9).
+    IsLetMut: bool
     Value: TypedExpr
     /// Destructured sub-bindings: (name, varId, type) for PatTuple/PatCons/PatStruct
     SubBindings: (string * IRId * IRType) list

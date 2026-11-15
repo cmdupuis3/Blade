@@ -1,0 +1,18 @@
+// TEST: generic arithmetic keeps its numeric and String instances
+// ============================================================================
+// The accepted twin of functions/810-822: a generic `+` with no numeric
+// partner is concatenation at a String instance; numeric instances are
+// unchanged; a Bool argument is converted explicitly with a numeric cast.
+// ============================================================================
+function cat(a, b) = a + b
+let s = cat("x", "y")
+// EXPECT: s = "xy"
+let i = cat(1, 2)
+// EXPECT: i = 3
+function inc(x) = x + 1
+let b = true
+let j = inc(Int64(b))
+// EXPECT: j = 2
+function sc(r: T^1) = r * 2
+let v = sc([1, 2])
+// EXPECT: v = [2, 4]

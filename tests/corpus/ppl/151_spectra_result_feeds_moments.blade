@@ -1,0 +1,14 @@
+// TEST: PPL former over a nested spectra round trip
+// #62: ppl reads the shape of `sp.ifft2(sp.fft2(f))` (spectra elaborates
+// later) and forms its pair moments; they agree with the annotated twin.
+import ppl as ppl
+import spectra as sp
+let f: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 1.0]]
+let y2 = sp.ifft2(sp.fft2(f))
+let m2 = ppl.moments(y2, 2)
+let y3: Array<Float64 like Idx<2>, Idx<4>> = sp.ifft2(sp.fft2(f))
+let m3 = ppl.moments(y3, 2)
+let d = (m2(0) - m3(0)) + (m2(2) - m3(2))
+// EXPECT: d = 0.0
+let e0 = m3(0)
+// EXPECT: e0 = 7.5

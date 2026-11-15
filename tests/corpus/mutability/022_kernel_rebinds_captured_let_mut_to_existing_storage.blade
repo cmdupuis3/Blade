@@ -1,0 +1,19 @@
+// TEST: a kernel may rebind a captured let mut to existing storage
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a whole
+// `out = e` REBINDS the name and writes no storage -- the old array keeps its
+// cells -- so a kernel that rebinds a captured `let mut` to another array
+// writes nothing of that array. The storage walk follows `out`'s rebindings
+// (it reaches `a`), and it used to judge the rebinding as a write of `a`.
+// Element stores through `out` are still judged: mutability-errors/059.
+type C = Idx<3>
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let got = reduce(method_for(0..2) <@> lambda(t) -> {
+    out = a
+    Float64(t)
+}, (+), 0.0)
+let after = reduce(out, (+))
+let a_sum = reduce(a, (+))
+// EXPECT: got = 1.0
+// EXPECT: after = 6.0
+// EXPECT: a_sum = 6.0

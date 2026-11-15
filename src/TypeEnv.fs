@@ -244,6 +244,26 @@ type GenericObligation =
     /// times a Float32, would put the wider value in `result` cells (g++
     /// refused it, BL9002), so that instance is refused at the call.
     | GOBroadcastElem of var: int * op: string * partner: ElemType * result: ElemType
+    /// THE NUMBERS-ONLY RULE (formalism 2.4): an arithmetic operator (or a
+    /// comparison beside a number, or a negation) over a value of the
+    /// variable's type -- `x + 1`, `x + y`, `-x` over `x: T` -- needs a NUMBER
+    /// at every instance: a Bool or String instance (`inc(true)`) is refused
+    /// at the call. `stringOk`: the operator is `+` with no numeric partner,
+    /// so a String instance is concatenation and stays legal. A struct, tuple
+    /// or function instance has no element class for this judgment; the
+    /// post-monomorphization backstop (IRValidate check 1d) refuses those.
+    | GONumericOperand of var: int * op: string * stringOk: bool
+    /// The mirror: a logical operator (!x, x && y) over a value of the
+    /// variable's type needs a BOOL at every instance (`notf(1)` is refused).
+    | GOBoolOperand of var: int * op: string
+    /// R3 (the D2 ruling): a value of the variable's type is OBSERVED in a way
+    /// no numeric obligation records -- an ORDERING comparison between two
+    /// generic values (`a < b`), or a sort key that is such a value. Judged
+    /// against nothing (any instance may order its values); read by the call
+    /// judgment, which hands an INTEGER EnumIdx argument to such a callee as
+    /// its KEYS (an instance at the EnumIdx would order the positions that
+    /// represent them).
+    | GOKeyObserve of var: int * op: string
     /// `a + b` (any arithmetic op) between values of TWO generic parameter
     /// variables that cannot be made one variable at the declaration -- a
     /// caret `T^k` (the whole array is the variable, `a: T^1, b: U^1`) or a
@@ -513,8 +533,16 @@ type TypeEnv = {
     /// Member alias name -> owning groupId, for annotation scanning.
     MutualMembers: Map<string, string>
     /// Functions whose return type introduces a mutual group (`-> (P1, P2)`):
-    /// funcName -> groupId. Joint check emitted at return; callers don't re-check. Shared by reference.
-    MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
+    /// function BINDER ID -> groupId (keyed by declaration, not name: two modules'
+    /// same-named functions, or a local value shadowing the function, must not
+    /// share an entry). Joint check emitted at return; callers don't re-check. Shared by reference.
+    MutualReturnFuncs: System.Collections.Generic.Dictionary<IRId, string>
+    /// The C++ GLOBAL type names every provider load of the program synthesizes
+    /// (its dims/vars structs, CSV column enum, store-axis aliases): (name,
+    /// kind, binding, module, load span). They are not module-qualified, so the
+    /// program check refuses two origins of one name (TypeCheck
+    /// providerTypeClashErrors). Shared by reference across modules.
+    ProviderEmittedTypes: ResizeArray<string * string * string * string * Span>
     /// Callee BINDER ID -> the 0-based positions of its `mut` parameters. A `mut`
     /// parameter grants the callee WRITE access to the caller's array, so the
     /// caller has to have write access to grant: formalism 2.7 lists only
@@ -707,6 +735,28 @@ type TypeEnv = {
     /// The accumulator the function declaration being checked collects its
     /// generic casts into (None outside a declaration body).
     CurrentGenericObligations: ResizeArray<GenericObligation> option
+    /// THE NUMBERS-ONLY RULE's DEFERRED DEMANDS (R10): an arithmetic operand (or a
+    /// negation's, a math intrinsic's) whose type was a plain open variable when the
+    /// operator was typed -- a lambda's unannotated parameter -- by variable id:
+    /// the operator (and whether a String instance would be concatenation). A call
+    /// that hands that parameter an enclosing generic declaration's own variable
+    /// moves the demand onto it (GONumericOperand), judged at each of its calls.
+    OpenNumericDemands: System.Collections.Generic.Dictionary<int, string * bool>
+    /// A block `let`'s bound value BY BINDER ID (R10): an alias chain is followed
+    /// by the ids its TExprVar nodes record, so a later binding that shadows a
+    /// name does not hide (or replace) what an alias denotes.
+    BinderValues: System.Collections.Generic.Dictionary<IRId, TypedExpr>
+    /// Open parameters of a one-value callee (an alias, a section, a lambda
+    /// applied where written) a NUMERIC argument met without binding them
+    /// (R10): a later Bool / String / struct argument is refused there instead
+    /// of binding the parameter and changing what the earlier call computed.
+    NumericMetOpenParams: System.Collections.Generic.Dictionary<int, Blade.Ast.Span>
+    /// An OPEN argument that met a one-value callee's OPEN parameter (R10): the
+    /// (parameter, argument, argument span) link, settled once the argument is
+    /// decided (TypeCheckSupport.settleOpenArgLinks). A NON-number binds the
+    /// parameter (or is refused there); a number leaves the parameter exactly
+    /// as it was -- the link is dropped, so no numeric value changes.
+    OpenArgLinks: ResizeArray<int * int * Blade.Ast.Span>
     /// ARROW APPLICATIONS (ArrowApplication) whose head is still open, in the
     /// order they were typed. Discharged when the head meets what is passed
     /// to it (a call's argument), at the end of the declaration whose body
@@ -916,7 +966,8 @@ let emptyEnv () = {
     FuncDefaultCaptures = System.Collections.Generic.Dictionary<IRId, Map<string, IRId>>()
     MutualGroups = Map.empty
     MutualMembers = Map.empty
-    MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
+    MutualReturnFuncs = System.Collections.Generic.Dictionary<IRId, string>()
+    ProviderEmittedTypes = ResizeArray<string * string * string * string * Span>()
     MutParamPositions = System.Collections.Generic.Dictionary<IRId, int list>()
     FuncOuterReads = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
     FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, CoIterObligation list>()
@@ -937,6 +988,10 @@ let emptyEnv () = {
     FuncWitnessBodies = System.Collections.Generic.Dictionary<IRId, IRId list * TypedExpr>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
+    OpenNumericDemands = System.Collections.Generic.Dictionary<int, string * bool>()
+    BinderValues = System.Collections.Generic.Dictionary<IRId, TypedExpr>()
+    NumericMetOpenParams = System.Collections.Generic.Dictionary<int, Blade.Ast.Span>()
+    OpenArgLinks = ResizeArray<int * int * Blade.Ast.Span>()
     PendingArrowApps = ResizeArray<ArrowApplication>()
     FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
     FuncAxisSubscriptParams = System.Collections.Generic.Dictionary<IRId, Set<int>>()
@@ -1065,6 +1120,36 @@ let pushContext (ctx: string) (env: TypeEnv) : TypeEnv =
 /// error, so the last stamp is always the failing one). Reset at every
 /// checkDecl/typeCheck/checkModule entry: AsyncLocal storage outlives one
 /// compilation in a long-lived process (`blade ide check`), so a stale span would leak.
+///
+/// THE SPAN RIDES WITH THE ERROR (deep review #48, 2026-11-14). `locateError`
+/// used to read the two cells below as "the LAST stamp": every expression
+/// stamps its span on entry, so when an error is raised the last stamp lies on
+/// the path to the failing expression -- as long as NOTHING STAMPS AFTER THE
+/// RAISE. Anything checked between the raise and `locateError` moved the
+/// report: a sibling inferred after the failing one (a tuple's later members,
+/// the apply form's left operand, inferred second), a second attempt made
+/// before the first refusal is returned, declaration-level checks that run on.
+/// Each such place needed its own point fix. Now the innermost expression frame
+/// an error leaves (inferExpr / checkExpr, `noteErrorSpan`) FREEZES the span
+/// current there against the error OBJECT -- a weak table keyed by reference,
+/// so no `TypeError` case carries a span and no match changes -- and
+/// `locateError` reads that record first. What the record holds is exactly what
+/// `locateError` would have read had it run at the raise, so the location of an
+/// error whose report nothing disturbed is unchanged. Nothing replaces a record
+/// but `relocateErrorSpan`, for the few checks that deliberately move an error
+/// they received.
+///
+/// Two conditions keep a record honest. (1) Every raise is its own object:
+/// `TypeError` has no case without fields (a field-less case is one shared
+/// object; the five that existed carry `unit` now, and the harness's Error
+/// Locations block fails if one is ever added -- a reflective guard here cost
+/// 0.4 s of start-up on every compile). (2) A record is read only in the DECLARATION
+/// CHECK that made it: `resetCurrentStmtSpan` opens a new epoch, so an error
+/// object that outlives its check (a cached result, a long-lived editor
+/// process) is located afresh.
+/// (A scoped cell -- restore on exit, so a parent's error is the parent's --
+/// was tried first and measured on the corpus: 327 of 1113 refusals moved, most
+/// to a coarser place. The last child IS usually the offender.)
 let private currentStmtSpanStorage = System.Threading.AsyncLocal<Span>()
 
 /// Expression-level span, stamped by inferExpr on entry to every node.
@@ -1072,6 +1157,12 @@ let private currentStmtSpanStorage = System.Threading.AsyncLocal<Span>()
 /// error, the last stamp lies on the path to the failing expression. Cleared
 /// on each new statement so a previous leaf can't win.
 let private currentExprSpanStorage = System.Threading.AsyncLocal<Span>()
+
+/// The declaration check in progress (see condition (2) above).
+type private SpanEpoch() =
+    [<DefaultValue>] val mutable n: int64
+let private spanEpochCounter = SpanEpoch()
+let private currentSpanEpoch = System.Threading.AsyncLocal<int64>()
 
 let setCurrentExprSpan (s: Span) = currentExprSpanStorage.Value <- s
 
@@ -1086,21 +1177,72 @@ let setCurrentStmtSpan (s: Span) =
 let resetCurrentStmtSpan () =
     currentStmtSpanStorage.Value <- noSpan
     currentExprSpanStorage.Value <- noSpan
+    currentSpanEpoch.Value <- System.Threading.Interlocked.Increment(&spanEpochCounter.n)
 
 let currentStmtSpan () : Span =
     match box currentStmtSpanStorage.Value with
     | null -> noSpan
     | _ -> currentStmtSpanStorage.Value
 
+/// The two cells as they stand, for a trial check that puts them back
+/// (`restoreSpanCells`).
+let saveSpanCells () : struct (Span * Span) =
+    struct (currentStmtSpan (), currentExprSpan ())
+let restoreSpanCells (struct (stmt, expr): struct (Span * Span)) =
+    currentStmtSpanStorage.Value <- stmt
+    currentExprSpanStorage.Value <- expr
+
+/// Where an error was raised, and in which declaration check.
+[<AllowNullLiteral>]
+type private ErrorLoc(span: Span, epoch: int64) =
+    member _.Span = span
+    member _.Epoch = epoch
+
+let private errorSpans = System.Runtime.CompilerServices.ConditionalWeakTable<TypeError, ErrorLoc>()
+
+let private liveRecord (err: TypeError) : ErrorLoc =
+    match errorSpans.TryGetValue err with
+    | true, loc when loc.Epoch = currentSpanEpoch.Value -> loc
+    | _ -> null
+
+/// The span frozen for `err` when it was raised, if an expression frame of
+/// this declaration check saw it.
+let errorOwnSpan (err: TypeError) : Span option =
+    match liveRecord err with
+    | null -> None
+    | loc -> Some loc.Span
+
+/// An error is leaving an expression frame: freeze the span current here (the
+/// expression stamp, else the statement's) against it, unless it has one.
+let noteErrorSpan (err: TypeError) : unit =
+    if isNull (liveRecord err) then
+        let here =
+            let e = currentExprSpan ()
+            if e.StartLine > 0 then e else currentStmtSpan ()
+        if here.StartLine > 0 then
+            errorSpans.AddOrUpdate(err, ErrorLoc(here, currentSpanEpoch.Value))
+
+/// Deliberately MOVE an error to `s` -- a check that received it and knows a
+/// better place (the call an instance was made for, the argument a settled
+/// obligation belongs to). Also stamps the cell, for an error with no record.
+let relocateErrorSpan (err: TypeError) (s: Span) : unit =
+    if s.StartLine > 0 then
+        currentExprSpanStorage.Value <- s
+        errorSpans.AddOrUpdate(err, ErrorLoc(s, currentSpanEpoch.Value))
+
 /// Wrap a TypeError with span and context into a CompileError. Precision
-/// order: active expression span > active statement span > the caller's span.
+/// order: the span frozen for the error when it was raised > the active
+/// expression span > the active statement span > the caller's span.
 let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
-    let exprSpan = currentExprSpan ()
-    let stmtSpan = currentStmtSpan ()
     let span =
-        if exprSpan.StartLine > 0 then exprSpan
-        elif stmtSpan.StartLine > 0 then stmtSpan
-        else span
+        match liveRecord err with
+        | null ->
+            let exprSpan = currentExprSpan ()
+            let stmtSpan = currentStmtSpan ()
+            if exprSpan.StartLine > 0 then exprSpan
+            elif stmtSpan.StartLine > 0 then stmtSpan
+            else span
+        | loc -> loc.Span
     { Error = err; Span = span; Context = env.Context; Code = None }
 
 /// Stands in for a declaration name when a unit-expression error comes from a
@@ -1199,7 +1341,7 @@ let private formatTypeErrorRaw (err: TypeError) : string =
         if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
-    | HaloWindowEscapes ->
+    | HaloWindowEscapes _ ->
         "a halo window is passed to a function whose body applies it, but a window is read (`w(o)`) only in the body of the halo kernel that binds it: it is neither an array nor a function, the only values an applied parameter takes. Read the neighbours in the kernel and pass the values (`lambda(w) -> f(A(w(-1)), A(w(1)))`), or write the kernel as a lambda over the window (`<@> lambda(w) -> A(w(1)) - A(w(-1))`)."
     | IndexOverApplied (arrTy, coords, supplied) ->
         let plural n = if n = 1 then "" else "s"
@@ -1435,12 +1577,15 @@ complex half)." where_
     | HermitianMapNotReal param -> $"mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '{param}'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim."
     | FoldOmpNeedsLicense kernelDesc -> $"parallel reduction needs comm(...) or a builtin op: {kernelDesc} carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold."
     | PlaceholderNeedsAllBound (got, total) -> $"the `_` placeholder needs every other parameter bound: this call supplies {got} of {total} args. Combine with prefix partial application in two steps, or use a lambda."
-    | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
+    | GroupKeysRank1 _ -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
     | GroupKeysEscapes (what, pos) -> $"{what} cannot be used {pos}: a `group_keys` result is NAME-KEYED, not a value. It compiles to three locals named after the binding (`<name>__ngroups`, `<name>__offsets`, `<name>__perm`) and the binding itself carries only an opaque sentinel, so `group_by` can find the grouping only under the exact name the keys were bound to. Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` directly to each `group_by` -- a group_keys result cannot be aliased to a second name, put in a tuple or struct, passed as a function argument, or returned. (Grouping two arrays the same way is what one shared `gk` is FOR: `group_by(a, gk)` and `group_by(b, gk)` co-iterate; two separate `group_keys` calls do not.)"
+    | ProviderTypeClash (name, kind, binding, site, other) ->
+        $"duplicate C++ type '{name}': the provider load '{binding}' ({site}) generates it (its {kind}), and {other} also defines '{name}'. A provider's generated types are not module-qualified, so the two would be one global name (this used to pass `check` and fail in the C++ back end). Rename one: a load's struct and column-enum names derive from its BINDING name (`<b>__vars`, `<b>__dims`, `<b>_cols`), so binding the store under another name separates them; an axis alias is named after the store's DIMENSION, so rename the clashing declaration instead."
+    | GroupedValueEscapes what -> $"{what} cannot be a GROUPED value: a `group_by` result, a per-group map of one, and each of its rows exist only under their grouped type. Their row lengths live in the grouping's side state (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm`) in the scope that bound the grouping, which no function signature, plain array annotation or struct field carries -- the same reason a grouped value cannot be passed as an argument. Keep the grouped value unannotated where it is used, and hand on what you compute FROM the groups -- a per-group fold (`reduce(g, (+))` is one value per group, an ordinary array), a statistic of a row -- or group at the call site, where the values and keys are. (A per-group map's row kernel, `lambda(r) -> ...` over a row, may return a row.)"
     | GroupingNeedsName (intrinsic, got) -> $"{intrinsic}(gk) requires the BARE NAME of a `group_keys(...)` binding; got {got}. A grouping is not a value -- its state lives in locals named after the binding (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm`), so it cannot be aliased, passed, returned, or built inline. Bind it once (`let gk = group_keys(...)`) and write `{intrinsic}(gk)`."
     | GroupBucketNotGrouping got -> $"group_bucket expects a `group_keys(...)` binding; '{got}' is not one. Bind the keys first: `let gk = group_keys(k)`, then `group_bucket(gk)`."
     | FallbackNeedsArrays (leftDesc, rightDesc) -> $"<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got {leftDesc} and {rightDesc}. For value-level choice (first nonzero wins) over scalars or computations, use <|>."
-    | FallbackSymmetricLeft -> "<|:> over a symmetric/antisymmetric/Hermitian left operand is not yet supported: symmetric A requires symmetric allocation (formalism 2.6), which the compiler cannot yet verify. decompact(A, d) to dense first."
+    | FallbackSymmetricLeft _ -> "<|:> over a symmetric/antisymmetric/Hermitian left operand is not yet supported: symmetric A requires symmetric allocation (formalism 2.6), which the compiler cannot yet verify. decompact(A, d) to dense first."
     | FallbackRightNotDense what -> $"<|:> right operand must be a plain dense array (it supplies the value for every cell the left side lacks); got {what}."
     | FallbackRankMismatch (leftRank, rightRank) -> $"<|:> operands must cover the same index space: the left side spans {leftRank} dimension(s) but the right side has rank {rightRank}."
     | CumulantOrderPositive order -> $"cumulant: order must be >= 1, got {order}"
@@ -1483,7 +1628,7 @@ complex half)." where_
         $"{what} cannot be used {pos}: it captures '{captured}', which is reassigned, so the closure shares that variable with the scope that defines it rather than holding a copy -- and that scope ends while the closure could still be called. Call it, or use it as a kernel, inside the scope that defines '{captured}'; to carry state out, return the updated value (or a tuple of values) instead of a closure that updates it."
     | MutualBindJointly (typeName, describe, lowerNames) -> $"type '{typeName}' belongs to mutual group ({describe}); bind the group jointly: let ({lowerNames}): ({describe}) = ..."
     | MutualDirectElementsOnly describe -> $"mutual member types (group {describe}) may appear only as direct elements of a joint tuple annotation"
-    | MutualMixedGroups -> "annotation mixes members of different mutual groups"
+    | MutualMixedGroups _ -> "annotation mixes members of different mutual groups"
     | MutualDuplicateMember describe -> $"duplicate mutual member in annotation (group {describe})"
     | MutualIncompleteAnnotation describe -> $"mutual group ({describe}) is incomplete in this annotation; all group members must appear together"
     | MutualJointAnnotationOnly describe -> $"mutual member types (group {describe}) may appear only in a joint let annotation or a function's declared return type"
@@ -1498,7 +1643,7 @@ complex half)." where_
     | MutualScalarBare (memberName, field) -> $"'{memberName}' aliases a scalar; reference it bare, not '{memberName}.{field}'"
     | MutualStructNeedsField memberName -> $"'{memberName}' aliases a struct; reference one of its fields as '{memberName}.<field>'"
     | MutualUnknownIdent name -> $"identifier '{name}' in a mutual-group constraint must be a group member, a member field path, or a static"
-    | MutualUnsupportedExpr -> "unsupported expression form in a mutual-group constraint"
+    | MutualUnsupportedExpr _ -> "unsupported expression form in a mutual-group constraint"
     | MutualConstraintNotBool (groupId, got) -> $"mutual-group constraint (group {groupId}) must be a boolean expression, got {got}"
     | MutualConstraintError (groupId, inner) -> $"mutual-group constraint (group {groupId}): {inner}"
     | ProviderStreamNeedsVar alias -> $"{alias}.stream expects a provider array variable"
@@ -1652,7 +1797,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnboundVariable _ | ImportNameMissing _ -> "BL2001"
             // Same-scope duplicate `function` name: a name-binding refusal,
             // so it lives in the BL2xxx resolution band, not BL3xxx.
-            | DuplicateFunctionDecl _ | DuplicateDecl _ -> "BL2009"
+            | DuplicateFunctionDecl _ | DuplicateDecl _ | ProviderTypeClash _ -> "BL2009"
             | AmbiguousImport _ -> "BL2010"
             // Environment condition, not a type judgment: the provider's
             // native library is unloadable, so the store's names cannot
@@ -1662,7 +1807,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // resolve, so no name it binds can. BL2007's sibling, one condition
             // over (library vs store).
             | ProviderStoreUnresolvable _ -> "BL2008"
-            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ | HaloWindowEscapes
+            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ | HaloWindowEscapes _
             | ScalarPinnedArray _ -> "BL3001"
             | CaretHeadSpelling _ -> "BL1004"
             | ArityMismatch _ | KernelPackArity _ | IndexOverApplied _ -> "BL3002"
@@ -1682,7 +1827,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | FactoryDupQuantityDecl _ -> "BL3013"
             | FactoryDupFill _ | FactoryUnknownTag _ | FactoryAmbiguousMix _ -> "BL3014"
             | UnknownUnitName _ -> "BL3015"
-            | GroupKeysEscapes _ -> "BL3017"
+            | GroupKeysEscapes _ | GroupedValueEscapes _ -> "BL3017"
             | IntrinsicBindArrayFailed _ | IntrinsicNeedsArray _
             | IntrinsicNotComplex _ | IntrinsicNeedsNumeric _ | AbsNeedsNumericScalar _
             | IntrinsicComplexScalarOnly _ | IntrinsicNeedsComplex _ | ComplexArity _
@@ -1691,14 +1836,14 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | ArrayLitLength _ | CompactLitShape _ | HermitianLitDiagComplex _
             | ObjectForKernel _ | ChainOpNeedsMethodFor _ | ChainOpBadKernel _
             | ChainOpUndecidable _
-            | PlaceholderNeedsAllBound _ | GroupKeysRank1
+            | PlaceholderNeedsAllBound _ | GroupKeysRank1 _
             | GroupingNeedsName _ | GroupBucketNotGrouping _
             | CumulantOrderPositive _
             | CumulantOrderExceeds _ | CumulantNeedsDist _ | DistOrderDisagree _
             | DistNotIndependent _ | DistOpUndefined _ | EnumIdxMixedKinds _
             | EnumIdxUnknownLabel _
             | ImplMissingMethods _
-            | FallbackNeedsArrays _ | FallbackSymmetricLeft
+            | FallbackNeedsArrays _ | FallbackSymmetricLeft _
             | FallbackRightNotDense _ | FallbackRankMismatch _ -> "BL3007"
             // Field ACCESS gets its own code: BL3008 reads "struct
             // construction error", and this one is raised nowhere near a
@@ -1786,13 +1931,13 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | RowMapCompactCell _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
             | MutArgNotPassable _ | MutArgAliased _ | MutArgAliasesCalleeGlobal _ | MutCaptureEscapes _ -> "BL4005"
-            | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
+            | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups _
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _
             | StructFieldMutualType _ | MutualMemberDupGroup _ | MutualMemberNotStruct _
             | MutualMemberBadAlias _ | MutualUnknownField _ | MutualScalarBare _
             | MutualStructNeedsField _ | MutualUnknownIdent _
-            | MutualUnsupportedExpr | MutualConstraintNotBool _ | MutualConstraintError _ -> "BL4006"
+            | MutualUnsupportedExpr _ | MutualConstraintNotBool _ | MutualConstraintError _ -> "BL4006"
             | ProviderStreamNeedsVar _ | ProviderReadWindowBounds _ | ProviderReadWindowLiteralExtent _
             | ProviderReadWindowPacked _ | ProviderReadWindowNeedsVar _ | ProviderReadWindowArgs _
             | ProviderWriteNeedsArray _ | ProviderWriteNamedBinding _ | ProviderWriteArgs _

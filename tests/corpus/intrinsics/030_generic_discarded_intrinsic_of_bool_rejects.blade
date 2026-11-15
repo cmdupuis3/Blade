@@ -1,0 +1,13 @@
+// TEST: a generic intrinsic whose result is discarded, called with a Bool (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: the domain demand must
+// survive even when the intrinsic's value never reaches the return.
+// ============================================================================
+function sn(x) -> Int32 = {
+    let y = sin(x)
+    1
+}
+let a = sn(1.0)
+let r = sn(true)
+// ERROR: BL3007

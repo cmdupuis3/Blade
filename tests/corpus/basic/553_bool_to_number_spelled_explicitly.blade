@@ -1,0 +1,27 @@
+// TEST: a Bool turned into a number explicitly
+// ============================================================================
+// The accepted twin of basic/530-552: a Bool converts to a number with a numeric
+// cast, 1 or 0, cell by cell for a mask; that also counts a mask's true cells.
+// Strings still join with `+`, Bools and Strings still compare with each
+// other, logical operators still take Bools, complex arithmetic is unchanged.
+// ============================================================================
+let b = true
+let t = Int64(b) + 1
+// EXPECT: t = 2
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let m = xs > 1.5
+let kept = xs * Float64(m)
+// EXPECT: kept = [0.0, 2.0, 3.0]
+let n = reduce(Int64(m), (+))
+// EXPECT: n = 2
+let s = "a" + "b"
+// EXPECT: s = "ab"
+let same = true == false
+// EXPECT: same = false
+let nz = n != 0 && !false
+// EXPECT: nz = true
+let ord = "a" < "b"
+// EXPECT: ord = true
+let z = complex(1.0, 2.0)
+let zz = -z * z + 1.0
+// EXPECT: zz = (4.0, -4.0)

@@ -1,0 +1,13 @@
+// TEST: a block lambda keeps an index value through an open kernel parameter
+// ============================================================================
+// R10 remainder: the kernel parameter `i` is still open when `idl(i)` is typed;
+// an open argument meeting an open parameter is linked to it, and once `i` is
+// decided an index value (a non-number) `idl` takes that type. On the
+// base the parameter fell to the Float64 default and the program died in g++.
+// ============================================================================
+type I = Idx<3>
+let t = method_for(range<I>) <@> lambda(i) -> {
+    let idl = lambda(x) -> x
+    idl(i)
+} |> compute
+// EXPECT: t = [0, 1, 2]

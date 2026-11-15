@@ -1,0 +1,9 @@
+// TEST: Math marker op refuses an inline array literal operand (rejects)
+// #62: matmul / solve / lu / the LAPACK eigh rewrite to intrinsic markers
+// whose operands codegen emits as stored arrays; an inline literal operand is
+// refused with the binding that fixes it (math/116 is the synthesized-op twin).
+// ERROR: BL5200
+// ERROR-CONTAINS: an inline array literal operand is not supported by this op
+import math as m
+let B: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 0.0], [1.0, 1.0]]
+let C = m.matmul([[1.0, 2.0], [3.0, 4.0]], B)

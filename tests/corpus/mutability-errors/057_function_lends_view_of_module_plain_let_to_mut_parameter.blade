@@ -1,0 +1,16 @@
+// TEST: a function lends a view of a module-level plain let to a mut parameter
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a write reaches `g` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a callable
+// that only CAPTURES a binding writes it only when it was declared `let mut`.
+// The type checker refuses the direct store (048-051, 054); a store that
+// REACHES the binding is refused at lowering, by storage provenance.
+// `v` is a `let mut` LOCAL, so it may be passed to a `mut` parameter -- but
+// it is a view of `g`, and `put` writes it (g printed [[9, 2], [3, 4]]).
+// Passing `g` itself was already refused (Codex review of the D9 change).
+type I = Idx<2>
+let g: Array<Int32 like I, I> = [[1, 2], [3, 4]]
+function put(a: mut Array<Int32 like I>) -> Int32 = { a(0) = 9; 0 }
+function f() -> Int32 = { let mut v = g(0); put(v) }
+let r = f()

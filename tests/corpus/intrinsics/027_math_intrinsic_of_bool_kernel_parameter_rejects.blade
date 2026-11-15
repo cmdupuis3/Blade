@@ -1,0 +1,8 @@
+// TEST: a math intrinsic of a Bool kernel parameter (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: the parameter is open while
+// the kernel body is typed (master: a Bool array).
+// ============================================================================
+let r = method_for([true, false]) <@> lambda(x) -> sin(x) |> compute
+// ERROR: BL3007

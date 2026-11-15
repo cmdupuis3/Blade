@@ -1,0 +1,12 @@
+// TEST: a lambda in a top-level block applied at two types
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. The block is a module binding's value.
+let r = {
+    let pair = lambda(x) -> x + x
+    let a = pair(2)
+    let b = pair(1.5)
+    Float32(a) + b
+}
+// EXPECT: r = 7.0

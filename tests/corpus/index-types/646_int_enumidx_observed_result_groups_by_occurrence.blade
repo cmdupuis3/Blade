@@ -1,0 +1,19 @@
+// TEST: An observing generic returns keys as Int64, which group by first occurrence
+// ============================================================================
+// R3, the visible consequence: a generic callee that observes its argument
+// (here a sort keyed by the value) receives the array as KEYS, so what it
+// returns is an Int64 array -- the same numbers. `group_keys` of an Int64
+// array numbers its groups by FIRST OCCURRENCE; of an array of R, in R's
+// DECLARED order (300, 100, 200).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes2: Array<R like Idx<4>> = [200, 300, 100, 200]
+function srt(x: T^1) = sort(x, lambda(e) -> e)
+let back = srt(codes2)
+// EXPECT: back = [100, 200, 200, 300]
+let gk = group_keys(back)
+let g = group_by(back, gk)
+// EXPECT: g = [[100], [200, 200], [300]]
+let gk2 = group_keys(codes2)
+let g2 = group_by(codes2, gk2)
+// EXPECT: g2 = [[300], [100], [200, 200]]

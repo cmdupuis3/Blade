@@ -1,0 +1,28 @@
+// TEST: rebinding a local view and writing an unrelated tuple member are the function's own
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a plain
+// `let` is writable in the callable that defines it, nested blocks included.
+// A callable that only CAPTURES it writes it only when it was declared
+// `let mut`. `rebind` REBINDS its local `v` to a
+// new array (a whole assignment names a new array; it writes no storage the
+// view reached), and `member` writes the tuple member that is its own fresh
+// array, not the captured scalar beside it. Both stay legal (Codex review of
+// the D9 change found the first cut refusing them).
+let g = [[1.0, 2.0], [3.0, 4.0]]
+function rebind() -> Float32 = {
+    let v = g(0)
+    v = [5.0, 6.0]
+    v(0)
+}
+let r1 = rebind()
+let k = 1
+function member() -> Float32 = {
+    let pair = (k, [5.0, 6.0])
+    let v = pair[1]
+    v(0) = 9.0
+    v(0)
+}
+let r2 = member()
+// EXPECT: g = [[1.0, 2.0], [3.0, 4.0]]
+// EXPECT: r1 = 5.0
+// EXPECT: k = 1
+// EXPECT: r2 = 9.0

@@ -72,7 +72,7 @@ type TypeError =
     /// where Lowering turns it into a neighbour position and the reach check
     /// (BL4019) judges its offset. Passed on, the read was typed against
     /// nothing (BL6001) or emitted as a call of an integer (BL9002).
-    | HaloWindowEscapes
+    | HaloWindowEscapes of unit
     /// Rank disagreement between a declared parameter and the argument
     /// supplied at a DIRECT application. Raised by dispatchAppOrIndex's
     /// FuncElem arm, which does not unify args against params (see the
@@ -525,7 +525,7 @@ type TypeError =
     // refuse rather than silently emit a serial loop. `kernelDesc` names it.
     | FoldOmpNeedsLicense of kernelDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
-    | GroupKeysRank1
+    | GroupKeysRank1 of unit
     /// BL3017: a `group_keys` result reached a position other than its own
     /// `let` RHS or a `group_by` grouping slot. The value is NAME-KEYED, not
     /// a value: `genGroupKeysBinding` puts the whole CSR structure in C++
@@ -538,6 +538,19 @@ type TypeError =
     /// TypeCheck's same-gk co-iteration check already ASSUMES this invariant
     /// (it compares gk operands by binding NAME); this enforces it.
     | GroupKeysEscapes of what: string * pos: string
+    /// BL3017's other half (deep review R7): a GROUPED value -- a `group_by`
+    /// result, a per-group map of one, or one of its rows -- leaving its
+    /// grouped type: a function's return value, a non-row-kernel lambda's,
+    /// a plainly annotated binding or assignment, a struct field. Its row
+    /// lengths live in the grouping's side state, which none of those carry
+    /// (it died in g++, BL9002). `what` names the position.
+    | GroupedValueEscapes of what: string
+    /// Deep review R1 (D11 leftover): a provider load synthesizes C++ GLOBAL
+    /// type names (`<b>__vars`, `<b>__dims`, `<b>_cols`, one alias per store
+    /// axis) that are not module-qualified; a second origin of one name --
+    /// another module's load, or a declaration emitted bare -- passed check
+    /// and died in g++ (BL9002, a redefinition). BL2009's family.
+    | ProviderTypeClash of name: string * kind: string * binding: string * site: string * other: string
     // The grouping ACCESSORS (`group_bucket`, `extents`) take a gk by NAME, for
     // the same reason BL3017 exists -- the state is reachable only through the
     // binding. These two are the accessor-side argument checks, raised during
@@ -556,7 +569,7 @@ type TypeError =
     | ImplMissingMethods of iface: string * typeName: string * methods: string
     // <|:> allocated-fallback operand violations (BL3007)
     | FallbackNeedsArrays of leftDesc: string * rightDesc: string
-    | FallbackSymmetricLeft
+    | FallbackSymmetricLeft of unit
     | FallbackRightNotDense of what: string
     | FallbackRankMismatch of leftRank: int * rightRank: int
     // Struct construction (BL3008)
@@ -647,7 +660,7 @@ type TypeError =
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string
-    | MutualMixedGroups
+    | MutualMixedGroups of unit
     | MutualDuplicateMember of describe: string
     | MutualIncompleteAnnotation of describe: string
     | MutualJointAnnotationOnly of describe: string
@@ -662,7 +675,7 @@ type TypeError =
     | MutualScalarBare of memberName: string * field: string
     | MutualStructNeedsField of memberName: string
     | MutualUnknownIdent of name: string
-    | MutualUnsupportedExpr
+    | MutualUnsupportedExpr of unit
     | MutualConstraintNotBool of groupId: string * got: string
     | MutualConstraintError of groupId: string * inner: string
     // Provider (import/read/write/stream) argument errors (BL3007 / BL2003)

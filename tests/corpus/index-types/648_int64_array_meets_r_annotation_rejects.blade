@@ -1,0 +1,9 @@
+// TEST: An Int64 array meeting an Array<R> annotation is a type mismatch (rejects)
+// ERROR: BL3001
+// ============================================================================
+// Unchanged by R3 (the twin of index-types/647): an Int64 array is not an
+// array of R values, whatever numbers it holds.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let ks: Array<Int64 like Idx<3>> = [100, 200, 300]
+let r: Array<R like Idx<3>> = ks

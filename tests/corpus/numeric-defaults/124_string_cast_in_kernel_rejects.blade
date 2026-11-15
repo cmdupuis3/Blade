@@ -1,0 +1,8 @@
+// TEST: a String cast to a number inside a kernel (rejects)
+// ============================================================================
+// The cast domain (formalism 2.4) is numbers and Bool, also where the operand is
+// a kernel parameter typed after the body (the deferred-cast judgment). Codex
+// review round 3: master accepted this and failed in the back end.
+// ============================================================================
+let r = method_for(["1", "2"]) <@> lambda(x) -> Float64(x) |> compute
+// ERROR: BL3019

@@ -1,0 +1,18 @@
+// TEST: a block lambda doubling called with a struct (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4): the block lambda is called with an
+// integer and with a struct; the struct instance's `x + x` is not arithmetic
+// on a number. (C:\bt_drf\rulings\probes\h_c.blade; refused BL3001 on master
+// by the parameter's first use, and still refused once the lambda is generic.)
+// ============================================================================
+struct P {
+    a: Float64
+}
+function f() -> Int32 = {
+    let dbl = lambda(x) -> x + x
+    let a = dbl(1)
+    let b = dbl(P { a = 1.0 })
+    a
+}
+let r = f()
+// ERROR: BL3001

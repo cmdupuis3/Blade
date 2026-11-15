@@ -1,0 +1,12 @@
+// TEST: a block lambda generalized at two numeric types
+// ============================================================================
+// The accepted twin of functions/890: Int32 and Float32 instances keep working.
+// ============================================================================
+function f() -> Float32 = {
+    let dbl = lambda(x) -> x + x
+    let a = dbl(1)
+    let b = dbl(2.0)
+    b
+}
+let r = f()
+// EXPECT: r = 4.0

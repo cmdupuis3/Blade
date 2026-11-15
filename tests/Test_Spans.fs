@@ -340,5 +340,18 @@ let runSpanTests () : BlockResult =
         (parseErrCode "let x = )\n" = "BL1999")
         ($"""got {(parseErrCode "let x = )\n")}""")
 
+    // (f) Deep review #48: the span of a type error is frozen against the error
+    //     OBJECT when it is raised (TypeEnv.noteErrorSpan), so every raise must
+    //     be its own object. A union case WITHOUT fields is one shared instance
+    //     for all its raises and can hold no location of its own -- give a new
+    //     case a field (`of unit` if it has nothing to say).
+    let fieldless =
+        Microsoft.FSharp.Reflection.FSharpType.GetUnionCases(typeof<Blade.Unify.TypeError>)
+        |> Array.filter (fun c -> c.GetFields().Length = 0)
+        |> Array.map (fun c -> c.Name)
+    check "no TypeError case is field-less (each raise is its own object)"
+        (fieldless.Length = 0)
+        (sprintf "field-less cases: %s" (String.concat ", " fieldless))
+
     printFooter "Error Locations" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

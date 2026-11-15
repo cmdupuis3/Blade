@@ -1,0 +1,25 @@
+// TEST: A local value shadowing a mutual-return function is checked (aborts)
+// ABORT: Mutual constraint violation (P1)
+// Deep review R1: the table of functions whose declared return checks a
+// mutual group (`-> (P1, P2)`, checked once at its return, its callers
+// exempt) was keyed by the callee's NAME, so a call to anything else of that
+// name -- here a local lambda shadowing `make`, or another module's own
+// `make` -- skipped the binding's check and bound a violating pair silently.
+// It is keyed by the callee's declaration now: this call runs the check.
+struct Body {
+    pos: Float64,
+    w: Float64
+}
+type P1 = Body
+and P2 = Body
+where P1.pos * P1.w + P2.pos * P2.w == 4.0
+function make() -> (P1, P2) = {
+    let a = Body { pos = 1.0, w = 2.0 }
+    let b = Body { pos = 2.0, w = 1.0 }
+    (a, b)
+}
+let v = {
+    let make = lambda() -> (Body { pos = 1.0, w = 2.0 }, Body { pos = 2.0, w = 5.0 })
+    let (p1, p2): (P1, P2) = make()
+    p1.pos + p2.w
+}

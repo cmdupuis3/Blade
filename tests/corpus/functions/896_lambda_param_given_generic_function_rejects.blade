@@ -1,0 +1,11 @@
+// TEST: a block lambda whose parameter meets a generic parameter, called with a function (rejects)
+// ============================================================================
+// R10 remainder: the moved demand is judged on the instance's full type, so a
+// function instance (no element class) is refused at the call too.
+// ============================================================================
+function outer(b) = {
+    let dbl = lambda(x) -> x + x
+    dbl(b)
+}
+let r = outer(lambda(x) -> x)
+// ERROR: BL3001 @ 9:15

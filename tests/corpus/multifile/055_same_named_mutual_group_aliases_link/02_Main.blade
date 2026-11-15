@@ -1,0 +1,30 @@
+// TEST: Same-named mutual-group aliases in two modules link
+// MODULE: Main
+// ============================================================================
+// D11 for mutual groups: a group member's alias has its module's identity
+// (A's `P1` is `A.P1`, emitted `A__P1`), so the importer's own group
+// `P1` / `P2` over another struct does not redeclare the C++ alias (it was
+// BL9002 `conflicting declaration 'using P1 = struct Body'`). Each module's
+// joint constraint still guards its own bindings (both abort BL8001 when violated;
+// the multi-file runner has no `(aborts)` probe, so that twin is not pinned here).
+module Main
+import A
+struct Body {
+    pos: Float64,
+    w: Float64
+}
+type P1 = Body
+and P2 = Body
+where P1.pos * P1.w + P2.pos * P2.w == 4.0
+function make() -> (P1, P2) = {
+    let a = Body { pos = 1.0, w = 2.0 }
+    let b = Body { pos = 2.0, w = 1.0 }
+    (a, b)
+}
+let (p1, p2): (P1, P2) = make()
+// EXPECT: p1 = Body { pos = 1.0, w = 2.0 }
+// EXPECT: p2 = Body { pos = 2.0, w = 1.0 }
+let v = p1.pos + p2.pos
+// EXPECT: v = 3.0
+let t = A.total(1.0)
+// EXPECT: t = 2.0

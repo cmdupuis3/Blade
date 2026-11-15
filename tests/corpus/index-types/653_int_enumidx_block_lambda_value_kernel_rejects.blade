@@ -1,0 +1,16 @@
+// TEST: A block lambda typed before it meets R that computes on it is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: Spell the key where it is computed on
+// ============================================================================
+// R3, a refusal that stays: a lambda bound in a block is one monomorphic
+// value, typed (with its parameter open) before the map hands it R values,
+// so its `c + 1` was typed as a value of R. Spell the key (`Int64(c) + 1`),
+// or write the kernel inline, which is seeded R.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function f() = {
+    let k = lambda(c) -> c + 1
+    method_for(codes) <@> k |> compute
+}
+let d = f()

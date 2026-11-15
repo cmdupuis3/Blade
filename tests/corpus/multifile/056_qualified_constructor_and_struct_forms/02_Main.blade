@@ -1,0 +1,30 @@
+// TEST: Module-qualified constructor and struct patterns and construction
+// MODULE: Main
+// ============================================================================
+// Deep review R1 (D11 leftovers): the module-qualified spellings of an
+// imported constructor and struct, in every position. `U.Red` in a match
+// PATTERN failed to parse (BL1999 "Expected declaration but got '|'"),
+// `U.P { a = 1.0 }` failed BL1001, and `U.Some(2.5)` said "Unbound
+// variable: U". A qualified pattern names the scope key the import
+// registers (`U.Red`, `U.P`); it is never a binder (057). The bare
+// spelling still resolves against the scrutinee's type (033).
+module Main
+import U
+function order_of(c: U.Color) -> Int64 = match c with
+    | U.Red -> 1
+    | U.Green -> 2
+    | U.Blue -> 3
+let k = order_of(U.Green)
+// EXPECT: k = 2
+function get(o: U.Opt) -> Float64 = match o with
+    | U.Some(x) -> x
+    | U.Nothing -> 0.0
+let s = get(U.Some(2.5))
+// EXPECT: s = 2.5
+let z = get(U.Nothing)
+// EXPECT: z = 0.0
+let p = U.P { a = 4.0 }
+// EXPECT: p = P { a = 4.0 }
+let pa = match p with
+    | U.P { a } -> a
+// EXPECT: pa = 4.0

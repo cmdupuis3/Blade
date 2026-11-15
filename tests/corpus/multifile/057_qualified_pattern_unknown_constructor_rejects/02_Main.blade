@@ -1,0 +1,12 @@
+// TEST: A module-qualified pattern that names no constructor (rejects)
+// MODULE: Main
+// ERROR: BL3004
+// ERROR-CONTAINS: pattern 'U.Rde': a module-qualified name in a pattern must name an imported constructor
+// A qualified name in a pattern is a constructor or an error -- never a
+// fresh binder that would match everything and kill the arms below it.
+module Main
+import U
+function order_of(c: U.Color) -> Int64 = match c with
+    | U.Rde -> 1
+    | _ -> 2
+let k = order_of(U.Green)

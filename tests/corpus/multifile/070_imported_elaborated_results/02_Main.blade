@@ -1,0 +1,16 @@
+// TEST: Imported results of elaborated calls feed math and spectra
+// MODULE: Main
+// #62: a qualified (`L.Q`) and a selectively imported (`lam`) binding of
+// another module carry the shape the exporter's elaborated call produced,
+// resolved in the exporter's context.
+module Main
+import Lib as L
+from Lib import lam
+import math as m
+import spectra as sp
+let P = m.matmul(L.S, L.Q)
+let w0 = P(0, 0) * L.Q(0, 0) + P(1, 0) * L.Q(1, 0) + P(2, 0) * L.Q(2, 0)
+// EXPECT: w0 = 3.414213562373095
+let F = sp.fft(lam)
+let tr = real(F(0))
+// EXPECT: tr = 6.0

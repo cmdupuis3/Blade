@@ -1,0 +1,15 @@
+// TEST: a block lambda forwarded through another lambda to a generic parameter, called with a Bool (rejects)
+// ============================================================================
+// R10 remainder: `g`'s parameter `y` is an open argument of `f(y)`, so it is
+// linked to `f`'s open parameter and inherits the arithmetic `f`'s body deferred
+// on it (`x + x`); `g(b)` then moves that demand to `outer`'s own parameter, and
+// `outer(true)` is refused, spanned. The base computed `r = 2.0`. No numeric
+// type is decided by the link (functions/895 is the one-level form).
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    let g = lambda(y) -> f(y)
+    g(b)
+}
+let r = outer(true)
+// ERROR: BL3001 @ 13:15

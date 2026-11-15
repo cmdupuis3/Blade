@@ -1,0 +1,10 @@
+// TEST: Math refuses an inferred complex operand with the fix (rejects)
+// #62: the result of sp.fft2 is a complex spectrum; an inferred operand of a
+// math op must be Float64, so the refusal names the element type here, not
+// a mismatch against the generated routine's parameter in the checker.
+// ERROR: BL5200
+// ERROR-CONTAINS: does not have Float64 elements
+import math as m
+import spectra as sp
+let f: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<Idx<4>, Idx<4>>) <@> lambda(i, j) -> Float64(i * 4 + j) |> compute
+let (U, sv, V) = m.svd(sp.fft2(f))

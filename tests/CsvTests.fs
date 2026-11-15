@@ -298,6 +298,39 @@ let bad = t.dims.time
          check "lower: .dims on a csv binding rejected (csv emits no dims section)"
              (e.Contains "struct t has no field 'dims'" && e.Contains "available fields: vars") e)
 
+    // A provider load in an IMPORTED module (deep review R1, a D11 leftover).
+    // The load's generated C++ types (`t__vars`, `t_cols`) keep their spelling
+    // in every module, so a second origin of one -- the importer loading under
+    // the same binding name, or declaring a type of that name -- passed check
+    // and died in g++ (BL9002 "redefinition of 'struct t__vars'"). Refused at
+    // the program check (BL2009) at the load; distinct binding names link.
+    (let checkModules (sources: (string * string) list) =
+        match Blade.Parser.parseMultiSource sources with
+        | Error e -> Error ([], e.Message)
+        | Ok program ->
+            match Blade.TypeCheck.typeCheck program with
+            | Ok _ -> Ok ()
+            | Error errors ->
+                let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
+                Error (ds |> List.map (_.Code), ds |> List.map (_.Message) |> String.concat "\n")
+     let libA = sprintf "module A\nimport csv as c\nlet t = c.load(\"%s\")\nlet obs = t.vars.data |> c.read\nlet t1 = obs(1, \"temp\")\n" (fixFile "lw_obs.csv")
+     let sameName = sprintf "module Main\nimport A\nimport csv as c\nlet t = c.load(\"%s\")\nlet obs = t.vars.data |> c.read\nlet v = A.t1 + obs(0, \"temp\")\n" (fixFile "lw_obs.csv")
+     let declared = "module Main\nimport A\nstruct t__vars { x: Float64 }\nlet v = A.t1\n"
+     let distinct = sprintf "module Main\nimport A\nimport csv as c\nlet u = c.load(\"%s\")\nlet obs = u.vars.data |> c.read\nlet v = A.t1 + obs(0, \"temp\")\n" (fixFile "lw_obs.csv")
+     match checkModules [ ("A", libA); ("Main", sameName) ] with
+     | Error (codes, msg) ->
+         check "modules: two modules loading under one binding name refused BL2009"
+             (List.contains "BL2009" codes && msg.Contains "duplicate C++ type 't__vars'") msg
+     | Ok () -> check "modules: two modules loading under one binding name refused BL2009" false "checked clean"
+     match checkModules [ ("A", libA); ("Main", declared) ] with
+     | Error (codes, msg) ->
+         check "modules: importer declaring a load's generated struct name refused BL2009"
+             (List.contains "BL2009" codes && msg.Contains "the struct 't__vars' declared in the main module") msg
+     | Ok () -> check "modules: importer declaring a load's generated struct name refused BL2009" false "checked clean"
+     match checkModules [ ("A", libA); ("Main", distinct) ] with
+     | Ok () -> check "modules: loads under distinct binding names check clean" true ""
+     | Error (_, msg) -> check "modules: loads under distinct binding names check clean" false msg)
+
     // ---------------------------------------------------------------
     // 7. Static fold (compile-time payload) + fold ceiling
     // ---------------------------------------------------------------
@@ -854,6 +887,51 @@ let total = reduce(vals, (+))
              [ "n = 4"; "total = 10.5"; "ok = [[true, false, true], [true, true, false]]" ]
          check "csv: the raw half is never printed" (not (r.InterpOut.Contains "__present_raw")) r.InterpOut
      | Error e -> check "csv: masked read lowers" false e)
+    // Deep review R8: the two masked forms above read the variable ONCE (one
+    // hidden raw read, one provider-read spec, so `blade plan`'s inputs and
+    // the run record's manifest list `data` once); the values are the pins
+    // just checked.
+    // Sharing is ON only under a whole-program verb (Cli wraps run / compile /
+    // emit / plan / check in ProviderDesugar.withRawReadSharing); every other
+    // entry point keeps one raw read per masked binding (fail closed).
+    (let bothForms = sprintf "import csv as c\nlet obs = c.load(\"%s\")\nlet vals = obs.vars.data |> c.read_present\nlet ok = c.present(obs.vars.data)\n" msFix
+     let csvReads (ir: IRProgram) = ir.Modules.[0].ProviderReads |> Map.filter (fun _ s -> s.Provider = "csv")
+     match Blade.ProviderDesugar.withRawReadSharing (fun () -> lower bothForms) with
+     | Ok ir ->
+         check "csv: under a whole-program verb both masked forms of one variable read the store once"
+             (Map.count (csvReads ir) = 1) $"%A{csvReads ir |> Map.keys |> List.ofSeq}"
+     | Error e -> check "csv: both masked forms lower (sharing)" false e
+     // The test helpers' default is the fail-closed side: no sharing.
+     match lower bothForms with
+     | Ok ir ->
+         check "csv: the harness default (no whole-program verb) keeps one raw read per masked binding"
+             (Map.count (csvReads ir) = 2) $"%A{csvReads ir |> Map.keys |> List.ofSeq}"
+     | Error e -> check "csv: both masked forms lower (default)" false e
+     // A SESSION (REPL / notebook / IDE eval: Interp.Repl.lowerSessionDiag,
+     // the accumulated source, cell after cell): a later cell's masked read
+     // keeps its own raw read, so it reads the store itself, as before R8.
+     let session = bothForms + "\nlet n = 1\n\nlet again = obs.vars.data |> c.present\n"
+     match Blade.Interp.Repl.lowerSessionDiag None session with
+     | Ok lowered ->
+         check "csv: a session keeps one raw read per masked binding (a later cell reads the store itself)"
+             (Map.count (csvReads lowered.Ir) = 3) $"%A{csvReads lowered.Ir |> Map.keys |> List.ofSeq}"
+     | Error (ds, _) -> check "csv: the session lowers" false $"%A{ds}")
+    // Both lanes run the SHARED form with the same values.
+    (match Blade.ProviderDesugar.withRawReadSharing (fun () ->
+               Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir "csv_present_shared" [ msFix ] (sprintf """
+import csv as c
+let obs = c.load("%s")
+let vals = obs.vars.data |> c.read_present
+let ok = c.present(obs.vars.data)
+let again = obs.vars.data |> c.present
+let n = extents(vals)
+let total = reduce(vals, (+))
+"""                                                                                         msFix)) with
+     | Ok r ->
+         Blade.Tests.ProviderBoundaryTests.expectValues check "csv: shared raw read, both lanes (read_present / present twice)" r
+             [ "n = 4"; "total = 10.5"; "ok = [[true, false, true], [true, true, false]]"; "again = [[true, false, true], [true, true, false]]" ]
+         check "csv: the shared raw half is never printed" (not (r.InterpOut.Contains "__present_raw")) r.InterpOut
+     | Error e -> check "csv: shared masked reads lower" false e)
     (let foldSource = sprintf """
 import csv as c
 let m = c.load("%s")

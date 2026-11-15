@@ -1,0 +1,10 @@
+// TEST: An arithmetic fold over EnumIdx values folds their keys
+// ============================================================================
+// R3: a `(+)` fold over values of R is the fold over their KEYS -- the fused
+// terminal `reduce(method_for(codes) <@> lambda(c) -> Int64(c), (+))`, nothing
+// stored. (It was refused, BL4003: as written it would have summed the
+// positions that represent the keys.)
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let s = reduce(codes, (+))
+// EXPECT: s = 600

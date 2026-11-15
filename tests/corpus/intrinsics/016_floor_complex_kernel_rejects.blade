@@ -9,7 +9,7 @@
 // consulting isComplexMathIntrinsic, so it would UPGRADE floor to complex and
 // emit std::floor(std::complex<double>) -- measured, and g++ really does refuse
 // it ("no matching function"). findBadComplexIntrinsic rejects it as Blade
-// instead. `exp <@> Z` and `abs <@> Z` stay legal (intrinsics/008, /009).
+// instead. `exp <@> Z` and `abs <@> Z` stay legal (intrinsics/050, /051).
 let RE: Array<Float64 like Idx<3>> = [3.0, 0.0, -1.0]
 let IM: Array<Float64 like Idx<3>> = [4.0, 2.0, 0.0]
 let Z = (zip(RE, IM) <@> lambda(a, b) -> complex(a, b)) |> compute

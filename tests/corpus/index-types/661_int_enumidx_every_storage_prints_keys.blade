@@ -1,0 +1,42 @@
+// TEST: An array of R values prints its keys in every storage
+// ============================================================================
+// R3 (lead review, F3): printing observes a value of an EnumIdx, so it shows
+// the KEY. A defect fixed: a COMPOUND array of R values printed its
+// POSITIONS in every lane (the base printed sel = [2, 0], sel2 = [2, 0]).
+// Dense arrays, a row view, a grouped and a ragged array, a set operation's
+// result, a tuple member, a struct's array field, a function's result and a
+// scalar already printed keys; they are pinned here beside it. (A sparse
+// array is not auto-printed in any lane; a deferred map is never printed.)
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+// EXPECT: sel = [200, 300]
+let m: Array<R like Idx<2>, Idx<2>> = [[100, 200], [300, 100]]
+let keep2 = mask(m, lambda(c) -> c > 150)
+let sel2 = compound(m, keep2)
+// EXPECT: sel2 = [200, 300]
+let row = m(1)
+// EXPECT: row = [300, 100]
+let other: Array<R like Idx<2>> = [300, 200]
+let ii = intersect(codes, other)
+// EXPECT: ii = [200, 300]
+let uu = union(codes, other)
+// EXPECT: uu = [100, 200, 300]
+let ks: Array<Int64 like Idx<3>> = [1, 2, 1]
+let gk = group_keys(ks)
+let g = group_by(codes, gk)
+// EXPECT: g = [[100, 300], [200]]
+let rg: Array<R like Idx<2>, RaggedIdx<_>> = [[100], [200, 300]]
+// EXPECT: rg = [[100], [200, 300]]
+let t = (codes, Float64(1.0))
+// EXPECT: t = ([100, 200, 300], 1.0)
+struct S { ks: Array<R like Idx<3>>, x: Float64 }
+let s = S { ks = codes, x = 1.0 }
+// EXPECT: s = S { ks = [100, 200, 300], x = 1.0 }
+function same(x: T) -> T = x
+let r = same(codes)
+// EXPECT: r = [100, 200, 300]
+let c0 = codes(2)
+// EXPECT: c0 = 300

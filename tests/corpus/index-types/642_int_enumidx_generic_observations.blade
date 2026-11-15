@@ -1,0 +1,20 @@
+// TEST: Generic negation, cast, kernel and selecting fold at R compute on keys
+// ============================================================================
+// R3: each generic body below observes its parameter's values, so the call
+// hands an array of R over as its keys (the first three were BL4003). The
+// selecting fold's `a > b` orders the keys and returns the largest one.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function ng(x: T) = -x
+let n = ng(codes)
+// EXPECT: n = [-100, -200, -300]
+function cf(x: T) = Float64(x)
+let c = cf(codes)
+// EXPECT: c = [100.0, 200.0, 300.0]
+function inc1(x: T^1) = method_for(x) <@> lambda(e) -> e + 1 |> compute
+let i1 = inc1(codes)
+// EXPECT: i1 = [101, 201, 301]
+function mx(x: T^1) = reduce(x, lambda(a, b) -> if a > b then a else b)
+let m = mx(codes)
+// EXPECT: m = 300

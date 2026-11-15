@@ -285,6 +285,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
              let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
              let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
              (match src with
+              // The cast domain (formalism 2.4): numbers and Bool only.
+              | Some ((ETString | ETUnit) as s) ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a {ppIRType (IRTScalar s)} value (a generic function instantiated at a non-numeric type): a numeric cast takes a number or a Bool"
               | Some s when isComplex s && not (isComplex target) ->
                   addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a complex value (a generic function instantiated at {ppIRType (IRTScalar s)}): project a real component first -- real(z), imag(z), abs(z), or arg(z)"
               | Some s when isFloat s && isInt target && not rounded ->
@@ -297,6 +300,126 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     // A specialization's C++ name (`toint_HM_10000_double`) is not a name the
     // program wrote: the message names the declaration it was cloned from.
     for f in modul.Functions do checkCasts $"in function '{f.SourceName}'" f.Body
+
+    // --- Check 1d: arithmetic on numbers only, after monomorphization ---
+    // The numbers-only rule (formalism 2.4): the type checker refuses an
+    // arithmetic operator over a non-number wherever it can see the operand
+    // (TypeCheckSupport.judgeNonNumericOperand, the post-zonk sweep, the
+    // GONumericOperand call judgment). This is the backstop for an instance
+    // those cannot name -- a generic body instantiated at a struct, a tuple
+    // or a function value, which has no element class for the call judgment:
+    // a specialized body whose `+ - * / % ^` or negation meets such a value
+    // is refused here instead of reaching g++ (BL9002) or answering a Bool.
+    let nonNumeric (t: IRType) : string option =
+        let rec cls (t: IRType) =
+            match t with
+            | IRTUnitAnnotated (inner, _) -> cls inner
+            | IRTIdxTagged (inner, _) -> cls inner
+            | IRTScalar ETBool -> Some "Bool"
+            | IRTScalar ETString -> Some "String"
+            | IRTScalar ETUnit -> Some "unit"
+            | IRTScalar _ -> None
+            | IRTTuple _ -> Some "tuple"
+            | IRTNamed n -> Some (TypeOrigins.sourceName n)
+            | ArrayElem arr -> cls arr.ElemType
+            | FuncElem _ -> Some "function"
+            | _ -> None
+        cls t
+    // The operand's full type: the reconstructing `typeOf` (a conditional over
+    // tuples, a struct field read through a generic receiver -- the cases
+    // `exprTypeIfKnown`'s scalar-only answers leave open), never throwing.
+    let tyOf (e: IRExpr) : IRType option =
+        try Some (typeOf e) with _ -> exprTypeIfKnown e
+    let rec checkArith (ctx: string) (e: IRExpr) =
+        (match e with
+         | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret as op), l, r, _) ->
+             let lt = tyOf l |> Option.bind nonNumeric
+             let rt = tyOf r |> Option.bind nonNumeric
+             let opS = match op with IRAdd -> "+" | IRSub -> "-" | IRMul -> "*" | IRDiv -> "/" | IRMod -> "%" | _ -> "^"
+             // `+` with a String side is concatenation unless the other side is
+             // KNOWN not to be a String (its type may be unknown here: a call
+             // result, a stdlib JSON helper's string).
+             let rec numericT (t: IRType) =
+                 match t with
+                 | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+                 | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+                 | ArrayElem arr -> numericT arr.ElemType
+                 | _ -> false
+             let knownNotString (e: IRExpr) =
+                 match tyOf e with
+                 | Some t -> numericT t || (match nonNumeric t with Some k -> k <> "String" | None -> false)
+                 | None -> false
+             (match lt, rt with
+              | Some "String", _ when op = IRAdd && not (knownNotString r) -> ()
+              | _, Some "String" when op = IRAdd && not (knownNotString l) -> ()
+              | Some k, _ | _, Some k ->
+                  addError ctx $"BL3001: arithmetic is defined on numbers only: `{opS}` meets a {k} value (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass a number"
+              | _ -> ())
+         // (No logical-operator mirror here: a section bound as a value, `let
+         // op = (&&)`, is lowered over Float64 parameters, so `IRAnd` over a
+         // number is not evidence of a user error at this level. The type
+         // checker's GOBoolOperand judges the generic instances.)
+         // A comparison of a number with a non-numeric value (a generic `x ==
+         // 1` instantiated at a tuple, a struct, a function).
+         | IRBinOp (_, (IREq | IRNeq | IRLt | IRLe | IRGt | IRGe), l, r, _) ->
+             let rec numericT (t: IRType) =
+                 match t with
+                 | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+                 | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+                 | IRTNat _ -> true
+                 | ArrayElem arr -> numericT arr.ElemType
+                 | _ -> false
+             let num (e: IRExpr) = tyOf e |> Option.exists numericT
+             let nn (e: IRExpr) = tyOf e |> Option.bind nonNumeric
+             (match nn l, nn r with
+              | Some k, None when num r ->
+                  addError ctx $"BL3001: a comparison converts nothing: it meets a {k} value and a number (a generic function instantiated at a non-numeric type) -- compare values of one type"
+              | None, Some k when num l ->
+                  addError ctx $"BL3001: a comparison converts nothing: it meets a {k} value and a number (a generic function instantiated at a non-numeric type) -- compare values of one type"
+              | _ -> ())
+         // A math intrinsic of a non-number (a generic `sin(x)` at a struct).
+         | IRUnaryOp (IRMath name, x) ->
+             (match tyOf x |> Option.bind nonNumeric with
+              | Some k ->
+                  addError ctx $"BL3007: {name} expects a numeric operand, and this one is a {k} value (a generic function instantiated at a non-numeric type)"
+              | None -> ())
+         | IRBinOp (_, IRMath2 name, l, r, _) ->
+             (match (tyOf l |> Option.bind nonNumeric), (tyOf r |> Option.bind nonNumeric) with
+              | Some k, _ | _, Some k ->
+                  addError ctx $"BL3007: {name} expects numeric operands, and one is a {k} value (a generic function instantiated at a non-numeric type)"
+              | _ -> ())
+         | IRProdSum args ->
+             (match args |> List.tryPick (fun a -> tyOf a |> Option.bind nonNumeric) with
+              | Some k ->
+                  addError ctx $"BL3001: arithmetic is defined on numbers only: prodsum() meets an array of {k} cells (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass numbers"
+              | None -> ())
+         // The logical mirror, for an operand that is a non-numeric value other
+         // than a Bool (a generic `!x` instantiated at a tuple, a struct, a
+         // function). A NUMBER is not judged here: a section bound as a value
+         // (`let op = (&&)`) is lowered over Float64 parameters, and generic
+         // numeric instances are the type checker's (GOBoolOperand).
+         | IRBinOp (_, (IRAnd | IROr as op), l, r, _) ->
+             let bad (x: IRExpr) = tyOf x |> Option.bind nonNumeric |> Option.filter (fun k -> k <> "Bool")
+             (match bad l, bad r with
+              | Some k, _ | _, Some k ->
+                  let opS = if op = IRAnd then "&&" else "||"
+                  addError ctx $"BL3001: a logical operator takes Bools only: `{opS}` meets a {k} value (a generic function instantiated at a non-Bool type), and Blade converts nothing implicitly"
+              | _ -> ())
+         | IRUnaryOp (IRNot, x) ->
+             (match tyOf x |> Option.bind nonNumeric |> Option.filter (fun k -> k <> "Bool") with
+              | Some k ->
+                  addError ctx $"BL3001: a logical operator takes Bools only: `!` meets a {k} value (a generic function instantiated at a non-Bool type), and Blade converts nothing implicitly"
+              | None -> ())
+         | IRUnaryOp (IRNeg, x) | IRArrayNegate x ->
+             (match tyOf x |> Option.bind nonNumeric with
+              | Some k ->
+                  addError ctx $"BL3001: arithmetic is defined on numbers only: `-` meets a {k} value (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass a number"
+              | None -> ())
+         | _ -> ())
+        let (ExprShape (children, _)) = e
+        children |> List.iter (checkArith ctx)
+    for b in modul.Bindings do checkArith $"in binding '{b.Name}'" b.Value
+    for f in modul.Functions do checkArith $"in function '{f.SourceName}'" f.Body
 
     // --- Check 2: No dangling VarId references ---
     // Scope threads through every binder via BinderShape (IRLet's body,

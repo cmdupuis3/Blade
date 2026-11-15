@@ -1,0 +1,8 @@
+// TEST: A prodsum over EnumIdx values multiplies their keys
+// ============================================================================
+// R3: each operand of R values contributes its KEYS, `Int64(codes)`. (It was
+// refused, BL4003: it would have multiplied the positions.)
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let p = prodsum(codes, codes)
+// EXPECT: p = 140000

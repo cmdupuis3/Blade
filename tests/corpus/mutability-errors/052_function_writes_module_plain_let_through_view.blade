@@ -1,0 +1,17 @@
+// TEST: a function writes a module-level plain let through a local row view
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a write reaches `G` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a callable
+// that only CAPTURES a binding writes it only when it was declared `let mut`.
+// The type checker refuses the direct store (048-051, 054); a store that
+// REACHES the binding is refused at lowering, by storage provenance.
+// A partial index is a VIEW, not a copy: the store through `t` writes `G`'s
+// storage (it used to compile, and G printed [[1.0, 9.0], [3.0, 4.0]]).
+let G = [[1.0, 2.0], [3.0, 4.0]]
+function w() -> Float32 = {
+    let t = G(0)
+    t(1) = 9.0
+    t(1)
+}
+let r = w()

@@ -1,0 +1,35 @@
+// TEST: views of a captured let mut, copies of a captured plain let, and a function's own array
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a plain
+// `let` is writable in the callable that defines it, nested blocks included.
+// A callable that only CAPTURES it writes it only when it was declared
+// `let mut`. `viewed` writes a `let mut` module
+// array through a row view (accepted: the declaration says it is shared);
+// `copied` takes an assignable COPY of a plain module array and writes the
+// copy, leaving `P` untouched; `own` writes its own local array through a
+// view. (mutability-errors/052-053 are the refused twins.)
+let mut M = [[1.0, 2.0], [3.0, 4.0]]
+function viewed() -> Float32 = {
+    let t = M(0)
+    t(1) = 9.0
+    t(1)
+}
+let rv = viewed()
+let P = [[1.0, 2.0], [3.0, 4.0]]
+function copied() -> Float32 = {
+    let mut c = P
+    c(0, 1) = 9.0
+    P(0, 1) + c(0, 1)
+}
+let rc = copied()
+function own() -> Float32 = {
+    let L = [[1.0, 2.0], [3.0, 4.0]]
+    let t = L(0)
+    t(1) = 9.0
+    L(0, 1)
+}
+let ro = own()
+// EXPECT: M = [[1.0, 9.0], [3.0, 4.0]]
+// EXPECT: rv = 9.0
+// EXPECT: P = [[1.0, 2.0], [3.0, 4.0]]
+// EXPECT: rc = 11.0
+// EXPECT: ro = 9.0

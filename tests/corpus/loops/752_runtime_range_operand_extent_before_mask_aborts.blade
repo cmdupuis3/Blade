@@ -9,4 +9,4 @@
 type I = Idx<5>
 let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
 let z: Int64 = 0
-let m = method_for(0..(100 / z), mask(d, lambda(a) -> 200 % (a - 3) > 0)) <@> lambda(i, b) -> i + b |> compute
+let m = method_for(0..(100 / z), mask(d, lambda(a) -> 200 % (a - 3) > 0)) <@> lambda(i, b) -> i + Int64(b) |> compute

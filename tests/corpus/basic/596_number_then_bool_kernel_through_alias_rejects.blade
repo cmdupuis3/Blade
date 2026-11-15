@@ -1,0 +1,16 @@
+// TEST: a number given to an alias whose parameter a later kernel makes a Bool (rejects)
+// ============================================================================
+// R10 remainder: an alias's open parameter met the numbers 1 and 2 without being
+// bound, then a kernel over Bool cells decided it a Bool -- the earlier call
+// would convert its numbers. Judged after every unification, at the numeric
+// argument (Codex review round 6).
+// ============================================================================
+function test() = {
+    let f = lambda(x, y) -> x < y
+    let g = f
+    let a = g(1, 2)
+    let xs = method_for([true, false]) <@> lambda(b) -> g(b, b) |> compute
+    (a, xs)
+}
+let r = test()
+// ERROR: BL3001 @ 10:15

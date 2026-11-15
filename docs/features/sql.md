@@ -467,6 +467,20 @@ of these used to typecheck, lower, emit, and then fail in g++ on undeclared
 inline and returned forms as a `BL7001` backend-gap note that invited a bug
 report for a hole nobody intends to fill. Pinned by `sql-group-by/035`–`/039`.
 
+The GROUPED VALUE inherits the same limit wherever it would leave its grouped
+type: a `group_by` result, a per-group map of one, and each of its rows carry
+their row lengths in the grouping's side state, which no function signature,
+plain array annotation or struct field carries. So each of these is `BL3017`
+too, at the value: a function returning one (whole, a row, inside a tuple or a
+branch), a lambda returning one unless it is a per-group ROW KERNEL (its
+parameter is a row: `method_for(g) <@> lambda(r) -> r - mean(r)`), a binding
+annotated with a plain array type (`let h: Float64^2 = g`) or an assignment to
+one, and a struct field (`Box { data = g }`). They used to pass `check` and
+die in g++ (BL9002) or leave a null extents table. What a function returns is
+what it computes FROM the groups: a per-group fold (`reduce(g, (+))`) keeps
+only the group axis and is an ordinary array. Passing a grouped value INTO a
+function is the back end's `BL7004`. Pinned by `sql-group-by/077`–`/082`.
+
 This is the same invariant the same-keys co-iteration check in §8 already
 relies on: that check decides "same grouping" by comparing binding **names**,
 which is only meaningful because a `group_keys` result always *is* its name.

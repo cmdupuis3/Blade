@@ -1,0 +1,9 @@
+// TEST: a let-bound operator section applied to Bools (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: `let op = (+)`, then
+// `op(true, false)`: judged on its arguments.
+// ============================================================================
+let op = (+)
+let r = op(true, false)
+// ERROR: BL3001

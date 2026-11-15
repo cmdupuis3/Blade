@@ -1,0 +1,14 @@
+// TEST: an aliased block lambda given a Bool (rejects)
+// ============================================================================
+// R10 remainder: a non-numeric argument binds the open parameter of EVERY callee
+// that is one value -- an alias of a lambda, a lambda applied where it is written,
+// a block-local operator section (judged on its arguments) -- not only a let-bound
+// lambda called by its own name; the body's arithmetic is then refused. Here: an alias of the lambda
+// (the base computed 2.0).
+// ============================================================================
+let a = {
+    let f = lambda(x) -> x + x
+    let g = f
+    g(true)
+}
+// ERROR: BL3001 @ 9:26
