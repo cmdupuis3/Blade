@@ -445,6 +445,11 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // count. Needs g++ (ASan arms the memcheck toolchain), Skipped without.
     // (Also `blade test owned-move`.)
     let ownedMove = Blade.Tests.OwnedMoveTests.runOwnedMoveTests ()
+    // The precompiled prelude (Build.fs, BLADE_PCH): built at a block's second
+    // sighting, used after, and a compile that fails with it re-run without
+    // it. Against a private store. Needs g++, Skipped without. (Also
+    // `blade test pch`.)
+    let pchBlock = Blade.Tests.PchTests.runPchTests ()
     // Wave 3 (E-G5): the threaded `let rec` step, threads-on vs threads-off
     // by raw bits at fixed team sizes. Needs g++, Skipped without. (Also
     // `blade test rec-step`.)
@@ -575,7 +580,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield syrkTile; yield foldLanes; yield rowTile; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield cellEpilogue; yield ownedMove; yield recStep; yield orbitScatter; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield syrkTile; yield foldLanes; yield rowTile; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield cellEpilogue; yield ownedMove; yield pchBlock; yield recStep; yield orbitScatter; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

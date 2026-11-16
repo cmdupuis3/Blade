@@ -11,6 +11,12 @@
 // One locked, large-stack F# pipeline pass per test (reusing Runner.runFullTest)
 // yields BOTH the validated IRProgram (the interpreter's input) and the
 // compiled-side compile+run result, so the expensive front-end runs once.
+//
+// The compiled side of up to BLADE_INTERP_JOBS tests is prepared AHEAD of the
+// test being judged (`runAhead`), so g++ and the compiled runs overlap; the
+// interpreter walks and every verdict stay on one thread, in corpus order, and
+// each walk holds the harness's pipeline lock (docs/plans/plan-test-tiers.md,
+// P2).
 module Blade.Tests.InterpDiff
 
 open System
@@ -241,6 +247,51 @@ let printBitsCategories : string list = [ "numeric-widths" ]
 
 let private bitsSuffix = System.Text.RegularExpressions.Regex(" #[0-9a-f]{8}(?:[0-9a-f]{8})?\\b")
 
+/// How many tests' compiled side may be in flight ahead of the test being
+/// judged. BLADE_INTERP_JOBS: unset (or malformed) = the processor count; `1` =
+/// one test at a time, the order this gate had before 2026-11-15 (the A/B arm).
+/// A harness knob: no emission reads it. Read once per gate run.
+let private interpJobs () : int =
+    let dflt = max 1 Environment.ProcessorCount
+    match Environment.GetEnvironmentVariable "BLADE_INTERP_JOBS" with
+    | null | "" -> dflt
+    | s ->
+        match Int32.TryParse s with
+        | true, v when v >= 1 -> v
+        | _ -> dflt
+
+/// Run `work` over `items` with a bounded number in flight, and hand each result
+/// back by index. The caller asks for the indices in ASCENDING order: asking for
+/// index i starts every item below i + jobs that has not started, then waits for
+/// item i. Nothing starts further ahead than that, so the results held at any
+/// moment (each carries an IRProgram) are bounded by the window, and a category's
+/// environment (BLADE_PRINT_BITS) is never read by a later category's work.
+/// Each item runs on its own thread (LongRunning): the work blocks on g++ and on
+/// the pipeline lock, which would starve the shared pool.
+let private runAhead (items: 'A[]) (work: 'A -> 'B) : int -> 'B =
+    let jobs = interpJobs ()
+    let tasks : Task<'B>[] = Array.zeroCreate items.Length
+    let mutable started = 0
+    fun (i: int) ->
+        while started < items.Length && started < i + jobs do
+            let item = items.[started]
+            tasks.[started] <-
+                Task.Factory.StartNew<'B>(Func<'B>(fun () -> work item), TaskCreationOptions.LongRunning)
+            started <- started + 1
+        let task = tasks.[i]
+        tasks.[i] <- Unchecked.defaultof<Task<'B>>
+        task.GetAwaiter().GetResult()
+
+/// The compiled side of one multi-file test, prepared ahead of its verdict.
+type private MultiFileSide =
+    /// A "(rejects)" probe: was the program refused?
+    | MfProbe of bool
+    /// A value test the front end refused (lowering or validation).
+    | MfRefused of string
+    /// The lowered program and the compiled binary's (exit, stdout), or why
+    /// there is none.
+    | MfReady of IRProgram * Result<int * string, string>
+
 let runInterpDiffTests (categories: string list) : BlockResult =
     printHeader "Interpreter Differential (M0)"
     let blockName = "Interp Diff"
@@ -285,14 +336,21 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         // process-lifetime heap pressure — exactly the confusion this
         // instrumentation exists to settle.
         let interpTimes = System.Collections.Generic.List<string * float * float * int>()
+        //
+        // The walk holds the pipeline lock: other tests' compiled sides are in
+        // flight (runAhead), and their front-end passes must not overlap it.
+        // Their g++ and compiled runs DO overlap it, so a walk's time is no
+        // longer an idle-box figure; BLADE_INTERP_JOBS=1 gives that. Timed
+        // inside the lock, so the wait for it is not counted.
         let runInterpTimedRec (program: IRProgram) (name: string) : Result<Run.InterpResult, string> =
-            let heapMbBefore = float (GC.GetTotalMemory false) / 1048576.0
-            let gen2Before = GC.CollectionCount 2
-            let sw = System.Diagnostics.Stopwatch.StartNew()
-            let r = runInterpTimed program name
-            sw.Stop()
-            interpTimes.Add(name, sw.Elapsed.TotalSeconds, heapMbBefore, GC.CollectionCount 2 - gen2Before)
-            r
+            underPipelineLock (fun () ->
+                let heapMbBefore = float (GC.GetTotalMemory false) / 1048576.0
+                let gen2Before = GC.CollectionCount 2
+                let sw = System.Diagnostics.Stopwatch.StartNew()
+                let r = runInterpTimed program name
+                sw.Stop()
+                interpTimes.Add(name, sw.Elapsed.TotalSeconds, heapMbBefore, GC.CollectionCount 2 - gen2Before)
+                r)
 
         let expectedUnsupported = Map.ofList interpExpectedUnsupported
         let fail name detail =
@@ -358,43 +416,65 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         // the only one that can see a cross-module specialization drift --
         // then compiled + run AND interpreted, judged like a single-file value
         // test. EXPECT pins are the UNION over the member files.
-        let runMultiFile (name: string) (files: (string * string) list) =
-            let (lowered, _) = Blade.Runtime.runOnLargeStack (fun () -> Blade.Lowering.lowerMultiSourceCaptured files)
-            if name.EndsWith "(rejects)" then
-                // The interpreter consumes the SAME lowered program, so the
-                // refusal is shared by construction; WHICH codes it carries is
-                // the Multi-File Modules block's verdict (it reads the checker's
-                // diagnostics). Here the question is only "refused?".
-                match lowered with
-                | Error _ -> pass name "refused by the shared front end"
-                | Ok _ -> fail name "reject-probe lowered: the program was expected to be refused"
-            else
-            match lowered |> Result.bind (fun ir -> validateIR ir |> Result.mapError (String.concat "; ")) with
-            | Error e -> fail name ($"front end rejected (unexpected): {(firstLine e)}")
-            | Ok ir ->
-                let stem = "mf_" + sanitizeFileName name
+        //
+        // Split in two so the compiled side can be prepared ahead (runAhead):
+        // prepareMultiFile lowers and emits under the pipeline lock (the two
+        // passes on their own large-stack threads, as before), then compiles
+        // and runs outside it and touches no counter; judgeMultiFile runs the
+        // interpreter and gives the verdict, in corpus order.
+        let prepareMultiFile ((name, files): string * (string * string) list) : MultiFileSide =
+            let stem = "mf_" + sanitizeFileName name
+            let front =
+                underPipelineLock (fun () ->
+                    let (lowered, _) = Blade.Runtime.runOnLargeStack (fun () -> Blade.Lowering.lowerMultiSourceCaptured files)
+                    if name.EndsWith "(rejects)" then
+                        Choice1Of3 (match lowered with Error _ -> true | Ok _ -> false)
+                    else
+                        match lowered |> Result.bind (fun ir -> validateIR ir |> Result.mapError (String.concat "; ")) with
+                        | Error e -> Choice2Of3 e
+                        | Ok ir ->
+                            let cpp =
+                                try
+                                    let (cpp, _) =
+                                        Blade.Runtime.runOnLargeStack (fun () ->
+                                            let r = CodeGen.genSelfContainedProgramFromIR ir stem
+                                            CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                                            r)
+                                    Ok cpp
+                                with ex -> Error ($"codegen raised: {ex.Message}")
+                            Choice3Of3 (ir, cpp))
+            match front with
+            | Choice1Of3 refused -> MfProbe refused
+            | Choice2Of3 e -> MfRefused e
+            | Choice3Of3 (ir, Error e) -> MfReady (ir, Error e)
+            | Choice3Of3 (ir, Ok cpp) ->
                 let compiled =
                     try
-                        let (cpp, _) =
-                            Blade.Runtime.runOnLargeStack (fun () ->
-                                let r = CodeGen.genSelfContainedProgramFromIR ir stem
-                                CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
-                                r)
                         let cppFile = Path.Combine(tmpRoot, stem + ".cpp")
                         File.WriteAllText(cppFile, cpp)
                         match compileCpp cppFile tmpRoot with
                         | Error e -> Error e
                         | Ok exe -> runExecutable exe
                     with ex -> Error ($"codegen raised: {ex.Message}")
-                match compiled with
-                | Error e when isSkipError e -> skip name e
-                | Error e -> fail name ($"compiled side failed: {(firstLine e)}")
-                | Ok (compiledExit, compiledOut) ->
-                    match runInterpTimedRec ir name with
-                    | Error e -> fail name e
-                    | Ok interp ->
-                        let expected = files |> List.collect (snd >> parseExpectedValues)
-                        judgeRun name expected compiledExit compiledOut interp
+                MfReady (ir, compiled)
+
+        let judgeMultiFile (name: string) (files: (string * string) list) (side: MultiFileSide) =
+            match side with
+            // The interpreter consumes the SAME lowered program, so the
+            // refusal is shared by construction; WHICH codes it carries is
+            // the Multi-File Modules block's verdict (it reads the checker's
+            // diagnostics). Here the question is only "refused?".
+            | MfProbe true -> pass name "refused by the shared front end"
+            | MfProbe false -> fail name "reject-probe lowered: the program was expected to be refused"
+            | MfRefused e -> fail name ($"front end rejected (unexpected): {(firstLine e)}")
+            | MfReady (_, Error e) when isSkipError e -> skip name e
+            | MfReady (_, Error e) -> fail name ($"compiled side failed: {(firstLine e)}")
+            | MfReady (ir, Ok (compiledExit, compiledOut)) ->
+                match runInterpTimedRec ir name with
+                | Error e -> fail name e
+                | Ok interp ->
+                    let expected = files |> List.collect (snd >> parseExpectedValues)
+                    judgeRun name expected compiledExit compiledOut interp
 
         let multiCats = Set.ofList (multiFileCategories ())
         let bitsPrior = System.Environment.GetEnvironmentVariable "BLADE_PRINT_BITS"
@@ -402,15 +482,27 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             printSubHeader ($"category: {cat}")
             System.Environment.SetEnvironmentVariable("BLADE_PRINT_BITS", (if List.contains cat printBitsCategories then "1" else bitsPrior))
             if multiCats.Contains cat then
-                for (name, files) in multiFileCategory cat do
-                    runMultiFile name files
+                let tests = multiFileCategory cat |> Array.ofList
+                let compiledSide = runAhead tests prepareMultiFile
+                for idx in 0 .. tests.Length - 1 do
+                    let (name, files) = tests.[idx]
+                    judgeMultiFile name files (compiledSide idx)
             else
             // Every test in a reject-only category is a compile-reject probe,
             // even without the "(rejects)" name marker (see rejectOnlyCategories).
             let catRejectOnly = rejectOnlyCategories.Contains cat
-            for (name, source) in categoryTests cat do
-                // ONE locked, large-stack pipeline pass -> IRProgram + compiled run.
-                let result = runFullTest name source tmpRoot true
+            let tests = categoryTests cat |> Array.ofList
+            // ONE locked, large-stack pipeline pass -> IRProgram + compiled run,
+            // prepared up to interpJobs () tests ahead of the one being judged.
+            let compiledSide =
+                runAhead tests (fun (name, source) ->
+                    let watch = System.Diagnostics.Stopwatch.StartNew ()
+                    let r = runFullTest name source tmpRoot true
+                    Timings.recordTest name watch.Elapsed.TotalSeconds
+                    r)
+            for idx in 0 .. tests.Length - 1 do
+                let (name, source) = tests.[idx]
+                let result = compiledSide idx
 
                 if isRejectProbe result || catRejectOnly then
                     // Compile-reject probe. The verdict is the MAIN SUITE's, via

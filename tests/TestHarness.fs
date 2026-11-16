@@ -28,9 +28,137 @@ let ruleWidth = 70
 /// it). Defaults to empty; Main sets it once before any block runs.
 let mutable version : string = ""
 
+// ============================================================================
+// Timings (docs/plans/plan-test-tiers.md, P0)
+// ============================================================================
+//
+// The harness printed no wall time, so where a run spent its time had to be
+// reverse-engineered from an outer script's timestamps. This records it:
+//
+//   - SECTIONS. Every `printHeader` call marks the start of a section; a
+//     section ends where the next one starts. Blocks run in sequence, so the
+//     sections partition the run. No block had to change to be timed.
+//   - TESTS. A block may record a test's own wall time (the corpus runner
+//     does). Those run in parallel, so they sum to more than the section.
+//   - PHASES. Seconds summed over every front-end pass a block reports, plus
+//     Build.CompileStats' g++ / executable-cache / program-run counters.
+//
+// `report` prints the table after the run and, given a path, writes all of it
+// as JSON (`blade test ... --timings <path>`). Reporting only: nothing here
+// feeds a verdict.
+module Timings =
+    let private clock = System.Diagnostics.Stopwatch.StartNew ()
+    let private gate = obj ()
+    let private sections = System.Collections.Generic.List<string * System.TimeSpan> ()
+    let private tests = System.Collections.Generic.List<string * string * float> ()
+    let mutable private frontEndPasses = 0
+    let mutable private frontEndTicks = 0L
+
+    let markSection (title: string) : unit =
+        lock gate (fun () -> sections.Add((title, clock.Elapsed)))
+
+    /// One test's wall time, filed under the section open when it finished.
+    let recordTest (name: string) (seconds: float) : unit =
+        lock gate (fun () ->
+            let section = if sections.Count = 0 then "" else fst sections.[sections.Count - 1]
+            tests.Add((section, name, seconds)))
+
+    /// One front-end pass (parse through C++ generation) took `elapsed`.
+    let recordFrontEnd (elapsed: System.TimeSpan) : unit =
+        lock gate (fun () ->
+            frontEndPasses <- frontEndPasses + 1
+            frontEndTicks <- frontEndTicks + elapsed.Ticks)
+
+    let private inv = System.Globalization.CultureInfo.InvariantCulture
+
+    let private jsonString (s: string) : string =
+        let sb = System.Text.StringBuilder()
+        sb.Append('"') |> ignore
+        for c in s do
+            match c with
+            | '"' -> sb.Append("\\\"") |> ignore
+            | '\\' -> sb.Append("\\\\") |> ignore
+            | c when c < ' ' -> sb.Append("\\u").Append((int c).ToString("x4")) |> ignore
+            | c -> sb.Append(c) |> ignore
+        sb.Append('"').ToString()
+
+    let private num (x: float) : string = x.ToString("0.000", inv)
+
+    /// Print the timing table; write the JSON record when `jsonPath` is given.
+    /// Sections shorter than a second are folded into one line of the table
+    /// (the JSON lists every one).
+    let report (jsonPath: string option) : unit =
+        let total = clock.Elapsed
+        let (marks, testRows, fePasses, feSeconds) =
+            lock gate (fun () ->
+                (sections.ToArray(), tests.ToArray(), frontEndPasses,
+                 System.TimeSpan.FromTicks(frontEndTicks).TotalSeconds))
+        let spans =
+            marks
+            |> Array.mapi (fun i (title, start) ->
+                let stop = if i + 1 < marks.Length then snd marks.[i + 1] else total
+                (title, start.TotalSeconds, (stop - start).TotalSeconds))
+        let (hits, gppRuns, gppSeconds, runs, runSeconds) = Blade.Build.CompileStats.snapshot ()
+        let rule = String.replicate ruleWidth "="
+        printfn "\n%s" rule
+        printfn "  Timings (wall seconds)"
+        printfn "%s\n" rule
+        let shown = spans |> Array.filter (fun (_, _, d) -> d >= 1.0)
+        let width = if shown.Length = 0 then 0 else shown |> Array.map (fun (t, _, _) -> t.Length) |> Array.max
+        for (title, _, d) in shown do
+            printfn "  %s  %9s" (title.PadRight width) (num d)
+        let small = spans |> Array.filter (fun (_, _, d) -> d < 1.0)
+        if small.Length > 0 then
+            printfn "  (%d section(s) under one second: %s in all)" small.Length (num (small |> Array.sumBy (fun (_, _, d) -> d)))
+        printfn "%s" (String.replicate ruleWidth "-")
+        printfn "  Run: %s s" (num total.TotalSeconds)
+        if gppRuns + hits + runs + fePasses > 0 then
+            printfn "  g++: %d compile(s), %s s summed; executable cache: %d hit(s)" gppRuns (num gppSeconds) hits
+            printfn "  Programs run: %d, %s s summed; front-end passes: %d, %s s summed" runs (num runSeconds) fePasses (num feSeconds)
+        let (pchUses, pchBuilds, pchBuildSeconds, pchRetries) = Blade.Build.CompileStats.pchSnapshot ()
+        if pchUses + pchBuilds + pchRetries > 0 then
+            printfn "  Precompiled prelude: used by %d compile(s); %d built, %s s; %d compile(s) re-run without it"
+                pchUses pchBuilds (num pchBuildSeconds) pchRetries
+        match jsonPath with
+        | None -> ()
+        | Some path ->
+            try
+                let sb = System.Text.StringBuilder()
+                sb.Append("{\n  \"version\": 1,\n") |> ignore
+                sb.Append("  \"total_seconds\": ").Append(num total.TotalSeconds).Append(",\n") |> ignore
+                sb.Append("  \"compile\": { \"gpp_runs\": ").Append(gppRuns)
+                  .Append(", \"gpp_seconds\": ").Append(num gppSeconds)
+                  .Append(", \"cache_hits\": ").Append(hits)
+                  .Append(", \"program_runs\": ").Append(runs)
+                  .Append(", \"program_seconds\": ").Append(num runSeconds)
+                  .Append(", \"front_end_passes\": ").Append(fePasses)
+                  .Append(", \"front_end_seconds\": ").Append(num feSeconds)
+                  .Append(", \"pch_uses\": ").Append(pchUses)
+                  .Append(", \"pch_builds\": ").Append(pchBuilds)
+                  .Append(", \"pch_build_seconds\": ").Append(num pchBuildSeconds)
+                  .Append(", \"pch_retries\": ").Append(pchRetries).Append(" },\n") |> ignore
+                sb.Append("  \"sections\": [") |> ignore
+                spans |> Array.iteri (fun i (title, start, d) ->
+                    sb.Append(if i = 0 then "\n" else ",\n")
+                      .Append("    { \"title\": ").Append(jsonString title)
+                      .Append(", \"start\": ").Append(num start)
+                      .Append(", \"seconds\": ").Append(num d).Append(" }") |> ignore)
+                sb.Append("\n  ],\n  \"tests\": [") |> ignore
+                testRows |> Array.iteri (fun i (section, name, d) ->
+                    sb.Append(if i = 0 then "\n" else ",\n")
+                      .Append("    { \"section\": ").Append(jsonString section)
+                      .Append(", \"name\": ").Append(jsonString name)
+                      .Append(", \"seconds\": ").Append(num d).Append(" }") |> ignore)
+                sb.Append("\n  ]\n}\n") |> ignore
+                System.IO.File.WriteAllText(path, sb.ToString())
+                printfn "  Timings written to %s" path
+            with ex ->
+                eprintfn "test: could not write the timings file %s: %s" path ex.Message
+
 /// Major section header: blank line, full rule, indented title (+ version if
 /// set), full rule, blank line. This is the canonical block header.
 let printHeader (title: string) =
+    Timings.markSection title
     let rule = String.replicate ruleWidth "="
     printfn "\n%s" rule
     if version <> "" then printfn "  %s (v%s)" title version

@@ -702,6 +702,65 @@ let private runtimeHeaderDigest : Lazy<string> =
             |> String.concat ""
         with _ -> "")
 
+/// `#include "x"` / `#include <x>` lines of a text, by FILE NAME (a relative
+/// path is reduced to its leaf: every runtime header is deployed flat beside
+/// the .cpp).
+let private includeLineRx =
+    System.Text.RegularExpressions.Regex(
+        "^[ \\t]*#[ \\t]*include[ \\t]*[\"<]([^\">\\r\\n]+)[\">]",
+        System.Text.RegularExpressions.RegexOptions.Multiline)
+
+let private includedFileNames (text: string) : string list =
+    [ for m in includeLineRx.Matches text -> Path.GetFileName(m.Groups.[1].Value.Trim()) ]
+
+/// Per runtime header: the hash of its (name, text) and the runtime headers
+/// its own text names. Computed once per process, like `runtimeHeaderDigest`.
+let private runtimeHeaderFacts : Lazy<Map<string, string * string list>> =
+    lazy (
+        let registry = Set.ofList CodeGen.runtimeHeaderNames
+        use sha = System.Security.Cryptography.SHA256.Create()
+        CodeGen.runtimeHeaderNames
+        |> List.map (fun name ->
+            let text = CodeGen.runtimeHeaderText name
+            let hash =
+                sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(name + " " + text))
+                |> Array.map _.ToString("x2")
+                |> String.concat ""
+            (name, (hash, includedFileNames text |> List.filter registry.Contains)))
+        |> Map.ofList)
+
+/// The runtime headers' contribution to ONE program's executable-cache key:
+/// the headers its text includes, closed under the headers those include
+/// (docs/plans/plan-test-tiers.md, P1). Hashing all of them, as the key did
+/// before, made an edit to a header only a handful of programs include
+/// (blade_lapack.hpp, blade_tilecache.hpp) invalidate every cached executable.
+///
+/// Sound because a generated program reaches a runtime header only through an
+/// include LINE: its own (codegen writes one per header it uses) or one in a
+/// header it already reached. Every include line counts, whatever conditional
+/// surrounds it, so the set can only be too large, never too small. A name
+/// outside the registry (a system header, a file some other step deploys) is
+/// ignored here exactly as the whole-set digest ignored it.
+///
+/// Empty on any failure, which returns the key to "no header contribution" --
+/// the same degradation `runtimeHeaderDigest` has.
+let private runtimeHeaderDigestFor (cppText: string) : string =
+    try
+        let facts = runtimeHeaderFacts.Value
+        let rec close (seen: Set<string>) (todo: string list) : Set<string> =
+            match todo with
+            | [] -> seen
+            | h :: rest when seen.Contains h -> close seen rest
+            | h :: rest ->
+                match facts.TryFind h with
+                | Some (_, deps) -> close (seen.Add h) (deps @ rest)
+                | None -> close seen rest
+        close Set.empty (includedFileNames cppText)
+        |> Set.toList
+        |> List.map (fun h -> h + ":" + fst facts.[h])
+        |> String.concat " "
+    with _ -> ""
+
 /// Size + mtime of every DLL named outright on the link line (netcdf.dll,
 /// libopenblas.dll). Their PATH is already in `args`, but their CONTENT is
 /// not: a reinstalled OpenBLAS at the same path must invalidate.
@@ -724,7 +783,7 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
         args.Replace(exeFullPath, "<EXE>").Replace(cppFullPath, "<CPP>")
     let material =
         String.concat " "
-            [ "blade-exe-cache-v1"
+            [ "blade-exe-cache-v2"
               gppIdentity.Value
               normalizedArgs
               // Only when the flag is `native`, and deliberately: an explicit
@@ -733,7 +792,7 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
               // So the common non-native configurations keep the keys they had
               // rather than being invalidated for a hazard they do not have.
               (if (marchFlag ()).Contains "native" then nativeTargetIdentity.Value else "")
-              runtimeHeaderDigest.Value
+              runtimeHeaderDigestFor cppText
               linkedDllStamp args
               cppText ]
     use sha = System.Security.Cryptography.SHA256.Create()
@@ -745,7 +804,14 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
 // count and a byte ceiling are needed; a trip on either prunes oldest-mtime
 // first down to 3/4 of the cap, so eviction runs rarely rather than on every
 // store past the line.
-let private exeCacheMaxEntries = 8192
+//
+// The entry cap was 8192 until the test-tier plan (docs/plans/plan-test-tiers.md,
+// P1): one full gate -- the default suite, the interpreter and optimizer
+// differentials, the LLVM lane's C++ oracle -- compiles more distinct programs
+// than that, so a gate evicted its own entries and the next run started cold.
+// At the observed ~126 KB per entry, 32768 entries are about 4 GB, under the
+// byte ceiling, which stays the limit that matters for large executables.
+let private exeCacheMaxEntries = 32768
 let private exeCacheMaxBytes = 6L * 1024L * 1024L * 1024L
 
 /// Prune the cache when either ceiling is exceeded. Called only on STORE (a
@@ -801,13 +867,18 @@ let tileCacheDir () : string option =
 /// grid makes them large (8 tiles of a 4000 x 4000 float64 field are 128 MB,
 /// measured) and a count cap alone would let the store reach hundreds of
 /// gigabytes before it evicted anything.
+///
+/// The tile COUNT cap keeps the value the two stores shared (8192) when the
+/// exe cache's was raised: nothing has measured a tile store against it.
+let private tileCacheMaxEntries = 8192
+
 let private evictTileCache (dir: string) : unit =
     try
         if Directory.Exists dir then
             let entries = DirectoryInfo(dir).GetFiles("*.tile", SearchOption.AllDirectories)
             let total = entries |> Array.sumBy _.Length
-            if entries.Length > exeCacheMaxEntries || total > exeCacheMaxBytes then
-                let targetCount = (exeCacheMaxEntries * 3) / 4
+            if entries.Length > tileCacheMaxEntries || total > exeCacheMaxBytes then
+                let targetCount = (tileCacheMaxEntries * 3) / 4
                 let targetBytes = (exeCacheMaxBytes / 4L) * 3L
                 let mutable count = entries.Length
                 let mutable bytes = total
@@ -837,6 +908,63 @@ let private toolchainIdentity (flags: string) : string =
     |> Array.map _.ToString("x2")
     |> String.concat ""
     |> fun h -> h.Substring(0, 16)
+
+/// Process-wide counters for the test harness's timing report
+/// (docs/plans/plan-test-tiers.md, P0): how many g++ processes ran and for how
+/// long, how many compiles the executable cache served, how many programs ran.
+/// Counting only -- nothing reads these to decide anything. One lock: every
+/// update sits beside a process launch or a file copy.
+module CompileStats =
+    let private gate = obj ()
+    let mutable private cacheHits = 0
+    let mutable private gppRuns = 0
+    let mutable private gppTicks = 0L
+    let mutable private programRuns = 0
+    let mutable private programTicks = 0L
+
+    let recordCacheHit () : unit =
+        lock gate (fun () -> cacheHits <- cacheHits + 1)
+
+    let recordGpp (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            gppRuns <- gppRuns + 1
+            gppTicks <- gppTicks + elapsed.Ticks)
+
+    let recordRun (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            programRuns <- programRuns + 1
+            programTicks <- programTicks + elapsed.Ticks)
+
+    /// (cache hits, g++ runs, g++ seconds summed over processes,
+    ///  program runs, program seconds summed over processes).
+    let snapshot () : int * int * float * int * float =
+        lock gate (fun () ->
+            (cacheHits, gppRuns, TimeSpan.FromTicks(gppTicks).TotalSeconds,
+             programRuns, TimeSpan.FromTicks(programTicks).TotalSeconds))
+
+    // The precompiled prelude (below): compiles that used one, preludes built
+    // and the time that took, compiles re-run without one after failing with it.
+    let mutable private pchUses = 0
+    let mutable private pchBuilds = 0
+    let mutable private pchBuildTicks = 0L
+    let mutable private pchRetries = 0
+
+    let recordPchUse () : unit =
+        lock gate (fun () -> pchUses <- pchUses + 1)
+
+    let recordPchBuild (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            pchBuilds <- pchBuilds + 1
+            pchBuildTicks <- pchBuildTicks + elapsed.Ticks)
+
+    let recordPchRetry () : unit =
+        lock gate (fun () -> pchRetries <- pchRetries + 1)
+
+    /// (compiles that used a prelude, preludes built, seconds building them,
+    ///  compiles re-run without one).
+    let pchSnapshot () : int * int * float * int =
+        lock gate (fun () ->
+            (pchUses, pchBuilds, TimeSpan.FromTicks(pchBuildTicks).TotalSeconds, pchRetries))
 
 /// Cache lookup. On a hit the entry is copied to `exeFullPath` (the exact file
 /// a real compile would have written) and its mtime is bumped so eviction sees
@@ -877,6 +1005,239 @@ let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : un
             if exeCacheVerbose () then eprintfn "[cache] store %s" (key.Substring(0, 8))
             evictExeCache dir
     with _ -> ()
+
+// ---------------------------------------------------------------------------
+// The precompiled prelude (docs/plans/plan-test-tiers.md, P6).
+//
+// A generated program opens with a block of #include lines (about seventeen
+// standard headers and the core runtime headers), and parsing them is about two
+// thirds of a cold compile. Nearly every program opens with one of two such
+// blocks, so each block is compiled ONCE per flag set into a GCC precompiled
+// header and handed to later compiles with `-include`.
+//
+// What keeps the compiled program the same:
+//   - The prelude is the program's OWN leading block: the include lines that
+//     precede everything else in its text, in its order. Putting them first a
+//     second time changes nothing -- every header is guarded, and GCC matches a
+//     guarded header already in the precompiled file by size and checksum, not
+//     by path -- so the translation unit is the one g++ would have read. A
+//     program with anything ahead of its first include (a non-default pool
+//     policy's #define lines) has no leading block and compiles as before.
+//   - The precompiled file is built with the compile's own flags (every -D and
+//     -f among them) from the same header text the compile deploys beside the
+//     .cpp, and is keyed on both, on the compiler and on the CPU that
+//     `-march=native` resolves to.
+//   - ANY failure of a compile that used the prelude is re-run without it, and
+//     that second result is the one reported. So a stale or unusable
+//     precompiled file costs time, never a verdict, and every diagnostic text
+//     is the plain compile's.
+//   - The emitted text and the executable-cache key do not change: the output
+//     is the same program (the generated assembly was compared byte for byte).
+//
+// BLADE_PCH: unset / 1 / on = %LOCALAPPDATA%\Blade\pch-cache; 0 / off =
+// disabled; an absolute path = that directory. Read per call.
+// Its `--verbose` lines carry the executable cache's `[cache]` prefix, which
+// the harnesses that compare a verbose run's stderr already strip.
+// ---------------------------------------------------------------------------
+
+let private pchCacheDir () : string option =
+    let defaultDir () =
+        let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+        if String.IsNullOrEmpty root then None
+        else Some (Path.Combine(root, "Blade", "pch-cache"))
+    match Toolchain.envSwitch "BLADE_PCH" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
+
+/// One line of a leading block: an include and nothing else but a `//` comment.
+let private leadingIncludeRx =
+    System.Text.RegularExpressions.Regex(
+        "^[ \\t]*#[ \\t]*include[ \\t]*([\"<][^\">]+[\">])[ \\t]*(//.*)?$")
+
+/// The include lines that open `cppText`, as their `<x>` / `"x"` operands in
+/// order. Blank lines and whole-line `//` comments are passed over; the block
+/// ends at the first line that is anything else. A line ending in a backslash
+/// ends it too (a spliced comment could swallow the next line).
+let private leadingIncludeBlock (cppText: string) : string list =
+    use reader = new StringReader(cppText)
+    let block = ResizeArray<string>()
+    let mutable go = true
+    while go do
+        match reader.ReadLine() with
+        | null -> go <- false
+        | line ->
+            let s = line.Trim()
+            if s.EndsWith "\\" then go <- false
+            else
+                let m = leadingIncludeRx.Match line
+                if m.Success then block.Add m.Groups.[1].Value
+                elif not (s = "" || s.StartsWith "//") then go <- false
+    List.ofSeq block
+
+/// A block shorter than this is not worth a precompiled file.
+let private pchMinIncludes = 8
+
+/// Precompiled files kept (about 76 MB each at the usual block): oldest-used
+/// first down to 3/4 when the count is exceeded, like the executable cache.
+let private pchMaxEntries = 12
+
+/// A prelude that failed this many compiles which then succeeded without it
+/// is dropped for the rest of the process and its file deleted, so a stale
+/// file is rebuilt instead of doubling every compile.
+let private pchMaxStrikes = 3
+
+type private PchState =
+    | PchReady of string
+    | PchUnusable
+
+let private pchMemo = System.Collections.Concurrent.ConcurrentDictionary<string, PchState>()
+let private pchStrikes = System.Collections.Concurrent.ConcurrentDictionary<string, int>()
+let private pchGate = obj ()
+
+let private pchKey (compileHalf: string) (preludeText: string) : string =
+    let material =
+        String.concat " "
+            [ "blade-pch-v1"
+              gppIdentity.Value
+              compileHalf
+              (if (marchFlag ()).Contains "native" then nativeTargetIdentity.Value else "")
+              runtimeHeaderDigestFor preludeText
+              preludeText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map _.ToString("x2")
+    |> String.concat ""
+    |> fun h -> h.Substring(0, 32)
+
+/// Prune the store: the oldest-used precompiled files past the cap, and the
+/// first-sighting markers (directories that never got a file) older than a
+/// week. Race-tolerant like the executable cache's eviction.
+let private evictPchCache (dir: string) : unit =
+    try
+        let subdirs = DirectoryInfo(dir).GetDirectories()
+        let built =
+            subdirs
+            |> Array.choose (fun d ->
+                let gch = FileInfo(Path.Combine(d.FullName, "blade_prelude.hpp.gch"))
+                if gch.Exists then Some (d, gch.LastWriteTimeUtc) else None)
+        if built.Length > pchMaxEntries then
+            let keep = (pchMaxEntries * 3) / 4
+            for (d, _) in built |> Array.sortBy snd |> Array.truncate (built.Length - keep) do
+                (try d.Delete true with _ -> ())
+        let stale = DateTime.UtcNow.AddDays -7.0
+        for d in subdirs do
+            if not (File.Exists (Path.Combine(d.FullName, "blade_prelude.hpp.gch")))
+               && d.LastWriteTimeUtc < stale then
+                (try d.Delete true with _ -> ())
+    with _ -> ()
+
+/// Build `<keyDir>/blade_prelude.hpp.gch`. The runtime headers are deployed
+/// into the key directory (the same text every compile deploys beside its
+/// .cpp), the precompiled file is written under a temporary name and moved
+/// into place, so a concurrent reader never sees half of one.
+let private buildPrecompiledPrelude (dir: string) (keyDir: string) (compileHalf: string) (preludeText: string) : bool =
+    let prelude = Path.Combine(keyDir, "blade_prelude.hpp")
+    let gch = prelude + ".gch"
+    let tmp = Path.Combine(keyDir, $"""blade_prelude.{(Guid.NewGuid().ToString("N"))}.tmp""")
+    try
+        CodeGen.deployRuntimeHeaders keyDir
+        if not (File.Exists prelude && File.ReadAllText prelude = preludeText) then
+            File.WriteAllText(prelude, preludeText)
+        let psi = ProcessStartInfo("g++", $"{compileHalf} -x c++-header \"{prelude}\" -o \"{tmp}\"")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        let watch = Stopwatch.StartNew ()
+        use proc = Process.Start(psi)
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
+        let finished = proc.WaitForExit(120000)
+        if not finished then (try proc.Kill() with _ -> ())
+        stdoutTask.Result |> ignore
+        let stderr = stderrTask.Result
+        CompileStats.recordPchBuild watch.Elapsed
+        if finished && proc.ExitCode = 0 && File.Exists tmp then
+            (try File.Move(tmp, gch) with _ -> ())
+            (try File.Delete tmp with _ -> ())
+            if exeCacheVerbose () then eprintfn "[cache] pch built %s" (Path.GetFileName keyDir)
+            evictPchCache dir
+            File.Exists gch
+        else
+            (try File.Delete tmp with _ -> ())
+            if exeCacheVerbose () then
+                eprintfn "[cache] pch build failed %s: %s" (Path.GetFileName keyDir) (stderr.Trim())
+            false
+    with _ ->
+        (try File.Delete tmp with _ -> ())
+        false
+
+/// The precompiled prelude for this compile, if one is ready: (memo key, path of
+/// `blade_prelude.hpp`). A block is precompiled at its SECOND sighting -- the
+/// first leaves only an empty key directory -- so a one-off include block (a
+/// hand-written harness program) never pays for a file nobody reuses. The
+/// build runs under one process-wide gate: the other workers that want the
+/// same prelude wait for it instead of each building their own.
+let private tryPrecompiledPrelude (compileHalf: string) (cppText: string) : (string * string) option =
+    if Platforms.os <> Platforms.Windows then None else
+    match pchCacheDir () with
+    | None -> None
+    | Some dir ->
+        try
+            let block = leadingIncludeBlock cppText
+            if List.length block < pchMinIncludes then None
+            else
+                let preludeText = block |> List.map (fun i -> "#include " + i + "\n") |> String.concat ""
+                let key = pchKey compileHalf preludeText
+                // The process-wide memo is per STORE: a harness may point
+                // BLADE_PCH at another directory mid-process.
+                let memoKey = dir + "|" + key
+                let ready () =
+                    match pchMemo.TryGetValue memoKey with
+                    | true, PchReady p when File.Exists (p + ".gch") -> Some (Some (memoKey, p))
+                    | true, PchUnusable -> Some None
+                    | _ -> None
+                match ready () with
+                | Some r -> r
+                | None ->
+                    lock pchGate (fun () ->
+                        match ready () with
+                        | Some r -> r
+                        | None ->
+                            let keyDir = Path.Combine(dir, key)
+                            let prelude = Path.Combine(keyDir, "blade_prelude.hpp")
+                            let gch = prelude + ".gch"
+                            if File.Exists gch then
+                                // Stamped as used, once per process, for eviction.
+                                (try File.SetLastWriteTimeUtc(gch, DateTime.UtcNow) with _ -> ())
+                                pchMemo.[memoKey] <- PchReady prelude
+                                Some (memoKey, prelude)
+                            elif not (Directory.Exists keyDir) then
+                                Directory.CreateDirectory keyDir |> ignore
+                                None
+                            elif buildPrecompiledPrelude dir keyDir compileHalf preludeText then
+                                pchMemo.[memoKey] <- PchReady prelude
+                                Some (memoKey, prelude)
+                            else
+                                pchMemo.[memoKey] <- PchUnusable
+                                None)
+        with _ -> None
+
+/// A compile failed with the prelude and succeeded without it. After
+/// `pchMaxStrikes` of those the prelude is dropped for this process and its
+/// file deleted (the next process rebuilds it).
+let private notePreludeOnlyFailure (key: string) : unit =
+    let strikes = pchStrikes.AddOrUpdate(key, 1, fun _ n -> n + 1)
+    if strikes >= pchMaxStrikes then
+        match pchMemo.TryGetValue key with
+        | true, PchReady p ->
+            pchMemo.[key] <- PchUnusable
+            (try File.Delete (p + ".gch") with _ -> ())
+            if exeCacheVerbose () then
+                eprintfn "[cache] pch dropped %s after %d failures" (Path.GetFileName (Path.GetDirectoryName p)) strikes
+        | _ -> pchMemo.[key] <- PchUnusable
 
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
 /// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
@@ -1018,7 +1379,13 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 let tid = toolchainIdentity (optFlags () + " " + ompFlag)
                 $" -DBLADE_TOOLCHAIN_ID={tid}"
             else ""
-        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        // Split at the output: `compileHalf` is everything that decides how a
+        // header is compiled (the precompiled prelude is built with exactly
+        // it); `args` is the same text as before the split, so the executable
+        // cache's keys are unchanged.
+        let compileHalf = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags}"
+        let linkHalf = $" -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        let args = compileHalf + linkHalf
         
         // The executable cache (Stage 4.1, above). v1 scope, deliberately
         // narrow -- every excluded lane is one whose inputs are not fully
@@ -1038,47 +1405,78 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 | Some dir -> Some (dir, exeCacheKey args cppText exeFullPath cppFullPath)
 
         match cacheSlot with
-        | Some (dir, key) when tryExeCacheHit dir key exeFullPath -> Ok exeFullPath
+        | Some (dir, key) when tryExeCacheHit dir key exeFullPath ->
+            CompileStats.recordCacheHit ()
+            Ok exeFullPath
         | _ ->
 
-        let psi = ProcessStartInfo("g++", args)
-        psi.RedirectStandardOutput <- true
-        psi.RedirectStandardError <- true
-        psi.UseShellExecute <- false
-        psi.CreateNoWindow <- true
+        // One g++ process: Error = it timed out; Ok = (exit code, its output).
+        let runGpp (gppArgs: string) : Result<int * string, string> =
+            let psi = ProcessStartInfo("g++", gppArgs)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
 
-        use proc = Process.Start(psi)
-        // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
-        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
-        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
-        
-        // 300s: spectra-scale generated programs (rank-2 transforms, capped
-        // at 65536 cells) can legitimately push g++ this long under -O3.
-        if not (proc.WaitForExit(300000)) then
-            try proc.Kill() with _ -> ()
-            Error "Compilation timed out after 300s"
-        else
-        
-        let stdout = stdoutTask.Result
-        let stderr = stderrTask.Result
-        
-        let allOutput = 
-            [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
-             if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
-            |> String.concat "\n"
-        
-        if proc.ExitCode = 0 then
+            use proc = Process.Start(psi)
+            // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
+            let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+            let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
+
+            let gppWatch = Stopwatch.StartNew ()
+            // 300s: spectra-scale generated programs (rank-2 transforms, capped
+            // at 65536 cells) can legitimately push g++ this long under -O3.
+            if not (proc.WaitForExit(300000)) then
+                (try proc.Kill() with _ -> ())
+                Error "Compilation timed out after 300s"
+            else
+                let stdout = stdoutTask.Result
+                let stderr = stderrTask.Result
+                let allOutput =
+                    [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
+                     if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
+                    |> String.concat "\n"
+                CompileStats.recordGpp gppWatch.Elapsed
+                Ok (proc.ExitCode, allOutput)
+
+        // The precompiled prelude (above), when one is ready for this program's
+        // leading include block and these flags. A program that carries an
+        // `#error` guard is refused by g++ either way, so it is not offered one.
+        // ANY failure with the prelude is re-run without it: the verdict and
+        // the text reported are always the plain compile's.
+        let prelude =
+            if cppText.Contains "#error" then None
+            else tryPrecompiledPrelude compileHalf cppText
+        let outcome =
+            match prelude with
+            | None -> runGpp args
+            | Some (pchKey, preludePath) ->
+                match runGpp ($"{compileHalf} -include \"{preludePath}\"{linkHalf}") with
+                | Ok (0, out) ->
+                    CompileStats.recordPchUse ()
+                    Ok (0, out)
+                | _ ->
+                    CompileStats.recordPchRetry ()
+                    let plain = runGpp args
+                    (match plain with
+                     | Ok (0, _) -> notePreludeOnlyFailure pchKey
+                     | _ -> ())
+                    plain
+
+        match outcome with
+        | Error e -> Error e
+        | Ok (0, _) ->
             // Publish for the next identical translation unit. Best-effort:
             // a store that fails costs a future recompile, never this result.
             (match cacheSlot with
              | Some (dir, key) -> storeExeCache dir key exeFullPath
              | None -> ())
             Ok exeFullPath
-        else
+        | Ok (exitCode, allOutput) ->
             if String.IsNullOrWhiteSpace allOutput then
-                Error $"Compilation failed (exit {proc.ExitCode}) with no output. Command: g++ {args}"
+                Error $"Compilation failed (exit {exitCode}) with no output. Command: g++ {args}"
             else
-                Error $"Compilation failed (exit {proc.ExitCode}):\n{allOutput}\nCommand: g++ {args}"
+                Error $"Compilation failed (exit {exitCode}):\n{allOutput}\nCommand: g++ {args}"
     with ex ->
         Error $"Compilation exception: {ex.Message}\n{ex.StackTrace}"
 
@@ -1630,7 +2028,9 @@ let runExecutableIn (cwd: string) (exeFile: string) : Result<int * string, strin
         // Memcheck runs get 600s: /Od plus ASan interception is a 5-20x
         // slowdown on exactly those simulation-scale programs.
         let timeoutMs = if CodeGen.memcheckEnabled () then 600000 else 120000
+        let runWatch = Stopwatch.StartNew ()
         if proc.WaitForExit(timeoutMs) then
+            CompileStats.recordRun runWatch.Elapsed
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
             let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr

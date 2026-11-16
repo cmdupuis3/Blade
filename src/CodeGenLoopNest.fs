@@ -4677,7 +4677,8 @@ let runtimeHeaderNames : string list =
 
 /// The shipped text of one runtime header, through the same per-process memo
 /// `deployRuntimeHeaders` uses -- so a consumer that only wants to *read* the
-/// header set (Build.fs's executable cache hashes all 13 into its key) pays no
+/// header set (Build.fs's executable cache hashes the ones a program includes
+/// into its key) pays no
 /// extra disk I/O beyond the one read the deploy already did. Same
 /// fail-loudly-on-missing contract as the deploy path.
 let runtimeHeaderText (filename: string) : string = readCppRuntimeHeader filename

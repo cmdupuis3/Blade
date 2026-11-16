@@ -187,6 +187,22 @@ let private fsharpParallelEnabled () : bool =
 /// The one place the pipeline lock is taken. Every use of `fsharpPipelineLock`
 /// must go through here, or the experiment gate measures half a change.
 let private withFsharpPipelineLock (body: unit -> 'T) : 'T =
+    // Timed INSIDE the lock, so the figure is the pass itself and not the wait
+    // for the lock (Timings: reporting only).
+    let timed () : 'T =
+        let sw = System.Diagnostics.Stopwatch.StartNew ()
+        try body ()
+        finally Blade.Tests.TestHarness.Timings.recordFrontEnd sw.Elapsed
+    if fsharpParallelEnabled () then timed ()
+    else lock fsharpPipelineLock timed
+
+/// The same lock, for F#-side work that is NOT a front-end pass but runs while
+/// `runFullTest` workers are in flight: the interpreter differential's walks and
+/// its multi-file lowering (tests/InterpDiff.fs). Holding it keeps that work
+/// from overlapping another test's front-end pass, which is the arrangement the
+/// differential had when it ran one test at a time. Same experiment gate; not
+/// counted as a front-end pass in the Timings table.
+let underPipelineLock (body: unit -> 'T) : 'T =
     if fsharpParallelEnabled () then body ()
     else lock fsharpPipelineLock body
 
@@ -1380,7 +1396,9 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
         
         testArray
         |> Array.Parallel.mapi (fun idx (testName, source) ->
+            let testWatch = System.Diagnostics.Stopwatch.StartNew ()
             let result = runFullTest testName source outputDir gppAvailable
+            Blade.Tests.TestHarness.Timings.recordTest testName testWatch.Elapsed.TotalSeconds
             let status =
                 match result.CompileResult with
                 | Ok _ -> "ok"

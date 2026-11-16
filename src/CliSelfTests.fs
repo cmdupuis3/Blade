@@ -5847,7 +5847,17 @@ let rec internal dispatchTest (rest: string list) : int =
         eprintfn "       Select a category instead (`blade test <category>`), or run one program with `blade run prog.blade --print a,b`."
         2
     else
-    withSuiteEnvironment false (fun () -> dispatchTestClean rest)
+    // `--timings <path>`: write the timing record (TestHarness.Timings) as
+    // JSON. The table itself is printed after every run.
+    let (timingsPath, rest) =
+        match rest |> List.tryFindIndex (fun a -> a = "--timings") with
+        | Some i when i + 1 < rest.Length ->
+            (Some rest.[i + 1], (rest |> List.take i) @ (rest |> List.skip (i + 2)))
+        | Some i -> (None, rest |> List.take i)
+        | None -> (None, rest)
+    let code = withSuiteEnvironment false (fun () -> dispatchTestClean rest)
+    TH.Timings.report timingsPath
+    code
 
 /// `dispatchTest` after the environment is made pristine.
 and internal dispatchTestClean (rest: string list) : int =
@@ -6004,6 +6014,11 @@ and internal dispatchTestClean (rest: string list) : int =
         // The RNG mirror's Philox4x32-10 generator against Random123's
         // published known-answer vectors, and the `_at` address identities.
         let failed = (Blade.Tests.RandMirrorTests.runRandMirrorTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "pch" ] ->
+        // The precompiled prelude (Build.fs, BLADE_PCH): built at the second
+        // sighting, used after, and a compile that fails with it re-run without.
+        let failed = (Blade.Tests.PchTests.runPchTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "owned-move" ] | [ "ownedmove" ] ->
         // Gap G92: a reassigned array frees its previous pool (owned move).
