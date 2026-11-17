@@ -1,0 +1,16 @@
+// TEST: A Functor-Wrapped Bool Stage Composed Over A reynolds Map Is Refused (rejects)
+// ERROR: BL3001 @ 11:38
+// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// ============================================================================
+// R11: the `@>>` right stage is `positive <$> (map over keep)`: the whole
+// composition (keep, then positive) runs inside the symmetrized kernel and
+// its Bools were summed. Base printed `r = [[true, true], [true, true]]`.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let products = a [*] b |> compute
+let keep = lambda(z: Float64) -> z
+let right = positive <$> (method_for(products) <@> keep)
+let r = ((method_for(a, b) <@> reynolds(g)) @>> right) |> compute

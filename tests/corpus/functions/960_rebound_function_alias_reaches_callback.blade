@@ -1,0 +1,22 @@
+// TEST: a rebound function-valued local handed to a callback parameter (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review; Codex review of the fix, class closure): the per-call-site
+// candidates of `f`'s parameter `h` follow `test`'s local `h` through its
+// REBINDING: `ident` reaches the call, so `t` may be the captured plain `G`.
+type R = Array<Float64 like Idx<3>>
+let G: R = [1.0, 2.0, 3.0]
+function fresh(a: R) -> R = a * 2.0
+function ident(a: R) -> R = a
+function f(h: (R) -> R) -> Float64 = {
+    let t = h(G)
+    t(0) = 9.0
+    t(0)
+}
+function test() -> Float64 = {
+    let h = fresh
+    h = ident
+    f(h)
+}
+let z = test()

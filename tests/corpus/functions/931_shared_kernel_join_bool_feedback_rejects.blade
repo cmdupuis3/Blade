@@ -1,0 +1,12 @@
+// TEST: A Shared Fold Kernel Over A Two-Leaf Join Whose Bool Result Feeds Its Accumulators Is Refused (rejects)
+// ERROR: BL3001 @ 8:27
+// ERROR-CONTAINS: returns a Bool value, but its accumulator parameter
+// ============================================================================
+// R11: functions/928 over a `<&!>` join: each leaf folds into its own
+// accumulator with the shared kernel, whose Bool result fed `acc + x`. Base
+// printed `r = (true, true)` in both lanes.
+// ============================================================================
+let k = lambda(acc, x) -> acc + x > 0
+let warm = k(Int64(1), Int64(2))
+let xs: Array<Int64 like Idx<3>> = [1, 2, 3]
+let r = reduce((method_for(xs) <@> lambda(x) -> x) <&!> (method_for(xs) <@> lambda(x) -> x), k, Int64(0))

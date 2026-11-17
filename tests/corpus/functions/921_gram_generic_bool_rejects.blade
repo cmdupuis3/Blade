@@ -1,0 +1,11 @@
+// TEST: gram Of A Generic Bool Matrix Is Refused (rejects)
+// ERROR: BL3001 @ 8:1
+// ERROR-CONTAINS: gram() meets an array of Bool cells
+// ============================================================================
+// R11: outer's generic parameter instantiated at a Bool matrix reached
+// gram's multiply-and-sum: base accepted it and printed a Bool matrix (both
+// lanes; the LLVM lane fell back to C++).
+// ============================================================================
+function outer(b) = gram(b, b)
+let x: Array<Bool like Idx<2>, Idx<2>> = [[true, false], [false, true]]
+let r = outer(x)

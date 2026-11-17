@@ -107,7 +107,10 @@ let internal suiteClearedKnobs =
 /// wave 6 `off` is the pre-wave-6 arm) for the same reason:
 /// a toolchain file that persisted the retention arm would otherwise put its
 /// defines into every program the suite emits.
-let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "default" ]
+/// BLADE_PRINT_FORM is pinned `test` (P3-26): every corpus pin, doc fence and
+/// harness reads the test print form, and a program a block spawns through
+/// `blade run` (which defaults to the DISPLAY form) inherits the pin.
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "default"; "BLADE_PRINT_FORM", "test" ]
 
 /// A program the LLVM lane REFUSES (it has no complex values), so `blade plan`
 /// under BLADE_LLVM=1 falls back to the C++ lane -- the cli case that pins the
@@ -1671,36 +1674,32 @@ let runCliSmokeTests () : TH.BlockResult =
                      && routedLl ol && cl = c1 && dLl = dCpp)
                     ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; C++ [{dCpp}]; LLVM [{dLl}]")
             // THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
-            // the plan declines for the TYPE reason, and each lane's ordinary
-            // outcome is pinned, routed, identical in both gates -- the LLVM
-            // lane exits 0 printing the singleton and the multirow group rounded
-            // through double (9007199254740992, 9007199254740994: the
-            // pre-existing ordinary-fold typing discrepancy), the C++ lane fails
-            // with BL9002 in both gates (only the private build path normalized).
-            let typeReason = "is not typed in the state's one scalar representation (Int64): parameters (Int64, Int64) -> Float64 over Int64 elements"
-            let normBuild (s: string) =
-                Text.RegularExpressions.Regex.Replace(s.Replace("\r\n", "\n"), @"[A-Za-z]:[\\/][^\s""']*blade-build[\\/][^\s""':]*", "<build>")
-            for llvm in [ null; "1" ] do
-                let lane = laneOf llvm
-                let (c0, o0, e0, oe0) = runIt "wtype" (envOf llvm "0" true [])
-                let (c1, o1, e1, oe1) = runIt "wtype" (envOf llvm null true [])
-                let line = planLine "wtype" "f" (envOf llvm null true [])
-                let declinedForType = line.Contains ": declined -- " && line.Contains typeReason
-                let routed = routeOk llvm oe0 && routeOk llvm oe1
-                let outcome =
-                    if isNull llvm then
-                        c0 <> 0 && c1 <> 0 && c0 = c1
-                        && (o0 + e0).Contains "error[BL9002]" && (o1 + e1).Contains "error[BL9002]"
-                        && normBuild (o0 + "\n--\n" + e0) = normBuild (o1 + "\n--\n" + e1)
-                    else
-                        c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
-                        && o1.Contains "s = [9007199254740992, 9007199254740994]"
-                        && o1.Contains "s2 = [9007199254740992, 9007199254740994]"
-                let expectText = if isNull llvm then "BL9002 in both gates" else "exit 0, s = s2 = [9007199254740992, 9007199254740994] in both gates"
-                recordCase $"cli: group aggregate ({lane}, wtype) a Float64-valued fold into an Int64 aggregate: declined for its types; routed {lane}; {expectText}; complete output identical across gates"
-                    (declinedForType && routed && outcome)
-                    (let errHead = (if e1.Length > 160 then e1.Substring(0, 160) else e1).Trim()
-                     $"plan {line.Trim()}; exit {c0}/{c1}; routed {routed}; {o1.Trim()} {errHead}")
+            // a Float64-valued kernel folded into an Int64 accumulator. Base
+            // split on it (the C++ lane BL9002, the LLVM lane rounding through
+            // double: 9007199254740992, 9007199254740994 for 9007199254740993);
+            // since R11 the lowering refuses it, BL3020 at one location, in both
+            // lanes and both gates (nothing is emitted, so no route to check).
+            // The group-aggregate type decline keeps its own fixture
+            // (OptimizeTests decision_group_agg_declined_mixed_type_fold).
+            let firstDiagLoc (s: string) =
+                let ls = s.Replace("\r\n", "\n").Split('\n')
+                match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+                | Some i ->
+                    let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+                    let code = if d.Length >= 13 then d.Substring(0, 13) else d
+                    let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+                    code + " | " + loc
+                | None -> "<no diagnostic>"
+            let wtypeRuns =
+                [ for llvm in [ null; "1" ] do
+                    for gate in [ "0"; null ] do
+                        let (c, o, e, _) = runIt "wtype" (envOf llvm gate true [])
+                        yield (c, firstDiagLoc (o + "\n" + e)) ]
+            let wtypeFirst = snd (List.head wtypeRuns)
+            recordCase "cli: group aggregate (wtype) a Float64-valued fold into an Int64 aggregate: refused BL3020 at one location in both lanes and both gates (R11)"
+                (wtypeRuns |> List.forall (fun (c, d) -> c <> 0 && d = wtypeFirst)
+                 && wtypeFirst.StartsWith "error[BL3020]" && not (wtypeFirst.EndsWith "<no location>"))
+                (wtypeRuns |> List.map (fun (c, d) -> $"exit {c}: {d}") |> String.concat "; ")
             // THE INLINE EFFECTFUL KEY PRODUCER (Codex second look at e6eadfa2,
             // BLOCKER): a top-level `group_keys` over an unforced inline map
             // whose kernel bumps a captured counter. Every lane evaluates the
@@ -5846,6 +5845,10 @@ let rec internal dispatchTest (rest: string list) : int =
         eprintfn "Error: --print is not valid on `blade test`: the corpus pins read every top-level binding, and --print would silence the ones it does not name."
         eprintfn "       Select a category instead (`blade test <category>`), or run one program with `blade run prog.blade --print a,b`."
         2
+    elif (match testVerbAt with Some _ -> argv |> Array.contains "--print-form" | None -> false) then
+        eprintfn "Error: --print-form is not valid on `blade test`: every pin, harness and differential gate reads the TEST print form, which `blade test` pins for its whole run (BLADE_PRINT_FORM=test)."
+        eprintfn "       The display form is checked by its own block (`blade test print-form`); run one program with `blade run prog.blade --print-form display`."
+        2
     else
     // `--timings <path>`: write the timing record (TestHarness.Timings) as
     // JSON. The table itself is printed after every run.
@@ -6381,6 +6384,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // on the fly by IcechunkWrite; only the e2e compile+run block needs
         // g++ and skips without it.
         Blade.Tests.IcechunkTests.runIcechunkTests ()
+    | [ "print-form" ] | [ "printform" ] ->
+        // The display print form (P3-26, src/PrintForm.fs): emission facts and
+        // the three lanes' display text. Also in the default suite (RunAll.fs
+        // yields `printForm`).
+        let failed = (Blade.Tests.PrintFormTests.runPrintFormTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "run-record" ] | [ "runrecord" ] ->
         // Input manifests + run records (plan-fortran-killer-2 section 7).
         // Also in the default suite (RunAll.fs yields `runRecord`).

@@ -19,7 +19,7 @@ reg=$1
 out=$2
 shift 2
 kernels=${*:-"fusedchain onepass stencil recur maskagg dot saxpy"}
-export BLADE_BLAS=0 BLADE_OMP_THREADS=1 BLADE_EXE_CACHE=0
+export BLADE_BLAS=0 BLADE_OMP_THREADS=1 BLADE_EXE_CACHE=0 BLADE_PRINT_FORM=test  # parsed output: the test print form (P3-26)
 unset BLADE_FP_REASSOC BLADE_FP_CONTRACT
 if [ "$reg" = "repro" ]; then export BLADE_FP_REPRO=1; else unset BLADE_FP_REPRO; fi
 for k in $kernels; do

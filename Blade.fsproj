@@ -38,6 +38,7 @@
          conservative pre-qualification resolver every optimizer plan and
          printer reads (gap G200). Dependency-free. -->
     <Compile Include="src/PrintSelection.fs" />
+    <Compile Include="src/PrintForm.fs" />
     <!-- Display frames: the {mime, data} rich-output wire format
          (Blade-REPL/docs/display-frames.md). Dependency-free string work, so
          it sits at the very front and is shared by everything that has to
@@ -656,6 +657,7 @@
     <!-- Input manifests + run records: the manifest table, its emission, and
          (with g++) the record a run writes, ok and aborting. -->
     <Compile Include="tests/RunRecordTests.fs" />
+    <Compile Include="tests/PrintFormTests.fs" />
     <Compile Include="tests/IcechunkTests.fs" />
     <!-- The checkout-desugar pass's own pins (src/ProviderDesugar.fs). Pure
          in-process AST rewrite: no store, no registry, no g++, never skips. -->
@@ -903,6 +905,12 @@
          (Build.buildLlvmTilesObject) and linked only into a .ll that calls it. -->
     <None Include="src/cpp/blade_llvm_tiles.c">
       <Link>cpp/blade_llvm_tiles.c</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The display print form's float spelling (P3-26): one C text, included by
+         blade_runtime.hpp and by blade_llvm_shim.c. -->
+    <None Include="src/cpp/blade_shortest.h">
+      <Link>cpp/blade_shortest.h</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Membership hoisting's C core (round 3, B-T1): the representation

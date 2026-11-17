@@ -62,7 +62,7 @@ def run_blade(path, names, lane):
         raise ValueError("unknown regime %r" % REGIME)
     if lane == "llvm":
         env["BLADE_LLVM"] = "1"
-    cmd = [str(BLADE), "run", str(path), "--print", ",".join(names), "--no-cache"]
+    cmd = [str(BLADE), "run", str(path), "--print", ",".join(names), "--print-form", "test", "--no-cache"]  # parsed: the test print form (P3-26)
     p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
     if p.returncode != 0:
         raise RuntimeError("blade failed (%d): %s\n%s" % (p.returncode, p.stdout[-2000:], p.stderr[-2000:]))

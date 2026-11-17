@@ -49,6 +49,9 @@
  * the end of this file). Deployed beside the shim by EmitLlvm.deployShim and
  * hashed into the shim object's identity (Build.buildLlvmShim). */
 #include "blade_member.h"
+/* The display print form's float spelling (P3-26): the one C text the C++
+ * lane's blade_runtime.hpp includes too. */
+#include "blade_shortest.h"
 
 #if defined(_MSC_VER)
 #define BLADE_NORETURN __declspec(noreturn)
@@ -497,9 +500,18 @@ double blade_now(void) {
 
 /* ---- printing --------------------------------------------------------- */
 
+/* THE DISPLAY PRINT FORM (P3-26; src/PrintForm.fs): an emitted main built
+ * under BLADE_PRINT_FORM=display calls blade_set_print_display() before any
+ * print; a float then prints at its SHORTEST round-trip digits
+ * (blade_shortest.h) and BLADE_PRINT_BITS -- a test-form instrument --
+ * appends nothing. Twin of blade_rt::print_display_flag. */
+static int blade_print_display = 0;
+void blade_set_print_display(void) { blade_print_display = 1; }
+
 /* `cout << setprecision(15) << x` for a double, into `buf`. See the header
  * comment for why nan/inf are handled before printf gets a chance. */
 static void blade_fmt_f64(char *buf, size_t cap, double v) {
+    if (blade_print_display) { blade_fmt_display_f64(buf, cap, v); return; }
     if (isnan(v)) snprintf(buf, cap, "nan");
     else if (isinf(v)) snprintf(buf, cap, v < 0.0 ? "-inf" : "inf");
     else {
@@ -538,6 +550,7 @@ static void blade_fmt_f64(char *buf, size_t cap, double v) {
  * " #<8 hex digits>". Twin of blade_rt::fmt_f32 (C++ lane, streamed through
  * blade_rt::pv) and CppFormat.formatFloat32 (interpreter). */
 static void blade_fmt_f32(char *buf, size_t cap, float v) {
+    if (blade_print_display) { blade_fmt_display_f32(buf, cap, v); return; }
     if (isnan(v)) snprintf(buf, cap, "nan");
     else if (isinf(v)) snprintf(buf, cap, v < 0.0f ? "-inf" : "inf");
     else {

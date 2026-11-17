@@ -18,7 +18,7 @@ let internal usageTestBlockKeys =
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
-      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"
+      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"; "print-form"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"; "rec-step"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
       "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
@@ -117,6 +117,11 @@ let printUsage () =
     printfn "  --print <a,b>  Print only the named top-level bindings (every one by default; a name"
     printfn "                 that is not a binding is refused). Any verb; the compiled program and"
     printfn "                 the interpreter both honour it (equivalently BLADE_PRINT)."
+    printfn "  --print-form test|display"
+    printfn "                 Which spelling the program's prints use. run / compile / emit / plan default"
+    printfn "                 to DISPLAY (shortest round-trip floats, units, bare expressions unlabelled,"
+    printfn "                 sum types); TEST is the spelling // EXPECT: pins are written in (equivalently"
+    printfn "                 BLADE_PRINT_FORM; blade test always uses the test form)."
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
     printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
@@ -1270,7 +1275,7 @@ let planFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: str
                         match poolLane with
                         | Blade.Toolchain.PoolLaneLlvm -> "llvm-shim"
                         | Blade.Toolchain.PoolLaneCpp -> "cpp-blade_pool"
-                    $",\"build\":{{\"pool_retain\":{{\"arm\":\"{retention.Arm}\",\"setting\":{Blade.Effects.Decisions.jsonString retention.Setting},\"source\":{Blade.Effects.Decisions.jsonString retention.Source},\"max_block\":{retention.MaxBlockBytes},\"budget\":{retention.BudgetBytes},\"budget_scope\":\"{Blade.Toolchain.poolBudgetScope poolLane}\",\"runtime\":\"{poolRuntime}\",\"malformed\":{malformed}}}}}"
+                    $",\"build\":{{\"pool_retain\":{{\"arm\":\"{retention.Arm}\",\"setting\":{Blade.Effects.Decisions.jsonString retention.Setting},\"source\":{Blade.Effects.Decisions.jsonString retention.Source},\"max_block\":{retention.MaxBlockBytes},\"budget\":{retention.BudgetBytes},\"budget_scope\":\"{Blade.Toolchain.poolBudgetScope poolLane}\",\"runtime\":\"{poolRuntime}\",\"malformed\":{malformed}}},\"print_form\":{Blade.Effects.Decisions.jsonString (Blade.PrintForm.describe ())}}}"
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
                 printfn "%s" (js.Substring(0, js.Length - 1) + laneJs + buildJs + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
             else
@@ -1279,6 +1284,9 @@ let planFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: str
                 | Some (_, text) -> printfn "lane: %s" text
                 | None -> ()
                 printfn "build: %s" (Blade.Toolchain.describePoolRetention poolLane retention)
+                // The print form the program's prints use (P3-26, Blade.PrintForm),
+                // with where it came from; a second `build:` line, after the pool's.
+                printfn "build: print form: %s" (Blade.PrintForm.describe ())
                 for d in ds do
                     printfn "  %s" (Blade.Effects.Decisions.render d)
                 printfn "inputs: %d (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)" inputs.Length

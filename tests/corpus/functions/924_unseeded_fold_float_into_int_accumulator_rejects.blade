@@ -1,0 +1,10 @@
+// TEST: An Unseeded Fold Whose Float64 Result Feeds Its Int64 Accumulator Is Refused (rejects)
+// ERROR: BL3020 @ 9:36
+// ERROR-CONTAINS: returns a Float64 value, but its accumulator parameter
+// ============================================================================
+// R11: the kernel's parameters are the Int64 cells', its result a Float64.
+// Base: the C++ lane BL9002 (g++ refused the double-to-int64 store), the LLVM
+// lane printed 9007199254740994 (the exact sum is 9007199254740996).
+// ============================================================================
+let xs: Array<Int64 like Idx<3>> = [9007199254740993, 1, 2]
+let r = reduce(xs, lambda(a, b) -> Float64(a) + Float64(b))

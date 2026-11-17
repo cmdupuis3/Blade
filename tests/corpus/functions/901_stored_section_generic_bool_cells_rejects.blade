@@ -1,0 +1,13 @@
+// TEST: A Stored Section Applied To Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 10:36
+// ERROR-CONTAINS: the section `(+)` is applied to a Bool value
+// ============================================================================
+// R11: `let f = (+)` is lifted over Float64 parameters whatever it is
+// applied to; applied to the cells of outer's generic array, instantiated at
+// Bool, it computed Bool arithmetic. Judged against the operator at the call.
+// ============================================================================
+function outer(b) = {
+    let f = (+)
+    method_for(b) <@> lambda(v) -> f(v, v) |> compute
+}
+let r = outer([true, false])

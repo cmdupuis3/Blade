@@ -9068,6 +9068,25 @@ let private gaMixedTypeSrc =
     + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
     + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
     + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n"
+/// The mixed-type fold the type decline still reaches since R11 refused the
+/// lossy spelling above (BL3020): a kernel whose RESULT is narrower than its
+/// state, converted by an explicit cast and widened back -- no lossy step.
+let private gaMixedTypeLegalSrc =
+    "type Row = Idx<3>\ntype Region = Idx<2>\n"
+    + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Int32(a + b)) |> compute\n    (s, s)\n}\n"
+    + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [7, 5, 2]\nlet (s, s2) = f(keys, vals)\n"
+/// R11: the lossy spelling (a Float64-valued kernel folded into an Int64
+/// accumulator) is refused at lowering -- base split on it (C++ BL9002, the
+/// LLVM lane rounded through double).
+let private gaMixedTypeLossyRefused () =
+    let name = "group_agg_mixed_type_lossy_fold_refused"
+    match lower gaMixedTypeSrc with
+    | Error e when e.Contains "returns a Float64 value, but its accumulator parameter" ->
+        resultLine Pass name "refused at lowering: the kernel's Float64 result feeds its Int64 accumulator"
+        true
+    | Error e -> resultLine Fail name ($"refused for another reason: {e}"); false
+    | Ok _ -> resultLine Fail name "lowered: expected the R11 refusal"; false
 let private gaWritingProducerSrc =
     "type One = Idx<1>\n" + gaHead
     + "let mut log: Array<Int64 like One> = [0]\n"
@@ -9174,9 +9193,10 @@ let private groupAggDecisionCases () =
       decisionCase "decision_group_agg_declined_unused_deferred_source" gaUnusedLazySrc gaRule
           (fun d -> d.Subject = "sums" && declinedMentioning "the value array is not proved stored: `lazy` is a deferred computation" d)
           "declined: an UNUSED grouped array over a deferred producer"
-      decisionCase "decision_group_agg_declined_mixed_type_fold" gaMixedTypeSrc gaRule
-          (fun d -> d.Subject = "f" && declinedMentioning "the fold kernel of `s` is not typed in the state's one scalar representation (Int64): parameters (Int64, Int64) -> Float64 over Int64 elements" d)
+      decisionCase "decision_group_agg_declined_mixed_type_fold" gaMixedTypeLegalSrc gaRule
+          (fun d -> d.Subject = "f" && declinedMentioning "the fold kernel of `s` is not typed in the state's one scalar representation (Int64): parameters (Int64, Int64) -> Int32 over Int64 elements" d)
           "declined: a fold whose result type differs from its state"
+      gaMixedTypeLossyRefused ()
       decisionCase "decision_group_agg_declined_writing_producer" gaWritingProducerSrc gaRule
           (fun d -> d.Subject = "agg" && declinedMentioning "producer `logged` may write or is assigned" d)
           "declined: a value source whose producer writes (count-only)"

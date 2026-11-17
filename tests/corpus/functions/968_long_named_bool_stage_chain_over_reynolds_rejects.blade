@@ -1,0 +1,85 @@
+// TEST: A Seventy-Stage Named Bool Wrapper Chain Over A reynolds Map Is Refused (rejects)
+// ERROR: BL3001 @ 84:1
+// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// ============================================================================
+// R11 (Codex round 9): the wrapper-stack walk follows every named deferred
+// stage (bindings are acyclic; no depth cutoff passes a stack unjudged), so
+// the Bool `positive` seventy stages down is still found. Accepted on base.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let keep = lambda(v: Bool) -> v
+let s0 = positive <$> (method_for(a, b) <@> reynolds(g))
+let s1 = keep <$> s0
+let s2 = keep <$> s1
+let s3 = keep <$> s2
+let s4 = keep <$> s3
+let s5 = keep <$> s4
+let s6 = keep <$> s5
+let s7 = keep <$> s6
+let s8 = keep <$> s7
+let s9 = keep <$> s8
+let s10 = keep <$> s9
+let s11 = keep <$> s10
+let s12 = keep <$> s11
+let s13 = keep <$> s12
+let s14 = keep <$> s13
+let s15 = keep <$> s14
+let s16 = keep <$> s15
+let s17 = keep <$> s16
+let s18 = keep <$> s17
+let s19 = keep <$> s18
+let s20 = keep <$> s19
+let s21 = keep <$> s20
+let s22 = keep <$> s21
+let s23 = keep <$> s22
+let s24 = keep <$> s23
+let s25 = keep <$> s24
+let s26 = keep <$> s25
+let s27 = keep <$> s26
+let s28 = keep <$> s27
+let s29 = keep <$> s28
+let s30 = keep <$> s29
+let s31 = keep <$> s30
+let s32 = keep <$> s31
+let s33 = keep <$> s32
+let s34 = keep <$> s33
+let s35 = keep <$> s34
+let s36 = keep <$> s35
+let s37 = keep <$> s36
+let s38 = keep <$> s37
+let s39 = keep <$> s38
+let s40 = keep <$> s39
+let s41 = keep <$> s40
+let s42 = keep <$> s41
+let s43 = keep <$> s42
+let s44 = keep <$> s43
+let s45 = keep <$> s44
+let s46 = keep <$> s45
+let s47 = keep <$> s46
+let s48 = keep <$> s47
+let s49 = keep <$> s48
+let s50 = keep <$> s49
+let s51 = keep <$> s50
+let s52 = keep <$> s51
+let s53 = keep <$> s52
+let s54 = keep <$> s53
+let s55 = keep <$> s54
+let s56 = keep <$> s55
+let s57 = keep <$> s56
+let s58 = keep <$> s57
+let s59 = keep <$> s58
+let s60 = keep <$> s59
+let s61 = keep <$> s60
+let s62 = keep <$> s61
+let s63 = keep <$> s62
+let s64 = keep <$> s63
+let s65 = keep <$> s64
+let s66 = keep <$> s65
+let s67 = keep <$> s66
+let s68 = keep <$> s67
+let s69 = keep <$> s68
+let s70 = keep <$> s69
+let r = s70 |> compute

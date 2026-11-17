@@ -427,7 +427,7 @@ let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
                          | _ -> a)
                     | _ -> a)
             if List.forall2 (fun (x: IRExpr) y -> obj.ReferenceEquals (x, y)) args args' then e
-            else IRApp (head, args', retTy)
+            else withAppParts e (head, args', retTy)
         | _ -> e
     | IRCompose (l, r) when isHmRef l || isHmRef r ->
         let single (ps: IRType list) = match ps with [p] -> p | _ -> IRTTuple ps
@@ -1222,8 +1222,8 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             match Map.tryFind key specMap with
             | Some spec ->
                 arityResultClash clashSpan func spec (match e with IRApp (_, _, t) -> t | _ -> spec.RetType)
-                IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
-                       args, spec.RetType)
+                withAppParts e (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
+                                args, spec.RetType)
             | None -> e
         | _ -> e
     let specRef (id: IRId) (b: Map<int, IRType>) : IRExpr option =
@@ -2108,7 +2108,7 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
                         elif isNarrow (Some slot) then narrowLit arg
                         else None) slots args
                 if replacements |> List.exists Option.isSome then
-                    Some (IRApp (f, List.map2 Option.defaultValue args replacements, retTy))
+                    Some (withAppParts e (f, List.map2 Option.defaultValue args replacements, retTy))
                 else None
             | _ -> None
         | _ -> None
@@ -2195,7 +2195,12 @@ let internal mapOneArrayApply (builder: IRBuilder) (arr: IRExpr) (la: IRArrayTyp
 /// parameters is cloned too), and the reference is redirected to the clone.
 /// A callable that needs no clone is shared. Returns the rewritten body and
 /// the clones, which the caller registers beside its other minted callables.
-let internal rebindThroughClosures
+/// `onFresh fresh original` is told every binder a CLONE freshened (its
+/// parameters and lets), so a caller can carry per-binder declarations onto
+/// the copies (IRModule.LetMutBinders: a `let mut` in a cloned lambda body is
+/// still `let mut`; deep review R12).
+let internal rebindThroughClosuresWith
+        (onFresh: IRId -> IRId -> unit)
         (builder: IRBuilder) (resolve: IRId -> IRCallable option)
         (renames: Map<IRId, IRId * string>) (body: IRExpr) : IRExpr * IRCallable list =
     let env = System.Collections.Generic.Dictionary<IRId, IRId * string>()
@@ -2232,12 +2237,14 @@ let internal rebindThroughClosures
                 c.Params |> List.map (fun p ->
                     let nid = builder.FreshId()
                     env.[p.VarId] <- (nid, $"__fz{nid}")
+                    onFresh nid p.VarId
                     { p with VarId = nid; Name = $"__fz{nid}" })
             iterIRExpr (fun x ->
                 match x with
                 | IRLet (id, _, _) when not (env.ContainsKey id) ->
                     let nid = builder.FreshId()
                     env.[id] <- (nid, $"__v{nid}")
+                    onFresh nid id
                 | _ -> ()) c.Body
             let caps =
                 c.Captures |> List.map (fun cap ->
@@ -2254,6 +2261,11 @@ let internal rebindThroughClosures
             k
     let body' = rewrite body
     body', List.ofSeq clones
+
+let internal rebindThroughClosures
+        (builder: IRBuilder) (resolve: IRId -> IRCallable option)
+        (renames: Map<IRId, IRId * string>) (body: IRExpr) : IRExpr * IRCallable list =
+    rebindThroughClosuresWith (fun _ _ -> ()) builder resolve renames body
 
 /// Clone a callable's parameters with fresh ids (the same callable can be
 /// spliced or inlined at more than one site; ids must stay unique), renaming
@@ -3772,7 +3784,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                 [ for j in off .. aritiesArr.[slot] - 1 -> slotParamVar slot j ]
                             if calleeIsVariadic then elems else [IRTuple elems]
                         | _ -> [a])
-                IRApp (callee, expandedArgs, rty)
+                withAppParts e (callee, expandedArgs, rty)
             | _ -> e
         let newBody = mapIRExpr rewrite func.Body
 
@@ -4243,7 +4255,10 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                                 (ordinalParam.VarId, (ordId, $"__v{ordId}"))
                                                 :: (fresh |> Map.toList |> List.map (fun (o, nn) -> (o, (nn, $"__v{nn}")))))
                                         let (body1, clones) =
-                                            rebindThroughClosures builder (fun id -> Map.tryFind id funcMap) renames lam.Body
+                                            // (the clones' freshened binders are
+                                            // recorded too: a `let mut` in a
+                                            // cloned lambda stays `let mut`, R12)
+                                            rebindThroughClosuresWith (fun nn o -> freshOut.[nn] <- o) builder (fun id -> Map.tryFind id funcMap) renames lam.Body
                                         clonesOut.AddRange clones
                                         let body2 =
                                             mapIRExpr (fun e ->
@@ -4636,7 +4651,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                     if not keepOpenCallerType && genericElement && flatArgs.IsEmpty
                        && spec.Params.IsEmpty && spec.Captures.IsEmpty && literalOnlyBase spec.Body then
                         spec.Body
-                    else IRApp (IRVar (spec.Id, fty), flatArgs, retTy)
+                    else withAppParts e (IRVar (spec.Id, fty), flatArgs, retTy)
                 | None -> e
             | None -> e
         | _ -> e
@@ -4915,7 +4930,7 @@ let internal shapeRewriteExpr (subst: Map<string, int64>) (expr: IRExpr) : IRExp
         // ever lives inside an index record, which this walk reaches through
         // the type positions instead.
         | IRParam (n, i, ty) -> IRParam (n, i, rt ty)
-        | IRApp (f, args, retTy) -> IRApp (f, args, rt retTy)
+        | IRAppAt (f, args, retTy, loc) -> IRAppAt (f, args, rt retTy, loc)
         | IRArrayLit (es, aty) -> IRArrayLit (es, rat aty)
         | IRRange (ixs, off) -> IRRange (ixs |> List.map rix, off)
         | IRVirtualReverse ix -> IRVirtualReverse (rix ix)
@@ -5441,9 +5456,9 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                     match Map.tryFind (fid, sign) specMap with
                     | Some spec ->
                         let subst = spec.Subst
-                        IRApp (IRVar (spec.SpecId, shapeRewriteType subst fty),
-                               args,
-                               shapeRewriteType subst retTy)
+                        withAppParts e (IRVar (spec.SpecId, shapeRewriteType subst fty),
+                                        args,
+                                        shapeRewriteType subst retTy)
                     | None -> e
             | _ -> e) expr
 

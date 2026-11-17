@@ -1,0 +1,13 @@
+// TEST: Math eigh: a Complex Operand With The LAPACK Gate Off Is Refused (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: is a Complex128 value
+// ============================================================================
+// With the LAPACK gate off (the corpus default) `m.eigh` is the synthesized
+// cyclic Jacobi, which is real-only: a Complex128 operand never compiled (g++
+// refused the Complex128 -> Float64 argument, BL9002). R11's call judgment
+// refuses it at lowering. The refusal names the generated Jacobi function;
+// the elaborator refusing the complex operand itself is the better message.
+// ============================================================================
+import math as m
+let S: Array<Complex128 like Idx<3>, Idx<3>> = [[complex(2.0, 0.0), complex(1.0, 1.0), complex(0.0, 0.0)], [complex(1.0, -1.0), complex(3.0, 0.0), complex(0.0, 1.0)], [complex(0.0, 0.0), complex(0.0, -1.0), complex(4.0, 0.0)]]
+let (Q, LAM) = m.eigh(S)

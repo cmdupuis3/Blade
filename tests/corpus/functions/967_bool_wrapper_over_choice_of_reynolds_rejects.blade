@@ -1,0 +1,13 @@
+// TEST: A Bool Wrapper Distributed Over A Choice Of reynolds Maps Is Refused (rejects)
+// ERROR: BL3001 @ 10:38
+// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// ============================================================================
+// R11: `f <$> (c1 <|> c2)` is emitted as `(f <$> c1) <|> (f <$> c2)`, so
+// `positive` runs inside each symmetrized kernel. Accepted on base.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let c = method_for(a, b) <@> reynolds(g)
+let r = positive <$> (c <|> c) |> compute

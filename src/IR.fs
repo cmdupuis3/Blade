@@ -102,7 +102,14 @@ type IRExpr =
     | IRIndex of array: IRExpr * index: IRExpr list * identity: ArrayIdentity option
     | IRSlice of array: IRExpr * dim: int * start: IRExpr * stop: IRExpr
     | IRCurry of array: IRExpr * index: IRExpr * resultRank: int
-    | IRApp of func: IRExpr * args: IRExpr list * retType: IRTypeG<IRExpr>
+    /// A call. `loc` is the source position of the call (R11: the
+    /// post-monomorphization argument judgment, Lowering.refuseArgumentConversions,
+    /// reports a refused argument there); equality-inert like every SrcLoc.
+    /// Written and matched through the `IRApp` constructor / view below, which
+    /// carry no location: only the builders that know the span (Lowering) and
+    /// the rebuilders that must keep it (IR.withChildren, substTypes, the
+    /// monomorphizers' call redirections) name `IRAppAt`.
+    | IRAppAt of func: IRExpr * args: IRExpr list * retType: IRTypeG<IRExpr> * loc: SrcLoc
     | IRTuple of IRExpr list
     // std::complex<double>(re, im) at codegen. Distinct from IRTuple: Complex
     // is a scalar throughout the IR. Components are arbitrary float-typed
@@ -624,6 +631,20 @@ and SparseKeysSource =
 // the prototype's extent representation. Everything downstream uses
 // these names; swapping the extent representation (the rewrite's
 // dedicated Extent DU) is a type-argument change here, nothing more.
+/// A call with no source location (a synthesized call): see IRAppAt.
+let IRApp (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
+    IRAppAt (func, args, retType, SrcLoc.Nowhere)
+/// The location-free view of a call: matches every IRAppAt.
+let (|IRApp|_|) (e: IRExpr) : (IRExpr * IRExpr list * IRTypeG<IRExpr>) option =
+    match e with
+    | IRAppAt (f, args, rt, _) -> Some (f, args, rt)
+    | _ -> None
+/// The same call with new parts, keeping its location.
+let withAppParts (call: IRExpr) (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
+    match call with
+    | IRAppAt (_, _, _, loc) -> IRAppAt (func, args, retType, loc)
+    | _ -> IRApp (func, args, retType)
+
 type IRType = IRTypeG<IRExpr>
 type IRIndexType = IRIndexTypeG<IRExpr>
 type IRArrayType = IRArrayTypeG<IRExpr>
@@ -2435,10 +2456,10 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
         (function
          | arr' :: idxs' when idxs'.Length = idxs.Length -> IRIndex (arr', idxs', ident)
          | _ -> badChildren "IRIndex")
-    | IRApp (f, args, rt) ->
+    | IRAppAt (f, args, rt, loc) ->
         f :: args,
         (function
-         | f' :: args' when args'.Length = args.Length -> IRApp (f', args', rt)
+         | f' :: args' when args'.Length = args.Length -> IRAppAt (f', args', rt, loc)
          | _ -> badChildren "IRApp")
 
     // -- Lists ----------------------------------------------------------------
@@ -2626,7 +2647,7 @@ let irNodeMayAbort (e: IRExpr) : bool =
     | IRTuple _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _
     | IRFieldAccess _ | IRStructLit _ -> false
     | IRIf _ | IRLet _ | IRSequence _ -> false
-    | IRApp _ -> false
+    | IRAppAt _ -> false
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
     | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRPure _ | IRReynolds _ -> false
     | IRRank _ | IRExtent _ -> false
@@ -2696,7 +2717,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IREigh _ | IRLu _ | IRLuSolve _ | IRSolve _ -> true
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
-    | IRApp (f, _, _) -> appFresh f
+    | IRAppAt (f, _, _, _) -> appFresh f
     // -- not fresh (see above) ----------------------------------------------
     | IRChoice _ | IRFallback _ | IRGuard _ | IRComposeMeth _ -> false
     | IRSequence _ | IRReplicate _ -> false
@@ -2836,7 +2857,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRZero ty -> IRZero (st ty)
         | IRUnseededSeed (b, ty, r) -> IRUnseededSeed (b, st ty, r)
         | IRUninit ty -> IRUninit (st ty)
-        | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
+        | IRAppAt (fn, args, retType, loc) -> IRAppAt (fn, args, st retType, loc)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
         | IRMethodFor info ->
@@ -3776,7 +3797,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // a brand-new IRExpr variant still fails to compile until it gets a
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
-    | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
+    | IRVar _ | IRParam _ | IRAppAt _ | IRArrayLit _ | IRStructLit _
     | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUnseededSeed _ | IRUninit _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _

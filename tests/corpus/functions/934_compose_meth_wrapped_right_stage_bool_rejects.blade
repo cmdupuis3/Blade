@@ -1,0 +1,14 @@
+// TEST: A Functor-Wrapped Method-Composition Stage Given Bool Values Is Refused (rejects)
+// ERROR: BL3001 @ 13:1
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: the right stage of `@>>` is `keep <$> (map over twice)`, composed into
+// one kernel whose first stage `twice(1.0)` decided; the left stage's Bools
+// reach it. Base printed `r = [2.0, 0.0]` (the LLVM lane fell back to C++).
+// ============================================================================
+let b = [true, false]
+let twice = lambda(x) -> x * 2.0
+let warm = twice(1.0)
+let keep = lambda(x: Float64) -> x
+let right = keep <$> (method_for([1.0, 2.0]) <@> twice)
+let r = ((method_for(b) <@> lambda(x) -> x) @>> right) |> compute

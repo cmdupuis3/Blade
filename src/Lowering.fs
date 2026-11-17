@@ -727,7 +727,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | _ ->
             // The call's span, for the opt-in kept inline's BL7005 (G69).
             (match f with IRVar (fid, _) -> Optimize.CallSpanTable.record fid as' texpr.Span | _ -> ())
-            IRApp (f, as', texpr.Type)
+            IRAppAt (f, as', texpr.Type, SrcLoc.Of texpr.Span)
     
     | TExprIndex (array, indices, identity) ->
         let arr = lowerTypedExpr env array
@@ -848,7 +848,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // isZeroLevelWholeArrayApply). Lowered here, before the lanes
             // split, so the C++ lane, the LLVM lane and the interpreter all
             // evaluate the same `f(operands)` -- one term, the operands whole.
-            IRApp (loweredKernel, arrays, info.OutputType)
+            IRAppAt (loweredKernel, arrays, info.OutputType, SrcLoc.Of texpr.Span)
         else
         let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
         IRApplyCombinator {
@@ -3643,6 +3643,808 @@ let private refuseForeignKernelCaptures (modules: IRModule list) : unit =
                  | None -> ())
             | _ -> ()) f.Body
 
+/// The value class R11's argument judgment compares (refuseArgumentConversions):
+/// a scalar's element, a non-number kind, a tuple's components, an array's
+/// element, a function, a halo window -- or OPEN (not judged).
+type private ValueClass =
+    | VCNum of ElemType
+    | VCBool
+    | VCString
+    | VCUnit
+    | VCNamed of string
+    | VCTuple of ValueClass list
+    | VCArray of ValueClass
+    | VCFunc
+    | VCWindow
+    | VCOpen
+
+/// R11, THE NUMBERS-ONLY JUDGMENT AT EVERY INSTANCE (formalism 2.4: arithmetic
+/// is defined on numbers only, and Blade converts nothing implicitly). Runs once
+/// every function is concrete (after the arity, HM and shape monomorphizers) and
+/// BEFORE the optimizer, which inlines calls and so erases the boundaries judged
+/// here. Two judgments, over every binding value and every callable body:
+///
+///   * EVERY CALL (each IRApp, whatever spelling produced it: a declared
+///     function, a let-bound lambda, an alias chain, a section, a block lambda,
+///     a lambda applied where it is written, a function-typed parameter) hands
+///     each argument to a parameter OF THE CALLEE'S DEFINITION (resolved through
+///     let aliases; a function-typed parameter's own slot type otherwise). The
+///     type checker unifies an argument with its parameter everywhere except
+///     where it deliberately leaves a single-value callee's open parameter alone
+///     (TypeCheckSupport's lambdaishHead arm: an open-argument LINK, so a numeric
+///     result never changes) -- so after monomorphization a call is the one place
+///     a value can meet a parameter of another class, and C++ would convert it
+///     (a Bool into an Int32 parameter computes 1 + 1; a Bool into a function
+///     slot dies in g++). Refused at the call's span: a non-number meeting a
+///     number, a number meeting a non-number, two different non-number classes,
+///     a non-function meeting a function slot -- BL3001; a LOSSY numeric
+///     conversion (a float into an integer, Float64 into Float32, complex into
+///     real), which g++ refused anyway -- BL3020. Also the call's RESULT: the
+///     type the checker gave the call against the callee's return (an Int64
+///     cell handed to a lambda whose parameter defaulted to Float64: the call
+///     was typed Int64, the body returns a Float64). A numeric WIDENING (an
+///     integer into a float, a narrower width into a wider one) is NOT refused:
+///     base compiled and printed those values, and a numeric parameter is never
+///     re-decided by its argument here.
+///   * EVERY ARITHMETIC, COMPARISON, MATH AND LOGICAL NODE whose operand is not
+///     of its class (IRValidate.numbersOnlyClashes, check 1d's judgment) -- a
+///     generic body instantiated at a struct, a tuple or a function value --
+///     refused at the operator's span (IRBinOp carries one), else the enclosing
+///     declaration's.
+///   * KERNEL SLOTS (a fold's, a mask predicate's, a sort key's, a map's
+///     per-cell kernel): the checker unifies them with the operand's cells; the
+///     judgment re-checks the CLASS of each cell against its parameter.
+///
+/// A literal argument is not judged for width (a literal adapts to its
+/// parameter: IRMono.adaptFloatLiteralsModule narrows it later).
+let private refuseArgumentConversions (modules: IRModule list) : unit =
+    let (funcs, programLets, _, _, resolve, _) = programWriteContext modules
+    let structFields =
+        modules
+        |> List.collect (fun m -> m.Types)
+        |> List.choose (fun td -> match td with IRTDStruct (n, fs) -> Some (n, fs) | _ -> None)
+        |> Map.ofList
+    // A named type is a CLASS of its own only when it is a struct or a sum type;
+    // an alias is its target; anything else (an index or EnumIdx name) is open.
+    let typeDefs = modules |> List.collect (fun m -> m.Types)
+    let aliasOf (n: string) =
+        typeDefs |> List.tryPick (fun td -> match td with IRTDAlias (a, ty) when a = n -> Some ty | _ -> None)
+    let isNominal (n: string) =
+        typeDefs |> List.exists (fun td ->
+            match td with
+            | IRTDStruct (a, _) | IRTDVariant (a, _) -> a = n
+            | _ -> false)
+    let rec cls (t: IRType) : ValueClass =
+        match t with
+        | IRTUnitAnnotated (inner, _) -> cls inner
+        | IRTIdxTagged (_, IRefNamed tag) when tag.StartsWith "__halowin|" -> VCWindow
+        | IRTIdxTagged (inner, _) -> cls inner
+        | IRTScalar ETBool -> VCBool
+        | IRTScalar ETString -> VCString
+        | IRTScalar ETUnit -> VCUnit
+        | IRTScalar et -> VCNum et
+        | IRTTuple ts -> VCTuple (ts |> List.map cls)
+        | IRTNamed n ->
+            (match aliasOf n with
+             | Some ty when ty <> t -> cls ty
+             | _ -> if isNominal n then VCNamed n else VCOpen)
+        | ArrayElem a -> VCArray (cls a.ElemType)
+        | FuncElem _ | IRTArrow _ -> VCFunc
+        | _ -> VCOpen
+    // The type the monomorphizers specialized from (exprTypeIfKnown: an `abs`
+    // of an integer is an integer there, where the reconstructing `typeOf`
+    // answers Float64), else the reconstruction (tuples, struct fields).
+    let tyOf (e: IRExpr) : IRType option =
+        match exprTypeIfKnown e with
+        | Some t -> Some t
+        | None -> try Some (typeOf e) with _ -> None
+    // The cell an array or a deferred computation yields.
+    let rec cellOf (t: IRType) : IRType option =
+        match stripUnits t with
+        | IRTComputation inner -> cellOf inner
+        | ArrayElem a -> Some a.ElemType
+        | _ -> None
+    let rec isLiteral (e: IRExpr) =
+        match e with
+        | IRLit _ -> true
+        | IRUnaryOp ((IRNeg | IRCast _), x) -> isLiteral x
+        | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, _) -> isLiteral l && isLiteral r
+        | IRComplex (re, im) -> isLiteral re && isLiteral im
+        // a synthesized seed (resolved to the instance's own identity later)
+        | IRUnseededSeed _ | IRZero _ -> true
+        | _ -> false
+    let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
+    let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+    let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
+    let lossy (src: ElemType) (dst: ElemType) =
+        (isFloat src && isInt dst)
+        || (src = ETFloat64 && dst = ETFloat32)
+        || (isComplex src && not (isComplex dst))
+        || (src = ETComplex128 && dst = ETComplex64)
+    let elemName (e: ElemType) = ppIRType (IRTScalar e)
+    let rec className (c: ValueClass) =
+        match c with
+        | VCNum e -> elemName e
+        | VCBool -> "Bool"
+        | VCString -> "String"
+        | VCUnit -> "unit"
+        | VCNamed n -> Blade.Types.TypeOrigins.sourceName n
+        | VCTuple cs -> "(" + (cs |> List.map className |> String.concat ", ") + ")"
+        | VCArray c -> $"an array of {className c}"
+        | VCFunc -> "a function"
+        | VCWindow -> "a halo window"
+        | VCOpen -> "an open type"
+    let article (c: ValueClass) =
+        match c with
+        | VCArray _ | VCFunc | VCWindow | VCOpen -> className c
+        | VCTuple _ -> "a tuple " + className c
+        | VCNum ETInt32 | VCNum ETInt64 -> "an " + className c + " value"
+        | _ -> "a " + className c + " value"
+    /// The first disagreement of an argument class with its slot's class:
+    /// Some (numericLossy, argClass, slotClass), or None when they agree (or
+    /// either is open, or the shapes are ones this judgment does not compare:
+    /// an array and a non-array -- an array is a function of its indices).
+    /// `numeric` judges numeric widths (a lossy conversion only).
+    let rec clash (numeric: bool) (a: ValueClass) (p: ValueClass) : (bool * ValueClass * ValueClass) option =
+        match a, p with
+        | VCOpen, _ | _, VCOpen -> None
+        | VCNum x, VCNum y -> if numeric && lossy x y then Some (true, a, p) else None
+        // a window IS its centre ordinal (an Int64) everywhere but a function slot
+        | VCWindow, VCNum _ | VCNum _, VCWindow -> None
+        | VCArray x, VCArray y -> clash numeric x y
+        // An array handed to a NUMBER parameter: only its element is judged
+        // (a numeric array may be lifted over the parameter); an array of
+        // non-numbers meets no number either way.
+        | VCArray x, VCNum _ ->
+            let rec elemOf (c: ValueClass) = match c with VCArray e -> elemOf e | c -> c
+            (match elemOf x with
+             | VCNum _ | VCOpen -> None
+             | _ -> Some (false, a, p))
+        | VCArray _, _ | _, VCArray _ -> None
+        | VCTuple xs, VCTuple ys ->
+            if xs.Length <> ys.Length then None
+            else List.zip xs ys |> List.tryPick (fun (x, y) -> clash numeric x y)
+        | VCFunc, VCFunc -> None
+        | x, y when x = y -> None
+        | _ -> Some (false, a, p)
+    // The let values of a body, so a local alias chain resolves to its callable.
+    let calleeOf (letValues: System.Collections.Generic.Dictionary<IRId, IRExpr>) (f: IRExpr) : IRCallable option =
+        let rec go (fuel: int) (e: IRExpr) =
+            match e with
+            | IRVar (id, _) when fuel > 0 ->
+                (match Map.tryFind id funcs with
+                 | Some c -> Some c
+                 | None ->
+                     match letValues.TryGetValue id with
+                     | true, (IRVar _ as v) -> go (fuel - 1) v
+                     | _ -> resolve e)
+            | _ -> None
+        go 64 f
+    // An operator section's lifted callable is named after its operator:
+    // `(+) in <scope>` (IRCallable.SourceName).
+    // (and is binary: a synthesized one-parameter kernel can carry such a name)
+    let isSection (c: IRCallable) =
+        c.Params.Length = 2 && System.Text.RegularExpressions.Regex.IsMatch(c.SourceName, @"^\([^\w\s()]+\)")
+    let calleeName (c: IRCallable option) (f: IRExpr) =
+        match c with
+        | Some c when c.SourceName.StartsWith "lambda" || isSection c -> $"called {c.SourceName}"
+        | Some c -> $"called '{c.SourceName}'"
+        | None -> (match f with IRVar _ -> "called function value" | _ -> "called value")
+    // The first located node of an expression (a call, an operator, a cast).
+    let firstLoc (e: IRExpr) : SrcLoc =
+        let mutable found = SrcLoc.Nowhere
+        iterIRExpr (fun n ->
+            if found.Span.StartLine = 0 then
+                match n with
+                | IRAppAt (_, _, _, l) | IRBinOp (_, _, _, _, l) | IRUnaryOp (IRCast (_, l), _)
+                    when not (isNull l) && l.Span.StartLine > 0 -> found <- l
+                | _ -> ()) e
+        found
+    // THE NARROWING PROOF. An Int64 argument handed to an Int32 parameter is
+    // refused unless it is STATICALLY PROVEN to fit Int32 (the user's decision
+    // of 2026-11-16): every exemption is a positive proof, anything else is
+    // judged. Proven (`fitsInt32`): an integer literal; the variable of a
+    // loop whose bounds are integer literals (IRForRange, half-open [lo, hi):
+    // a `let rec` step ordinal, which the desugar bounds by the recursion's
+    // static extent -- the surface has no other loop); a `let` alias of a
+    // proven value (bound once in its body, or a module binding); `x + c`,
+    // `x - c`, `c + x`, `c - x` of a proven x and an integer literal c, by
+    // exact interval arithmetic. A variable any assignment in the program
+    // targets (`v = e`, at any depth: a nested callable may write a captured
+    // binding) is never proven. Nothing else: no product, no parameter, no
+    // index tag (arithmetic on a tagged position keeps the tag).
+    let mutable allBodies : IRExpr list = []
+    let assignedIds =
+        lazy (
+            let s = System.Collections.Generic.HashSet<IRId>()
+            let rec rootOf (t: IRExpr) =
+                match t with
+                | IRVar (id, _) -> s.Add id |> ignore
+                | IRIndex (a, _, _) -> rootOf a
+                | IRFieldAccess (o, _) -> rootOf o
+                // any other target shape: every name in it (over-approximation)
+                | other -> iterIRExpr (fun n -> match n with IRVar (id, _) -> s.Add id |> ignore | _ -> ()) other
+            for b in allBodies do
+                iterIRExpr (fun n -> match n with IRAssign (t, _) -> rootOf t | _ -> ()) b
+            s)
+    let staticInt (e: IRExpr) : bigint option =
+        match e with
+        | IRLit (IRLitInt v) -> Some (bigint v)
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt v)) -> Some (-(bigint v))
+        | _ -> None
+    // A body's loop bounds and let values, each id bound exactly ONCE in it
+    // (a binder seen twice -- a cloned body -- proves nothing).
+    let bodyFacts (body: IRExpr) =
+        let bounds = System.Collections.Generic.Dictionary<IRId, (bigint * bigint) option>()
+        let lets = System.Collections.Generic.Dictionary<IRId, IRExpr option>()
+        iterIRExpr (fun n ->
+            match n with
+            | IRForRange (vid, lo, hi, _) ->
+                let r =
+                    match staticInt lo, staticInt hi with
+                    | Some l, Some h when l < h -> Some (l, h - 1I)
+                    | _ -> None
+                bounds.[vid] <- (if bounds.ContainsKey vid then None else r)
+            | IRLet (id, v, _) -> lets.[id] <- (if lets.ContainsKey id then None else Some v)
+            | _ -> ()) body
+        (bounds, lets)
+    let int32Lo, int32Hi = bigint System.Int32.MinValue, bigint System.Int32.MaxValue
+    // module bindings (unique ids; a body's own lets are its facts)
+    let moduleLets = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for m in modules do
+        for b in m.Bindings do moduleLets.[b.Id] <- b.Value
+    let fitsInt32 (facts: Lazy<System.Collections.Generic.Dictionary<IRId, (bigint * bigint) option>
+                                * System.Collections.Generic.Dictionary<IRId, IRExpr option>>) (arg: IRExpr) : bool =
+        let bounds, lets = facts.Value
+        let rec rangeOf (fuel: int) (e: IRExpr) : (bigint * bigint) option =
+            if fuel <= 0 then None
+            else
+            match e with
+            | IRLit (IRLitInt v) -> Some (bigint v, bigint v)
+            | IRVar (id, _) when not (assignedIds.Value.Contains id) ->
+                (match bounds.TryGetValue id with
+                 | true, r -> r
+                 | _ ->
+                     match lets.TryGetValue id with
+                     | true, Some v -> rangeOf (fuel - 1) v
+                     | true, None -> None
+                     | _ ->
+                         match moduleLets.TryGetValue id with
+                         | true, v -> rangeOf (fuel - 1) v
+                         | _ -> None)
+            | IRBinOp (_, (IRAdd | IRSub as op), l, r, _) ->
+                (match staticInt l, staticInt r with
+                 | _, Some c ->
+                     rangeOf (fuel - 1) l |> Option.map (fun (a, b) -> if op = IRAdd then (a + c, b + c) else (a - c, b - c))
+                 | Some c, None ->
+                     rangeOf (fuel - 1) r |> Option.map (fun (a, b) -> if op = IRAdd then (c + a, c + b) else (c - b, c - a))
+                 | None, None -> None)
+            | _ -> None
+        match rangeOf 64 arg with
+        | Some (a, b) -> a >= int32Lo && b <= int32Hi
+        | None -> false
+    let check (phase: int) (declName: string) (sourceName: string) (instance: string) (deferredRoot: bool) (body: IRExpr) =
+        // A node without a location is reported at its declaration, else (a
+        // lifted lambda the span table does not name) at the first located
+        // node of the body it is in -- never without a location.
+        // (`lambda in r` / `lambda in lambda in r`: a lambda's source name
+        // names the binding it is written in)
+        let rec ownerSpan (n: string) =
+            let s = IR.declSpanOf n
+            if s.StartLine > 0 then s
+            elif n.StartsWith "lambda in " then ownerSpan (n.Substring "lambda in ".Length)
+            else Blade.Ast.noSpan
+        let fallbackSpan () =
+            let s = IR.declSpanOf declName
+            if s.StartLine > 0 then s
+            else
+            let s = IR.declSpanOf sourceName
+            if s.StartLine > 0 then s
+            else
+            let s = (firstLoc body).Span
+            if s.StartLine > 0 then s
+            else ownerSpan sourceName
+        let spanOf (loc: SrcLoc) =
+            if not (isNull loc) && loc.Span.StartLine > 0 then loc.Span else fallbackSpan ()
+        let refuse (code: string) (loc: SrcLoc) (msg: string) =
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) (spanOf loc) (msg + instance)))
+        let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        iterIRExpr (fun n -> match n with IRLet (id, v, _) -> letValues.[id] <- v | _ -> ()) body
+        let facts = lazy (bodyFacts body)
+        let argMessage (i: int) (pname: string) (what: string) (lossyNum: bool) (a: ValueClass) (p: ValueClass) =
+            let castHint =
+                match a with
+                | VCBool -> " -- convert it explicitly with a numeric cast (`Int64(b)` or `Float64(b)` is 1 or 0), or annotate the parameter"
+                | _ -> " -- pass a value of the parameter's type, or annotate the parameter with the argument's type"
+            if lossyNum then
+                let loss =
+                    match a, p with
+                    | VCNum (ETInt32 | ETInt64), VCNum (ETInt32 | ETInt64) -> "wrapping it into the narrower integer"
+                    | _ -> "losing precision"
+                $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is {className p} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): the call would convert it, {loss}, and Blade converts nothing implicitly (formalism 2.4) -- convert it explicitly at the call, or annotate the parameter"
+            else
+                match a, p with
+                | VCWindow, VCFunc ->
+                    Blade.TypeEnv.formatTypeError (Blade.Unify.HaloWindowEscapes ())
+                | _, VCFunc ->
+                    $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is a function its body applies: {article a} is not a function, and a call converts nothing"
+                | (VCBool | VCString | VCUnit | VCNamed _ | VCTuple _ | VCFunc | VCWindow), VCNum _ ->
+                    $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is {className p} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): {className a} is not a number, and Blade converts nothing implicitly{castHint}"
+                | _ ->
+                    $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is {className p} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): a call converts nothing{castHint}"
+        let codeOf (lossyNum: bool) = if lossyNum then "BL3020" else "BL3001"
+        // A kernel's signature: its DEFINITION's (resolved through aliases),
+        // else the kernel expression's own function type (a callable returned
+        // by a call, projected from a tuple, chosen by an `if`). An operator
+        // SECTION is lifted over Float64 parameters whatever it folds: its
+        // operands are the checker's fold / operator judgment, not this one.
+        let rec kernelSig (k: IRExpr) : (string list * IRType list * IRType * IRExpr option * string) option =
+            match calleeOf letValues k with
+            | Some c when isSection c -> None
+            | Some c -> Some (c.Params |> List.map (fun p -> p.Name), c.Params |> List.map (fun p -> p.Type), c.RetType, Some c.Body, calleeName (Some c) k)
+            | None ->
+                match k with
+                // a COMPOSED kernel ( <$> (L <@> g) is L <@> (g then f)):
+                // its parameters are the first stage's, its result the last's
+                | IRCompose (first, second) ->
+                    (match kernelSig first, kernelSig second with
+                     | Some (n, ps, _, b, w), Some (_, _, r, _, _) -> Some (n, ps, r, b, w)
+                     | Some (n, ps, _, b, w), None -> Some (n, ps, IRTInfer 0, b, w)
+                     | _ -> None)
+                | _ ->
+                match tyOf k |> Option.map stripUnits with
+                | Some (FuncElem (ps, r)) -> Some (ps |> List.mapi (fun i _ -> $"#{i + 1}"), ps, r, None, calleeName None k)
+                // (an arrow of value slots: a kernel the checker synthesized)
+                | Some (IRTArrow (slots, r, _)) when slots |> List.forall (function SVal _ -> true | _ -> false) ->
+                    let ps = slots |> List.choose (function SVal t -> Some t | _ -> None)
+                    Some (ps |> List.mapi (fun i _ -> $"#{i + 1}"), ps, r, None, calleeName None k)
+                | _ -> None
+        // One value handed to parameter i of a kernel.
+        let judgeSlot (k: IRExpr) (i: int) (given: ValueClass) (numeric: bool) (role: string) =
+            match kernelSig k with
+            | Some (names, ps, _, _, what) when i < ps.Length ->
+                (match clash numeric given (cls ps.[i]) with
+                 | Some (lossyNum, a, p) -> refuse (codeOf lossyNum) SrcLoc.Nowhere (argMessage i names.[i] (what + role) lossyNum a p)
+                 | None -> ())
+            | _ -> ()
+        // A fold: each cell into the kernel's second parameter, the seed (or,
+        // unseeded, the first cell) into its accumulator, and the kernel's
+        // result into its next accumulator.
+        let judgeFold (k: IRExpr) (cell: IRType) (init: IRExpr option) =
+            // A COMPARISON section folded over NUMBERS returns a Bool that the
+            // fold feeds back into its numeric accumulator (`reduce(xs, (<), 0)`
+            // computes `acc < x` with acc a Bool after the first step). Sections
+            // are otherwise the checker's (kernelSig skips them); a comparison
+            // fold over Bools (`reduce(bs, (==))`) stays legal.
+            (match calleeOf letValues k with
+             | Some c when isSection c ->
+                 let op = let i = c.SourceName.IndexOf ')' in c.SourceName.Substring(1, i - 1)
+                 match op, cls cell with
+                 | ("<" | "<=" | ">" | ">=" | "==" | "!="), VCNum _ ->
+                     refuse "BL3001" SrcLoc.Nowhere
+                         $"arithmetic is defined on numbers only: the fold kernel ({op}) returns a Bool, which the fold feeds back into its accumulator as the next left operand, beside a number -- Blade converts nothing implicitly; fold with a kernel that returns the accumulator's type"
+                 | _ -> ()
+             | _ -> ())
+            match kernelSig k with
+            | Some (names, ps, ret, kbody, what) when ps.Length = 2 ->
+                judgeSlot k 1 (cls cell) true " (a fold kernel)"
+                (match init with
+                 | Some i ->
+                     (match tyOf i with
+                      | Some it -> judgeSlot k 0 (cls it) (not (isLiteral i)) " (a fold kernel, its seed)"
+                      | None -> ())
+                 | None -> judgeSlot k 0 (cls cell) true " (a fold kernel, its first cell as the accumulator)")
+                match clash true (cls ret) (cls ps.[0]) with
+                | Some (lossyNum, a, p) ->
+                    // at the kernel's own body (its result is the defect)
+                    let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
+                    refuse (codeOf lossyNum) loc
+                        $"the {what} (a fold kernel) returns {article a}, but its accumulator parameter `{names.[0]}` is {className p}: each step's result would be converted into the next, and Blade converts nothing implicitly (formalism 2.4) -- annotate the kernel's parameters"
+                | None -> ()
+            | _ -> ()
+        // A DEFERRED binding's value (an alias chain of deferred stages); a
+        // materialized one (`|> compute`) is a stored array: the emitter
+        // resolves only its deferred computations, so the walk stops there.
+        let deferredValue (id: IRId) : IRExpr option =
+            let v =
+                match letValues.TryGetValue id with
+                | true, v -> Some v
+                | _ -> match programLets.TryGetValue id with | true, v -> Some v | _ -> None
+            match v with
+            | Some (IRCompute _) -> None
+            | v -> v
+        // The kernel an `@>>` right stage contributes: the emitter's
+        // extractInlinableKernel (a map's kernel, through named deferred stages;
+        // a functor-wrapped stage's inner kernel, composed BEFORE the wrapper,
+        // so the value goes to that kernel first).
+        let rec stageKernel (fuel: int) (e: IRExpr) =
+            match e with
+            | IRApplyCombinator info -> Some info.Kernel
+            // (a wrapped stage contributes its WHOLE composition, the inner
+            // kernel first and the wrapper after it: extractInlinableKernel's
+            // IRCompose(k, f))
+            | IRFunctorMap (f, inner) -> stageKernel fuel inner |> Option.map (fun k -> IRCompose (k, f))
+            | IRVar (id, _) when fuel > 0 -> deferredValue id |> Option.bind (stageKernel (fuel - 1))
+            | _ -> None
+        // The emitter's resolveComputation: the wrappers `<$>` and `@>>` stack
+        // over a computation (through guards and named deferred stages) are
+        // composed into its map's kernel. Over a REYNOLDS map they run inside
+        // the symmetrized kernel, whose terms are SUMMED: every one of them must
+        // return a number.
+        let judgeReynoldsWrappers (e: IRExpr) =
+            let rec walk (fuel: int) (e: IRExpr) (wrappers: IRExpr list) : (IRExpr * IRExpr list) list =
+                // (bindings are acyclic, so the walk ends; a budget it could
+                // still exhaust fails CLOSED -- an unjudged stack is never passed)
+                if fuel <= 0 then
+                    refuse "BL3001" SrcLoc.Nowhere "a chain of more than a million named <$> / @>> stages cannot be judged by the numbers-only rule: compute an intermediate stage (|> compute)"
+                else
+                match e with
+                | IRFunctorMap (f, inner) -> walk fuel inner (f :: wrappers)
+                | IRGuard (_, body) -> walk fuel body wrappers
+                // an INLINE compute is peeled, its wrappers kept (resolveComputation);
+                // a NAMED materialized binding stops the walk (deferredValue)
+                | IRCompute inner -> walk fuel inner wrappers
+                | IRComposeMeth (left, right) ->
+                    (match stageKernel 1000000 right with
+                     | Some k -> walk fuel left (k :: wrappers)
+                     | None -> [ (e, wrappers) ])
+                // the emitter DISTRIBUTES pending wrappers over both alternatives
+                // of <|> (f <$> (c1 <|> c2) = (f <$> c1) <|> (f <$> c2))
+                | IRChoice (l, r) -> walk fuel l wrappers @ walk fuel r wrappers
+                | IRVar (id, _) ->
+                    (match deferredValue id with
+                     | Some v -> walk (fuel - 1) v wrappers
+                     | None -> [ (e, wrappers) ])
+                | _ -> [ (e, wrappers) ]
+            for core in walk 1000000 e [] do
+                match core with
+                // the stack's LAST stage produces the summed term (every boundary
+                // between stages is a judged argument binding of its own)
+                | (IRApplyCombinator info, (_ :: _ as wrappers))
+                    when (info.HasReynolds || (match info.Kernel with IRReynolds _ -> true | _ -> false))
+                         && (match kernelSig (fst (IR.peelReynolds info.Kernel)) with
+                             | Some (_, ps, _, _, _) -> ps.Length >= 2
+                             | None -> true) ->
+                    let w = List.last wrappers
+                    match kernelSig w with
+                        | Some (_, _, ret, kbody, what) ->
+                            let rec elemOf (c: ValueClass) = match c with VCArray x -> elemOf x | c -> c
+                            (match elemOf (cls ret) with
+                             | VCNum _ | VCOpen -> ()
+                             | r ->
+                                 let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
+                                 refuse "BL3001" loc
+                                     ($"arithmetic is defined on numbers only: a `<$>` / `@>>` stage over a reynolds(..) map runs inside the symmetrized kernel, whose values are summed over the permutations, and the {what} returns {article r}; Blade converts nothing implicitly -- return a number, or apply the stage to the computed map"))
+                        | None -> ()
+                | _ -> ()
+        // The nodes INSIDE a wrapper stack (a stage's operand): the stack is judged
+        // once, at its root, where its last stage's value is consumed.
+        let stackInner = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
+        iterIRExpr (fun n ->
+            match n with
+            | IRFunctorMap (_, inner) | IRComposeMeth (inner, _) | IRGuard (_, inner) ->
+                let rec add (e: IRExpr) =
+                    stackInner.Add e |> ignore
+                    match e with IRCompute i -> add i | _ -> ()
+                add inner
+            | IRChoice (l, r) ->
+                let rec add (e: IRExpr) =
+                    stackInner.Add e |> ignore
+                    match e with IRCompute i -> add i | _ -> ()
+                add l
+                add r
+            | _ -> ()) body
+        // A module binding bound to a DEFERRED wrapper stack is not computed at
+        // its own site (it prints as <deferred ..>): its stack is judged where
+        // a use forces it (the walk follows deferred bindings).
+        if deferredRoot then stackInner.Add body |> ignore
+        iterIRExpr (fun n ->
+            // the numbers-only operand judgment (check 1d), at the node's span:
+            // the LAST sweep, so a call that hands a parameter the wrong value
+            // is named first (the callee's body is typed at that parameter)
+            if phase = 2 then
+                match numbersOnlyClashes n with
+                | msg :: _ ->
+                    let m = System.Text.RegularExpressions.Regex.Match(msg, @"^(BL\d{4}): (.*)$", System.Text.RegularExpressions.RegexOptions.Singleline)
+                    let loc = match n with IRBinOp (_, _, _, _, l) -> l | _ -> SrcLoc.Nowhere
+                    if m.Success then refuse m.Groups.[1].Value loc m.Groups.[2].Value
+                | [] -> ()
+            else
+            match n with
+            | IRAppAt (f, args, retTy, loc) when phase = 0 ->
+                let callee = calleeOf letValues f
+                let what = calleeName callee f
+                let slots : (string * IRType) list option =
+                    match callee with
+                    | Some c -> Some (c.Params |> List.map (fun p -> (p.Name, p.Type)))
+                    | None ->
+                        match tyOf f |> Option.map stripUnits with
+                        | Some (FuncElem (ps, _)) -> Some (ps |> List.mapi (fun i p -> ($"#{i + 1}", p)))
+                        | _ -> None
+                // An operator SECTION bound as a value (`let f = (+)`) is lifted
+                // over Float64 parameters whatever it is applied to: its
+                // arguments are judged against the operator itself.
+                let sectionOp =
+                    match callee with
+                    | Some c when isSection c ->
+                        let i = c.SourceName.IndexOf ')'
+                        if i > 1 then Some (c.SourceName.Substring(1, i - 1)) else None
+                    | _ -> None
+                match sectionOp with
+                | Some op ->
+                    let rec scalarOf (c: ValueClass) = match c with VCArray e -> scalarOf e | c -> c
+                    args |> List.iteri (fun i arg ->
+                        match tyOf arg |> Option.map (cls >> scalarOf) with
+                        | Some (VCOpen | VCNum _) | None -> ()
+                        | Some VCString when op = "+" -> ()
+                        | Some VCBool when op = "&&" || op = "||" -> ()
+                        | Some a ->
+                            match op with
+                            | "+" | "-" | "*" | "/" | "%" | "^" ->
+                                let castHint =
+                                    match a with
+                                    | VCBool -> " -- convert it explicitly with a numeric cast (`Int64(b)` or `Float64(b)` is 1 or 0)"
+                                    | _ -> " -- pass a number"
+                                refuse "BL3001" loc $"arithmetic is defined on numbers only: the section `({op})` is applied to {article a} (argument {i + 1}), and Blade converts nothing implicitly{castHint}"
+                            | "&&" | "||" ->
+                                refuse "BL3001" loc $"a logical operator takes Bools only: the section `({op})` is applied to {article a} (argument {i + 1}), and Blade converts nothing implicitly"
+                            | _ -> ())
+                | None ->
+                    match slots with
+                    | Some ps ->
+                        List.zip (List.truncate ps.Length args) (List.truncate args.Length ps)
+                        |> List.iteri (fun i (arg, (pname, pTy)) ->
+                            match tyOf arg with
+                            | Some aTy ->
+                                match clash (not (isLiteral arg)) (cls aTy) (cls pTy) with
+                                | Some (lossyNum, a, p) -> refuse (codeOf lossyNum) loc (argMessage i pname what lossyNum a p)
+                                // INTEGER NARROWING at a call (an Int64 argument into an
+                                // Int32 parameter, declared or decided by an earlier call
+                                // or a generic): the call wrapped it silently. Refused
+                                // unless the argument is proven to fit (fitsInt32). Judged
+                                // at calls only: a kernel slot's parameter types may not be
+                                // the ones its emitted body computes in (a fold kernel
+                                // inlined over its cells).
+                                | None when not (isLiteral arg)
+                                            && (let rec scalarOf (c: ValueClass) = match c with VCArray e -> scalarOf e | c -> c
+                                                scalarOf (cls aTy) = VCNum ETInt64 && scalarOf (cls pTy) = VCNum ETInt32)
+                                            && not (cls aTy = VCNum ETInt64 && fitsInt32 facts arg) ->
+                                    refuse "BL3020" loc
+                                        ($"argument {i + 1} of this call is {article (cls aTy)}, but parameter `{pname}` of the {what} is {className (cls pTy)} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): "
+                                         + "the call would convert it, wrapping it into the narrower integer when it does not fit, and Blade converts nothing implicitly (formalism 2.4); "
+                                         + "an Int64 argument is passed to an Int32 parameter only where it is statically proven to fit (an integer literal, or a loop ordinal bounded by a static extent -- a `let rec` step -- "
+                                         + "through `let` aliases and `+` / `-` of an integer literal) -- convert it at the call (`Int32(x)`), or declare the parameter Int64")
+                                | None ->
+                                    // A FUNCTION ARGUMENT: the slot's parameter types are
+                                    // what the callee will hand the function's own
+                                    // definition (resolved through aliases), and its
+                                    // return what the callee expects back.
+                                    match stripUnits pTy, calleeOf letValues arg with
+                                    | FuncElem (sps, sret), Some g when sps.Length = g.Params.Length && not (isSection g) ->
+                                        List.zip sps g.Params
+                                        |> List.iteri (fun j (sp, gp) ->
+                                            match clash true (cls sp) (cls gp.Type) with
+                                            | Some (lossyNum, a, p) ->
+                                                let gName = (calleeName (Some g) arg).Replace("called ", "")
+                                                refuse (codeOf lossyNum) loc
+                                                    ($"argument {i + 1} of this call is the function {gName}, and the {what} will call it with {article a} as argument {j + 1}, but its parameter `{gp.Name}` is {className p} (a parameter its body left open is decided by its first use or its default): "
+                                                     + "Blade converts nothing implicitly -- annotate the function's parameter with the type the callee passes")
+                                            | None -> ())
+                                        match clash true (cls g.RetType) (cls sret) with
+                                        | Some (lossyNum, r, t) ->
+                                            refuse (codeOf lossyNum) loc
+                                                $"argument {i + 1} of this call is a function returning {article r}, but the {what} expects one returning {className t}: Blade converts nothing implicitly"
+                                        | None -> ()
+                                    | _ -> ()
+                            | None -> ())
+                        // the call's result, against the callee's own return
+                        match callee with
+                        | Some c when args.Length = ps.Length ->
+                            (match clash true (cls c.RetType) (cls retTy) with
+                             | Some (lossyNum, r, t) ->
+                                 refuse (codeOf lossyNum) loc
+                                     ($"this call is typed {className t}, but the {what} returns {article r} (its body was typed before this call, at its first use or its parameters' defaults): "
+                                      + "the result would be converted, and Blade converts nothing implicitly (formalism 2.4) -- annotate the callee's parameters, or convert explicitly")
+                             | None -> ())
+                        | _ -> ()
+                    | None -> ()
+            | _ when phase = 0 -> ()
+            // KERNEL SLOTS (the SECOND sweep): every node that applies a callable
+            // without an IRAppAt hands a value to a parameter of the kernel's
+            // signature (kernelSig: its definition, else its own function type).
+            | IRReduce (arr, k, init) ->
+                (match tyOf arr |> Option.bind cellOf with
+                 | Some cell -> judgeFold k cell init
+                 | None -> ())
+            // The FUSED terminal: a fold over a deferred map (or a fusion tree of
+            // maps). Each leaf's map is the IRApplyCombinator child the map arm
+            // judges; its cells are folded by the leaf's own kernel and seed (a
+            // reduction join: one tuple entry per leaf), or, for ONE leaf, by the
+            // shared kernel. A shared kernel over several leaves folds the TUPLE
+            // of their values, which the checker types as one tuple state.
+            | IRReduceCompute (comp, kernel, init) ->
+                let rec leaves (e: IRExpr) =
+                    match e with
+                    | IRFusion (l, r) -> leaves l @ leaves r
+                    | IRCompute inner -> leaves inner
+                    | e -> [ e ]
+                let ls = leaves comp
+                let leafCell (e: IRExpr) =
+                    match e with
+                    | IRApplyCombinator info -> cellOf info.OutputType
+                    | _ -> tyOf e |> Option.bind cellOf
+                // (every leaf folds into its OWN scalar accumulator, a shared
+                // kernel and seed included: CodeGenBinding's one accumulator per
+                // leaf, cc = kernel(acc, cell))
+                let pairs =
+                    let seeds =
+                        match init with
+                        | IRTuple is when is.Length = ls.Length -> is |> List.map Some
+                        | i -> ls |> List.map (fun _ -> Some i)
+                    match kernel with
+                    | IRTuple ks when ks.Length = ls.Length -> List.zip3 ls ks seeds
+                    | IRTuple _ -> []
+                    | k -> List.zip3 ls (ls |> List.map (fun _ -> k)) seeds
+                for (leaf, k, i) in pairs do
+                    match leafCell leaf with
+                    | Some cell -> judgeFold k cell i
+                    | None -> ()
+            // `wrapper <$> comp`: the wrapper receives each cell comp yields.
+            | IRFunctorMap (wrapper, comp) ->
+                (match tyOf comp |> Option.bind cellOf with
+                 | Some cell -> judgeSlot wrapper 0 (cls cell) true " (a `<$>` wrapper, given each cell)"
+                 | None -> ())
+                if not (stackInner.Contains n) then judgeReynoldsWrappers n
+            // `left @>> right`: right's kernel receives each value left yields.
+            | IRComposeMeth (left, right) ->
+                (match stageKernel 1000000 right, tyOf left |> Option.bind cellOf with
+                 | Some k, Some cell -> judgeSlot k 0 (cls cell) true " (an `@>>` stage, given each value of the stage before it)"
+                 | _ -> ())
+                if not (stackInner.Contains n) then judgeReynoldsWrappers n
+            // `reynolds(k)`: the kernel's values over the permutations of its
+            // arguments are SUMMED (with multiplicities, a sign for anticomm), so
+            // its result must be a number whatever its parameters are.
+            | IRReynolds (k, _) ->
+                // (only a kernel of two or more parameters is summed over permutations;
+                // a unary reynolds is the kernel itself: CodeGenLoopNest / Interp)
+                (match kernelSig k with
+                 | Some (_, ps, ret, kbody, what) when ps.Length >= 2 ->
+                     let rec elemOf (c: ValueClass) = match c with VCArray e -> elemOf e | c -> c
+                     (match elemOf (cls ret) with
+                      | VCNum _ | VCOpen -> ()
+                      | r ->
+                          let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
+                          let castHint = match r with VCBool -> " -- convert it explicitly in the kernel (`Int64(b)` or `Float64(b)` is 1 or 0)" | _ -> " -- return a number"
+                          refuse "BL3001" loc
+                              ($"arithmetic is defined on numbers only: reynolds(..) sums the values of the {what} over the permutations of its arguments, and it returns {article r}; Blade converts nothing implicitly{castHint}"))
+                 | _ -> ())
+            // `object_for(f) >>@ object_for(g)`: g receives what f returns.
+            | IRComposeObj (IRObjectFor lo, IRObjectFor ro) ->
+                (match kernelSig lo.Kernel with
+                 | Some (_, _, ret, _, _) -> judgeSlot ro.Kernel 0 (cls ret) true " (a `>>@` stage, given what the stage before it returns)"
+                 | None -> ())
+            | IRMask (arr, k) | IRSort (arr, k) ->
+                (match tyOf arr |> Option.bind cellOf with
+                 | Some cell -> judgeSlot k 0 (cls cell) true " (a per-element kernel)"
+                 | None -> ())
+            | IRApplyCombinator info when not info.HasReynolds ->
+                (match kernelSig info.Kernel with
+                 | Some (names, ps, ret, kbody, what) when ps.Length = info.Arrays.Length
+                                                          && info.KernelInputRanks.Length = info.Arrays.Length
+                                                          && info.ArrayTypes.Length = info.Arrays.Length ->
+                     List.zip3 info.Arrays info.ArrayTypes (List.zip3 names ps info.KernelInputRanks)
+                     |> List.iteri (fun i (arr, at, (pname, pTy, irank)) ->
+                         // a range / halo operand's cells are index values (Int64
+                         // ordinals or a window), never a Bool, a String or a struct
+                         match arr with
+                         | IRRange _ | IRVirtualReverse _ -> ()
+                         | _ ->
+                             // a cell (input rank 0) or a row (an array of the operand's element)
+                             let given = if irank = 0 then cls at.ElemType else VCArray (cls at.ElemType)
+                             match clash true given (cls pTy) with
+                             | Some (lossyNum, a, pc) -> refuse (codeOf lossyNum) SrcLoc.Nowhere (argMessage i pname (what + " (a map kernel)") lossyNum a pc)
+                             | None -> ())
+                     // ...and the kernel's RESULT against the map's cells (a kernel
+                     // whose tail call was typed at a cell's type while the callee
+                     // returns its parameters' default)
+                     match stripUnits info.OutputType with
+                     | ArrayElem oa when info.KernelOutputRank = 0 ->
+                         (match clash true (cls ret) (cls oa.ElemType) with
+                          | Some (lossyNum, r, t) ->
+                              let rec tailLoc (e: IRExpr) =
+                                  match e with
+                                  | IRAppAt (_, _, _, l) when not (isNull l) && l.Span.StartLine > 0 -> l
+                                  | IRLet (_, _, b) -> tailLoc b
+                                  | IRCompute inner -> tailLoc inner
+                                  | _ -> SrcLoc.Nowhere
+                              let loc = match kbody with Some b -> (let l = tailLoc b in if l.Span.StartLine > 0 then l else firstLoc b) | None -> SrcLoc.Nowhere
+                              refuse (codeOf lossyNum) loc
+                                  ($"the map's cells are {className t}, but its kernel returns {article r} (a lambda whose parameter its body left open is typed at its first use or its default, never by a later argument): "
+                                   + "the value would be converted, and Blade converts nothing implicitly (formalism 2.4) -- annotate the lambda's parameter with the cell's type, or convert explicitly")
+                          | None -> ())
+                     | _ -> ()
+                 | _ -> ())
+            // `comp >>= cont`: the continuation's parameter receives comp's value.
+            | IRBind (comp, cont) ->
+                (match tyOf comp with
+                 | Some ct ->
+                     let given = match stripUnits ct with IRTComputation inner -> inner | t -> t
+                     judgeSlot cont 0 (cls given) true " (a `>>=` continuation)"
+                 | None -> ())
+            // a guard can root a wrapper stack too (resolveComputation passes it)
+            | IRGuard _ -> if not (stackInner.Contains n) then judgeReynoldsWrappers n
+            // ...and so can a choice, and a USE of a named deferred stack: every
+            // forcing site (a compute, a fold, an operand) is where the emitter
+            // resolves the stack the binding holds
+            | IRChoice _ -> if not (stackInner.Contains n) then judgeReynoldsWrappers n
+            | IRVar (id, _) ->
+                if not (stackInner.Contains n) then
+                    // (through alias chains: `let alias = flags`)
+                    let rec isStack (fuel: int) (v: IRExpr option) =
+                        match v with
+                        | Some (IRFunctorMap _ | IRComposeMeth _ | IRGuard _ | IRChoice _) -> true
+                        | Some (IRVar (id2, _)) when fuel > 0 -> isStack (fuel - 1) (deferredValue id2)
+                        | _ -> false
+                    if isStack 1000000 (deferredValue id) then judgeReynoldsWrappers n
+            // A struct literal's field values against the declared field types.
+            | IRStructLit (typeName, fields) ->
+                (match Map.tryFind typeName structFields with
+                 | Some declared ->
+                     for (fname, fe) in fields do
+                         match List.tryFind (fun (n, _) -> n = fname) declared, tyOf fe with
+                         | Some (_, fty), Some aty ->
+                             (match clash (not (isLiteral fe)) (cls aty) (cls fty) with
+                              | Some (lossyNum, a, p) ->
+                                  refuse (codeOf lossyNum) SrcLoc.Nowhere
+                                      $"the field `{fname}` of a {Blade.Types.TypeOrigins.sourceName typeName} literal is given {article a}, but it is declared {className p}: Blade converts nothing implicitly"
+                              | None -> ())
+                         | _ -> ()
+                 | None -> ())
+            | _ -> ()) body
+    // Constant-scrutinee matches folded first, as the optimizer folds them: an
+    // arity-polymorphic instance's arms for OTHER ranks are dead there.
+    let fold (e: IRExpr) = IRMono.foldConstMatchesExpr e
+    let roots =
+        [ for m in modules do
+            for b in m.Bindings do
+                // (a deferred stack, or an alias chain to one: not computed here)
+                let rec deferredStackValue (fuel: int) (v: IRExpr) =
+                    match v with
+                    | IRFunctorMap _ | IRComposeMeth _ | IRGuard _ | IRChoice _ -> true
+                    | IRVar (id, _) when fuel > 0 ->
+                        (match programLets.TryGetValue id with
+                         | true, (IRCompute _) -> false
+                         | true, v2 -> deferredStackValue (fuel - 1) v2
+                         | _ -> false)
+                    | _ -> false
+                let deferredStack = deferredStackValue 1000000 b.Value
+                yield (b.Name, b.Name, "", deferredStack, fold b.Value)
+            for f in m.Functions do
+                let instance =
+                    if f.Name <> f.SourceName && f.Name.Contains "_HM_" && not f.Params.IsEmpty then
+                        let ps = f.Params |> List.map (fun p -> $"{p.Name}: {ppIRType p.Type}") |> String.concat ", "
+                        $" (in the instance of '{f.SourceName}' at {ps})"
+                    else ""
+                yield (f.Name, f.SourceName, instance, false, fold f.Body)
+            // executable side-table payloads (a top-level compound / random /
+            // sparse constructor's operands: the binding's value is a unit there)
+            for root in Optimize.compactionRoots m.Functions m do
+                match root with
+                | Optimize.RootSideOperand (b, _, e) -> yield (b.Name, b.Name, "", false, fold e)
+                | _ -> () ]
+    // ...and the expressions the types along every root carry (a range bound,
+    // a computed extent), which the expression walk does not enter
+    let roots =
+        roots @ (roots |> List.collect (fun (d, s, i, _, body) ->
+                    Optimize.embeddedExtentExprs body |> List.map (fun x -> (d, s, i, false, fold x))))
+    allBodies <- roots |> List.map (fun (_, _, _, _, body) -> body)
+    // three sweeps, so the most direct cause is named: every call's arguments,
+    // then every kernel slot, then every operand
+    for phase in [ 0; 1; 2 ] do
+        for (declName, sourceName, instance, deferredRoot, body) in roots do
+            check phase declName sourceName instance deferredRoot body
+
 /// Two shapes the lanes cannot give ONE meaning, refused here so every lane
 /// (C++, LLVM, the interpreter -- all lower through this pass) reports the
 /// same diagnostic (round 3 wave 4, W4-1; formalism 10.2). COMPLETE rather
@@ -3689,19 +4491,15 @@ let private refuseForeignKernelCaptures (modules: IRModule list) : unit =
 /// BL4005 -- every lane and the interpreter agree. Binders that only CARRY
 /// storage (a tuple, a struct) do not make two arrays one. A walk that runs out
 /// of budget refuses (fail closed).
-let private refuseAliasedMutArgumentsWith
-        (origins: Map<IRId, IRId>)
-        (allBindings: IRBinding list) (allFuncs: IRCallable list) (funcs: Map<IRId, IRCallable>)
-        (lets: System.Collections.Generic.Dictionary<IRId, IRExpr>) (deferred: Set<IRId>)
-        (resolve: IRExpr -> IRCallable option)
-        (storageOf: int -> IRCallable option -> IRExpr -> Set<IRId> option)
-        (exprHoldsStorage: IRExpr -> bool)
-        (sites: (Blade.Ast.Span * IRCallable option * IRExpr) list) : unit =
-    let moduleIds = allBindings |> List.map (fun b -> b.Id) |> Set.ofList
-    let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
-    // the declared mut positions (TypeCheck publishes them by binder id); a
-    // specialization answers through its ORIGIN (IRModule.DerivedFuncOrigins,
-    // never a display name: Codex diff review round 2)
+/// The declared `mut` parameter positions of a callable (TypeCheck publishes
+/// them by binder id); a specialization answers through its ORIGIN
+/// (IRModule.DerivedFuncOrigins, never a display name: Codex diff review round
+/// 2). A lambda declares none; an ETA WRAPPER of a named function forwards its
+/// parameters to that function's positions. Shared by the mut-argument
+/// judgment and D9's protected-parameter roots (deep review R12).
+let private mutParamPositionsOf
+        (origins: Map<IRId, IRId>) (funcs: Map<IRId, IRCallable>)
+        (resolve: IRExpr -> IRCallable option) (c0: IRCallable) : int list =
     let rec positionsOf (c: IRCallable) : int list =
         // a LAMBDA declares no mut parameter: a clone of one inherits none
         // (DerivedFuncOrigins files it under its enclosing function, for
@@ -3741,6 +4539,19 @@ let private refuseAliasedMutArgumentsWith
                  positionsOf g |> List.choose (fun k -> if k < args.Length then paramIndex args.[k] else None)
              | _ -> [])
         | _ -> []
+    positionsOf c0
+
+let private refuseAliasedMutArgumentsWith
+        (origins: Map<IRId, IRId>)
+        (allBindings: IRBinding list) (allFuncs: IRCallable list) (funcs: Map<IRId, IRCallable>)
+        (lets: System.Collections.Generic.Dictionary<IRId, IRExpr>) (deferred: Set<IRId>)
+        (resolve: IRExpr -> IRCallable option)
+        (storageOf: int -> IRCallable option -> IRExpr -> Set<IRId> option)
+        (exprHoldsStorage: IRExpr -> bool)
+        (sites: (Blade.Ast.Span * IRCallable option * IRExpr) list) : unit =
+    let moduleIds = allBindings |> List.map (fun b -> b.Id) |> Set.ofList
+    let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+    let positionsOf (c: IRCallable) : int list = mutParamPositionsOf origins funcs resolve c
     // the module bindings a callable reads by name, through the callables it
     // names (calls, kernels, captures) -- transitively
     // (reads, untraced): untraced when a body the callee may run APPLIES a
@@ -4204,8 +5015,22 @@ let private refuseAliasedMutArgumentsWith
             | _ -> ()) (IRSequence (siteRoots owner root))
 
 let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit =
+    // (BLADE_PHASE_TIMING: the pass's parts, printed at its end)
+    let swParts = System.Diagnostics.Stopwatch.StartNew()
+    let parts = ResizeArray<string * int64>()
+    let part (name: string) = parts.Add((name, swParts.ElapsedMilliseconds)); swParts.Restart()
     let (funcs, lets, mutableLets, _chaseAlias, resolve, _facts) = programWriteContext modules
     let allBindings = modules |> List.collect (fun m -> m.Bindings)
+    // a root with the expressions its types carry, computed once per root (R12's
+    // three scans share it)
+    let extentRootsCache = System.Collections.Generic.Dictionary<IRExpr, IRExpr list>(HashIdentity.Reference)
+    let withExtents (e: IRExpr) =
+        match extentRootsCache.TryGetValue e with
+        | true, l -> l
+        | _ ->
+            let l = e :: Optimize.embeddedExtentExprs e
+            extentRootsCache.[e] <- l
+            l
     let allFuncs = modules |> List.collect (fun m -> m.Functions)
     let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
     let isArrayTy (t: IRType) = match stripUnits t with ArrayElem _ -> true | _ -> false
@@ -4281,14 +5106,26 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // ---- the written binders ----------------------------------------------------
     // Every rebinding of a name (`row = m(1)`) is another value it may hold.
     let rebinds = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRExpr>>()
+    // (R12: the expressions types carry are walked too. A store INTO a struct
+    // field, `b.r = d(0)`, is NOT recorded as a value `b` may hold: tracking
+    // what a field holds apart from the struct that holds it is the staged
+    // carrier-provenance class -- see formalism 2.7's "not covered")
+    let installedName (target: IRExpr) =
+        match target with
+        | IRVar (id, _) -> Some id
+        | _ -> None
     let noteRebinds (e: IRExpr) =
-        iterIRExpr (fun n ->
-            match n with
-            | IRAssign (IRVar (id, _), rhs) ->
-                (match rebinds.TryGetValue id with
-                 | true, l -> l.Add rhs
-                 | _ -> rebinds.[id] <- ResizeArray [ rhs ])
-            | _ -> ()) e
+        for r in withExtents e do
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (target, rhs) ->
+                    (match installedName target with
+                     | Some id ->
+                         (match rebinds.TryGetValue id with
+                          | true, l -> l.Add rhs
+                          | _ -> rebinds.[id] <- ResizeArray [ rhs ])
+                     | None -> ())
+                | _ -> ()) r
     for b in allBindings do noteRebinds b.Value
     for f in allFuncs do noteRebinds f.Body
     // the side tables' payloads too (G190 (c): their calls are judged; Codex
@@ -4333,6 +5170,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // `copyArr` of any pool rename, the interpreter's deep copy; corpus
     // loops/517 `rs`). The deferred-write and mut-argument judgments keep the
     // dense-only reading.
+    part "setup: context"
     let captureMode = ref false
     // The callables the program uses as VALUES (named anywhere but as the head
     // of a direct call: an argument, a let, a kernel, a returned closure): the
@@ -4343,12 +5181,15 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         let heads = System.Collections.Generic.Dictionary<IRId, int>()
         let bump (d: System.Collections.Generic.Dictionary<IRId, int>) id =
             d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 1)
+        // (the expressions types carry too: a callable handed on inside a range
+        // bound is a value use -- R12's per-site candidates rely on this set)
         let scan (e: IRExpr) =
-            iterIRExpr (fun n ->
-                match n with
-                | IRVar (id, _) when Map.containsKey id funcs -> bump all id
-                | IRApp (IRVar (id, _), _, _) when Map.containsKey id funcs -> bump heads id
-                | _ -> ()) e
+            for r in withExtents e do
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRVar (id, _) when Map.containsKey id funcs -> bump all id
+                    | IRApp (IRVar (id, _), _, _) when Map.containsKey id funcs -> bump heads id
+                    | _ -> ()) r
         for b in allBindings do scan b.Value
         for f in allFuncs do scan f.Body
         for (_, e) in sidePayloads do scan e
@@ -4356,6 +5197,97 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             let n = match all.TryGetValue c.Id with | true, n -> n | _ -> 0
             let h = match heads.TryGetValue c.Id with | true, n -> n | _ -> 0
             n > h)
+    let valueUsedIds = valueUsedCallables |> List.map (fun c -> c.Id) |> Set.ofList
+    let origins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
+    // Every parameter binder, with its callable and position (deep review
+    // R12: a non-`mut` parameter is a protected root of the D9 judgment, and
+    // a function-valued parameter's candidates are its callable's arguments).
+    let paramOwners = System.Collections.Generic.Dictionary<IRId, IRCallable * int>()
+    for f in allFuncs do
+        f.Params |> List.iteri (fun i p -> paramOwners.[p.VarId] <- (f, i))
+    // The parameter a call head names, when it is one: an IRParam of the
+    // owner by name, or a parameter binder by id (the owner's, or one an
+    // enclosing callable's lambda captured).
+    let paramOfHead (owner: IRCallable option) (f: IRExpr) : (IRCallable * int) option =
+        match f with
+        | IRParam (nm, _, _) ->
+            owner |> Option.bind (fun c ->
+                c.Params |> List.tryFindIndex (fun p -> p.Name = nm) |> Option.map (fun i -> (c, i)))
+        | IRVar (vid, _) ->
+            (match paramOwners.TryGetValue vid with
+             | true, ci -> Some ci
+             | _ -> None)
+        | _ -> None
+    // Every DIRECT call of a callable, with the site's owner (to read an
+    // IRParam argument): `callable id -> (owner, args)` list.
+    let directCalls = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRCallable option * IRExpr list>>()
+    let noteCalls (owner: IRCallable option) (e: IRExpr) =
+        for r in withExtents e do
+            iterIRExpr (fun n ->
+                match n with
+                | IRApp (IRVar (id, _), args, _) when Map.containsKey id funcs ->
+                    (match directCalls.TryGetValue id with
+                     | true, l -> l.Add((owner, args))
+                     | _ -> directCalls.[id] <- ResizeArray [ (owner, args) ])
+                | _ -> ()) r
+    for b in allBindings do noteCalls None b.Value
+    for f in allFuncs do noteCalls (Some f) f.Body
+    for (_, e) in sidePayloads do noteCalls None e
+    part "setup: value uses and calls"
+    // THE CALLABLES A FUNCTION-VALUED PARAMETER MAY HOLD (deep review R12,
+    // defect 2): the arguments its callable receives at that position at
+    // every direct call -- a resolved callable, or, when the argument is
+    // itself a parameter of the caller, that parameter's candidates in turn.
+    // None (unknown: the caller falls back to every value-used callable) when
+    // the callable is itself used as a value (its calls are not all visible),
+    // a call supplies too few arguments (a partial application), or an
+    // argument is any other function value (a closure binder, an aggregate
+    // element, a call result).
+    let rec paramCandidatesFrom (seen: Set<IRId * int>) (c: IRCallable) (k: int) : IRCallable list option =
+        if seen.Contains (c.Id, k) then Some []
+        elif valueUsedIds.Contains c.Id then None
+        else
+            let seen = seen.Add (c.Id, k)
+            let sites = match directCalls.TryGetValue c.Id with | true, l -> List.ofSeq l | _ -> []
+            sites |> List.fold (fun acc (siteOwner, args) ->
+                match acc with
+                | None -> None
+                | Some cs ->
+                    if k >= args.Length then None
+                    else
+                        let a = args.[k]
+                        // a name whose alias chain passes a REBOUND binder
+                        // (`let h = fresh; h = ident; f(h)`) may hold any value
+                        // it was assigned: unknown (Codex review of R12)
+                        let rec rebound (seen: Set<IRId>) (x: IRExpr) =
+                            match x with
+                            | IRVar (id, _) when not (seen.Contains id) ->
+                                rebinds.ContainsKey id
+                                || (match lets.TryGetValue id with
+                                    | true, v -> rebound (seen.Add id) v
+                                    | _ -> false)
+                            | _ -> false
+                        match resolve a with
+                        | _ when rebound Set.empty a -> None
+                        | Some g -> Some (g :: cs)
+                        | None ->
+                            match paramOfHead siteOwner a with
+                            | Some (c2, k2) ->
+                                paramCandidatesFrom seen c2 k2 |> Option.map (fun more -> more @ cs)
+                            | None -> None) (Some [])
+    // The callables a call through the function-valued head `f` may run: its
+    // per-site candidates when `f` is a parameter, else every value-used
+    // callable of the call's arity (the reading before R12).
+    // (`arity` None: no arity filter, the write fixpoint's reading)
+    let fnValueCandidates (owner: IRCallable option) (f: IRExpr) (arity: int option) : IRCallable list =
+        let fits (c: IRCallable) = match arity with Some n -> c.Params.Length = n | None -> true
+        let fallback () = valueUsedCallables |> List.filter fits
+        match paramOfHead owner f with
+        | Some (c, k) ->
+            (match paramCandidatesFrom Set.empty c k with
+             | Some cs -> cs |> List.distinctBy (fun g -> g.Id) |> List.filter fits
+             | None -> fallback ())
+        | None -> fallback ()
     let isProvedCopy (id: IRId) (v: IRExpr) =
         match v with
         | IRVar (_, ty) ->
@@ -4437,19 +5369,11 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // (the walk is a union): a cyclic rebinding ends here, not at fuel
             | IRVar (id, _) when (exprHoldsStorage e || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
             | IRVar (id, _) when exprHoldsStorage e || deferred.Contains id ->
-                let viaInit =
-                    match lets.TryGetValue id with
-                    | true, v when path.IsEmpty && isProvedCopy id v -> Some Set.empty
-                    | true, v -> storageAt seen (fuel - 1) owner path v
-                    | _ ->
-                        // a match PATTERN variable: the part of the scrutinee
-                        // its pattern binds (finding 2's pattern-bound aliases)
-                        match patBinds.TryGetValue id with
-                        | true, (scrut, ppath) -> storageAt seen (fuel - 1) owner (ppath @ path) scrut
-                        | _ -> Some Set.empty
+                let viaInit = initStorageAt seen fuel owner path id
                 let viaRebinds =
                     match rebinds.TryGetValue id with
-                    | true, rs -> allAt path (List.ofSeq rs)
+                    | true, rs ->
+                        allAt path (List.ofSeq rs)
                     | _ -> Some Set.empty
                 (match viaInit, viaRebinds with
                  | Some a, Some b -> Some (Set.add id (Set.union a b))
@@ -4487,7 +5411,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // returns -- `function get() -> A = a` --, a capture). A callee
             // whose summary is unknown (in progress through recursion, or
             // untraced) keeps the conservative reading: every argument.
-            | IRApp (f, args, _) ->
+            | IRAppAt (f, args, _, _) ->
                 let conservative () = all ((if exprHoldsStorage f then [ f ] else []) @ (args |> List.filter exprHoldsStorage))
                 // STRICT MODE (G250 / Codex probe E): a storage-holding result of
                 // a call through a FUNCTION VALUE (a closure binder, a callback
@@ -4523,9 +5447,10 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                      // an unknown summary keeps the conservative reading
                      elif captureMode.Value && functionValueHead && not (exprHoldsStorage f)
                           && (match f with IRVar _ | IRParam _ -> true | _ -> false) then
+                         // (per call site since R12: the callables that can
+                         // reach a function-valued PARAMETER, fnValueCandidates)
                          let summaries =
-                             valueUsedCallables
-                             |> List.filter (fun c -> c.Params.Length = args.Length)
+                             fnValueCandidates owner f (Some args.Length)
                              |> List.map calleeReturnSummary
                          if summaries |> List.exists Option.isNone then conservative ()
                          else
@@ -4598,6 +5523,18 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // (EXHAUSTIVE over IRExpr, no wildcard: a form added later is an
             // incomplete-match warning here until it is classified, never
             // silently "fresh")
+    // What a name's INITIALIZER shares (its rebindings aside): none for a
+    // proved copy; a match pattern variable's part of its scrutinee.
+    and initStorageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (id: IRId) : Set<IRId> option =
+        match lets.TryGetValue id with
+        | true, v when path.IsEmpty && isProvedCopy id v -> Some Set.empty
+        | true, v -> storageAt seen (fuel - 1) owner path v
+        | _ ->
+            // a match PATTERN variable: the part of the scrutinee
+            // its pattern binds (finding 2's pattern-bound aliases)
+            match patBinds.TryGetValue id with
+            | true, (scrut, ppath) -> storageAt seen (fuel - 1) owner (ppath @ path) scrut
+            | _ -> Some Set.empty
     // The RETURN SUMMARY of a callable: (the argument positions whose storage
     // the return value may share, every other binder it may share -- a module
     // array, a capture, a callee-local let), from its body's own storage walk;
@@ -4670,6 +5607,36 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                 ownBinders.[c.Id] <- s
                 s
         own.Contains id
+    // A NON-`mut` PARAMETER is a protected root too (deep review R12, defect
+    // 1): `function touch(d: D) = { let mut v = d(0); v(1) = 7 }` writes the
+    // caller's array exactly as the direct `d(0, 1) = 7` the type checker
+    // refuses (parameters bind read-only unless declared `mut`). The root is
+    // judged for its own callable and for every callable that captures it
+    // (a lambda in its body), by the same walk and the same sharing forms.
+    // `mut` positions are mutParamPositionsOf's (an eta wrapper of a named
+    // function forwards that function's).
+    let mutPositionCache = System.Collections.Generic.Dictionary<IRId, Set<int>>()
+    let mutPositions (c: IRCallable) =
+        match mutPositionCache.TryGetValue c.Id with
+        | true, s -> s
+        | _ ->
+            let s = mutParamPositionsOf origins funcs resolve c |> Set.ofList
+            mutPositionCache.[c.Id] <- s
+            s
+    let protectedParam (id: IRId) : (string * string) option =
+        match paramOwners.TryGetValue id with
+        | true, (c, i) when not ((mutPositions c).Contains i) ->
+            let p = c.Params.[i]
+            let isFunctionTyped = (match stripUnits p.Type with FuncElem _ -> true | _ -> false)
+            if isFunctionTyped then None
+            elif c.Name.StartsWith "__lambda" then
+                Some ($"the lambda or kernel parameter `{p.Name}`, which is read-only (a lambda declares no `mut` parameter)",
+                      $"take a copy first (`let mut c = {p.Name}`) and write the copy, or hand the array to a named function whose parameter is `mut`")
+            else
+                let fname = if System.String.IsNullOrEmpty c.SourceName then c.Name else c.SourceName
+                Some ($"the parameter `{p.Name}` of `{fname}`, which is not `mut` (a parameter is read-only unless declared `mut`)",
+                      $"declare it `{p.Name}: mut ...` if the caller's array is meant to change, or take a copy first (`let mut c = {p.Name}`) and write the copy")
+        | _ -> None
     let capturedPlainLet (owner: IRCallable option) (id: IRId) : string option =
         match owner with
         | None -> None
@@ -4685,6 +5652,173 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                     | true, v when not (letMutBinders.Contains id) && typeIsArray v ->
                         Some "an array bound by a plain `let` of an enclosing function or block"
                     | _ -> None
+    // ---- WHAT A LOCAL HOLDS AT A WRITE (deep review R12, defect 4) ------------
+    // A whole `v = e` rebinds the name (formalism 2.7): after it, `v` no longer
+    // shares what it held before. The shared walk is flow-insensitive (a name
+    // that EVER held a view is judged as one at every later store), so the
+    // capture judgment reads, at each write / call / map node of a callable, the
+    // definitions of the callable's own lets that may REACH it: the initializer
+    // and the rebindings on some path from the let to the node. Straight-line
+    // code kills (`let t = G(0); t = [..]; t(0) = 9.0` writes the fresh array);
+    // the arms of an `if` / `match` join; any other form (a loop body, an
+    // operand of `&&`, a kernel slot) is ONE region whose rebindings all reach
+    // every node inside it and everything after it (no kill across it, so a
+    // repeated body sees its own later rebindings). A let is tracked only when
+    // no OTHER callable rebinds it (a lambda that rebinds a captured `let mut`
+    // may run at any of its calls); a node reached twice in the tree (a shared
+    // subtree) has no state. Only the root name of the target is read this way
+    // (`t(0)`, `t[1](0)`): every other name it reaches keeps the flow-
+    // insensitive reading, which is what an alias bound BEFORE the rebinding
+    // shares (`let w = t; t = [..]; w(0) = ..` still writes G).
+    let rebindOwners = System.Collections.Generic.Dictionary<IRId, System.Collections.Generic.HashSet<IRId>>()
+    let noteRebindOwner (ownerKey: IRId) (e: IRExpr) =
+        for r in withExtents e do
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (target, _) when (installedName target).IsSome ->
+                    let id = (installedName target).Value
+                    (match rebindOwners.TryGetValue id with
+                     | true, s -> s.Add ownerKey |> ignore
+                     | _ -> rebindOwners.[id] <- System.Collections.Generic.HashSet<IRId> [ ownerKey ])
+                | _ -> ()) r
+    // (module-level code and side payloads under a key no callable has)
+    let moduleKey : IRId = System.Int32.MinValue
+    for b in allBindings do noteRebindOwner moduleKey b.Value
+    for f in allFuncs do noteRebindOwner f.Id f.Body
+    part "setup: walk"
+    for (_, e) in sidePayloads do noteRebindOwner moduleKey e
+    part "setup: rebind owners"
+    let flowStates = System.Collections.Generic.Dictionary<IRId, System.Collections.Generic.Dictionary<IRExpr, Map<IRId, bool * IRExpr list> option>>()
+    let statesOf (c: IRCallable) =
+        match flowStates.TryGetValue c.Id with
+        | true, d -> d
+        | _ ->
+            let d = System.Collections.Generic.Dictionary<IRExpr, Map<IRId, bool * IRExpr list> option>(HashIdentity.Reference)
+            flowStates.[c.Id] <- d
+            // a name (re)bound inside an expression a TYPE carries (a range
+            // bound) is never tracked: those expressions are not children of
+            // the tree the flow walks, so their order is unknown here
+            let extentAssigned = System.Collections.Generic.HashSet<IRId>()
+            for r in Optimize.embeddedExtentExprs c.Body @ (c.Params |> List.collect (fun p -> Optimize.embeddedExtentExprs (IRVar (p.VarId, p.Type)))) do
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRAssign (target, _) -> (match installedName target with Some id -> extentAssigned.Add id |> ignore | None -> ())
+                    | _ -> ()) r
+            let onlyHere (id: IRId) =
+                not (extentAssigned.Contains id)
+                && (match rebindOwners.TryGetValue id with
+                    | true, s -> s.Count = 1 && s.Contains c.Id
+                    | _ -> false)
+            // nothing to kill without a rebinding of a tracked let
+            let anyKill =
+                let found = ref false
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRAssign (IRVar (id, _), _) when ownedBy c id && onlyHere id -> found.Value <- true
+                    | _ -> ()) c.Body
+                found.Value
+            if anyKill then
+                // the rebindings of tracked lets anywhere inside a node (memoized)
+                let inner = System.Collections.Generic.Dictionary<IRExpr, (IRId * IRExpr) list>(HashIdentity.Reference)
+                let rec rebindsIn (e: IRExpr) : (IRId * IRExpr) list =
+                    match inner.TryGetValue e with
+                    | true, l -> l
+                    | _ ->
+                        let own =
+                            match e with
+                            | IRAssign (target, rhs) ->
+                                (match installedName target with
+                                 | Some id when onlyHere id -> [ (id, rhs) ]
+                                 | _ -> [])
+                            | _ -> []
+                        let l = own @ (childrenOf e |> List.collect rebindsIn)
+                        inner.[e] <- l
+                        l
+                let addDefs (s: Map<IRId, bool * IRExpr list>) (adds: (IRId * IRExpr) list) =
+                    adds |> List.fold (fun (acc: Map<IRId, bool * IRExpr list>) (id, rhs) ->
+                        match acc.TryFind id with
+                        | Some (init, rs) when not (rs |> List.exists (fun r -> obj.ReferenceEquals(r, rhs))) -> acc.Add(id, (init, rhs :: rs))
+                        | _ -> acc) s
+                let join (a: Map<IRId, bool * IRExpr list>) (b: Map<IRId, bool * IRExpr list>) =
+                    b |> Map.fold (fun (acc: Map<IRId, bool * IRExpr list>) id (init, rs) ->
+                        match acc.TryFind id with
+                        | Some (init0, rs0) ->
+                            let merged = rs |> List.fold (fun l r -> if l |> List.exists (fun x -> obj.ReferenceEquals(x, r)) then l else r :: l) rs0
+                            acc.Add(id, (init0 || init, merged))
+                        | None -> acc.Add(id, (init, rs))) a
+                let record (n: IRExpr) (s: Map<IRId, bool * IRExpr list>) =
+                    if d.ContainsKey n then d.[n] <- None else d.[n] <- Some s
+                let rec flow (s: Map<IRId, bool * IRExpr list>) (e: IRExpr) : Map<IRId, bool * IRExpr list> =
+                    match e with
+                    | IRLet (id, v, b) ->
+                        let s1 = flow s v
+                        let s2 = if onlyHere id || not (rebindOwners.ContainsKey id) then s1.Add(id, (true, [])) else s1
+                        flow s2 b
+                    | IRSequence es -> es |> List.fold flow s
+                    | IRIf (cond, t, f) ->
+                        let s1 = flow s cond
+                        join (flow s1 t) (flow s1 f)
+                    | IRMatch (scrut, cases) ->
+                        let s1 = flow s scrut
+                        // a guard may run and fail before a later case: every
+                        // guard's rebindings reach every case
+                        let s1 = addDefs s1 (cases |> List.collect (fun cs -> match cs.Guard with Some g -> rebindsIn g | None -> []))
+                        (match cases with
+                         | [] -> s1
+                         | _ ->
+                             cases
+                             |> List.map (fun cs ->
+                                 (match cs.Guard with Some g -> flow s1 g |> ignore | None -> ())
+                                 flow s1 cs.Body)
+                             |> List.reduce join)
+                    | IRAssign (IRVar (id, _), rhs) when s.ContainsKey id && onlyHere id ->
+                        let s1 = flow s rhs
+                        s1.Add(id, (false, [ rhs ]))
+                    | _ ->
+                        let sIn = addDefs s (rebindsIn e)
+                        (match e with
+                         | IRAssign _ | IRApp _ | IRApplyCombinator _ -> record e sIn
+                         | _ -> ())
+                        for ch in childrenOf e do flow sIn ch |> ignore
+                        sIn
+                flow Map.empty c.Body |> ignore
+            d
+    // The storage the capture judgment reads for a write target (or a call /
+    // map argument) at `node`: the root name's reaching definitions when the
+    // flow above has them, else the capture walk.
+    let judgedStorage (owner: IRCallable option) (node: IRExpr) (e: IRExpr) : Set<IRId> option =
+        let normal () = storageOfCapture 48 owner e
+        let state =
+            match owner with
+            | Some c ->
+                (match (statesOf c).TryGetValue node with
+                 | true, s -> s
+                 | _ -> None)
+            | None -> None
+        match state with
+        | None -> normal ()
+        | Some s ->
+            let rec peel (x: IRExpr) (path: (int * bool) list) =
+                match x with
+                | IRIndex (a, _, _) | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRFieldAccess (a, _) -> peel a []
+                | IRTupleProj (a, k, flat) -> peel a ((k, flat) :: path)
+                | IRVar (id, _) when exprHoldsStorage x && not (deferred.Contains id) -> Some (id, path)
+                | _ -> None
+            match peel e [] with
+            | Some (id, path) when s.ContainsKey id ->
+                let (init, rhs) = s.[id]
+                let saved = captureMode.Value
+                captureMode.Value <- true
+                try
+                    let seen = System.Collections.Generic.HashSet<IRId * (int * bool) list>()
+                    let viaInit = if init then initStorageAt seen 48 owner path id else Some Set.empty
+                    rhs |> List.fold (fun acc r ->
+                        match acc, storageAt seen 47 owner path r with
+                        | Some a, Some b -> Some (Set.union a b)
+                        | _ -> None) viaInit
+                    |> Option.map (Set.add id)
+                finally captureMode.Value <- saved
+            | _ -> normal ()
     let written = System.Collections.Generic.HashSet<IRId>()
     let writeSite = System.Collections.Generic.Dictionary<IRId, Blade.Ast.Span>()
     let changed = ref true
@@ -4697,12 +5831,30 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // the fixpoint keeps the shared walk. Both are flow-insensitive -- a name
     // that EVER holds a view of a captured plain `let` is judged as one at
     // every later store through it.
-    let markWith (judgeCapture: bool) (span: Blade.Ast.Span) (owner: IRCallable option) (e: IRExpr) =
+    // (the first protected-parameter refusal, raised at the end of this pass)
+    let pendingParamRefusal : Blade.Diagnostics.Diagnostic option ref = ref None
+    // THE JUDGED WRITES (R12): the binders a JUDGED store may reach (the
+    // capture walk's reading). `written` is the deferred-write fixpoint's
+    // superset -- it also takes every array handed to a call the capture
+    // judgment proved writes nothing (an intrinsic, a kernel or callback that
+    // writes no parameter) and every whole rebinding -- so a callee's
+    // parameter in `written` alone does not make the caller's argument a
+    // write; one in `judgedWritten` does.
+    let judgedWritten = System.Collections.Generic.HashSet<IRId>()
+    let markWith (judgeCapture: bool) (span: Blade.Ast.Span) (owner: IRCallable option) (node: IRExpr) (e: IRExpr) =
         match storageOf 48 owner e with
         | Some ids ->
             if judgeCapture then
-                let judged = storageOfCapture 48 owner e |> Option.defaultValue ids
+                let judged = judgedStorage owner node e |> Option.defaultValue ids
                 for id in judged do
+                    if judgedWritten.Add id then changed.Value <- true
+                for id in judged do
+                    (match protectedParam id with
+                     | Some (what, remedy) when pendingParamRefusal.Value.IsNone ->
+                         pendingParamRefusal.Value <-
+                             Some (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
+                                     ($"a write through a view, an alias or a `mut` argument reaches {what}: it would change the array the caller passed (formalism 2.7). To write it, {remedy}."))
+                     | _ -> ())
                     match capturedPlainLet owner id with
                     | Some what ->
                         raise (Blade.Diagnostics.BladeDiagnosticException
@@ -4718,6 +5870,36 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                     (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints span
                         "a write whose target's storage could not be traced (through a storage-carrying form the provenance walk does not know, or more than 48 nested view, alias, projection or rebinding steps; a cycle of rebindings is followed once, not counted): it may write a deferred computation, which has no storage of its own (formalism 10.2). Bind the array the write is meant for with `|> compute` and write that name directly."))
     let mark = markWith true
+    // A map / composition applying kernel `k` to `arrays`: an operand is a
+    // judged write only when ITS parameter was (R12, Codex review: `method_for(a,
+    // b) <@> poke` with `poke(a: mut R, b: R)` writes a, not b); a multi-slot
+    // operand list that does not line up with the parameters judges every
+    // operand. The deferred-write fixpoint keeps its reading (every operand
+    // when any parameter is in `written`).
+    let markKernelOperands (span: Blade.Ast.Span) (owner: IRCallable option) (n: IRExpr) (k: IRCallable) (arrays: IRExpr list) =
+        let anyWritten = k.Params |> List.exists (fun p -> written.Contains p.VarId)
+        if k.Params.Length = arrays.Length then
+            List.zip k.Params arrays |> List.iter (fun (p, a) ->
+                if judgedWritten.Contains p.VarId then mark span owner n a
+                elif anyWritten then markWith false span owner n a)
+        elif k.Params |> List.exists (fun p -> judgedWritten.Contains p.VarId) then
+            arrays |> List.iter (mark span owner n)
+        elif anyWritten then
+            arrays |> List.iter (markWith false span owner n)
+    // a composition value through let / binding aliases, and its stage kernels
+    let rec compositionOfLocal (seen: Set<IRId>) (e: IRExpr) : IRExpr option =
+        match e with
+        | IRComposeObj _ | IRObjectFor _ -> Some e
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match lets.TryGetValue id with
+             | true, v -> compositionOfLocal (seen.Add id) v
+             | _ -> None)
+        | _ -> None
+    let rec stagesOfLocal (e: IRExpr) : IRExpr list =
+        match e with
+        | IRComposeObj (l, r) -> stagesOfLocal l @ stagesOfLocal r
+        | IRObjectFor oi -> [ oi.Kernel ]
+        | _ -> []
     // Every site, with its owner (the callable whose parameters an IRParam
     // names) and the span a refusal reports.
     let sites =
@@ -4727,20 +5909,26 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         match owner with
         | Some c -> c.Params |> List.map (fun p -> p.Name) |> Set.ofList
         | None -> Set.empty
+    part "setup: sites and spans"
     while changed.Value do
         changed.Value <- false
+        // (the expressions types carry too: a store inside a range bound is a
+        // store -- R12, Codex review)
         for (span, owner, root) in sites do
             let ownParams = paramNamesOf owner
             iterIRExpr (fun n ->
                 match n with
                 | IRAssign (target, _) ->
                     let wholeRebind = match target with IRVar _ -> true | _ -> false
-                    markWith (not wholeRebind) span owner target
+                    markWith (not wholeRebind) span owner n target
+
                 | IRApp (f, args, _) ->
                     (match resolve f with
                      | Some c ->
                          List.zip (List.truncate args.Length c.Params) (List.truncate c.Params.Length args)
-                         |> List.iter (fun (p, a) -> if written.Contains p.VarId then mark span owner a)
+                         |> List.iter (fun (p, a) ->
+                             if judgedWritten.Contains p.VarId then mark span owner n a
+                             elif written.Contains p.VarId then markWith false span owner n a)
                      | None ->
                          // a FUNCTION VALUE (a callback parameter, a function-
                          // typed name): its effects are unknown, so every array
@@ -4764,7 +5952,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                                  match f with
                                  | IRObjectFor info ->
                                      (match resolve info.Kernel with
-                                      | Some k -> k.Params |> List.exists (fun p -> written.Contains p.VarId)
+                                      | Some k -> k.Params |> List.exists (fun p -> judgedWritten.Contains p.VarId)
                                       | None ->
                                           match info.Kernel with
                                           | IRParam (nm, _, _) -> ownParams.Contains nm
@@ -4772,17 +5960,27 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                                  // a call through a function value writes what one
                                  // of the program's value-used callables writes:
                                  // judged only when one of them writes a parameter
+                                 // (per call site since R12: fnValueCandidates)
                                  | _ ->
-                                     valueUsedCallables |> List.exists (fun c ->
-                                         c.Params |> List.exists (fun p -> written.Contains p.VarId))
+                                     fnValueCandidates owner f None |> List.exists (fun c ->
+                                         c.Params |> List.exists (fun p -> judgedWritten.Contains p.VarId))
                              // (a tuple / struct carrying arrays too: finding 2)
-                             args |> List.iter (fun a -> if exprHoldsStorage a then markWith judgeArgs span owner a))
+                             args |> List.iter (fun a -> if exprHoldsStorage a then markWith judgeArgs span owner n a))
                 | IRApplyCombinator info ->
                     (match resolve info.Kernel with
-                     | Some k when k.Params |> List.exists (fun p -> written.Contains p.VarId) ->
-                         info.Arrays |> List.iter (mark span owner)
+                     | Some k -> markKernelOperands span owner n k info.Arrays
                      | _ -> ())
-                | _ -> ()) root
+                // an APPLIED composition: its FIRST stage receives the applied
+                // arrays (R12, Codex review: `p <@> v` with `p = object_for(poke)
+                // >>@ ..` writes v through poke's `mut` parameter)
+                | IRComposeApply info ->
+                    (match compositionOfLocal Set.empty info.Composition |> Option.map stagesOfLocal with
+                     | Some (k0 :: _) ->
+                         (match resolve k0 with
+                          | Some k -> markKernelOperands span owner n k info.InputArrays
+                          | None -> ())
+                     | _ -> ())
+                | _ -> ()) (IRSequence (withExtents root))
     for id in written do
         if deferred.Contains id then
             let (what, remedy) = describe id
@@ -4792,8 +5990,9 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // the side tables' payloads are call sites too (a random fill's
     // parameter, a compound / sparse operand: Codex diff review round 2)
     let sideSites = sidePayloads |> List.map (fun (b, e) -> (IR.declSpanOf b.Name, None, e))
-    let origins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
+    part "write fixpoint"
     refuseAliasedMutArgumentsWith origins allBindings allFuncs funcs lets deferred resolve storageOfStrict exprHoldsStorage (sites @ sideSites)
+    part "mut arguments"
     // ---- if values over computed arrays -----------------------------------------
     let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
     // The deferred binders a piece of an arm READS: its references plus the
@@ -4987,7 +6186,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // a CALL (eleventh look, finding 1): the callee expression and every
             // argument left to right first, then the invocation -- a barrier (its
             // body is not entered)
-            | IRApp (f, args, _) -> (match first f with Some ev -> Some ev | None -> seqOperands args barrier)
+            | IRAppAt (f, args, _, _) -> (match first f with Some ev -> Some ev | None -> seqOperands args barrier)
             | IRProdSum es -> seqOperands es barrier
             // control: the condition / scrutinee runs first; the next event is in
             // an arm or case, which is conditional
@@ -5225,8 +6424,19 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             checkIfs (IR.declSpanOf b.Name) false moduleForced b.Value
             moduleForced <- Set.union moduleForced (dominatingForces b.Value)
     for f in allFuncs do checkIfs (funcSpan f) true Set.empty f.Body
+    part "if values"
+    if Blade.Toolchain.envFlag "BLADE_PHASE_TIMING" false then
+        eprintfn "[phase] write rules: %s" (parts |> Seq.map (fun (n, ms) -> sprintf "%s %d ms" n ms) |> String.concat ", ")
+    // R12's protected-parameter refusal comes LAST, so a program every other
+    // rule of this pass already refuses keeps that rule's diagnostic
+    match pendingParamRefusal.Value with
+    | Some d -> raise (Blade.Diagnostics.BladeDiagnosticException d)
+    | None -> ()
 
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
+    // (BLADE_PHASE_TIMING: the lowering up to and through the write rules --
+    // what an editor tier reporting them would pay; deep review R12, gap 5)
+    let swLower = System.Diagnostics.Stopwatch.StartNew()
     // The scratch-reuse plan is keyed by let id and let ids restart per
     // compile, so a stale plan from an earlier program in this flow (the test
     // harness compiles hundreds) must never reach this one.
@@ -5364,6 +6574,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     let irModules = irModules |> List.map inlineModuleFunctionAliases
     refuseUncountableStorage irModules
     refuseUnorderableSortKeys irModules
+    // R11: every call's arguments and every arithmetic operand, at the instance
+    // (before the optimizer inlines a call boundary away).
+    refuseArgumentConversions irModules
     // G45: an effectful named map runs once, at its definition, in every
     // scope (before the join refusal: a join over a stored map writes nothing)
     let irModules =
@@ -5371,7 +6584,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         irModules |> List.map (forceEffectfulModuleLets allFuncs)
     refuseWritingJoinLegs irModules
     refuseForeignKernelCaptures irModules
+    let swRules = System.Diagnostics.Stopwatch.StartNew()
     refuseDeferredWritesAndUnorderedIfs irModules
+    if Blade.Toolchain.envFlag "BLADE_PHASE_TIMING" false then
+        eprintfn "[phase] lower: through the write rules: %d ms (the rules alone: %d ms)" swLower.ElapsedMilliseconds swRules.ElapsedMilliseconds
 
     // Every struct the program declares, for `zero` at a struct type
     // (IRMono.resolveTypedZerosModule): the struct may live in another module

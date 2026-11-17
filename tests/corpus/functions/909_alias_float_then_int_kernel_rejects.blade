@@ -1,0 +1,16 @@
+// TEST: An Aliased Lambda Given A Float Then An Int64 Cell Is Refused (rejects)
+// ERROR: BL3020 @ 12:46
+// ERROR-CONTAINS: the map's cells are Int64
+// ============================================================================
+// R11: `g(3.0)` makes g's parameter a Float64; the kernel's `g(v)` over Int64
+// cells was typed Int64 and g++ refused the narrowing (BL9002).
+// ============================================================================
+function test() = {
+    let f = lambda(x) -> x / 2
+    let g = f
+    let a = g(3.0)
+    let xs: Array<Int64 like Idx<2>> = [3, 5]
+    let ys = method_for(xs) <@> lambda(v) -> g(v) |> compute
+    (a, ys)
+}
+let r = test()

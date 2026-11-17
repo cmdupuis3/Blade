@@ -1,0 +1,17 @@
+// TEST: A Block Lambda Given A Number Then A Generic Bool Is Refused (rejects)
+// ERROR: BL3001 @ 14:5
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11 (deep review): `f(1)` decides f's open parameter (Int32); `f(b)` then
+// hands it outer's generic parameter, instantiated at Bool by `outer(true)`.
+// The checker links rather than unifies a single-value callee's open
+// parameter, so the instance passed a Bool to an Int32 parameter and
+// computed `1 + 1 = 2` silently. Refused at the call `f(b)`, after
+// monomorphization (Lowering.refuseArgumentConversions).
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    let a = f(1)
+    f(b)
+}
+let r = outer(true)

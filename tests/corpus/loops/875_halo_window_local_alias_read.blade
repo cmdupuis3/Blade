@@ -1,0 +1,9 @@
+// TEST: A Halo Window Renamed By A Local Let And Read In The Kernel Computes
+// EXPECT: g = [3.0, 6.0, 12.0]
+// ============================================================================
+// R11 accepted twin of loops/871: the renamed window is read where it is
+// bound.
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> { let v = w; a(v(1)) - a(v(-1)) } |> compute

@@ -1,0 +1,11 @@
+// TEST: A Stored Section Applied To Generic Number Cells Computes
+// EXPECT: r = [3.0, 5.0]
+// ============================================================================
+// R11 accepted twin of functions/901.
+// ============================================================================
+function outer(b) = {
+    let f = (+)
+    method_for(b) <@> lambda(v) -> f(v, v) |> compute
+}
+let xs: Array<Float64 like Idx<2>> = [1.5, 2.5]
+let r = outer(xs)

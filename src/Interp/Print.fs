@@ -195,6 +195,31 @@ let rec private formatAggregate (name: string) (types: IRTypeDef list) (ap: Blad
                     | None -> bad $"struct value has no field '{f}'")
             Blade.Types.TypeOrigins.sourceName sn + " { " + String.concat ", " items + " }"
         | _ -> bad $"no struct value of type '{sn}'"
+    // A sum-type value (the display form only): its constructor, and its
+    // payload in parentheses -- byte-twin of genPrintAggregate's APVariant arm.
+    // The interpreter tags a variant by its constructor name's hash
+    // (Core.fs), so the declared list is searched for that name.
+    | Blade.CodeGen.APUnits (p, suffix) -> formatAggregate name types p t v + suffix
+    | Blade.CodeGen.APVariant (vn, ctors, _) ->
+        match v with
+        | VVariant (_, tag, payload) ->
+            let declared =
+                types |> List.tryPick (function
+                    | IRTDVariant (n, vs) when n = vn -> Some vs
+                    | _ -> None)
+            let hit =
+                ctors |> List.tryFindIndex (fun (c, _) ->
+                    hash c = tag || hash (Blade.CodeGen.variantCtorDisplayName c) = tag)
+            match hit, declared with
+            | Some k, Some vs ->
+                let (c, p) = ctors.[k]
+                let nm = Blade.CodeGen.variantCtorDisplayName c
+                match p, payload, snd vs.[k] with
+                | None, _, _ -> nm
+                | Some pp, Some pv, Some pt -> nm + "(" + formatAggregate name types pp pt pv + ")"
+                | _ -> bad $"variant '{vn}': constructor '{c}' has no payload value"
+            | _ -> bad $"variant '{vn}': no constructor with tag {tag}"
+        | _ -> bad $"no variant value of type '{vn}'"
 
 /// The interpreter twin of genPrintStatements' `--print` refusal: an AMBIENT
 /// selection (BLADE_PRINT) naming something that is not a top-level binding,
@@ -292,18 +317,32 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 match td with
                 | IRTDStruct (sn, fs) when sn = n -> Some fs
                 | _ -> None)
+        // a sum type's constructors with their payload types (R3 keys inside
+        // a variant payload print as keys too: Codex review of P3-26)
+        let variantCtorsOf (n: string) =
+            irModule.Types |> List.tryPick (fun td ->
+                match td with
+                | IRTDVariant (vn, vs) when vn = n -> Some vs
+                | _ -> None)
         let key (keys: int64[]) (v: Value) =
             match v with
             | VInt p when p >= 0L && p < int64 keys.Length -> VInt keys.[int p]
             | VInt32 p when p >= 0 && p < keys.Length -> VInt keys.[p]
             | _ -> v
-        let rec mentionsKeys (fuel: int) (t: IRType) =
-            fuel > 0 &&
-            (match stripUnits t with
-             | ArrayElem at -> mentionsKeys (fuel - 1) at.ElemType
-             | IRTTuple ts -> ts |> List.exists (mentionsKeys (fuel - 1))
-             | IRTNamed n -> structFieldsOf n |> Option.exists (List.exists (fun (_, ft) -> mentionsKeys (fuel - 1) ft))
-             | t -> (keysOf t).IsSome)
+        // (cycle-detecting over NAMED types, not depth-limited: a key under any
+        // number of struct / variant / tuple / array levels is a key -- Codex
+        // review of P3-26 found eight nested variants exhausting a depth of 8)
+        let rec mentionsKeysIn (seen: Set<string>) (t: IRType) =
+            match stripUnits t with
+            | ArrayElem at -> mentionsKeysIn seen at.ElemType
+            | IRTTuple ts -> ts |> List.exists (mentionsKeysIn seen)
+            | IRTNamed n when not (seen.Contains n) ->
+                let seen = seen.Add n
+                (structFieldsOf n |> Option.exists (List.exists (fun (_, ft) -> mentionsKeysIn seen ft)))
+                || (variantCtorsOf n |> Option.exists (List.exists (fun (_, pt) -> pt |> Option.exists (mentionsKeysIn seen))))
+                || (keysOf t).IsSome
+            | t -> (keysOf t).IsSome
+        let mentionsKeys (_: int) (t: IRType) = mentionsKeysIn Set.empty t
         let rec mapValue (fuel: int) (t: IRType) (v: Value) : Value =
             if fuel <= 0 then v else
             match keysOf t, stripUnits t, v with
@@ -340,6 +379,10 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                  | _ -> v)
             | None, IRTTuple ts, VTuple vs when ts.Length = vs.Length ->
                 VTuple (Array.map2 (mapValue (fuel - 1)) (List.toArray ts) vs)
+            | None, IRTNamed n, VVariant (tn, tag, Some pv) when (variantCtorsOf n).IsSome ->
+                (match (variantCtorsOf n).Value |> List.tryFind (fun (c, _) -> hash c = tag || hash (Blade.CodeGen.variantCtorDisplayName c) = tag) with
+                 | Some (_, Some pt) -> VVariant (tn, tag, Some (mapValue (fuel - 1) pt pv))
+                 | _ -> v)
             | None, IRTNamed n, VStruct (sn, fs) ->
                 (match structFieldsOf n with
                  | Some decl ->
@@ -357,7 +400,8 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
         else
             fun (id: IRId) ->
                 match lookup id, Map.tryFind id keyedTypes with
-                | Some v, Some t -> Some (mapValue 16 t v)
+                // (the value is a finite tree: the walk ends with it)
+                | Some v, Some t -> Some (mapValue System.Int32.MaxValue t v)
                 | v, _ -> v
     // Timing line first, mirroring genMainWrapper, where `timing` precedes
     // `printCode`. Constant elapsed (gate-stripped); see module header.
@@ -433,7 +477,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             // (formatAggregate over CodeGen.aggregatePrintOf) -- the twin of
             // genPrintStatements' arm: `pts = [P { x = 1.0, y = 2.0 }, ...]`.
             // No element print form, or rank > 1 -> CodeGen comment, nothing.
-            match Blade.CodeGen.aggregatePrintOf irModule.Types arrType.ElemType with
+            match Blade.CodeGen.aggregatePrintOfForm irModule.Types arrType.ElemType with
             | Some ap when rank = 1 ->
                 match lookup b.Id with
                 | Some (VArray ba) ->
@@ -504,7 +548,29 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 | None ->
                     raise (PrintUnsupported $"array binding '{b.Name}': no evaluated value")
 
+    // THE DISPLAY PRINT FORM (P3-26; Blade.PrintForm): floats at their
+    // shortest digits for the whole pass (CppFormat.withDisplay), and each
+    // binding's line framed like genPrintStatements' displayFraming -- a bare
+    // expression drops its `__exprN = ` label, a unit-carrying value closes
+    // with its unit.
+    let display = Blade.PrintForm.current () = Blade.PrintForm.Display
+    let frame (b: IRBinding) (start: int) =
+        if display && sb.Length > start then
+            let text = sb.ToString(start, sb.Length - start)
+            let label = b.Name + " = "
+            let text =
+                if Blade.CodeGen.isExprCarrierName b.Name && text.StartsWith label then text.Substring label.Length
+                else text
+            let text =
+                match Blade.CodeGen.printUnitSuffixOf b.Type with
+                | "" -> text
+                | suffix when text.EndsWith "\n" -> text.Substring(0, text.Length - 1) + suffix + "\n"
+                | _ -> text
+            sb.Remove(start, sb.Length - start).Append(text) |> ignore
+    CppFormat.withDisplay display (fun () ->
     for b in irModule.Bindings do
+      let start = sb.Length
+      (
         // isPrintable: a faithful mirror of CodeGen.genPrintStatements'
         // per-binding gate. A binding does not print if it is deferred, is a
         // streamed provider read, or is an unmaterialized loop value
@@ -560,7 +626,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 // Tuples and structs in their literal spelling; one with no
                 // print form (a variant, a function component) prints nothing,
                 // as genPrintStatements' twin arm does.
-                match Blade.CodeGen.aggregatePrintOf irModule.Types b.Type with
+                match Blade.CodeGen.aggregatePrintOfForm irModule.Types b.Type with
                 | Some ap ->
                     match lookup b.Id with
                     | Some v ->
@@ -572,4 +638,6 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             | IRTNamed _ -> ()
             | IRTUnit -> ()      // genPrintStatements: [] -- unit prints nothing
             | _ -> ()            // function values (IRTArrow non-array), inference vars, etc.
+      )
+      frame b start)
 

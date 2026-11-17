@@ -1,0 +1,15 @@
+// TEST: a write through a view inside a range bound (rejects)
+// ERROR: BL4005 @ 8:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review; Codex review of the fix, class closure): a store inside an
+// expression a type carries is a store: it writes the captured plain `g` (it
+// used to compile).
+let g = [[1.0, 2.0], [3.0, 4.0]]
+function f() -> Float32 = {
+    let v = g(0)
+    let y = method_for(0..{ v(0) = 9.0; 2 })
+        <@> lambda(i) -> i |> compute
+    v(0)
+}
+let r = f()

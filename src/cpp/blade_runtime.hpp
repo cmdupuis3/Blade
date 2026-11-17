@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "blade_shortest.h"  // the display print form's float spelling (P3-26)
 #if !defined(__CUDA_ARCH__)
 // ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
 //
@@ -599,6 +600,12 @@ namespace blade_rt {
     return !(std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 || std::strcmp(e, "OFF") == 0
              || std::strcmp(e, "false") == 0);
   }
+  // THE DISPLAY PRINT FORM (P3-26; src/PrintForm.fs): set by a generated main
+  // built under BLADE_PRINT_FORM=display, before any print. A float then
+  // prints at its SHORTEST round-trip digits (blade_shortest.h, the text the
+  // LLVM shim runs too), and BLADE_PRINT_BITS -- a test instrument of the
+  // test form -- appends nothing.
+  inline bool& print_display_flag() { static bool f = false; return f; }
   struct float_put : std::num_put<char> {
     using base = std::num_put<char>;
     using iter_type = base::iter_type;
@@ -622,18 +629,28 @@ namespace blade_rt {
         return base::do_put(out, io, fill, v);
       const std::streamsize w = io.width(0);
       sink s;
-      base::do_put(iter_type(&s), io, fill, v);
-      std::size_t n = s.size();
-      std::size_t i = (n > 0 && (s.b[0] == '-' || s.b[0] == '+')) ? 1 : 0;
-      bool bare = n > i;
-      for (std::size_t k = i; k < n; ++k)
-        if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
-      if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
-      if constexpr (std::is_same<F, double>::value) {
-        if (bits_ && n + 20 < sizeof s.b) {
-          unsigned long long u;
-          std::memcpy(&u, &v, sizeof u);
-          n += (std::size_t)std::snprintf(s.b + n, sizeof s.b - n, " #%016llx", u);
+      std::size_t n;
+      std::size_t i;
+      if (print_display_flag()) {
+        // The display form: shortest round-trip digits, marked as a float
+        // (blade_shortest.h); no bit suffix.
+        blade_fmt_display_f64(s.b, sizeof s.b, static_cast<double>(v));
+        n = std::strlen(s.b);
+        i = (n > 0 && s.b[0] == '-') ? 1 : 0;
+      } else {
+        base::do_put(iter_type(&s), io, fill, v);
+        n = s.size();
+        i = (n > 0 && (s.b[0] == '-' || s.b[0] == '+')) ? 1 : 0;
+        bool bare = n > i;
+        for (std::size_t k = i; k < n; ++k)
+          if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
+        if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
+        if constexpr (std::is_same<F, double>::value) {
+          if (bits_ && n + 20 < sizeof s.b) {
+            unsigned long long u;
+            std::memcpy(&u, &v, sizeof u);
+            n += (std::size_t)std::snprintf(s.b + n, sizeof s.b - n, " #%016llx", u);
+          }
         }
       }
       // Re-apply the width the rendering was taken without.
@@ -673,6 +690,7 @@ namespace blade_rt {
     return b;
   }
   inline void fmt_f32(char* buf, std::size_t cap, float v) {
+    if (print_display_flag()) { blade_fmt_display_f32(buf, cap, v); return; }
     if (std::isnan(v)) std::snprintf(buf, cap, "nan");
     else if (std::isinf(v)) std::snprintf(buf, cap, v < 0.0f ? "-inf" : "inf");
     else {

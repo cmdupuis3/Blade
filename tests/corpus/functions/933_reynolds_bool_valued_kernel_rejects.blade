@@ -1,0 +1,12 @@
+// TEST: reynolds Of A Bool-Valued Kernel Is Refused (rejects)
+// ERROR: BL3001 @ 10:25
+// ERROR-CONTAINS: reynolds(..) sums the values of the called
+// ============================================================================
+// R11: the kernel's parameters are numbers, but reynolds sums its values
+// over the permutations of its arguments, and they are Bools: base printed
+// `r = [[true, true], [true, true]]` in both lanes.
+// ============================================================================
+let a = [1, 2]
+let b = [3, 4]
+let k = lambda(x, y) -> x < y
+let r = method_for(a, b) <@> reynolds(k) |> compute

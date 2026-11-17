@@ -1,0 +1,15 @@
+// TEST: A Mask Predicate Decided As A Float Over Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 8:1
+// ERROR-CONTAINS: (a per-element kernel)
+// ============================================================================
+// R11: `pred(1.0)` decided the predicate's parameter; `mask(b, pred)` over
+// outer's generic array, instantiated at Bool, converted each cell (accepted
+// on base). Refused at the enclosing declaration.
+// ============================================================================
+function outer(b) = {
+    let pred = lambda(x) -> x * x > 0.0
+    let a = pred(1.0)
+    let m = mask(b, pred)
+    reduce(Int64(m), (+))
+}
+let r = outer([true, false])

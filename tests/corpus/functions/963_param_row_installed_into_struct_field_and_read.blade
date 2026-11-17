@@ -1,0 +1,20 @@
+// TEST: a non-mut parameter row installed into a local struct field and read
+// R12 (deep review; Codex review of the fix, rounds 2-3): a store INTO a field
+// replaces the struct's member -- it writes the struct, never the cells of an
+// array the field held or now holds -- so installing views of the non-`mut`
+// parameter `d`, twice, and reading them writes nothing of the caller's
+// (a store THROUGH an installed view is the staged carrier-provenance class:
+// not judged, formalism 2.7).
+type R = Array<Float64 like Idx<3>>
+type D = Array<Float64 like Idx<2>, Idx<3>>
+let g: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+struct Box { r: R }
+function touch(d: D) -> Float64 = {
+    let b = Box { r = [0.0, 0.0, 0.0] }
+    b.r = d(0)
+    let first = b.r(1)
+    b.r = d(1)
+    first + b.r(1)
+}
+let z = touch(g)
+// EXPECT: z = 7.0

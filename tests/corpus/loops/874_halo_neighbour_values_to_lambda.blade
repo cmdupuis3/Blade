@@ -1,0 +1,11 @@
+// TEST: A Halo Kernel Passing Neighbour Values To A Lambda Computes
+// EXPECT: g = [3.0, 6.0, 12.0]
+// ============================================================================
+// R11 accepted twin of loops/871-873: read the window in the kernel, pass
+// the values.
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let d = lambda(l, r) -> r - l
+let d_alias = d
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> d(a(w(-1)), a(w(1))) |> compute

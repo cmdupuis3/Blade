@@ -4595,6 +4595,9 @@ let runtimeHeaderNames : string list =
       // BLADE_FRAME macro. Header-only, host-only (device passes see
       // no-op stubs); deployed unconditionally and included by every program.
       "blade_runtime.hpp"
+      // The display print form's float spelling (P3-26): included by
+      // blade_runtime.hpp, and by the LLVM shim (EmitLlvm.shimIncludedHeaders).
+      "blade_shortest.h"
       // Explicit private-spool artifacts include this protocol header. Keep
       // deployment/cache/cleanup on the shared registry like other runtimes;
       // deploying its bytes alone grants no disk or compiler admission.

@@ -1,0 +1,15 @@
+// TEST: A Generic Int64 Into A Lambda Parameter Decided As Int32 Is Refused (rejects)
+// ERROR: BL3020 @ 11:5
+// ERROR-CONTAINS: wrapping it into the narrower integer
+// ============================================================================
+// R11: `f(1)` decided f's parameter (Int32); `outer(big)` handed it an Int64
+// and the instance wrapped it silently: `r = 1410065408` for 2 * 5000000000.
+// Refused at `f(b)`, as a declared Int32 parameter already refuses an Int64.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    let a = f(1)
+    f(b)
+}
+let big: Int64 = 5000000000
+let r = outer(big)

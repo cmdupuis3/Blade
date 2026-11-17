@@ -1,0 +1,11 @@
+// TEST: A Halo Window Passed As An If Value To A Lambda That Applies It Is Refused (rejects)
+// ERROR: BL3001 @ 10:58
+// ERROR-CONTAINS: is a function its body applies
+// ============================================================================
+// R11: loops/225 with the window passed as `if true then w else w`.
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let d = lambda(w) -> a(w(Int64(1))) - a(w(-1))
+let d_alias = d
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> d(if true then w else w) |> compute

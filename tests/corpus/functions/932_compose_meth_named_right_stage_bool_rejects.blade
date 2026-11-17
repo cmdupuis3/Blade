@@ -1,0 +1,13 @@
+// TEST: A Named Method-Composition Stage Given Bool Values Is Refused (rejects)
+// ERROR: BL3001 @ 12:1
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: functions/929 with the right stage bound to a name first. Base
+// printed `r = [2.0, 0.0]` (the Bools doubled; the LLVM lane fell back to
+// C++).
+// ============================================================================
+let b = [true, false]
+let twice = lambda(x) -> x * 2.0
+let warm = twice(1.0)
+let right = method_for([1.0, 2.0]) <@> twice
+let r = ((method_for(b) <@> lambda(x) -> x) @>> right) |> compute

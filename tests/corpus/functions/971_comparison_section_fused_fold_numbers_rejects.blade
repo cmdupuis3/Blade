@@ -1,0 +1,10 @@
+// TEST: A Comparison Section Folding Number Cells Through A Fused Fold Is Refused (rejects)
+// ERROR: BL3001 @ 8:1
+// ERROR-CONTAINS: the fold kernel (<) returns a Bool
+// ============================================================================
+// R11: `(<)`'s Bool result is fed back beside the next number: base printed
+// `r = true` (C++) and `r = 1` (LLVM), and `s = r + 1 = 2` in both.
+// ============================================================================
+let xs: Array<Int64 like Idx<3>> = [1, 2, 3]
+let r = reduce(method_for(xs) <@> lambda(x) -> x, (<), Int64(0))
+let s = r + Int64(1)

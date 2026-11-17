@@ -1,0 +1,11 @@
+// TEST: An Int64 Value Into A Declared Int32 Parameter Is Refused (rejects)
+// ERROR: BL3020 @ 9:33
+// ERROR-CONTAINS: declare the parameter Int64
+// ============================================================================
+// R11: an Int64 argument is passed to an Int32 parameter only where it is
+// statically proven to fit. `n` is a parameter: nothing bounds it, and the
+// call would wrap 5000000000 to 705032704. Convert at the call or widen.
+// ============================================================================
+function g(i: Int32) -> Int32 = i + i
+function h(n: Int64) -> Int32 = g(n)
+let r = h(5000000000)

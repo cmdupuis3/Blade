@@ -27,7 +27,7 @@ let isInlineForm (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
     | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
     | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
@@ -89,7 +89,7 @@ let isStatementShaped (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRIndex _ | IRSlice _
-    | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _
+    | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _ | IRTupleCons _
     | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
     | IRParallel _ | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
@@ -133,7 +133,7 @@ let isDeferringForm (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
     | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
     | IRBind _ | IRParallel _ | IRFusion _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
@@ -168,7 +168,7 @@ let isGroupTableForm (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
     | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
     | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
@@ -211,7 +211,7 @@ let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
     | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _
     | IRBind _ | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _
@@ -272,8 +272,8 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
         | _ -> false
     match e with
     | IRCompute _ -> true
-    | IRApp (IRObjectFor _, _, _) -> true
-    | IRApp _ | IRIndex _ -> isArrayTyped ()
+    | IRAppAt (IRObjectFor _, _, _, _) -> true
+    | IRAppAt _ | IRIndex _ -> isArrayTyped ()
     // `m.matmul(A, B) * 2.0` puts a matmul directly in a loop form's Arrays
     // list. As an intrinsic node -- not a synthesized function-call IRApp,
     // which the line above already hoists -- it needs its own entry or the
@@ -360,7 +360,7 @@ let internal isArrayValuedSelect (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRMatch _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
     | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _
@@ -400,7 +400,7 @@ let internal isNestedLoopFormArg (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRFieldAccess _ | IRStructLit _ | IRIf _ | IRMatch _
     | IRLet _ | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
     | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _ | IRComposeMeth _
@@ -450,7 +450,7 @@ let internal isArrayFieldAccess (e: IRExpr) : bool =
     // Every other node: classified, not defaulted (P3-12) -- a new IRExpr
     // variant must be placed here or above, never fall through a wildcard.
     | IRLit _ | IRVar _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRArrayLit _ | IRIndex _
-    | IRSlice _ | IRCurry _ | IRApp _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
+    | IRSlice _ | IRCurry _ | IRAppAt _ | IRTuple _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRIf _ | IRMatch _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRComposeApply _ | IRBind _
     | IRParallel _ | IRFusion _ | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRComposeObj _
@@ -934,7 +934,7 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets binds (IRShift (arrFinal, d, off', bm))
 
     // Multi-child consumers (any arg can be an inline form)
-    | IRApp (fn, args, retTy) ->
+    | IRAppAt (fn, args, retTy, _) ->
         // Function args may contain inline IRArrayLit (e.g.,
         // `f([1.0, 2.0, 3.0])`) which can't render inline. Use the
         // extended helper that lifts both inline forms and IRArrayLit.

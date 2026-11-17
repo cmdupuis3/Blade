@@ -378,7 +378,12 @@ Float64 = 1` is refused; `1.0` is the float spelling), as a float is none for
 an integer one (BL3019's cast-site rounding is the only way down). A fixed
 non-literal argument must match the parameter without conversion: Float32
 into Float64, Int64 into Int32, and real into complex parameters all require
-an explicit cast. A literal adapts only within its own class.
+an explicit cast. The one exemption is an Int64 STATICALLY PROVEN to fit Int32:
+a `let rec` step ordinal (bounded by its axis's static extent), a `let` alias
+of a proven value, or `+` / `-` of one and an integer literal, passes to an
+Int32 parameter as it is; any other Int64 argument there is BL3020 at the call
+(`Int32(x)` at the call, or declare the parameter Int64). A literal adapts only
+within its own class.
 
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type. There is no promotion TYPE
@@ -475,27 +480,53 @@ it only when it was declared `let mut`: the declaration then says the state is
 shared. A write to a captured plain `let` is refused (BL4005, "declare it
 `let mut`, or return the new value"); a PARALLEL body may not write a captured
 binding of either spelling (§5.2). A `let` binding a body makes itself is its
-own, whatever outer name it shadows.
+own, whatever outer name it shadows. A PARAMETER is read-only unless declared
+`mut` (array parameters only; a lambda declares none), in its own callable and
+in every callable that captures it: writing it, directly or through anything
+that shares its storage, would change the array the caller passed.
 
 The rule is about STORAGE, not spelling, so it is judged in two places. The
 type checker refuses the direct store, whose target's root is the captured
-binding (`x = ..`, `A(i) = ..`, `p.f = ..`, `g[0](i) = ..`). A store that
-REACHES a captured plain `let` -- through a local view (`let t = G(0)`; a
-partial index is a view, not a copy), a tuple or struct member holding one, a
-rebinding, an `if` value, or a `mut` parameter the local is lent to -- is
-refused at lowering by the storage-provenance walk that also guards deferred
-maps (§10.2), with the same code. That walk is flow-insensitive and fails
-closed: a name that EVER holds a view of a captured plain `let` is judged as
-one at every later store through it, and a target whose storage cannot be
-traced is refused. A whole `v = e` -- of the callable's own local or of a
-captured `let mut` -- rebinds the name and writes nothing (a later store
-through `v` is judged by what `v` then holds); an assignable copy (`let mut c =
-G`, of a dense or a compact array) is its own storage.
-A call through a FUNCTION VALUE (a callback parameter, a function-typed name)
-is judged against every callable the program uses as a value: it may write
+binding or the parameter (`x = ..`, `A(i) = ..`, `p.f = ..`, `g[0](i) = ..`).
+A store that REACHES a captured plain `let` or a non-`mut` parameter --
+through a local view (`let t = G(0)`; a partial index is a view, not a copy),
+a tuple or struct member holding one, a rebinding, an `if` or `match` value, a
+callee that returns its argument, a `mut` parameter the local is lent to, or a
+lambda that captures it -- is refused at lowering by the storage-provenance
+walk that also guards deferred maps (§10.2), with the same code. The walk
+fails closed (a target whose storage cannot be traced is refused) and reads
+the NAME BEING WRITTEN by the definitions that may reach the store: a whole `v
+= e` of the callable's own local rebinds the name and writes nothing, and
+after it `v` holds only `e` on that path (`let t = G(0); t = [0.0, 0.0]; t(0)
+= 1.0` writes the fresh array); the arms of an `if` or `match` join (a
+rebinding on one arm only keeps what `v` held before), and inside any other
+form -- a loop body, an operand -- every rebinding reaches every store.
+Every OTHER name the target reaches is judged by everything it ever held: a
+tuple holding `v` bound before the rebinding (`let w = (v, 1.0)`) still holds
+the old storage. A local that another callable rebinds (a lambda over a
+captured `let mut`), or that is rebound inside an expression a type carries (a
+range bound), is judged by everything it ever held; a store inside such an
+expression is judged like any other. An assignable copy (`let mut c = G`, of a
+dense or a compact array) is its own storage. A map or a composition applying
+a kernel judges each operand by ITS parameter: only the operands in written
+positions are written.
+A call through a FUNCTION VALUE is judged against the callables that can
+reach it: for a function-valued PARAMETER, the arguments its callable
+receives in that position at every direct call (through callers that forward
+a parameter of their own); otherwise -- the callable itself used as a value,
+a partial application, an argument that is any other function value (a
+closure held by a binding, an aggregate element, a call result, a name that
+is rebound) -- every callable the program uses as a value. The call may write
 the arrays it is handed when one of them writes a parameter, and its result
-may share what one of them returns -- fail closed, so an unrelated callback
-that writes or returns its parameter makes every such call judged that way.
+may share what one of them returns.
+NOT COVERED (deep review R12, staged; the walk accepts these, for a captured
+plain `let` and a non-`mut` parameter alike): a view INSTALLED into a field, a
+tuple member or an array cell after the carrier was built (`b.r = G(0); let v
+= b.r; v(1) = ..`), a view held by an element of an array literal (`[Box { r =
+G(0) }]`), a direct call through a REBOUND function-valued local (`let h =
+fresh; h = ident; h(G(0))` is read as `fresh`), and a call through a closure
+returned by a call or held in a struct field, whose captured storage is not
+followed.
 
 A `let` (either spelling: both are assignable in their scope) whose value is
 an existing array holds a private DEEP COPY of it, with the source's storage
@@ -1026,6 +1057,35 @@ the same bytes (the compiled program, the interpreter, the LLVM back end, and
 the REPL/notebook echo, which shows the program's own output); under the
 `BLADE_PRINT_BITS` test instrument each float also carries its raw IEEE bits,
 16 hex digits for a Float64 and 8 for a Float32.
+
+**Two print forms.** Everything above is the TEST form: the spelling every
+`// EXPECT:` pin, doc fence, differential gate and harness reads, and what
+`blade test`, the REPL, notebooks and the editor print. The human-facing verbs
+(`blade run`, `compile`, `emit`, `plan`) default to the DISPLAY form instead
+(`--print-form test|display`, `BLADE_PRINT_FORM`; the default lives in one
+place, `Blade.PrintForm.cliDefault`). It differs in four ways and nowhere else
+(the labels, the rank regime and the selection are the test form's):
+
+- a float prints at its SHORTEST decimal that reads back to the same bits at
+  its own width -- a Float64 `1/3` is `0.3333333333333333`, `0.1 + 0.2` is
+  `0.30000000000000004`, a Float32 `1/3` is `0.33333334` -- laid out fixed for a
+  decimal exponent in [-4, 17) and as `d.ddde±dd` otherwise (`1e+20`, `1e-05`),
+  always visibly a float (`1.0`, `100.0`, `-0.0`); a complex value prints its
+  parts so; `BLADE_PRINT_BITS` appends nothing;
+- a unit-carrying value is followed by one space and its unit, an array's once
+  after its closing bracket (`dist = 10.0 meters`, `lens = [1.0, 2.5] meters`):
+  a quantity's own name, else the unit checker's spelling of the dims
+  (`meters / seconds`); a dimensionless value prints none;
+- a bare top-level expression prints its value with no `__exprN = ` label;
+- a sum-type value prints its constructor and its payload (`Circle(1.5)`,
+  `Empty`), and a tuple or struct holding one prints like its literal
+  (`Tagged { name = 7, shape = Square(2.0) }`) -- in the test form such a
+  binding prints nothing.
+
+All three lanes print the display form identically (one shortest-digit C
+text, `blade_shortest.h`, in both compiled lanes; the interpreter's twin is
+.NET's shortest round-trip digits laid out by the same rule; `blade test
+print-form`).
 
 ### 3.10 Index values and nominal typing
 

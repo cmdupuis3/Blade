@@ -1,0 +1,12 @@
+// TEST: A Guard-Rooted Bool Wrapper Over A reynolds Map Is Refused (rejects)
+// ERROR: BL3001 @ 10:38
+// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// ============================================================================
+// R11: the wrapper stack is rooted at a `guard(..)`, which the emitter
+// resolves through: base printed `r = [[true, true], [true, true]]`.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let r = guard(true, positive <$> (method_for(a, b) <@> reynolds(g))) |> compute

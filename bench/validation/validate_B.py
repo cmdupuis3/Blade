@@ -74,7 +74,7 @@ def run_dump(blade, kernel, saved, regime):
     if regime == "repro":
         env["BLADE_FP_REPRO"] = "1"
     src = os.path.join(HERE, "dump", f"{kernel}_dump.blade")
-    r = subprocess.run([blade, "run", src, "--print", ",".join(DUMPS[kernel])],
+    r = subprocess.run([blade, "run", src, "--print", ",".join(DUMPS[kernel]), "--print-form", "test"],  # parsed: the test print form (P3-26)
                        capture_output=True, text=True, env=env, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"{kernel}: blade run failed ({r.returncode}): {r.stderr[-2000:]}")

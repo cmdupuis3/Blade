@@ -322,54 +322,32 @@ let ifftDecl (name: string) (n: int) : FunctionDecl =
     mkFunc name [ ("xs", tyCplxArr n) ] (tyFloatArr n) (blockE (stmts, Some (v "xo")))
 
 // power -- |FFT(x)|^2 per bin (real)
+//
+// DECLARATIVE (P3-24): a map over the bins of the transform, each cell re^2 + im^2 of its bin in the order the loop it
+// replaced computed it -- written straight into the result, no zero-filled work array.
 let powerDecl (name: string) (n: int) (fftName: string) : FunctionDecl =
     let xk = idx "sx" (v "k")
-    let stmts =
-        [ sLet "sx" (syn (ExprApp (v fftName, [ v "x" ])))
-          sLetMut "p" (zerosLit n)
-          sFor "k" 0 n
-            [ sAssign (idx "p" (v "k"))
-                      (add (mul (realE xk) (realE xk)) (mul (imagE xk) (imagE xk))) ] ]
-    mkFunc name [ ("x", tyFloatArr n) ] (tyFloatArr n) (blockE (stmts, Some (v "p")))
+    let stmts = [ sLet "sx" (syn (ExprApp (v fftName, [ v "x" ]))) ]
+    let cell = add (mul (realE xk) (realE xk)) (mul (imagE xk) (imagE xk))
+    mkFunc name [ ("x", tyFloatArr n) ] (tyFloatArr n) (blockE (stmts, Some (mapRanges [ n ] [ "k" ] cell)))
 
 // polyspec -- order-k cross-polyspectrum (order = call-site arity)
 
 /// P(f_0..f_{k-2}) = X_1(f_0) *** X_{k-1}(f_{k-2}) * conj(X_k((Sum f) mod n)), a rank-(k-1) complex array. The order lives
-/// entirely in this F# generator: k fft calls, a (k-1)-deep loop nest, and a statically-unrolled complex product chain.
+/// entirely in this F# generator: k fft calls and a statically-unrolled complex product chain. DECLARATIVE (P3-24): the
+/// result is a map over its (k-1) frequency ranges, each cell the same left-associated product chain the loop nest
+/// stored (((X_1 * X_2) * ...) * conj(X_k)), written straight into the rank-(k-1) result -- no flat work array, no reshape.
 let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDecl =
     let outDims = List.replicate (k - 1) n
-    let outSize = prodInts outDims
     let fvars = [ for j in 0 .. k - 2 -> $"f{j}" ]
-    let strides = [ for j in 0 .. k - 2 -> prodInts (List.replicate (k - 2 - j) n) ]
-    let flatIdx =
-        List.map2 (fun fv st -> mul (v fv) (iLit st)) fvars strides
-        |> List.reduce add
     let ffts =
         [ for i in 1 .. k -> sLet $"s{i}" (syn (ExprApp (v fftName, [ v $"x{i}" ]))) ]
     let chain =
-        [ yield sLet "a1" (idx "s1" (v "f0"))
-          for j in 2 .. k - 1 do
-            yield sLet $"a{j}"
-                       (mul (v $"a{j - 1}") (idx $"s{j}" (v $"f{j - 1}"))) ]
-    let inner =
-        sLet "sm" (modE (fvars |> List.map v |> List.reduce add) (iLit n))
-        :: chain
-        @ [ sAssign (idx "pp" flatIdx)
-                    (mul (v $"a{k - 1}") (conjE (idx $"s{k}" (v "sm")))) ]
-    let stmts =
-        ffts
-        @ [ sLetMut "pp" (cplxZerosLit outSize) ]
-        @ loopNest fvars outDims inner
-    let body =
-        if k = 2 then
-            // Rank-1 output: the flat mut IS the result.
-            blockE (stmts, Some (v "pp"))
-        else
-            // Rank-(k-1): reshape the flat work array through a nested literal of runtime reads (element-type-agnostic,
-            // so the MathDecls helper serves complex cells too).
-            blockE (stmts @ [ sLet "po" (nestedFromFlatN "pp" outDims 0) ], Some (v "po"))
+        [ 2 .. k - 1 ] |> List.fold (fun acc j -> mul acc (idx $"s{j}" (v $"f{j - 1}"))) (idx "s1" (v "f0"))
+    let sm = modE (fvars |> List.map v |> List.reduce add) (iLit n)
+    let cell = mul chain (conjE (idx $"s{k}" sm))
     let ps = [ for i in 1 .. k -> ($"x{i}", tyFloatArr n) ]
-    mkFunc name ps (tyCplxTensor outDims) body
+    mkFunc name ps (tyCplxTensor outDims) (blockE (ffts, Some (mapRanges outDims fvars cell)))
 
 // fft2 / ifft2 -- separable 2-D DFT over a rank-2 field
 //

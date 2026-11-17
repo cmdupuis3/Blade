@@ -124,6 +124,22 @@ let private nonemptySubsets (k: int) : int list list =
 // P_S = Sum_t Prod_{l in S} row_l(t) replaces per-cell-per-order prodsum loops. Combinator algebra: rows -> zip -> shared
 // method_for -> one product kernel per multiset -> chain -> reduce((+)); single-leading-axis sources with static extents only.
 let private iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
+/// P3-24 declarative accumulation: the +0.0-seeded builtin-`(+)` fold of `term` over `var` in 0 .. n-1 (a static
+/// range) -- `reduce(method_for(range<Idx<n>>) <@> lambda(var) -> term, (+), Float64(0.0))`, the fused fold. Licensed:
+/// under BLADE_FP_REPRO=1 it is the ascending chain from +0.0, bitwise the `acc = 0.0; acc = acc + term` loop it
+/// replaces. Coordinates are read as `lo + var` (Int64), as the loop's were.
+let private rangeMapE (n: int) (var: string) (term: Expr) =
+    applyE (methodForE [ syn (ExprRange [ TyIdx (iLit n) ]) ])
+           (lambdaE [ { Name = var; Type = None; Default = None; NameSpan = noSpan } ] None term)
+let private sumFrom0E (src: Expr) = syn (ExprReduce (src, syn (ExprSection OpAdd), Some (asF64 (fLit 0.0)), None))
+let private sumOverE (n: int) (var: string) (term: Expr) = sumFrom0E (rangeMapE n var term)
+/// Two seeded `(+)` folds in ONE traversal: `let a, b = object_for(<&!>) <@> (reduce(ma, (+), 0.0), reduce(mb, (+),
+/// 0.0))` -- a reduction join, each leg its own ascending chain from +0.0.
+let private joinSums2 (aN: string) (bN: string) (ma: Expr) (mb: Expr) : Stmt =
+    StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar aN); synPat (PatVar bN) ]); Type = None
+              Value = applyE (syn (ExprObjectFor (syn (ExprSection OpFusion))))
+                             (syn (ExprTuple [ sumFrom0E ma; sumFrom0E mb ]))
+              Mutability = BindLet }
 
 /// Canonical (non-decreasing) label tuples of rank p over dim d, lex order.
 let private canonicalTuples (d: int) (p: int) : int list list =
@@ -2409,12 +2425,8 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
             // loglik's accumulation idiom, read through a `__` alias so the
             // synthesized-buffer gate applies.
             let srcN, sumN, iN, accN = nm "src", nm "sum", nm "i", nm "acc"
-            let sumVal =
-                syn (ExprBlock (
-                        [ sMutFloat accN (fLit 0.0)
-                          forIn iN (iLit 0) (iLit n)
-                              [ assignStmt (v accN) (addE (v accN) (appE (v srcN) [v iN])) ] ],
-                        Some (v accN)))
+            let sumVal = sumOverE n iN (appE (v srcN) [ addE (iLit 0) (v iN) ])
+            ignore accN
             let statDecls = [ bind srcN (v aName); bind sumN sumVal ]
             let S = v sumN
             // Posterior hyperparameters (Density.fs Conjugate's formulas,
@@ -3386,23 +3398,17 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let nmOf s = $"""__ppl_{(if isVar then "cv" else "cm")}_{outName}_{s}"""
             let srcN, iN, aN, bN = nmOf "src", nmOf "i", nmOf "acc", nmOf "acc2"
-            let read = appE (v srcN) [v iN]
+            let read = appE (v srcN) [ addE (iLit burn) (v iN) ]
+            let nKept = len - burn
             let value =
                 if isVar then
-                    // population variance of the suffix: E[x^2] - mean^2
+                    // population variance of the suffix: E[x^2] - mean^2, both sums in ONE traversal (a reduction join)
                     syn (ExprBlock (
-                            [ sMutFloat aN (fLit 0.0)
-                              sMutFloat bN (fLit 0.0)
-                              forIn iN (iLit burn) (iLit len)
-                                  [ assignStmt (v aN) (addE (v aN) read)
-                                    assignStmt (v bN) (addE (v bN) (mulE read read)) ] ],
+                            [ joinSums2 aN bN (rangeMapE nKept iN read) (rangeMapE nKept iN (mulE read read)) ],
                             Some (subE (divE (v bN) (fLit m))
                                        (mulE (divE (v aN) (fLit m)) (divE (v aN) (fLit m))))))
                 else
-                    syn (ExprBlock (
-                            [ sMutFloat aN (fLit 0.0)
-                              forIn iN (iLit burn) (iLit len) [ assignStmt (v aN) (addE (v aN) read) ] ],
-                            Some (divE (v aN) (fLit m))))
+                    divE (sumOverE nKept iN read) (fLit m)
             Ok [ bind srcN (v src)
                  { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
@@ -3424,6 +3430,8 @@ let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt l
 
 /// autocorr(c, maxlag): a synthesized function (mut array + element writes +
 /// nested for loops, the grad-emission shape) applied to the chain.
+/// STAYS A LOOP (P3-24): as a map over lags of runtime-length `(+)` folds its `blade check` front end measured
+/// ~140 ms slower (and ess's, sharing the mean / centered-sum prologue); a conversion may not cost compile time.
 let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
     (chains: Map<string, int>) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -3526,14 +3534,13 @@ let private elabRhat (ctx: Ctx) (span: Span) (outName: string) (binding: Binding
             let tN, dN = "__t", "__d"
             let segStmts =
                 segs |> List.mapi (fun j (srcP, lo) ->
-                    let read = appE (v srcP) [v tN]
-                    [ sMutFloat (muN j) (fLit 0.0)
-                      forIn tN (iLit lo) (iLit (lo + m)) [ assignStmt (v (muN j)) (addE (v (muN j)) read) ]
+                    // P3-24: the segment mean and centered sum of squares as two dependent seeded `(+)` folds.
+                    let read = appE (v srcP) [ addE (iLit lo) (v tN) ]
+                    let d = subE read (v (mN j))
+                    ignore dN
+                    [ sLet (muN j) (sumOverE m tN read)
                       sLet (mN j) (divE (v (muN j)) (fLit mF))
-                      sMutFloat (vvN j) (fLit 0.0)
-                      forIn tN (iLit lo) (iLit (lo + m))
-                          [ sLet dN (subE read (v (mN j)))
-                            assignStmt (v (vvN j)) (addE (v (vvN j)) (mulE (v dN) (v dN))) ]
+                      sLet (vvN j) (sumOverE m tN (mulE d d))
                       sLet (sN j) (divE (v (vvN j)) (fLit (mF - 1.0))) ])
                 |> List.concat
             let wN, mbN, bigBN, vpN = "__W", "__mb", "__B", "__vp"

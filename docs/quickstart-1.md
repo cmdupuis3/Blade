@@ -49,7 +49,7 @@ mySum
 a = 2
 b = 3
 mySum = 5
-__expr1 = 5
+5
 ```
 
 Conditionals: `if`/`then`/`else` and `match` are expressions; results can be

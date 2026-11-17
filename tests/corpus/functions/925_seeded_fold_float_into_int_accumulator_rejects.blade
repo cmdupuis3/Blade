@@ -1,0 +1,8 @@
+// TEST: A Seeded Fold Whose Float64 Result Feeds Its Int64 Accumulator Is Refused (rejects)
+// ERROR: BL3020 @ 7:36
+// ERROR-CONTAINS: returns a Float64 value, but its accumulator parameter
+// ============================================================================
+// R11: as functions/924 with a seed (base: C++ BL9002, LLVM 9007199254740994).
+// ============================================================================
+let xs: Array<Int64 like Idx<3>> = [9007199254740993, 1, 2]
+let r = reduce(xs, lambda(a, b) -> Float64(a) + Float64(b), 0)

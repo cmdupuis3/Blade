@@ -489,6 +489,10 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // on a BL8007 abort. The e2e halves skip without g++. (Also `blade test
     // run-record`.)
     let runRecord = Blade.Tests.RunRecordTests.runRunRecordTests ()
+    // The display print form (P3-26): emission facts and the three lanes'
+    // display text; the run halves skip without g++ / clang. (Also `blade
+    // test print-form`.)
+    let printForm = Blade.Tests.PrintFormTests.runPrintFormTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -580,7 +584,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield syrkTile; yield foldLanes; yield rowTile; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield cellEpilogue; yield ownedMove; yield pchBlock; yield recStep; yield orbitScatter; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield syrkTile; yield foldLanes; yield rowTile; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield cellEpilogue; yield ownedMove; yield pchBlock; yield recStep; yield orbitScatter; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord; yield printForm
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

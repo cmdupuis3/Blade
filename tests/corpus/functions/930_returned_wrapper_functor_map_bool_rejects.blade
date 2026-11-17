@@ -1,0 +1,17 @@
+// TEST: A Returned Function Used As A Functor-Map Wrapper Over Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 16:1
+// ERROR-CONTAINS: (a `<$>` wrapper, given each cell)
+// ============================================================================
+// R11: the wrapper is a function value a call returned, so no definition
+// resolves: its own function type is the signature judged. Base accepted it
+// and printed `r = [true, false]` (both lanes).
+// ============================================================================
+function make() = {
+    let f = lambda(x) -> x * 2.0
+    let warm = f(1.0)
+    f
+}
+let b = [true, false]
+let f = make()
+let c = method_for(b) <@> lambda(x) -> x
+let r = f <$> c |> compute

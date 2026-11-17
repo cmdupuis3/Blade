@@ -12,17 +12,22 @@ import ad as ad
 // ============================================================================
 type D = Array<Int32 like Idx<1>, Idx<1>>
 type A = Array<Int32 like Idx<3>>
-function k(x: Float64, d: D, sin: A) -> Float64 = {
+// R12 (deep review): `k` used to take `d` as a NON-`mut` parameter and write
+// it through the view -- now BL4005 (functions/955-956 keep that shape as
+// refusal witnesses), and a `mut` parameter is not inlinable by AD (BL5500) --
+// so `d` is a module-level `let mut` that `k` captures: the same view
+// write, the same statement in the replayed loop, the same values.
+let mut d: D = [[0]]   // `mut`: `k` writes it through a view -- a captured binding is writable only as `let mut` (D9, formalism 2.7)
+function k(x: Float64, sin: A) -> Float64 = {
     let unused = sin(d(0, 0))
     let mut row = d(0)
     row(0) += 1
     x
 }
 function f(x: Float64) -> Float64 = {
-    let mut d: D = [[0]]   // `mut`: the kernel lambda lends d to `k`, which writes it through a view -- a captured binding is writable only as `let mut` (D9, formalism 2.7)
     let sin: A = [10, 20, 30]
     let ys = method_for(range<Idx<2>>)
-        <@> lambda(i) -> k(x, d, sin) |> compute
+        <@> lambda(i) -> k(x, sin) |> compute
     reduce(ys, (+))
 }
 let (value, dx) = ad.grad(f)(Float64(2.0))

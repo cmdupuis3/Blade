@@ -1370,7 +1370,7 @@ def _build_blade(b: Build, k: Kernel, arm: ArmSpec, regime: Regime, src: Path, a
     exe = armdir / f"{stem}{EXE_SUFFIX}"
     b.knobs = blade_knobs(regime, arm.lane or "cpp", config)
     b.knobs.update(variant_knobs(k, arm, "compile"))
-    b.flags = ["--verbose", "--print", "checksum,input_checksum"]
+    b.flags = ["--verbose", "--print", "checksum,input_checksum", "--print-form", "test"]  # the test print form: the checksums are parsed (P3-26)
     b.command = [str(BLADE_EXE), "compile", str(src), "-o", str(exe), *b.flags]
     b.compiler = {"blade": blade, "gpp": tools.gpp()}
     if arm.lane == "llvm":

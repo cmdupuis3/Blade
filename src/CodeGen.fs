@@ -3292,6 +3292,21 @@ let intEnumKeysOfModule (types: IRTypeDef list) (tag: string) : int64 list optio
         |> Option.flatten
     go 16 tag
 
+/// THE DISPLAY FORM's unit (P3-26): the unit a value of type `t` prints after
+/// it -- a quantity's own name (`mps`), else the unit checker's rendering of
+/// the dims (ppUnitSig: `meters / seconds`); nothing for a dimensionless value.
+/// An array's unit is its element's.
+let rec displayUnitOf (t: IRType) : string option =
+    match t with
+    | IRTUnitAnnotated (inner, u) ->
+        let n = Blade.Types.unitNormalize u
+        if u.Nominal.IsSome then Some (Blade.Types.ppUnitSig u)
+        elif Map.isEmpty n.Dims && Blade.Types.scaleIsOne n.Scale then displayUnitOf inner
+        else Some (Blade.Types.ppUnitSig u)
+    | IRTIdxTagged (inner, _) -> displayUnitOf inner
+    | ArrayElem at -> displayUnitOf at.ElemType
+    | _ -> None
+
 /// How a top-level TUPLE or STRUCT value prints: spelled like its literal,
 /// `t = (1, 2.0)`, `p = P { a = 1.0, b = 2.0 }`, nesting as the literal nests.
 /// Shared by both lanes (Interp/Print.fs walks the same classification), so
@@ -3312,13 +3327,32 @@ type AggregatePrint =
     | APOpaque of text: string
     | APTuple of AggregatePrint list
     | APStruct of name: string * fields: (string * AggregatePrint) list
+    /// A SUM-TYPE value (the DISPLAY print form only, P3-26): its constructor,
+    /// with its payload when it has one -- `Circle(1.5)`, `Empty`. `hasData`:
+    /// the C++ lane holds the type as a std::variant of payload structs (else a
+    /// plain enum, genTypeDefs).
+    | APVariant of name: string * ctors: (string * AggregatePrint option) list * hasData: bool
+    /// A unit-carrying component (the DISPLAY form only, P3-26): its print, then
+    /// `suffix` (` meters`) -- the binding-level rule applied to each leaf.
+    | APUnits of AggregatePrint * suffix: string
 
 /// The print form of a tuple- or struct-typed value, or None when it has none
 /// (a component that is a function, a loop object, a variant, unit, ...). A
 /// struct prints through its DECLARED field list (`types` = IRModule.Types);
 /// a recursive struct reference has no finite literal and is None.
-let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+let aggregatePrintOfIn (variants: bool) (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    // (`variants`: the DISPLAY form -- sum types print, and a unit-carrying
+    // leaf carries its unit, APUnits)
     let rec go (seen: Set<string>) (t: IRType) : AggregatePrint option =
+        let core = goCore seen t
+        match IR.stripUnits t with
+        | IRTTuple _ | IRTNamed _ -> core
+        | _ when variants ->
+            (match displayUnitOf t with
+             | Some u -> core |> Option.map (fun p -> APUnits (p, " " + u))
+             | None -> core)
+        | _ -> core
+    and goCore (seen: Set<string>) (t: IRType) : AggregatePrint option =
         let all (xs: AggregatePrint option list) =
             if xs |> List.forall Option.isSome then Some (List.map Option.get xs) else None
         match IR.stripUnits t with
@@ -3350,11 +3384,74 @@ let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option
                  let seen' = seen.Add n
                  fs |> List.map (fun (_, ft) -> go seen' ft) |> all
                  |> Option.map (fun ps -> APStruct (n, List.zip (List.map fst fs) ps))
-             | _ -> None)
+             | Some _ -> None
+             | None when variants ->
+                 // A sum type (the display form only): every payload must
+                 // have a print form of its own.
+                 let ctors =
+                     types |> List.tryPick (function
+                         | IRTDVariant (m, vs) when m = n -> Some vs
+                         | _ -> None)
+                 (match ctors with
+                  | Some vs when not vs.IsEmpty ->
+                      let seen' = seen.Add n
+                      let parts =
+                          vs |> List.map (fun (c, d) ->
+                              match d with
+                              | None -> Some (c, None)
+                              // (a payload holding an ARRAY is stored as a raw pointer in
+                              // the std::variant (genTypeDefs' irTypeToCpp): no shape to
+                              // print it by, so the type keeps no print form -- Codex
+                              // review of P3-26)
+                              | Some dt when (IR.flattenTupleLeaves dt |> List.exists (fun lt -> match IR.stripUnits lt with ArrayElem _ -> true | _ -> false)) -> None
+                              | Some dt -> go seen' dt |> Option.map (fun p -> (c, Some p)))
+                      if parts |> List.forall Option.isSome then
+                          Some (APVariant (n, List.map Option.get parts, vs |> List.exists (fun (_, d) -> d.IsSome)))
+                      else None
+                  | _ -> None)
+             | None -> None)
         | _ -> None
     match IR.stripUnits t with
     | IRTTuple _ | IRTNamed _ -> go Set.empty t
     | _ -> None
+
+/// The TEST form's classification (a sum type has no print form there).
+let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    aggregatePrintOfIn false types t
+
+/// The classification of the CURRENT print form (Blade.PrintForm): a sum type,
+/// and an aggregate holding one, print in the display form only.
+let aggregatePrintOfForm (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    aggregatePrintOfIn (Blade.PrintForm.current () = Blade.PrintForm.Display) types t
+
+/// The display spelling of a constructor name: its last dotted segment (a
+/// module's constructor is written unqualified, like its literal).
+let variantCtorDisplayName (c: string) : string =
+    let s = Blade.Types.TypeOrigins.sourceName c
+    match s.LastIndexOf '.' with
+    | -1 -> s
+    | i -> s.Substring(i + 1)
+
+/// A bare top-level expression's carrier (`__expr<N>`, the last dotted
+/// segment): the display form prints its value with no label.
+let isExprCarrierName (name: string) : bool =
+    let seg = match name.LastIndexOf '.' with -1 -> name | i -> name.Substring(i + 1)
+    System.Text.RegularExpressions.Regex.IsMatch(seg, @"^__expr\d+$")
+
+/// The label a binding's print opens with under the CURRENT form: `name = `,
+/// or nothing for a bare expression in the display form.
+let printLabelOf (name: string) : string =
+    if Blade.PrintForm.current () = Blade.PrintForm.Display && isExprCarrierName name then ""
+    else name + " = "
+
+/// The text a binding's print closes with under the CURRENT form (before the
+/// newline): ` <unit>` for a unit-carrying value in the display form.
+let printUnitSuffixOf (t: IRType) : string =
+    if Blade.PrintForm.current () = Blade.PrintForm.Display then
+        match displayUnitOf t with
+        | Some u -> " " + u
+        | None -> ""
+    else ""
 
 /// The statements printing the aggregate `expr` (a C++ expression of the
 /// value's type) in its literal spelling, no name and no newline.
@@ -3388,6 +3485,27 @@ let rec genPrintAggregate (ap: AggregatePrint) (expr: string) (ind: string) : st
             [ $"{ind}cout << \"{sep}{f} = \";" ]
             @ genPrintAggregate p $"{expr}.{f}" ind) |> List.concat)
         @ [ $"{ind}cout << \" }}\";" ]
+    | APUnits (p, suffix) -> genPrintAggregate p expr ind @ [ $"{ind}cout << \"{suffix}\";" ]
+    | APVariant (_, ctors, false) ->
+        // A plain enum (no constructor carries data): its name by position.
+        let table = ctors |> List.map (fun (c, _) -> $"\"{variantCtorDisplayName c}\"") |> String.concat ", "
+        [ $"{ind}cout << std::array<const char*, {ctors.Length}>{{{{{table}}}}}[(int)({expr})];" ]
+    | APVariant (_, ctors, true) ->
+        // A std::variant of `<Ctor>_T` payload structs (genTypeDefs): the
+        // alternative's name, and its payload in parentheses.
+        [ $"{ind}switch (({expr}).index()) {{" ]
+        @ (ctors |> List.mapi (fun k (c, payload) ->
+            let nm = variantCtorDisplayName c
+            match payload with
+            | None -> [ $"{ind}case {k}: cout << \"{nm}\"; break;" ]
+            | Some p ->
+                [ $"{ind}case {k}: {{"
+                  $"{ind}    cout << \"{nm}(\";" ]
+                @ genPrintAggregate p $"std::get<{k}>({expr}).value" (ind + "    ")
+                @ [ $"{ind}    cout << \")\";"
+                    $"{ind}    break; }}" ]) |> List.concat)
+        @ [ $"{ind}default: break;"
+            $"{ind}}}" ]
 
 /// The statements printing a tuple held FLAT (`std::make_tuple(t_0, t_1,
 /// t_2)` under a left-nested type, moduleTupleChildrenCell): the parentheses
@@ -3585,7 +3703,7 @@ let hasNoPrintedForm (modul: IRModule) (b: IRBinding) : bool =
     match IR.stripUnits b.Type with
     | IRTScalar ETUnit | IRTUnit -> true
     | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> false
-    | IRTTuple _ | IRTNamed _ -> (aggregatePrintOf modul.Types b.Type).IsNone
+    | IRTTuple _ | IRTNamed _ -> (aggregatePrintOfForm modul.Types b.Type).IsNone
     | ArrayElem arrType ->
         let wreathUnprintable =
             arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath)
@@ -3596,7 +3714,7 @@ let hasNoPrintedForm (modul: IRModule) (b: IRBinding) : bool =
             match arrType.ElemType with
             | FuncElem _ | IRTTuple _ -> true
             | IRTNamed _ ->
-                not (arrayRank arrType = 1 && (aggregatePrintOf modul.Types arrType.ElemType).IsSome)
+                not (arrayRank arrType = 1 && (aggregatePrintOfForm modul.Types arrType.ElemType).IsSome)
             | _ -> false
         wreathUnprintable
         || (isCompoundArrayType arrType && (compoundPrintShape arrType).IsNone)
@@ -3755,7 +3873,11 @@ let genPrintStatements (modul: IRModule) : string list =
                 else
                     [ refusalErrorLine "    " (formlessPrintRefusal modul formless) ]
         | None -> []
-    aliasDecls @ selectionRefusal @
+    // The display form switches the float spelling here, AFTER the timing
+    // line, so `completed in` reads the same in both forms (blade_runtime.hpp
+    // print_display_flag).
+    (if Blade.PrintForm.current () = Blade.PrintForm.Display then [ "    blade_rt::print_display_flag() = true;" ] else [])
+    @ aliasDecls @ selectionRefusal @
     (let printLinesOf (b: IRBinding) : string list =
         let isPrintable = isPrintableBinding b
         
@@ -3873,7 +3995,7 @@ let genPrintStatements (modul: IRModule) : string list =
                     // literal has. An element with no print form (a variant
                     // field, a function field), or rank > 1, prints nothing.
                     let rank = arrayRank arrType
-                    match aggregatePrintOf modul.Types arrType.ElemType, rank with
+                    match aggregatePrintOfForm modul.Types arrType.ElemType, rank with
                     | Some ap, 1 ->
                         let bv = sanitizeCppName b.Name
                         let firstVar = $"{bv}__first"
@@ -4040,7 +4162,7 @@ let genPrintStatements (modul: IRModule) : string list =
             // variant, a component that is a function, ...) prints nothing,
             // and `--print` refuses it above (hasNoPrintedForm).
             | IRTTuple _ | IRTNamed _ when not (isDestructureCarrier b) ->
-                (match aggregatePrintOf modul.Types b.Type with
+                (match aggregatePrintOfForm modul.Types b.Type with
                  | Some ap ->
                      let v = sanitizeCppName b.Name
                      let body =
@@ -4055,7 +4177,29 @@ let genPrintStatements (modul: IRModule) : string list =
             | IRTUnit -> []
             | _ -> []
         else []
-     modul.Bindings |> List.collect (fun b -> intEnumKeyedPrint modul b (printLinesOf b))
+     // THE DISPLAY FORM's framing (P3-26; Blade.PrintForm): a bare
+     // expression's line drops its `__exprN = ` label, and a unit-carrying
+     // value closes with its unit (an array's after its closing bracket). The
+     // test form's lines are untouched.
+     let displayFraming (b: IRBinding) (lines: string list) : string list =
+         if Blade.PrintForm.current () <> Blade.PrintForm.Display then lines
+         else
+             let lines =
+                 if isExprCarrierName b.Name then
+                     lines |> List.map (fun (l: string) -> l.Replace("\"" + b.Name + " = ", "\""))
+                 else lines
+             match printUnitSuffixOf b.Type with
+             | "" -> lines
+             | suffix ->
+                 match lines |> List.tryFindIndexBack (fun (l: string) -> l.Contains "<< endl;") with
+                 | Some i ->
+                     lines |> List.mapi (fun k (l: string) ->
+                         if k <> i then l
+                         else
+                             let j = l.LastIndexOf "<< endl;"
+                             l.Substring(0, j) + $"<< \"{suffix}\" " + l.Substring(j))
+                 | None -> lines
+     modul.Bindings |> List.collect (fun b -> displayFraming b (intEnumKeyedPrint modul b (printLinesOf b)))
     )
 
 /// Assemble the main() function wrapper around binding code and print statements.

@@ -1,0 +1,12 @@
+// TEST: A Halo Window Forwarded Through A Local Alias To A Lambda That Applies It Is Refused (rejects)
+// ERROR: BL3001 @ 11:71
+// ERROR-CONTAINS: a halo window is passed to a function whose body applies it
+// ============================================================================
+// R11: loops/225 with the window renamed by `let v = w` first; it died in
+// g++ (BL9002).
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let d = lambda(w) -> a(w(Int64(1))) - a(w(-1))
+let d_alias = d
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> { let v = w; d(v) } |> compute

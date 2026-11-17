@@ -12,7 +12,7 @@ REPO=$(cd "$HERE/../../.." && pwd)
 K=$REPO/bench/kernels
 B=$REPO/bin/Release/net10.0/Blade.exe
 export PATH="/c/msys64/ucrt64/bin:$PATH"
-export BLADE_BLAS=0 BLADE_EXE_CACHE=0
+export BLADE_BLAS=0 BLADE_EXE_CACHE=0 BLADE_PRINT_FORM=test  # parsed output: the test print form (P3-26)
 unset BLADE_FP_REASSOC BLADE_FP_CONTRACT
 reg=$1
 out=$2

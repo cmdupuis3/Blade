@@ -72,6 +72,7 @@ $cleared = @('OPENBLAS_DIR', 'BLADE_FP_REPRO', 'BLADE_FP_REASSOC', 'BLADE_FP_CON
 foreach ($k in $cleared) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 $env:BLADE_BLAS = 'off'
 $env:BLADE_EXE_CACHE = '0'
+$env:BLADE_PRINT_FORM = 'test'   # base vs head compare the TEST print form (P3-26: the CLI default is display)
 $dllHash = { param($exe) (Get-FileHash -Algorithm SHA256 ([IO.Path]::ChangeExtension($exe, '.dll'))).Hash }
 $baseHash = & $dllHash $Base
 $headHash = & $dllHash $Head

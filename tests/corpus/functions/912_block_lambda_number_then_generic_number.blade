@@ -1,0 +1,12 @@
+// TEST: A Block Lambda Given A Number Then A Generic Number Computes
+// EXPECT: r = 6
+// ============================================================================
+// R11 accepted twin of functions/900: the instance at Int32 hands `f` the
+// type its parameter already has.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    let a = f(1)
+    f(b)
+}
+let r = outer(3)

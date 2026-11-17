@@ -738,7 +738,7 @@ let embeddedExtentExprs (e: IRExpr) : IRExpr list =
         let addIx (ixs: IRIndexType list) = for ix in ixs do found.Add ix.Extent
         iterIRExpr (fun n ->
             match n with
-            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRApp (_, _, ty) -> addTy ty
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRZero ty | IRUnseededSeed (_, ty, _) | IRUninit ty | IRAppAt (_, _, ty, _) -> addTy ty
             | IRArrayLit (_, at) -> found.AddRange(arrayTypeExtentExprs at)
             | IRApplyCombinator info ->
                 addTy info.OutputType
@@ -9479,7 +9479,7 @@ let recFoldConstructorTable : (string * RecFoldChannel) list =
       "IRExpr.IRIndex.index", ChChild; "IRExpr.IRIndex.identity", ChInert; "IRExpr.IRSlice.array", ChChild;
       "IRExpr.IRSlice.dim", ChInert; "IRExpr.IRSlice.start", ChChild; "IRExpr.IRSlice.stop", ChChild;
       "IRExpr.IRCurry.array", ChChild; "IRExpr.IRCurry.index", ChChild; "IRExpr.IRCurry.resultRank", ChInert;
-      "IRExpr.IRApp.func", ChChild; "IRExpr.IRApp.args", ChChild; "IRExpr.IRApp.retType", ChType;
+      "IRExpr.IRAppAt.func", ChChild; "IRExpr.IRAppAt.args", ChChild; "IRExpr.IRAppAt.retType", ChType;
       "IRExpr.IRTuple.Item", ChChild; "IRExpr.IRComplex.re", ChChild; "IRExpr.IRComplex.im", ChChild;
       "IRExpr.IRFma.a", ChChild; "IRExpr.IRFma.b", ChChild; "IRExpr.IRFma.c", ChChild;
       "IRExpr.IRRandAt.args", ChChild; "IRExpr.IRRandAt.weights", ChChild; "IRExpr.IRTupleProj.Item1", ChChild;

@@ -1,0 +1,18 @@
+// TEST: a non-mut parameter's row lent to a mut parameter through a let mut view (rejects)
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: reaches the parameter `d` of `touch`, which is not `mut`
+// REJECT-AT: lower
+// R12 (deep review): a parameter is read-only unless declared `mut`, and the rule
+// is about STORAGE: a write that REACHES a non-`mut` parameter through a local
+// view, alias, tuple member, `if` / `match` value, a callee that returns its
+// argument, a `mut` argument or a capturing lambda writes the CALLER'S array, as
+// the direct `d(0, 1) = 7.0` the type checker refuses does (formalism 2.7).
+type R = Array<Float64 like Idx<3>>
+type D = Array<Float64 like Idx<2>, Idx<3>>
+function bump(a: mut R) -> Float64 = { a(1) = 7.0; 0.0 }
+function touch(d: D) -> Float64 = {
+    let mut v = d(0)
+    bump(v)
+}
+let g: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let z = touch(g)

@@ -1,0 +1,16 @@
+// TEST: A Block Lambda In A Nested Function Over Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 11:40
+// ERROR-CONTAINS: Bool is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: the generic kernel-cell shape inside a NESTED function (the block-
+// binding path never moved the lambda's numeric demand onto `c`): `x + x`
+// computed on Bools. Refused at the instance.
+// ============================================================================
+function outer() = {
+    function inner(c) = {
+        let f = lambda(x) -> x + x
+        method_for(c) <@> lambda(v) -> f(v) |> compute
+    }
+    inner([true, false])
+}
+let r = outer()

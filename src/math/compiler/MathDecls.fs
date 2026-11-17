@@ -9,6 +9,9 @@
 ///   - for-in loop nests (runtime-expression bounds allowed),
 ///   - if-EXPRESSIONS for guards (no statement-level control flow),
 ///   - rank-2+ inputs copied in via `w(i*n+j) = a(i, j)`,
+///   - BUT where every cell is written once (and, for a sum, from +0.0 in ascending order) the body is a map / seeded
+///     `(+)` fold instead (`mapRanges`, `sumRange`; P3-24, docs/features.md "Domain-elaborated routine forms"): the
+///     for-in nests below are the in-place sequential algorithms and the forms a map measured slower in,
 ///   - work arrays zero-initialized and rank-2+ outputs reshaped by `method_for(range<..>)` maps (`zerosLit`,
 ///     `reshapeFlat`) -- O(1) source text per buffer, never an O(cells) literal.
 ///
@@ -241,7 +244,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                     [ sLet "wj" (wAt (v "i") (v "j"))
                       sAccum (v "aa") (mul (v "wj") (v "wj")) ]
                   sAssign (idx "s" (v "j")) (sqrtE (v "aa")) ]
-              // selection sort descending (ties keep original order); swap s entries and matching columns of w and vv
+              // selection sort descending; swap s entries and matching columns of w and vv. NOT stable: each pass picks the FIRST maximum, but its swap can move the displaced entry past equal ones (s = [1, 1', 2] sorts to [2, 1', 1]), so the column order of repeated singular values is this sweep's, not the input's
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
@@ -364,7 +367,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
               // eigenvalues = diagonal
               sLetMut "lam" (zerosLit n)
               sFor "j" 0 n [ sAssign (idx "lam" (v "j")) (aAt (v "j") (v "j")) ]
-              // selection sort descending (ties keep original order) + QM column swaps
+              // selection sort descending + QM column swaps. NOT stable (first maximum per pass, but the swap can reorder equal eigenvalues), so the column order of a repeated eigenvalue's eigenvectors is this sweep's
               sFor "kk" 0 n
                 [ sAssign (v "best") (v "kk")
                   sForE "j" (add (v "kk") (iLit 1)) (iLit n)
@@ -602,7 +605,7 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
                                ifE (isOne (v "fdpos"), fLit 0.0, syn (ExprUnaryOp (OpNeg, v "rt"))),
                                idx "lim" (v "k2")))
               sAssign (v "skip") (v "fpair") ]
-          // selection sort by modulus^2 descending (pair swap keeps re/im aligned; ties keep original order, conjugates adjacent)
+          // selection sort by modulus^2 descending (re and im swapped together). NOT stable: the swap can reorder equal moduli, so a conjugate pair displaced by a larger eigenvalue may come out -im first (extraction order [+i, -i, 3] sorts to [3, -i, +i])
           sFor "kk" 0 n
             [ sAssign (v "best") (v "kk")
               sForE "j" (add (v "kk") one_) (iLit n)
@@ -665,6 +668,24 @@ let recordModeProductDest (name: string) (applied: bool) (dims: int list) (mode:
           Evidence =
             [ sprintf "mode-%d product of a %s tensor: the rank-%d result (%d cells) is filled in place, each cell one ascending chain from +0.0 over the mode index" mode shape dims.Length cells
               sprintf "cost: peak -%d cells (no flat work array beside the result) and one copy pass fewer; the contraction order is unchanged" cells ] }
+
+/// The forced rank-N map over static ranges: `method_for(range<Idx<d0>>, .., range<Idx<dk>>) <@> lambda(n0, .., nk)
+/// -> cell |> compute`. The declarative form of a loop nest whose every iteration writes its own output cell once
+/// (class P of the P3-24 census): the cell is computed straight into the result's pool, no flat work array, no reshape.
+let mapRanges (dims: int list) (names: string list) (cell: Expr) : Expr =
+    let ops = dims |> List.map (fun d -> syn (ExprRange [ TyIdx (iLit d) ]))
+    let ps : LambdaParam list = names |> List.map (fun nm -> { Name = nm; Type = None; Default = None; NameSpan = noSpan })
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply, syn (ExprMethodFor ops), syn (ExprLambda (ps, None, cell))))))
+
+/// The seeded sum of `term` over `var` in 0 .. n-1: `reduce(method_for(range<Idx<n>>) <@> lambda(var) -> term, (+),
+/// seed)` -- the fused fold (no temporary). Its kernel is the builtin `(+)`, so it is LICENSED: under
+/// `BLADE_FP_REPRO=1` it is the ascending chain from `seed`, bitwise the `acc = seed; acc = acc + term` loop it
+/// replaces; the default build may take its K-lane / simd form (a licensed association change).
+let sumRange (n: int) (var: string) (term: Expr) (seed: Expr) : Expr =
+    let ps : LambdaParam list = [ { Name = var; Type = None; Default = None; NameSpan = noSpan } ]
+    let m = syn (ExprBinOp (Elementwise, OpApply, syn (ExprMethodFor [ syn (ExprRange [ TyIdx (iLit n) ]) ]),
+                            syn (ExprLambda (ps, None, term))))
+    syn (ExprReduce (m, syn (ExprSection OpAdd), Some seed, None))
 
 /// A rank-N zero tensor: `method_for(range<Idx<d0>>, .., range<Idx<dk>>) <@> lambda(..) -> 0.0 |> compute`.
 let zerosN (dims: int list) : Expr =

@@ -346,14 +346,8 @@ let private emissionCases : (string * bool * string * string list * string list)
        symF64 + "let (Q, LAM) = m.eigh(S)\n",
        [ "std::tuple<Array<double, 2>, Array<double, 1>> __math_1(" ],
        [ lapackInclude; "blade_lapack::"; "__math_eigh"; "LAPACKE_" ])
-      // Complex gate-off behaves the same way. Worth its own case because the
-      // gate-ON complex route is the one that changes the RESULT TYPE (mixed
-      // tuple), so "gate off is unchanged" has to be asserted for it separately
-      // rather than inferred from the f64 row.
-      ("eigh_gate_off_complex_is_synthesized_jacobi", false,
-       hermC128 + "let (Q, LAM) = m.eigh(S)\n",
-       [ "__math_1" ],
-       [ lapackInclude; "blade_lapack::"; "__math_eigh" ])
+      // (The complex gate-off row is a REFUSAL, below the emission loop:
+      // `eigh_gate_off_complex_is_refused`.)
 
       // ================= DEPENDENCY SURFACE =================
       // A BLAS program must not advertise a LAPACK dependency. `lapackAvailable`
@@ -526,6 +520,26 @@ let runLapackEmissionTests () : BlockResult =
             passed <- passed + 1
             resultLine Pass name "rejected at typecheck (gate on)"
         | Error e -> fail name ($"rejected, but not for the pinned reason: {e}")
+
+    // Complex gate-off. Worth its own case because the gate-ON complex route
+    // is the one that changes the RESULT TYPE (mixed tuple), so "gate off is
+    // unchanged" has to be asserted for it separately rather than inferred from
+    // the f64 row. Gate off, a complex operand takes the synthesized Jacobi,
+    // which is REAL-only: the program never compiled (g++ refused the
+    // Complex128 -> Float64 argument, BL9002), and R11's call judgment now
+    // refuses it at lowering (BL3020, naming the synthesized `__math_1`). The
+    // point kept: gate off names nothing LAPACK-related, even in its refusal.
+    // (Corpus math/<witness> pins the same refusal.)
+    (let name = "eigh_gate_off_complex_is_refused"
+     match cppOf false name (hermC128 + "let (Q, LAM) = m.eigh(S)\n") with
+     | Ok cpp ->
+         fail name (sprintf "expected a BL3020 refusal (the synthesized Jacobi is real-only), but the program lowered (names blade_lapack: %b)"
+                        (cpp.Contains "blade_lapack::"))
+     | Error e when e.Contains "Complex128" && e.Contains "__math_1"
+                    && not (e.Contains "lapack" || e.Contains "LAPACK" || e.Contains "__math_eigh") ->
+         passed <- passed + 1
+         resultLine Pass name "refused at lowering: the synthesized real Jacobi takes no complex operand (gate off)"
+     | Error e -> fail name ($"refused, but not for the pinned reason: {e}"))
 
     // ---- the packed route's REACHABILITY, recorded as a test ----
     //

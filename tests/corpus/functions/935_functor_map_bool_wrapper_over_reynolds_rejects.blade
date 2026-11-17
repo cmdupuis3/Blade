@@ -1,0 +1,13 @@
+// TEST: A Bool-Valued Functor Wrapper Over A reynolds Map Is Refused (rejects)
+// ERROR: BL3001 @ 11:38
+// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// ============================================================================
+// R11: the emitter moves the wrapper inside the symmetrized kernel, so the
+// SUMMED terms were the wrapper's Bools: base printed
+// `r = [[true, true], [true, true]]` (the LLVM lane fell back to C++).
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let r = positive <$> (method_for(a, b) <@> reynolds(g)) |> compute

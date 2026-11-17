@@ -483,6 +483,9 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
     if cells > 100000L then
         Error (err5000 ($"sym_lift: the degree-{k} monomial space of a dim-{n} input has C({(n + k - 1)}, {k}) = {cells} cells, over the 100000-cell limit -- lift a smaller spec (ml.scalars/ml.linear first) or lower K"))
     else
+    // STAYS A LOOP (P3-24): as a map the primal checks faster (no O(cells) zero literal), but reverse-mode AD
+    // lowers the map back into a construction buffer and the check of a differentiated sym_lift got slower
+    // (witness: 1667 -> 1842 ms front end); a conversion may not cost compile time.
     let tuples = symMultisets n k
     let nCells = tuples.Length
     let stmts =
@@ -1195,6 +1198,8 @@ let private scalarsDecl (name: string) (spec: Spec) : Result<FunctionDecl, ElabE
 /// norms for a fixed spec: per-(block, multiplicity) 2-norms in (block, mu)
 /// order -- mirrors ml/Activations.norms exactly (sum of squares in
 /// ascending component order, then sqrt). O(3)-invariant for every parity.
+/// STAYS A LOOP (P3-24): the per-slot computed-map + seeded fold form (the one AD differentiates) checked slower
+/// (front end +100 ms primal, +300 ms under ad.grad on small specs); a conversion may not cost compile time.
 /// Squares accumulate into a scratch buffer and `out` is written ONCE per
 /// slot: grad() differentiates `x = x + e` accumulation but rejects the
 /// general read-then-rewrite `out(k) = sqrt(out(k))`.
@@ -1238,7 +1243,8 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
 /// baked orthonormal closed-form table (Blade.ML.CartesianBridge -- the
 /// single source of truth, fit-certified against SphericalHarmonics by the
 /// ml/ `dump-cartesian` oracle). Loop order mirrors the oracle's matvec
-/// (i ascending, j ascending) for ulp agreement with the sgs corpus pins.
+/// (i ascending, j ascending) for ulp agreement with the sgs corpus pins. STAYS A LOOP (P3-24): as a map of licensed
+/// `(+)` folds the default build moves the last bit of tensor_to_irreps / irreps_to_sym (ml-ops/012, 016).
 let private bridgeDecl (name: string) (table: float list) (n: int)
                        (pName: string) (tyIn: TypeExpr) (tyOut: TypeExpr) : FunctionDecl =
     let body =

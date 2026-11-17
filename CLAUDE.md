@@ -86,7 +86,8 @@ blade check prog.blade        # typecheck + lower (no C++)
 blade emit prog.blade         # emit C++ without compiling
 blade compile prog.blade      # produce an executable
 blade run prog.blade          # compile and run (--verbose, --mpi N, --memcheck, --run-record out.json,
-                              #                  --print a,b -- print only these top-level bindings)
+                              #                  --print a,b -- print only these top-level bindings,
+                              #                  --print-form test|display -- default display, see below)
 blade plan prog.blade         # optimization decisions + the input manifest (--json)
 blade test                    # full default suite
 blade test docs               # every `blade` code block in CLAUDE.md + docs/ (tests/DocTests.fs)
@@ -100,6 +101,14 @@ time, while the C++ keeps the path as written. `--verbose` keeps the build direc
 
 `--strict-pins` (valid on `check`/`emit`/`compile`/`run`) promotes BL4010 pin suggestions to
 errors; it also has its own test block, `blade test strict-pins`.
+
+`blade run` / `compile` / `emit` / `plan` print the DISPLAY form by default (formalism 3.9:
+shortest round-trip floats, units after the value, bare expressions unlabelled, sum types
+printed); `--print-form test` (or `BLADE_PRINT_FORM=test`) gives the TEST form, the spelling
+every `// EXPECT:` pin is written in -- write pins from `--print-form test` output. `blade test`,
+the REPL, notebooks and the IDE always use the test form; `blade test --print-form` is refused.
+Anything that parses a program's printed output (check_pins.ps1, the bench harness) passes
+`--print-form test`.
 
 Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything that compiles C++
 (`C:\msys64\ucrt64\bin`). `blade test cuda` additionally needs a vcvars64 environment
@@ -265,6 +274,7 @@ final-newline fixing — these are byte-pinned assets; never auto-reformat them.
 | `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`: Blade is fast by default, so a user build may round `a*b + c` differently from the interpreter; `off` is the per-build reproducible mode, `where repro` the per-function one, and the differential gates pin `off`). The LLVM lane follows the SAME default since 2026-10-17 (unset = per-instruction `contract`; `off`/`0` = none) |
 | `BLADE_STDLIB` | extra stdlib search root |
 | `BLADE_PRINT` | which top-level bindings the program prints (comma/space separated); unset = all of them, the default every corpus pin reads. Set by `--print a,b` on any verb. Read by BOTH lanes (codegen's print pass and the interpreter's), so a differential run compares like with like; a name that is no binding refuses BL7004. An imported module's binding is named QUALIFIED (`Lib.y`, its print label). ONE parser and resolver, `Blade.PrintSelection` (gap G200): printers compare final names exactly; every optimizer plan licensed by a selection that EXCLUDES a binding runs before qualification and asks the CONSERVATIVE `mayName` / `excludes` (an entry selects a binding by its name or its last dotted segment, so `Lib.y` keeps every module's `y`); an explicit selection is read before the internal-name default (`--print __y` prints `__y`); a REPL / notebook evaluation with its own print demand lowers under `withoutSelection`. It changes the EMISSION, so the exe cache keys on it for free |
+| `BLADE_PRINT_FORM` | which SPELLING the program's prints use (deep review P3-26, `src/PrintForm.fs`; formalism 3.9): `test` = the spelling every corpus pin, doc fence, differential gate and harness reads (Float64 at 15 significant digits, Float32 at 6, no units, a bare expression under its `__exprN = ` label, a sum-type value unprinted), `display` = for people (shortest round-trip floats at their own width, `1.0` always marked, a unit after a quantity and once after an array's bracket, a bare expression unlabelled, a sum-type value as `Circle(1.5)` / `Empty` and a struct holding one as its literal). Read per call by codegen's print pass, the LLVM lane's and the interpreter's (one shortest-digit C text, `src/cpp/blade_shortest.h`, in both compiled lanes). UNSET in-process = `test` (the REPL, notebooks, the IDE, MCP hosts, every test block); the CLI verbs `run` / `compile` / `emit` / `plan` resolve `--print-form` (wins), then this variable, then the `blade.toolchain.json` key of the same name, then `Blade.PrintForm.cliDefault` = `display` (the user's decision of 2026-11-16, the one place it lives), and pin it for the process; a value that is no form is refused. `blade plan` prints `build: print form: <form> (<source>)` (JSON `build.print_form`). `blade test` pins `test` (`suitePinnedKnobs`) and refuses `--print-form`; `BLADE_PRINT_BITS` is a test-form instrument (inert under display). It changes the EMISSION, so the exe cache keys on it for free |
 | `BLADE_PRINT_BITS` | a RUN-TIME test instrument read by the COMPILED PROGRAM (never by the compiler, so the emission and the exe cache are untouched): `1`/`on` appends each printed float's raw IEEE-754 bit pattern after its decimal text, ` #<16 hex digits>` for a Float64 and ` #<8 hex digits>` for a Float32 (the float's OWN bits, not its widened double's) -- in the C++ lane's `blade_rt::float_put` facet / `blade_rt::pv` Float32 proxy, the LLVM lane's `blade_fmt_f64` / `blade_fmt_f32` and the interpreter's `CppFormat` alike (round 6: the interpreter reads it too, per call) -- the exact-bits channel the differential tests compare (signed zero and NaN payload included; `blade test orbit-scatter`; `test interp` sets it for the categories in `InterpDiff.printBitsCategories`, today `numeric-widths`, whose 6-digit Float32 text would hide a last-bit divergence). Unset/`0`/`off` = the ordinary text. Cleared by `suiteClearedKnobs` |
 | `BLADE_TILE_CACHE` | revision reuse (structural/04): unset = OFF; `1`/`on` = `%LOCALAPPDATA%\Blade\tile-cache`, an absolute path = that store. Read by the COMPILER (plans tiled bindings) and by the COMPILED PROGRAM (probe/load/store); `BLADE_TILE_CACHE_VERBOSE=1` prints the planner's admissions and the run's `[tiles]`/`[chunks]` census |
 | `BLADE_RUN_RECORD` | read by the COMPILED PROGRAM at exit: path of the JSON run record (input manifest + observed size/mtime per input, executable/compiler identity, FP policy and library routes from the `-DBLADE_RR_*` build defines, RNG generator, the runtime FORM CENSUS `forms` -- per site whose form is chosen at run time, today the rank-3 orbit scatter's leaf stage, its executed form (`row-pull` / `serial-leaf3`) with the requested and actual team and a call count -- ok / BLxxxx status; `policy.pool` = the pool-retention arm the executable runs, see `BLADE_POOL_RETAIN` -- an ADDITIVE, OPTIONAL member of the version-1 record: every C++ record since round-3 W2-6 carries it, default builds included (so a default record is not byte-identical to an older one), and a v1 reader must accept records without it; the version stays 1). `blade run --run-record path` sets it |
@@ -497,7 +507,9 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   assigned in the callable that defines it (nested blocks included); a nested function, lambda
   or kernel -- and a top-level function naming a module binding -- that writes a binding it
   captures, directly or through a view, alias, tuple member, callee or `mut` argument, needs it
-  declared `let mut` (BL4005; formalism 2.7). A whole `v = e` rebinds and writes no storage.
+  declared `let mut` (BL4005; formalism 2.7). A parameter is read-only unless declared `mut`,
+  through a local view or alias of it too (`let v = d(0); v(1) = x` is BL4005 for a plain `d`).
+  A whole `v = e` rebinds and writes no storage: after it, `v` holds only `e` on that path.
 - **A block-bound lambda is monomorphic when the block checks that way**; otherwise it is
   generic in exactly the types it is applied at (unannotated, applied at two or more sites,
   never used as a value; formalism 4.3).

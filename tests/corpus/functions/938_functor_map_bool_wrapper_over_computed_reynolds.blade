@@ -1,0 +1,12 @@
+// TEST: A Bool-Valued Functor Wrapper Over A Computed reynolds Map Computes
+// EXPECT: r = [[true, true], [true, true]]
+// ============================================================================
+// R11 accepted twin of functions/935: the reynolds map is computed first, so
+// the wrapper maps over stored numbers (no summed Bool term).
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let values = method_for(a, b) <@> reynolds(g) |> compute
+let r = positive <$> values |> compute

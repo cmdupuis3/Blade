@@ -1,0 +1,11 @@
+// TEST: A Bool Cell Handed To An Alias Of A Lambda That Applies Its Parameter Is Refused (rejects)
+// ERROR: BL3001 @ 10:52
+// ERROR-CONTAINS: is a function its body applies
+// ============================================================================
+// R11: `ap`'s parameter is a function (its body applies it); the kernel
+// handed it a Bool cell through the alias `ap2` and g++ refused the call
+// (BL9002). Refused at the call `ap2(b)`.
+// ============================================================================
+let ap = lambda(h) -> h(1)
+let ap2 = ap
+let r = method_for([true, false]) <@> lambda(b) -> ap2(b) |> compute

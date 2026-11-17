@@ -14,7 +14,7 @@ K=$REPO/bench/kernels
 B=$REPO/bin/Release/net10.0/Blade.exe
 out=$1
 mkdir -p "$out"
-export BLADE_BLAS=0 BLADE_OMP_THREADS=1
+export BLADE_BLAS=0 BLADE_OMP_THREADS=1 BLADE_PRINT_FORM=test  # the test print form (P3-26)
 unset BLADE_FP_REASSOC BLADE_FP_CONTRACT
 for k in fusedchain onepass stencil recur maskagg dot saxpy; do
   for tag in licensed repro; do

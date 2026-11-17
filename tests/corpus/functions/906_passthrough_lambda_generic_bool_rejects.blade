@@ -1,0 +1,13 @@
+// TEST: A Pass-Through Lambda Given A Float Then A Generic Bool Is Refused (rejects)
+// ERROR: BL3001 @ 10:5
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: no arithmetic at all -- the conversion itself was the defect:
+// `outer(true)` returned 1.0.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x
+    let a = f(1.0)
+    f(b)
+}
+let r = outer(true)

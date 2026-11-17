@@ -1,0 +1,22 @@
+// TEST: a call through a function-valued parameter is judged against the callables passed there
+// R12 (deep review, defect 2; formalism 2.7): `f`'s parameter `h` only ever
+// receives `lambda(a) -> a * 2.0` (directly, and forwarded by `g2`), which
+// returns fresh cells, so `t` shares nothing and the store is `f`'s own. It
+// was refused because the call was judged against EVERY callable the program
+// uses as a value -- `keep`'s unrelated identity lambda among them. The
+// refused twin is 953 (an identity callback reaches `h`).
+let G: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function f(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = {
+    let t = h(G)
+    t(0) = 9.0
+    t(0)
+}
+function g2(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = f(h)
+let r = f(lambda(a) -> a * 2.0)
+let r2 = g2(lambda(a) -> a * 3.0)
+function keep(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>, a: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = h(a)
+let u: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
+let unrelated = keep(lambda(a) -> a, u)
+// EXPECT: G = [1.0, 2.0, 3.0]
+// EXPECT: r = 9.0
+// EXPECT: r2 = 9.0

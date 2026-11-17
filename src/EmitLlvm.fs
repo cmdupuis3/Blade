@@ -1511,7 +1511,9 @@ let private shimTable : Map<string, ShimFn> =
           "blade_print_f64", io "void" [ "ptr"; "double" ]
           "blade_print_bool", io "void" [ "ptr"; "i32" ]
           "blade_print_str", io "void" [ "ptr"; "ptr" ]
-          "blade_print_completed", io "void" [ "ptr"; "double" ] ]
+          "blade_print_completed", io "void" [ "ptr"; "double" ]
+          // the display print form's switch (P3-26; blade_shortest.h)
+          "blade_set_print_display", io "void" [] ]
 
 /// The shim symbols that can panic: the panic path itself and the
 /// arithmetic-contract helpers. Shadow-frame elision (`resolveFrames`) treats
@@ -11390,7 +11392,10 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
 /// a nested pack for a nested literal -- both are consumed here. A component
 /// this lane cannot print the C++ lane's way refuses, so the program falls
 /// back to the C++ lane rather than printing a different line.
-let private emitTuplePrint (c: Ctx) (label: string) (ap: Blade.CodeGen.AggregatePrint) (parts: ValKind list) : unit =
+/// (`labelText`: what the line opens with -- `name = `, or nothing for a bare
+/// expression in the display form.)
+let private emitTuplePrintLabelled (c: Ctx) (labelText: string) (ap: Blade.CodeGen.AggregatePrint) (parts: ValKind list) : unit =
+    let label = labelText.TrimEnd(' ', '=')
     let bad what = refuse ($"the print of tuple '{label}': {what}")
     // Print `ap` from the front of `rest`, answering what is left.
     let rec tuple (aps: Blade.CodeGen.AggregatePrint list) (rest: ValKind list) : ValKind list =
@@ -11411,15 +11416,22 @@ let private emitTuplePrint (c: Ctx) (label: string) (ap: Blade.CodeGen.Aggregate
         | (Blade.CodeGen.APScalar | Blade.CodeGen.APKeyed _), VScalar v :: tail when v.Ty <> ScVoid -> outVal c v; tail
         | (Blade.CodeGen.APDenseArray _ | Blade.CodeGen.APKeyedArray _), VArray a :: tail -> emitArrayPrintFramed c "[" "]" a; tail
         | Blade.CodeGen.APOpaque text, _ :: tail -> outStr c text; tail
+        | Blade.CodeGen.APUnits (p, suffix), _ ->
+            let r = go p rest
+            outStr c suffix
+            r
         | _, [] -> bad "the pack has fewer components than the tuple's type"
         | _ -> bad "a component has no print in this lane"
     match ap with
     | Blade.CodeGen.APTuple aps ->
-        outStr c (label + " = ")
+        outStr c labelText
         (match tuple aps parts with
          | [] -> outStr c "\n"
          | _ -> bad "the pack has more components than the tuple's type")
     | _ -> bad "not a tuple"
+
+let private emitTuplePrint (c: Ctx) (label: string) (ap: Blade.CodeGen.AggregatePrint) (parts: ValKind list) : unit =
+    emitTuplePrintLabelled c (label + " = ") ap parts
 
 /// Which bindings never print, mirroring `CodeGen.computeDeferredIds`: an
 /// unforced computation has no materialized array to echo. A binding a
@@ -11533,9 +11545,42 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
             if not (bindings |> List.exists (fun b -> b.Name = n && printsHere b)) then
                 refuse ($"the --print selection names '{n}', which this lane does not print (the C++ lane prints it or refuses BL7004)")
     | None -> ()
+    // THE DISPLAY PRINT FORM (P3-26; Blade.PrintForm): the shim's float
+    // spelling is switched here, after the timing line (the C++ lane's
+    // print_display_flag), and each line is framed by CodeGen's
+    // printLabelOf / printUnitSuffixOf -- a bare expression has no label, a
+    // unit-carrying value closes with its unit.
+    let display = Blade.PrintForm.current () = Blade.PrintForm.Display
+    if display && (bindings |> List.exists (fun b -> wanted b && printsHere b)) then
+        needShim c "blade_set_print_display"
+        ln c "call void @blade_set_print_display()"
     for b in bindings do
         let visible = wanted b && printsHere b
-        if visible then
+        if visible && display then
+            let label = Blade.CodeGen.printLabelOf b.Name
+            let suffix = Blade.CodeGen.printUnitSuffixOf b.Type
+            match c.Slots.TryGetValue b.Id with
+            | true, (slot, sc) when sc <> ScVoid ->
+                let v = loadSlot c slot sc
+                outStr c label
+                outVal c v
+                outStr c (suffix + "\n")
+            | _ ->
+                match c.ArrSlots.TryGetValue b.Id with
+                | true, a ->
+                    if not (a.Groups |> List.exists (function GDomain _ -> true | _ -> false)) then
+                        emitArrayPrintFramed c (label + "[") ("]" + suffix + "\n") a
+                | _ ->
+                    match c.TupleSlots.TryGetValue b.Id with
+                    | true, parts when not (Blade.CodeGen.isDestructureCarrier b) ->
+                        match Blade.CodeGen.aggregatePrintOfIn true [] b.Type with
+                        | Some ap -> emitTuplePrintLabelled c label ap parts
+                        | None when Blade.IR.flattenTupleLeaves b.Type
+                                    |> List.exists (fun t -> (Blade.IR.stripUnits t).IsIRTNamed) ->
+                            refuse ($"the print of tuple '{b.Name}': a struct component")
+                        | None -> ()
+                    | _ -> ()
+        elif visible then
             match c.Slots.TryGetValue b.Id with
             | true, (slot, sc) when sc <> ScVoid ->
                 let v = loadSlot c slot sc
@@ -12368,7 +12413,7 @@ let shimFileName = "blade_llvm_shim.c"
 /// The headers the shim `#include`s from its own directory: deployed beside
 /// it (`deployShim`) and hashed into its object identity (Build.buildLlvmShim).
 /// blade_member.h is membership hoisting's C core, shared with the C++ lane.
-let shimIncludedHeaders = [ "blade_member.h" ]
+let shimIncludedHeaders = [ "blade_member.h"; "blade_shortest.h" ]
 
 let shimSourceText () : string =
     Blade.CodeGenLoopNest.readCppRuntimeHeader shimFileName
