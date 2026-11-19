@@ -1,0 +1,11 @@
+// TEST: match arms of an Int32 value and an Int64 value (rejects)
+// ============================================================================
+// R29: one judgment for every join -- a literal that does not fit the other
+// branch / arm is BL3020 at the literal; two concrete widths are BL3001.
+// ============================================================================
+let a: Int32 = 3
+let b: Int64 = 7
+let c = match a with
+    | 1 -> a
+    | _ -> b
+// ERROR: BL3001 @ 9:12

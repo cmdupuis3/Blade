@@ -1,0 +1,15 @@
+// TEST: A Bool-Valued Functor Wrapper Over A Guarded reynolds Map Is A Bool Array
+// EXPECT: r = [[true, true], [true, true]]
+// ============================================================================
+// R20 (review round 3): a `<$>` / `@>>` stage over a reynolds map applies to
+// the map's SYMMETRIZED values, after the permutation sum (formalism 5.3,
+// 10.1), so a Bool stage is not summed and its map is a Bool array. Round 2
+// (R11) refused this program because every lane ran the stage inside each
+// summed term:
+// functions/935 through a `guard(..)`: the wrapper maps the guarded symmetrized values.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let r = positive <$> guard(true, method_for(a, b) <@> reynolds(g)) |> compute

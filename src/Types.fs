@@ -1647,15 +1647,67 @@ module LiteralDefaults =
         | _ -> false
     let floatFits (et: ElemType) (f: float) : bool =
         match et with
-        // Inside Float32's finite range at BOTH ends (lead ruling): a value
-        // past FLT_MAX, or a nonzero value whose Float32 rounding is zero or
-        // subnormal, does not fit.
+        // The ROUNDED value decides at BOTH ends (lead ruling; R19 review): a
+        // literal fits iff its round-to-nearest Float32 is finite and normal.
+        // 3.4028235e38 (FLT_MAX's shortest spelling, a hair above it as a
+        // double) rounds to FLT_MAX and fits; from the halfway point
+        // 3.4028235677973366e38 up it rounds to an infinity; a nonzero value
+        // whose rounding is zero or subnormal does not fit.
         | ETFloat32 ->
             if not (System.Double.IsFinite f) || f = 0.0 then true
-            elif abs f > float System.Single.MaxValue then false
-            else abs (float32 f) >= 1.17549435e-38f
+            else
+                let r = float32 f
+                not (System.Single.IsInfinity r) && abs r >= 1.17549435e-38f
         | ETFloat64 -> true
         | _ -> false
+
+    /// R19, THE LITERAL-FIT REFUSAL: the one sentence every site that gives a
+    /// numeric literal a NARROWER width than its value needs reports (the
+    /// checker's literal arms -- an annotation, a parameter, a struct field, a
+    /// return, an array-literal cell, a default --, the per-instance narrowing
+    /// after monomorphization, static folding). `text` is the literal as
+    /// written (a negated literal is judged as a whole: `-2147483648` fits
+    /// Int32). A literal adapts to the width its context gives it only when
+    /// its value fits (intFits / floatFits); it is never wrapped, nor rounded
+    /// to an infinity, a subnormal or zero.
+    let misfitMessage (et: ElemType) (text: string) : string =
+        match et with
+        | ETInt32 ->
+            $"the integer literal `{text}` does not fit Int32, the width its context gives it (Int32 holds -2147483648 .. 2147483647): "
+            + "a literal takes its context's width only when its value fits, and Blade never wraps it into a narrower integer (formalism 2.4) -- "
+            + $"give the context a wider type (an Int64 annotation or parameter), or convert explicitly (`Int32({text})`) if the wrap is intended"
+        | ETFloat32 | ETComplex64 ->
+            let w = if et = ETFloat32 then "Float32" else "Complex64 (Float32 components)"
+            $"the float literal `{text}` does not round to a finite, normal Float32, and its context gives it {w} (a literal fits when it rounds to a finite, normal Float32: a magnitude from about 1.1754944e-38 to about 3.4028235e38): "
+            + "a literal takes its context's width only when its value fits, and Blade never rounds it to an infinity, a subnormal or zero (formalism 2.4) -- "
+            + "declare it Float64 (a Float64 annotation or parameter), or write a literal that fits"
+        | _ -> $"the literal `{text}` does not fit {et}, the width its context gives it"
+
+    /// The spelling of an integer / float literal in a misfit message.
+    let intText (n: int64) : string = string n
+    let floatText (f: float) : string =
+        let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        let s = s.Replace("E+", "e").Replace("E-", "e-").Replace("E", "e")
+        if s.Contains "." || s.Contains "e" || s.Contains "Infinity" || s.Contains "NaN" then s else s + ".0"
+
+    /// R19 (lane a2), THE SPELLING-AWARE FORMS every literal site reads: a
+    /// float literal at `span` whose SPELLING the lexer's double could not hold
+    /// (Blade.Ast.DegenerateFloatLiterals: `1e400` parsed to an infinity, a
+    /// nonzero `1e-400` to 0.0) denotes a value outside Float32's finite range,
+    /// so it does not fit Float32 and DEFAULTS to Float64 (formalism 2.4, read
+    /// by spelling). A Float64 context keeps the double (inf / 0.0; review
+    /// item R32 is open): refusing it there too is the one-line change of
+    /// dropping `et <> ETFloat64 &&` in floatLiteralFits.
+    let floatLiteralFits (et: ElemType) (f: float) (span: Blade.Ast.Span) : bool =
+        floatFits et f && not (et <> ETFloat64 && Blade.Ast.DegenerateFloatLiterals.isDegenerate span)
+    let floatDefaultAt (f: float) (span: Blade.Ast.Span) : ElemType =
+        if Blade.Ast.DegenerateFloatLiterals.isDegenerate span then ETFloat64 else floatDefault f
+    /// The literal's text in a misfit message: its spelling when its double
+    /// cannot show it, else the double's shortest form.
+    let floatTextAt (f: float) (span: Blade.Ast.Span) : string =
+        match Blade.Ast.DegenerateFloatLiterals.spellingOf span with
+        | Some s -> s
+        | None -> floatText f
 
 
 /// G190 (c), round 4 wave 8: the DECLARED `mut` parameter positions of every

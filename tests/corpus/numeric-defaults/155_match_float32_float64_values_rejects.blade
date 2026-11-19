@@ -1,0 +1,12 @@
+// TEST: match arms of a Float32 value and a Float64 value (rejects)
+// ============================================================================
+// R29: one judgment for every join -- a literal that does not fit the other
+// branch / arm is BL3020 at the literal; two concrete widths are BL3001.
+// ============================================================================
+let a: Float32 = 3.0
+let b: Float64 = 7.0
+let k: Int64 = 2
+let c = match k with
+    | 1 -> a
+    | _ -> b
+// ERROR: BL3001 @ 10:12

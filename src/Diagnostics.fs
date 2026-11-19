@@ -524,7 +524,9 @@ module Codes =
             // recurrence did not converge, and freezing the last slice would
             // silently pretend it did. Emitted by inferRecArray's budget
             // check (an IRConstraintCheck after the recursion loop) and
-            // mirrored by the interpreter through the same node.
+            // mirrored by the interpreter through the same node. Also the
+            // math module's `m.eig` when its Francis QR budget (MAXITER) runs
+            // out on a finite operand (MathDecls.sBudgetSpent).
             "BL8010", "recursion budget exhausted"
             // Two operands co-iterated in one loop nest (`a + b`, `zip(a, b)`,
             // gram's contracted axis) disagree on the RUNTIME extent of a

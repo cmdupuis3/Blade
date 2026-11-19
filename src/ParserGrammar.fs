@@ -474,7 +474,7 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
 
 and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkLitExpr tokens lit) (advance tokens)
     | Some (TokIdent ("True" | "False" as name)) ->
         let line, col = currentPos tokens
         errorC "BL1003" (capitalBoolMessage name) line col
@@ -1298,7 +1298,7 @@ and parseGuardMultiplicative (tokens: Token list) : ParseResult<Expr> =
 
 and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkLitExpr tokens lit) (advance tokens)
     | Some (TokIdent ("True" | "False" as name)) ->
         let line, col = currentPos tokens
         errorC "BL1003" (capitalBoolMessage name) line col

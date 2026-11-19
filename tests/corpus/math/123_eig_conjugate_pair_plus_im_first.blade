@@ -1,0 +1,11 @@
+// TEST: Math eig: a conjugate pair comes out +im first after a larger eigenvalue (stable sort)
+// R26: eig orders its eigenvalues by descending modulus with a STABLE sort,
+// so equal moduli keep their extraction order -- and the extraction emits a
+// conjugate pair +im first, as the routine documents. The old selection sort
+// swapped the larger eigenvalue 3 into place past the pair, reversing it:
+// this matrix gave lim = [0, -1, 1].
+import math as m
+let e: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 3.0]]
+let (lre, lim) = m.eig(e)
+// EXPECT: lre = [3.0, 0.0, 0.0]
+// EXPECT: lim = [0.0, 1.0, -1.0]

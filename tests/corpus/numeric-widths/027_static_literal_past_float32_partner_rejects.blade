@@ -1,0 +1,8 @@
+// TEST: a let static float literal past FLT_MAX beside a Float32 static (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let static a: Float32 = 3.0
+let static b = a * 1e40
+// ERROR: BL3020 @ 6:20

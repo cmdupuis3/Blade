@@ -338,6 +338,24 @@ Float32, `i32 + 1` is Int32), a declared type (a `let`, a struct field, a
 return, a parameter), a cast target, a generic type variable that a
 NON-literal argument fixed (below), the other branch of an `if` / the other
 arms of a `match`, the other elements of an array literal, an index position.
+It adapts only when its VALUE fits the width it is given: an integer literal
+past Int32's range where an Int32 is fixed (`g(5000000000)` over `i: Int32`,
+`let x: Int32 = 5000000000`), or a float literal that does not round to a
+finite, normal Float32 (its round-to-nearest Float32 is an infinity, a
+subnormal or zero: `1e40`, `3.4028236e38`, `1e-40`; `3.4028235e38` rounds to
+FLT_MAX and fits) where a Float32 or Complex64 is fixed, is refused at
+compile time (BL3020, at the literal; at a generic instance, at the call) --
+never wrapped, nor rounded to an infinity, a subnormal or zero. A negated
+literal is judged whole (`-2147483648` fits Int32), and a literal-only
+expression leaf by leaf: `2147483647 + 1` at Int32 has two fitting literals and
+wraps by the integer contract, while `5000000000 - 4000000000` at Int32 is
+refused for its first leaf. A float literal is judged by what its SPELLING
+denotes, not by the double the lexer read: `1e400` (whose double is an
+infinity) and a nonzero `1e-400` (whose double is 0.0) fit no Float32, and
+their default is a Float64 by the rule above; a Float64 context keeps the
+double (inf, 0.0). An explicit cast is a conversion, not an
+adaptation: `Int32(5000000000)` wraps and `Float32(1e40)` is an infinity, as
+the same casts of a run-time value.
 An expression made ONLY of literals (literals, unary minus, `+ - * / % ^`, the
 math intrinsics, `complex`) adapts as a whole: `let c: Float64 = 1.0 / 3.0`
 divides in Float64, and the same expression unannotated is a Float32. A
@@ -351,7 +369,14 @@ literal in those positions is an Int64. A `let static` value follows the same
 rules (a Float32 static folds in Float32, rounding after every operation, so it
 agrees bit for bit with the same expression at run time); an INTEGER static
 name adapts its width like a literal (an Int32 value widens exactly), a FLOAT
-static name does not -- it is a constant of its own width. (One place an
+static name does not -- it is a constant of its own width: a value that does
+not fit a declared width (an Int64 static past Int32 under `let static n:
+Int32`, a Float64 static under a Float32 one, an Int32 struct field) is
+refused, BL3020, at the value. A `static function`'s parameters and return have
+their declared widths, as at run time: an argument adapts to its parameter by
+the same rules (a literal or an integer static when it fits; a Float64 value
+never into a Float32) and the body computes at those widths, so `f(2147483647)`
+over `i: Int32` with body `i + 1` wraps to -2147483648 in both. (One place an
 integer literal still meets a float: an array literal that mixes them, `[1,
 2.5]`, is a float array -- a known inconsistency, kept for now.)
 
@@ -1083,9 +1108,11 @@ place, `Blade.PrintForm.cliDefault`). It differs in four ways and nowhere else
   binding prints nothing.
 
 All three lanes print the display form identically (one shortest-digit C
-text, `blade_shortest.h`, in both compiled lanes; the interpreter's twin is
-.NET's shortest round-trip digits laid out by the same rule; `blade test
-print-form`).
+text, `blade_shortest.h`, in both compiled lanes; the interpreter's twin,
+`CppFormat.displayDigits`, follows that search step for step -- the shortest
+digit count whose correctly rounded decimal, or its neighbour, reads back --
+and is deliberately not .NET's `"R"`, which answers 17 digits at some powers
+of two where 16 read back; `blade test print-form`).
 
 ### 3.10 Index values and nominal typing
 
@@ -1669,6 +1696,20 @@ that buys still follows the H ∩ Stab law (§11.2):
   and not index-symmetric (`Out(i,j) = g(A(i),B(j)) + g(B(j),A(i))`, which is
   not `Out(j,i)`; pinned by corpus reynolds/013). Reynolds does not substitute
   for identity.
+
+A stage over a reynolds map -- `f <$> (M <@> reynolds(g))`, `(M <@>
+reynolds(g)) @>> c`, through guards, choices and named deferred stages --
+applies to the map's VALUES, i.e. to the symmetrized K(x), never to the
+summed terms: `f(K(x))`, not `Σ_σ f(g(x_σ))` (§10.1, `f <$> c ≡ c >>= pure ∘
+f`). The emitters fuse it into the same single pass, applying f once per
+cell after the sum, and the cells are what the LAST stage returns -- a Bool
+stage gives a Bool array; only the wrapped kernel g, whose values ARE
+summed, must return a number (BL3001, `functions/933`). Storage follows
+§10.5's map rule: a symmetric output stays packed (f(K) is symmetric), a
+strict antisymmetric one admits only a sign-odd f (BL4015, a Bool stage
+included). Before review round 3 (R20) every lane composed the stage into
+each term, and round 2 refused a non-number last stage for that reason
+(corpus reynolds/032-040, functions/935-970).
 
 Distinguish this from the INDEX-LEVEL (per-dimension) Reynolds of the proof
 tower — `R(i₁,i₂,j₁,j₂) = Σ over index swaps` — which genuinely has

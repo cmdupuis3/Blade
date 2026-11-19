@@ -1,0 +1,7 @@
+// TEST: a let static float literal spelled past Float64's range under a Float32 annotation (rejects)
+// ============================================================================
+// R19 (lane a2): a float literal whose SPELLING its double cannot hold
+// (`1e400` parsed to inf, a nonzero `1e-400` to 0.0) does not fit Float32.
+// ============================================================================
+let static s: Float32 = 1e400
+// ERROR: BL3020 @ 5:25

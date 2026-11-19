@@ -1,0 +1,32 @@
+// TEST: float literals inside Float32's finite range still adapt to it
+// ============================================================================
+// R19's accepted twin: a float literal outside Float32's finite range where a
+// Float32 is fixed is refused (017-029). Inside it, rounding to the nearest
+// Float32 is the ordinary adaptation: FLT_MAX, the smallest normal, 0.1, a
+// signed zero, and the same out-of-range literals in Float64 contexts.
+// ============================================================================
+function g(x: Float32) -> Float32 = x
+let big: Float32 = 3.4028234e38
+let tiny: Float32 = 1.17549435e-38
+// FLT_MAX / FLT_MIN's shortest round-trip spellings: as doubles a hair past
+// the bounds, they ROUND to them (round-to-nearest decides, R19 review).
+let top: Float32 = 3.4028235e38
+let low: Float32 = 1.1754944e-38
+let top_is_max = top == big
+let low_is_min = low == tiny
+let tenth = g(0.1)
+let nz: Float32 = -0.0
+let huge: Float64 = 1e40
+let sub: Float64 = 1e-40
+let z: Complex64 = complex(0.5, 3.0e38)
+// EXPECT: big = 3.40282e+38
+// EXPECT: tiny = 1.17549e-38
+// EXPECT: top = 3.40282e+38
+// EXPECT: low = 1.17549e-38
+// EXPECT: top_is_max = true
+// EXPECT: low_is_min = true
+// EXPECT: tenth = 0.1
+// EXPECT: nz = -0.0
+// EXPECT: huge = 1e+40
+// EXPECT: sub = 1e-40
+// EXPECT: z = (0.5, 3e+38)

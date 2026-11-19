@@ -1624,15 +1624,20 @@ let eighArrays (operand: BladeArray) (outType: IRType) : BladeArray * BladeArray
                     let tq = qm.[i, r]
                     qm.[i, p] <- cs * tp - sn * tq
                     qm.[i, r] <- sn * tp + cs * tq
-    let lam = Array.init n (fun j -> aw.[j, j])
-    // Selection sort descending (ties keep original order) + Q column swaps.
-    for kk in 0 .. n - 1 do
-        let mutable best = kk
-        for j in kk + 1 .. n - 1 do
-            if lam.[j] > lam.[best] then best <- j
-        let tl = lam.[kk] in lam.[kk] <- lam.[best]; lam.[best] <- tl
-        for i in 0 .. n - 1 do
-            let tq = qm.[i, kk] in qm.[i, kk] <- qm.[i, best]; qm.[i, best] <- tq
+    let ld = Array.init n (fun j -> aw.[j, j])
+    // STABLE descending order (ties keep diagonal order; the oracle's and
+    // `MathDecls.stableDescPerm`'s insertion sort of an index array), then
+    // one gather each for LAM and Q's columns.
+    let perm = Array.init n id
+    for kk in 1 .. n - 1 do
+        for j in kk - 1 .. -1 .. 0 do
+            let a = perm.[j]
+            let b = perm.[j + 1]
+            if ld.[b] > ld.[a] then
+                perm.[j] <- b
+                perm.[j + 1] <- a
+    let lam = Array.init n (fun k -> ld.[perm.[k]])
+    let qm = Array2D.init n n (fun i j -> qm.[i, perm.[j]])
     // Sign fix: first row attaining max |entry| per column made positive.
     for j in 0 .. n - 1 do
         let mutable bigv = 0.0

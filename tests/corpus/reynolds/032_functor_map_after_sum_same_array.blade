@@ -1,0 +1,17 @@
+// TEST: A Functor Wrapper Over A Same-Array reynolds Map Applies To The Sum
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// Master printed wrapped = 0x... (a heap pointer). K(x, y) = -x - y.
+let xs: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let k = lambda(a, b) -> a - 2.0 * b
+let sq = lambda(v) -> v * v
+let plain = method_for(xs, xs) <@> reynolds(k) |> compute
+let wrapped = sq <$> (method_for(xs, xs) <@> reynolds(k)) |> compute
+// EXPECT: plain = [[-2.0, -3.0], [-3.0, -4.0]]
+// EXPECT: wrapped = [[4.0, 9.0], [9.0, 16.0]]

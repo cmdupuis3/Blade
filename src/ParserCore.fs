@@ -189,7 +189,7 @@ let private keywordText =
 let describeToken (kind: TokenKind) : string =
     match kind with
     | TokInt v -> $"integer literal {v}"
-    | TokFloat v -> sprintf "float literal %g" v
+    | TokFloat (v, _) -> sprintf "float literal %g" v
     | TokString s -> $"string literal \"{s}\""
     | TokChar c -> $"character literal '{c}'"
     | TokBool b -> sprintf "boolean literal %b" b
@@ -302,6 +302,16 @@ let internal headSpan (tokens: Token list) : Span =
     match tokens with
     | t :: _ -> spanOfToken t
     | [] -> noSpan
+
+/// A literal expression built from the head token. A FLOAT literal records,
+/// for its span, whether its spelling denotes a value its double does not hold
+/// (R19: Ast.DegenerateFloatLiterals, read by every literal-fit judgment).
+let internal mkLitExpr (tokens: Token list) (lit: Literal) : Expr =
+    let sp = headSpan tokens
+    (match tokens with
+     | { Kind = TokFloat (_, spelling) } :: _ -> DegenerateFloatLiterals.record sp spelling
+     | _ -> ())
+    mkExpr sp (ExprLit lit)
 
 /// Real span for a multi-token production: from the first token of `startToks`
 /// to the last meaningful token consumed reaching `remaining`. The natural
@@ -541,7 +551,7 @@ let parseBody tokens = !parseBodyRef tokens
 // (mode, op) pair returned by most of these is (Elementwise | Outer, BinOp).
 let (|LiteralTok|_|) = function
     | TokInt v -> Some (LitInt v)
-    | TokFloat v -> Some (LitFloat v)
+    | TokFloat (v, _) -> Some (LitFloat v)
     | TokBool v -> Some (LitBool v)
     | TokString v -> Some (LitString v)
     | TokChar v -> Some (LitChar v)
@@ -764,7 +774,7 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
 
 and parseSimpleAtom (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkLitExpr tokens lit) (advance tokens)
     | Some (TokIdent name) -> success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
     | Some (TokKeyword KwArity) ->
         // `arity(p)` in a static payload position, e.g. `Idx<arity(args)>`:
@@ -810,7 +820,7 @@ let parseLiteral (tokens: Token list) : ParseResult<Literal> =
     | t :: rest ->
         match t.Kind with
         | TokInt v -> success (LitInt v) rest
-        | TokFloat v -> success (LitFloat v) rest
+        | TokFloat (v, _) -> success (LitFloat v) rest
         | TokBool v -> success (LitBool v) rest
         | TokString v -> success (LitString v) rest
         | TokChar v -> success (LitChar v) rest

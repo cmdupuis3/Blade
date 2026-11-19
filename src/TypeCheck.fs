@@ -835,6 +835,12 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             let env' = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues se.Values }
             let errs =
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->
+                  match f.Misfit with
+                  | Some (sp, msg) ->
+                    // R19 / R28: a literal or a static value folding would
+                    // narrow is reported where it stands (BL3020).
+                    locateError sp env' (ImplicitNumericMix msg)
+                  | None ->
                     let msg =
                         $"""`let static {(f.Names |> String.concat ", ")}` does not evaluate at compile time: {f.Reason}. `let static` asserts a compile-time value -- use plain `let` for values computed at runtime."""
                     locateError f.Span env' (StaticEvalErr msg))

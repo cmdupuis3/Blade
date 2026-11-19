@@ -1,0 +1,36 @@
+// TEST: Stacked Stages Over A reynolds Map Apply To The Sum In Order
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// Two <$> wrappers, an @>> stage, a functor-wrapped @>> stage, a named
+// deferred stack forced later, a guard and a choice: every spelling the
+// emitters compose into the map's kernel. Master printed
+// [[20.0, 45.0], [9.0, 26.0]] for 	wo, [[26.0, 53.0], [17.0, 36.0]] for
+// staged / orced / guarded / chosen, [[28.0, 55.0], [19.0, 38.0]] for wrapped_stage.
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let k = lambda(x: Float64, y: Float64) -> x - 2.0 * y
+let sq = lambda(v: Float64) -> v * v
+let inc = lambda(v: Float64) -> v + 1.0
+let two = sq <$> (inc <$> (method_for(a, b) <@> reynolds(k))) |> compute
+let prods = a [*] b |> compute
+let right = method_for(prods) <@> sq
+let staged = ((method_for(a, b) <@> reynolds(k)) @>> right) |> compute
+let right2 = inc <$> (method_for(prods) <@> sq)
+let wrapped_stage = ((method_for(a, b) <@> reynolds(k)) @>> right2) |> compute
+let held = sq <$> (method_for(a, b) <@> reynolds(k))
+let forced = held |> compute
+let guarded = sq <$> guard(true, method_for(a, b) <@> reynolds(k)) |> compute
+let c = method_for(a, b) <@> reynolds(k)
+let chosen = sq <$> (c <|> c) |> compute
+// EXPECT: two = [[9.0, 16.0], [16.0, 25.0]]
+// EXPECT: staged = [[16.0, 25.0], [25.0, 36.0]]
+// EXPECT: wrapped_stage = [[17.0, 26.0], [26.0, 37.0]]
+// EXPECT: forced = [[16.0, 25.0], [25.0, 36.0]]
+// EXPECT: guarded = [[16.0, 25.0], [25.0, 36.0]]
+// EXPECT: chosen = [[16.0, 25.0], [25.0, 36.0]]

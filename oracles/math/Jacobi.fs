@@ -5,6 +5,23 @@
 /// This project is a SEPARATE fsproj; the compiler never builds it.
 module BladeMath.Jacobi
 
+/// The order svd / eigh / eig return their values in: STABLE descending --
+/// equal keys keep their extraction order (R26). perm.[k] = the extracted
+/// position output position k takes. An insertion sort of the index array
+/// (adjacent compare-swaps; an equal key never swaps), the generated
+/// `MathDecls.stableDescPerm` step for step.
+let stableDescPerm (keys: float[]) : int[] =
+    let n = keys.Length
+    let perm = Array.init n id
+    for kk in 1 .. n - 1 do
+        for j in kk - 1 .. -1 .. 0 do
+            let a = perm.[j]
+            let b = perm.[j + 1]
+            if keys.[b] > keys.[a] then
+                perm.[j] <- b
+                perm.[j + 1] <- a
+    perm
+
 /// Thin SVD, m >= n: returns (U mxn, S length-n descending, V nxn) with
 /// A ~= U*diag(S)*V^T, i.e. A[i,j] = Sigma_k U[i,k]*S[k]*V[j,k].
 let svd (sweeps: int) (a: float[,]) : float[,] * float[] * float[,] =
@@ -40,21 +57,16 @@ let svd (sweeps: int) (a: float[,]) : float[,] * float[] * float[,] =
                     let tq = vv.[i, q]
                     vv.[i, p] <- cs * tp - sn * tq
                     vv.[i, q] <- sn * tp + cs * tq
-    // singular values = column norms
-    let s = Array.init n (fun j ->
+    // singular values = column norms, in extraction (column) order
+    let sraw = Array.init n (fun j ->
         let mutable acc = 0.0
         for i in 0 .. m - 1 do acc <- acc + w.[i, j] * w.[i, j]
         sqrt acc)
-    // selection sort descending (ties keep original order)
-    for kk in 0 .. n - 1 do
-        let mutable best = kk
-        for j in kk + 1 .. n - 1 do
-            if s.[j] > s.[best] then best <- j
-        let ts = s.[kk] in s.[kk] <- s.[best]; s.[best] <- ts
-        for i in 0 .. m - 1 do
-            let tw = w.[i, kk] in w.[i, kk] <- w.[i, best]; w.[i, best] <- tw
-        for i in 0 .. n - 1 do
-            let tv = vv.[i, kk] in vv.[i, kk] <- vv.[i, best]; vv.[i, best] <- tv
+    // stable descending order, one gather per output
+    let perm = stableDescPerm sraw
+    let s = Array.init n (fun k -> sraw.[perm.[k]])
+    let w = Array2D.init m n (fun i j -> w.[i, perm.[j]])
+    let vv = Array2D.init n n (fun i j -> vv.[i, perm.[j]])
     // U = normalized columns (zero sigma -> zero column)
     let u = Array2D.zeroCreate m n
     for j in 0 .. n - 1 do
@@ -108,15 +120,11 @@ let eigh (sweeps: int) (s0: float[,]) : float[,] * float[] =
                     let tq = q.[i, r]
                     q.[i, p] <- cs * tp - sn * tq
                     q.[i, r] <- sn * tp + cs * tq
-    let lam = Array.init n (fun j -> aw.[j, j])
-    // selection sort descending + column swaps
-    for kk in 0 .. n - 1 do
-        let mutable best = kk
-        for j in kk + 1 .. n - 1 do
-            if lam.[j] > lam.[best] then best <- j
-        let tl = lam.[kk] in lam.[kk] <- lam.[best]; lam.[best] <- tl
-        for i in 0 .. n - 1 do
-            let tq = q.[i, kk] in q.[i, kk] <- q.[i, best]; q.[i, best] <- tq
+    let ld = Array.init n (fun j -> aw.[j, j])
+    // stable descending order (ties keep diagonal order), one gather per output
+    let perm = stableDescPerm ld
+    let lam = Array.init n (fun k -> ld.[perm.[k]])
+    let q = Array2D.init n n (fun i j -> q.[i, perm.[j]])
     // sign fix: first row attaining max |entry| per column made positive
     for j in 0 .. n - 1 do
         let mutable bigv = 0.0

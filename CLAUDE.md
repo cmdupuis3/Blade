@@ -360,7 +360,9 @@ type EarthArray = Array<Float64 like LatIdx, LonIdx>
   context is the width -- an operator partner, an annotation, a parameter, a cast, a generic
   variable another argument fixed, the other `if`/`match` branch, the other array-literal
   elements, an index position (Int64). A literal-only expression adapts as a whole
-  (`let c: Float64 = 1.0 / 3.0`). With nothing fixing it the DEFAULT is the smaller width: Int32
+  (`let c: Float64 = 1.0 / 3.0`), and only when every literal FITS the width: `5000000000` where
+  an Int32 is fixed, or `1e40` / `1e-40` where a Float32 is, is BL3020, never wrapped or rounded
+  to inf / zero (an explicit cast, `Int32(5000000000)`, still converts). With nothing fixing it the DEFAULT is the smaller width: Int32
   (Int64 only past Int32's range), Float32 (Float64 only outside Float32's finite range),
   Complex64 for `complex` of defaulted floats. So `let x = 0.5` is a Float32 VARIABLE: spell
   `let x: Float64 = 0.5` when you mean a Float64.

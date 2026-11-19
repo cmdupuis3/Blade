@@ -33,7 +33,33 @@ type StaticFuncDef = {
     Name: string
     Params: string list
     Body: Expr
+    /// R28: the DECLARED scalar width of each parameter and of the return
+    /// (None = unannotated or not a bit-sized scalar). A static function
+    /// computes at its declared widths, as its run-time twin does.
+    ParamWidths: Blade.Types.ElemType option list
+    RetWidth: Blade.Types.ElemType option
 }
+
+/// The scalar width a declared type names, if it is one of the bit-sized
+/// numeric types (units ride along: `Float32<m>` is a Float32).
+let declaredWidth (t: TypeExpr option) : Blade.Types.ElemType option =
+    match t with
+    | Some (TyNamed (("Float32" | "Float64" | "Int32" | "Int64") as n, _)) ->
+        Some (match n with
+              | "Float32" -> Blade.Types.ETFloat32
+              | "Float64" -> Blade.Types.ETFloat64
+              | "Int32" -> Blade.Types.ETInt32
+              | _ -> Blade.Types.ETInt64)
+    | _ -> None
+
+/// The StaticFuncDef of a `static function` declaration (both registries --
+/// resolveStatics and the checker's static-count fold -- build it here).
+let staticFuncDefOf (fd: FunctionDecl) : StaticFuncDef =
+    { Name = fd.Name
+      Params = fd.Params |> List.map (_.Name)
+      Body = fd.Body
+      ParamWidths = fd.Params |> List.map (fun p -> declaredWidth p.Type)
+      RetWidth = declaredWidth fd.ReturnType }
 
 /// Struct constraint info for fold-time checks: field names in declaration
 /// order plus the FULL conjunct list (declared where-conjuncts + desugared
@@ -153,7 +179,7 @@ let rec private litDefaultWidths (e: Expr) : Blade.Types.ElemType * Blade.Types.
     let rec walk (e: Expr) =
         match e.Kind with
         | ExprKind.ExprLit (LitInt n) -> if litIntDefault n <> Blade.Types.ETInt32 then i32 <- false
-        | ExprKind.ExprLit (LitFloat x) -> if litFloatDefault x <> Blade.Types.ETFloat32 then f32 <- false
+        | ExprKind.ExprLit (LitFloat x) -> if Blade.Types.LiteralDefaults.floatDefaultAt x e.Span <> Blade.Types.ETFloat32 then f32 <- false
         | ExprKind.ExprUnaryOp (_, x) -> walk x
         | ExprKind.ExprBinOp (_, _, l, r) -> walk l; walk r
         | ExprKind.ExprApp (_, args) -> List.iter walk args
@@ -597,6 +623,73 @@ let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue
     | None, _ ->
         Error "Static evaluation: `alias.read(...)` folds only over a provider-backed variable (root.vars.<name> where root = alias.load(\"store\"))"
 
+/// R19, THE STATIC HALF OF THE LITERAL-FIT RULE (LiteralDefaults.misfitMessage):
+/// folding gives a literal-only subtree the width its partner or its static's
+/// annotation fixes (evalLitTree at Int32 / Float32), and a leaf that does not
+/// fit it was wrapped (`int32 n`) or overflowed (`float32 f`) silently. The
+/// first such leaf -- a negated literal judged whole -- is raised and reported
+/// by resolveStatics as the checker reports it (BL3020 at the literal). An
+/// EXPLICIT cast (`Int32(5000000000)`) is the user's conversion and is not
+/// judged.
+exception LiteralMisfit of Span * Blade.Types.ElemType * string
+
+/// R28, A STATIC VALUE AT A DECLARED WIDTH (formalism 2.4: "A `let static`
+/// value follows the same rules"): a value folding hands to a declared
+/// Int32 / Float32 -- a `let static` annotation, a static function's
+/// parameter or return, a struct field -- adapts only as its run-time twin
+/// would: an integer value only when it fits (an integer static adapts its
+/// width like a literal), a Float64 value never into a Float32 (a float
+/// static is a constant of its own width; R11). Anything else folds as
+/// before. Raised with the span to report and the whole message (BL3020).
+exception StaticValueMisfit of Span * string
+
+let private staticMisfitMessage (w: Blade.Types.ElemType) (v: StaticValue) (what: string) : string option =
+    match w, v with
+    | Blade.Types.ETInt32, SVInt n when not (Blade.Types.LiteralDefaults.intFits Blade.Types.ETInt32 n) ->
+        Some ($"{what} is the compile-time value {n}, which does not fit Int32, the width declared here (Int32 holds -2147483648 .. 2147483647): "
+              + "a static value takes a declared width only when it fits, as a literal does, and Blade never wraps it (formalism 2.4) -- "
+              + "declare the width Int64, or convert explicitly with `Int32(..)` if the wrap is intended")
+    | Blade.Types.ETFloat32, SVFloat f ->
+        let text = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        Some ($"{what} is the Float64 value {text}, and the width declared here is Float32: a float static is a constant of its own width, "
+              + "and Blade converts nothing implicitly (formalism 2.4) -- declare it Float32, or convert explicitly with `Float32(..)`")
+    | _ -> None
+
+/// Hand a folded value to a declared width: the misfit is raised, a fitting
+/// integer narrows / widens exactly, a Float32 widens exactly into a Float64;
+/// anything else is left as it is (the explicit-cast converter is not used).
+let private adaptToDeclared (w: Blade.Types.ElemType) (v: StaticValue) (span: Span) (what: string) : StaticValue =
+    match staticMisfitMessage w v what with
+    | Some msg -> raise (StaticValueMisfit (span, msg))
+    | None ->
+        match w, v with
+        | Blade.Types.ETInt32, SVInt n -> SVInt32 (int32 n)
+        | Blade.Types.ETInt64, SVInt32 n -> SVInt (int64 n)
+        | Blade.Types.ETFloat64, SVFloat32 f -> SVFloat (float f)
+        | _ -> v
+
+let private literalMisfitLeaf (fw: Blade.Types.ElemType) (iw: Blade.Types.ElemType) (e: Expr) : (Span * Blade.Types.ElemType * string) option =
+    let fitsI n = Blade.Types.LiteralDefaults.intFits iw n
+    let fitsF f sp = Blade.Types.LiteralDefaults.floatLiteralFits fw f sp
+    let rec go (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit (LitInt n) when not (fitsI n) -> Some (e.Span, iw, Blade.Types.LiteralDefaults.intText n)
+        | ExprKind.ExprLit (LitFloat f) when not (fitsF f e.Span) -> Some (e.Span, fw, Blade.Types.LiteralDefaults.floatTextAt f e.Span)
+        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt n) }) ->
+            if fitsI (-n) then None else Some (e.Span, iw, "-" + Blade.Types.LiteralDefaults.intText n)
+        | ExprKind.ExprUnaryOp (OpNeg, ({ Kind = ExprKind.ExprLit (LitFloat f) } as fl)) ->
+            if fitsF f fl.Span then None else Some (e.Span, fw, "-" + Blade.Types.LiteralDefaults.floatTextAt f fl.Span)
+        | ExprKind.ExprUnaryOp (_, x) -> go x
+        | ExprKind.ExprBinOp (_, _, l, r) -> go l |> Option.orElseWith (fun () -> go r)
+        | ExprKind.ExprApp (_, args) -> List.tryPick go args
+        | _ -> None
+    go e
+
+let private refuseMisfit (fw: Blade.Types.ElemType) (iw: Blade.Types.ElemType) (e: Expr) =
+    match literalMisfitLeaf fw iw e with
+    | Some (sp, et, text) -> raise (LiteralMisfit (sp, et, text))
+    | None -> ()
+
 /// The evaluator proper. `depth` is the nesting level of THIS node; every
 /// child is visited at `depth + 1`, and every visit costs one step out of
 /// the shared pool. Both guards are checked before the node is looked at,
@@ -668,7 +761,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
             let (fw0, iw0) = litDefaultWidths litSide
             let fw = match ov with SVFloat32 _ -> Blade.Types.ETFloat32 | SVFloat _ -> Blade.Types.ETFloat64 | _ -> fw0
             let iw = match ov with SVInt32 _ -> Blade.Types.ETInt32 | SVInt _ -> Blade.Types.ETInt64 | _ -> iw0
-
+            refuseMisfit fw iw litSide
             evalLitTree env fuel (depth + 1) fw iw litSide |> Result.bind (fun lv' ->
                 if isLitOnly l then evalBinOp op lv' ov else evalBinOp op ov lv'))
     | ExprKind.ExprBinOp (_, op, l, r) ->
@@ -710,7 +803,24 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         match Map.tryFind fname env.Functions with
         | Some funcDef ->
             env.CalledFunctions.Value <- Set.add fname env.CalledFunctions.Value
-            evalArgs env fuel depth args |> Result.bind (fun argVals ->
+            // R28: an argument meets its parameter's DECLARED width as at run
+            // time -- a literal-only argument adapts to it (a leaf that does
+            // not fit is refused at the leaf), a folded value adapts only when
+            // it fits (adaptToDeclared); an unannotated parameter takes the
+            // value as it is.
+            let evalArg (i: int) (a: Expr) =
+                match List.tryItem i funcDef.ParamWidths |> Option.flatten with
+                | Some w when isLitOnly a ->
+                    let (fw0, iw0) = litDefaultWidths a
+                    let fw = match w with Blade.Types.ETFloat32 | Blade.Types.ETFloat64 -> w | _ -> fw0
+                    let iw = match w with Blade.Types.ETInt32 | Blade.Types.ETInt64 -> w | _ -> iw0
+                    refuseMisfit fw iw a
+                    evalLitTree env fuel (depth + 1) fw iw a
+                | Some w ->
+                    evalCore env fuel (depth + 1) a
+                    |> Result.map (fun v -> adaptToDeclared w v a.Span $"argument {i + 1} of '{fname}'")
+                | None -> evalCore env fuel (depth + 1) a
+            (args |> List.mapi evalArg |> seqResults) |> Result.bind (fun argVals ->
                 if argVals.Length <> funcDef.Params.Length then
                     Error ($"Static function '{fname}' expects {funcDef.Params.Length} args, got {argVals.Length}")
                 else
@@ -728,7 +838,11 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
                     // this frame and returns to it, so the stack grows exactly
                     // as it does for a real subexpression. Charging it is what
                     // makes an unbounded static recursion hit `maxDepth`.
-                    evalCore bodyEnv fuel (depth + 1) funcDef.Body)
+                    evalCore bodyEnv fuel (depth + 1) funcDef.Body
+                    |> Result.map (fun v ->
+                        match funcDef.RetWidth with
+                        | Some w -> adaptToDeclared w v funcDef.Body.Span $"the result of '{fname}'"
+                        | None -> v))
         | None ->
             // Try as a built-in static function
             evalBuiltin env fuel depth fname args
@@ -795,8 +909,21 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         // struct folding here runs its conjuncts with the field values
         // bound by name, failing the fold on violation (let-static
         // assertion semantics) instead of waiting for a runtime guard.
+        // R28: a field's value meets the field's DECLARED width as at run time
+        // -- a value that does not fit it (an Int64 static into an Int32
+        // field, a Float64 into a Float32 one) is refused at the field's
+        // expression instead of reaching the back end (BL9002 on master).
+        let declaredFieldWidth (fn: string) =
+            match Map.tryFind name env.Structs with
+            | Some info ->
+                info.FieldDecls |> List.tryFind (fun d -> d.Name = fn) |> Option.bind (fun d -> declaredWidth (Some d.Type))
+            | None -> None
+        let checkField (fn: string) (v: StaticValue) (sp: Span) =
+            match declaredFieldWidth fn |> Option.bind (fun w -> staticMisfitMessage w v $"field '{fn}' of {name}") with
+            | Some msg -> raise (StaticValueMisfit (sp, msg))
+            | None -> ()
         let providedR =
-            fields |> List.map (fun (fn, e) -> evalCore env fuel (depth + 1) e |> Result.map (fun v -> (fn, v)))
+            fields |> List.map (fun (fn, e) -> evalCore env fuel (depth + 1) e |> Result.map (fun v -> checkField fn v e.Span; (fn, v)))
             |> List.fold (fun acc r ->
                 acc |> Result.bind (fun xs -> r |> Result.map (fun x -> xs @ [x]))) (Ok [])
         let fieldValsR =
@@ -1279,13 +1406,23 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
 /// Fold an expression under an explicit budget. Each call starts a FRESH
 /// pool at depth zero -- the budget bounds one top-level fold, not the compiler.
 let evalExprWith (env: StaticEnv) (budget: Budget) (expr: Expr) : Result<StaticValue, string> =
-    evalCore env { Left = budget.Steps; MaxDepth = budget.Depth } 0 expr
+    (try evalCore env { Left = budget.Steps; MaxDepth = budget.Depth } 0 expr
+     with
+     | LiteralMisfit (_, et, text) -> Error (Blade.Types.LiteralDefaults.misfitMessage et text)
+     | StaticValueMisfit (_, msg) -> Error msg)
     |> Result.map normalizeStatic
 
 /// The fold WITHOUT normalization: a Float32 / Int32 result stays SVFloat32 /
 /// SVInt32 (resolveStatics records the width of the static it binds).
 /// Unfold also needs these tags when it reifies a folded value as source.
 let internal evalExprNarrow (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
+    try evalCore env { Left = fuel; MaxDepth = defaultBudget.Depth } 0 expr
+    with
+    | LiteralMisfit (_, et, text) -> Error (Blade.Types.LiteralDefaults.misfitMessage et text)
+    | StaticValueMisfit (_, msg) -> Error msg
+
+/// resolveStatics' fold: a literal misfit escapes as LiteralMisfit, reported at the literal.
+let private evalNarrowRaw (env: StaticEnv) (fuel: int) (expr: Expr) : Result<StaticValue, string> =
     evalCore env { Left = fuel; MaxDepth = defaultBudget.Depth } 0 expr
 
 /// Fold an expression under a STEP budget of `fuel`, at the default depth
@@ -1311,6 +1448,9 @@ type StaticFailure = {
     Reason: string
     /// The declaration's source span.
     Span: Span
+    /// R19 / R28: a literal or a static value that does not fit the width
+    /// folding gave it -- the span to report and the whole message (BL3020).
+    Misfit: (Span * string) option
 }
 
 /// One `let static` declaration collected in Phase 1, carrying what Phase 3
@@ -1329,15 +1469,7 @@ type private PendingStatic = {
 
 /// The scalar width a `let static` annotation names, if it is one of the
 /// bit-sized numeric types (units ride along: `Float32<m>` is a Float32).
-let private annotWidth (t: TypeExpr option) : Blade.Types.ElemType option =
-    match t with
-    | Some (TyNamed (("Float32" | "Float64" | "Int32" | "Int64") as n, _)) ->
-        Some (match n with
-              | "Float32" -> Blade.Types.ETFloat32
-              | "Float64" -> Blade.Types.ETFloat64
-              | "Int32" -> Blade.Types.ETInt32
-              | _ -> Blade.Types.ETInt64)
-    | _ -> None
+let private annotWidth (t: TypeExpr option) : Blade.Types.ElemType option = declaredWidth t
 
 /// A lambda-valued `let static` declares a function (the marker means
 /// immutability there), not a foldable value -- the fold assertion skips it.
@@ -1400,11 +1532,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
     for locDecl in decls do
         match locDecl.Value with
         | DeclFunction fd when fd.IsStatic ->
-            staticFuncs <- Map.add fd.Name {
-                Name = fd.Name
-                Params = fd.Params |> List.map (_.Name)
-                Body = fd.Body
-            } staticFuncs
+            staticFuncs <- Map.add fd.Name (staticFuncDefOf fd) staticFuncs
         | DeclType (TyDeclStruct (sname, _, sfields, sconstraints, sIsStatic)) ->
             // Full pre-scan (struct/static decl order is irrelevant): the
             // fold-time conjunct list mirrors the checker's via the shared
@@ -1545,23 +1673,44 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                     // as a whole (`let static x: Float32 = 0.1 * 3.0` is two
                     // float32 literals and a float32 product), any other value
                     // is folded at its own width and converted once.
+                    let mutable misfit = None
                     let folded =
+                      try
                         match annotWidth pd.Annot with
                         | Some w when isLitOnly pd.Expr ->
+                            // R19: the annotation adapts the literals; one that
+                            // does not fit it is refused (the synthesized cast
+                            // below is not the user's).
+                            (match w with
+                             | Blade.Types.ETFloat32 -> refuseMisfit w Blade.Types.ETInt64 pd.Expr
+                             | Blade.Types.ETInt32 -> refuseMisfit Blade.Types.ETFloat64 w pd.Expr
+                             | _ -> ())
                             let lit =
                                 match w with
                                 | Blade.Types.ETFloat32 | Blade.Types.ETFloat64 ->
                                     { pd.Expr with Kind = ExprKind.ExprApp ({ pd.Expr with Kind = ExprKind.ExprVar (if w = Blade.Types.ETFloat32 then "Float32" else "Float64") }, [ pd.Expr ]) }
                                 | _ ->
                                     { pd.Expr with Kind = ExprKind.ExprApp ({ pd.Expr with Kind = ExprKind.ExprVar (if w = Blade.Types.ETInt32 then "Int32" else "Int64") }, [ pd.Expr ]) }
-                            evalExprNarrow env maxSteps lit
+                            evalNarrowRaw env maxSteps lit
                         | Some w ->
-                            evalExprNarrow env maxSteps pd.Expr
+                            evalNarrowRaw env maxSteps pd.Expr
                             |> Result.bind (fun v ->
                                 match v with
-                                | SVFloat _ | SVFloat32 _ | SVInt _ | SVInt32 _ -> convertStatic w v
+                                | SVFloat _ | SVFloat32 _ | SVInt _ | SVInt32 _ ->
+                                    // R28: the value meets the declared width as a
+                                    // run-time value would (adaptToDeclared), then
+                                    // folds to it.
+                                    convertStatic w (adaptToDeclared w v pd.Expr.Span "this `let static` initializer")
                                 | _ -> Ok v)
-                        | None -> evalExprNarrow env maxSteps pd.Expr
+                        | None -> evalNarrowRaw env maxSteps pd.Expr
+                      with
+                      | LiteralMisfit (sp, et, text) ->
+                        let msg = Blade.Types.LiteralDefaults.misfitMessage et text
+                        misfit <- Some (sp, msg)
+                        Error msg
+                      | StaticValueMisfit (sp, msg) ->
+                        misfit <- Some (sp, msg)
+                        Error msg
                     match folded with
                     | Ok value ->
                         // Top level: every folded static is a module global,
@@ -1576,7 +1725,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
                             | _ -> env.Widths
                         env <- { bound with Globals = bound.Values; Widths = widths }
                     | Error reason ->
-                        failures <- failures @ [{ Names = pd.Names; Reason = reason; Span = pd.Span }]
+                        failures <- failures @ [{ Names = pd.Names; Reason = reason; Span = pd.Span; Misfit = misfit }]
             | _ -> ()
 
         Ok (env, failures)

@@ -1,0 +1,32 @@
+// TEST: Functor Wrappers Over Antisymmetric reynolds Maps Apply To The Signed Sum
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// Without an anticomm licence the antisymmetrized map is dense, and an even or
+// affine stage gives a dense (not antisymmetric) result: master printed
+// sq = [[0.0, 9.0], [-9.0, 0.0]] and inc = [[0.0, -3.0], [3.0, 0.0]]. With the
+// licence (packed strict triangle) only a sign-odd stage is admitted (BL4015
+// otherwise), and the cube of the signed sum keeps the packed storage: master
+// printed the signed sum of the cubed terms, odd = [[-27.0, -351.0], [-216.0], []].
+let xs: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let ys: Array<Float64 like Idx<3>> = [1.0, 2.0, 4.0]
+let k = lambda(x: Float64, y: Float64) -> x - 2.0 * y
+let ka = lambda(x: Float64, y: Float64) where anticomm(x, y) -> x - 2.0 * y
+let sq = lambda(v: Float64) -> v * v
+let inc = lambda(v: Float64) -> v + 1.0
+let cube = lambda(v: Float64) -> v * v * v
+let dense = method_for(xs, xs) <@> reynolds(k, Antisymmetric) |> compute
+let even = sq <$> (method_for(xs, xs) <@> reynolds(k, Antisymmetric)) |> compute
+let affine = inc <$> (method_for(xs, xs) <@> reynolds(k, Antisymmetric)) |> compute
+let packed = method_for(ys, ys) <@> reynolds(ka, Antisymmetric) |> compute
+let odd = cube <$> (method_for(ys, ys) <@> reynolds(ka, Antisymmetric)) |> compute
+// EXPECT: dense = [[0.0, -3.0], [3.0, 0.0]]
+// EXPECT: even = [[0.0, 9.0], [9.0, 0.0]]
+// EXPECT: affine = [[1.0, -2.0], [4.0, 1.0]]
+// EXPECT: packed = [[-3.0, -9.0], [-6.0], []]
+// EXPECT: odd = [[-27.0, -729.0], [-216.0], []]

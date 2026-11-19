@@ -1,0 +1,8 @@
+// TEST: a float literal past FLT_MAX as a Float32 variant payload (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+type S = A : Float32 | B
+let s = A(1e40)
+// ERROR: BL3020 @ 6:11

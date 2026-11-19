@@ -1,0 +1,14 @@
+// TEST: a static function computes at its declared widths, as its run-time twin
+// ============================================================================
+// R28: a static function's parameters and return have their declared widths;
+// integers wrap by the integer contract at those widths (formalism 2.4), so
+// the compile-time and run-time twins agree.
+// ============================================================================
+static function f(i: Int32) -> Int32 = i + 1
+function g(i: Int32) -> Int32 = i + 1
+let static s = f(2147483647)
+let r = g(2147483647)
+let static t = f(21)
+// EXPECT: s = -2147483648
+// EXPECT: r = -2147483648
+// EXPECT: t = 22

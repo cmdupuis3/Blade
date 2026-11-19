@@ -2088,6 +2088,83 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
         | Some (ArrayElem a) -> IR.stripUnits a.ElemType = IRTScalar ETInt32
         | Some t -> IR.stripUnits t = IRTScalar ETInt32
         | None -> false
+    // R19, THE INSTANCE HALF OF THE LITERAL-FIT RULE: narrowInt / narrowLit
+    // narrow a literal-only tree only when every leaf fits the narrow width;
+    // a tree of the right class with a leaf that does not fit was silently
+    // left wide here (and wrapped / overflowed at the narrow slot it meets).
+    // Every narrowing this pass would attempt instead REFUSES such a tree
+    // (BL3020, LiteralDefaults.misfitMessage): the first leaf that does not
+    // fit, a negated literal judged whole (`-2147483648` fits Int32).
+    let rec intMisfit (e: IRExpr) : string option =
+        match e with
+        | IRLit (IRLitInt n) when not (LiteralDefaults.intFits ETInt32 n) -> Some (LiteralDefaults.intText n)
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) ->
+            if LiteralDefaults.intFits ETInt32 (-n) then None else Some ("-" + LiteralDefaults.intText n)
+        | IRUnaryOp (IRNeg, x) -> intMisfit x
+        | IRBinOp (IRElementwise, _, l, r, _) -> intMisfit l |> Option.orElseWith (fun () -> intMisfit r)
+        | _ -> None
+    let rec floatTree (e: IRExpr) =
+        match e with
+        | IRLit (IRLitFloat _) -> true
+        | IRUnaryOp ((IRNeg | IRMath _), x) -> floatTree x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _), l, r, _) -> floatTree l && floatTree r
+        | IRBinOp (IRElementwise, IRCaret, l, r, _) -> floatTree l && (floatTree r || intLiteralTree r)
+        | _ -> false
+    let rec floatMisfit (e: IRExpr) : string option =
+        match e with
+        | IRLit (IRLitFloat v) when not (LiteralDefaults.floatFits ETFloat32 v) -> Some (LiteralDefaults.floatText v)
+        | IRUnaryOp (IRNeg, IRLit (IRLitFloat v)) when not (LiteralDefaults.floatFits ETFloat32 v) ->
+            Some ("-" + LiteralDefaults.floatText v)
+        | IRUnaryOp (_, x) -> floatMisfit x
+        | IRBinOp (IRElementwise, IRCaret, l, r, _) when not (floatTree r) -> floatMisfit l
+        | IRBinOp (IRElementwise, _, l, r, _) -> floatMisfit l |> Option.orElseWith (fun () -> floatMisfit r)
+        | _ -> None
+    let narrowElemOf (t: IRType option) =
+        let elemOf (t: IRType) =
+            match IR.stripUnits t with
+            | IRTScalar et -> Some et
+            | IRTIdxTagged (inner, _) -> (match IR.stripUnits inner with IRTScalar et -> Some et | _ -> None)
+            | _ -> None
+        match t with
+        | Some (ArrayElem a) -> elemOf a.ElemType
+        | Some t -> elemOf t
+        | None -> None
+    let mutable owner : string = ""
+    let refuseMisfit (loc: SrcLoc) (target: IRType option) (text: string) =
+        let span =
+            if not (isNull loc) && loc.Span.StartLine > 0 then loc.Span
+            else IR.declSpanOf owner
+        let et = narrowElemOf target |> Option.defaultValue ETInt32
+        raise (Blade.Diagnostics.BladeDiagnosticException (
+            Blade.Diagnostics.mkError "BL3020" Blade.Diagnostics.PhTypes span (LiteralDefaults.misfitMessage et text)))
+    // The narrowing a tree meets at a narrow position: Some misfit text when
+    // the tree is literal-only of the position's class with a leaf that does
+    // not fit (refused), None otherwise (narrowed, or not a literal tree).
+    let misfitAt (target: IRType option) (intAllowed: bool) (tree: IRExpr) : string option =
+        if isInt32 target then
+            if intAllowed && intLiteralTree tree then intMisfit tree else None
+        elif isNarrow target then
+            if floatTree tree then floatMisfit tree else None
+        else None
+    // R19 (lane a2): a float literal whose SPELLING its double cannot hold
+    // reaches the IR as Lowering's marker, an explicit Float64 cast carrying
+    // the literal's span (Ast.DegenerateFloatLiterals). Met by a narrow
+    // Float32 / Complex64 position at an instance, it is refused at the
+    // literal: never narrowed, never handed to a Float32 slot as a Float64.
+    // Refused exactly where a finite misfit at the same position is (the call
+    // or the operator, refuseMisfit), so the two spellings agree.
+    let degenerateAt (target: IRType option) (tree: IRExpr) : string option =
+        if not (isNarrow target) then None
+        else
+            let marker (e: IRExpr) =
+                match e with
+                | IRUnaryOp (IRCast (ETFloat64, loc), IRLit (IRLitFloat v))
+                    when not (isNull loc) && Blade.Ast.DegenerateFloatLiterals.isDegenerate loc.Span ->
+                    Some (LiteralDefaults.floatTextAt v loc.Span)
+                | _ -> None
+            match tree with
+            | IRUnaryOp (IRNeg, inner) -> marker inner |> Option.map (fun t -> "-" + t)
+            | _ -> marker tree
     let adapt (e: IRExpr) : IRExpr option =
         match e with
         | IRBinOp (IRElementwise, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
@@ -2098,10 +2175,23 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
                  match narrowInt r, narrowInt l with
                  | Some r', _ when op <> IRCaret && isInt32 (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
                  | _, Some l' when isInt32 (exprTypeIfKnown r) && op <> IRCaret -> Some (IRBinOp (IRElementwise, op, l', r, loc))
-                 | _ -> None)
+                 | _ ->
+                     let tl, tr = exprTypeIfKnown l, exprTypeIfKnown r
+                     degenerateAt tl r |> Option.iter (refuseMisfit loc tl)
+                     degenerateAt tr l |> Option.iter (refuseMisfit loc tr)
+                     match misfitAt tl (op <> IRCaret) r, misfitAt tr (op <> IRCaret) l with
+                     | Some text, _ -> refuseMisfit loc tl text
+                     | _, Some text -> refuseMisfit loc tr text
+                     | _ -> None)
         | IRApp (f, args, retTy) ->
             match exprTypeIfKnown f |> Option.map IR.stripUnits with
             | Some (FuncElem (slots, _)) when slots.Length = args.Length ->
+                let loc = match e with IRAppAt (_, _, _, l) -> l | _ -> SrcLoc.Nowhere
+                List.iter2 (fun slot arg ->
+                    degenerateAt (Some slot) arg |> Option.iter (refuseMisfit loc (Some slot))
+                    match misfitAt (Some slot) true arg with
+                    | Some text -> refuseMisfit loc (Some slot) text
+                    | None -> ()) slots args
                 let replacements =
                     List.map2 (fun slot arg ->
                         if isInt32 (Some slot) then narrowInt arg
@@ -2117,15 +2207,15 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
         let scan (b: IRExpr) =
             if not hit then
                 iterIRExpr (fun e -> if not hit && (adapt e).IsSome then hit <- true) b
-        modul.Functions |> List.iter (fun f -> scan f.Body)
-        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        modul.Functions |> List.iter (fun f -> owner <- f.SourceName; scan f.Body)
+        modul.Bindings |> List.iter (fun b -> owner <- b.Name; scan b.Value)
         hit
     if not hit then modul
     else
     let rewrite b = b |> mapIRExpr (fun e -> adapt e |> Option.defaultValue e)
     { modul with
-        Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
-        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+        Functions = modul.Functions |> List.map (fun f -> owner <- f.SourceName; { f with Body = rewrite f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> owner <- b.Name; { b with Value = rewrite b.Value }) }
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>

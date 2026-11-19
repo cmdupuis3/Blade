@@ -1,0 +1,10 @@
+// TEST: an underflowing float literal at a generic instance made Float32 (rejects)
+// ============================================================================
+// R19 (lane a2): a float literal whose SPELLING its double cannot hold
+// (`1e400` parsed to inf, a nonzero `1e-400` to 0.0) does not fit Float32.
+// ============================================================================
+function f(x: T, y: T) -> T = x * y
+function h(a) = f(a, 1e-400)
+let a: Float32 = 3.0
+let r = h(a)
+// ERROR: BL3020 @ 6:17

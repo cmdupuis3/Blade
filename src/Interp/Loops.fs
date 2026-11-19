@@ -150,57 +150,18 @@ type private OutTarget =
     /// lanes agree cell for cell rather than by construction.
     | OutArrayRows of BladeArray
 
-// applyFunctorWrappers: ported from CodeGen.genComputeBinding (7534). Folds
-// functor-map wrappers into the ApplyInfo kernel body (beta-reduce +
-// synthetic-callable registration in the AnalysisContext, which the
-// interpreter's own resolveKernel then reads). Uses st.Builder for FreshId.
+// applyFunctorWrappers: the twin of CodeGenBinding.genComputeBinding's -- both
+// run IR.composeFunctorWrappers (map fusion; over a Reynolds kernel the stack
+// is the post-sum stage of an envelope, R20), registering the synthetic
+// callables in the AnalysisContext the interpreter's own resolveKernel reads.
+// Uses st.Builder for FreshId.
 
 let private applyFunctorWrappers (st: InterpState) (info: ApplyInfo) (wrappers: IRExpr list) : ApplyInfo =
     if List.isEmpty wrappers then info
     else
-        let betaReduce (wrapper: IRExpr) (body: IRExpr) : IRExpr =
-            match resolveCallable wrapper with
-            | Some c when c.Params.Length = 1 ->
-                let paramId = c.Params.[0].VarId
-                let rec subst (expr: IRExpr) =
-                    match expr with
-                    | IRVar (id, _) when id = paramId -> body
-                    | IRVar _ | IRLit _ | IRParam _ -> expr
-                    | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
-                    | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
-                    | IRIf (c2, t, e) -> IRIf (subst c2, subst t, subst e)
-                    | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
-                    | IRIndex (a2, idxs, ty) -> IRIndex (subst a2, idxs |> List.map subst, ty)
-                    | IRTuple es -> IRTuple (es |> List.map subst)
-                    | IRComplex (re, im) -> IRComplex (subst re, subst im)
-                    | IRFma (a, b, c) -> IRFma (subst a, subst b, subst c)
-                    | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
-                    | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
-                    | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
-                    | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
-                    | _ -> expr
-                subst c.Body
-            | _ ->
-                let retTy =
-                    match resolveCallable wrapper with
-                    | Some c -> c.RetType
-                    | None -> IRTScalar ETFloat64
-                IRApp (wrapper, [body], retTy)
-        let wrappedKernel =
-            let wrapBody (body: IRExpr) = wrappers |> List.fold (fun b w -> betaReduce w b) body
-            let buildInline (c: IRCallable) : IRExpr =
-                let synthetic = { c with Id = st.Builder.FreshId(); Body = wrapBody c.Body }
-                registerSyntheticCallable synthetic
-            mapKernelInner buildInline info.Kernel
-        let newOutputType =
-            match wrappers |> List.tryHead with
-            | Some w -> (match resolveCallable w with Some c -> c.RetType | None -> info.OutputType)
-            | None -> info.OutputType
-        let adjustedOutputType =
-            match info.OutputType, newOutputType with
-            | ArrayElem arr, IRTScalar et -> mkArrayLike { arr with ElemType = IRTScalar et }
-            | _ -> newOutputType
-        { info with Kernel = wrappedKernel; OutputType = adjustedOutputType }
+        let (wrappedKernel, outputType) =
+            composeFunctorWrappers (fun () -> st.Builder.FreshId()) info.Kernel info.OutputType wrappers
+        { info with Kernel = wrappedKernel; OutputType = outputType }
 
 // Input gating: mirrors CodeGen's ragged/grouped/compound/mpi refusals so
 // the differential gate SKIP-UNSUPPORTEDs the exact categories CodeGen also gates.
@@ -2225,6 +2186,11 @@ and private interpretNest
     // consistent bijective renaming of CodeGen's peeled C++ names -- so the
     // dedup / coefficient / first-occurrence ordering are IDENTICAL to the
     // compiled binary by construction.
+    // A `<$>` / `@>>` stack over the map is the envelope's POST stage, applied
+    // to the sum (IR.composeFunctorWrappers, R20); the permutations sum the TERM.
+    let (reynoldsTerm, reynoldsPost) =
+        if cg.HasReynolds && cg.KernelParams.Length >= 2 then splitReynoldsPost cg.KernelExpr
+        else (cg.KernelExpr, None)
     let reynoldsPlan : (ValueRef[] * Blade.ReynoldsCore.ReynoldsTermPlan) option =
         if cg.HasReynolds && cg.KernelParams.Length >= 2 then
             let n = cg.KernelParams.Length
@@ -2235,7 +2201,7 @@ and private interpretNest
                 |> List.fold (fun acc (vid, nm) -> Map.add vid nm acc) Map.empty
             let plan =
                 Blade.ReynoldsCore.reynoldsTermPlan n cg.IsAntisymmetric
-                    (fun perm -> Blade.CodeGen.canonicalKey (permNameMap perm) cg.KernelExpr)
+                    (fun perm -> Blade.CodeGen.canonicalKey (permNameMap perm) reynoldsTerm)
             let pcells = cg.KernelParams |> List.map (fun p -> paramCells.[p.VarId]) |> Array.ofList
             Some (pcells, plan)
         else None
@@ -2251,8 +2217,8 @@ and private interpretNest
         let origVals = pcells |> Array.map _.V
         let evalPerm (perm: int list) : Value =
             perm |> List.iteri (fun i src -> pcells.[i].V <- origVals.[src])
-            force st kenv (Core.evalExpr st kenv cg.KernelExpr)
-        let result =
+            force st kenv (Core.evalExpr st kenv reynoldsTerm)
+        let sum =
             match plan.Terms with
             | [] -> VFloat 0.0
             | (coeff0, perm0) :: rest ->
@@ -2274,7 +2240,13 @@ and private interpretNest
                 acc
         // Restore the peeled values so the next output cell starts clean.
         Array.iteri (fun i (c: ValueRef) -> c.V <- origVals.[i]) pcells
-        result
+        // ...then the post stage, once, on the summed value.
+        match reynoldsPost with
+        | None -> sum
+        | Some p ->
+            let penv = envChild kenv
+            envBind penv p.Params.Head.VarId sum |> ignore
+            force st penv (Core.evalExpr st penv p.Body)
 
     // Peel one element at `level` given the current per-position peeled arrays
     // (immutable Map threaded down the recursion -- sibling iterations don't see

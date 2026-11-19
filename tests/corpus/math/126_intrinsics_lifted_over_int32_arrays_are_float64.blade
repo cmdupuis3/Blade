@@ -1,0 +1,48 @@
+// TEST: Real intrinsics lifted over Int32 arrays are Float64, cell for cell the scalar value
+// ============================================================================
+// R18 (deep review, one sub-point): formalism 2.4 -- a transcendental
+// intrinsic's INTEGER operand widens to double, and the scalar form types
+// `exp(x: Int64)` Float64. Lifted over an integer ARRAY the complex-capable
+// intrinsics (exp log sin cos tan sinh cosh tanh asin acos atan sqrt) typed
+// their kernel at the operand's own variable, so the result came out INTEGER:
+// g++ rejected the narrowing (BL9002) and the interpreter and LLVM lanes
+// printed truncated cells (exp([1, 4, 9]) = [2, 54, 8103]). The kernel
+// re-stamp in buildApplyInfo now types it Float64, each cell the scalar form's
+// value, in every lane.
+// ============================================================================
+let a0: Array<Int32 like Idx<3>> = [1, 4, 9]
+let exp_a = exp(a0)
+let a1: Array<Int32 like Idx<3>> = [1, 4, 9]
+let log_a = log(a1)
+let a2: Array<Int32 like Idx<3>> = [1, 4, 9]
+let sqrt_a = sqrt(a2)
+let a3: Array<Int32 like Idx<3>> = [1, 4, 9]
+let sin_a = sin(a3)
+let a4: Array<Int32 like Idx<3>> = [1, 4, 9]
+let cos_a = cos(a4)
+let a5: Array<Int32 like Idx<3>> = [1, 4, 9]
+let tan_a = tan(a5)
+let a6: Array<Int32 like Idx<3>> = [1, 4, 9]
+let sinh_a = sinh(a6)
+let a7: Array<Int32 like Idx<3>> = [1, 4, 9]
+let cosh_a = cosh(a7)
+let a8: Array<Int32 like Idx<3>> = [1, 4, 9]
+let tanh_a = tanh(a8)
+let a9: Array<Int32 like Idx<3>> = [1, 4, 9]
+let atan_a = atan(a9)
+let a10: Array<Int32 like Idx<3>> = [0, 1, 1]
+let asin_a = asin(a10)
+let a11: Array<Int32 like Idx<3>> = [0, 1, 1]
+let acos_a = acos(a11)
+// EXPECT: exp_a = [2.71828182845905, 54.5981500331442, 8103.08392757538]
+// EXPECT: log_a = [0.0, 1.38629436111989, 2.19722457733622]
+// EXPECT: sqrt_a = [1.0, 2.0, 3.0]
+// EXPECT: sin_a = [0.841470984807897, -0.756802495307928, 0.412118485241757]
+// EXPECT: cos_a = [0.54030230586814, -0.653643620863612, -0.911130261884677]
+// EXPECT: tan_a = [1.5574077246549, 1.15782128234958, -0.45231565944181]
+// EXPECT: sinh_a = [1.1752011936438, 27.2899171971278, 4051.54190208279]
+// EXPECT: cosh_a = [1.54308063481524, 27.3082328360165, 4051.54202549259]
+// EXPECT: tanh_a = [0.761594155955765, 0.999329299739067, 0.999999969540041]
+// EXPECT: atan_a = [0.785398163397448, 1.32581766366803, 1.460139105621]
+// EXPECT: asin_a = [0.0, 1.5707963267949, 1.5707963267949]
+// EXPECT: acos_a = [1.5707963267949, 0.0, 0.0]

@@ -353,5 +353,51 @@ let runSpanTests () : BlockResult =
         (fieldless.Length = 0)
         (sprintf "field-less cases: %s" (String.concat ", " fieldless))
 
+    // (g) R19 (lane a2): the verdict "this float literal's spelling is a value
+    //     its double cannot hold" (`1e-400` parsed to 0.0) lives on the
+    //     PARSER-BUILT span object of that literal (Ast.DegenerateFloatLiterals,
+    //     a ConditionalWeakTable keyed by reference). A later program in the
+    //     same process and flow -- a string-sourced program at the SAME line and
+    //     column, or a literal synthesized at a structurally equal span without
+    //     the parser's literal path -- must not see it.
+    let floatLitOf (p: Program) : Expr =
+        p.Modules |> List.collect (fun m -> m.Decls) |> List.pick (fun d ->
+            match d.Value with
+            | DeclLet b -> (match b.Value.Kind with ExprKind.ExprLit (LitFloat _) -> Some b.Value | _ -> None)
+            | _ -> None)
+    match Parser.parseProgram "let x: Float32 = 1e-400\n" with
+    | Error e -> check "degenerate float: the first program parses" false (sprintf "%A" e)
+    | Ok pa ->
+        let la = floatLitOf pa
+        let firstErr = match TypeCheck.typeCheck pa with Error (e :: _) -> Some e | _ -> None
+        check "degenerate float: 1e-400 under a Float32 annotation is refused"
+            (firstErr.IsSome) (sprintf "%A" (firstErr |> Option.map (fun e -> e.Span)))
+        check "degenerate float: the verdict is on the literal's parser-built span object"
+            (DegenerateFloatLiterals.isDegenerate la.Span) ""
+        let equalSpan = { la.Span with File = la.Span.File }
+        check "degenerate float: a structurally EQUAL span built elsewhere carries no verdict"
+            (equalSpan = la.Span && not (DegenerateFloatLiterals.isDegenerate equalSpan)) ""
+        match Parser.parseProgram "let y: Float32 = 0.0000\n" with
+        | Error e -> check "degenerate float: the second program parses" false (sprintf "%A" e)
+        | Ok pb ->
+            let lb = floatLitOf pb
+            check "degenerate float: a second program's 0.0000 at the SAME span is not degenerate"
+                (lb.Span = la.Span && not (DegenerateFloatLiterals.isDegenerate lb.Span)) (sprintf "%A vs %A" lb.Span la.Span)
+            check "degenerate float: the second program type-checks"
+                (match TypeCheck.typeCheck pb with Ok _ -> true | Error _ -> false) ""
+        // A literal NOT built by the parser's literal path, at the first
+        // literal's span VALUE, in the first program's own AST.
+        let synth = { la with Kind = ExprKind.ExprLit (LitFloat 0.0); Span = equalSpan }
+        let pc =
+            { pa with
+                Modules = pa.Modules |> List.map (fun m ->
+                    { m with
+                        Decls = m.Decls |> List.map (fun d ->
+                            match d.Value with
+                            | DeclLet b when obj.ReferenceEquals (b.Value, la) -> { d with Value = DeclLet { b with Value = synth } }
+                            | _ -> d) }) }
+        check "degenerate float: a synthesized 0.0 at the same span value type-checks"
+            (match TypeCheck.typeCheck pc with Ok _ -> true | Error _ -> false) ""
+
     printFooter "Error Locations" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

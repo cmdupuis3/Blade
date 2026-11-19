@@ -16,6 +16,43 @@ type Span = {
 
 let noSpan = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
 
+/// R19 (round 3, lane a2): FLOAT LITERALS WHOSE SPELLING THE DOUBLE CANNOT HOLD.
+/// The lexer reads a float literal into a double, so `1e400` is already an
+/// infinity and a nonzero `1e-400` already 0.0 -- indistinguishable, by value,
+/// from a spelled `0.0`. The parser marks such a literal (Lexer.TokFloat's
+/// spelling) on the literal's own SPAN OBJECT -- the record instance it builds
+/// for that ExprLit, keyed by REFERENCE (ConditionalWeakTable), never by its
+/// value. The span object travels with the node through every copy the
+/// checker, Zonk and lowering make (`{ e with Type = .. }` shares it), so every
+/// literal-fit judgment (LiteralDefaults.floatLiteralFits) reads the verdict
+/// of exactly the literal it judges. Closed by construction: an entry is
+/// visible only through the AST it was made for -- another compilation, flow
+/// or module builds its own span objects, and a structurally EQUAL span (a
+/// re-parse, a string-sourced program at the same line and column, a
+/// synthesized node) is a different object -- and it dies with that AST.
+/// A module imported into a program is parsed by the same parser, so its
+/// literals carry their marks into the program that imports it.
+module DegenerateFloatLiterals =
+    let private table = System.Runtime.CompilerServices.ConditionalWeakTable<Span, string>()
+    /// Mark the span object of a float literal the parser built whose
+    /// spelling its double does not hold.
+    let record (span: Span) (degenerateSpelling: string option) =
+        match degenerateSpelling with
+        | Some text -> table.AddOrUpdate(span, text)
+        | None -> ()
+    /// Whether `span` IS (by reference) the span of a float literal spelled as
+    /// a value its double does not hold (an overflow to an infinity, a
+    /// nonzero underflow to 0.0).
+    let isDegenerate (span: Span) : bool =
+        match table.TryGetValue span with
+        | true, _ -> true
+        | _ -> false
+    /// The spelling of a degenerate float literal (for its refusal message).
+    let spellingOf (span: Span) : string option =
+        match table.TryGetValue span with
+        | true, s -> Some s
+        | _ -> None
+
 type Located<'T> = {
     Value: 'T
     Span: Span

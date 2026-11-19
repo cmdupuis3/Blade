@@ -1,0 +1,19 @@
+// TEST: if / match / array-literal joins whose literals fit, and same-width values
+// ============================================================================
+// R29's accepted twin: a literal takes the other branch's, arm's or cell's
+// width when it fits; values of one width join as before.
+// ============================================================================
+let a: Int32 = 3
+let b: Int64 = 7
+let c = match a with
+    | 1 -> a
+    | _ -> 5
+let d = if a == 1 then a else 2147483647
+let e = match a with
+    | 1 -> b
+    | _ -> 5000000000
+let xs = [a, -2147483648]
+// EXPECT: c = 5
+// EXPECT: d = 2147483647
+// EXPECT: e = 5000000000
+// EXPECT: xs = [3, -2147483648]

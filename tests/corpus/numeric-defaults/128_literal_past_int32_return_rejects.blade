@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 returned as Int32 (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function h() -> Int32 = 5000000000
+let r = h()
+// ERROR: BL3020 @ 5:25

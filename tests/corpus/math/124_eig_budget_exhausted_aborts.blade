@@ -1,0 +1,12 @@
+// TEST: Math eig: running out of the iteration budget panics BL8010 (aborts)
+// eig's Francis QR runs a fixed budget (MAXITER, default 30 n). A finite
+// operand whose windows are still open when the budget is spent did not
+// converge: that is BL8010, the language's "budget ran out" code (as a
+// `while`-guarded recursion's), not a silently unconverged result. A
+// NaN / Inf operand is still BL8008 (math/094, math/097). With its default
+// budget the same matrix converges (math/052).
+import math as m
+let c: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [6.0, -11.0, 6.0]]
+let (re, im) = m.eig(c, 1)
+// ABORT: error[BL8010]
+// ABORT: MAXITER = 1

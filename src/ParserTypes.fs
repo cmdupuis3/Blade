@@ -57,7 +57,7 @@ and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
         let line, col = currentPos tokens
         error "A unit scale factor cannot be zero (a zero-magnitude unit has no inverse)" line col
     | Some (TokInt n) -> success (UnitScaleLit (bigint n, bigint 1)) (advance tokens)
-    | Some (TokFloat v) ->
+    | Some (TokFloat (v, _)) ->
         (match rationalOfFloatLiteral v with
          | Some (num, den) -> success (UnitScaleLit (num, den)) (advance tokens)
          | None ->

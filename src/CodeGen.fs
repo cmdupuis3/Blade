@@ -3293,8 +3293,10 @@ let intEnumKeysOfModule (types: IRTypeDef list) (tag: string) : int64 list optio
     go 16 tag
 
 /// THE DISPLAY FORM's unit (P3-26): the unit a value of type `t` prints after
-/// it -- a quantity's own name (`mps`), else the unit checker's rendering of
-/// the dims (ppUnitSig: `meters / seconds`); nothing for a dimensionless value.
+/// it -- a quantity's own name (`speed`, declared `Unit speed: mps`), else the
+/// unit checker's rendering of the dims (ppUnitSig: `meters / seconds`, also
+/// for a plain alias such as `Unit mps = meters / seconds`, which carries no
+/// quantity name); nothing for a dimensionless value.
 /// An array's unit is its element's.
 let rec displayUnitOf (t: IRType) : string option =
     match t with

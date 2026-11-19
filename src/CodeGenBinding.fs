@@ -1991,91 +1991,15 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     let (resolved, functorWrappers) = resolveComputation inner []
     
     // Compose functor wrappers into ApplyInfo kernel if present
-    // f <$> (L <@> g) -> L <@> (f . g)
-    // Wraps kernel body: lambdaparams -> f(g(params))
+    // f <$> (L <@> g) -> L <@> (f . g); over a Reynolds kernel the stack is
+    // applied to the permutation SUM (IR.composeFunctorWrappers, R20). The
+    // interpreter's materializeApply runs the same composition.
     let applyFunctorWrappers (info: ApplyInfo) (wrappers: IRExpr list) : ApplyInfo =
         if wrappers.IsEmpty then info
         else
-            // Beta-reduce: substitute wrapper's parameter with inner body
-            // f <$> (L <@> g) where f = lambdax -> h(x)
-            // becomes L <@> lambdaparams -> h(g(params))
-            let betaReduce (wrapper: IRExpr) (body: IRExpr) : IRExpr =
-                // Resolve through the CallablesTable. When the
-                // wrapper resolves to a single-param callable,
-                // substitute the param VarId with `body`. When it
-                // doesn't resolve (or arity mismatch), fall back
-                // to IRApp form (still correct, just not inlined).
-                match resolveCallable wrapper with
-                | Some c when c.Params.Length = 1 ->
-                    // Substitute param VarId with body expression
-                    let paramId = c.Params.[0].VarId
-                    let rec subst (expr: IRExpr) =
-                        match expr with
-                        | IRVar (id, _) when id = paramId -> body
-                        | IRVar _ | IRLit _ | IRParam _ -> expr
-                        | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
-                        | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
-                        | IRIf (c, t, e) -> IRIf (subst c, subst t, subst e)
-                        | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
-                        | IRIndex (a, idxs, ty) -> IRIndex (subst a, idxs |> List.map subst, ty)
-                        | IRTuple es -> IRTuple (es |> List.map subst)
-                        | IRComplex (re, im) -> IRComplex (subst re, subst im)
-                        | IRFma (a, b, c) -> IRFma (subst a, subst b, subst c)
-                        | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
-                        | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
-                        | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
-                        | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
-                        | _ -> expr  // For complex nodes, leave as-is
-                    subst c.Body
-                | _ ->
-                    // Can't beta-reduce (couldn't resolve, or arity
-                    // mismatch), fall back to IRApp (IIFE in C++).
-                    let retTy =
-                        match resolveCallable wrapper with
-                        | Some c -> c.RetType
-                        | None -> IRTScalar ETFloat64
-                    IRApp (wrapper, [body], retTy)
-            
-            let wrappedKernel =
-                // Synthetic-registry construction. Each
-                // per-use-site wrap produces a fresh IRCallable with
-                // a new builder-allocated id, registers it in the
-                // codegen-pass synthetic registry, and returns an
-                // IRVar reference. resolveCallable queries both
-                // the module's CallablesTable and the synthetic
-                // registry, so downstream consumers (buildLoopNest-
-                // CodeGen for inline emission, betaReduce for further
-                // kernel-fold) see the wrapped body uniformly.
-                // `mapKernelInner` peels any `IRReynolds` wrapper,
-                // applies the transform to the inner callable, and
-                // re-wraps with Reynolds (preserving isAntisymmetric)
-                // if it was present.
-                let wrapBody (body: IRExpr) =
-                    wrappers |> List.fold (fun b w -> betaReduce w b) body
-                let buildInline (c: IRCallable) : IRExpr =
-                    let synthetic =
-                        { c with Id = builder.FreshId()
-                                 Body = wrapBody c.Body }
-                    registerSyntheticCallable synthetic
-                mapKernelInner buildInline info.Kernel
-            // Update output type from outermost wrapper's return
-            // type, resolving the wrapper through resolveCallable.
-            // info.OutputType might otherwise be stale relative to
-            // the wrapped kernel, mis-typing downstream sites (the
-            // element-type adjustment below, output allocation).
-            let newOutputType =
-                match wrappers |> List.tryHead with
-                | Some w ->
-                    match resolveCallable w with
-                    | Some c -> c.RetType
-                    | None -> info.OutputType
-                | None -> info.OutputType
-            // If output is an array, update the element type
-            let adjustedOutputType =
-                match info.OutputType, newOutputType with
-                | ArrayElem arr, IRTScalar et -> mkArrayLike { arr with ElemType = IRTScalar et }
-                | _ -> newOutputType
-            { info with Kernel = wrappedKernel; OutputType = adjustedOutputType }
+            let (wrappedKernel, outputType) =
+                composeFunctorWrappers (fun () -> builder.FreshId()) info.Kernel info.OutputType wrappers
+            { info with Kernel = wrappedKernel; OutputType = outputType }
     
     // THE ROW ORBIT ACTION (round 3, D-P2 / gap G73): a row action over a
     // stored SymIdx<2, n> pool, admitted (Blade.OrbitFold.orbitActionAdmissible),

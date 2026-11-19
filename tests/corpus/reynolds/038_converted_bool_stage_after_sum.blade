@@ -1,0 +1,26 @@
+// TEST: A Bool Stage Converted Back To A Number Over A reynolds Map Is A Float64 Map
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// The last stage returns Float64, so the map holds Float64 cells. Master
+// printed a Bool matrix in the compiled lanes (the output was typed by the
+// INNERMOST stage) and nan cells in the interpreter: r = [[true, true],
+// [true, true]], p = [[true, true, true], [true, true], [true]]. The packed (comm) twin
+// holds an intermediate Bool per canonical cell.
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 4.0]
+let g = lambda(x, y) -> x * y
+let kc = lambda(x: Float64, y: Float64) where comm(x, y) -> x - 2.0 * y
+let positive = lambda(z: Float64) -> z > 0.0
+let above = lambda(z: Float64) -> z > -7.0
+let number = lambda(v: Bool) -> Float64(v)
+let r = number <$> (positive <$> (method_for(a, b) <@> reynolds(g))) |> compute
+let p = number <$> (above <$> (method_for(xs, xs) <@> reynolds(kc))) |> compute
+// EXPECT: r = [[1.0, 1.0], [1.0, 1.0]]
+// EXPECT: p = [[1.0, 1.0, 1.0], [1.0, 1.0], [0.0]]

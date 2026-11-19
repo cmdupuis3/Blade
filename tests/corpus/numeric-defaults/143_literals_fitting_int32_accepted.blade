@@ -1,0 +1,23 @@
+// TEST: integer literals that fit Int32 still adapt to it
+// ============================================================================
+// R19's accepted twin: a literal past Int32 where an Int32 is fixed is refused
+// (125-142), so the boundaries must stay accepted -- Int32's extremes, the
+// negated minimum judged whole, a literal-only sum of fitting literals (which
+// wraps by the integer contract, formalism 2.4), and Int64 contexts.
+// ============================================================================
+function g(i: Int32) -> Int32 = i
+function g64(i: Int64) -> Int64 = i + 1
+let hi = g(2147483647)
+let lo = g(-2147483648)
+let wrapped: Int32 = 2147483647 + 1
+let mn: Int32 = -2147483648
+let wide = g64(5000000000)
+let static s: Int32 = -2147483648
+let static s2: Int32 = 2147483647 + 1
+// EXPECT: hi = 2147483647
+// EXPECT: lo = -2147483648
+// EXPECT: wrapped = -2147483648
+// EXPECT: mn = -2147483648
+// EXPECT: wide = 5000000001
+// EXPECT: s = -2147483648
+// EXPECT: s2 = -2147483648

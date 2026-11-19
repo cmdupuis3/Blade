@@ -1463,6 +1463,10 @@ let genKernelExprWithReynolds
     (nameMap: Map<int, string>)
     (paramFinalNames: Map<int, string>) : ReynoldsResult =
     if hasReynolds && kernelParams.Length >= 2 then
+        // A `<$>` / `@>>` stack over the map is the envelope's POST stage,
+        // applied to the sum below (IR.composeFunctorWrappers, R20); the
+        // permutations sum the TERM.
+        let (kernelExpr, post) = splitReynoldsPost kernelExpr
         let n = kernelParams.Length
         let paramCppNames =
             kernelParams |> List.map (fun p ->
@@ -1503,6 +1507,21 @@ let genKernelExprWithReynolds
                 "0.0"  // Complete cancellation (e.g. antisymmetrization of symmetric kernel)
             else
                 $"({sumExpr})"
+        // The post stage, once per cell on the summed value: its parameter
+        // names the sum directly when it reads it once, else one local holds
+        // it (an immediately-invoked lambda, so the sum is evaluated once).
+        let cppExpr =
+            match post with
+            | None -> cppExpr
+            | Some p ->
+                let sumId = p.Params.Head.VarId
+                let reads = ref 0
+                iterIRExpr (fun e -> match e with IRVar (v, _) when v = sumId -> reads.Value <- reads.Value + 1 | _ -> ()) p.Body
+                if reads.Value <= 1 then
+                    exprToCpp (Map.add sumId cppExpr nameMap) p.Body
+                else
+                    let local = $"__rsum{sumId}"
+                    $"([&](const auto {local}) {{ return {(exprToCpp (Map.add sumId local nameMap) p.Body)}; }})({cppExpr})"
         { CppExpr = cppExpr; TotalPerms = totalPerms; UniqueTerms = uniqueTerms }
     else
         { CppExpr = exprToCpp nameMap kernelExpr; TotalPerms = 1; UniqueTerms = 1 }

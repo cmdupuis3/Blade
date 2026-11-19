@@ -614,6 +614,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         let literalTy = match texpr.Type with ArrayElem a -> a.ElemType | ty -> ty
         match lit, literalTy with
         | LitInt n, AnyPrimElem ETInt32 -> IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), IRLit (IRLitInt n))
+        // R19 (lane a2): a float literal whose SPELLING its double cannot hold
+        // (`1e400`, a nonzero `1e-400`; Ast.DegenerateFloatLiterals) is typed
+        // Float64 and keeps that width: an explicit Float64 cast carrying the
+        // literal's span, so the per-instance narrowing (IRMono's
+        // adaptFloatLiteralsModule) never narrows it -- it refuses it there.
+        | LitFloat f, AnyPrimElem ETFloat64 when DegenerateFloatLiterals.isDegenerate texpr.Span ->
+            IRUnaryOp (IRCast (ETFloat64, SrcLoc.Of texpr.Span), IRLit (IRLitFloat f))
         | _ -> IRLit (lowerLiteralValued lit literalTy)
 
     | TExprWildcard ->
@@ -3696,7 +3703,9 @@ type private ValueClass =
 ///     judgment re-checks the CLASS of each cell against its parameter.
 ///
 /// A literal argument is not judged for width (a literal adapts to its
-/// parameter: IRMono.adaptFloatLiteralsModule narrows it later).
+/// parameter: IRMono.adaptFloatLiteralsModule narrows it later, and refuses
+/// one whose value does not fit, R19 -- as the checker does for a concrete
+/// parameter, TypeCheckSupport.literalArgMisfit).
 let private refuseArgumentConversions (modules: IRModule list) : unit =
     let (funcs, programLets, _, _, resolve, _) = programWriteContext modules
     let structFields =
@@ -3923,7 +3932,7 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
         match rangeOf 64 arg with
         | Some (a, b) -> a >= int32Lo && b <= int32Hi
         | None -> false
-    let check (phase: int) (declName: string) (sourceName: string) (instance: string) (deferredRoot: bool) (body: IRExpr) =
+    let check (phase: int) (declName: string) (sourceName: string) (instance: string) (body: IRExpr) =
         // A node without a location is reported at its declaration, else (a
         // lifted lambda the span table does not name) at the first located
         // node of the body it is in -- never without a location.
@@ -4067,78 +4076,13 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
             | IRFunctorMap (f, inner) -> stageKernel fuel inner |> Option.map (fun k -> IRCompose (k, f))
             | IRVar (id, _) when fuel > 0 -> deferredValue id |> Option.bind (stageKernel (fuel - 1))
             | _ -> None
-        // The emitter's resolveComputation: the wrappers `<$>` and `@>>` stack
-        // over a computation (through guards and named deferred stages) are
-        // composed into its map's kernel. Over a REYNOLDS map they run inside
-        // the symmetrized kernel, whose terms are SUMMED: every one of them must
-        // return a number.
-        let judgeReynoldsWrappers (e: IRExpr) =
-            let rec walk (fuel: int) (e: IRExpr) (wrappers: IRExpr list) : (IRExpr * IRExpr list) list =
-                // (bindings are acyclic, so the walk ends; a budget it could
-                // still exhaust fails CLOSED -- an unjudged stack is never passed)
-                if fuel <= 0 then
-                    refuse "BL3001" SrcLoc.Nowhere "a chain of more than a million named <$> / @>> stages cannot be judged by the numbers-only rule: compute an intermediate stage (|> compute)"
-                else
-                match e with
-                | IRFunctorMap (f, inner) -> walk fuel inner (f :: wrappers)
-                | IRGuard (_, body) -> walk fuel body wrappers
-                // an INLINE compute is peeled, its wrappers kept (resolveComputation);
-                // a NAMED materialized binding stops the walk (deferredValue)
-                | IRCompute inner -> walk fuel inner wrappers
-                | IRComposeMeth (left, right) ->
-                    (match stageKernel 1000000 right with
-                     | Some k -> walk fuel left (k :: wrappers)
-                     | None -> [ (e, wrappers) ])
-                // the emitter DISTRIBUTES pending wrappers over both alternatives
-                // of <|> (f <$> (c1 <|> c2) = (f <$> c1) <|> (f <$> c2))
-                | IRChoice (l, r) -> walk fuel l wrappers @ walk fuel r wrappers
-                | IRVar (id, _) ->
-                    (match deferredValue id with
-                     | Some v -> walk (fuel - 1) v wrappers
-                     | None -> [ (e, wrappers) ])
-                | _ -> [ (e, wrappers) ]
-            for core in walk 1000000 e [] do
-                match core with
-                // the stack's LAST stage produces the summed term (every boundary
-                // between stages is a judged argument binding of its own)
-                | (IRApplyCombinator info, (_ :: _ as wrappers))
-                    when (info.HasReynolds || (match info.Kernel with IRReynolds _ -> true | _ -> false))
-                         && (match kernelSig (fst (IR.peelReynolds info.Kernel)) with
-                             | Some (_, ps, _, _, _) -> ps.Length >= 2
-                             | None -> true) ->
-                    let w = List.last wrappers
-                    match kernelSig w with
-                        | Some (_, _, ret, kbody, what) ->
-                            let rec elemOf (c: ValueClass) = match c with VCArray x -> elemOf x | c -> c
-                            (match elemOf (cls ret) with
-                             | VCNum _ | VCOpen -> ()
-                             | r ->
-                                 let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
-                                 refuse "BL3001" loc
-                                     ($"arithmetic is defined on numbers only: a `<$>` / `@>>` stage over a reynolds(..) map runs inside the symmetrized kernel, whose values are summed over the permutations, and the {what} returns {article r}; Blade converts nothing implicitly -- return a number, or apply the stage to the computed map"))
-                        | None -> ()
-                | _ -> ()
-        // The nodes INSIDE a wrapper stack (a stage's operand): the stack is judged
-        // once, at its root, where its last stage's value is consumed.
-        let stackInner = System.Collections.Generic.HashSet<IRExpr>(HashIdentity.Reference)
-        iterIRExpr (fun n ->
-            match n with
-            | IRFunctorMap (_, inner) | IRComposeMeth (inner, _) | IRGuard (_, inner) ->
-                let rec add (e: IRExpr) =
-                    stackInner.Add e |> ignore
-                    match e with IRCompute i -> add i | _ -> ()
-                add inner
-            | IRChoice (l, r) ->
-                let rec add (e: IRExpr) =
-                    stackInner.Add e |> ignore
-                    match e with IRCompute i -> add i | _ -> ()
-                add l
-                add r
-            | _ -> ()) body
-        // A module binding bound to a DEFERRED wrapper stack is not computed at
-        // its own site (it prints as <deferred ..>): its stack is judged where
-        // a use forces it (the walk follows deferred bindings).
-        if deferredRoot then stackInner.Add body |> ignore
+        // (R20, review round 3: a `<$>` / `@>>` stage over a REYNOLDS map
+        // applies to the symmetrized VALUE, after the permutation sum -- the
+        // emitters' IR.composeFunctorWrappers -- so its result is never summed
+        // and needs no numbers-only judgment of its own; only the reynolds
+        // KERNEL's values are summed (the IRReynolds arm below). Every boundary
+        // between stages stays a judged argument binding: the IRFunctorMap and
+        // IRComposeMeth arms.)
         iterIRExpr (fun n ->
             // the numbers-only operand judgment (check 1d), at the node's span:
             // the LAST sweep, so a call that hands a parameter the wrong value
@@ -4295,13 +4239,11 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                 (match tyOf comp |> Option.bind cellOf with
                  | Some cell -> judgeSlot wrapper 0 (cls cell) true " (a `<$>` wrapper, given each cell)"
                  | None -> ())
-                if not (stackInner.Contains n) then judgeReynoldsWrappers n
             // `left @>> right`: right's kernel receives each value left yields.
             | IRComposeMeth (left, right) ->
                 (match stageKernel 1000000 right, tyOf left |> Option.bind cellOf with
                  | Some k, Some cell -> judgeSlot k 0 (cls cell) true " (an `@>>` stage, given each value of the stage before it)"
                  | _ -> ())
-                if not (stackInner.Contains n) then judgeReynoldsWrappers n
             // `reynolds(k)`: the kernel's values over the permutations of its
             // arguments are SUMMED (with multiplicities, a sign for anticomm), so
             // its result must be a number whatever its parameters are.
@@ -4372,21 +4314,6 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                      let given = match stripUnits ct with IRTComputation inner -> inner | t -> t
                      judgeSlot cont 0 (cls given) true " (a `>>=` continuation)"
                  | None -> ())
-            // a guard can root a wrapper stack too (resolveComputation passes it)
-            | IRGuard _ -> if not (stackInner.Contains n) then judgeReynoldsWrappers n
-            // ...and so can a choice, and a USE of a named deferred stack: every
-            // forcing site (a compute, a fold, an operand) is where the emitter
-            // resolves the stack the binding holds
-            | IRChoice _ -> if not (stackInner.Contains n) then judgeReynoldsWrappers n
-            | IRVar (id, _) ->
-                if not (stackInner.Contains n) then
-                    // (through alias chains: `let alias = flags`)
-                    let rec isStack (fuel: int) (v: IRExpr option) =
-                        match v with
-                        | Some (IRFunctorMap _ | IRComposeMeth _ | IRGuard _ | IRChoice _) -> true
-                        | Some (IRVar (id2, _)) when fuel > 0 -> isStack (fuel - 1) (deferredValue id2)
-                        | _ -> false
-                    if isStack 1000000 (deferredValue id) then judgeReynoldsWrappers n
             // A struct literal's field values against the declared field types.
             | IRStructLit (typeName, fields) ->
                 (match Map.tryFind typeName structFields with
@@ -4408,42 +4335,31 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
     let roots =
         [ for m in modules do
             for b in m.Bindings do
-                // (a deferred stack, or an alias chain to one: not computed here)
-                let rec deferredStackValue (fuel: int) (v: IRExpr) =
-                    match v with
-                    | IRFunctorMap _ | IRComposeMeth _ | IRGuard _ | IRChoice _ -> true
-                    | IRVar (id, _) when fuel > 0 ->
-                        (match programLets.TryGetValue id with
-                         | true, (IRCompute _) -> false
-                         | true, v2 -> deferredStackValue (fuel - 1) v2
-                         | _ -> false)
-                    | _ -> false
-                let deferredStack = deferredStackValue 1000000 b.Value
-                yield (b.Name, b.Name, "", deferredStack, fold b.Value)
+                yield (b.Name, b.Name, "", fold b.Value)
             for f in m.Functions do
                 let instance =
                     if f.Name <> f.SourceName && f.Name.Contains "_HM_" && not f.Params.IsEmpty then
                         let ps = f.Params |> List.map (fun p -> $"{p.Name}: {ppIRType p.Type}") |> String.concat ", "
                         $" (in the instance of '{f.SourceName}' at {ps})"
                     else ""
-                yield (f.Name, f.SourceName, instance, false, fold f.Body)
+                yield (f.Name, f.SourceName, instance, fold f.Body)
             // executable side-table payloads (a top-level compound / random /
             // sparse constructor's operands: the binding's value is a unit there)
             for root in Optimize.compactionRoots m.Functions m do
                 match root with
-                | Optimize.RootSideOperand (b, _, e) -> yield (b.Name, b.Name, "", false, fold e)
+                | Optimize.RootSideOperand (b, _, e) -> yield (b.Name, b.Name, "", fold e)
                 | _ -> () ]
     // ...and the expressions the types along every root carry (a range bound,
     // a computed extent), which the expression walk does not enter
     let roots =
-        roots @ (roots |> List.collect (fun (d, s, i, _, body) ->
-                    Optimize.embeddedExtentExprs body |> List.map (fun x -> (d, s, i, false, fold x))))
-    allBodies <- roots |> List.map (fun (_, _, _, _, body) -> body)
+        roots @ (roots |> List.collect (fun (d, s, i, body) ->
+                    Optimize.embeddedExtentExprs body |> List.map (fun x -> (d, s, i, fold x))))
+    allBodies <- roots |> List.map (fun (_, _, _, body) -> body)
     // three sweeps, so the most direct cause is named: every call's arguments,
     // then every kernel slot, then every operand
     for phase in [ 0; 1; 2 ] do
-        for (declName, sourceName, instance, deferredRoot, body) in roots do
-            check phase declName sourceName instance deferredRoot body
+        for (declName, sourceName, instance, body) in roots do
+            check phase declName sourceName instance body
 
 /// Two shapes the lanes cannot give ONE meaning, refused here so every lane
 /// (C++, LLVM, the interpreter -- all lower through this pass) reports the

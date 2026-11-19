@@ -79,9 +79,7 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
             let p =
                 src
                 |> Map.map (fun _ (fd: FunctionDecl) ->
-                    { StaticEval.Name = fd.Name
-                      StaticEval.Params = fd.Params |> List.map (_.Name)
-                      StaticEval.Body = fd.Body })
+                    StaticEval.staticFuncDefOf fd)
             staticFuncProjCache <- Some (box src, p)
             p
     { Values = env.StaticValues

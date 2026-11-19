@@ -1,0 +1,12 @@
+// TEST: Math svd: a repeated singular value's vectors keep their column order (stable sort)
+// R26: svd orders its singular values descending by a STABLE sort -- equal
+// singular values keep the order of the columns the one-sided Jacobi sweeps
+// produced them in, and U's and V's columns with them. The old selection
+// sort swapped the displaced 1 past its equal: diag(1, 1, 2) gave U's (and
+// V's) columns e3, e2, e1. The stable order gives e3, e1, e2.
+import math as m
+let a: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]]
+let (u, s, vv) = m.svd(a)
+// EXPECT: s = [2.0, 1.0, 1.0]
+// EXPECT: u = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]
+// EXPECT: vv = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]

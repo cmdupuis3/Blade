@@ -2153,6 +2153,10 @@ type AnalysisContext = {
     /// in-place accumulation; a per-flow AsyncLocal field, so concurrent
     /// module compilations don't interfere.
     SyntheticCallables: System.Collections.Generic.Dictionary<IRId, IRCallable>
+    /// The synthetic callables registered as the POST-SUM stages of a
+    /// Reynolds kernel (registerReynoldsPost / splitReynoldsPost, R20).
+    /// Reset with SyntheticCallables.
+    ReynoldsPosts: System.Collections.Generic.HashSet<IRId>
 }
 
 let private analysisCtxStorage =
@@ -2161,7 +2165,8 @@ let private analysisCtxStorage =
 let private emptyAnalysisCtx : AnalysisContext =
     { Callables = Map.empty
       Visited = Set.empty
-      SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+      SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+      ReynoldsPosts = System.Collections.Generic.HashSet<IRId>() }
 
 let internal currentAnalysisCtx () : AnalysisContext =
     let v = analysisCtxStorage.Value
@@ -2177,7 +2182,8 @@ let setCallablesContext (callables: CallablesTable) : AnalysisContext =
     analysisCtxStorage.Value <-
         { prev with
             Callables = callables
-            SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+            SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+            ReynoldsPosts = System.Collections.Generic.HashSet<IRId>() }
     prev
 
 /// Restore a previously-captured context.
@@ -2285,6 +2291,132 @@ let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
         if desc.HasReynolds then IRReynolds (transformed, desc.IsAntisymmetric)
         else transformed
     | None -> expr
+
+// Functor-wrapper composition (R20, review round 3)
+//
+// `f <$> c` applies f to each value c yields (formalism 10.1: f <$> c =
+// c >>= pure . f), and `c1 @>> c2` applies c2's kernel to each value c1
+// yields. Both emitters (genComputeBinding and the interpreter's
+// materializeApply) compose such a stack into the map's KERNEL -- map fusion,
+// one pass and no temporary: `f <$> (L <@> g)` is `L <@> (f . g)`.
+//
+// A REYNOLDS map yields the SYMMETRIZED value K(x) = sum over the
+// permutations sigma of g(x_sigma) (formalism 5.3), so the stack applies to
+// that sum: f(K(x)), never sum f(g(x_sigma)). Composing f into g's body put
+// it INSIDE every term (a nonlinear f, an affine one, a Bool-valued one all
+// computed something else -- `sq <$> reynolds map` printed sum sq(term)). The
+// composed kernel therefore keeps its IRReynolds wrapper and g's parameters,
+// and its body becomes the ENVELOPE
+//     IRFunctorMap (IRVar post, term)
+// where `term` is g's body (the per-permutation term the sum adds) and `post`
+// a synthetic one-parameter callable whose parameter receives the sum and
+// whose body is the stack applied to it, registered with
+// registerReynoldsPost. Every renderer of a Reynolds sum
+// (CodeGenLoopNest.genKernelExprWithReynolds, the interpreter's nest)
+// splits the envelope with splitReynoldsPost, sums `term` and applies `post`
+// once per cell, in the same single pass; any renderer that does not know
+// the envelope meets an IRFunctorMap in value position, which every lane
+// refuses (fail closed, never a per-term application).
+
+/// Register `post` (a synthetic one-parameter callable) as the post-sum stage
+/// of a Reynolds kernel envelope; returns its IRVar reference.
+let registerReynoldsPost (post: IRCallable) : IRExpr =
+    let ctx = currentAnalysisCtx ()
+    ctx.ReynoldsPosts.Add post.Id |> ignore
+    registerSyntheticCallable post
+
+/// Split a Reynolds kernel body into (term, post stage). A body that is not
+/// an envelope returns (body, None).
+let splitReynoldsPost (body: IRExpr) : IRExpr * IRCallable option =
+    match body with
+    | IRFunctorMap ((IRVar (id, _) as p), term) when (currentAnalysisCtx ()).ReynoldsPosts.Contains id ->
+        match resolveCallable p with
+        | Some c when c.Params.Length = 1 -> (term, Some c)
+        | _ -> (body, None)
+    | _ -> (body, None)
+
+/// The value a wrapper stage hands back: a callable's return type, or for an
+/// `@>>` stage's extracted kernel `IRCompose (k, f)` (f after k), f's.
+let rec functorWrapperRetType (w: IRExpr) : IRType option =
+    match w with
+    | IRCompose (_, f) -> functorWrapperRetType f
+    | _ -> resolveCallable w |> Option.map (fun c -> c.RetType)
+
+/// Beta-reduce one wrapper over `body`: a one-parameter callable's body with
+/// its parameter replaced by `body`; anything else (an unresolved reference,
+/// an `IRCompose`) is applied as a call.
+let betaReduceFunctorWrapper (wrapper: IRExpr) (body: IRExpr) : IRExpr =
+    match resolveCallable wrapper with
+    | Some c when c.Params.Length = 1 ->
+        let paramId = c.Params.[0].VarId
+        let rec subst (expr: IRExpr) =
+            match expr with
+            | IRVar (id, _) when id = paramId -> body
+            | IRVar _ | IRLit _ | IRParam _ -> expr
+            | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
+            | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
+            | IRIf (c2, t, e) -> IRIf (subst c2, subst t, subst e)
+            | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
+            | IRIndex (a, idxs, ty) -> IRIndex (subst a, idxs |> List.map subst, ty)
+            | IRTuple es -> IRTuple (es |> List.map subst)
+            | IRComplex (re, im) -> IRComplex (subst re, subst im)
+            | IRFma (a, b, c3) -> IRFma (subst a, subst b, subst c3)
+            | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
+            | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
+            | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
+            | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
+            | _ -> expr  // For complex nodes, leave as-is
+        subst c.Body
+    | _ ->
+        let retTy = functorWrapperRetType wrapper |> Option.defaultValue (IRTScalar ETFloat64)
+        IRApp (wrapper, [body], retTy)
+
+/// Compose a wrapper stack (innermost first) into a map's kernel and its
+/// output type -- the ONE composition both lanes run (CodeGenBinding's and
+/// the interpreter's applyFunctorWrappers). Each per-use-site composition is
+/// a fresh synthetic callable (`freshId` mints its ids). Over a Reynolds
+/// kernel of two or more parameters the stack becomes the post-sum stage of
+/// an envelope (above); a unary Reynolds kernel is the kernel itself (one
+/// permutation), so the stack composes into it as into any map.
+let composeFunctorWrappers (freshId: unit -> IRId) (kernel: IRExpr) (outputType: IRType)
+                           (wrappers: IRExpr list) : IRExpr * IRType =
+    if List.isEmpty wrappers then (kernel, outputType)
+    else
+    let wrapBody (body: IRExpr) = wrappers |> List.fold (fun b w -> betaReduceFunctorWrapper w b) body
+    let (_, desc) = peelReynolds kernel
+    let composed =
+        mapKernelInner (fun (c: IRCallable) ->
+            if desc.HasReynolds && c.Params.Length >= 2 then
+                let sumId = freshId ()
+                let sumParam : IRParam = { Name = "__reynolds_sum"; Type = c.RetType; Index = 0; VarId = sumId }
+                let post =
+                    { c with Id = freshId ()
+                             Params = [ sumParam ]
+                             Body = wrapBody (IRVar (sumId, c.RetType))
+                             RetType = (List.last wrappers |> functorWrapperRetType |> Option.defaultValue c.RetType)
+                             IsCommutative = false
+                             CommGroups = []
+                             AntisymGroups = [] }
+                let postRef = registerReynoldsPost post
+                registerSyntheticCallable { c with Id = freshId (); Body = IRFunctorMap (postRef, c.Body) }
+            else
+                registerSyntheticCallable { c with Id = freshId (); Body = wrapBody c.Body }) kernel
+    // The cells are what the OUTERMOST stage returns (the wrappers are
+    // innermost first). An array keeps its shape: a stage whose return type
+    // is not a scalar here (an open one) leaves the element type as typed.
+    let cellTy = List.last wrappers |> functorWrapperRetType
+    let rec isCell (t: IRType) =
+        match t with
+        | IRTScalar _ -> true
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> isCell inner
+        | _ -> false
+    let outTy =
+        match outputType, cellTy with
+        | ArrayElem arr, Some t when isCell t -> mkArrayLike { arr with ElemType = t }
+        | ArrayElem _, _ -> outputType
+        | _, Some t -> t
+        | _, None -> outputType
+    (composed, outTy)
 
 
 

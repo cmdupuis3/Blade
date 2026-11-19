@@ -1,0 +1,13 @@
+// TEST: an explicit width cast of a literal still converts it
+// ============================================================================
+// R19 refuses a literal that does not fit the width its CONTEXT gives it; an
+// explicit cast is a conversion, not an adaptation (formalism 2.4), and keeps
+// master's behaviour: Int32 wraps, Float32 overflows to an infinity (f prints inf) -- as the
+// same casts of a run-time value. (An open item for the user: whether a cast
+// of a constant that cannot fit should be refused too.)
+// ============================================================================
+let w = Int32(5000000000)
+let f = Float32(1e40)
+let f_overflowed = f > 3.0e38
+// EXPECT: w = 705032704
+// EXPECT: f_overflowed = true

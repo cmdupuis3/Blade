@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 in an if branch under an Int32 annotation (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let a: Int32 = 3
+let c: Int32 = if a > 1 then a else 5000000000
+// ERROR: BL3020 @ 6:37

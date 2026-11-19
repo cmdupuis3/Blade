@@ -1082,10 +1082,11 @@
     },
     "BL8010": {
       "title": "recursion budget exhausted",
-      "explanation": "A recursive array's `while` guard was still true when the recursion reached the end of its declared leading extent (the budget). The recurrence did not converge, and freezing the last slice would silently pretend it did, so the runtime aborts naming the array and the budget.",
-      "fix": "Raise the budget (the leading `Idx<N>` extent), loosen the convergence tolerance in the guard, or fix the recurrence so it actually contracts. If running the full budget is the intended behavior, drop the `while` guard -- an unguarded `let rec` runs every step unconditionally.",
+      "explanation": "A recursive array's `while` guard was still true when the recursion reached the end of its declared leading extent (the budget). The recurrence did not converge, and freezing the last slice would silently pretend it did, so the runtime aborts naming the array and the budget. The same code reports `m.eig` (import math) running out of its Francis QR iteration budget (MAXITER, default 30 n) on a finite operand: the iteration did not converge, and its unconverged state is not returned.",
+      "fix": "Raise the budget (the leading `Idx<N>` extent), loosen the convergence tolerance in the guard, or fix the recurrence so it actually contracts. If running the full budget is the intended behavior, drop the `while` guard -- an unguarded `let rec` runs every step unconditionally. For `m.eig`, pass a larger budget, `m.eig(A, MAXITER)`; a spectrum of equal-modulus roots of unity can stall the shift strategy at any budget.",
       "examples": [
-        "tests/corpus/recursive-arrays/013_while_guard_budget_aborts.blade"
+        "tests/corpus/recursive-arrays/013_while_guard_budget_aborts.blade",
+        "tests/corpus/math/124_eig_budget_exhausted_aborts.blade"
       ],
       "docs": [
         "docs/formalism.md"

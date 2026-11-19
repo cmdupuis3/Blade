@@ -806,6 +806,19 @@ let freshLiteralType (subst: Subst) lit =
     | LitBool _ -> subst.FreshLiteral ETBool
     | _ -> inferLiteralType lit
 
+/// The SPAN-AWARE defaults (R19, lane a2): a float literal whose spelling its
+/// double cannot hold (`1e400`, a nonzero `1e-400`) defaults to Float64 by
+/// formalism 2.4's rule read on the spelling (LiteralDefaults.floatDefaultAt).
+/// Value-position literals are typed through these.
+let inferLiteralTypeAt lit (span: Span) =
+    match lit with
+    | LitFloat f -> IRTScalar (LiteralDefaults.floatDefaultAt f span)
+    | _ -> inferLiteralType lit
+let freshLiteralTypeAt (subst: Subst) lit (span: Span) =
+    match lit with
+    | LitFloat f -> subst.FreshLiteral (LiteralDefaults.floatDefaultAt f span)
+    | _ -> freshLiteralType subst lit
+
 // ROUND 6: LITERAL-ONLY EXPRESSIONS (formalism 2.4). A literal -- or an
 // expression made only of literals -- has no committed width: synthesis gives
 // it its DEFAULT (LiteralDefaults: Int32 / Float32 by fit and range) and the
@@ -890,7 +903,7 @@ let retypeLiteralOnly (subst: Subst) (target: ElemType) (e: TypedExpr) : TypedEx
         match e.Kind with
         | TExprLit (LitInt n) when cls = 0 && LiteralDefaults.intFits target n ->
             Some { e with Type = targetType target e }
-        | TExprLit (LitFloat f) when cls = 1 && LiteralDefaults.floatFits target f ->
+        | TExprLit (LitFloat f) when cls = 1 && LiteralDefaults.floatLiteralFits target f e.Span ->
             Some { e with Type = targetType target e }
         | TExprUnaryOp (OpNeg, ({ Kind = TExprLit (LitInt 2147483648L) } as x)) when target = ETInt32 ->
             // -2147483648 is Int32's minimum (R2).
@@ -3564,6 +3577,80 @@ let internal adaptLiteralPeers (env: TypeEnv) (peers: TypedExpr list) : TypedExp
                 | Some w when w <> le -> retypeLiteralOnly subst w p |> Option.defaultValue p
                 | _ -> p)
 
+/// R19: the first leaf of a literal-only tree that does not fit the narrow
+/// width `target` (Int32, Float32, or Complex64's Float32 components) -- the
+/// literal's text, a negated literal judged whole (`-2147483648` fits Int32).
+/// None when every leaf fits or the tree is not literal-only of that class.
+let literalOnlyMisfit (subst: Subst) (target: ElemType) (e: TypedExpr) : string option =
+    let cls = litClassOf target
+    let rec go (e: TypedExpr) =
+        match e.Kind with
+        | TExprLit (LitInt n) when cls = 0 ->
+            if LiteralDefaults.intFits target n then None else Some (LiteralDefaults.intText n)
+        | TExprLit (LitFloat f) when cls >= 1 ->
+            let comp = if target = ETComplex64 then ETFloat32 elif target = ETComplex128 then ETFloat64 else target
+            if LiteralDefaults.floatLiteralFits comp f e.Span then None else Some (LiteralDefaults.floatTextAt f e.Span)
+        | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt n) }) when cls = 0 ->
+            if LiteralDefaults.intFits target (-n) then None else Some ("-" + LiteralDefaults.intText n)
+        | TExprUnaryOp (OpNeg, ({ Kind = TExprLit (LitFloat _) } as x)) -> go x |> Option.map (fun t -> "-" + t)
+        | TExprUnaryOp (_, x) -> go x
+        | TExprBinOp (Elementwise, OpCaret, l, _) when cls = 0 -> go l
+        | TExprBinOp (_, _, l, r) -> go l |> Option.orElseWith (fun () -> go r)
+        | TExprComplexLit (re, im) -> go re |> Option.orElseWith (fun () -> go im)
+        | _ -> None
+    match target with
+    | ETInt32 | ETFloat32 | ETComplex64 ->
+        (match literalOnlyElem subst e with
+         | Some le when litClassOf le = cls || (cls = 2 && litClassOf le = 1) -> go e
+         | _ -> None)
+    | _ -> None
+
+/// R29, THE ONE PEER JUDGMENT (formalism 2.4): the branches of an `if`, the
+/// arms of a `match` and the cells of an array literal fix each other's
+/// width (adaptLiteralPeers); a literal-only peer whose class has a fixed
+/// non-literal scalar width it does not FIT is refused here, BL3020 at the
+/// literal, by the same predicate and message every literal site uses
+/// (literalOnlyMisfit, LiteralDefaults.misfitMessage) -- not left at its own
+/// width for the join to widen (a `match`) or refuse as a bare mismatch.
+let internal peerLiteralMisfit (env: TypeEnv) (target: ElemType) (peer: TypedExpr) : TypeError option =
+    match literalOnlyMisfit env.Subst target peer with
+    | Some text ->
+        if peer.Span.StartLine > 0 then setCurrentExprSpan peer.Span
+        Some (ImplicitNumericMix (LiteralDefaults.misfitMessage target text))
+    | None -> None
+
+let internal adaptLiteralPeersChecked (env: TypeEnv) (peers: TypedExpr list) : TypeResult<TypedExpr list> =
+    let subst = env.Subst
+    let los = peers |> List.map (literalOnlyElem subst)
+    let fixedOf (cls: int) =
+        List.zip peers los |> List.tryPick (fun (p, lo) ->
+            match lo, IR.stripUnits (subst.Resolve p.Type) with
+            | None, IRTScalar et when litClassOf et = cls -> Some et
+            | _ -> None)
+    let misfit =
+        List.zip peers los |> List.tryPick (fun (p, lo) ->
+            match lo with
+            | Some le ->
+                (match fixedOf (litClassOf le) with
+                 | Some w -> peerLiteralMisfit env w p
+                 | None -> None)
+            | None -> None)
+    match misfit with
+    | Some e -> Error e
+    | None -> Ok (adaptLiteralPeers env peers)
+
+/// R29, the NON-LITERAL half (R11: nothing converts implicitly): two joined
+/// values of one numeric class at different CONCRETE widths are a mismatch,
+/// as the branches of an `if` already were (unify refuses two concrete
+/// scalars). A `match` unifies each arm with a fresh result variable, which
+/// unify's promotion path may rebind to the wider width (`| 1 -> a32 | _ ->
+/// b64` was an Int64): this is the `if`'s judgment for that join.
+let internal concreteScalarClash (subst: Subst) (expected: IRType) (actual: IRType) : TypeError option =
+    match IR.stripUnits (subst.Resolve expected), IR.stripUnits (subst.Resolve actual) with
+    | IRTScalar a, IRTScalar b when a <> b && litClassOf a >= 0 && litClassOf b >= 0 ->
+        Some (TypeMismatch (IRTScalar a, IRTScalar b))
+    | _ -> None
+
 /// ROUND 6, the seam for a value position whose width comes from OTHER
 /// types (a fold seed: the kernel's accumulator, else the operand's element):
 /// a literal-only `te` takes the first CONCRETE same-class width among the candidates
@@ -6112,6 +6199,34 @@ let internal adaptLiteralArgs (env: TypeEnv) (headTy: IRType) (tArgs: TypedExpr 
         adapted @ List.skip adapted.Length tArgs
     | _ -> tArgs
 
+/// R19 at a call: a literal-only argument of a CONCRETE narrow parameter
+/// (Int32 / Float32 / Complex64, bare, unit-carrying or index-tagged; tuple
+/// parameters leaf by leaf) whose literal does not fit. adaptLiteralArgs left
+/// such an argument at its own width, which the call then narrowed at run
+/// time (`g(5000000000)` over `i: Int32` printed 705032705).
+let internal literalArgMisfit (env: TypeEnv) (headTy: IRType) (tArgs: TypedExpr list) : (TypedExpr * string) option =
+    let subst = env.Subst
+    match headTy with
+    | FuncElem (paramTys, _) ->
+        let target (p: IRType) =
+            match IR.stripUnits (subst.Resolve p) with
+            | IRTScalar (ETInt32 | ETFloat32 | ETComplex64 as et) -> Some et
+            | IRTIdxTagged (inner, _) ->
+                (match IR.stripUnits (subst.Resolve inner) with IRTScalar (ETInt32 as et) -> Some et | _ -> None)
+            | _ -> None
+        let rec judge (p: IRType, a: TypedExpr) =
+            match subst.Resolve p, a.Kind with
+            | IRTTuple ps, TExprTuple cs when ps.Length = cs.Length -> List.zip ps cs |> List.tryPick judge
+            | _ ->
+                match target p with
+                | Some et ->
+                    literalOnlyMisfit subst et a
+                    |> Option.map (fun text -> (a, LiteralDefaults.misfitMessage et text))
+                | None -> None
+        List.zip (List.truncate tArgs.Length paramTys) (List.truncate paramTys.Length tArgs)
+        |> List.tryPick judge
+    | _ -> None
+
 /// A literal array passed to a generic arrow receives the cell width that
 /// the arrow's result already requires, either from its body or another fixed
 /// argument sharing that result variable. This teaches only literal syntax;
@@ -6309,6 +6424,11 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
     // Round 6: literal-only arguments take the width their position fixes.
     let tArgs = adaptArrowLiteralArrays env tFunc tArgs
     let tArgs = adaptLiteralArgs env (env.Subst.Resolve headTy) tArgs
+    match literalArgMisfit env (env.Subst.Resolve headTy) tArgs with
+    | Some (a, msg) ->
+        if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+        Error (ImplicitNumericMix msg)
+    | None ->
     match headTy with
     // SUBSCRIPTING A WREATH ARRAY, handled FIRST and EXPLICITLY -- because
     // of the catch-all's vacuity, not tidiness. A depth-2 OrbIdx record is

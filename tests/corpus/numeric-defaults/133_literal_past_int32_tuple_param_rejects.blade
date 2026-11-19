@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 in an Int32 component of a tuple parameter (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function g(t: (Int32, Int64)) -> Int32 = t[0]
+let r = g((5000000000, 1))
+// ERROR: BL3020 @ 6:12

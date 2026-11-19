@@ -1,0 +1,16 @@
+// TEST: prodsum over a sparse array is refused before the back end (rejects)
+// ERROR: BL4003 @ 15:17
+// ERROR-CONTAINS: stored as a sparse array
+// ============================================================================
+// R13 (deep review): prodsum walks each operand as a dense rank-1 buffer.
+// Over a compound selection or a sparse array -- tabulated storage, at any
+// element type and in any position -- it was a g++ rejection (BL9002) after
+// `check` said OK. It is refused in the type checker, keyed on the operand's
+// STORAGE class (prodsumUnbuiltStorage), naming the fold that is built.
+// ============================================================================
+let static S = [(2, 1), (0, 3), (1, 0)]
+let da: Array<Int64 like Idx<3>> = [2, 3, 4]
+let db: Array<Int64 like Idx<3>> = [6, 7, 8]
+let a = sparse(da, S)
+let b = sparse(db, S)
+let r = prodsum(a, b)

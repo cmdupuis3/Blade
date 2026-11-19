@@ -1,0 +1,13 @@
+// TEST: A Bool Stage Over A Packed Antisymmetric reynolds Map Is Refused (rejects)
+// ERROR: BL4015 @ 12:38
+// ERROR-CONTAINS: UNKNOWN sign parity
+// ============================================================================
+// R20 (review round 3): the stage maps the symmetrized values of an
+// anticomm-licensed map stored as a strict triangle; a Bool stage is not
+// sign-odd, so the strict storage cannot hold its result (it has a diagonal
+// and no sign law) -- the type checker's map rule refuses it, located.
+// ============================================================================
+let ys: Array<Float64 like Idx<3>> = [1.0, 2.0, 4.0]
+let ka = lambda(x: Float64, y: Float64) where anticomm(x, y) -> x - 2.0 * y
+let positive = lambda(z: Float64) -> z > 0.0
+let r = positive <$> (method_for(ys, ys) <@> reynolds(ka, Antisymmetric)) |> compute

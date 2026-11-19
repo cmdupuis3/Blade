@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 under a unit-carrying Int32 annotation (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+Unit m
+let d: Int32<m> = 5000000000
+// ERROR: BL3020 @ 6:19

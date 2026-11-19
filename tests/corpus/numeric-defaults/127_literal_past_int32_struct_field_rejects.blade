@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 in an Int32 struct field (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+struct P { v: Int32 }
+let p = P { v = 5000000000 }
+// ERROR: BL3020 @ 6:17

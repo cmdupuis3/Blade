@@ -1,10 +1,13 @@
-// TEST: A Seventy-Stage Named Bool Wrapper Chain Over A reynolds Map Is Refused (rejects)
-// ERROR: BL3001 @ 84:1
-// ERROR-CONTAINS: stage over a reynolds(..) map runs inside the symmetrized kernel
+// TEST: A Seventy-Stage Named Bool Wrapper Chain Over A reynolds Map Is A Bool Array
+// EXPECT: r = [[true, true], [true, true]]
 // ============================================================================
-// R11 (Codex round 9): the wrapper-stack walk follows every named deferred
-// stage (bindings are acyclic; no depth cutoff passes a stack unjudged), so
-// the Bool `positive` seventy stages down is still found. Accepted on base.
+// R20 (review round 3): a `<$>` / `@>>` stage over a reynolds map applies to
+// the map's SYMMETRIZED values, after the permutation sum (formalism 5.3,
+// 10.1), so a Bool stage is not summed and its map is a Bool array. Round 2
+// (R11) refused this program because every lane ran the stage inside each
+// summed term:
+// seventy named deferred stages (`positive`, then `keep` seventy times) applied
+// in order to each symmetrized value.
 // ============================================================================
 let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
 let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
