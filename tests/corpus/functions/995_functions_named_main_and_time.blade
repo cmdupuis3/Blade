@@ -1,0 +1,12 @@
+// TEST: User functions named main and time
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): a user function emitted as main
+// is the program entry point (::main must return int, BL9002), one named
+// time meets the C library's. A user function whose spelling the global
+// namespace of the emitted TU declares is emitted under another C++ name; a
+// panic frame would still name it by its source name (IRCallable.SourceName).
+// ============================================================================
+function main(x: Float64) -> Float64 = x * 2.0
+function time(x: Float64) -> Float64 = x + 1.0
+let r = main(Float64(3.0)) + time(Float64(1.0))
+// EXPECT: r = 8.0

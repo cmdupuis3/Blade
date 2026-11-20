@@ -1,0 +1,19 @@
+// TEST: A Functor Wrapper Capture Over A Pipeline Is Forced At The Wrapper Stage (aborts)
+// ============================================================================
+// Gap G242, round 4 wave 10 (lane C, C4; Codex diff review 03cfa2dd finding 3):
+// a FUNCTOR WRAPPER over an applied pipeline is its own stage after the
+// composition, so its kernel's deferred capture is forced at that stage's
+// start -- in every lane (the interpreter applied the wrapper inside stage 2's
+// walk with no capture force; the C++ wrapper lambda named an undeclared map).
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / (e - 2)
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let p = object_for(first) >>@ object_for(lambda(v: Int64) -> v * 2)
+let w = lambda(v: Int64) -> if v > 100 then delayed(0) else v
+let ys = w <$> (p <@> backing) |> compute
+// ABORT: integer division by zero

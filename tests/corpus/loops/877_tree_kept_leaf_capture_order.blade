@@ -1,0 +1,15 @@
+// TEST: a kept tree leaf keeps its own capture-prelude position (aborts)
+// Gap G233, round 4 wave 10 (the row's counterexample to an identity leaf
+// built before the prelude): the leaf p's kernel captures d (7 % 0), the leaf
+// q's kernel captures p (whose input e is 10 / 0). The prelude walks the
+// AS-WRITTEN leaves -- p's kernel first -- so d fails first, at its own
+// line, in every lane; the kept name p is replaced by its stored-leaf
+// traversal only after the prelude.
+let x: Array<Int64 like Idx<2>> = [0, 1]
+let e = method_for(x) <@> lambda(v) -> 10 / v
+let d = method_for(x) <@> lambda(v) -> 7 % v
+let p = method_for(e) <@> lambda(v) -> v + extents(d)
+let q = method_for(x) <@> lambda(v) -> v + extents(p)
+let s = reduce(p <&!> q, (+))
+// ABORT: BL8013
+// ABORT: .blade:9

@@ -1,0 +1,12 @@
+// TEST: explicitly cast arithmetic handed through an alias to a parameter of another width (rejects)
+// ============================================================================
+// G275 (Codex round 4): an explicit cast is a fixed-width VALUE, never a
+// literal that adapts. `h(Float32(2.0))` decides `v` as a Float32, so the
+// Float64 sum would be narrowed -- to an infinity -- at the alias call; it
+// was handed over unjudged.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a = saved(Float64(1e100) + Float64(1e100))
+let b = h(Float32(2.0))
+// ERROR: BL3020

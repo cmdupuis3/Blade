@@ -1,0 +1,15 @@
+// TEST: A Row-Map prodsum Against A Run-Time-Shaped Vector Checks Its Extents (aborts)
+// Gap G265 (b) (round 4 wave 10 lane d): the row-fold jam (CodeGenLoopNest.tryGenRowFoldJamNest)
+// bounded every row's fold by the row's extent (5) and read b (3 cells) past its end
+// (r = [5.0, 8.0, 11.0, 14.0]); it now compares the extents at the first row, where the per-row
+// prodsum would (BL8011), as the interpreter does. The BLAS gemv dispatch of the same shape got
+// the same check.
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let A = method_for(0..4, a) <@> lambda(i, v) -> v + Float64(i) |> compute
+let r = method_for(A) <@> lambda(row) -> prodsum(row, b) |> compute

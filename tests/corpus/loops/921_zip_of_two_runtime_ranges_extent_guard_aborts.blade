@@ -1,0 +1,11 @@
+// TEST: A Map Over A Zip Of Two Run-Time Ranges Checks Their Extents (aborts)
+// Gap G265 (c) (round 4 wave 10 lane d; Codex design review): two ranges of 5 and 3 cells walked
+// 5 cells of the second; each range operand is compared by its extent (BL8011).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let m = method_for(zip(0..extents(a), 0..extents(b))) <@> lambda(i, j) -> i + j |> compute

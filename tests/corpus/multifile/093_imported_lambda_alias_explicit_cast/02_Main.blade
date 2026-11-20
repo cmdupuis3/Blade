@@ -1,0 +1,7 @@
+// TEST: an imported lambda value alias called with an explicit cast
+// MODULE: Main
+module Main
+import Helpers as h
+let x: Float32 = 0.1
+let y = h.saved(Float64(x))
+// EXPECT: y = 0.200000002980232

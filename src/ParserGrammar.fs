@@ -206,7 +206,10 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
             // Provider reads are module-qualified (`x |> alias.read`), so they
             // take the generic pipe-application desugar below; the checker's
             // provider-read arm rewrites the application to TExprRead.
-            | _ -> loop (mkExpr (mergeSpan acc.Span right.Span) (ExprApp (right, [acc]))) remaining
+            | _ ->
+                let app = mkExpr (mergeSpan acc.Span right.Span) (ExprApp (right, [acc]))
+                (match right.Kind with ExprKind.ExprVar n -> UserCasts.recordIfCast n 1 app.Span | _ -> ())
+                loop app remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
             advance toks' |> parseChoice >>= fun right remaining ->
@@ -454,13 +457,15 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
                 lastLineBefore t.Line rest
             | _ -> last
         lastLineBefore opener.Line tokens < opener.Line
-    let rec loop acc toks =
+    let rec loop (acc: Expr) toks =
         match peek toks with
         | Some TokLParen when not (opensOnLaterLine (List.head toks)) ->
             // Function call (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> sepBy parseExprImpl TokComma) >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            loop (mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprApp (acc, args))) remaining
+            let app = mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprApp (acc, args))
+            (match acc.Kind with ExprKind.ExprVar n -> UserCasts.recordIfCast n args.Length app.Span | _ -> ())
+            loop app remaining
         | Some TokLBracket when not (opensOnLaterLine (List.head toks)) ->
             // Poly-tuple indexing: args[k] (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> parseExprImpl) >>= fun index afterIndex ->
@@ -930,7 +935,11 @@ the axis count is the named final argument `axes = n`" line col
     // level). Span widens to cover both parens; child spans are untouched.
     | Some TokLParen ->
         allowingStructLiterals (fun () -> advance tokens |> parseParenExpr) >>= fun e remaining ->
-        success { e with Span = rangeSpan tokens remaining } remaining
+        // (a parenthesized cast keeps its user-cast mark on the widened span:
+        // `(x |> Float64)` is the cast the user wrote -- Ast.UserCasts)
+        let widened = rangeSpan tokens remaining
+        UserCasts.transfer e.Span widened
+        success { e with Span = widened } remaining
 
     | Some TokLBracket ->
         allowingStructLiterals (fun () ->
@@ -1309,7 +1318,9 @@ and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
             advance afterName |> sepBy parseGuardExpr TokComma >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             let fn = mkExpr (headSpan tokens) (ExprVar name)
-            success (mkE tokens remaining (ExprApp (fn, args))) remaining
+            let app = mkE tokens remaining (ExprApp (fn, args))
+            UserCasts.recordIfCast name args.Length app.Span
+            success app remaining
         | _ -> success (mkExpr (headSpan tokens) (ExprVar name)) afterName
     | Some TokLParen ->
         advance tokens |> parseGuardExpr >>= fun expr afterExpr ->

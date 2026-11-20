@@ -1,0 +1,9 @@
+// TEST: A Fold Evaluates A Range Operand In Operand Order (aborts)
+// Gap G209 (round 4 wave 10 lane d; the fold arm of the G207 operand order, the twin of loops/752):
+// the range at operand 1 divides by zero before the mask at operand 2 reaches its modulo by zero;
+// the interpreter evaluated the range extent at the nest entry, after the mask.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let z: Int64 = 0
+let s = reduce(method_for(0..(100 / z), mask(d, lambda(a) -> 200 % (a - 3) > 0)) <@> lambda(i, b) -> i + Int64(b), (+), 0)

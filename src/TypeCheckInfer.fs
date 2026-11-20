@@ -1653,6 +1653,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         else
                             match env.Subst.Resolve a.Type with
                             | FuncElem _ | ArrayElem _ -> Some a.Type
+                            // G275: a FIXED numeric scalar argument (not a
+                            // literal: that adapts, and binds the parameter at
+                            // the call, dispatchAppOrIndex's lambdaHead) decides
+                            // the parameter before the body is typed, as the one
+                            // call of a lambda written where it is applied
+                            // (formalism 4.3: its first use decides). Left open,
+                            // the parameter fell to zonk's Float64 default and
+                            // the call converted the argument: `(lambda(x) -> x /
+                            // 2)(Int64(7))` computed 3.5.
+                            | t when (match IR.stripUnits t with
+                                      | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+                                      | _ -> false) -> Some a.Type
                             // An abstract array still open inside a generic
                             // body (`xs: T^1`): the variable itself, rank pin
                             // and all, so the body reads it as an array.
@@ -1665,7 +1677,13 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 // inferExpr's entry bookkeeping for the head node, which is
                 // typed here rather than through inferExpr.
                 if func.Span.StartLine > 0 then setCurrentExprSpan func.Span
-                inferLambdaSeeded env parms whereClause body seeds
+                // (its parameters are a lambda value's, decided by this one
+                // call: a literal beside one takes the width the call gives it,
+                // TypeEnv.LetLambdaParamVars)
+                env.PendingLetLambda.Value <- true
+                let tLamR = inferLambdaSeeded env parms whereClause body seeds
+                env.PendingLetLambda.Value <- false
+                tLamR
                 |> Result.map (fun te ->
                     if te.Span.StartLine = 0 && func.Span.StartLine > 0 then { te with Span = func.Span } else te)
                 |> Result.bind (fun tLam ->
@@ -2420,8 +2438,40 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         inferExpr env mask |> Result.bind (fun tMask ->
             match env.Subst.Resolve(tDense.Type), env.Subst.Resolve(tMask.Type) with
             | ArrayElem denseArr, ArrayElem maskArr ->
-                (match compoundViewType (env.Builder.FreshId()) denseArr maskArr (IRLit IRLitUnit) with
+                let cid = env.Builder.FreshId()
+                (match compoundViewType cid denseArr maskArr (IRLit IRLitUnit) with
                  | Ok compoundTy ->
+                     // G265 (d): the compound record's mask provenance -- the
+                     // mask binding when the mask is a named value, resolved
+                     // through a chain of plain aliases (`let k2 = keep`) to its
+                     // ROOT binder, but never past a binder the module may write
+                     // or reassign (the never-written proof of the stored alias
+                     // classes, which judges MODULE-LEVEL binders only: a block or
+                     // a callable body is not resolved) -- else a fresh
+                     // token (every inline mask is its own index space). Wave-end
+                     // review F3.
+                     let rec maskRoot (seen: Set<IRId>) (name: string) (vid: IRId) : IRId =
+                         if env.InCallableBody || not (env.ModuleLetBinders.Contains vid) then vid
+                         else
+                         match Map.tryFind name env.Variables with
+                         | Some vi when vi.VarId = vid ->
+                             (match vi.TypedValue with
+                              | Some { Kind = TExprVar (src, srcVid, _) }
+                                  when not (seen.Contains srcVid) && not (src.Contains ".")
+                                       && env.ModuleLetBinders.Contains srcVid
+                                       && (match Map.tryFind src env.Variables with
+                                           | Some si -> si.VarId = srcVid
+                                           | None -> false) ->
+                                  (match env.StoredAliasNeverWritten.Value src false [ src; name ] with
+                                   | Ok _ -> maskRoot (seen.Add vid) src srcVid
+                                   | Error _ -> vid)
+                              | _ -> vid)
+                         | _ -> vid
+                     let token =
+                         match tMask.Kind with
+                         | TExprVar (name, vid, _) -> maskRoot (Set.singleton vid) name vid
+                         | _ -> env.Builder.FreshId()
+                     env.CompoundMaskTokens.[cid] <- token
                      Ok (mkTyped (TExprCompound (tDense, tMask)) compoundTy)
                  | Error msg -> Error (BuiltinArgErr msg))
             | _ -> Error (BuiltinArgErr "compound(dense, mask) expects two array arguments: a dense array and a bool mask covering its leading dimensions")))
@@ -2567,7 +2617,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         match tKey.Kind with
                         | TExprLambda info when info.Params.Length = 1 ->
                             unify env.Subst info.Params.[0].Type arrTy.ElemType
-                        | _ -> Ok ()
+                        | _ -> callableRefParamMeetsCells env tKey arrTy.ElemType
                     // THE KEY'S RESULT TYPE (gap G126; docs/features/sql.md
                     // section 9): a real, integer, Bool or String scalar --
                     // the types sort's total preorder is written for, in
@@ -2990,15 +3040,143 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
     // body reads a module map privately, G75), seed reads (staged, G235).
     // Module level and top-level blocks only; a rank-1 scalar-element spine
     // (a rank >= 2 or fusion-tree spine is G233); not a parallel fold kernel.
+    // (shared by the kept root and the kept tree leaves, gap G233)
+    let blockLocalK = lazy (blockLocalVids ())
+    let valueOfK (name: string) (vid: IRId) : TypedExpr option =
+        match lookupVar name env with
+        | Some info when info.VarId = vid -> info.TypedValue
+        | _ -> None
+    // a plain dense unsymmetric scalar-element map, of any rank (G233): the
+    // storage every lane's stored-leaf traversal folds
+    // (IRStorage.storedLeafTraversal)
+    let plainMapValue (v: TypedExpr) =
+        match v.Kind with
+        | TExprApply info when not info.IsComposeApply ->
+            (match env.Subst.Resolve info.OutputType with
+             | ArrayElem arr ->
+                not arr.IndexTypes.IsEmpty
+                && arr.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone && ix.IxKind = IxKPlain)
+                && (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                    | IRTScalar _ -> true
+                    | _ -> false)
+             | _ -> false)
+        | _ -> false
+    // Does a FORCING EVENT reach a binder of `targets`? A capture forces its
+    // map under its own name, and that force forces the map's deferred
+    // inputs and its kernel's captures under theirs (formalism 10.2). A fresh
+    // visited set per question (Codex G233 design review: one shared set can
+    // suppress another leaf's proof).
+    let reachesTargets (targets: Set<IRId>) =
+        let visited = System.Collections.Generic.HashSet<IRId>()
+        let rec reachesVar (name: string) (vid: IRId) : bool =
+            if targets.Contains vid then true
+            elif not (visited.Add vid) || blockLocalK.Value.Contains vid then false
+            else
+                match valueOfK name vid with
+                | Some value -> reachesValue value
+                | None -> false
+        and reachesValue (value: TypedExpr) : bool =
+            match value.Kind with
+            | TExprVar (n, vid, _) -> reachesVar n vid
+            | TExprApply info when not info.IsComposeApply ->
+                (info.Arrays |> List.exists (fun a ->
+                    match a.Kind with
+                    | TExprVar (n, vid, _) -> reachesVar n vid
+                    | _ -> false))
+                || kernelReaches info.Kernel
+            // a BLOCK-valued binding defers exactly when its final
+            // value does (IRLift's let chain): judged by that value
+            | TExprBlock (stmts, Some final)
+                when stmts |> List.forall (function TStmtLet _ -> true | _ -> false) ->
+                reachesValue final
+            // a top-level projection of a WHOLLY deferred tuple is an
+            // alias of its member (formalism 10.2, gap G111)
+            | TExprTupleIndex (t, { Kind = TExprLit (LitInt k) }) ->
+                (match (resolveTypedExprDeep env t).Kind with
+                 | TExprTuple es when int k >= 0 && int k < es.Length
+                                      && es |> List.forall (fun m ->
+                                             match m.Kind with
+                                             | TExprVar _ ->
+                                                (match (resolveTypedExprDeep env m).Kind with
+                                                 | TExprApply mi -> not mi.IsComposeApply
+                                                 | _ -> false)
+                                             | _ -> false) ->
+                    (match es.[int k].Kind with
+                     | TExprVar (n, vid, _) -> reachesVar n vid
+                     | _ -> false)
+                 | _ -> false)
+            | _ -> false
+        and kernelReaches (k: TypedExpr) : bool =
+            // through callable aliases (`let k2 = k`, Codex diff review)
+            match (resolveTypedExprDeep env k).Kind with
+            | TExprLambda li -> li.Captures |> List.exists (fun cv -> reachesVar cv.Name cv.VarId)
+            | _ -> false
+        (reachesValue, kernelReaches)
+    // ---- Keep a TREE LEAF's NAME (gap G233, round 4 wave 10) ----------------
+    // The `<&!>` tree's leaves are spliced as their RESOLVED applies; a leaf
+    // written as the NAME of a deferred map binding that the fold's own
+    // prelude forces under its own name -- a capture of ANY leaf kernel (the
+    // other leaves' too) or of the fold kernel reaching it, or the private
+    // evaluation of a leaf's deferred operand whose kernel captures (or whose
+    // inputs reach) it -- keeps its NAME in the tree, so every lane's prelude
+    // walks the as-written leaves and the traversal folds that leaf's
+    // snapshot (IRStorage.storedLeafTraversal). Narrow as the root rule
+    // below: module level and top-level blocks, a direct name of the map (no
+    // alias chain, no block-local binder: staged, G233), a plain dense map.
+    let leafNames (t: TypedExpr) : TypedExpr option list =
+        let rec go (t: TypedExpr) =
+            match t.Kind with
+            | TExprCompute inner -> go inner |> List.map (fun _ -> None)
+            | TExprFusion (l, r) -> go l @ go r
+            | TExprVar (_, vid, _) when not (blockLocalK.Value.Contains vid) ->
+                let r = resolveTypedExpr env t
+                (match r.Kind with
+                 | TExprApply info when not info.IsComposeApply && not (obj.ReferenceEquals (r, t)) -> [ Some t ]
+                 | TExprFusion _ -> go r |> List.map (fun _ -> None)
+                 | _ -> [ None ])
+            | _ -> [ None ]
+        go t
+    let keptTreeLeaves (leaves: TypedExpr list) : TypedExpr list =
+        if env.InCallableBody || foldKernelIsParallel () || leaves.Length < 2 then leaves else
+        let names = leafNames tArr
+        if names.Length <> leaves.Length then leaves else
+        let leafVids =
+            names |> List.choose (Option.bind (fun n -> match n.Kind with TExprVar (_, v, _) -> Some v | _ -> None)) |> Set.ofList
+        let leafKernels =
+            leaves |> List.choose (fun l -> match l.Kind with TExprApply info -> Some info.Kernel | _ -> None)
+        // the leaves' deferred OPERANDS (a fold's private operands: evaluated
+        // before the cells, their kernels' captures and inputs forced)
+        let privateValues =
+            leaves |> List.collect (fun l ->
+                match l.Kind with
+                | TExprApply info ->
+                    info.Arrays |> List.choose (fun a ->
+                        match a.Kind with
+                        | TExprVar (n, v, _) when not (leafVids.Contains v) ->
+                            (match valueOfK n v with
+                             | Some ({ Kind = TExprApply pi } as pv) when not pi.IsComposeApply -> Some pv
+                             | _ -> None)
+                        | _ -> None)
+                | _ -> [])
+        List.map2 (fun (name: TypedExpr option) (leaf: TypedExpr) ->
+            match name with
+            | Some ({ Kind = TExprVar (n, vid, _) } as nameExpr) when plainMapValue leaf ->
+                let (reachesValue, kernelReaches) = reachesTargets (Set.singleton vid)
+                if (leafKernels @ [ tKernel ]) |> List.exists kernelReaches
+                   || privateValues |> List.exists reachesValue then
+                    Blade.Effects.Decisions.record
+                        { Blade.Effects.Rule = "deferred-capture-force"; Version = 1; Span = nameExpr.Span; Subject = n
+                          Outcome = Blade.Effects.Applied
+                          Evidence = [ $"a capture in the fold's prelude forces the leaf `{n}` under its own name before the traversal: the tree keeps the leaf's name and folds that snapshot, not a fresh walk of its producer (G233)" ] }
+                    nameExpr
+                else leaf
+            | _ -> leaf) names leaves
     let keepSpineName () : bool =
         if env.InCallableBody || foldKernelIsParallel () then false else
         match tArr.Kind with
         | TExprVar (_, spineVid0, _) ->
-            let blockLocal = blockLocalVids ()
-            let valueOf (name: string) (vid: IRId) : TypedExpr option =
-                match lookupVar name env with
-                | Some info when info.VarId = vid -> info.TypedValue
-                | _ -> None
+            let blockLocal = blockLocalK.Value
+            let valueOf = valueOfK
             // the spine's alias chain (`reduce(p2, ..)`, `let p2 = p`): one class
             let rec chain (fuel: int) (name: string) (vid: IRId) (acc: Set<IRId>) =
                 let acc = acc.Add vid
@@ -3017,63 +3195,8 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
             // fresh walk every lane agrees on is kept
             | spineSet, Some _ when spineSet.Count > 1 -> false
             | spineSet, Some v ->
-                let spineOk =
-                    match v.Kind with
-                    | TExprApply info when not info.IsComposeApply ->
-                        (match env.Subst.Resolve info.OutputType with
-                         | ArrayElem arr ->
-                            (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = 1
-                            && arr.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
-                            && (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
-                                | IRTScalar _ -> true
-                                | _ -> false)
-                         | _ -> false)
-                    | _ -> false
-                if not spineOk then false else
-                let visited = System.Collections.Generic.HashSet<IRId>()
-                let rec reachesVar (name: string) (vid: IRId) : bool =
-                    if spineSet.Contains vid then true
-                    elif not (visited.Add vid) || blockLocal.Contains vid then false
-                    else
-                        match valueOf name vid with
-                        | Some value -> reachesValue value
-                        | None -> false
-                and reachesValue (value: TypedExpr) : bool =
-                    match value.Kind with
-                    | TExprVar (n, vid, _) -> reachesVar n vid
-                    | TExprApply info when not info.IsComposeApply ->
-                        (info.Arrays |> List.exists (fun a ->
-                            match a.Kind with
-                            | TExprVar (n, vid, _) -> reachesVar n vid
-                            | _ -> false))
-                        || kernelReaches info.Kernel
-                    // a BLOCK-valued binding defers exactly when its final
-                    // value does (IRLift's let chain): judged by that value
-                    | TExprBlock (stmts, Some final)
-                        when stmts |> List.forall (function TStmtLet _ -> true | _ -> false) ->
-                        reachesValue final
-                    // a top-level projection of a WHOLLY deferred tuple is an
-                    // alias of its member (formalism 10.2, gap G111)
-                    | TExprTupleIndex (t, { Kind = TExprLit (LitInt k) }) ->
-                        (match (resolveTypedExprDeep env t).Kind with
-                         | TExprTuple es when int k >= 0 && int k < es.Length
-                                              && es |> List.forall (fun m ->
-                                                     match m.Kind with
-                                                     | TExprVar _ ->
-                                                        (match (resolveTypedExprDeep env m).Kind with
-                                                         | TExprApply mi -> not mi.IsComposeApply
-                                                         | _ -> false)
-                                                     | _ -> false) ->
-                            (match es.[int k].Kind with
-                             | TExprVar (n, vid, _) -> reachesVar n vid
-                             | _ -> false)
-                         | _ -> false)
-                    | _ -> false
-                and kernelReaches (k: TypedExpr) : bool =
-                    // through callable aliases (`let k2 = k`, Codex diff review)
-                    match (resolveTypedExprDeep env k).Kind with
-                    | TExprLambda li -> li.Captures |> List.exists (fun cv -> reachesVar cv.Name cv.VarId)
-                    | _ -> false
+                if not (plainMapValue v) then false else
+                let (_, kernelReaches) = reachesTargets spineSet
                 // G248 residual (round 4 wave 9, B2): the SEED reads a cell of
                 // the spine (or of an alias in its chain) in an UNCONDITIONAL
                 // position -- `{ let t = p(0); x(0) = 10.0; t }` -- which forces
@@ -3185,7 +3308,8 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                             let s = mkTyped (TExprLit lit) e
                             if op = OpAdd then markUnseeded s else s)
                     let tree =
-                        match leaves with
+                        // G233: a leaf the prelude forces keeps its name
+                        match keptTreeLeaves leaves with
                         | first :: rest ->
                             rest |> List.fold (fun acc leaf ->
                                 mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
@@ -3260,9 +3384,13 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                      | _ -> ())
                     markKeptSpine tArr
                 | [one] -> one
-                | first :: rest ->
-                    rest |> List.fold (fun acc leaf ->
-                        mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
+                | _ :: _ ->
+                    // G233: a leaf the prelude forces keeps its name
+                    (match keptTreeLeaves leaves with
+                     | first :: rest ->
+                         rest |> List.fold (fun acc leaf ->
+                             mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
+                     | [] -> tArr)
                 | [] -> tArr
             let resultType =
                 match leaves with
@@ -4362,6 +4490,35 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                 | TExprApply _ | TExprFusion _ -> true
                 | _ -> false
             let deferredWithOmpKernel () = operandIsDeferred () && kernelRequestsOmp ()
+            // G233 (round 4 wave 10; Codex design review D4a): a NAMED
+            // operand that is a deferred MAP is not desugared either. The
+            // desugar reads it by position (`p(i, j)` in a synthesized block),
+            // a forcing use: the compiled lanes forced and PRINTED it at the
+            // block's pre-pass, the interpreter at the first read (after the
+            // seed). A fold over a deferred map fuses and forces nothing
+            // (formalism 10.2): the fused terminal below folds every cell, and
+            // its prelude runs the captures before the seed (a captured spine
+            // folds its snapshot). Module level and top-level blocks only (a
+            // callable body's S2 stores the let; its fold reads the array).
+            let namedDeferredMap () =
+                array.Kind.IsExprVar && not env.InCallableBody
+                && (let r = resolveTypedExpr env tArr0
+                    match r.Kind with
+                    // a WRITING map is stored at its definition (G45): its
+                    // fold reads the array, which this desugar keeps
+                    // ... and only the shape the fused terminal folds
+                    // (Codex diff review: a ROW kernel, `lambda(row: T^1) ->
+                    // row + 1.0`, or a ragged / grouped / compound input kept
+                    // its working desugar): a scalar-cell kernel over plain
+                    // dense operands
+                    | TExprApply info when not info.IsComposeApply ->
+                        info.KernelOutputRank = 0
+                        && info.KernelInputRanks |> List.forall (fun k -> k = 0)
+                        && info.ArrayTypes |> List.forall (fun at ->
+                               at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone))
+                        && (outerWritesOfBody env env r).IsEmpty
+                        && (parallelCalleeWriteError env [] r).IsNone
+                    | _ -> false)
             // The same silent drop for a MATERIALIZED operand (bench gap G10 /
             // the `reduce(lap * lap, lambda ... where omp ..., 0.0, axes = 2)`
             // probe): the nest below carries no clause, so the licence vanished
@@ -4403,7 +4560,8 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                                 && at.IndexTypes |> List.forall (fun ix ->
                                        ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
                                 && (env.Subst.Resolve at.ElemType).IsIRTScalar
-                                && not (deferredWithOmpKernel ()) ->
+                                && not (deferredWithOmpKernel ())
+                                && not (namedDeferredMap ()) ->
                 let extents =
                     at.IndexTypes |> List.map (fun ix ->
                         match ix.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
@@ -6686,7 +6844,7 @@ and inferMask (env: TypeEnv) array pred : TypeResult<TypedExpr> =
                 match tPred.Kind with
                 | TExprLambda info when info.Params.Length = 1 ->
                     unify env.Subst info.Params.[0].Type arrTy.ElemType
-                | _ -> Ok ()
+                | _ -> callableRefParamMeetsCells env tPred arrTy.ElemType
             unifyPredParam |> Result.bind (fun () ->
                 let resultType = mkArrayArrow arrTy.IndexTypes (IRTScalar ETBool) None
                 Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
@@ -8519,7 +8677,26 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                     mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
                         mkExpr sp (ExprMethodFor [arrExpr]),
                         mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; Default = None; NameSpan = noSpan }], None, body))))))
-                inferExpr env synth |> Result.map (fun tSynth ->
+                // G276 (2): an array whose ELEMENT is still a let-bound lambda
+                // value's open parameter (`[v, v] * 3.0` in a fused compose
+                // stage) hands that dependency to the synthesized kernel: its
+                // parameter is judged like the lambda value's (the literal
+                // partner takes the width the later use decides).
+                let elemIsLetLambdaParam =
+                    match (if arrayOnLeft then lRes else rRes) with
+                    | ArrayElem arr when elemAnn.IsNone ->
+                        (match env.Subst.Resolve arr.ElemType |> IR.stripUnits with
+                         | IRTInfer ev ->
+                             env.LetLambdaParamVars |> Seq.exists (fun p ->
+                                 match env.Subst.Resolve (IRTInfer p) |> IR.stripUnits with
+                                 | IRTInfer r -> r = ev
+                                 | _ -> false)
+                         | _ -> false)
+                    | _ -> false
+                if elemIsLetLambdaParam then env.PendingLetLambda.Value <- true
+                let synthResult = inferExpr env synth
+                env.PendingLetLambda.Value <- false
+                synthResult |> Result.map (fun tSynth ->
                     // A GENERIC array (`a: T^1`, element a signature variable)
                     // beside a concrete scalar (`a * 0.5`): the kernel was typed
                     // while the element was open, so its cells took the
@@ -9030,6 +9207,63 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                             | OpMod -> "%" | _ -> "^"
                         env.CurrentGenericObligations
                         |> Option.iter (fun acc -> acc.Add(GOPromotion (vid, opName, partner, literal)))
+                        match IR.getUnits resTy0 with
+                        | Some u -> IRTUnitAnnotated (IRTInfer vid, u)
+                        | None -> IRTInfer vid
+                    | None ->
+                    // G275 (2): a LITERAL-ONLY operand beside a still-OPEN plain
+                    // variable (a let-bound lambda's own parameter, typed before
+                    // its first call decides it) takes that variable's width
+                    // (formalism 2.4: the literal says the class, its partner
+                    // the width). adaptLiteralOperands keeps the literal at the
+                    // class's WIDE width as the representation (IRMono's
+                    // adaptFloatLiteralsModule narrows it -- or refuses a value
+                    // that does not fit, R19 -- once the partner is concrete),
+                    // but the RESULT is the partner variable, not the literal's
+                    // representation: answering the wide width fixed the
+                    // lambda's result at Float64 while a later call made its
+                    // parameter Float32 -- an implicit conversion of the body's
+                    // value. A partner of another class is the mixing rule's
+                    // (the post-zonk sweep refuses it).
+                    let literalBesideOpen =
+                        let isArithOp =
+                            match op with
+                            | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true
+                            | _ -> false
+                        if (mode <> Elementwise && mode <> Outer) || not isArithOp then None
+                        else
+                            let openPlain (t: IRType) =
+                                match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                                | IRTInfer v when not (env.Subst.IsPolymorphicId v)
+                                                  && (env.Subst.GetLiteralDefault v).IsNone
+                                                  && (env.Subst.GetElemCast v).IsNone
+                                                  && (env.Subst.GetElemHint v).IsNone
+                                                  && not (env.Subst.IsIndexDefault v)
+                                                  && (env.Subst.GetArityConstraint v).IsNone
+                                                  && (env.Subst.GetRankLowerBound v).IsNone
+                                                  // a LET-BOUND lambda value's own
+                                                  // parameter (a kernel lambda's is
+                                                  // decided at its apply site, and a
+                                                  // generic body's by its instance)
+                                                  && (env.LetLambdaParamVars |> Seq.exists (fun p ->
+                                                        match env.Subst.Resolve (IRTInfer p) |> IR.stripUnits with
+                                                        | IRTInfer r -> r = v
+                                                        | _ -> false)) -> Some v
+                                | _ -> None
+                            // An integer or float literal (a COMPLEX literal makes
+                            // a real partner's result complex: not this rule).
+                            let literalOnly (te: TypedExpr) =
+                                match literalOnlyElem env.Subst te with
+                                | Some le -> litClassOf le = 0 || litClassOf le = 1
+                                | None -> false
+                            match openPlain tL.Type, literalOnly tR, openPlain tR.Type, literalOnly tL with
+                            | Some v, true, _, _ -> Some v
+                            // (`^` is typed as its BASE: only an open base takes
+                            // the result; a literal base keeps its own width)
+                            | _, _, Some v, true when op <> OpCaret -> Some v
+                            | _ -> None
+                    match literalBesideOpen with
+                    | Some vid ->
                         match IR.getUnits resTy0 with
                         | Some u -> IRTUnitAnnotated (IRTInfer vid, u)
                         | None -> IRTInfer vid
@@ -14185,6 +14419,15 @@ and inferLambdaFullHinted env parms whereClause body (seeds: IRType option list)
             env.DeclaredTupleWidths.[varId] <- w)
         paramEnv <- bindVarSimple p.Name varId ty paramEnv
         { Name = p.Name; Type = ty; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
+    // G275 (2): this lambda is a let's whole value (TypeEnv.PendingLetLambda,
+    // consumed by the first lambda judged under that let): its open
+    // parameters are the ones a later call decides.
+    if env.PendingLetLambda.Value then
+        env.PendingLetLambda.Value <- false
+        for tp in typedParams do
+            match tp.Type with
+            | IRTInfer v -> env.LetLambdaParamVars.Add v |> ignore
+            | _ -> ()
 
     // ---- Parameter defaults (BL3012 rules + typing) ----
     // Trailing rule, required-params-only scope rule, then each default
@@ -15427,7 +15670,14 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
     // block statement, top-level DeclLet, DeclStatic) funnel through here.
     // Keyed by the TYPED lambda's first parameter id (defaultsKeyOfVar): the
     // binding's own id is minted later, on each of those paths separately.
-    inferLetBindingValueCore env binding |> Result.map (fun tv ->
+    // G275 (2): a lambda that IS the let's value is a lambda VALUE whose open
+    // parameters a later call decides; the lambda judgment records them.
+    (match binding.Value.Kind with
+     | ExprKind.ExprLambda _ -> env.PendingLetLambda.Value <- true
+     | _ -> ())
+    let inferred = inferLetBindingValueCore env binding
+    env.PendingLetLambda.Value <- false
+    inferred |> Result.map (fun tv ->
         // ROUND 6 (lead ruling): a COMPILER-SYNTHESIZED literal-only binding
         // -- an unannotated `__` binder, the internal-name marker every
         // elaborator (ppl, ml, math, spectra, sgs, rand, display, Grad*) uses
@@ -18173,6 +18423,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             match zipSharedRecords arrayTypes with
             | Error e -> Error e
             | Ok sharedRecords ->
+            match compoundMaskProvenanceClash env arrayTypes with
+            | Some e -> Error e
+            | None ->
             // Real per-array S-dim counts: buildApplyInfo's IRTInfer fallback
             // computes the kernel slice rank as (records - sDims); a scalar
             // kernel over rank-2 operands must see kR = 0 (full product), which
@@ -18225,6 +18478,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                 match zipSharedRecords arrayTypes with
                 | Error e -> Error e
                 | Ok sharedRecords ->
+                match compoundMaskProvenanceClash env arrayTypes with
+                | Some e -> Error e
+                | None ->
                 let sDimsPerArray = computeSDimsPerArray arrayTypes
                 let totalSDims = List.sum sDimsPerArray
                 let info : TypedMethodForInfo = {
@@ -18353,7 +18609,17 @@ and inferObjectForCore env kernel (typeKernel: (unit -> TypeResult<TypedExpr>) o
         | None ->
         match etaExpandFunctionKernel env kernel with
         | Some r -> r
-        | None -> inferExpr env kernel
+        | None ->
+            // G276 (2): an object former's lambda is a kernel VALUE (a stored
+            // former, a compose stage -- a fused pipeline's kernel included):
+            // its open parameters are decided where it is later applied, as a
+            // let-bound lambda value's are (TypeEnv.LetLambdaParamVars).
+            (match kernel.Kind with
+             | ExprKind.ExprLambda _ -> env.PendingLetLambda.Value <- true
+             | _ -> ())
+            let r = inferExpr env kernel
+            env.PendingLetLambda.Value <- false
+            r
     kernelResult |> Result.bind (fun tKernel ->
         // A DEFERRED former: a bare named reference to an arity-polymorphic
         // function. etaExpandFunctionKernel refused to eta-expand it (its Poly
@@ -19229,6 +19495,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // one array for the identity groups (loopOperandIdentity).
             (match binding.Pattern.Kind with
              | PatternKind.PatVar _ ->
+                 env.ModuleLetBinders.Add varId |> ignore
                  let surfaceVar = match binding.Value.Kind with ExprKind.ExprVar s -> Some s | _ -> None
                  recordDeferredAliasMember env (binding.Mutability = BindLet) binding.Type.IsSome
                                            surfaceVar varId name tValue

@@ -1,0 +1,13 @@
+// TEST: a lambda value decided Float64, then called through an alias with a Float32 (rejects)
+// ============================================================================
+// G275 (1): one lambda VALUE has one body; its first call decided Float64,
+// and the alias call would convert the Float32 argument (the reverse order
+// was always refused: this is no polymorphism, an asymmetric widening).
+// ============================================================================
+let f64: Float64 = 2.0
+let f32: Float32 = 1.0
+let h = lambda(v) -> v
+let saved = h
+let x = h(f64)
+let y = saved(f32)
+// ERROR: BL3020

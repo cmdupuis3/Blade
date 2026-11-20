@@ -1,0 +1,11 @@
+// TEST: an integer static handed through an alias to a lambda value decided Float64 (rejects)
+// ============================================================================
+// G275: an integer static adapts its WIDTH like a literal, never its class.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let static k = 3
+let y = saved(k)
+let a: Float64 = 1.0
+let z = h(a)
+// ERROR: BL3020

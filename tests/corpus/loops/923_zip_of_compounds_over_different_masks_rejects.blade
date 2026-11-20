@@ -1,0 +1,12 @@
+// TEST: A Zip Of Compounds Over Different Masks Is Refused (rejects)
+// Gap G265 (d) (round 4 wave 10 lane d; the lead ruling): a compound's index is its mask's present
+// cells, so two compounds over DIFFERENT mask bindings are two index spaces -- mask identity is
+// index provenance, as Nat<LatIdx> vs Nat<LonIdx> -- even at equal cardinality (3 and 3 here).
+// The C++ lane paired them by position (m = [4, 10, 18]); the LLVM lane refused; the interpreter
+// had no compound co-iteration. Refused at typecheck, BL3016.
+// ERROR: BL3016 @ 11:30
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let left = compound(x, mask(x, lambda(v) -> v <= 3))
+let right = compound(x, mask(x, lambda(v) -> v > 3))
+let m = method_for(zip(left, right)) <@> lambda(p, q) -> p * q |> compute

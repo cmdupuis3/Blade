@@ -1,0 +1,18 @@
+// TEST: A Later Pipeline Stage Capture Through A Deferred Alias After A Failing Stage (aborts)
+// ============================================================================
+// Gap G242, round 4 wave 10 (lane C, C4; Codex diff review 03cfa2dd round 2):
+// loops/898 with the map captured through a deferred ALIAS -- the first stage
+// still fails first (BL8013 in first) in every lane; the LLVM staged-pipeline
+// arm follows the alias when it declines.
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [0, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> Int64(floor(sqrt(Float64(e) - 3.0)))
+let alias = delayed
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> v + alias(0))
+let ys = k <@> backing |> compute
+// ABORT: integer division by zero

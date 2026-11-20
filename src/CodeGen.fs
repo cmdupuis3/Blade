@@ -290,7 +290,7 @@ let rec private genFuncBodyScoped
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
-        let varName = $"__v{id}"
+        let varName = (localVarName id)
         // Collapse stacked IRCompute wrappers before dispatching. `compute` is
         // idempotent at inference, but IR construction can stack the user's
         // `|> compute` on a node that already carries its own wrap (measured:
@@ -340,19 +340,19 @@ let rec private genFuncBodyScoped
             | None ->
             let targetStr =
                 match target with
-                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ($"__v{tid}")
+                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ((localVarName tid))
                 | _ -> exprToCpp currentNames target
             // Copy-in-place (see exprToCppCore's IRAssign arm): sole-owner mut keeps
             // ONE pool; the RHS temp stays iteration-owned and its scope frees it.
             match copyInPlaceAssign target v with
             | Some (_, rid, n) ->
-                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ($"__v{rid}")
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ((localVarName rid))
                 [$"{indent}std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data));"]
             | None ->
             // Owned move (gap G92): free T's previous pool, then take R's.
             match ownedMoveAssign target v with
             | Some (_, rid) ->
-                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ("__v" + string rid)
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue (localVarName rid)
                 let staticShape = ownedMoveStaticShape target
                 [$"{indent}{(renderOwnedMove targetStr rhsStr staticShape)};"]
             | None ->
@@ -1096,9 +1096,9 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             | None -> currentNames <- Map.remove i currentNames
         preCode @ lines
     let stmts = lets |> List.collect (fun (id, value) ->
-        siblingArmBegin id $"__v{id}" siblingPreflight
+        siblingArmBegin id (localVarName id) siblingPreflight
         let lines = emitBodyLet (id, value)
-        lines @ siblingArmEnd id $"__v{id}")
+        lines @ siblingArmEnd id (localVarName id))
     // Scratch reuse: a let the plan gave a donor takes the donor's pool -- its
     // `allocate<>` declaration is rewritten into an alias of the donor's data
     // (its own extents table stays), and its scope free is spared; the donor's
@@ -1111,7 +1111,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             | Some d ->
                 (match Map.tryFind d currentNames with
                  | Some dn ->
-                     let name = $"__v{id}"
+                     let name = (localVarName id)
                      let (acc', matched) = rewritePoolAlias acc name dn
                      // the backing goes with the donor; an owned run-time extents
                      // table (PM60) is still the reuser's to free
@@ -1945,7 +1945,7 @@ let private paramCppNames (ctx: CodeGenContext) (funcDef: IRFuncDef) : Map<IRId,
     funcDef.Params
     |> List.map (fun p ->
         let shadows = clashing |> Map.exists (fun id n -> n = p.Name && refs.Contains id)
-        (p.VarId, (if shadows then $"{p.Name}__p{p.VarId}" else p.Name)))
+        (p.VarId, (if shadows then avoidUserSpelled $"{p.Name}__p{p.VarId}" else p.Name)))
     |> Map.ofList
 
 let rec genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
@@ -3129,8 +3129,8 @@ let genTypeDefs (modul: IRModule) : string list =
 // expressions and temporaries go through `sanitizeCppName`, which is the
 // spelling `bindingCppName` declared the binding under. The two differ only
 // for a binding whose name is a C++ reserved word (`let final = ...`) or one
-// spelled as another binding's name plus a generated suffix
-// (`installUserNameRenames`: `a_extents` beside an array `a`).
+// the program's name table moved (`installCppNameTable`: `a_extents` beside
+// an array `a`, a user `Lib__a` beside an imported `Lib.a`, `let EOF = ..`).
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
@@ -4594,9 +4594,11 @@ let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan opti
     // a reused id re-registers the original variable's name in VarNames.
     // 2^30 is far above any real program's id count.
     builder.EnsureAtLeast(0x40000000)
-    // User bindings whose names extend another binding's by `_...` step
-    // aside from the generated `<name>_suffix` namespace (CodeGenState).
-    installUserNameRenames (modul.Bindings |> List.map (fun b -> b.Name))
+    // The program's C++ name table (gap G252, CodeGenState.installCppNameTable):
+    // colliding / reserved spellings move -- callables at IR level (so `modul`
+    // is rebound), bindings through the raw-keyed rename table -- and the
+    // emitter's minted names avoid the program's own spellings.
+    let modul = installCppNameTable modul
 
     let includes =
         // Provider reads/writes emit provider-specific runtime calls (nc_*,

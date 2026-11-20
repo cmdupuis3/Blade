@@ -53,6 +53,28 @@ module DegenerateFloatLiterals =
         | true, s -> Some s
         | _ -> None
 
+/// G275: the numeric CASTS A USER WROTE (`Float64(x)`, `x |> Int32`), marked
+/// on the span object of the application node the PARSER builds, keyed by
+/// REFERENCE as DegenerateFloatLiterals is. An explicit cast is a fixed-width
+/// value, never a literal that adapts (Lowering.refuseArgumentConversions);
+/// a cast an elaborator or the AD pipeline synthesizes -- located at a
+/// declaration's span, or at none -- is not in the table, so it can never
+/// masquerade as one the user wrote.
+module UserCasts =
+    let private table = System.Runtime.CompilerServices.ConditionalWeakTable<Span, obj>()
+    let private heads = set [ "Int32"; "Int64"; "Float32"; "Float64"; "Complex64"; "Complex128" ]
+    /// Mark `span` (the application node's own span object) when `head` names
+    /// a numeric cast and the application has exactly one argument.
+    let recordIfCast (head: string) (argCount: int) (span: Span) =
+        if argCount = 1 && heads.Contains head then table.AddOrUpdate(span, null)
+    let isUserCast (span: Span) : bool =
+        match table.TryGetValue span with
+        | true, _ -> true
+        | _ -> false
+    /// The parser re-spans a node (parentheses widen it): the mark follows.
+    let transfer (fromSpan: Span) (toSpan: Span) =
+        if isUserCast fromSpan then table.AddOrUpdate(toSpan, null)
+
 type Located<'T> = {
     Value: 'T
     Span: Span

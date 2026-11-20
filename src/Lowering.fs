@@ -3753,23 +3753,77 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
         | IRTComputation inner -> cellOf inner
         | ArrayElem a -> Some a.ElemType
         | _ -> None
+    // An EXPLICIT cast the user wrote (`Float64(1e100)`) is a fixed-width
+    // VALUE, never a literal that adapts (G275, Codex round 4):
+    // `saved(Float64(1e100) + Float64(1e100))` into a Float32 parameter was
+    // handed over unjudged and narrowed to an infinity. Judged by PROVENANCE,
+    // not by location: the parser marks the span object of every cast
+    // application it builds (Ast.UserCasts), and the cast node carries that
+    // span. Every other cast around a literal still adapts -- the IR's own
+    // (an Int32 literal's width, a static's, the degenerate-literal marker)
+    // and the AST casts an elaborator or the AD pipeline synthesizes at a
+    // DECLARATION's span (`PplElaborate.asF64 (fLit 0.0)`, a fold seed over
+    // Float32 cells: a located cast the user never wrote).
+    let userCast (_et: ElemType) (loc: SrcLoc) (_x: IRExpr) =
+        not (isNull loc) && Blade.Ast.UserCasts.isUserCast loc.Span
     let rec isLiteral (e: IRExpr) =
         match e with
         | IRLit _ -> true
-        | IRUnaryOp ((IRNeg | IRCast _), x) -> isLiteral x
+        | IRUnaryOp (IRNeg, x) -> isLiteral x
+        | IRUnaryOp (IRCast (et, loc), x) -> not (userCast et loc x) && isLiteral x
         | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, _) -> isLiteral l && isLiteral r
         | IRComplex (re, im) -> isLiteral re && isLiteral im
         // a synthesized seed (resolved to the instance's own identity later)
         | IRUnseededSeed _ | IRZero _ -> true
         | _ -> false
+    // A literal tree with no USER cast in it: an explicit cast
+    // (`Int64(4294967296)`) is a fixed-width VALUE, which the narrowing proof
+    // judges (G275); the compiler's own width casts around a literal (`1` at
+    // Int32 inside `(46341 ^ (1 + 1)) / 2`) keep the tree a literal.
+    let rec isPlainLiteral (e: IRExpr) =
+        match e with
+        | IRLit _ -> true
+        | IRUnaryOp (IRNeg, x) -> isPlainLiteral x
+        | IRUnaryOp (IRCast (et, loc), x) -> not (userCast et loc x) && isPlainLiteral x
+        | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, _) -> isPlainLiteral l && isPlainLiteral r
+        | _ -> false
     let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
     let isInt = function ETInt32 | ETInt64 -> true | _ -> false
     let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
-    let lossy (src: ElemType) (dst: ElemType) =
+    // An INTEGER `let static` name (a module binding the static desugar marks
+    // IsConst) adapts its width like the literal it folds to (formalism 2.4),
+    // at any depth of a tuple argument; a FLOAT static is a constant of its
+    // own width and is judged like any value.
+    let constIntIds =
+        modules
+        |> List.collect (fun m -> m.Bindings)
+        |> List.filter (fun b ->
+            b.IsConst && not b.IsMutable
+            && (match stripUnits b.Type with
+                | IRTScalar (ETInt32 | ETInt64) -> true
+                | IRTIdxTagged (inner, _) -> (match stripUnits inner with IRTScalar (ETInt32 | ETInt64) -> true | _ -> false)
+                | _ -> false))
+        |> List.map (fun b -> b.Id)
+        |> Set.ofList
+    let lossyOnly (src: ElemType) (dst: ElemType) =
         (isFloat src && isInt dst)
         || (src = ETFloat64 && dst = ETFloat32)
         || (isComplex src && not (isComplex dst))
         || (src = ETComplex128 && dst = ETComplex64)
+    // G275: a numeric WIDENING (Float32 into Float64, Int32 into Int64, an
+    // integer into a float, Complex64 into Complex128, a real into a complex)
+    // converts as surely as a lossy one (formalism 2.4: a fixed non-literal
+    // argument meets its parameter without conversion). Refused here too, on
+    // the concrete instance types: what the checker could not see when it
+    // typed the call -- a lambda value's parameter decided by a later call or
+    // by its default, a generic body's call at a narrower instance, a fold
+    // kernel's result fed back into a wider accumulator, a callable chosen by
+    // an expression in a kernel slot. Int64 into Int32 is the narrowing proof
+    // below (calls only), not this judgment.
+    let widening (src: ElemType) (dst: ElemType) =
+        src <> dst && (isInt src || isFloat src || isComplex src)
+        && IR.promoteElemType src dst = Some dst
+    let lossy (src: ElemType) (dst: ElemType) = lossyOnly src dst || widening src dst
     let elemName (e: ElemType) = ppIRType (IRTScalar e)
     let rec className (c: ValueClass) =
         match c with
@@ -3816,6 +3870,43 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
         | VCFunc, VCFunc -> None
         | x, y when x = y -> None
         | _ -> Some (false, a, p)
+    // G275: an ARGUMENT judged component by component (a tuple argument's
+    // literals and integer statics adapt, its fixed components do not): a
+    // literal is judged by class only (it adapts to its parameter: IRMono), an
+    // integer let static name adapts its WIDTH but never its class, anything
+    // else is a fixed value.
+    // `proven` is the call's narrowing proof (fitsInt32) for an Int64
+    // COMPONENT of a tuple handed to an Int32 one (a whole Int64 argument is the
+    // call arm's own check); `literalClass` judges a literal's CLASS (an integer
+    // literal is no float, a real literal no complex) except at an
+    // elaborator-synthesized (`__`) callee, whose calls are its contract.
+    let classOf (e: ElemType) = if isInt e then 0 elif isFloat e then 1 elif isComplex e then 2 else -1
+    let rec clashArg (proven: IRExpr -> bool) (literalClass: bool) (arg: IRExpr) (a: ValueClass) (p: ValueClass)
+                     : (bool * ValueClass * ValueClass) option =
+        // (an Int64 component reaching an Int32 one through a NAMED or computed
+        // tuple has no per-component expression to prove: refused)
+        let rec narrowsInTuple (x: ValueClass) (y: ValueClass) =
+            match x, y with
+            | VCTuple xs, VCTuple ys when xs.Length = ys.Length ->
+                List.exists2 (fun u v -> (u = VCNum ETInt64 && v = VCNum ETInt32) || narrowsInTuple u v) xs ys
+            | _ -> false
+        match arg, a, p with
+        | IRTuple es, VCTuple xs, VCTuple ys when es.Length = xs.Length && xs.Length = ys.Length ->
+            List.zip3 es xs ys |> List.tryPick (fun (e, x, y) ->
+                match x, y with
+                | VCNum ETInt64, VCNum ETInt32
+                        when not (isPlainLiteral e)
+                             && not (match e with IRVar (id, _) -> constIntIds.Contains id | _ -> false)
+                             && not (proven e) -> Some (true, x, y)
+                | _ -> clashArg proven literalClass e x y)
+        | _, VCTuple _, VCTuple _ when narrowsInTuple a p -> Some (true, a, p)
+        | _ when isLiteral arg ->
+            (match a, p with
+             | VCNum x, VCNum y when literalClass && classOf x >= 0 && classOf y >= 0 && classOf x <> classOf y -> Some (true, a, p)
+             | _ -> clash false a p)
+        | IRVar (id, _), VCNum x, VCNum y when constIntIds.Contains id ->
+            if isInt x && not (isInt y) then Some (true, a, p) else None
+        | _ -> clash true a p
     // The let values of a body, so a local alias chain resolves to its callable.
     let calleeOf (letValues: System.Collections.Generic.Dictionary<IRId, IRExpr>) (f: IRExpr) : IRCallable option =
         let rec go (fuel: int) (e: IRExpr) =
@@ -3969,9 +4060,23 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
             if lossyNum then
                 let loss =
                     match a, p with
+                    | VCNum x, VCNum y when widening x y -> $"widening it to {elemName y}"
+                    | VCNum ETInt64, VCNum ETInt32 ->
+                        "wrapping it into the narrower integer when it does not fit (an Int64 value -- a tuple component included -- meets an Int32 only where it is statically proven to fit: an integer literal, a `let rec` step ordinal, through `let` aliases and `+` / `-` of an integer literal)"
                     | VCNum (ETInt32 | ETInt64), VCNum (ETInt32 | ETInt64) -> "wrapping it into the narrower integer"
                     | _ -> "losing precision"
-                $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is {className p} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): the call would convert it, {loss}, and Blade converts nothing implicitly (formalism 2.4) -- convert it explicitly at the call, or annotate the parameter"
+                // G275 (the lead's ruling): a lambda VALUE (aliased, wrapped in
+                // a block, passed) is monomorphic at its binding -- its open
+                // parameter is decided by a DIRECT call or its default, never
+                // by a call through the value -- so the remedy names both ways
+                // to give the parameter the argument's width.
+                let remedy =
+                    match a, p with
+                    | VCNum x, VCNum y when widening x y ->
+                        $" -- annotate the parameter with the argument's type (`{pname}: {elemName x}`), or convert the argument explicitly (`{elemName y}(..)`); a lambda kept as a value (an alias, a block, a tuple member, an argument) is monomorphic at its binding, so call it directly by the name it is bound to if that call should decide its parameter"
+                    | VCNum ETInt64, VCNum ETInt32 -> $" -- convert it explicitly at the call (`Int32(..)`), or declare the parameter Int64"
+                    | _ -> " -- convert it explicitly at the call, or annotate the parameter"
+                $"argument {i + 1} of this call is {article a}, but parameter `{pname}` of the {what} is {className p} (a parameter the callee's body left open is decided by its first use or its default, never by a later argument): the call would convert it, {loss}, and Blade converts nothing implicitly (formalism 2.4){remedy}"
             else
                 match a, p with
                 | VCWindow, VCFunc ->
@@ -4015,7 +4120,22 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
             | Some (names, ps, _, _, what) when i < ps.Length ->
                 (match clash numeric given (cls ps.[i]) with
                  | Some (lossyNum, a, p) -> refuse (codeOf lossyNum) SrcLoc.Nowhere (argMessage i names.[i] (what + role) lossyNum a p)
-                 | None -> ())
+                 | None ->
+                     // G276: a kernel SLOT has no call-site narrowing proof
+                     // (fitsInt32 is a call's): an Int64 cell handed to an Int32
+                     // parameter wraps, whatever expression chose the kernel.
+                     let rec narrows (g: ValueClass) (q: ValueClass) =
+                         match g, q with
+                         | VCNum ETInt64, VCNum ETInt32 -> true
+                         | VCArray x, VCArray y -> narrows x y
+                         | VCArray x, (VCNum _ as y) -> narrows x y
+                         | VCTuple xs, VCTuple ys when xs.Length = ys.Length -> List.exists2 narrows xs ys
+                         | _ -> false
+                     if numeric && narrows given (cls ps.[i]) then
+                         refuse "BL3020" SrcLoc.Nowhere
+                             ($"each value handed to parameter `{names.[i]}` of the {what}{role} is an Int64, and the parameter is an Int32: "
+                              + "a kernel slot would wrap every value into the narrower integer, and Blade converts nothing implicitly (formalism 2.4) -- "
+                              + "declare the parameter Int64, or convert the array first (`Int32(xs)`)"))
             | _ -> ()
         // A fold: each cell into the kernel's second parameter, the seed (or,
         // unseeded, the first cell) into its accumulator, and the kernel's
@@ -4050,7 +4170,20 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                     let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
                     refuse (codeOf lossyNum) loc
                         $"the {what} (a fold kernel) returns {article a}, but its accumulator parameter `{names.[0]}` is {className p}: each step's result would be converted into the next, and Blade converts nothing implicitly (formalism 2.4) -- annotate the kernel's parameters"
-                | None -> ()
+                | None ->
+                    // G275 (Codex round 4): the FEEDBACK edge has no narrowing
+                    // proof either -- an Int64 result fed into an Int32
+                    // accumulator wraps (a tuple state component included).
+                    let rec narrows (g: ValueClass) (q: ValueClass) =
+                        match g, q with
+                        | VCNum ETInt64, VCNum ETInt32 -> true
+                        | VCTuple xs, VCTuple ys when xs.Length = ys.Length -> List.exists2 narrows xs ys
+                        | _ -> false
+                    if narrows (cls ret) (cls ps.[0]) then
+                        let loc = match kbody with Some b -> firstLoc b | None -> SrcLoc.Nowhere
+                        refuse "BL3020" loc
+                            ($"the {what} (a fold kernel) returns an Int64 value, but its accumulator parameter `{names.[0]}` is an Int32: each step's result would be wrapped into the next, "
+                             + "and Blade converts nothing implicitly (formalism 2.4) -- declare the accumulator Int64, or convert the result explicitly (`Int32(..)`)")
             | _ -> ()
         // A DEFERRED binding's value (an alias chain of deferred stages); a
         // materialized one (`|> compute`) is a stored array: the emitter
@@ -4141,7 +4274,7 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                         |> List.iteri (fun i (arg, (pname, pTy)) ->
                             match tyOf arg with
                             | Some aTy ->
-                                match clash (not (isLiteral arg)) (cls aTy) (cls pTy) with
+                                match clashArg (fun e -> fitsInt32 facts e) (match callee with Some c -> not (c.SourceName.StartsWith "__") | None -> true) arg (cls aTy) (cls pTy) with
                                 | Some (lossyNum, a, p) -> refuse (codeOf lossyNum) loc (argMessage i pname what lossyNum a p)
                                 // INTEGER NARROWING at a call (an Int64 argument into an
                                 // Int32 parameter, declared or decided by an earlier call
@@ -4150,7 +4283,7 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                                 // at calls only: a kernel slot's parameter types may not be
                                 // the ones its emitted body computes in (a fold kernel
                                 // inlined over its cells).
-                                | None when not (isLiteral arg)
+                                | None when not (isPlainLiteral arg)
                                             && (let rec scalarOf (c: ValueClass) = match c with VCArray e -> scalarOf e | c -> c
                                                 scalarOf (cls aTy) = VCNum ETInt64 && scalarOf (cls pTy) = VCNum ETInt32)
                                             && not (cls aTy = VCNum ETInt64 && fitsInt32 facts arg) ->
@@ -4306,6 +4439,29 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
                                    + "the value would be converted, and Blade converts nothing implicitly (formalism 2.4) -- annotate the lambda's parameter with the cell's type, or convert explicitly")
                           | None -> ())
                      | _ -> ()
+                 | _ -> ())
+            // G275: a REYNOLDS map sums its kernel over the PERMUTATIONS of its
+            // arguments, so every operand's cell is handed to every parameter
+            // (the positional pairing above is one permutation of many).
+            | IRApplyCombinator info when info.HasReynolds ->
+                let rec unReynolds (k: IRExpr) = match k with IRReynolds (inner, _) -> unReynolds inner | k -> k
+                let k = unReynolds info.Kernel
+                (match kernelSig k with
+                 | Some (names, ps, _, _, what) when ps.Length = info.Arrays.Length
+                                                     && info.KernelInputRanks.Length = info.Arrays.Length
+                                                     && info.ArrayTypes.Length = info.Arrays.Length
+                                                     && ps.Length >= 2 ->
+                     for (arr, at, irank) in List.zip3 info.Arrays info.ArrayTypes info.KernelInputRanks do
+                         match arr with
+                         | IRRange _ | IRVirtualReverse _ -> ()
+                         | _ ->
+                             let given = if irank = 0 then cls at.ElemType else VCArray (cls at.ElemType)
+                             List.zip names ps |> List.iteri (fun i (pname, pTy) ->
+                                 match clash true given (cls pTy) with
+                                 | Some (lossyNum, a, pc) ->
+                                     refuse (codeOf lossyNum) SrcLoc.Nowhere
+                                         (argMessage i pname (what + " (a reynolds kernel, which receives every operand at every parameter)") lossyNum a pc)
+                                 | None -> ())
                  | _ -> ())
             // `comp >>= cont`: the continuation's parameter receives comp's value.
             | IRBind (comp, cont) ->
@@ -4464,6 +4620,7 @@ let private refuseAliasedMutArgumentsWith
         (resolve: IRExpr -> IRCallable option)
         (storageOf: int -> IRCallable option -> IRExpr -> Set<IRId> option)
         (exprHoldsStorage: IRExpr -> bool)
+        (paramCands: IRExpr -> IRCallable list option)
         (sites: (Blade.Ast.Span * IRCallable option * IRExpr) list) : unit =
     let moduleIds = allBindings |> List.map (fun b -> b.Id) |> Set.ofList
     let bindingById = allBindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
@@ -4677,6 +4834,8 @@ let private refuseAliasedMutArgumentsWith
     let nameOfBinder (id: IRId) =
         match bindingById.TryFind id with
         | Some b -> $"'{b.Name}'"
+        // a member identity of a known tuple carrier (storageAt, G240 (2))
+        | None when id < 0 -> "one tuple member"
         | None -> "a local array"
     // the first binder `a` and `b` share, the one the refusal names
     let sharedOf (a: Set<IRId>) (b: Set<IRId>) : IRId option =
@@ -4756,16 +4915,24 @@ let private refuseAliasedMutArgumentsWith
             | _ -> Some c.Id
         | None -> None
     for (span, owner, root) in sites do
+        // G240 (1), round 4 wave 10: a value use inside a call's arguments is
+        // spanned at that call (its surface span), else at the declaration
+        let vspan = ref span
         let mutValue (e: IRExpr) =
             let c = (resolve e).Value
-            refuse span ($"function {calleeName c} has a mut parameter and is used here as a VALUE (an argument, a tuple / array / struct member, a returned value, a composition stage): a function type carries no `mut`, so a call through it would write its argument unjudged (formalism: a mut argument may not share storage with what the callee reads). Call it directly (`{calleeName c}(..)` with its arguments), or bind the array it writes with `let mut` and pass a function without a mut parameter.")
+            refuse vspan.Value ($"function {calleeName c} has a mut parameter and is used here as a VALUE (an argument, a tuple / array / struct member, a returned value, a composition stage): a function type carries no `mut`, so a call through it would write its argument unjudged (formalism: a mut argument may not share storage with what the callee reads). Call it directly (`{calleeName c}(..)` with its arguments), or bind the array it writes with `let mut` and pass a function without a mut parameter.")
         let rec scanV (e: IRExpr) =
             match e with
             | IRApp (f, args, _) ->
                 (match f with
                  | IRVar _ when (resolve f).IsSome -> ()
                  | _ -> scanV f)
+                let saved = vspan.Value
+                (match e with
+                 | IRAppAt (_, _, _, loc) when not (isNull loc) && loc.Span.StartLine > 0 -> vspan.Value <- loc.Span
+                 | _ -> ())
                 args |> List.iter scanV
+                vspan.Value <- saved
             | IRLet (_, (IRVar _ as v), b) when isMutCallable v -> scanV b
             | IRApplyCombinator info ->
                 let kc = resolve info.Kernel
@@ -4875,11 +5042,21 @@ let private refuseAliasedMutArgumentsWith
                 (match resolve f with
                  | Some c ->
                      // a callable ARGUMENT runs inside the callee: its reads
-                     // are the callee's (Codex diff review round 2)
+                     // are the callee's (Codex diff review round 2). G240 (3),
+                     // round 4 wave 10: an argument that is a function-valued
+                     // PARAMETER of the enclosing callable forwarded on (`function
+                     // outer(cb: .., y: mut A) = helper(cb, y)`) runs the callables
+                     // its every direct call site passes there (paramCandidatesFrom,
+                     // rebinding-aware; None -- a value-used callable, a partial
+                     // application, any other function value -- stays untraced)
+                     let argCallables (a: IRExpr) : IRCallable list option =
+                         match resolve a with
+                         | Some g -> Some [ g ]
+                         | None -> paramCands a
                      let reads =
                          args |> List.fold (fun acc a ->
-                             match resolve a with
-                             | Some g -> Set.union acc (calleeReads g)
+                             match argCallables a with
+                             | Some gs -> gs |> List.fold (fun s g -> Set.union s (calleeReads g)) acc
                              | None -> acc) (calleeReads c)
                      // a callee that applies an untraceable function value, or
                      // a function-valued ARGUMENT no resolution reaches (a
@@ -4887,18 +5064,26 @@ let private refuseAliasedMutArgumentsWith
                      let readsUntraced =
                          snd (calleeReadsT c)
                          || (args |> List.exists (fun a ->
-                                match resolve a with
-                                | Some g -> snd (calleeReadsT g)
+                                match argCallables a with
+                                | Some gs -> gs |> List.exists (fun g -> snd (calleeReadsT g))
                                 | None ->
                                     (try (match stripUnits (typeOf a), a with
                                           | FuncElem _, _ -> true
                                           | IRTUnit, IRFieldAccess _ -> true   // a field of unknown type
                                           | _ -> false) with _ -> false)))
+                     // G240 (1), round 4 wave 10: a CALL is spanned at the call
+                     // itself -- every lowered call carries its surface span
+                     // (Lowering's TExprApp arm: IRAppAt .. SrcLoc.Of texpr.Span,
+                     // kept by every clone and specialization); a map / applied
+                     // composition, and a synthesized call with no location,
+                     // keep the enclosing declaration
+                     let callSpan =
+                         match n with
+                         | IRAppAt (_, _, _, loc) when not (isNull loc) && loc.Span.StartLine > 0 -> loc.Span
+                         | _ -> span
                      for i in positionsOf c do
                          if i < args.Length && exprHoldsStorage args.[i] then
-                             // (spanned at the declaration: per-argument spans
-                             // need call-site provenance, G240 (1), staged)
-                             let aspan = span
+                             let aspan = callSpan
                              match storageOf 48 owner args.[i] with
                              | None -> untraced aspan c i
                              | Some si ->
@@ -4908,7 +5093,7 @@ let private refuseAliasedMutArgumentsWith
                                      args |> List.iteri (fun j other ->
                                          if j <> i && exprHoldsStorage other then
                                              match storageOf 48 owner other with
-                                             | None -> untraced span c j
+                                             | None -> untraced aspan c j
                                              | Some sj ->
                                                  match sharedOf si (sj |> Set.filter isStorageId) with
                                                  | Some sh ->
@@ -5271,6 +5456,36 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // Codex probe E). Return summaries are cached per mode.
     let strictMode = ref false
     let returnSummaries = System.Collections.Generic.Dictionary<bool * bool * IRId, (Set<int> * Set<IRId>) option>()
+    // G240 (2), round 4 wave 10 (STRICT MODE only): MEMBER IDENTITIES of a
+    // KNOWN carrier. A binder initialized by a tuple LITERAL and never rebound
+    // (let pair = (g, h)) holds its members at distinct identities: pair[k]
+    // is the member (carrier, k) plus what the literal's k-th member holds, and
+    // the whole carrier is the carrier plus every member identity -- so two
+    // DIFFERENT members passed as a read argument and a mut argument are two
+    // storages (each still reaches its own named array), while the same member
+    // twice, or a member beside its whole carrier, still share. An OPAQUE
+    // carrier (a tuple parameter, a call result, a rebound binder) keeps the
+    // one carrier identity: distinct paths there are no proof (Codex probe A,
+    // wave 9). The synthetic identities are negative ids no binder has.
+    let memberIds = System.Collections.Generic.Dictionary<IRId * int, IRId>()
+    let memberCarrier = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let memberIdOf (carrier: IRId) (k: int) : IRId =
+        match memberIds.TryGetValue ((carrier, k)) with
+        | true, m -> m
+        | _ ->
+            let m = -(1000000 + memberIds.Count)
+            memberIds.[(carrier, k)] <- m
+            memberCarrier.[m] <- carrier
+            m
+    let knownCarrierMembers (id: IRId) : IRExpr list option =
+        if rebinds.ContainsKey id then None
+        else
+            match lets.TryGetValue id with
+            | true, v ->
+                (match snd (IRLift.peelLetChain v) with
+                 | IRTuple es when not es.IsEmpty -> Some es
+                 | _ -> None)
+            | _ -> None
     let rec storageAt (seen: System.Collections.Generic.HashSet<IRId * (int * bool) list>) (fuel: int) (owner: IRCallable option) (path: (int * bool) list) (e: IRExpr) : Set<IRId> option =
         if fuel <= 0 then None
         else
@@ -5283,7 +5498,24 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             match e with
             // a binder already being followed along this path adds nothing new
             // (the walk is a union): a cyclic rebinding ends here, not at fuel
-            | IRVar (id, _) when (exprHoldsStorage e || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
+            | IRVar (id, _) when strictMode.Value
+                                 && (knownCarrierMembers id).IsSome
+                                 && seen.Add((id, path)) ->
+                let es = (knownCarrierMembers id).Value
+                let memberAt (k: int) (rest: (int * bool) list) =
+                    storageAt seen (fuel - 1) owner rest es.[k] |> Option.map (Set.add (memberIdOf id k))
+                (match path with
+                 | (k, false) :: rest when k >= 0 && k < es.Length -> memberAt k rest
+                 // the whole carrier, or a FLAT leaf path (a destructuring
+                 // let (a, b, tag) = pair names leaves of nested members):
+                 // the carrier and EVERY member identity, so it overlaps any
+                 // structural path into the same carrier (Codex 03cfa2dd,
+                 // finding 2)
+                 | _ ->
+                     es |> List.indexed |> List.fold (fun acc (k, _) ->
+                         match acc, memberAt k [] with
+                         | Some a, Some b -> Some (Set.union a b)
+                         | _ -> None) (Some (Set.singleton id)))            | IRVar (id, _) when (exprHoldsStorage e || deferred.Contains id) && not (seen.Add((id, path))) -> Some (Set.singleton id)
             | IRVar (id, _) when exprHoldsStorage e || deferred.Contains id ->
                 let viaInit = initStorageAt seen fuel owner path id
                 let viaRebinds =
@@ -5475,7 +5707,9 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                         // review round 2)
                         let ownLets = System.Collections.Generic.HashSet<IRId>()
                         iterIRExpr (fun n -> match n with IRLet (id, _, _) -> ownLets.Add id |> ignore | _ -> ()) c.Body
-                        let others = ids |> Set.filter (fun id -> not (paramIds.ContainsKey id) && not (ownLets.Contains id))
+                        // (a member identity of an own carrier is own too: G240 (2),
+                        // Codex 03cfa2dd finding 4)
+                        let others = ids |> Set.filter (fun id -> not (paramIds.ContainsKey id) && not (ownLets.Contains id) && not (match memberCarrier.TryGetValue id with | true, cid -> ownLets.Contains cid | _ -> false))
                         Some (positions, others)
                     | None -> None
             returnSummaries.[key] <- s
@@ -5907,7 +6141,14 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // parameter, a compound / sparse operand: Codex diff review round 2)
     let sideSites = sidePayloads |> List.map (fun (b, e) -> (IR.declSpanOf b.Name, None, e))
     part "write fixpoint"
-    refuseAliasedMutArgumentsWith origins allBindings allFuncs funcs lets deferred resolve storageOfStrict exprHoldsStorage (sites @ sideSites)
+    let paramCands (a: IRExpr) : IRCallable list option =
+        match a with
+        | IRVar _ | IRParam _ when (try (match stripUnits (typeOf a) with FuncElem _ -> true | _ -> false) with _ -> false) ->
+            (match paramOfHead None a with
+             | Some (c, k) -> paramCandidatesFrom Set.empty c k
+             | None -> None)
+        | _ -> None
+    refuseAliasedMutArgumentsWith origins allBindings allFuncs funcs lets deferred resolve storageOfStrict exprHoldsStorage paramCands (sites @ sideSites)
     part "mut arguments"
     // ---- if values over computed arrays -----------------------------------------
     let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
@@ -6349,6 +6590,545 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     | Some d -> raise (Blade.Diagnostics.BladeDiagnosticException d)
     | None -> ()
 
+// ---------------------------------------------------------------------------
+// G239: A FORCE AT EACH READ POSITION INSIDE A FUNCTION BODY (round 4 wave 10,
+// lane C, C1; Codex design review edb50dd4 rounds 1-2, BUILD WITH CHANGES).
+//
+// Formalism 10.2 / the confirmed G239 contract: inside a callable body every
+// ordinary forcing use of a deferred MODULE map -- a positional read `d(i)` --
+// evaluates the map AT ITS POSITION, in evaluation order; an untaken read (an
+// `if` / `match` arm, the right operand of `&&` / `||`) evaluates nothing; a
+// read in a loop step evaluates it per iteration, so the evaluation COUNT is
+// observable when the body writes the map's input between two reads. That is
+// what the interpreter does (each read forces privately: Loops.force under
+// FunctionCallDepth > 0). Both compiled lanes force once per body STATEMENT,
+// before it (CodeGen.genFuncBodyScoped's statement pre-pass; the LLVM lane's
+// statement hoist).
+//
+// THE REWRITE (one IR pass before the lane split, so every lane runs one
+// tree): in a statement whose order the pre-pass cannot reproduce, each read
+// becomes a CALL of a one-statement helper function `__bfr<id>_<map>(i..) =
+// map(i..)` -- an ordinary named function body, whose own statement pre-pass
+// forces the map privately per call in every lane (holder ownership is the
+// existing function-body machinery) -- and the statement's evaluated-once
+// SPINE is put in A-normal form, in the interpreter's evaluation order
+// (Interp/Core.fs evalExpr: binop left then right, call head then arguments,
+// index base then indices, let value then body, condition first): every event
+// on the spine (a call -- the helper calls included --, an operation that may
+// fail, a checked subscript, an assignment) is bound to a fresh body let, and
+// every scalar read of a binding a later event may write (a module value, or a
+// local the statement itself assigns) is snapshotted before it. An arm, a
+// right operand or a loop step is a nested region normalized the same way
+// inside it (an arm that needs ordering becomes a block of lets), so a C++
+// ternary / `&&` / `||` / loop evaluates a call only where the interpreter
+// reads. The interpreter result is unchanged BY CONSTRUCTION: the pass
+// rewrites a statement only when every condition below holds and otherwise
+// leaves it byte-identical (fail closed in the do-not-touch sense; the
+// residuals are recorded under G239):
+//   * every index of every read is INERT (IRLift.memberMayFailOf clears it, it
+//     names no deferred binder): the interpreter forces the map BEFORE it
+//     evaluates the index, a helper call after; a force writes nothing (a
+//     writing named map is stored at its definition, G45), so the order of an
+//     inert index is unobservable;
+//   * the deferred map appears in no other position (no whole-array use, no
+//     operand, no alias, no deferred-tuple member) and NO callable the
+//     statement references captures a deferred module binder (its capture is
+//     forced by the statement pre-pass, which may sit outside the branch that
+//     runs it -- Codex round 2, finding 1);
+//   * the spine holds no non-scalar event and no traversal before a later
+//     bound event (a fold / map / array call is never moved, so no planner
+//     side table keyed by its binding is invalidated; an opaque node may stay
+//     in place only as the LAST event of its region -- round 2, finding 2).
+// A statement whose reads are all of ONE map, all on the spine, and which has
+// no other event is left to the pre-pass: one force before it equals the
+// interpreter's force-read-force-read (nothing can write or fail between).
+//
+// THE HELPER: one per (caller, map, index types); a named function (not
+// `__lambda`), capture-free (the interpreter's private-force rule), its
+// SourceName the caller's, HoistFrame = Some false (no shadow frame in any
+// lane, so panic traces read `at <caller>` as before), located at the caller's
+// declaration (HoistDeclTable -> Lowering.copyHoistDeclSpans), filed in
+// DerivedFuncOrigins under its CALLER and placed just before it, so the C++
+// lane emits it at the caller's program point (the same deferred context: a
+// map an earlier top-level statement stored is read stored by both).
+// ---------------------------------------------------------------------------
+
+exception private BodyReadsCannotSplit
+
+let rec private bodyReadsScalarType (t: IRType) =
+    match t with
+    | IRTScalar _ -> true
+    | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> bodyReadsScalarType inner
+    | _ -> false
+
+let private bodyReadsUnitType (t: IRType) =
+    match t with
+    | IRTUnit -> true
+    | _ -> false
+
+let splitDeferredBodyReadsModule (builder: IRBuilder) (allModules: IRModule list) (modul: IRModule) : IRModule =
+    let allFuncs = allModules |> List.collect (fun m -> m.Functions)
+    let deferredIds = IRLift.computeDeferredIds modul.Bindings
+    let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
+    let maps =
+        modul.Bindings
+        |> List.filter (fun b ->
+            deferredIds.Contains b.Id
+            && (match stripUnits b.Type with ArrayElem _ -> true | _ -> false)
+            && (match stripC b.Value with IRApplyCombinator _ | IRComposeApply _ -> true | _ -> false))
+        |> List.map (fun b -> (b.Id, b))
+        |> Map.ofList
+    if maps.IsEmpty then modul else
+    let bindingValues = modul.Bindings |> List.map (fun b -> (b.Id, b.Value)) |> Map.ofList
+    let dv : IRLift.DeferredView =
+        { IsDeferred = deferredIds.Contains
+          ValueOf = fun id -> Map.tryFind id bindingValues
+          TypeOfExpr = typeOf }
+    let inert (e: IRExpr) = not (IRLift.memberMayFailOf dv e)
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in allFuncs do callables.[f.Id] <- f
+    for f in modul.Functions do callables.[f.Id] <- f
+    // A callable whose captures reach a deferred module binder, directly or
+    // through a captured callable.
+    let capMemo = System.Collections.Generic.Dictionary<IRId, bool>()
+    let rec capturesDeferred (seen: Set<IRId>) (id: IRId) : bool =
+        match capMemo.TryGetValue id with
+        | true, v -> v
+        | _ ->
+            match callables.TryGetValue id with
+            | true, c when not (seen.Contains id) ->
+                let v =
+                    c.Captures |> List.exists (fun cap ->
+                        deferredIds.Contains cap.Id || capturesDeferred (seen.Add id) cap.Id)
+                capMemo.[id] <- v
+                v
+            | _ -> false
+    let isRead (e: IRExpr) =
+        match e with
+        | IRIndex (IRVar (d, _), (_ :: _), _) when maps.ContainsKey d -> bodyReadsScalarType (typeOf e)
+        | _ -> false
+    let rec hasRead (e: IRExpr) = isRead e || (childrenOf e |> List.exists hasRead)
+    let staticExtent (ty: IRType) (dim: int) =
+        match stripUnits ty with
+        | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length ->
+            (match at.IndexTypes.[dim].Extent with IRLit (IRLitInt _) -> true | _ -> false)
+        | _ -> false
+    // Every read's indices are inert, and no deferred binder or deferred-
+    // capturing callable is named anywhere else in the statement.
+    let rec admissible (e: IRExpr) : bool =
+        match e with
+        | IRIndex (IRVar _, idxs, _) when isRead e ->
+            idxs |> List.forall (fun i -> inert i && not (hasRead i) && admissible i)
+        // an extent read of a deferred map is inert only when the extent is a
+        // static literal of its type (G218); a RUN-TIME extent forces the map
+        // (G234) at its position, which a rewrite would move: declined (Codex
+        // diff review 03cfa2dd, finding 1)
+        | IRExtent (IRVar (id, ty), dim) when deferredIds.Contains id -> staticExtent ty dim
+        | IRVar (id, _) -> not (deferredIds.Contains id) && not (capturesDeferred Set.empty id)
+        | _ -> childrenOf e |> List.forall admissible
+    // A read in a CONDITIONAL or REPEATED position: an if / match arm or guard,
+    // the right operand of && / ||, a loop body or a while guard.
+    let rec readOffSpine (e: IRExpr) : bool =
+        match e with
+        | IRIf (c, t, f) -> readOffSpine c || hasRead t || hasRead f
+        | IRMatch (s, cases) ->
+            readOffSpine s
+            || cases |> List.exists (fun c -> hasRead c.Body || (c.Guard |> Option.exists hasRead))
+        | IRBinOp (_, (IRAnd | IROr), l, r, _) -> readOffSpine l || hasRead r
+        | IRForRange (_, lo, hi, body) -> readOffSpine lo || readOffSpine hi || hasRead body
+        | IRBreakIf c -> hasRead c
+        | _ -> childrenOf e |> List.exists readOffSpine
+    let readMaps (e: IRExpr) =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        iterIRExpr (fun n -> match n with IRIndex (IRVar (d, _), _, _) when isRead n -> acc.Add d |> ignore | _ -> ()) e
+        acc.Count
+    // The statement with each read replaced by a plain value of its type: does
+    // anything else in it act (fail, call, write)?
+    let otherwiseInert (e: IRExpr) =
+        let dummy = builder.FreshId()
+        inert (mapIRExpr (fun n -> if isRead n then IRVar (dummy, typeOf n) else n) e)
+    let wrapLets (pre: (IRId * IRExpr) list) (body: IRExpr) =
+        List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) pre body
+    let minted = ResizeArray<IRCallable * IRId * IRId>()   // helper, map, caller
+    // G255: a module map no module-level code names is evaluated only inside
+    // function bodies, privately (formalism 10.2): a function-body COPY of it
+    // (d |> compute) or a MASK over it evaluates its own map form there --
+    // the C++ lane named the module binder, which nothing declared (BL9002).
+    // Only a let-free map form is inlined (ids stay unique).
+    // (Codex design review 03cfa2dd, finding 1) every id MODULE-LEVEL code may
+    // force in module mode: what the program's binding values, side payloads
+    // and type-carried extents name, and -- through every callable they
+    // reference other than as the head of a direct call of a capture-free
+    // named function (whose body runs privately, under a call) -- that
+    // callable's captures and body, transitively (a kernel runs inline in the
+    // interpreter, at module depth: Codex finding 3)
+    let isPlainNamedFn (c: IRCallable) = c.Captures.IsEmpty && not (c.Name.StartsWith "__lambda")
+    let funcById = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in allFuncs do funcById.[f.Id] <- f
+    let moduleNamed =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let walked = System.Collections.Generic.HashSet<IRId>()
+        let rec walk (e: IRExpr) =
+            match e with
+            | IRApp ((IRVar (fid, _)), args, _) when (match funcById.TryGetValue fid with | true, c -> isPlainNamedFn c | _ -> false) ->
+                acc.Add fid |> ignore
+                List.iter walk args
+            | IRVar (id, _) ->
+                acc.Add id |> ignore
+                match funcById.TryGetValue id with
+                | true, c when walked.Add id ->
+                    for cap in c.Captures do acc.Add cap.Id |> ignore
+                    walk c.Body
+                | _ -> ()
+            | IRApp ((IRVar _ as head), args, _) ->
+                walk head
+                List.iter walk args
+            | _ -> childrenOf e |> List.iter walk
+        for m in allModules do
+            // binding values and side payloads (no function body)
+            for r in moduleExecutablePayloads { m with Functions = [] } do
+                walk r
+                for x in Optimize.embeddedExtentExprs r do walk x
+        acc
+    // a capture-free named function every reference to which, anywhere in the
+    // program, is the head of a direct call: its body runs only under a call
+    // (the interpreter's private-force depth), never inline as a kernel
+    let nonCallRefs =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let rec walk (e: IRExpr) =
+            match e with
+            | IRApp ((IRVar _), args, _) -> List.iter walk args
+            | IRVar (id, _) -> acc.Add id |> ignore
+            | _ -> childrenOf e |> List.iter walk
+        for m in allModules do
+            for r in moduleExecutablePayloads m do
+                walk r
+                for x in Optimize.embeddedExtentExprs r do walk x
+        for f in allFuncs do
+            for cap in f.Captures do acc.Add cap.Id |> ignore
+        acc
+    let directCallOnly (f: IRCallable) = isPlainNamedFn f && not (nonCallRefs.Contains f.Id)
+    let inlineValue (d: IRId) : IRExpr option =
+        match Map.tryFind d maps with
+        | Some b when not (moduleNamed.Contains d) ->
+            let v = stripC b.Value
+            let hasLet = ref false
+            iterIRExpr (fun n -> match n with IRLet _ -> hasLet.Value <- true | _ -> ()) v
+            if hasLet.Value then None else Some v
+        | _ -> None
+    let hasInlineUse (body: IRExpr) =
+        let found = ref false
+        iterIRExpr (fun n ->
+            match n with
+            | IRCompute (IRVar (d, _)) | IRMask (IRVar (d, _), _) when (inlineValue d).IsSome -> found.Value <- true
+            | _ -> ()) body
+        found.Value
+    // closure: a lambda the body CALLS (G241, processed by the closure arm
+    // below): every read is rewritten, the pre-pass keep rule does not apply
+    // (its body reads the CAPTURED binder, never a private force)
+    let processFunc (closure: bool) (f: IRCallable) : IRCallable =
+        if (not closure && not (directCallOnly f))
+           || f.HoistFrame.IsSome
+           || f.IsStatic || f.IsCudaKernel || f.IsMpiParallel || f.IsArityPoly || f.IsOmpParallel
+           || not (hasRead f.Body || (not closure && hasInlineUse f.Body)) then f
+        else
+        let helperFor = System.Collections.Generic.Dictionary<IRId * IRType list, IRCallable>(HashIdentity.Structural)
+        let helperCall (read: IRExpr) : IRExpr =
+            match read with
+            | IRIndex (IRVar (d, dty), idxs, ident) ->
+                let idxTys = idxs |> List.map typeOf
+                let h =
+                    match helperFor.TryGetValue ((d, idxTys)) with
+                    | true, h -> h
+                    | _ ->
+                        let ps = idxTys |> List.mapi (fun k t -> { Name = $"__bfr_i{k}"; Type = t; Index = k; VarId = builder.FreshId() })
+                        let body = IRIndex (IRVar (d, dty), ps |> List.map (fun p -> IRVar (p.VarId, p.Type)), ident)
+                        let hid = builder.FreshId()
+                        let c =
+                            mkCallable builder { defaultLambdaOptions with NameOverride = Some $"__bfr{hid}_{maps.[d].Name}"; IdOverride = Some hid }
+                                ps body (typeOf read) [] false [] [] false false 256 false
+                        let c = { c with SourceName = f.SourceName; HoistFrame = Some false }
+                        helperFor.[(d, idxTys)] <- c
+                        minted.Add((c, d, f.Id))
+                        Optimize.HoistDeclTable.record hid (Optimize.LocatedAsCallable f.Id)
+                        c
+                IRApp (IRVar (h.Id, mkFuncArrow (h.Params |> List.map (fun p -> p.Type)) h.RetType), idxs, h.RetType)
+            | _ -> read
+        // the body's own binders (parameters, lets, loop variables): a later
+        // event of the statement cannot write one the statement does not assign
+        let locals = System.Collections.Generic.HashSet<IRId>()
+        for p in f.Params do locals.Add p.VarId |> ignore
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, _, _) | IRForRange (id, _, _, _) -> locals.Add id |> ignore
+            | _ -> ()) f.Body
+        // ONE statement (a let value, an assignment, a loop, a return):
+        // (lets bound before it, the residual statement)
+        let rec normStmt (v: IRExpr) : (IRId * IRExpr) list * IRExpr =
+            let assigned = System.Collections.Generic.HashSet<IRId>()
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (t, _) ->
+                    let rec root (x: IRExpr) =
+                        match x with
+                        | IRVar (id, _) -> assigned.Add id |> ignore
+                        | IRIndex (a, _, _) | IRTupleProj (a, _, _) | IRFieldAccess (a, _) -> root a
+                        | _ -> ()
+                    root t
+                | _ -> ()) v
+            let binds = ResizeArray<IRId * IRExpr>()
+            let pending = ResizeArray<IRId * IRExpr>()
+            let mutable opaqueSeen = false
+            let flushPending () =
+                for p in pending do binds.Add p
+                pending.Clear()
+            let bindAs (id: IRId) (e: IRExpr) =
+                if opaqueSeen then raise BodyReadsCannotSplit
+                flushPending ()
+                binds.Add((id, e))
+            let bind (e: IRExpr) : IRExpr =
+                let ty = typeOf e
+                if not (bodyReadsScalarType ty || bodyReadsUnitType ty) then raise BodyReadsCannotSplit
+                let t = builder.FreshId()
+                bindAs t e
+                IRVar (t, ty)
+            let event (root: bool) (n: IRExpr) = if root then n else bind n
+            // a scalar read a later event of this statement may write: a
+            // module value, or a local the statement assigns
+            let snapVar (id: IRId) (ty: IRType) =
+                not (deferredIds.Contains id) && not (callables.ContainsKey id)
+                && bodyReadsScalarType ty && (not (locals.Contains id) || assigned.Contains id)
+            let needsSnap (e: IRExpr) =
+                let found = ref false
+                iterIRExpr (fun n -> match n with IRVar (id, ty) when snapVar id ty -> found.Value <- true | _ -> ()) e
+                found.Value
+            let rec spine (root: bool) (e: IRExpr) : IRExpr =
+                match e with
+                | IRLit _ | IRParam _ -> e
+                | IRVar (id, ty) ->
+                    if deferredIds.Contains id then raise BodyReadsCannotSplit
+                    elif snapVar id ty then
+                        if opaqueSeen then raise BodyReadsCannotSplit
+                        let ph = builder.FreshId()
+                        pending.Add((ph, e))
+                        IRVar (ph, ty)
+                    else e
+                | _ when isRead e -> event root (helperCall e)
+                | IRBinOp (m, (IRAnd | IROr as op), l, r, loc) ->
+                    let l' = spine false l
+                    if not (hasRead r) && inert r && not (needsSnap r) then IRBinOp (m, op, l', r, loc)
+                    else
+                        match region r with
+                        // a right operand that needs ordering is a block: written as
+                        // the `if` it means (the C++ lane renders an `if` arm block
+                        // as a sequenced IIFE; a block operand of `&&` would be
+                        // flattened ahead of the statement)
+                        | IRLet _ as r' ->
+                            let n =
+                                match op with
+                                | IRAnd -> IRIf (l', r', IRLit (IRLitBool false))
+                                | _ -> IRIf (l', IRLit (IRLitBool true), r')
+                            event root n
+                        | r' -> event root (IRBinOp (m, op, l', r', loc))
+                | IRBinOp (m, op, l, r, loc) ->
+                    let l' = spine false l
+                    let r' = spine false r
+                    let n = IRBinOp (m, op, l', r', loc)
+                    if inert n then n else event root n
+                | IRUnaryOp (op, a) ->
+                    let n = IRUnaryOp (op, spine false a)
+                    if inert n then n else event root n
+                | IRTupleProj (a, i, fl) ->
+                    let n = IRTupleProj (spine false a, i, fl)
+                    if inert n then n else event root n
+                | IRFieldAccess (a, fld) ->
+                    let n = IRFieldAccess (spine false a, fld)
+                    if inert n then n else event root n
+                | IRTuple es -> IRTuple (es |> List.map (spine false))
+                | IRComplex (a, b) ->
+                    let a' = spine false a
+                    IRComplex (a', spine false b)
+                | IRFma (a, b, c) ->
+                    let a' = spine false a
+                    let b' = spine false b
+                    IRFma (a', b', spine false c)
+                | IRExtent (IRVar (id, ty), dim) when deferredIds.Contains id && not (staticExtent ty dim) -> raise BodyReadsCannotSplit
+                | IRExtent _ when not (hasRead e) -> e
+                | IRIndex (a, idxs, ident) ->
+                    // a checked read of a stored array: base, then indices
+                    let a' = spine false a
+                    let idxs' = idxs |> List.map (spine false)
+                    event root (IRIndex (a', idxs', ident))
+                | IRApp ((IRVar _ as fn), args, rt) ->
+                    let args' = args |> List.map (spine false)
+                    event root (withAppParts e (fn, args', rt))
+                | IRIf (c, t, fl) ->
+                    let c' = spine false c
+                    let t' = region t
+                    let f' = region fl
+                    let n = IRIf (c', t', f')
+                    if inert n && not (needsSnap t' || needsSnap f') then n else event root n
+                | IRMatch (s, cases) when hasRead e ->
+                    let s' = spine false s
+                    let cases' = cases |> List.map (fun c -> { c with Guard = c.Guard |> Option.map region; Body = region c.Body })
+                    event root (IRMatch (s', cases'))
+                | IRLet (x, v0, b) ->
+                    let v' = spine true v0
+                    bindAs x v'
+                    spine root b
+                | IRAssign (target, value) ->
+                    let value' = spine false value
+                    let rec lvalueOk (t: IRExpr) =
+                        match t with
+                        | IRVar _ -> true
+                        | IRIndex (a, idxs, _) -> lvalueOk a && idxs |> List.forall (fun i -> inert i && not (hasRead i))
+                        | _ -> false
+                    if not (lvalueOk target) || hasRead target then raise BodyReadsCannotSplit
+                    event root (IRAssign (target, value'))
+                | IRForRange (vid, lo, hi, body) when root ->
+                    let lo' = spine false lo
+                    let hi' = spine false hi
+                    IRForRange (vid, lo', hi', region body)
+                | IRBreakIf c when root -> IRBreakIf (spine false c)
+                | _ ->
+                    if hasRead e then raise BodyReadsCannotSplit
+                    elif inert e && not (needsSnap e) then e
+                    else
+                        // an opaque event (a fold, a map, an array call): kept in
+                        // place, so nothing after it in this statement may be bound
+                        if not root then opaqueSeen <- true
+                        e
+            let residual = spine true v
+            // an unflushed snapshot is read where it stood: no event follows it
+            let unflushed = pending |> Seq.map (fun (ph, orig) -> (ph, orig)) |> Map.ofSeq
+            let residual =
+                if unflushed.IsEmpty then residual
+                else mapIRExpr (fun n -> match n with IRVar (id, _) when unflushed.ContainsKey id -> unflushed.[id] | n -> n) residual
+            (List.ofSeq binds, residual)
+        // A nested region (an arm, a right operand, a loop body): every
+        // statement holding a read is normalized; a region without one is kept.
+        and region (e: IRExpr) : IRExpr =
+            if not (hasRead e) then e
+            else
+                // ONE read and nothing else that acts: the call replaces the read
+                // in place (no block), nothing to order
+                let light (v: IRExpr) =
+                    let n = ref 0
+                    iterIRExpr (fun x -> if isRead x then n.Value <- n.Value + 1) v
+                    n.Value = 1 && otherwiseInert v && not (readOffSpine v)
+                let inPlace (v: IRExpr) = mapIRExpr (fun x -> if isRead x then helperCall x else x) v
+                match e with
+                | IRLet (id, v, rest) ->
+                    let (pre, v') =
+                        if not (hasRead v) then ([], v)
+                        elif light v then ([], inPlace v)
+                        else normStmt v
+                    wrapLets pre (IRLet (id, v', region rest))
+                | e when light e -> inPlace e
+                | e ->
+                    let (pre, r) = normStmt e
+                    wrapLets pre r
+        let topStmt (v: IRExpr) : (IRId * IRExpr) list * IRExpr =
+            match v with
+            | IRCompute (IRVar (d, _)) when not closure && (inlineValue d).IsSome -> ([], IRCompute (inlineValue d).Value)
+            | IRMask (IRVar (d, dty), pred) when not closure && (inlineValue d).IsSome ->
+                let h = builder.FreshId()
+                ([ (h, IRCompute (inlineValue d).Value) ], IRMask (IRVar (h, dty), pred))
+            | _ ->
+            if not (hasRead v) || not (admissible v) then ([], v)
+            elif not closure && readMaps v = 1 && not (readOffSpine v) && otherwiseInert v then ([], v)
+            else
+                try normStmt v
+                with BodyReadsCannotSplit -> ([], v)
+        let rec rewriteBody (e: IRExpr) : IRExpr =
+            match e with
+            | IRLet (id, v, rest) ->
+                let (pre, v') = topStmt v
+                wrapLets pre (IRLet (id, v', rewriteBody rest))
+            | e ->
+                let (pre, r) = topStmt e
+                wrapLets pre r
+        { f with Body = rewriteBody f.Body }
+    // G241: a LAMBDA capturing a deferred module map that the program only
+    // CALLS -- bound by a let in a capture-free named function body and
+    // applied there by that name, or applied directly; never a kernel, an
+    // argument, a returned or stored value, never named by module code or
+    // captured by another callable -- runs only inside that function's call, so
+    // each read in its body is an ordinary forcing use AT ITS POSITION at each
+    // call (the interpreter's evaluation; a closure binding forces nothing).
+    // Its reads become helper calls and the map leaves its captures: the C++
+    // closure copy-captured the module binder at the binding, which nothing had
+    // declared (BL9002, the unused and the called twin alike).
+    let namedFns = modul.Functions |> List.filter directCallOnly
+    let calledOnly (lid: IRId) : bool =
+        if moduleNamed.Contains lid then false else
+        let aliases = System.Collections.Generic.HashSet<IRId>()
+        let ok = ref true
+        let rec walk (e: IRExpr) =
+            match e with
+            | IRLet (k, IRVar (id, _), b) when id = lid || aliases.Contains id -> aliases.Add k |> ignore; walk b
+            | IRApp (IRVar (id, _), args, _) when id = lid || aliases.Contains id -> List.iter walk args
+            | IRVar (id, _) when id = lid || aliases.Contains id -> ok.Value <- false
+            | _ -> childrenOf e |> List.iter walk
+        for f in namedFns do walk f.Body
+        let named (e: IRExpr) = let r = collectVarRefsIR e in r.Contains lid || aliases |> Seq.exists r.Contains
+        // EVERY other callable of the PROGRAM -- a lambda, a function used as a
+        // value (not direct-call-only: its body may RETURN the closure, which
+        // then escapes to module level, where a capturing closure's read is a
+        // module force: wave-10 fable review F1), another module's -- must not
+        // name the closure or an alias of it at all, nor capture it
+        let namedIds = namedFns |> List.map (fun f -> f.Id) |> Set.ofList
+        ok.Value
+        && allFuncs |> List.forall (fun c ->
+               (c.Captures |> List.forall (fun cap -> cap.Id <> lid && not (aliases.Contains cap.Id)))
+               && (namedIds.Contains c.Id || c.Id = lid || not (named c.Body)))
+    let closures' =
+        modul.Functions |> List.choose (fun c ->
+            if c.Name.StartsWith "__lambda" && not c.Captures.IsEmpty
+               && c.Captures |> List.exists (fun cap -> maps.ContainsKey cap.Id)
+               && hasRead c.Body && calledOnly c.Id then
+                let c' = processFunc true c
+                if obj.ReferenceEquals(c', c) then None
+                else
+                    // the deferred captures its rewritten body no longer names
+                    // (directly or through a callable it names) leave
+                    let refs = collectVarRefsIR c'.Body
+                    let viaCallables =
+                        refs |> Seq.collect (fun r ->
+                            match callables.TryGetValue r with
+                            | true, g -> g.Captures |> List.map (fun ci -> ci.Id)
+                            | _ -> []) |> Set.ofSeq
+                    let caps = c'.Captures |> List.filter (fun cap -> not (deferredIds.Contains cap.Id) || refs.Contains cap.Id || viaCallables.Contains cap.Id)
+                    Some (c.Id, { c' with Captures = caps })
+            else None)
+        |> Map.ofList
+    // the closure rewrite first: a named body applying such a closure then
+    // sees its new captures (no deferred capture left to forbid its rewrite)
+    for KeyValue (_, c) in closures' do callables.[c.Id] <- c
+    capMemo.Clear()
+    let functions' =
+        modul.Functions |> List.map (fun f ->
+            match Map.tryFind f.Id closures' with
+            | Some c -> c
+            | None -> processFunc false f)
+    let changed = List.exists2 (fun (a: IRCallable) b -> not (obj.ReferenceEquals(a, b))) modul.Functions functions'
+    if minted.Count = 0 && not changed then modul
+    else
+        // each helper just before its first caller (callee before caller in
+        // any list-order consumer); the C++ order key is the map's binding
+        let byCaller = minted |> Seq.groupBy (fun (_, _, caller) -> caller) |> Map.ofSeq
+        { modul with
+            Functions =
+                functions' |> List.collect (fun f ->
+                    match Map.tryFind f.Id byCaller with
+                    | Some hs -> (hs |> Seq.map (fun (h, _, _) -> h) |> List.ofSeq) @ [ f ]
+                    | None -> [ f ])
+            // keyed on the CALLER (emitted just before it): the helper sees the
+            // deferred context its caller does -- a map a top-level statement
+            // forced before the caller's definition is read stored by both
+            DerivedFuncOrigins =
+                minted |> Seq.fold (fun acc (h, _, caller) -> Map.add h.Id caller acc) modul.DerivedFuncOrigins }
+
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // (BLADE_PHASE_TIMING: the lowering up to and through the write rules --
     // what an editor tier reporting them would pay; deep review R12, gap 5)
@@ -6522,6 +7302,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // whole-program, so a twin lives in the module that defines its origin
     let (irModules, reproTwins) = reproFoldUsesProgram irModules env.Builder
     let programFuncs = irModules |> List.collect (fun m -> m.Functions)
+    // Every module's binding names: the modules share one C++ `main` scope, so
+    // a plan that mints an emitter name checks the WHOLE program's spellings
+    // (stream-group-aggregate's `__sga` guard, round 4 wave 10 lane a, A3).
+    let programBindingNames = lazy (irModules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Name)))
     // Every module's type declarations (the EnumIdx key backstop, R3).
     let programTypeDefs = irModules |> List.collect (fun m -> m.Types)
     // The same snapshot with constant-scrutinee matches folded, as every module's
@@ -6682,7 +7466,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // 4 wave 4 H2 / ST08): an unprinted group_by over a streamed variable
         // read only by per-group strict folds keeps one state per group per
         // fold in the windowed pass, no pool. Gate: BLADE_STREAM_GROUP_AGG.
-        OptimizeStreamGroup.planStreamGroupAggregate programFuncs foreignRefs irModule
+        OptimizeStreamGroup.planStreamGroupAggregate programFuncs (programBindingNames.Force()) foreignRefs irModule
         // The sort form (Blade.OptimizeSort.planSortForms, round 4 wave 4
         // D1): a range operand sorted as its iota in place, a total pure
         // key cached once per element; side table, the C++ emitter reads
@@ -6783,6 +7567,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // A05 consumes every module's final executable/type/side payload and ALL
     // established owners. No planner runs after these typed resource barriers.
     let irModules = EarlyPoolRelease.scheduleModules builder irModules
+    // G239: a function body forces a deferred module map at each read
+    // position (splitDeferredBodyReadsModule): after every planner and the
+    // release schedule (its lets are scalar and own no pool), before
+    // dead-polymorph elimination and qualification.
+    let irModules =
+        irModules |> List.map (splitDeferredBodyReadsModule builder irModules)
 
     // DEAD-POLYMORPH ELIMINATION, last and whole-program: a lambda lifted out
     // of a never-instantiated generic keeps that generic's type vars in its

@@ -1325,7 +1325,10 @@ and applyValue (st: InterpState) (fv: Value) (argVals: Value list) : Value =
 /// a callable body reaches only its params, its captures, and other callables
 /// (via the id->callable table), never the caller's locals.
 and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, ValueRef>) (args: Value list) : Value =
-    st.Depth <- st.Depth + 1
+    // A HoistFrame helper (a kernel-invariant hoist, a G239 read helper) is
+    // inline code of its caller: it is not a call level against the depth
+    // budget either (it never recurses).
+    if callable.HoistFrame.IsNone then st.Depth <- st.Depth + 1
     if st.Depth > st.Limits.MaxDepth then
         raise (InterpPanic ("BL8002", $"interpreter call depth budget exceeded ({st.Limits.MaxDepth})", None, 0))
     // Shadow-stack frame at body entry, named by the Blade function -- the SAME
@@ -1396,7 +1399,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
             else raise (InterpPanic (code, msg, None, -1))
     if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
     if not inlineHoist then popFrame st
-    st.Depth <- st.Depth - 1
+    if not inlineHoist then st.Depth <- st.Depth - 1
     // A NAMED function converts at `return` to its declared type's width, as
     // its C++ declaration does; a lifted lambda (`__lambda_<id>`, a C++
     // `auto` return) returns its body's own width -- no conversion.

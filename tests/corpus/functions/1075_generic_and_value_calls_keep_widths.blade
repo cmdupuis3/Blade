@@ -1,0 +1,23 @@
+// TEST: generic instances, explicit casts and a lambda value keep their widths
+// ============================================================================
+// G275's passing twin: a generic identity at two widths, a relay at its own
+// width or through a cast, and a lambda value whose `+ 0.1` follows the
+// Float32 its first call decides.
+// ============================================================================
+function wide(v: Float64) -> Float64 = v
+function relay(v: T) = wide(v)
+function ident(v: T) -> T = v
+let a: Float32 = 0.1
+let b: Float64 = 0.1
+let x = relay(b)
+let p = ident(a)
+let q = ident(b)
+let r = relay(Float64(a))
+let h = lambda(v) -> v + 0.1
+let saved = h
+let s = h(a)
+// EXPECT: x = 0.1
+// EXPECT: p = 0.1
+// EXPECT: q = 0.1
+// EXPECT: r = 0.100000001490116
+// EXPECT: s = 0.2

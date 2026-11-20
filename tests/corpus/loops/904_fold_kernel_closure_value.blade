@@ -1,0 +1,24 @@
+// TEST: A Fold Whose Kernel Is A Closure Held By A Module Binding
+// ============================================================================
+// Gap G260, round 4 wave 10 (lane C, C5): a fold kernel that is a FUNCTION
+// VALUE no resolution reaches (`kf2`, the closure `factory2(g)` returned) is
+// called as the value it is, once per cell, in the left fold's order. The C++
+// lane rendered a comment inside a `return` (g++: return-statement with no
+// value, BL9002); the LLVM lane refuses the closure-returning factory.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory2(a: A) -> ((Float64, Float64) -> Float64) = lambda(s: Float64, t: Float64) -> s + t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf2 = factory2(g)
+function total(y: A) -> Float64 = reduce(y, kf2, 0.0)
+function total1(y: A) -> Float64 = reduce(y, kf2)
+function total2(y: A) -> Float64 = {
+    let s = reduce(y, kf2, 1.0)
+    s * 2.0
+}
+let r = total(g)
+let r1 = total1(g)
+let r2 = total2(g)
+// EXPECT: r = 4.0
+// EXPECT: r1 = 2.0
+// EXPECT: r2 = 10.0

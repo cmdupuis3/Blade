@@ -3969,6 +3969,7 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
     // An intervening statement is audited by its complete payload (finding 7).
     let payloadOf = intervalPayloadOf modul
     let providerEffect = intervalHasProviderEffect modul
+    let isDeferredId = programDeferredId modul programFuncs Seq.empty
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
             { Blade.Effects.Rule = "hot-row-fold"; Version = 1
@@ -4097,6 +4098,39 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                         match offending with
                         | Some why -> declined why
                         | None ->
+                        // G265: a row kernel that MAY FAIL (not the movable
+                        // self-prodsum, not closed-total: `prodsum(row, b)`
+                        // checks its extents, BL8011) runs behind each produced
+                        // row, so its failure would overtake the producer's
+                        // later cells, the seed and the outer kernel's earlier
+                        // applications, which the two-pass form runs first:
+                        // every one of them must be closed-total (Codex design
+                        // review of G265; the deferred-value predicate), and the
+                        // producer must be serial (on its thread team the rows
+                        // run out of order, so another row's failure could
+                        // arrive first: Codex diff review). A fold of the ROW
+                        // PARAMETER itself with a closed-total kernel and seed
+                        // cannot fail (every cell exists).
+                        let resolveF = resolveCallableIn funcs
+                        let totalExpr (e: IRExpr) =
+                            IRTotality.walk resolveF (fun _ -> None) isDeferredId Map.empty Map.empty Set.empty Set.empty Set.empty e |> Result.isOk
+                        let totalCallable (c: IRCallable) =
+                            IRTotality.auditCallable resolveF (fun _ -> None) isDeferredId c [] |> Result.isOk
+                        let rowKernelTotal =
+                            totalCallable ck
+                            || (match ck.Params, ck.Body with
+                                | [ rp ], IRReduce (IRVar (rv, _), rk, Some rseed) when rv = rp.VarId ->
+                                    (match resolveF rk with
+                                     | Some rkc when rkc.Params.Length = 2 -> totalCallable rkc && totalExpr rseed
+                                     | _ -> false)
+                                | _ -> false)
+                        if not kernelMovable && not rowKernelTotal
+                           && (outerLicensed pinfo pk
+                               || (IRTotality.auditApply resolveF (fun _ -> None) isDeferredId pinfo |> Result.isError)
+                               || not (totalCallable fk)
+                               || not (totalExpr seed)) then
+                            declined "the row kernel may fail (it is neither the self-prodsum nor closed-total) and the producer runs a thread team (another row's failure could arrive first) or the producer, the outer fold kernel or the seed is not proved closed-total: running the row kernel behind each produced row could move its failure ahead of theirs (G265)"
+                        else
                         let accTy =
                             match stripUnits fk.RetType with
                             | IRTScalar _ as t -> Some t
@@ -10750,6 +10784,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         modul.ProviderReads |> Map.toSeq |> Seq.filter (fun (_, spec) -> spec.Streamed) |> Seq.map fst |> Set.ofSeq
     let isStreamed (id: IRId) = streamedIds.Contains id || streamedIds.Contains (resolveAlias 64 id)
     let ownBindingIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+    let moduleValues = modul.Bindings |> List.map (fun b -> (b.Id, b.Value)) |> Map.ofList
     // MAY EVALUATING `e` WRITE? The CSE facts (callees resolved through the
     // whole program), CLOSED over what a read evaluates elsewhere: a deferred
     // let's producer runs where it is read, an alias reads its target, and a
@@ -11250,6 +11285,53 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             if deferred.Contains id || deferred.Contains (resolveAlias 64 id)
                || classifiedDeferred id || classifiedDeferred (resolveAlias 64 id) then
                 Some "an operand is a deferred computation (one level of sharing only)"
+            // round 4 wave 10 (lane a, A3, the fresh class-closure round of
+            // `top`, Codex af3eedf4): a LOCAL alias of an IMPORTED binding
+            // (`from Lib import d; let y = d`) resolves to an id this module's
+            // open classifier never saw, so an imported deferred map passed as
+            // stored and its force moved to the join (BL8013 ahead of an
+            // intervening BL8014). The fail-closed classifier judges the
+            // alias's target, as the kernel-read arm already does (m11).
+            // Followed through every STRUCTURAL step of the operand's value --
+            // an alias, a tuple construction, a tuple projection (`let pair =
+            // (d, d); let y = pair[0]`, the diff review's second spelling) --
+            // to a root this module does not bind; a region parameter is a
+            // root the region owns.
+            elif (// each binding is judged ONCE per operand (memo) and the whole
+                  // walk has one work budget: shared tuple members made it
+                  // exponential (the diff review, round 5, Codex 00f0ebe8: eight
+                  // copies of an alias per tuple, ten levels deep)
+                  let memo = System.Collections.Generic.Dictionary<IRId, bool>()
+                  let work = ref 0
+                  let rec reachesForeign (fuel: int) (x: IRId) : bool =
+                    match memo.TryGetValue x with
+                    | true, r -> r
+                    | _ ->
+                      work.Value <- work.Value + 1
+                      // an exhausted budget is UNKNOWN, so it declines (the diff
+                      // review, round 4: 66 chained aliases were admitted)
+                      let r =
+                          if fuel <= 0 || work.Value > 4096 then true
+                          elif regionParams.Contains x then false
+                          else
+                              let valueOf =
+                                  match boundAt.TryGetValue x with
+                                  | true, ui -> Some tentative.[ui].Value
+                                  | _ -> Map.tryFind x moduleValues
+                              match valueOf with
+                              | Some v ->
+                                  let rec structural (e: IRExpr) =
+                                      match e with
+                                      | IRVar (y, _) -> reachesForeign (fuel - 1) y
+                                      | IRTuple es -> List.exists structural es
+                                      | IRTupleProj (inner, _, _) -> structural inner
+                                      | _ -> false
+                                  structural v
+                              | None -> foreignDeferred x
+                      memo.[x] <- r
+                      r
+                  (boundAt.ContainsKey id || ownBindingIds.Contains id) && reachesForeign 64 id) then
+                Some "an operand is (an alias of) a binding of another module the fail-closed deferred classifier cannot prove stored"
             elif isStreamed id then Some "an operand is a streamed provider read (walked one block at a time by its own fold; not a stored, pure value)"
             elif not (boundAt.ContainsKey id || regionParams.Contains id || ownBindingIds.Contains id) then
                 Some "an operand is bound outside this region and module (its provider metadata is not visible here)"

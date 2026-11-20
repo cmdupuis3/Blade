@@ -1,0 +1,12 @@
+// TEST: A Map Over A Range With A Mutable Start Reads The Start Once
+// Gap G209 (round 4 wave 10 lane d; the lead ruling): the map twin of loops/926 -- the C++ holder
+// cached the start, the interpreter re-read it per cell ([2, 4, 6, 8]); the start is read once,
+// at the map's operand stage, in every lane.
+let mut lo: Int64 = 2
+let n: Int64 = 6
+let r = method_for(lo..n) <@> lambda(k) -> {
+    lo = lo + 1
+    k
+} |> compute
+// EXPECT: r = [2, 3, 4, 5]
+// EXPECT: lo = 6

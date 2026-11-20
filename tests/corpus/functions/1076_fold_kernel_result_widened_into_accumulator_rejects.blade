@@ -1,0 +1,8 @@
+// TEST: a fold kernel returning Float32 into a Float64 accumulator (rejects)
+// ============================================================================
+// G275: the explicit cast inside the kernel does not license the implicit
+// Float32 -> Float64 conversion of each step's result into the accumulator.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let y = reduce(a, lambda(x: Float64, y: Float64) -> Float32(x + y))
+// ERROR: BL3020

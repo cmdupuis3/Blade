@@ -75,7 +75,7 @@ let streamGroupAggEnabled () = Blade.Toolchain.envFlag "BLADE_STREAM_GROUP_AGG" 
 
 let private printSelectionNames () : Set<string> option = Blade.PrintSelection.names ()
 
-let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
+let planStreamGroupAggregate (programFuncs: IRCallable list) (programBindingNames: string list) (foreignRefs: Set<IRId>) (modul: IRModule) : unit =
     let funcs = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let resolve (k: IRExpr) = match k with IRVar (fid, _) -> Map.tryFind fid funcs | _ -> None
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
@@ -199,10 +199,15 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (foreignRefs: Set<I
             // `let _g__sga_n = 42` beside a grouping `_g`, which the user-name
             // rename skips as `_`-prefixed) redeclared one in main and g++
             // refused the program (round 4 wave 9, lane A, A4, Codex 0219820a)
-            // -- fail closed: such a module keeps the pool form
+            // -- fail closed: such a module keeps the pool form. PROGRAM-WIDE
+            // (round 4 wave 10, lane a, A3, Codex 5161db13): the modules share
+            // one C++ `main` scope, so an IMPORTER's `let __sga14_state = 42.0`
+            // beside an imported module's state form redeclared it too (these
+            // late-minted names are not owned by the C++ name table, gap G268)
             let sgaSpelled =
                 (modul.Bindings |> List.map (fun x -> x.Name))
-                @ (modul.Functions |> List.collect (fun f -> [ f.Name; f.SourceName ]))
+                @ programBindingNames
+                @ ((modul.Functions @ programFuncs) |> List.collect (fun f -> [ f.Name; f.SourceName ]))
                 |> List.tryFind (fun n -> not (isNull n) && n.Contains "__sga")
             let why =
                 if not enabled then Some "disabled by BLADE_STREAM_GROUP_AGG"

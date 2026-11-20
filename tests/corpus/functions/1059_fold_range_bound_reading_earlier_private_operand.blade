@@ -1,0 +1,11 @@
+// TEST: A Fold Range Bound Is Rendered After An Earlier Privately Forced Operand
+// Gap G209 (round 4 wave 10 lane d; Codex diff review rounds 2-3): the holder of the range at operand
+// 2 is rendered at its operand position, after the deferred map p (operand 1) is evaluated
+// privately; its bound reads the extent of ANOTHER deferred map g over a run-time range, which forces
+// g under its own name there (the holder named an unforced binding before: BL9002):
+// 4 * (1 + 2 + 3 + 4) + 4 * (0 + 1 + 2 + 3).
+let n = 4
+let g = method_for(0..n) <@> lambda(k) -> k * 2
+let p = method_for(0..n) <@> lambda(k) -> k + 1
+let result = reduce(method_for(p, 0..extents(g)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+// EXPECT: result = 64

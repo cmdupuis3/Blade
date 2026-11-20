@@ -1,0 +1,5 @@
+// TEST: an imported lambda value alias called with a Float32 (rejects)
+// MODULE: Helpers
+module Helpers
+let k = lambda(v: Float64) -> v
+let saved = k

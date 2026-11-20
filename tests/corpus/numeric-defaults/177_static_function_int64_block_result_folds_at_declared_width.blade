@@ -1,0 +1,9 @@
+// TEST: a static function's literal-only Int64 result is folded at Int64, never first at its Int32 default
+// ============================================================================
+// G275: `65536 * 65536` at Int32 would wrap to 0 and the division fail; at
+// the declared Int64 it is 4294967296 and the quotient 0.
+// ============================================================================
+static function f() -> Int64 = { 1 / (65536 * 65536) }
+let static x = f()
+let y = x
+// EXPECT: y = 0

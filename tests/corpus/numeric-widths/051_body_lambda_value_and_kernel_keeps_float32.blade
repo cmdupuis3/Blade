@@ -1,0 +1,15 @@
+// TEST: a function-body lambda kept as a value and used as a kernel over Float32 cells stays Float32
+// ============================================================================
+// G275 (2) (the single-use variant of G226 (c)): the kernel's cells decide
+// the lambda's parameter, and its `+ 0.1` takes their width.
+// ============================================================================
+function work(a: Array<Float32 like Idx<3>>) = {
+    let inc = lambda(v) -> v + 0.1
+    let s = inc
+    (inc <@> a) |> compute
+}
+let a: Array<Float32 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = work(a)
+let total = reduce(r, (+))
+// EXPECT: r = [1.1, 2.1, 3.1]
+// EXPECT: total = 6.3

@@ -472,6 +472,21 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             | MfReady (ir, Ok (compiledExit, compiledOut)) ->
                 match runInterpTimedRec ir name with
                 | Error e -> fail name e
+                | Ok interp when name.EndsWith "(aborts)" ->
+                    // the single-file abort-probe rule on multi-file terms: both
+                    // sides exit nonzero with every `// ABORT:` pin of any member
+                    // (round 4 wave 10, lane a: multifile/083, 085, 086)
+                    let pins = files |> List.collect (snd >> parseAbortExpectations)
+                    if interp.ExitCode = Run.ExitUnsupported then
+                        skipUnsupported name (unsupportedFeature interp)
+                    else
+                        let compiledAborted = compiledExit <> 0 && pins |> List.forall (fun sub -> compiledOut.Contains sub)
+                        let interpAborted = interp.ExitCode <> 0 && pins |> List.forall (fun sub -> interp.Stderr.Contains sub)
+                        if compiledAborted && interpAborted then pass name "both abort with pinned message"
+                        elif not compiledAborted then fail name "compiled side did not abort as expected"
+                        else
+                            fail name (sprintf "interp did not abort with pinned message (exit %d): %s"
+                                           interp.ExitCode (firstLine interp.Stderr))
                 | Ok interp ->
                     let expected = files |> List.collect (snd >> parseExpectedValues)
                     judgeRun name expected compiledExit compiledOut interp

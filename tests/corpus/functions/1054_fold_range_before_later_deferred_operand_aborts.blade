@@ -1,0 +1,10 @@
+// TEST: A Fold Evaluates A Range Operand Before A Later Deferred Operand (aborts)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review): the fold operands are evaluated in POSITION
+// order. The range at operand 1 divides by zero before the deferred map p at operand 2 is forced
+// (its modulo by zero); the C++ prelude forced every deferred operand before every range holder.
+// ABORT: integer division by zero
+type I = Idx<5>
+let xs: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let z: Int64 = 0
+let p = method_for(xs) <@> lambda(a) -> 200 % (a - 3)
+let r = reduce(method_for(0..(100 / z), p) <@> lambda(i, v) -> i + v, (+), 0, axes = 2)

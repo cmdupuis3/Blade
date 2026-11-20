@@ -1407,3 +1407,61 @@ let buildLoopNestCodeGen
         CompactRowEpilogue = None
         FoldOmpDecline = None
     }
+
+/// THE STORED-LEAF TRAVERSAL (gap G233, round 4 wave 10). A fused terminal
+/// (`IRReduceCompute`) whose tree keeps a leaf's NAME (`IRVar p`: the checker's
+/// kept spine / kept leaf, a join leg written `reduce(p, op)`) folds the
+/// SNAPSHOT of that leaf when its own prelude -- a kernel capture, a seed cell
+/// read -- stored it under its own name (formalism 10.2, G214). Every lane
+/// builds the prelude from the AS-WRITTEN leaves (each leaf kernel's captures
+/// at its leaf position) and only then replaces a leaf naming a STORED array
+/// by the identity map over it, `method_for(p) <@> lambda(v) -> v`: the same
+/// cells in the same row-major order, so every nest form, join share and
+/// BL8011 guard downstream is the ordinary one. Answers None for a leaf that
+/// is not a plain dense unsymmetric scalar-element array variable (the caller
+/// keeps its own refusal). The identity kernel is a synthetic callable of the
+/// active analysis context (IR.registerSyntheticCallable).
+let storedLeafTraversal (builder: IRBuilder) (leaf: IRExpr) : IRExpr option =
+    match leaf with
+    | IRVar (_, ty) ->
+        (match ty with
+         | ArrayElem at when not at.IsVirtual
+                             && not at.IndexTypes.IsEmpty
+                             && at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                             && (match stripUnits at.ElemType with IRTScalar _ -> true | _ -> false) ->
+            let sd = at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let pid = builder.FreshId ()
+            let p : IRParam = { Name = $"__sl_{pid}"; VarId = pid; Index = 0; Type = at.ElemType }
+            let k = mkCallable builder defaultLambdaOptions [ p ] (IRVar (pid, at.ElemType)) at.ElemType [] false [] [] false false 256 false
+            let kref = registerSyntheticCallable { k with Name = $"__stored_leaf_{k.Id}" }
+            let identity = AIDLiteral (builder.FreshId ())
+            Some (IRApplyCombinator
+                    { Loop = IRMethodFor { Arrays = [ leaf ]; Identities = [ identity ]; ArrayTypes = [ at ]
+                                           SDimsPerArray = [ sd ]; TotalSDims = sd; SharedIndexTypes = [] }
+                      Kernel = kref
+                      Arrays = [ leaf ]; Identities = [ identity ]; ArrayTypes = [ at ]; SharedIndexTypes = []
+                      SymcomStates = List.replicate sd SCNeither; TriangularLevels = List.replicate sd false
+                      SDimsPerArray = [ sd ]; KernelInputRanks = [ 0 ]; KernelOutputRank = 0; KernelTDims = []
+                      SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+                      OutputType = ty; IsCoIteration = false })
+         | _ -> None)
+    | _ -> None
+
+/// Rewrite every leaf of a fused-terminal tree that is an `IRVar` naming a
+/// STORED array (`isStored`) into its stored-leaf traversal (G233); `None`
+/// when some such leaf has no traversal form (the caller keeps its refusal),
+/// else the rebuilt tree and whether anything changed. A leaf still deferred
+/// stays its name (every lane resolves and fuses it).
+let rewriteStoredLeaves (builder: IRBuilder) (isStored: IRId -> bool) (tree: IRExpr) : (IRExpr * bool) option =
+    let mutable ok = true
+    let mutable changed = false
+    let rec go (e: IRExpr) =
+        match e with
+        | IRFusion (l, r) -> IRFusion (go l, go r)
+        | IRVar (id, _) when isStored id ->
+            (match storedLeafTraversal builder e with
+             | Some t -> changed <- true; t
+             | None -> ok <- false; e)
+        | _ -> e
+    let t = go tree
+    if ok then Some (t, changed) else None

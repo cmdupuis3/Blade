@@ -4238,24 +4238,28 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 + $"let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> {x3} |> compute\n"
                 + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
                 + "let tn = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.5 |> compute\n"
-                + "let tm = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.25 |> compute\n"
+                + "let tq = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.25 |> compute\n"
                 + "let th = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) * 0.125 |> compute\n"
                 + "let s1 = " + lv3 "t(i, j, k)" "(+)" + ", 0.25)\n"
                 + "let s2 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "lambda(a, b) -> a + b, -0.0" + ", -0.0)\n"
                 + "let s3 = " + lv3 "t(i, j, k) * t(i, j, k) * 1.0e-9 - t(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s4 = " + lv3 "tn(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s5 = " + lv3 "tn(i, j, k) * 2.0 + 1.0" "(+)" + ", 0.0)\n"
-                + "let s6 = " + lv3 "tm(i, j, k)" "(+)" + ", 0.0)\n"
+                + "let s6 = " + lv3 "tq(i, j, k)" "(+)" + ", 0.0)\n"
                 + "let s7 = " + lv3 "-0.0 * (t(i, j, k) * t(i, j, k))" "(+)" + ", -0.0)\n"
                 + "let s8 = " + lv3 "th(i, j, k)" "(+)" + ", 0.0)\n"
             // (rank, source, the NaN pool, its poked cells: C(522, 2) = 135981
             // and C(69, 3) = 52394 canonical cells)
-            // `gm` / `tm` carry the same two payloads in the OPPOSITE order, so
+            // (The rank-3 pool was `tm` until round 4 wave 10: `tm` is the <ctime>
+            // struct, so the C++ name table (G252) emits that binding under another
+            // spelling, and the poke injected below names the binding's C++ name.
+            // A pool poked here must keep an unreserved spelling.)
+            // `gm` / `tq` carry the same two payloads in the OPPOSITE order, so
             // each payload is the first one some walk meets.
             // G74: `gh` / `th` carry payload A in their FIRST canonical cell
             // (S(0, 0) / T(0, 0, 0)), the head of row 0's seedless chain (s8)
             [ ("rank2", rank2, [ ("gn", [ (1234, rawNaNA); (70000, rawNaNB) ]); ("gm", [ (500, rawNaNB); (90000, rawNaNA) ]); ("gh", [ (0, rawNaNA) ]) ])
-              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tm", [ (300, rawNaNB); (45000, rawNaNA) ]); ("th", [ (0, rawNaNA) ]) ]) ]
+              ("rank3", rank3, [ ("tn", [ (777, rawNaNA); (40000, rawNaNB) ]); ("tq", [ (300, rawNaNB); (45000, rawNaNA) ]); ("th", [ (0, rawNaNA) ]) ]) ]
         let rawScalars = [ "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8" ]
         for (rank, src, pokes) in rawCases do
          let name = $"scatter_precedence_raw_bits_{rank}"

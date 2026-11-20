@@ -1,0 +1,18 @@
+// TEST: a later operand reading an intermediate alias forces it by name
+// Gap G266, round 4 wave 10 (Codex diff review round 1, finding 2): a2 (the
+// alias of the alias a of e) is the fold's private operand, but the later
+// operand f reads a by name, which forces the alias class of e under its own
+// names -- e, a and a2 print, in every lane (the first build kept every
+// alias of the chain private in the LLVM lane, which then printed d and s
+// only).
+let d: Array<Int64 like Idx<3>> = [1, 2, 3]
+let e = method_for(d) <@> lambda(v) -> v + 1
+let a = e
+let a2 = a
+let f = method_for(a) <@> lambda(x) -> x + 2
+let s = reduce(method_for(zip(a2, f)) <@> lambda(x, y) -> x + y, (+))
+// EXPECT: d = [1, 2, 3]
+// EXPECT: e = [2, 3, 4]
+// EXPECT: a = [2, 3, 4]
+// EXPECT: a2 = [2, 3, 4]
+// EXPECT: s = 24

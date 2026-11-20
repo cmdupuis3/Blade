@@ -1,0 +1,12 @@
+// TEST: named-function stages declaring different widths, fused (rejects)
+// ============================================================================
+// G276 (2): fusion substitutes the named stages' bodies; their DECLARED
+// parameter and return types ride along, so the Float32 stage cannot feed
+// the Float64 one implicitly.
+// ============================================================================
+function f(x: Float32) -> Float32 = x
+function g(x: Float64) -> Float64 = x
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let p = object_for(f) >>@ object_for(g)
+let y = (p <@> a) |> compute
+// ERROR: BL3001

@@ -1,0 +1,9 @@
+// TEST: A Fold Evaluates A Failing Range Bound Before A Failing Seed (aborts)
+// Gap G209 (round 4 wave 10 lane d; the lead ruling, the G207 rule): a range operand is an operand,
+// the fold's first stage, and reduce(A, k, s) evaluates its arguments left to right, so the range
+// bound's division by zero (BL8013) comes before the seed's out-of-range subscript (BL8006).
+// ABORT: BL8013
+let zs: Array<Int64 like Idx<1>> = [0]
+let xs: Array<Int64 like Idx<3>> = [1, 2, 3]
+let i = zs(0) + 7
+let s = reduce(method_for(0..(10 / zs(0))) <@> lambda(k) -> k, (+), xs(i))

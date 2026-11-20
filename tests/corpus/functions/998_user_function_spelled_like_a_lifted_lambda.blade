@@ -1,0 +1,12 @@
+// TEST: A user function spelled like a lifted lambda
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 1): a lambda is
+// lifted to a C++ function minted __lambda_<id>; a user function of that
+// spelling was a second definition (BL9002). The generated one moves.
+// ============================================================================
+let f = lambda(x: Float64) -> x + 1.0
+function __lambda_7(x: Float64) -> Float64 = x * 10.0
+let r = f(Float64(2.0))
+let s = __lambda_7(Float64(2.0))
+// EXPECT: r = 3.0
+// EXPECT: s = 20.0

@@ -1,0 +1,8 @@
+// TEST: an explicit Int64 cast handed to an Int32 tuple component (rejects)
+// ============================================================================
+// R12: an explicit cast is a fixed-width VALUE, not a literal -- the Int64
+// 4294967296 would wrap into the Int32 component.
+// ============================================================================
+function pair(p: (Int32, Float64)) -> Int32 = p[0]
+let y = pair((Int64(4294967296), 1.0))
+// ERROR: BL3020

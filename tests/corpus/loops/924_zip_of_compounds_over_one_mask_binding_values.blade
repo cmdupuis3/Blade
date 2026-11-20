@@ -1,0 +1,12 @@
+// TEST: A Zip Of Compounds Over One Mask Binding Co-Iterates
+// Gap G265 (d) (round 4 wave 10 lane d; the lead ruling): two compounds over ONE mask binding share
+// one index space (the mask's present cells), so their zip is admitted: the cells pair by the
+// mask's positions, x(3..5) with y(3..5).
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let y: Array<Int64 like I> = [10, 20, 30, 40, 50, 60]
+let keep = mask(x, lambda(v) -> v > 3)
+let left = compound(x, keep)
+let right = compound(y, keep)
+let m = method_for(zip(left, right)) <@> lambda(p, q) -> p * q |> compute
+// EXPECT: m = [160, 250, 360]

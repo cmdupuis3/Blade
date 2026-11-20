@@ -1,0 +1,9 @@
+// TEST: a fused compose over Float32 cells stays Float32
+// ============================================================================
+// G276 (2): the fused kernel's literal takes the width of the value the first
+// stage produces (it was typed Float64).
+// ============================================================================
+let a: Array<Float32 like Idx<2>> = [0.1, 0.2]
+let p = object_for(lambda(v) -> [v, v]) >>@ object_for(lambda(v) -> v * 3.0)
+let r = (p <@> a) |> compute
+// EXPECT: r = [[0.3, 0.3], [0.6, 0.6]]

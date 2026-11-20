@@ -1,0 +1,19 @@
+// TEST: A Fold Evaluates Its Range And Deferred Operands In Position Order
+// Gap G209 (round 4 wave 10 lane d; Codex diff review): the successful twin of functions/1054-1055.
+// The range bound `mark(log, 2)` writes log(0) = 2; the deferred map q reads log(0) in its cells.
+// In r1 the range (operand 1) is evaluated before q (operand 2) is forced, so q reads 2:
+// 5 * (0 + 1) + 2 * (3 + 4 + 5 + 6 + 7) = 55; in r2 q is forced first and reads 0: 5 + 2 * 15 = 35.
+function mark(a: mut Array<Int64 like Idx<1>>, digit: Int64) -> Int64 = {
+    a(0) = a(0) * 10 + digit
+    2
+}
+type I = Idx<5>
+let xs: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let mut log1: Array<Int64 like Idx<1>> = [0]
+let mut log2: Array<Int64 like Idx<1>> = [0]
+let q1 = method_for(xs) <@> lambda(a) -> a + log1(0)
+let r1 = reduce(method_for(0..mark(log1, 2), q1) <@> lambda(i, v) -> i + v, (+), 0, axes = 2)
+let q2 = method_for(xs) <@> lambda(a) -> a + log2(0)
+let r2 = reduce(method_for(q2, 0..mark(log2, 2)) <@> lambda(v, i) -> i + v, (+), 0, axes = 2)
+// EXPECT: r1 = 55
+// EXPECT: r2 = 35

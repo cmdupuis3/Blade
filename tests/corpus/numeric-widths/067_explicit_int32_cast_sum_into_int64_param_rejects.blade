@@ -1,0 +1,8 @@
+// TEST: an explicitly cast Int32 sum handed to an Int64 parameter (rejects)
+// ============================================================================
+// G275 (Codex round 4): `Int32(3) + Int32(4)` is a fixed Int32 value, not a
+// literal; an Int64 parameter would widen it implicitly.
+// ============================================================================
+function f(x: Int64) -> Int64 = x * 2
+let y = f(Int32(3) + Int32(4))
+// ERROR: BL3020

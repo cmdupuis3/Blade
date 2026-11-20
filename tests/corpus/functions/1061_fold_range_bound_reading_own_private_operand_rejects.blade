@@ -1,0 +1,15 @@
+// TEST: A Fold Range Bound Reading A Cell Of The Fold's Own Deferred Operand Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 3): p is an operand of the fold, evaluated
+// privately at its position, and the range bound p(0) then reads a cell of p, which forces p under its
+// own name (a snapshot, formalism 10.2). The C++ prelude would read the private copy and leave p
+// deferred (a later p(0) after xs is written would see the new value); restoring the named snapshot
+// there is not built: a coded refusal, BL7004 at codegen (the interpreter keeps p = [4, 6]).
+// REJECT-AT: codegen
+// ERROR-CONTAINS: reads a cell of one of its own operands in a range bound
+// WARN-CODEGEN: reads a cell of one of its own operands in a range bound
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let result = reduce(method_for(p, 0..p(0)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+xs(0) = 10
+let after = p(0)

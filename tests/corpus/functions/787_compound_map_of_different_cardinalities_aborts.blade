@@ -2,9 +2,14 @@
 // Gap G249 (round 4 wave 9 lane d): the C++ lane read b past its end (the guard skipped compound
 // operands, which have no .extents); it now compares the cardinalities, as the interpreter does; the
 // LLVM lane refuses operands of different compounds (recorded, C++ fallback).
+// Gap G265 (d) (round 4 wave 10 lane d): two compounds over DIFFERENT mask bindings are refused at
+// typecheck (loops/923), so the run-time cardinality check is reached here through ONE mask
+// binding reassigned between the two compounds (5 and 3 present cells).
 // ABORT: BL8011
 type I = Idx<6>
 let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
-let a = compound(x, mask(x, lambda(v) -> v > 1))
-let b = compound(x, mask(x, lambda(v) -> v > 3))
+let mut keep = mask(x, lambda(v) -> v > 1)
+let a = compound(x, keep)
+keep = mask(x, lambda(v) -> v > 3)
+let b = compound(x, keep)
 let s = method_for(zip(a, b)) <@> lambda(p, q) -> p * q |> compute

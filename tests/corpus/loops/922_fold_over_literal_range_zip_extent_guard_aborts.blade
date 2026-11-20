@@ -1,0 +1,12 @@
+// TEST: A Fold Over A Zip Of A Literal Range And A Run-Time-Shaped Array Checks Its Extents (aborts)
+// Gap G265 (c) (round 4 wave 10 lane d; Codex design review): the fold's guard compares a literal
+// range operand (5 cells) with b (3 cells) before its seed, in both lanes. A RUN-TIME range in a
+// fold's zip is the G209 range holder (lane d item D2).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let s = reduce(method_for(zip(0..5, b)) <@> lambda(i, v) -> v + Float64(i), (+))

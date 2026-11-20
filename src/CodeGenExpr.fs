@@ -272,6 +272,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             $"std::array<{elemStr}, {elems.Length}>{{{{ {cells} }}}}[{pStr}]"
     | ExprShape (children, rebuild)
         when children |> List.exists (function GatherTeardown _ -> true | _ -> false)
+             && (match expr with IRProdSum _ -> false | _ -> true)
              && (match stripUnits (inferExprType expr) with
                  | IRTScalar _ | IRTIdxTagged _ -> true
                  | _ -> false) ->
@@ -320,7 +321,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 (match streamedValueSentinel id name with
                  | Some sentinel -> sentinel
                  | None -> name)
-            | None -> $"__v{id}"
+            | None -> (localVarName id)
     | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRHaloUnhash (w, off) ->
         // halo window read over a masked domain: coordinate of the present
@@ -515,26 +516,35 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         renderExtentExpr subst names arr dim
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         renderReduceExpr subst names arrExpr kernelExpr initExpr
-    | IRProdSum args when args |> List.exists (function GatherTeardown _ -> true | _ -> false) ->
-        // A partial sparse read as an operand: the loop below spells each
-        // operand once per element, so an inline gather would be re-gathered
-        // (and leaked) on every access. Bind it once and free it.
-        bindInlineGathers subst names false args (fun args' -> exprToCppCore subst names (IRProdSum args'))
     | IRProdSum args ->
         // G249: THE CO-ITERATION EXTENT GUARD of prodsum (BL8011). The walk
         // below is bounded by the FIRST operand; an operand whose extent is
         // known only at run time (a row of a run-time-shaped array, a
         // `|> compute` over `0..extents(c)`) used to be read past its end.
         // Every later operand is compared with the first once, before the
-        // first product, unless both extents are the same literal. Plain-name
-        // operands only (the IIFE below re-spells each operand; an operand
-        // EXPRESSION is evaluated once by its own alias there): gap G265.
+        // first product, unless both extents are the same literal.
+        // G265 (a): an operand EXPRESSION (a row view `A(0)`, a call) is bound
+        // ONCE PER OCCURRENCE, in operand order, to an `auto&&` alias before
+        // the guard (never shared by spelling: two equal texts may be two
+        // calls of a writing function -- Codex design review), so the guard
+        // and every fold form below read plain names.
+        let isPlainOperand (s: string) =
+            s.Length > 0
+            && (System.Char.IsLetter s.[0] || s.[0] = '_')
+            && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+        let rawStrs = args |> List.map (exprToCppCore subst names)
+        // (a UNARY prodsum too: its serial form re-spells the operand per
+        // element; and a partial sparse read -- an inline GATHER -- is bound
+        // the same way, in its operand position, and freed after the fold:
+        // Codex diff review of G265)
+        let gatherOf (e: IRExpr) = match e with GatherTeardown r -> Some r | _ -> None
+        let operandBinds =
+            List.zip args rawStrs |> List.mapi (fun i (e, s) ->
+                if isPlainOperand s then None else Some ($"__pg{i}", s, gatherOf e)) |> List.choose id
+        let opStrs =
+            rawStrs |> List.mapi (fun i s -> if isPlainOperand s then s else $"__pg{i}")
         let prodGuard =
-            let isPlainOperand (s: string) =
-                s.Length > 0
-                && (System.Char.IsLetter s.[0] || s.[0] = '_')
-                && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
-            let strs = args |> List.map (exprToCppCore subst names)
+            let strs = opStrs
             if args.Length < 2 || not (strs |> List.forall isPlainOperand) then ""
             else
             let boundOf (e: IRExpr) (s: string) =
@@ -546,7 +556,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // a FUNCTION PARAMETER's literal extent is not trusted (shape
             // monomorphization copies one argument's extent onto another, the
             // co-iteration guards' rule; wave-end review of G249)
-            let isParam (e: IRExpr) = match e with IRVar (id, _) -> Set.contains id (functionParamIdsCell ()).Value | _ -> false
+            // (an operand EXPRESSION keeps its provenance: any parameter it
+            // reads -- `A(0)` over a parameter A -- distrusts its literal)
+            let paramIds = (functionParamIdsCell ()).Value
+            let rec isParam (e: IRExpr) =
+                match e with
+                | IRVar (id, _) -> Set.contains id paramIds
+                | _ -> childrenOf e |> List.exists isParam
             let bounds = List.map2 (fun e s -> let (l, b) = boundOf e s in ((if isParam e then None else l), b)) args strs
             let (lit0, b0) = List.head bounds
             if b0 = "" then "" else
@@ -562,7 +578,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             // (TypeCheck rejects provably mismatched static extents), through the
             // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
             // gives GCC its trip count instead of an opaque pointer load.
-            let argStrs = args |> List.map (exprToCppCore subst names)
+            let argStrs = opStrs
             let headTy = inferExprType (List.head args)
             let elemStr =
                 match headTy with
@@ -719,8 +735,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                     @ laneStmts
                     @ [ $"return {resultLane};" ]
                 $$"""[&]() { {{(String.concat " " body)}} }()"""
-        if prodGuard = "" then rendered
-        else $"([&]() {{ {prodGuard} return {rendered}; }}())"
+        let bindDecls = operandBinds |> List.map (fun (n, s, _) -> $"auto&& {n} = {s};") |> String.concat " "
+        let gatherFrees =
+            operandBinds |> List.rev
+            |> List.choose (fun (n, _, r) -> r |> Option.map (fun r -> $"nested_array_utilities::{r}({n});"))
+            |> String.concat " "
+        if prodGuard = "" && bindDecls = "" then rendered
+        elif gatherFrees = "" then $"([&]() {{ {bindDecls} {prodGuard} return {rendered}; }}())"
+        else $"([&]() {{ {bindDecls} {prodGuard} auto __gres = {rendered}; {gatherFrees} return __gres; }}())"
     | IRDisplayEmit (head, quoted, dataExpr, metaTail, None) ->
         // One display-frame line on stdout (docs/display-frames.md), answering
         // bool. The head / quoting flag / meta tail are elaboration-time
@@ -930,7 +952,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         | None ->
         let targetStr =
             match target with
-            | LVVar id -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
+            | LVVar id -> Map.tryFind id names |> Option.defaultValue ((localVarName id))
             | LVIndex (arr, idxs) ->
                 let arrStr = exprToCppCore subst names arr
                 let idxStr = idxs |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]") |> String.concat ""
@@ -948,19 +970,19 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         | LVVar tid, IRVar (rid, _) when (match Map.tryFind rid (kernelMoves ()) with Some (t, _) -> t = tid | None -> false)
                                         && (kernelMoveFrees ()).ContainsKey rid ->
             let (_, n) = (kernelMoves ()).[rid]
-            let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
+            let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
             let frees = (kernelMoveFrees ()).[rid] |> String.concat " "
             $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data)); {frees.TrimEnd(';')}"
         | _ ->
         match copyInPlaceAssign target value with
         | Some (_, rid, n) ->
-            let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
+            let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
             $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data))"
         | None ->
         // Owned move (gap G92): free T's previous pool, then take R's.
         match ownedMoveAssign target value with
         | Some (_, rid) ->
-            ownedMoveRenderer targetStr (Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")) (ownedMoveStaticShape target)
+            ownedMoveRenderer targetStr (Map.tryFind rid names |> Option.defaultValue ((localVarName rid))) (ownedMoveStaticShape target)
         | None ->
             $"{targetStr} = {(exprToCppCore subst names value)}"
     | IRForRange (vid, lo, hi, body) ->
@@ -1848,6 +1870,30 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         else
         sprintf "[&]() { %s%s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
             ompNote guard wrapperStr elemStr (reduceAccAt "0") reduceBound wname (reduceAccAt "__ri")
+    // G260, round 4 wave 10: a kernel that is a FUNCTION VALUE no resolution
+    // reaches -- a closure held by a binding (`let kf2 = factory2(g)`), a
+    // function-typed parameter -- is called as the value it is, once per cell,
+    // in the left fold's order (no licence: an opaque callable is never
+    // reordered). It rendered a comment in a `return` (g++: "return-statement
+    // with no value", BL9002).
+    | None when (match stripUnits (inferExprType kernelExpr) with FuncElem _ -> true | _ -> false) ->
+        let kStr = exprToCppCore subst names kernelExpr
+        recordFoldForm "" (serialFoldForm ()) "reduce in expression position over a function-valued kernel"
+        match initExpr with
+        | Some initE ->
+            let initStr = exprToCppCore subst names initE
+            // the seed, then the kernel value (the interpreter's order: Codex
+            // diff review 03cfa2dd round 2)
+            sprintf "[&]() { %s __r = %s; auto&& __rk = %s; for (size_t __ri = 0; __ri < %s; __ri++) { __r = __rk(__r, %s); } return __r; }()"
+                elemStr initStr kStr reduceBound (reduceAccAt "__ri")
+        | None ->
+            let guard =
+                if reduceNonEmpty then ""
+                else $"if ({reduceBound} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", {(declPanicArgs ())}); }} "
+            // the kernel value, then the emptiness check (the interpreter resolves
+            // the kernel before it folds)
+            sprintf "[&]() { auto&& __rk = %s; %s%s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = __rk(__r, %s); } return __r; }()"
+                kStr guard elemStr (reduceAccAt "0") reduceBound (reduceAccAt "__ri")
     | _ ->
         "/* reduce: non-callable kernel (typechecker or IR bug) */"
 
@@ -1899,22 +1945,25 @@ and bindInlineArrayCall (subst: SubstMap) (names: Map<IRId, string>) (retains: b
 /// consumers routed here return a scalar or a fresh array, never a view into
 /// the gather, so the free cannot dangle. The binding's name is a hash of the
 /// gather's own text: deterministic, and distinct gathers in one IIFE (or a
-/// nested one) cannot collide; an identical operand repeated is bound once.
+/// nested one) cannot collide; a repeated operand is bound once PER OCCURRENCE.
 and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (retains: bool) (operands: IRExpr list) (render: IRExpr list -> string) : string =
     let fnv (t: string) =
         let mutable h = 2166136261u
         for c in t do
             h <- (h ^^^ uint32 c) * 16777619u
         h.ToString("x8")
+    // ONE binding PER OCCURRENCE (G265, Codex diff review): two equal
+    // spellings may be two evaluations (a coordinate calling a writing
+    // function), so a repeated operand is never shared by its text
     let bound =
-        operands |> List.map (fun e ->
+        operands |> List.mapi (fun i e ->
             match e with
             | GatherTeardown routine ->
                 let text = exprToCppCore subst names e
-                let gname = "__gath" + fnv text
+                let gname = "__gath" + fnv text + "_" + string i
                 (Some (gname, text, routine), IRParam (gname, 0, inferExprType e))
             | _ -> (None, e))
-    let binds = bound |> List.choose fst |> List.distinctBy (fun (n, _, _) -> n)
+    let binds = bound |> List.choose fst
     if List.isEmpty binds then render operands
     else
         let decls = binds |> List.map (fun (n, t, _) -> $"auto {n} = {t};") |> String.concat " "
@@ -1986,7 +2035,7 @@ and kernelLetCopy (subst: SubstMap) (names: Map<IRId, string>) (id: IRId) (value
             else
                 match vty with
                 | ArrayElem at ->
-                    match materializeArrayCopyForm subst names ($"__v{id}") (elemTypeToCpp at.ElemType) value with
+                    match materializeArrayCopyForm subst names ((localVarName id)) (elemTypeToCpp at.ElemType) value with
                     | Some (stmts, allocs) ->
                         // every use a FULL element access or an extent
                         let rec elementOnly (e: IRExpr) =
@@ -2014,7 +2063,7 @@ and kernelLetCopy (subst: SubstMap) (names: Map<IRId, string>) (id: IRId) (value
 
 and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : string =
     // For inline let expressions, we need statement context
-    let names' = Map.add id ($"__v{id}") names
+    let names' = Map.add id ((localVarName id)) names
     // a let CHAIN ending in a statement is a statement too (gap G227: the
     // lift pass binds an array literal assigned inside a kernel block --
     // `{ out = [1.0, 2.0, 3.0]; 1.0 }` -- as `let t = [..]; out = t`)
@@ -2059,7 +2108,7 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         // materializeInlineForm's note).
         let inlineElemTypeStr (form: IRExpr) =
             lazy (inferInlineElemTypeStr "IRLet inline form" form)
-        match materializeInlineForm subst names ($"__v{id}") (inlineElemTypeStr value) value with
+        match materializeInlineForm subst names ((localVarName id)) (inlineElemTypeStr value) value with
         // Expression position: the materialization is spliced into an IIFE, so
         // there is no statement scope whose exit could carry a free. Drop the
         // descriptors (unchanged pre-existing leak).
@@ -2113,15 +2162,15 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
             let valStr = exprToCppCore subst names value
             match body with
             | IRLit IRLitUnit ->
-                $$"""([&]() { auto __v{{id}} = {{valStr}}; }())"""
+                $$"""([&]() { auto {{(localVarName id)}} = {{valStr}}; }())"""
             | b when isUnitValue b ->
                 // Unit-typed but effectful tail (assignment / for-in as the
                 // block's last statement): emit its statement form rather
                 // than a `return` of a statement expression.
-                $$"""([&]() { auto __v{{id}} = {{valStr}}; {{(renderUnitStmts subst names' b)}} }())"""
+                $$"""([&]() { auto {{(localVarName id)}} = {{valStr}}; {{(renderUnitStmts subst names' b)}} }())"""
             | _ ->
                 let bodyStr = exprToCppCore subst names' body
-                $$"""([&]() { auto __v{{id}} = {{valStr}}; return {{bodyStr}}; }())"""
+                $$"""([&]() { auto {{(localVarName id)}} = {{valStr}}; return {{bodyStr}}; }())"""
 
 
 /// Render a unit-typed side-effecting expression -- a STATEMENT that
@@ -2168,14 +2217,14 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // values, splice unit statements, continue down the chain. Inline
         // forms (mask/sort/...) get their multi-statement materialization,
         // mirroring renderLetExpr's expression-position handling.
-        let names' = Map.add letId ($"__v{letId}") names
+        let names' = Map.add letId ((localVarName letId)) names
         let (valueStmt, frees) =
             if isUnitValue value then
                 (renderUnitStmts subst names value, "")
             else
                 // Lazy for the same reason as renderLetExpr's site above: this
                 // arm sees every statement-position let value, inline form or not.
-                match materializeInlineForm subst names ($"__v{letId}") (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
+                match materializeInlineForm subst names ((localVarName letId)) (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
                 // Inline statement TEXT for an enclosing IIFE -- same
                 // no-scope-exit situation as renderLetExpr above; drop.
                 | Some (prelude, allocs) ->
@@ -2191,7 +2240,7 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
                     // G46: an assignable let of an existing dense array copies
                     match kernelLetCopy subst names letId value body with
                     | Some (copyStmts, fr) -> (copyStmts |> String.concat " ", fr |> String.concat " ")
-                    | None -> ($"auto __v{letId} = {(exprToCppCore subst names value)};", "")
+                    | None -> ($"auto {(localVarName letId)} = {(exprToCppCore subst names value)};", "")
         [valueStmt; renderUnitStmts subst names' body; frees]
         |> List.filter (fun s -> s <> "")
         |> String.concat " "
@@ -2496,19 +2545,19 @@ and materializeRangeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                   && (match ix.Tag with
                       | Some t -> not (t.StartsWith haloWinTagPrefix)
                       | None -> true) ->
+        // G209: the bounds evaluated ONCE, lo then hi (rangeBoundLines), a
+        // negative extent an empty range
+        let (boundDecls, boundTexts, offStr) =
+            rangeBoundLines (exprToCppCore subst names) ($"{varName}__rb") [ ix ] offset
         let boundDim =
             match tryEvalIntIR ix.Extent with
             | Some n -> (string n, true)
-            | None -> ($"(size_t)({exprToCppCore subst names ix.Extent})", false)
+            | None -> (List.head boundTexts, false)
         let (extentsDecl, ownedExtents) =
             emitExtentsTable "" ($"{varName}_extents") 1 [boundDim]
         let bound = fst boundDim
-        let offStr =
-            match offset with
-            | Some o -> exprToCppCore subst names o
-            | None -> "0"
         Some (
-            extentsDecl @ [
+            boundDecls @ extentsDecl @ [
                 $$"""Array<int64_t, 1> {{varName}} = { new int64_t[{{bound}}], {{varName}}_extents };"""
                 $"for (size_t __ri = 0; __ri < {bound}; __ri++) {varName}[__ri] = (int64_t)__ri + (int64_t)({offStr});"
             ],

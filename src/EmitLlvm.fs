@@ -6491,6 +6491,40 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
             | _ -> refuse "a staged pipeline that does not resolve to two object stages"
         let (o1, t1, p1, r1) = stage left
         let (o2, _, p2, r2) = stage right
+        // G242, round 4 wave 10: the stages are successive traversals, so a
+        // SECOND stage's deferred capture is forced at that stage's start --
+        // after a first stage that may fail. This arm forces it in the map's
+        // prelude, ahead of stage 1: declined unless stage 1 is closed-total
+        // (then nothing can fail before the prelude). The C++ two-sweep path
+        // forces it between the sweeps.
+        // (through deferred ALIASES, let alias = delayed: Codex diff review
+        // 03cfa2dd round 2)
+        let rec isDeferredFrom (seen: Set<IRId>) (id: IRId) =
+            match Map.tryFind id c.BindingValues with
+            | Some v when not (seen.Contains id) ->
+                let rec strip (e: IRExpr) = match e with IRCompute x -> strip x | e -> e
+                (match v with
+                 | IRVar (src, _) -> isDeferredFrom (seen.Add id) src
+                 | _ ->
+                     match strip v with
+                     | IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRChoice _ | IRFallback _ -> true
+                     | _ -> false)
+            | _ -> false
+        let isDeferredBinding (id: IRId) = isDeferredFrom Set.empty id
+        let deferredCaps (o: ObjectForInfo) =
+            match resolveCallable o.Kernel with
+            | Some cl -> cl.Captures |> List.exists (fun ci -> isDeferredBinding ci.Id)
+            | None -> false
+        if deferredCaps o2 then
+            let total =
+                match resolveCallable o1.Kernel with
+                | Some cl1 ->
+                    (match Blade.IRTotality.auditCallable resolveCallable (fun id -> Map.tryFind id c.BindingValues) isDeferredBinding cl1 [] with
+                     | Ok () -> true
+                     | Error _ -> false)
+                | None -> false
+            if not total then
+                refuse "a staged pipeline whose second stage captures a deferred map after a first stage that may fail (the capture belongs at the second stage's own start)"
         let src =
             match info.InputArrays with
             | [ (IRVar _ | IRParam _) as src ] -> src
@@ -6540,9 +6574,16 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
 
     | IRSequence exprs ->
         (match List.rev exprs with
-         | last :: earlier ->
+         // G240 (5), round 4 wave 10: an array `sequence(a, b, ..)` STACKS
+         // copies of its members (the C++ lane and, since this wave, the
+         // interpreter); this arm used to hand back the LAST member, a wrong
+         // value. A sequence whose earlier members are values is that
+         // construct: refused (the program runs in the C++ lane). Only a
+         // statement sequence (unit-valued earlier members) keeps the arm.
+         | last :: earlier when earlier |> List.forall (fun x -> match Blade.IR.typeOf x with IRTUnit -> true | _ -> false) ->
              for x in List.rev earlier do emitExpr c x |> ignore
              emitArr c last
+         | _ :: _ -> refuse "an array sequence(..) (its members stacked as copied rows): not built in this lane"
          | [] -> refuse "an empty sequence in array position")
 
     | IRBind (comp, cont) -> emitArr c (bindContinuationBody c comp cont)
@@ -10074,14 +10115,26 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
                           | _ -> false)
                      | _ -> false)
                 | _ -> false)
-        // the PRIVATE operands (deferredOperandIds; none for a join)
+        // G266: an ALIAS chain (`let a = e`, `let a2 = a`) of a deferred map:
+        // (the root map, the alias ids on the way)
+        let aliasRoot (id: IRId) : (IRId * IRId list) option =
+            let rec go (seen: Set<IRId>) (x: IRId) (chain: IRId list) =
+                match deferredValue x with
+                | Some (IRVar (r, _)) when not (seen.Contains r) -> go (seen.Add r) r (x :: chain)
+                | _ when chain.IsEmpty -> None
+                | _ when isMapValue x -> Some (x, chain)
+                | _ -> None
+            go (Set.singleton id) id []
+        // the PRIVATE operands (deferredOperandIds; none for a join) -- an
+        // alias of a deferred map too (gap G266: the C++ alias entry carries
+        // the copied apply, so the alias is a private operand there)
         let operandIds =
             if isJoin then [] else
             leaves compExpr
             |> List.collect (function
                 | IRApplyCombinator info ->
                     info.Arrays |> List.choose (function
-                        | IRVar (id, _) when isMapValue id -> Some id
+                        | IRVar (id, _) when isMapValue id || (aliasRoot id).IsSome -> Some id
                         | _ -> None)
                 | _ -> [])
             |> List.distinct
@@ -10103,12 +10156,20 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
         // a capture of the spine is forced like any other (the fold then reads
         // the stored snapshot, emitReduceComputeBody's IRVar leg)
         let keptSpineRoot = match compExpr with IRVar _ -> true | _ -> false
+        // a NAMED LEAF of the tree (a kept leaf, gap G233; a join leg written
+        // `reduce(p, op)`): a capture of it is forced like the kept root's,
+        // and the fold's IRVar leg then reads the stored snapshot
+        let rec namedLeaf (id: IRId) (e: IRExpr) =
+            match e with
+            | IRVar (vid, _) -> vid = id
+            | IRFusion (l, r) -> namedLeaf id l || namedLeaf id r
+            | _ -> false
         for k in leafKernels @ foldKernels do
             match resolveKernel k with
             | Some rk ->
                 for cap in rk.Callable.Captures do
                     if c.BindingValues.ContainsKey cap.Id
-                       && (keptSpineRoot || not (onSpine cap.Id compExpr))
+                       && (keptSpineRoot || namedLeaf cap.Id compExpr || not (onSpine cap.Id compExpr))
                        && isMapCapture (Set.singleton cap.Id) cap.Id then
                         forceCapture c cap.Id
             | None -> ()
@@ -10163,7 +10224,20 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
         let pooled =
             operandIds |> List.choose (fun id ->
                 let start = c.StmtStart
-                markForcedChildren c id
+                // G266: a private operand that is an ALIAS of a deferred map
+                // (`let a = e`) is evaluated as its root map's private copy --
+                // the root's INPUTS are walked (forced under their names, as
+                // the C++ alias entry's copied apply forces them), never the
+                // root itself or the alias (neither prints)
+                (match aliasRoot id with
+                 | Some (root, _) ->
+                     // (only the operand itself is skipped -- below: a LATER
+                     // operand reading an intermediate alias or the root by
+                     // name forces it there, as in C++; Codex diff review)
+                     (match Map.tryFind root c.BindingValues with
+                      | Some rv -> markNamedIn c (Some root) rv
+                      | None -> ())
+                 | None -> markForcedChildren c id)
                 c.PrivateOperandSkip.Add id |> ignore
                 if inlineBefore && c.StmtStart <> start then
                     refuse "a fold whose later private operand forces a capture that hoists ahead of an earlier private operand evaluated in place (the C++ lane forces them operand by operand; gap G207)"

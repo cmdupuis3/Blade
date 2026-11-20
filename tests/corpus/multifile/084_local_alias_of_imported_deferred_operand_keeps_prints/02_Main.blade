@@ -1,0 +1,13 @@
+// TEST: A local alias of an imported deferred map folded at top level keeps every print
+// MODULE: Main
+// Round 4 wave 10 (lane A, A3, gap G107): the non-failing twin of
+// multifile/083 -- under top the join had dropped the prints of Lib.d and y.
+module Main
+from Lib import I, d
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let y = d
+let a = prodsum(x, x)
+let b = prodsum(y, y)// EXPECT: Lib.d = [100.0, 25.0, 50.0]
+// EXPECT: y = [100.0, 25.0, 50.0]
+// EXPECT: a = 14.0
+// EXPECT: b = 13125.0

@@ -1,0 +1,14 @@
+// TEST: A Function Body Copy Of A Map Whose Kernel Captures Another Map
+// ============================================================================
+// Gap G255, round 4 wave 10 (lane C, C2): a module map that only function
+// bodies use is evaluated privately inside each body (formalism 10.2): a body
+// COPY (`q |> compute`) or a MASK over it evaluates its own map form there --
+// its kernel's captures forced first, as any map's. The C++ lane named the
+// module binder, which nothing declared (BL9002).
+// ============================================================================
+let x: Array<Int64 like Idx<3>> = [1, 2, 4]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let q = method_for(x) <@> lambda(v) -> v + extents(d)
+function copy_q() -> Array<Int64 like Idx<3>> = q |> compute
+let s = copy_q()
+// EXPECT: s = [4, 5, 7]

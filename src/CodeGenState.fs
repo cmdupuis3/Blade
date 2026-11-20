@@ -197,9 +197,16 @@ let freshCell (storage: System.Threading.AsyncLocal<'T ref>) (v: 'T) : unit =
     storage.Value <- ref v
 
 /// Per-program table of user binding names emitted under a different C++
-/// spelling (sanitized form -> emitted form); see `installUserNameRenames`.
+/// spelling (RAW IR spelling -> emitted form); see `installCppNameTable`.
 let internal userNameRenamesStorage =
     System.Threading.AsyncLocal<Map<string, string> ref>()
+
+/// Per-program census of the C++ spellings the PROGRAM's own names take
+/// (bindings, callables, parameters, captures), against which a name the
+/// emitter mints for a body local (`localVarName`) or a renamed parameter is
+/// lengthened (gap G252); see `installCppNameTable`.
+let internal userSpellingCensusStorage =
+    System.Threading.AsyncLocal<Set<string> ref>()
 
 /// The declaration currently being emitted, for attributing an unhandled node
 /// to a source position. `genModule`/`genModuleSplit` set it around each item.
@@ -1813,6 +1820,7 @@ let resetProgramStateCells () : unit =
     freshCell ompApiUsedStorage false
     freshCell mpiProgramOnStorage false
     freshCell userNameRenamesStorage Map.empty
+    freshCell userSpellingCensusStorage Set.empty
     resetStreamedValueState ()
 
 /// A `.stream` binding was emitted under C++ name `name`: from here on, a
@@ -2000,26 +2008,42 @@ let cppReservedWords = Set.ofList [
     "switch"; "case"; "break"; "continue"; "goto"; "default"; "try"; "catch"; "throw"
     "sizeof"; "alignof"; "decltype"; "typedef"; "using"; "operator"
     "true"; "false"; "nullptr"; "inline"; "constexpr"; "mutable"
+    // The rest of the C++17 keyword list and the alternative tokens (gap
+    // G252: `let thread_local = 1.0` reached g++ verbatim), plus the C++20
+    // keywords a newer -std would reserve.
+    "alignas"; "asm"; "char16_t"; "char32_t"; "char8_t"; "const_cast"; "dynamic_cast"
+    "explicit"; "export"; "friend"; "noexcept"; "reinterpret_cast"; "static_assert"
+    "static_cast"; "thread_local"; "typeid"; "wchar_t"; "concept"; "requires"
+    "consteval"; "constinit"; "co_await"; "co_return"; "co_yield"
+    "and"; "and_eq"; "bitand"; "bitor"; "compl"; "not"; "not_eq"; "or"; "or_eq"; "xor"; "xor_eq"
 ]
 
 /// The spelling rule alone: dots to `__`, reserved words `_`-suffixed.
 let private baseCppName (name: string) : string =
     // A module member's IR name is qualified with dots (`units.SI.x`, see
-    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, so
-    // `M__x` can only meet a user name spelled `M__x` itself.
+    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, but a
+    // user name may SPELL `M__x` itself (gap G252) -- `installCppNameTable`
+    // moves the dotted member then.
     if name.Contains '.' then name.Replace(".", "__")
     elif Set.contains name cppReservedWords then name + "_"
     else name
 
-/// Sanitize a name to avoid C++ reserved word conflicts -- and, through the
-/// per-program rename table (`installUserNameRenames`), collisions with the
-/// names codegen DERIVES from another top-level binding (see there).
-/// Idempotent: a renamed spelling is never itself a key.
+/// The C++ name of a binding: through the per-program rename table
+/// (`installCppNameTable`) when its RAW IR spelling was moved there -- a
+/// collision with another binding's spelling, a generated suffix, a reserved
+/// spelling of the emitted translation unit -- else the spelling rule.
+/// THE TABLE IS KEYED BY THE RAW SPELLING (gap G252): at module scope a raw
+/// spelling is one binding (a dotted `Lib.a` is one module member; an
+/// undotted name is one binding, BL2009; a reserved spelling moves every
+/// binding of that spelling alike), while the MANGLED spelling is not
+/// (`Lib.a` and a user `Lib__a` both mangle to `Lib__a`; keying by it moved
+/// the importer's binding together with the import's reads, wave 9). The
+/// binding that keeps its spelling is never a key and no emitted spelling is
+/// one, so re-sanitizing an already emitted name is the identity.
 let sanitizeCppName (name: string) : string =
-    let s = baseCppName name
     let r = userNameRenamesStorage.Value
-    if isNull (box r) then s
-    else match Map.tryFind s r.Value with Some t -> t | None -> s
+    if isNull (box r) then baseCppName name
+    else match Map.tryFind name r.Value with Some t -> t | None -> baseCppName name
 
 /// The suffixes the emitters append to a binding's C++ name (a census of the
 /// `{name}_...` spellings in CodeGen*.fs and the provider emitters; a
@@ -2057,8 +2081,8 @@ let private generatedNameSuffix (suffix: string) : bool =
 /// with a trailing `_` (the reserved-word convention), lengthened until it
 /// collides with nothing. `x` beside `x_mean` is not such a pair and emits
 /// as before; programs without a pair emit byte for byte what they did.
-/// Installed per program assembly (after `resetProgramStateCells`).
-let installUserNameRenames (bindingNames: string list) : unit =
+/// The RAW spellings of the bindings at risk (`installCppNameTable` moves them).
+let private generatedSuffixAtRisk (bindingNames: string list) : Set<string> =
     let names =
         bindingNames
         // `__` internals and `_(` tuple temps stay out; a SINGLE-underscore
@@ -2067,21 +2091,12 @@ let installUserNameRenames (bindingNames: string list) : unit =
         // 9, lane A, A4, Codex 0219820a: `let _g__sga_n = 42` beside a grouping
         // `_g` redeclared the generated count)
         |> List.filter (fun n -> not (n.StartsWith "__") && not (n.StartsWith "_("))
-        |> List.map baseCppName
-        |> Set.ofList
-    let atRisk =
-        names |> Set.filter (fun n ->
-            names |> Set.exists (fun b -> b <> n && n.StartsWith (b + "_") && generatedNameSuffix (n.Substring b.Length)))
-    let mutable used = names
-    let renames =
-        atRisk
-        |> Seq.map (fun n ->
-            let mutable r = n + "_"
-            while used.Contains r do r <- r + "_"
-            used <- used.Add r
-            n, r)
-        |> Map.ofSeq
-    freshCell userNameRenamesStorage renames
+        |> List.distinct
+    let bases = names |> List.map baseCppName |> Set.ofList
+    names |> List.filter (fun raw ->
+        let n = baseCppName raw
+        bases |> Set.exists (fun b -> b <> n && n.StartsWith (b + "_") && generatedNameSuffix (n.Substring b.Length)))
+    |> Set.ofList
 
 /// Identifiers the generated TU's own includes declare at GLOBAL scope. None
 /// of them is a C++ keyword, so `cppReservedWords` does not catch them, but a
@@ -2159,8 +2174,246 @@ let indexTypeCppName (name: string) : string =
     then name + "_"
     else name
 
-let addVarName id name ctx = 
+let addVarName id name ctx =
     { ctx with VarNames = Map.add id (sanitizeCppName name) ctx.VarNames }
+
+/// THE RESERVED SPELLINGS OF THE EMITTED TRANSLATION UNIT (gap G252), generated
+/// mechanically from the configured prelude by
+/// tools/cpp-reserved-names/generate.sh into src/CppReservedNames.txt (an
+/// embedded resource): the object-like and function-like macros (`g++ -dM -E`),
+/// the functions of the global namespace and of every named namespace, the
+/// global types / variables / templates, and nested_array_utilities, which the
+/// runtime hoists with a using-directive (`g++ -fdump-lang-raw`). Read once per
+/// process: it is data about the toolchain, not a gate.
+let private cppReservedNameSets : Lazy<Map<string, System.Collections.Generic.HashSet<string>>> =
+    lazy (
+        let asm = System.Reflection.Assembly.GetExecutingAssembly()
+        use s = asm.GetManifestResourceStream "CppReservedNames.txt"
+        if isNull s then failwith "internal compiler error: the CppReservedNames.txt resource is missing from Blade.dll"
+        use r = new System.IO.StreamReader(s)
+        let sets = System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>>()
+        let mutable cur : System.Collections.Generic.HashSet<string> = null
+        let mutable line = r.ReadLine()
+        while not (isNull line) do
+            let t = line.Trim()
+            if t.StartsWith "[" && t.Contains "]" then
+                cur <- System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                sets.[t.Substring(1, t.IndexOf ']' - 1)] <- cur
+            elif t <> "" && not (t.StartsWith "#") && not (isNull cur) then
+                for w in t.Split([| ' ' |], System.StringSplitOptions.RemoveEmptyEntries) do cur.Add w |> ignore
+            line <- r.ReadLine()
+        sets |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq)
+
+let private reservedIn (section: string) (s: string) : bool =
+    match Map.tryFind section (cppReservedNameSets.Force()) with
+    | Some h -> h.Contains s
+    | None -> false
+
+/// Names the emitter itself writes UNQUALIFIED into every scope it emits user
+/// names into (the print pass's `cout << .. << endl`, the `^` operator's
+/// `pow(..)`), and the prefixes of its runtime entry points and scaffolding
+/// (`blade_member_init_i64`, `__blade_t0` of the timing scaffold).
+let private emitterScopeNames = Set.ofList [ "cout"; "endl"; "pow" ]
+let private emitterReservedPrefix (s: string) = s.StartsWith "__blade_" || s.StartsWith "blade_"
+
+/// Would a VALUE (a binding, a parameter, a capture) spelled `s` meet a
+/// declaration or a macro of the emitted TU? An object-like macro expands at
+/// every use; a function-like one only before `(`, i.e. for a function-typed
+/// value that is called.
+let private valueSpellingReserved (functionValued: bool) (s: string) : bool =
+    reservedIn "objectMacros" s
+    || (functionValued && reservedIn "functionMacros" s)
+    || reservedIn "globalValueNames" s || reservedIn "runtimeNamespaceNames" s
+    // a namespace name (std, blade_rt): a declaration at namespace scope redeclares it
+    || reservedIn "namespaceNames" s
+    || emitterScopeNames.Contains s || emitterReservedPrefix s
+
+/// Would a user FUNCTION spelled `s` meet one? Besides the value rule: the
+/// global functions ordinary lookup finds beside it (and `main`), and -- when
+/// an argument may have a class type (`adl`) -- every named namespace's
+/// functions, which argument-dependent lookup brings in: `apply(add, t)` over a
+/// tuple `t` called std::apply (r = 3.0 for 30.0, gap G252).
+let private callableSpellingReserved (adl: bool) (s: string) : bool =
+    valueSpellingReserved true s
+    || reservedIn "globalFunctions" s || Set.contains s cppLibraryGlobals || s = "main"
+    || (adl && reservedIn "namespaceFunctions" s)
+
+/// `s`, lengthened with `_` past every spelling of the census.
+let private lengthenPast (census: Set<string>) (s: string) : string =
+    if not (census.Contains s) then s
+    else
+        let mutable r = s + "_"
+        while census.Contains r do r <- r + "_"
+        r
+
+/// A name the emitter MINTS (a body local, a renamed parameter) that keeps its
+/// spelling unless the program spells it too (gap G252: `let __v3 = 10.0` read
+/// inside a function whose own local is `__v3` read 6.0 for 13.0).
+let avoidUserSpelled (s: string) : string =
+    let c = userSpellingCensusStorage.Value
+    if isNull (box c) then s else lengthenPast c.Value s
+
+/// The C++ name of the body-local / temporary for IR id `id`: `__v<id>`, unless
+/// the program spells that.
+let localVarName (id: IRId) : string = avoidUserSpelled $"__v{id}"
+
+/// THE C++ NAME TABLE OF ONE PROGRAM (gap G252), installed per program assembly
+/// (after `resetProgramStateCells`). It returns the module with its CALLABLES
+/// renamed at IR level (Name only: SourceName, which frames and diagnostics
+/// print, is kept; call sites resolve by id through VarNames, so the rename is
+/// total), installs the RAW-keyed rename table of the BINDINGS
+/// (`sanitizeCppName`), and the census of the program's spellings that the
+/// emitter's minted names avoid (`avoidUserSpelled`, `localVarName`). A program
+/// with no collision and no reserved spelling emits what it emitted before.
+///   CALLABLES: a callable moves (`<name>_`, lengthened) when its spelling is
+///   reserved (`callableSpellingReserved`), is a binding's spelling plus a
+///   generated suffix (`a_extents` beside an array `a`), equals a binding's spelling (a
+///   generated `walk__arrow1` beside `let walk__arrow1`), or equals another
+///   callable's with a different id (a generated arrow instance / HM clone /
+///   lifted lambda beside a user function of that name, a qualified `Lib.f`
+///   beside `Lib__f`): the user-written one (Name = SourceName) keeps it.
+///   BINDINGS: the generated-suffix rule (`generatedSuffixAtRisk`); a reserved
+///   VALUE spelling; then, per emitted spelling shared by several bindings
+///   (`Lib.a` and `Lib__a`; a keyword `auto` emitted `auto_` beside a user
+///   `auto_`), the binding whose raw spelling IS the emitted one keeps it and
+///   the others move.
+///   PARAMETERS and CAPTURES: a reserved or keyword spelling moves at IR level
+///   (they were emitted raw).
+let installCppNameTable (modul: IRModule) : IRModule =
+    let rec plainScalar (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> plainScalar inner
+        | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETBool | ETUnit) | IRTNat _ | IRTUnit -> true
+        | _ -> false
+    let rec functionValued (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) -> functionValued inner
+        | FuncElem _ -> true
+        | _ -> false
+    let bindingRaws =
+        modul.Bindings |> List.map (fun b -> b.Name) |> List.filter (fun n -> not (n.StartsWith "_(")) |> List.distinct
+    let mutable census =
+        seq {
+            for n in bindingRaws do yield n; yield baseCppName n
+            for f in modul.Functions do
+                yield f.Name; yield baseCppName f.Name
+                for p in f.Params do yield p.Name; yield baseCppName p.Name
+                for c in f.Captures do yield c.Name; yield baseCppName c.Name }
+        |> Set.ofSeq
+    // a fresh spelling is itself neither taken nor reserved (BLADE_RR_STR moved to
+    // BLADE_RR_STR_ met another macro: the diff review, Codex 067cb140)
+    let reservedAny (s: string) = Set.contains s cppReservedWords || callableSpellingReserved true s
+    // A spelling under an emitter PREFIX (blade_x, __blade_t0) cannot leave it by
+    // lengthening (the diff review, Codex 067cb140 round 4: an endless loop), so it
+    // is moved under u_ first; the other reserved sets are finite.
+    // Nor may a fresh spelling be the BASE of a program spelling plus a generated
+    // suffix (`blade_a` moved to `u_blade_a_` brings `u_blade_a__extents`, which a
+    // user binding may spell: the diff review, round 5, Codex 00f0ebe8). Each
+    // lengthening outgrows a finite census, so the loop terminates.
+    let suffixTaken (r: string) =
+        census |> Set.exists (fun n -> n.StartsWith (r + "_") && generatedNameSuffix (n.Substring r.Length))
+    let fresh (s: string) =
+        let s = if emitterReservedPrefix s then "u_" + s else s
+        let mutable r = lengthenPast census (s + "_")
+        while reservedAny r || suffixTaken r do r <- lengthenPast census (r + "_")
+        census <- census.Add r
+        r
+    // CALLABLES.
+    let bindingSpellings = bindingRaws |> List.map baseCppName |> Set.ofList
+    let keptOfGroup =
+        modul.Functions
+        |> List.groupBy (fun f -> baseCppName f.Name)
+        |> List.choose (fun (_, fs) ->
+            match fs |> List.distinctBy (fun f -> f.Id) with
+            | [] | [_] -> None
+            | many ->
+                let keep = many |> List.sortBy (fun f -> (if f.Name = f.SourceName then 0 else 1), f.Id) |> List.head
+                Some (many |> List.filter (fun f -> f.Id <> keep.Id) |> List.map (fun f -> f.Id)))
+        |> List.concat |> Set.ofList
+    let callableNames = System.Collections.Generic.Dictionary<IRId, string>()
+    for f in modul.Functions do
+        if not (callableNames.ContainsKey f.Id) then
+            let s = baseCppName f.Name
+            let adl =
+                (f.Params |> List.exists (fun p -> not (plainScalar p.Type)))
+                || (f.Captures |> List.exists (fun c -> not (plainScalar c.Type)))
+            // a callable spelled as a binding's name plus a GENERATED suffix: the
+            // binding's generated name (an array `a` declares `a_extents` in main)
+            // shadows the file-scope function at its calls (the wave-end review,
+            // F5: `function a_extents(k: Int64)` beside `let a = [1.0, 2.0]`, BL9002)
+            let besideGenerated =
+                bindingSpellings |> Set.exists (fun b -> b <> s && s.StartsWith (b + "_") && generatedNameSuffix (s.Substring b.Length))
+            if callableSpellingReserved adl s || bindingSpellings.Contains s || keptOfGroup.Contains f.Id || besideGenerated then
+                callableNames.[f.Id] <- fresh s
+    // BINDINGS.
+    let renames = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
+    for raw in generatedSuffixAtRisk bindingRaws do renames.[raw] <- fresh (baseCppName raw)
+    for b in modul.Bindings do
+        if not (b.Name.StartsWith "_(") && not (renames.ContainsKey b.Name)
+           && valueSpellingReserved (functionValued b.Type) (baseCppName b.Name) then
+            renames.[b.Name] <- fresh (baseCppName b.Name)
+    let emitted (raw: string) = match renames.TryGetValue raw with | true, t -> t | _ -> baseCppName raw
+    for (spelling, raws) in bindingRaws |> List.groupBy emitted do
+        if raws.Length > 1 then
+            let keep = match raws |> List.tryFind (fun r -> r = spelling) with Some r -> r | None -> List.min raws
+            for r in raws do
+                if r <> keep then renames.[r] <- fresh spelling
+    // PARAMETERS and CAPTURES (emitted raw): a keyword or reserved spelling moves.
+    let rawSpellings =
+        seq {
+            yield! bindingRaws
+            for f in modul.Functions do
+                for p in f.Params do yield p.Name
+                for c in f.Captures do yield c.Name }
+        |> Set.ofSeq
+    let valueMoves = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
+    let localSpelling (functionValuedName: bool) (name: string) =
+        if name.Contains '.' then name
+        else
+            let moved () =
+                match valueMoves.TryGetValue name with
+                | true, t -> Some t
+                | _ ->
+                    let t =
+                        if valueSpellingReserved functionValuedName name then fresh name
+                        else
+                            // a keyword: its `_` spelling, unless the program spells that too
+                            let b = baseCppName name
+                            if rawSpellings.Contains b || reservedAny b then fresh b else b
+                    valueMoves.[name] <- t
+                    Some t
+            if Set.contains name cppReservedWords || valueSpellingReserved functionValuedName name then
+                (moved ()).Value
+            else name
+    let mutable anyChanged = false
+    let functions =
+        modul.Functions |> List.map (fun f ->
+            let name = match callableNames.TryGetValue f.Id with | true, n -> n | _ -> f.Name
+            let ps = f.Params |> List.map (fun p -> let n = localSpelling (functionValued p.Type) p.Name in if n = p.Name then p else { p with Name = n })
+            let cs = f.Captures |> List.map (fun c -> let n = localSpelling (functionValued c.Type) c.Name in if n = c.Name then c else { c with Name = n })
+            let changed =
+                name <> f.Name
+                || List.exists2 (fun (a: IRParam) (b: IRParam) -> a.Name <> b.Name) ps f.Params
+                || List.exists2 (fun (a: CaptureInfo) (b: CaptureInfo) -> a.Name <> b.Name) cs f.Captures
+            if not changed then f
+            else
+                anyChanged <- true
+                { f with Name = name; Params = ps; Captures = cs })
+    freshCell userNameRenamesStorage (renames |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq)
+    // The census of the program's FINAL spellings the minted names avoid. A
+    // lowering temporary named `__v<id>` after its own id is the emitter's own
+    // name, not a user spelling.
+    let userSpellings =
+        seq {
+            for b in modul.Bindings do
+                if b.Name <> $"__v{b.Id}" && not (b.Name.StartsWith "_(") then yield emitted b.Name
+            for f in functions do
+                yield baseCppName f.Name
+                for p in f.Params do if p.Name <> $"__v{p.VarId}" then yield p.Name
+                for c in f.Captures do if c.Name <> $"__v{c.Id}" then yield c.Name }
+        |> Set.ofSeq
+    freshCell userSpellingCensusStorage userSpellings
+    if not anyChanged then modul else { modul with Functions = functions }
 
 
 // Type Inference Helper (for code generation)

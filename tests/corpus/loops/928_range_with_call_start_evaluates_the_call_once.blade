@@ -1,0 +1,14 @@
+// TEST: A Range Whose Start Is A Call Evaluates The Call Once
+// Gap G209 (round 4 wave 10 lane d; the lead ruling): `lo..hi` lowers to an extent `hi - lo` and a
+// start `lo`, so a call start was evaluated twice by the C++ map holder (once per spelling) and the
+// fold had no holder (BL9002). Each bound is evaluated once, lo before hi: two ranges, two calls.
+function start(a: mut Array<Int64 like Idx<1>>) -> Int64 = {
+    a(0) = a(0) + 1
+    2
+}
+let mut calls: Array<Int64 like Idx<1>> = [0]
+let s = reduce(method_for(start(calls)..6) <@> lambda(k) -> k, (+))
+let m = method_for(start(calls)..6) <@> lambda(k) -> k * 10 |> compute
+// EXPECT: s = 14
+// EXPECT: m = [20, 30, 40, 50]
+// EXPECT: calls = [2]

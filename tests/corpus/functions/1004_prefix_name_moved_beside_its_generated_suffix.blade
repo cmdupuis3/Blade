@@ -1,0 +1,15 @@
+// TEST: A name moved out of the emitter prefix does not land beside a user spelling of its generated suffix
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252; the diff review round 5, Codex
+// 00f0ebe8): blade_a moves to u_blade_a_ (functions/1003), whose extents
+// table the emitter spells u_blade_a__extents -- a spelling the program
+// already takes: two declarations for g++ (BL9002, the review's reading). A fresh spelling is
+// now also checked against every program spelling of it plus a generated
+// suffix.
+// ============================================================================
+let blade_a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let u_blade_a__extents: Float64 = 3.0
+let r = reduce(blade_a, (+)) + u_blade_a__extents
+// EXPECT: blade_a = [1.0, 2.0]
+// EXPECT: u_blade_a__extents = 3.0
+// EXPECT: r = 6.0

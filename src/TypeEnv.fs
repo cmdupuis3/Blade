@@ -588,6 +588,21 @@ type TypeEnv = {
     ///
     /// Keyed by binder id like MutParamPositions. Shared by reference.
     FuncCoIterObligations: System.Collections.Generic.Dictionary<IRId, CoIterObligation list>
+    /// G265 (d): a `compound(dense, mask)` index record's Id -> its MASK
+    /// PROVENANCE token (the mask binding's VarId when the mask is a named
+    /// value, a fresh token for an inline mask). A compound's index is its
+    /// mask's present cells, so two compounds co-iterate only over ONE mask
+    /// binding (index provenance, as `Nat<LatIdx>` vs `Nat<LonIdx>`: the lead
+    /// ruling of round 4 wave 10). The record is copied verbatim by aliases and
+    /// by maps that keep the index, so its Id names the compound everywhere.
+    /// Shared by reference.
+    CompoundMaskTokens: System.Collections.Generic.Dictionary<IRId, IRId>
+    /// The binder ids of the MODULE-LEVEL variable lets (checkDecl), the only
+    /// binders the stored-alias never-written proof judges: a mask alias is
+    /// resolved to its root for CompoundMaskTokens only between two of these
+    /// (a block-local alias may be reassigned unseen -- wave-end review F3).
+    /// Shared by reference.
+    ModuleLetBinders: System.Collections.Generic.HashSet<IRId>
     /// Callee BINDER ID -> how its return's UNIT is built from its arguments':
     /// `(exponents, residual)` means the result measures
     /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
@@ -757,6 +772,20 @@ type TypeEnv = {
     /// parameter (or is refused there); a number leaves the parameter exactly
     /// as it was -- the link is dropped, so no numeric value changes.
     OpenArgLinks: ResizeArray<int * int * Blade.Ast.Span>
+    /// G275 (2): the parameter variables of LET-BOUND lambda values (a lambda
+    /// that is the whole value of a `let`), whose open parameters a later
+    /// call or kernel use decides. A literal operand beside one of them takes
+    /// its width as the operator's RESULT (TypeCheckInfer.inferBinOpCore).
+    /// `PendingLetLambda` is set by the let seam just before its value is
+    /// inferred and consumed by the lambda judgment that types it.
+    LetLambdaParamVars: System.Collections.Generic.HashSet<int>
+    PendingLetLambda: bool ref
+    /// G275: the fresh variables of a generic declaration's VALUE use
+    /// (TypeCheckSupport.instantiateGenericValueUse): they belong to that one
+    /// use, so a FIXED numeric argument of a call through it decides them
+    /// (`(lambda(f, x) -> f(x))(idg, Int64(7))` is idg at Int64), instead of
+    /// a Float64 default the argument would be converted into.
+    GenericUseCopyVars: System.Collections.Generic.HashSet<int>
     /// ARROW APPLICATIONS (ArrowApplication) whose head is still open, in the
     /// order they were typed. Discharged when the head meets what is passed
     /// to it (a call's argument), at the end of the declaration whose body
@@ -971,6 +1000,8 @@ let emptyEnv () = {
     MutParamPositions = System.Collections.Generic.Dictionary<IRId, int list>()
     FuncOuterReads = System.Collections.Generic.Dictionary<IRId, (string * IRId) list>()
     FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, CoIterObligation list>()
+    CompoundMaskTokens = System.Collections.Generic.Dictionary<IRId, IRId>()
+    ModuleLetBinders = System.Collections.Generic.HashSet<IRId>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<IRId, int list * UnitSig>()
     FuncUnitEqualities = System.Collections.Generic.Dictionary<IRId, (UnitSig * UnitSig) list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<IRId, int list list>()
@@ -992,6 +1023,9 @@ let emptyEnv () = {
     BinderValues = System.Collections.Generic.Dictionary<IRId, TypedExpr>()
     NumericMetOpenParams = System.Collections.Generic.Dictionary<int, Blade.Ast.Span>()
     OpenArgLinks = ResizeArray<int * int * Blade.Ast.Span>()
+    LetLambdaParamVars = System.Collections.Generic.HashSet<int>()
+    PendingLetLambda = ref false
+    GenericUseCopyVars = System.Collections.Generic.HashSet<int>()
     PendingArrowApps = ResizeArray<ArrowApplication>()
     FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
     FuncAxisSubscriptParams = System.Collections.Generic.Dictionary<IRId, Set<int>>()

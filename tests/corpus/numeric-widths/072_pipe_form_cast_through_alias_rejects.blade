@@ -1,0 +1,13 @@
+// TEST: a pipe-form explicit cast handed through an alias to a parameter of another width (rejects)
+// ============================================================================
+// G275: an explicit cast is a fixed-width VALUE by PROVENANCE -- the parser
+// marks every cast application it builds, the pipe form `x |> Float64`
+// included -- never a literal that adapts. The later `h(Float32(2.0))`
+// decides `v` as a Float32, so the Float64 1e100 would be narrowed to an
+// infinity at the earlier alias call.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a = saved(1e100 |> Float64)
+let b = h(Float32(2.0))
+// ERROR: BL3020

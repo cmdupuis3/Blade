@@ -1,0 +1,8 @@
+// TEST: an integer literal through an alias into a lambda value whose parameter defaults to Float64 (rejects)
+// ============================================================================
+// G275: a literal adapts only within its own class -- `1` is no float.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let y = saved(1)
+// ERROR: BL3020

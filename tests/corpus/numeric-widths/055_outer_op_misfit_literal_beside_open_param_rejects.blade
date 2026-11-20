@@ -1,0 +1,9 @@
+// TEST: an outer-product operator with a literal that does not fit the Float32 a later call decides (rejects)
+// ============================================================================
+// R19: the bracketed operator adapts its literal like the elementwise one.
+// ============================================================================
+let h = lambda(v) -> v [*] 1e100
+let saved = h
+let a: Float32 = 1.0
+let y = h(a)
+// ERROR: BL3020

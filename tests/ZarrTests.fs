@@ -1507,6 +1507,45 @@ let esums = method_for(eg) <@> lambda(r) -> reduce(r, (+)) |> compute
                       && not (cppCode.Contains "stream-group-aggregate v1: `g` is not stored") && refusals.IsEmpty)
                      (String.concat "\n" (recs @ refusals))
          finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
+        // round 4 wave 10 lane a (A3, the fresh class-closure round, Codex
+        // 5161db13): the guard was per MODULE, but the modules share one C++
+        // `main` scope -- an IMPORTER spelling `__sga14_state` beside the
+        // imported module's state form redeclared it (BL9002); the guard reads
+        // the whole program's spellings now
+        (let lib = "module Lib\n" + (keyed "stream")
+         let main = "module Main\nfrom Lib import sums\nlet __sga14_state = 42.0\nlet q = sums(0) + __sga14_state\n"
+         let saved = [ "BLADE_STREAM_GROUP_AGG"; "BLADE_PRINT"; "BLADE_FP_REPRO" ] |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+         let name = "stream-group-aggregate: an IMPORTER spelling `__sga14_state` keeps the imported grouping's pool form (no redeclaration)"
+         try
+             Environment.SetEnvironmentVariable("BLADE_STREAM_GROUP_AGG", "1")
+             Environment.SetEnvironmentVariable("BLADE_PRINT", "q")
+             Environment.SetEnvironmentVariable("BLADE_FP_REPRO", "1")
+             Blade.Effects.Decisions.start ()
+             let lowered = fst (Blade.Runtime.runOnLargeStack (fun () -> Lowering.lowerMultiSourceCaptured [ ("Lib", lib); ("Main", main) ]))
+             let recs = Blade.Effects.Decisions.drain () |> List.filter (fun d -> d.Rule = "stream-group-aggregate") |> List.map Blade.Effects.Decisions.render
+             match lowered with
+             | Error e -> check name false (sprintf "lowers: %A" e)
+             | Ok ir ->
+                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_sga_importer_name_hygiene"
+                 let refusals = CodeGen.takeCodegenRefusalDiagnostics cppCode |> List.map string
+                 if not (recs |> List.exists (fun r -> r.Contains "declined" && r.Contains "spelled with `__sga`"))
+                    || cppCode.Contains "stream-group-aggregate v1: `g` is not stored" || not refusals.IsEmpty then
+                     check name false (String.concat "\n" (recs @ refusals))
+                 else
+                 CodeGen.deployRuntimeHeaders e2eDir
+                 let cppFile = Path.Combine(e2eDir, "zarr_sga_importer_name_hygiene.cpp")
+                 File.WriteAllText(cppFile, cppCode)
+                 match compileCpp cppFile e2eDir with
+                 | Error e when isSkipError e -> printfn "  SKIP %s: %s" name e
+                 | Error e -> check name false ("compile: " + e)
+                 | Ok exe ->
+                     match runExecutable exe with
+                     // sums(0) = 20.0 over the keyed fixture (the imported cases
+                     // below print it), so q = 20.0 + 42.0
+                     | Ok (0, out) -> check name (out.Contains "q = 62.0") out
+                     | Ok (code, out) -> check name false ($"exit {code}: {out}")
+                     | Error e -> check name false e
+         finally for (k, v) in saved do Environment.SetEnvironmentVariable(k, v))
         // G200 (round 4 wave 7 lane B): the print selection is QUALIFIED for an
         // imported module (`Lib.g`), the plan runs before qualification on `g`.
         // The shared resolver (Blade.PrintSelection) matches an entry by its

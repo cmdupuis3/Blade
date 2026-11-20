@@ -1,0 +1,9 @@
+// TEST: a stored compose whose second stage multiplies by a literal that does not fit the Float32 cells (rejects)
+// ============================================================================
+// G276 (2) / G226 (e): pipeline fusion substitutes the stages into one kernel;
+// its literal still meets the Float32 the first stage produces.
+// ============================================================================
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let p = object_for(lambda(v) -> [v, v]) >>@ object_for(lambda(v) -> v * 1e100)
+let r = (p <@> a) |> compute
+// ERROR: BL3020

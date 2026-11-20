@@ -1,0 +1,15 @@
+// TEST: A C++ keyword binding beside a binding spelled with its underscore suffix
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): a binding named after a C++ keyword
+// is emitted with a _ suffix, which a second user binding may SPELL (auto
+// and auto_ were both auto_: a redeclaration, BL9002). The keyword binding
+// now moves further; thread_local was missing from the keyword list.
+// ============================================================================
+let auto: Float64 = 1.0
+let auto_: Float64 = 2.0
+let thread_local: Float64 = 4.0
+let w = auto + auto_ + thread_local
+// EXPECT: auto = 1.0
+// EXPECT: auto_ = 2.0
+// EXPECT: thread_local = 4.0
+// EXPECT: w = 7.0

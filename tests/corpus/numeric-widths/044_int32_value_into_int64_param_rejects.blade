@@ -1,0 +1,9 @@
+// TEST: an Int32 variable into an Int64 parameter (rejects)
+// ============================================================================
+// G275: `let n = 3` is an Int32 VARIABLE (the literal default); handing it to
+// an Int64 parameter converts it -- `Int64(n)` at the call, or `let n: Int64`.
+// ============================================================================
+function g(v: Int64) -> Int64 = v * 2
+let n = 3
+let y = g(n)
+// ERROR: BL3020

@@ -4316,7 +4316,12 @@ let internal instantiateGenericValueUse (env: TypeEnv) (a: TypedExpr) : TypedExp
         if not closed then a
         else
             match instantiateOpenVars env.Subst quantified [a.Type] with
-            | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
+            | [ copy ], ids when not (Set.isEmpty ids) ->
+                // (G275: the copy's variables belong to THIS use -- a fixed
+                // numeric argument of a call through it decides them,
+                // dispatchAppOrIndex; TypeEnv.GenericUseCopyVars)
+                for v in freeInferVars env.Subst copy do env.GenericUseCopyVars.Add v |> ignore
+                { a with Type = copy }
             | _ -> a
     | _ -> a
 
@@ -4583,18 +4588,35 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
             Some (ImplicitNumericMix
                       ($"implicit numeric conversion: {what} is passed where a {ppIRType (IRTScalar pe)} is expected, "
                        + $"and Blade converts nothing implicitly -- {advice}."))
-        // Widening WITHIN a class (Float32 -> Float64, Complex64 ->
-        // Complex128) and the exact real -> complex embedding stay licensed.
-        elif widen && promoteElemType ae pe = Some pe && literalMayMean ae pe then None
-        // Integer to integer in either width: the emitted call converts
-        // implicitly (no -Werror covers it), and a recurrence index (Int64)
-        // handed to an `i: Int` (Int32) parameter is an established idiom.
-        // What stays refused is the float -> integer narrowing g++ rejects.
-        elif widen && isInt pe && isInt ae then None
         else
             match litKind, pe with
+            // A LITERAL adapts to its parameter within its class (R19 judges
+            // its value against the width: literalArgMisfit / IRMono).
             | ALLeaf ETInt64, (ETInt32 | ETInt64) when widen -> None
-            | ALLeaf ETFloat64, (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | ALLeaf ETFloat64, (ETFloat32 | ETFloat64) when widen -> None
+            // A literal adapts only within its own CLASS (formalism 2.4): a
+            // float literal is no complex argument (the operator embedding
+            // `2.0 * z` is the mixing rule's, not a call's).
+            | ALLeaf ETFloat64, (ETComplex64 | ETComplex128) when widen ->
+                Some (ImplicitNumericMix
+                          ($"implicit numeric conversion: a float literal is passed where a {ppIRType (IRTScalar pe)} is expected, "
+                           + $"and a literal adapts only within its own class -- write the complex value, complex(x, 0.0)."))
+            // An Int64 into an Int32 parameter: Lowering's narrowing proof
+            // (refuseArgumentConversions, fitsInt32) admits a statically
+            // proven value and refuses any other one (BL3020) -- the checker
+            // leaves it to that judgment.
+            | _ when widen && pe = ETInt32 && ae = ETInt64 -> None
+            // G275 (formalism 2.4): a FIXED non-literal argument meets its
+            // parameter without conversion -- Float32 into Float64, Int32
+            // into Int64, Complex64 into Complex128 and real into complex
+            // all need an explicit cast at the call.
+            | _ when widen && isNumeric ae && isNumeric pe && promoteElemType ae pe = Some pe ->
+                let aS = ppIRType (IRTScalar ae)
+                let pS = ppIRType (IRTScalar pe)
+                let article (s: string) = if s.StartsWith "I" then "an" else "a"
+                Some (ImplicitNumericMix
+                          ($"implicit numeric conversion: {article aS} {aS} value is passed where {article pS} {pS} is expected, "
+                           + $"and Blade converts nothing implicitly -- convert it with the type in call position, {pS}(x)."))
             | _ -> mismatch ()
     | ArrayElem pa, ArrayElem aa ->
         if pa.IndexTypes.Length <> aa.IndexTypes.Length then mismatch ()
@@ -4638,6 +4660,42 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
         | Some "dist", Some "dist" -> None
         | Some _, Some _ when Set.isEmpty (freeInferVars subst a) -> viaUnify p a
         | _ -> None
+
+/// G276 (1): a per-cell kernel slot (a sort key, a mask predicate) filled by
+/// a CALLABLE REFERENCE -- a let-bound lambda named, an alias of one, a
+/// function name -- meets the cells it is handed exactly as a lambda written
+/// there does: the slot's parameter is the reference's OWN type (its binder's,
+/// an instance of a declaration's scheme), so a parameter its body left open
+/// is decided by the cells (the first use of one value decides, formalism
+/// 4.3), and a decided or declared one is judged against them by the call
+/// judgment -- no implicit conversion (formalism 2.4), so a Float64 predicate
+/// over Float32 cells is refused instead of converting every cell. An open
+/// SIGNATURE variable (a declaration's own, never instantiated here) is not
+/// this slot's to bind.
+let internal callableRefParamMeetsCells (env: TypeEnv) (k: TypedExpr) (cell: IRType) : Result<unit, TypeError> =
+    match k.Kind with
+    | TExprVar _ ->
+        (match IR.stripUnits (env.Subst.Resolve k.Type) with
+         | FuncElem ([ p ], _) ->
+             (match IR.stripUnits (env.Subst.Resolve p) with
+              | IRTInfer v when env.Subst.IsPolymorphicId v -> Ok ()
+              | IRTInfer _ -> unify env.Subst p cell
+              // (a kernel slot has no call-site narrowing proof: an Int64 cell
+              // into an Int32 parameter wraps, and is refused)
+              | IRTScalar ETInt32 when (match IR.stripUnits (env.Subst.Resolve cell) with
+                                        | IRTScalar ETInt64 -> true
+                                        | IRTIdxTagged (inner, _) -> IR.stripUnits (env.Subst.Resolve inner) = IRTScalar ETInt64
+                                        | _ -> false) ->
+                  Error (ImplicitNumericMix
+                             ("implicit numeric conversion: this kernel's parameter is an Int32, and the cells it is handed are Int64 -- "
+                              + "the slot would wrap each cell into the narrower integer, and Blade converts nothing implicitly; "
+                              + "declare the parameter Int64, or convert the array first (Int32(xs))."))
+              | _ ->
+                  match argPairClash env.Subst Set.empty true ALNone p cell with
+                  | None -> Ok ()
+                  | Some e -> Error e)
+         | _ -> Ok ())
+    | _ -> Ok ()
 
 /// SHARED STATIC-EXTENT REFINEMENT. Extents are deliberately NOT part of type
 /// identity (unify never compares them -- extents are shape-monomorphized at
@@ -4718,6 +4776,36 @@ type internal CoIterVerdict =
 /// name half, so the memory error is the one reported when both exist. A
 /// position whose type is not (yet) an array is not judged -- the status quo,
 /// never an invented refusal.
+/// G265 (d): THE MASK-PROVENANCE AGREEMENT of a co-iteration over compounds
+/// (BL3016, the index-identity half of the extent agreement). Two compound
+/// head records whose masks are DIFFERENT bindings (`TypeEnv.CompoundMaskTokens`)
+/// walk different index spaces -- each the present cells of its own mask --
+/// even at equal cardinality, so pairing them by position is refused here
+/// (the lead ruling of round 4 wave 10). One mask binding (`compound(x, keep)`
+/// beside `compound(y, keep)`, or beside `compound(y, k2)` with `let k2 = keep`
+/// a never-written plain alias of the mask -- the token is the mask's ROOT
+/// binder), a compound with itself, a compound ALIAS (its record is copied) or
+/// a map that keeps the index co-iterate. A record with no token (a provider
+/// compound, a residual, a dynamic compound) is not judged here: its
+/// cardinality is compared at run time (BL8011); the token-bearing operands
+/// are still judged against each other (wave-end review F3).
+let internal compoundMaskProvenanceClash (env: TypeEnv) (arrayTypes: IRArrayType list) : TypeError option =
+    let tokenOf (at: IRArrayType) =
+        match at.IndexTypes with
+        | h :: _ when h.IxKind = IxKCompound ->
+            (match env.CompoundMaskTokens.TryGetValue h.Id with
+             | true, t -> Some (h.Id, t)
+             | _ -> None)
+        | _ -> None
+    let tokens = arrayTypes |> List.map tokenOf |> List.indexed |> List.choose (fun (i, o) -> o |> Option.map (fun t -> (i, t)))
+    match tokens with
+    | (p0, (id0, t0)) :: rest ->
+        rest |> List.tryPick (fun (i, (id, t)) ->
+            if id <> id0 && t <> t0 then
+                Some (ExtentErr (sprintf "co-iteration over compounds of DIFFERENT masks: operand %d and operand %d are compounds over two different mask bindings. A compound's index is its mask's present cells, so two masks -- even of equal cardinality -- are two index spaces, and pairing their cells by position would match unrelated cells. Build both compounds over ONE mask binding (`let keep = mask(..)`, then `compound(x, keep)` and `compound(y, keep)`), or co-iterate the dense arrays and apply the mask once" (p0 + 1) (i + 1)))
+            else None)
+    | [] -> None
+
 let internal coIterVerdict (env: TypeEnv) (obs: CoIterObligation list)
                            (typeAt: int -> IRType option) : CoIterVerdict option =
     let headAt (i: int) =
@@ -7560,6 +7648,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                              | Some { TypedValue = Some { Kind = TExprLambda _ } } -> true
                              | Some { TypedValue = Some { Kind = TExprApp _ }; Scheme = None } -> true
                              | _ -> false)
+                        // G275: a lambda APPLIED WHERE IT IS WRITTEN has this one
+                        // call: a literal argument decides its open parameter as
+                        // a direct call of a let-bound one does (a fixed scalar
+                        // argument seeded it before the body: ExprApp's lambda
+                        // head arm). It fell to the Float64 default and the call
+                        // converted the argument: `(lambda(x) -> x)(7)` was 7.0.
+                        | TExprLambda _ -> true
                         | _ -> false
                     // THE BACKSTOP (R10; lead ruling 2026-11-15): an argument the
                     // arm below does not bind -- a tuple, a function value -- must
@@ -7704,7 +7799,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                  // parameter, as before: the literal-width rule decides the
                                  // rest -- and the parameter remembers it met a number.)
                                  | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) as s ->
-                                     if lambdaHead then unify env.Subst (IRTInfer pid) s |> ignore
+                                     // (G275: also a generic declaration's VALUE-USE
+                                     // copy, whose variables belong to this one use)
+                                     let useCopy =
+                                         env.GenericUseCopyVars |> Seq.exists (fun c ->
+                                             match env.Subst.Resolve (IRTInfer c) |> IR.stripUnits with
+                                             | IRTInfer r -> r = pid
+                                             | _ -> false)
+                                     if lambdaHead || useCopy then unify env.Subst (IRTInfer pid) s |> ignore
                                      elif not (env.NumericMetOpenParams.ContainsKey pid) then env.NumericMetOpenParams.[pid] <- (List.item i tArgs).Span
                                  // ...and a NON-NUMERIC scalar value (R10, the numbers-only
                                  // rule): a Bool, a String, a struct or a sum-type value.
@@ -7870,7 +7972,26 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         appArgPairs pCopies (tArgs |> List.map (_.Type))
                         |> List.tryPick (fun (i, pTy, aTy) ->
                             let arg = List.item i tArgs
-                            argPairClash env.Subst copyIds true (argLiteralShape arg) pTy aTy
+                            // G275: what ADAPTS at a parameter (formalism 2.4): a
+                            // numeric literal, a literal-only expression and an
+                            // INTEGER `let static` name (it adapts its width like
+                            // the literal it folds to), at any depth of a tuple
+                            // argument; anything else is a fixed value.
+                            let rec litShapeOf (a: TypedExpr) : ArgLit =
+                                match a.Kind, IR.stripUnits (env.Subst.Resolve a.Type) with
+                                | TExprTuple es, _ -> ALTuple (es |> List.map litShapeOf)
+                                | TExprVar (n, _, _), IRTScalar (ETInt32 | ETInt64)
+                                        when Map.containsKey n env.StaticValues -> ALLeaf ETInt64
+                                | _, ty ->
+                                    match numericLiteralKind a with
+                                    | Some et -> ALLeaf et
+                                    | None when isNumericLiteralOperand a ->
+                                        (match ty with
+                                         | IRTScalar (ETInt32 | ETInt64) -> ALLeaf ETInt64
+                                         | IRTScalar (ETFloat32 | ETFloat64) -> ALLeaf ETFloat64
+                                         | _ -> ALNone)
+                                    | None -> ALNone
+                            argPairClash env.Subst copyIds true (litShapeOf arg) pTy aTy
                             |> Option.map (fun e -> (i, e)))
                         // The callee's GENERIC CASTS, judged against the
                         // instance the arguments just built.

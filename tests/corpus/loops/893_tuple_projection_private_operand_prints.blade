@@ -1,0 +1,15 @@
+// TEST: a projection of a wholly deferred tuple as a fold operand prints
+// Gap G266, round 4 wave 10 (the row's second spelling, the control): a
+// top-level projection of a wholly deferred tuple is an alias of its member
+// (G111), forced through the alias arm -- the member under its own name, then
+// the projection as its copy -- so e and a print, in every lane.
+let d: Array<Int64 like Idx<3>> = [1, 2, 3]
+let e = method_for(d) <@> lambda(v) -> v + 1
+let pair = (e, e)
+let a = pair[0]
+let f = method_for(a) <@> lambda(x) -> x + 2
+let s = reduce(method_for(zip(a, f)) <@> lambda(x, y) -> x + y, (+))
+// EXPECT: d = [1, 2, 3]
+// EXPECT: e = [2, 3, 4]
+// EXPECT: a = [2, 3, 4]
+// EXPECT: s = 24

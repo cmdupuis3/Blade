@@ -1,0 +1,10 @@
+// TEST: A Fold Over A Run-Time Range Beside A Hoisted Operand Expression
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 2): the operand `xs + xs` is hoisted to
+// a let ahead of the apply (the lift pass), which hid the run-time range 0..n from its holder (an
+// undeclared `__range0`, BL9002); the holder is now planned under the let prelude:
+// 3 * (2 + 4 + 6) + 3 * (0 + 1 + 2).
+function f(n: Int64, xs: Array<Int64 like Idx<3>>) -> Int64 =
+    reduce(method_for(0..n, xs + xs) <@> lambda(k, v) -> k + v, (+), 0, axes = 2)
+let ys: Array<Int64 like Idx<3>> = [1, 2, 3]
+let r = f(Int64(3), ys)
+// EXPECT: r = 45

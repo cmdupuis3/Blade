@@ -1,6 +1,6 @@
 // TEST: An Aliased Lambda Given A Float Then An Int64 Cell Is Refused (rejects)
 // ERROR: BL3020 @ 12:46
-// ERROR-CONTAINS: the map's cells are Int64
+// ERROR-CONTAINS: widening it to Float64
 // ============================================================================
 // R11: `g(3.0)` makes g's parameter a Float64; the kernel's `g(v)` over Int64
 // cells was typed Int64 and g++ refused the narrowing (BL9002).

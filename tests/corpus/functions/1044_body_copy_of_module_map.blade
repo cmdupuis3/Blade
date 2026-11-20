@@ -1,0 +1,19 @@
+// TEST: A Function Body Copy Of A Deferred Module Map
+// ============================================================================
+// Gap G255, round 4 wave 10 (lane C, C2): a module map that only function
+// bodies use is evaluated privately inside each body (formalism 10.2): a body
+// COPY (`q |> compute`) or a MASK over it evaluates its own map form there --
+// its kernel's captures forced first, as any map's. The C++ lane named the
+// module binder, which nothing declared (BL9002).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [4.0]
+let forcing = method_for(backing) <@> lambda(e) -> Int64(floor(sqrt(e)))
+function f(z: Int64) -> Int64 = {
+    let t1 = 10 / z
+    let h = forcing |> compute
+    let a = t1 + h(0)
+    a
+}
+let r = f(5)
+// EXPECT: r = 4

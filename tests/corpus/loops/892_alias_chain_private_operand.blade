@@ -1,0 +1,12 @@
+// TEST: an alias chain of a deferred map as a fold's private operand
+// Gap G266, round 4 wave 10: the chain a2 = a = e resolves to e's map; the
+// fold evaluates it privately for both its co-iteration operand and f's
+// input, so no name of the chain prints, in every lane.
+let d: Array<Int64 like Idx<3>> = [1, 2, 3]
+let e = method_for(d) <@> lambda(v) -> v + 1
+let a = e
+let a2 = a
+let f = method_for(a2) <@> lambda(x) -> x + 2
+let s = reduce(method_for(zip(a2, f)) <@> lambda(x, y) -> x + y, (+))
+// EXPECT: d = [1, 2, 3]
+// EXPECT: s = 24

@@ -1,0 +1,9 @@
+// TEST: a Float32 value into a Float64 parameter (rejects)
+// ============================================================================
+// G275 (formalism 2.4): a FIXED non-literal argument meets its parameter
+// without conversion -- Float32 into Float64 needs `Float64(x)` at the call.
+// ============================================================================
+let f32: Float32 = 1.5
+function wide(v: Float64) -> Float64 = v * 2.0
+let y = wide(f32)
+// ERROR: BL3020

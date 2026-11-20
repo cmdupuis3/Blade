@@ -1,0 +1,28 @@
+// TEST: call arguments that adapt or are converted explicitly
+// ============================================================================
+// G275's passing twin: a literal adapts to its parameter within its class, an
+// INTEGER `let static` name adapts like the literal it folds to (also inside a
+// tuple argument), and an explicit cast is the conversion.
+// ============================================================================
+let f32: Float32 = 0.1
+function wide(v: Float64) -> Float64 = v * 2.0
+function g(v: Int64) -> Int64 = v * 2
+function c(z: Complex128) -> Complex128 = z * z
+function pair(p: (Int64, Int64)) -> Int64 = p[0] + p[1]
+let static k = 3
+let n: Int64 = 4
+let r: Float64 = 1.5
+let a = wide(Float64(f32))
+let b = wide(0.1)
+let d = g(k)
+let e = g(7)
+let f = g(n)
+let h = c(complex(r, 0.0))
+let t = pair((k, k))
+// EXPECT: a = 0.200000002980232
+// EXPECT: b = 0.2
+// EXPECT: d = 6
+// EXPECT: e = 14
+// EXPECT: f = 8
+// EXPECT: h = (2.25,0.0)
+// EXPECT: t = 6

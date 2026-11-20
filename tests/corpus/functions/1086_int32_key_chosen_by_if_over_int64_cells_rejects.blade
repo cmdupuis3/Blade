@@ -1,0 +1,9 @@
+// TEST: an Int32 sort key chosen by an `if` over Int64 cells (rejects)
+// ============================================================================
+// G276: a kernel slot has no narrowing proof, whatever expression chose the
+// kernel (4294967296 would wrap to 0).
+// ============================================================================
+let a: Array<Int64 like Idx<2>> = [4294967296, 1]
+let k = lambda(v: Int32) -> v
+let y = sort(a, if true then k else k)
+// ERROR: BL3020

@@ -497,7 +497,11 @@ and IRCallable = {
     // LLVM lanes push this helper's frame iff `compiledLanesCall`; the
     // interpreter evaluates every such kernel inline (its nests push no
     // kernel frame) and never pushes it. `None` = an ordinary callable,
-    // whose frame every lane pushes as always.
+    // whose frame every lane pushes as always. `Some false` also marks a G239
+    // READ HELPER (Lowering.splitDeferredBodyReadsModule): a one-statement
+    // function forcing a deferred module map at a read position, inline code
+    // of its caller -- no frame in any lane, located at the caller's
+    // declaration, and not counted against the interpreter's depth budget.
     HoistFrame: bool option
 }
 

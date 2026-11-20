@@ -658,15 +658,28 @@ let private staticMisfitMessage (w: Blade.Types.ElemType) (v: StaticValue) (what
 /// Hand a folded value to a declared width: the misfit is raised, a fitting
 /// integer narrows / widens exactly, a Float32 widens exactly into a Float64;
 /// anything else is left as it is (the explicit-cast converter is not used).
-let private adaptToDeclared (w: Blade.Types.ElemType) (v: StaticValue) (span: Span) (what: string) : StaticValue =
+let private adaptToDeclaredWith (fixedValue: bool) (w: Blade.Types.ElemType) (v: StaticValue) (span: Span) (what: string) : StaticValue =
     match staticMisfitMessage w v what with
     | Some msg -> raise (StaticValueMisfit (span, msg))
     | None ->
+        // G275: a FLOAT static is a constant of its own width (formalism 2.4),
+        // so a Float32 value handed to a declared Float64 converts -- refused,
+        // as its run-time twin is (only an integer static adapts its width;
+        // a literal-only value never reaches here, it adapts by its spelling).
+        (match w, v with
+         | Blade.Types.ETFloat64, SVFloat32 f when fixedValue ->
+             let text = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+             raise (StaticValueMisfit (span,
+                     $"{what} is the Float32 value {text}, and the width declared here is Float64: a float static is a constant of its own width, "
+                     + "and Blade converts nothing implicitly (formalism 2.4) -- declare it Float64, or convert explicitly with `Float64(..)`"))
+         | _ -> ())
         match w, v with
         | Blade.Types.ETInt32, SVInt n -> SVInt32 (int32 n)
         | Blade.Types.ETInt64, SVInt32 n -> SVInt (int64 n)
         | Blade.Types.ETFloat64, SVFloat32 f -> SVFloat (float f)
         | _ -> v
+
+let private adaptToDeclared w v span what = adaptToDeclaredWith true w v span what
 
 let private literalMisfitLeaf (fw: Blade.Types.ElemType) (iw: Blade.Types.ElemType) (e: Expr) : (Span * Blade.Types.ElemType * string) option =
     let fitsI n = Blade.Types.LiteralDefaults.intFits iw n
@@ -771,6 +784,30 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         // made the budget a depth bound with a step bound's name.
         evalCore env fuel (depth + 1) l |> Result.bind (fun lv ->
         evalCore env fuel (depth + 1) r |> Result.bind (fun rv ->
+            // G275, THE MIXING RULE AT COMPILE TIME (formalism 2.4): two FIXED
+            // values (neither literal-only) of different float widths, or an
+            // integer beside a float, would be converted -- refused as the
+            // run-time operator is (an integer static adapts its WIDTH, never
+            // its class; `^` keeps its polymorphic exponent).
+            (if not (isLitOnly l) && not (isLitOnly r) then
+                let floatW (v: StaticValue) = match v with SVFloat32 _ -> Some 32 | SVFloat _ -> Some 64 | _ -> None
+                let isIntV (v: StaticValue) = match v with SVInt _ | SVInt32 _ -> true | _ -> false
+                let mixMsg =
+                    match op with
+                    | OpAdd | OpSub | OpMul | OpDiv | OpMod
+                    | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
+                        (match floatW lv, floatW rv with
+                         | Some a, Some b when a <> b -> Some $"a Float{min a b} value meets a Float{max a b} value"
+                         | Some a, None when isIntV rv -> Some $"an integer value meets a Float{a} value"
+                         | None, Some b when isIntV lv -> Some $"an integer value meets a Float{b} value"
+                         | _ -> None)
+                    | _ -> None
+                match mixMsg with
+                | Some m ->
+                    raise (StaticValueMisfit (expr.Span,
+                            $"implicit numeric conversion at compile time: {m} in a static expression, and Blade converts nothing implicitly "
+                            + "(formalism 2.4: a float static is a constant of its own width) -- convert one operand explicitly (`Float64(..)`)"))
+                | None -> ())
             evalBinOp op lv rv))
 
     | ExprKind.ExprUnaryOp (op, e) ->
@@ -838,6 +875,34 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
                     // this frame and returns to it, so the stack grows exactly
                     // as it does for a real subexpression. Charging it is what
                     // makes an unbounded static recursion hit `maxDepth`.
+                    // G275: a LITERAL-ONLY result (through transparent blocks:
+                    // `= { 0.1 }`) adapts to the declared return width by its
+                    // spelling and is folded AT that width -- never first at its
+                    // default (an Int32 `65536 * 65536` would wrap); the block's
+                    // statements still run, before it. Any other result is a
+                    // fixed value (adaptToDeclared).
+                    let rec resultExpr (e: Expr) =
+                        match e.Kind with
+                        | ExprKind.ExprBlock (_, Some fe) -> resultExpr fe
+                        | _ -> e
+                    let re = resultExpr funcDef.Body
+                    match funcDef.RetWidth with
+                    | Some w when isLitOnly re ->
+                        let rec statementsOnly (e: Expr) =
+                            match e.Kind with
+                            | ExprKind.ExprBlock (ss, Some fe) -> { e with Kind = ExprKind.ExprBlock (ss, Some (statementsOnly fe)) }
+                            | _ -> { e with Kind = ExprKind.ExprLit (LitInt 0L) }
+                        let pre =
+                            match funcDef.Body.Kind with
+                            | ExprKind.ExprBlock _ -> evalCore bodyEnv fuel (depth + 1) (statementsOnly funcDef.Body) |> Result.map ignore
+                            | _ -> Ok ()
+                        pre |> Result.bind (fun () ->
+                            let (fw0, iw0) = litDefaultWidths re
+                            let fw = match w with Blade.Types.ETFloat32 | Blade.Types.ETFloat64 -> w | _ -> fw0
+                            let iw = match w with Blade.Types.ETInt32 | Blade.Types.ETInt64 -> w | _ -> iw0
+                            refuseMisfit fw iw re
+                            evalLitTree bodyEnv fuel (depth + 1) fw iw re)
+                    | _ ->
                     evalCore bodyEnv fuel (depth + 1) funcDef.Body
                     |> Result.map (fun v ->
                         match funcDef.RetWidth with

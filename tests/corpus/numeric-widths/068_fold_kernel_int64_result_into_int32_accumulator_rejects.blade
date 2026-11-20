@@ -1,0 +1,9 @@
+// TEST: a fold kernel whose Int64 result feeds an Int32 accumulator (rejects)
+// ============================================================================
+// G275 (Codex round 4): the fold hands each step's result back to the
+// kernel's accumulator parameter -- an Int64 wrapped into an Int32 there
+// (4294967296 is 0), with no narrowing proof on that edge.
+// ============================================================================
+function k(a: Int32, b: Int32) -> Int64 = 4294967296
+let r = reduce(Int32([1, 2, 3]), k)
+// ERROR: BL3020

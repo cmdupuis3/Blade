@@ -1,0 +1,13 @@
+// TEST: a static function whose block body ends in a literal takes the declared return width
+// ============================================================================
+// G275: a literal-only RESULT -- through a block -- adapts to the declared
+// Float64 by its spelling (it is no Float32 value converted).
+// ============================================================================
+static function f() -> Float64 = { 0.1 }
+static function g() -> Float64 = 0.1
+let static x = f()
+let static w = g()
+let y = x
+let v = w
+// EXPECT: y = 0.1
+// EXPECT: v = 0.1

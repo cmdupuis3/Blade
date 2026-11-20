@@ -1,0 +1,19 @@
+// TEST: A Failing First Pipeline Stage Fails Before A Later Stage Capture (aborts)
+// ============================================================================
+// Gap G242, round 4 wave 10 (lane C, C4): a pipeline's stages run as successive
+// traversals, so a LATER stage's deferred capture is forced at that stage's
+// start -- after an earlier stage that may fail. The C++ two-sweep emitter now
+// forces it between the sweeps (a per-stage capture prelude); it was a coded
+// refusal (BL7004). The first stage is a block-bodied named function, so the
+// pipeline is not fused.
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [0, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> Int64(floor(sqrt(Float64(e) - 3.0)))
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> v + delayed(0))
+let ys = k <@> backing |> compute
+// ABORT: integer division by zero

@@ -617,8 +617,8 @@ let (gv, gx, gr) = ad.grad(f)(Float64(0.3), Float64(3.7))
 """
 
 /// A step reading the step ordinal and an immutable module array (no
-/// gradient buffers: nothing is written during the reverse sweep, so the
-/// replay is admitted).
+/// gradient buffers; since round 4 wave 10 the array is snapshotted in every
+/// build -- gap G162 m22-m24 -- and the replay reads the copy).
 let private ckForcing = """import ad as ad
 let xs = 0.25 + 0.125 * Float64(0..31)
 function g(x: Float64, a: Float64) -> Float64 = {
@@ -763,7 +763,11 @@ let private ckCorpusPins () : bool list =
           // is refused, G190 (c), BL4005 -- ad/050, 052, 053, 060-067 and 075
           // are now that refusal's witnesses, pinned by the corpus)
           "051_recarray_checkpoint_snapshots_fresh_array_aliased_later.blade", Ok "replay-input snapshot: forcing -> "
-          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "casts to an integer type under fast contraction"
+          // since round 4 wave 10 (G162 m22-m24) `table` is snapshotted in every
+          // build, so the state-dependent subscript declines first (the diff
+          // review, round 5, Codex 00f0ebe8); the contraction guard alone is the
+          // inline `int_cast_no_array` case below
+          "054_recarray_checkpoint_declines_cast_under_fast_contraction.blade", Error "the step value may fail"
           // the FRESH-BUFFER twins (round 4 wave 9, lane A, A1) of the
           // witnesses the G190 (c) refusal turned into (rejects) files: the
           // same step, the gradient buffer a fresh array, each decision of
@@ -788,7 +792,10 @@ let private ckCorpusPins () : bool list =
     // corpus index-types/579.)
     let inlineForced : (string * Result<string, string> * string) list =
         [ "deferred_division", Error "its value is not a stored form",
-          "import ad as ad\ntype A = Array<Float64 like Idx<1>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [4.0]\nlet forcing = method_for(backing) <@> lambda(e) -> 8.0 / e\n" + ckAliasTail ]
+          "import ad as ad\ntype A = Array<Float64 like Idx<1>>\nfunction identity(a: A) -> A = a\nlet mut backing: A = [4.0]\nlet forcing = method_for(backing) <@> lambda(e) -> 8.0 / e\n" + ckAliasTail
+          // the fast-contraction guard with no snapshot target ahead of it
+          "int_cast_no_array", Error "casts to an integer type under fast contraction",
+          "import ad as ad\nfunction f(x: Float64) -> Float64 = {\n    let rec s: Array<Float64 like Idx<6>> =\n        match s with\n        | zero -> zero\n        | zero :: n -> zero :: x\n        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + Float64(Int64(floor(prefix(n - 1)))) * 0.125\n    s(5)\n}\nlet (value, dx) = ad.grad(f)(Float64(3.5))\n" ]
     let inlinePins =
         [ for (nm, want, src) in inlineForced do
             let name = "ad_checkpoint_inline: " + nm + " (BLADE_AD_CHECKPOINT=2)"
@@ -970,7 +977,17 @@ let private ckCorpusDifferential () : (string * (string * Result<string, string>
       // a module array spelled like the checkpoint buffer (`__ck4`) is not
       // captured by it, at forced intervals and under the auto arm
       "126_recarray_checkpoint_buffer_does_not_capture_user_name.blade", [ "2", Ok "segments of K = 2 steps"; "3", Ok "segments of K = 3 steps" ]
-      "127_recarray_checkpoint_auto_does_not_capture_user_name.blade", [ "auto", Ok "71 segments of K = 71 steps" ] ]
+      "127_recarray_checkpoint_auto_does_not_capture_user_name.blade", [ "auto", Ok "71 segments of K = 71 steps" ]
+      // no gradient buffers, but the body writes an alias of a step input
+      // AFTER the recurrence (round 4 wave 10, A2, Codex 81d2ce3b): the
+      // replay reads the snapshot, under auto and at forced intervals
+      "153_recarray_checkpoint_snapshots_alias_written_after_recurrence.blade", [ "auto", Ok "replay-input snapshot: forcing -> " ]
+      "154_recarray_checkpoint_snapshots_alias_written_after_recurrence_forced.blade", [ "2", Ok "replay-input snapshot: forcing -> "; "3", Ok "replay-input snapshot: forcing -> " ]
+      // the second fresh round (Codex 0d817dd5): a module LAMBDA writes the
+      // input during a later statement's adjoint (snapshotted), and a
+      // stateful lambda inside the step (declined): the audit runs always
+      "155_recarray_checkpoint_snapshots_input_written_by_a_lambda_adjoint.blade", [ "auto", Ok "replay-input snapshot: forcing -> " ]
+      "156_recarray_checkpoint_declines_a_stateful_lambda_in_the_step.blade", [ "auto", Error "the step reads 'tick', which the replay cannot snapshot" ] ]
 
 /// Gap G250 (round 4 wave 9, lane A, A2): programs the G190 (c) rule still
 /// ACCEPTS although the gradient buffer shares storage the checkpointed step

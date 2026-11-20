@@ -2092,9 +2092,24 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
         | ExprKind.ExprUnaryOp (OpNeg, a) -> formOf seen a
         | ExprKind.ExprDotDot (lo, hi) when (litOf lo).IsSome && (litOf hi).IsSome -> Ok true
         | _ -> Error "its value is not a stored form or a total arithmetic form (a deferred value whose early copy could fail, a subscript, a division, an integer cast, an unknown call)"
+    // WITHOUT gradient buffers the replay can still read another value: a
+    // statement of the body AFTER the recurrence runs before the descending
+    // sweep, and it may write the storage of an array the step reads through
+    // an alias the name check (`writtenRead`) cannot see --
+    // `let forcing = identity(backing)` read by the step, `backing(0) = 0.25`
+    // after it (round 4 wave 10, lane a, A2: the fresh class-closure round,
+    // Codex 81d2ce3b; dx 0.0180956572294235 for 0.00267982482910156 under
+    // auto, gap G162). A first fix took the snapshots only when a statement
+    // after the recurrence assigned or called a declared function; the second
+    // fresh round (Codex 0d817dd5) found two more members of that shortcut --
+    // a module LAMBDA writing the input in a later statement's ADJOINT, before
+    // the replay (ad/155), and a stateful lambda called INSIDE the step, which
+    // the skipped audit never refused (ad/156). So the replay-input audit and
+    // its snapshots run in EVERY build, gradient buffers or not: no effect on a
+    // step input between the forward pass and the replay reaches the replay,
+    // and a step reading anything the audit cannot snapshot declines.
+    ignore hasGradBuffers
     let snapTargets, snapRefusal =
-        if not hasGradBuffers then [], None
-        else
             stepReads
             |> Seq.filter (fun x -> match judge Set.empty x with Error _ -> true | Ok () -> false)
             |> Seq.fold (fun (acc, refusal) x ->
@@ -2319,6 +2334,24 @@ let internal checkpointCarries (rc: RevCtx) (hasGradBuffers: bool) (arrayParams:
             match st with
             | CarryLoop (buf, t, _, hi, _, _) & NFor (_, _, _, body) -> Some (buf, t, hi, body)
             | _ -> None)
+    // A recurrence NESTED in a loop body (a function with a `let rec` called
+    // inside a map kernel, inlined) keeps its full tape; its decline is
+    // recorded too (round 4 wave 10, A2, Codex 81d2ce3b: it had no record).
+    let rec nested (ss: NStmt list) =
+        ss |> List.iter (fun st ->
+            match st with
+            | NFor (_, _, _, body) ->
+                body |> List.iter (fun inner ->
+                    match inner with
+                    | CarryLoop (buf, _, _, _, _, _) ->
+                        Blade.Effects.Decisions.record
+                            { Blade.Effects.Rule = "ad-checkpoint"; Version = 1; Span = noSpan; Subject = $"{rc.Fname}: {buf}"
+                              Outcome = Blade.Effects.Declined "the recurrence is nested in a loop body (v1 checkpoints top-level recurrences of the differentiated body only); it keeps its full tape"
+                              Evidence = [] }
+                    | _ -> ())
+                nested body
+            | _ -> ())
+    nested fwd
     carries |> List.fold (fun (fwd, finalE, cotDecls, rev) (s, t, hi, body) ->
         let record outcome evidence =
             Blade.Effects.Decisions.record

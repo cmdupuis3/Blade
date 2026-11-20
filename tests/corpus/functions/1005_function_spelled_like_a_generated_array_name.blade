@@ -1,0 +1,13 @@
+// TEST: A function spelled as an array binding plus a generated suffix is not shadowed by the generated name
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252; the wave-end review, F5): an array
+// binding a declares its extents table a_extents in main, which shadowed a
+// file-scope function a_extents at its call (a g++ rejection, BL9002). The
+// name table moved only BINDINGS spelled <binding>_<generated suffix>; a
+// callable so spelled now moves too.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+function a_extents(k: Int64) -> Int64 = k + 1
+let r = a_extents(1)
+// EXPECT: a = [1.0, 2.0]
+// EXPECT: r = 2

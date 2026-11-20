@@ -1,0 +1,13 @@
+// TEST: A parameter spelled like the compiler's rename of another parameter
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 1): the G224
+// rename gives a parameter that shadows a captured module binding the C++
+// name <name>__p<id>; a second parameter may SPELL that (both were
+// scale__p4: BL9002). The rename now avoids the program's spellings.
+// ============================================================================
+let scale: Float64 = 7.0
+let k = lambda(x: Float64) -> x * scale
+function f(scale: Float64, scale__p4: Float64) -> Float64 = k(scale__p4) + scale
+let r = f(Float64(2.0), Float64(3.0))
+// EXPECT: scale = 7.0
+// EXPECT: r = 23.0

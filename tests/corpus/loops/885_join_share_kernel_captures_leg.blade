@@ -1,0 +1,17 @@
+// TEST: a join share whose kernel captures another leg's leaf
+// Gap G233, round 4 wave 10 (Codex design review, class closure): the leg
+// `reduce(q, (+))` reads the deferred r, a join SHARE (evaluated per cell);
+// r's kernel captures the leg leaf p, so the prelude (leg kernels, then share
+// kernels) forces p under its own name and the p leg folds that snapshot.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let r = method_for(x) <@> lambda(v) -> v + p(1)
+let q = method_for(r) <@> lambda(v) -> v + 1.0
+let (s1, s2) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))
+x(0) = 10.0
+let w = p(0)
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: p = [2.0, 4.0]
+// EXPECT: s1 = 6.0
+// EXPECT: s2 = 13.0
+// EXPECT: w = 2.0

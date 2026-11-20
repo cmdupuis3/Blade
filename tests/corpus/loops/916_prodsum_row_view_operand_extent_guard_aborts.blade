@@ -1,0 +1,14 @@
+// TEST: A prodsum Over A Row View Operand Checks Its Extents (aborts)
+// Gap G265 (a) (round 4 wave 10 lane d): a and b are dense arrays whose extents (5 and 3) are known
+// only at run time. The C++ prodsum IIFE guarded plain-name operands only, so a row-view operand
+// A(0) read b past its end (s = 5.0); each operand expression is now bound once, then compared
+// (BL8011 before the first product), as the interpreter does.
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let A = method_for(0..4, a) <@> lambda(i, v) -> v + Float64(i) |> compute
+let s = prodsum(A(0), b)

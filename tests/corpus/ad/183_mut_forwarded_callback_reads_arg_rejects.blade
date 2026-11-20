@@ -1,0 +1,16 @@
+// TEST: A Forwarded Callback That Reads The Mut Argument Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3), round 4 wave 10 (lane C, C3): the callable a call site passes
+// for the forwarded parameter reads g by name, and g is the mut argument.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function helper(cb: Float64 -> Float64, y: mut A) -> Float64 = {
+    y(0) = cb(y(1))
+    y(0)
+}
+function outer(cb: Float64 -> Float64, y: mut A) -> Float64 = helper(cb, y)
+let mut g: A = [1.0, 2.0]
+function reads_g(v: Float64) -> Float64 = v + g(0)
+let r = outer(reads_g, g)
+// ERROR: BL4005
+// REJECT-AT: lower

@@ -59,7 +59,7 @@ let sum_good = reduce(good_temps, (+))
 // the O(|A|+|B|) hash-set fusion is a planned optimization.
 // ============================================================================
 let audited = Int64([1, 4, 5])
-let from_audited = mask(r_station, lambda(s) -> contains(audited, s))
+let from_audited = mask(r_station, lambda(s) -> contains(audited, Int64(s)))
 let audited_temps = compound(r_temp, from_audited)
 let n_audited = extents(audited_temps)
 let sum_audited = reduce(audited_temps, (+))
@@ -150,7 +150,7 @@ let station_qc_score = reduce(by_station_qc, (+))
 // EXPECT: station_qc_score = [0, 1, 0, 2, 1, 0]
 
 let uniq_stations = unique(r_station)
-let audited_mask = mask(uniq_stations, lambda(s) -> contains(audited, s))
+let audited_mask = mask(uniq_stations, lambda(s) -> contains(audited, Int64(s)))
 let troubled_mask = mask(uniq_stations, lambda(s) -> station_qc_score(s) > 0)
 let audited_and_troubled = audited_mask && troubled_mask
 let audited_or_troubled = audited_mask || troubled_mask

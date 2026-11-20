@@ -1,0 +1,13 @@
+// TEST: A Fold Range Whose High Bound Reads A Deferred Map Beside A Failing Low Bound Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 4): the interpreter evaluates the low
+// bound 100 / z first (integer division by zero); forcing p for the high bound ahead of it would
+// report p's modulo first. Hoisting the force is admitted only beside a closed-total bound; here
+// it is a coded refusal, BL7004.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: evaluates a range bound that reads a deferred map beside another name
+// WARN-CODEGEN: evaluates a range bound that reads a deferred map beside another name
+type I = Idx<2>
+let xs: Array<Int64 like I> = [2, 3]
+let z = 0
+let p = method_for(xs) <@> lambda(x) -> 200 % (x - 3)
+let result = reduce(method_for((100 / z)..p(0)) <@> lambda(k) -> k, (+), 0)

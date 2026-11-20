@@ -1,0 +1,22 @@
+// TEST: An imported member beside an importer binding spelled like its C++ name
+// MODULE: Main
+// Round 4 wave 10 (lane A, A1, gap G252): the C++ name of the qualified member
+// Lib.a is Lib__a, which the importer may spell; both were declared
+// double Lib__a (BL9002; the interpreter printed w = 3.0). A rename keyed by
+// the MANGLED spelling (tried in wave 9) moved the import's reads onto the
+// importer's binding (w = 4.0); the table is keyed by the raw IR spelling, so
+// the dotted member moves and each read follows its own binding. Lib.f beside
+// a user function Lib__f and Lib.EOF beside a user Lib__EOF are the same pair.
+module Main
+import Lib
+let Lib__a: Float64 = 2.0
+function Lib__f(x: Float64) -> Float64 = x * 3.0
+let Lib__EOF: Float64 = 8.0
+let w = Lib.a + Lib__a
+let v = Lib.f(Float64(1.0)) + Lib__f(Float64(1.0))
+let u = Lib.EOF + Lib__EOF
+// EXPECT: Lib.a = 1.0
+// EXPECT: Lib__a = 2.0
+// EXPECT: w = 3.0
+// EXPECT: v = 5.0
+// EXPECT: u = 12.0

@@ -1,0 +1,15 @@
+// TEST: Bindings, a function and a parameter spelled under the emitter's blade_ prefixes
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): the emitter's runtime entry points
+// and scaffolding are spelled blade_... / __blade_... (the timing
+// scaffold's __blade_t0), so a user spelling under those prefixes moves --
+// under u_, since lengthening with _ never leaves a prefix (the diff
+// review, Codex 067cb140 round 4: the first fix looped forever on
+// let blade_x).
+// ============================================================================
+let blade_x: Float64 = 1.0
+let __blade_t0: Float64 = 3.0
+function blade_f(__blade_p: Float64) -> Float64 = __blade_p * 10.0
+let r = blade_x + __blade_t0 + blade_f(Float64(2.0))
+// EXPECT: blade_x = 1.0
+// EXPECT: r = 24.0

@@ -1,0 +1,16 @@
+// TEST: A Row Fold Of A Possibly Failing prodsum Keeps The Seed's Failure First (aborts)
+// Gap G265 (round 4 wave 10 lane d; Codex design review): the hot-row schedule ran each row's
+// prodsum(row, b) right behind the row's production, so its BL8011 (rows of 5 cells against b's 3)
+// overtook the fold's seed, which the two-pass form evaluates first and which fails (7 % 0). A row
+// kernel that may fail is scheduled behind the rows only when the producer, the outer fold kernel
+// and the seed are closed-total; here it is not, so the seed's BL8013 comes first, in every lane.
+// ABORT: BL8013
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let z = extents(b) - 3
+let P = method_for(0..4, a) <@> lambda(i, v) -> v + Float64(i) |> compute
+let s = reduce(method_for(P) <@> lambda(row: T^1) -> prodsum(row, b), (+), Float64(7 % z))

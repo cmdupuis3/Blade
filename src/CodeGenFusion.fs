@@ -847,6 +847,10 @@ let genComposeApply
     (info: ComposeApplyInfo)
     (outputType: IRType)
     (builder: IRBuilder)
+    // G242, round 4 wave 10: CodeGenBinding.forceDeferredBindingIds (a later
+    // file), for the PER-STAGE capture prelude of the two-sweep path; None at
+    // a consumer with no capture prelude (the refusal below stays)
+    (stageForce: (CodeGenContext -> string -> IRId list -> string list * CodeGenContext) option)
     : string list * CodeGenContext =
     let ind = indentStr ctx
     let rec resolveDeferred e =
@@ -864,15 +868,37 @@ let genComposeApply
                 | None -> e
         | _ -> e
     let resolvedComposition = resolveDeferred info.Composition
+    // G242, round 4 wave 10: the TWO-SWEEP path (two named stage kernels) runs
+    // stage 1 over every cell, then stage 2 -- the interpreter's successive
+    // traversals -- so a SECOND stage's deferred captures are forced between
+    // the sweeps, at stage 2's own start (G115), after a stage 1 that may
+    // fail. Admitted only when the first stage captures nothing deferred.
+    let stageKernelOf (o: IRExpr) = match resolveDeferred o with IRObjectFor x -> x.Kernel | r -> r
+    let deferredCapsOf (k: IRExpr) =
+        match resolveCallable k with
+        | Some c -> c.Captures |> List.filter (fun ci -> Map.containsKey ci.Id ctx.DeferredComputations)
+        | None -> []
+    let namedStage (k: IRExpr) = match k with IRVar (id, _) -> Map.containsKey id ctx.VarNames | _ -> false
+    let stage2Prelude : IRId list =
+        match stageForce, resolvedComposition, info.InputArrays with
+        | Some _, IRComposeObj (o1, o2), [ _ ] ->
+            let k1 = stageKernelOf o1
+            let k2 = stageKernelOf o2
+            if namedStage k1 && namedStage k2
+               && composeStageInputRank k1 = 0 && composeStageInputRank k2 = 0
+               && List.isEmpty (deferredCapsOf k1) then
+                deferredCapsOf k2 |> List.map (fun ci -> ci.Id)
+            else []
+        | _ -> []
     match composeUnforcedStageCaptures ctx info.Composition with
-    | (_ :: _) as unforced ->
+    | (_ :: _) as unforced when not (unforced |> List.forall (fun n -> deferredCapsOf (match resolvedComposition with IRComposeObj (_, o2) -> stageKernelOf o2 | c -> c) |> List.exists (fun ci -> ci.Name = n) && not stage2Prelude.IsEmpty)) ->
         let names = unforced |> List.map (fun n -> $"`{n}`") |> String.concat ", "
         (codegenError ctx ind
             ($"a pipeline stage captures the deferred map {names}, which is not forced before the pipeline runs: \
 a stage after a stage that may fail cannot have it forced ahead of that stage's traversal, and this lane has no \
 per-stage capture prelude for it (gap G242). Force it first (`let m = <it> |> compute`) and capture `m`, \
 or make the earlier stages' kernels total"), ctx)
-    | [] ->
+    | _ ->
     match resolvedComposition with
     | IRComposeObj (obj1, obj2) ->
         let rObj1 = resolveDeferred obj1
@@ -988,8 +1014,8 @@ or make the earlier stages' kernels total"), ctx)
             // other call of a lifted callable forwards them -- gap G242,
             // Codex diff review 5f64f352 round 2: `__lambda_20(backing[__i0])`
             // called a two-argument lifted kernel with one argument)
-            let directName (kn: string) (k: IRExpr) : string * string list =
-                let withCaps (name: string) (callee: IRCallable) = (name, captureForwardArgs ctx.VarNames callee.Captures)
+            let directName (varNames: Map<IRId, string>) (kn: string) (k: IRExpr) : string * string list =
+                let withCaps (name: string) (callee: IRCallable) = (name, captureForwardArgs varNames callee.Captures)
                 match resolveCallable k with
                 | Some c ->
                     (match c.Params, c.Body with
@@ -1047,7 +1073,7 @@ or make the earlier stages' kernels total"), ctx)
                 [ $"{ind}const size_t* {s1Name}_extents = {arrName}.extents;"
                   arrayAlloc { Ind = ind; Elem = s1Elem; Rank = arrRank; Name = s1Name
                                Symm = "nullptr"; Strict = None; Extents = s1Name + "_extents" } ]
-                @ stageSweep arrName s1Name (directName k1 kernel1)
+                @ stageSweep arrName s1Name (directName ctx.VarNames k1 kernel1)
             // Deterministic deallocation, site 5e: the `>>@` two-stage pipeline.
             // Both stages allocate dense/nullptr under a borrowed extents pointer
             // (`s1` aliases the input's, `name` aliases `s1`'s), so neither owns
@@ -1057,14 +1083,24 @@ or make the earlier stages' kernels total"), ctx)
             let singleArray = match arrays with [_] -> true | _ -> false
             if singleArray then
                 registerPoolAlloc AllocDense s1Elem arrRank "nullptr" (s1Name + "_extents") s1Name None
+            // stage 2's deferred captures, forced here: after stage 1's sweep,
+            // before stage 2's first cell (G242, the per-stage prelude)
+            // (the context the force returns goes back to the caller: the forced
+            // map is stored now, so a later read or capture reads it -- Codex
+            // diff review 03cfa2dd, finding 2)
+            let (s2Force, s2Ctx) =
+                match stageForce with
+                | Some force when not stage2Prelude.IsEmpty -> force ctx $"{name}__s2cap" stage2Prelude
+                | _ -> ([], ctx)
             let s2Code =
+                s2Force @
                 [ $"{ind}const size_t* {name}_extents = {s1Name}.extents;"
                   arrayAlloc { Ind = ind; Elem = s2Elem; Rank = arrRank; Name = name
                                Symm = "nullptr"; Strict = None; Extents = name + "_extents" } ]
-                @ stageSweep s1Name name (directName k2 kernel2)
+                @ stageSweep s1Name name (directName s2Ctx.VarNames k2 kernel2)
             if singleArray then
                 registerPoolAlloc AllocDense s2Elem arrRank "nullptr" (name + "_extents") name None
-            (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx)
+            (elemTypeErrCode @ s1Code @ [""] @ s2Code, s2Ctx)
         | _ when not (stageEmittable kernelName1 kernel1 && stageEmittable kernelName2 kernel2) ->
             // STAGED EMISSION IS TWO-STAGE (v1), and `IRComposeObj` NESTS. A
             // three-stage `o1 >>@ o2 >>@ o3` therefore arrives with a whole
@@ -1167,6 +1203,30 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         let leafCgs = infos |> List.mapi (fun i info ->
             // S2 routing, same rule as the single-kernel site.
             routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder))
+        // G265: EACH LEAF'S CO-ITERATION EXTENT GUARD (BL8011) -- the merged
+        // nest is bounded by the leaves' shared traversal, and a leaf's OTHER
+        // operands (`zip(a, b)` beside a leaf over `a`) were never compared.
+        // Every leaf's guard runs before the merged nest; a later leaf's guard
+        // is hoisted ahead of the earlier leaves' cells, so it is admitted only
+        // when every earlier leaf's kernel is closed-total (the interpreter
+        // runs the leaves one after another: an earlier leaf's failing cell
+        // would otherwise be overtaken). Otherwise the fusion is refused here.
+        let leafGuards =
+            List.map2 (fun (info: ApplyInfo) (cg: LoopNestCodeGen) ->
+                // a STORED operand only: a deferred operand of a leaf is not
+                // forced on this path (gap G284), and the guard must never
+                // name an array nothing declared
+                coIterationGuardLines ctx ind info cg.Bindings (fun pos ->
+                    match List.tryItem pos info.Arrays with
+                    | Some (IRVar (id, _)) -> not (Map.containsKey id ctx.DeferredComputations)
+                    | _ -> false)) infos leafCgs
+        let leafTotal (info: ApplyInfo) =
+            Blade.IRTotality.auditApply resolveCallable (fun id -> Map.tryFind id ctx.DeferredComputations)
+                (fun id -> Map.containsKey id ctx.DeferredComputations) info = Ok ()
+        let guardHoistBlocked =
+            leafGuards |> List.indexed |> List.exists (fun (k, g) ->
+                k > 0 && not g.IsEmpty && (infos |> List.take k |> List.exists (leafTotal >> not)))
+        let guardLines = List.concat leafGuards
         let backends = infos |> List.map classifyLeafBackend
         // Deterministic deallocation, site 2: `declCode` below is built EAGERLY
         // but reaches the output only through `wrap` (the host arms). The device
@@ -1244,6 +1304,11 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // Loop structure (bounds/triangularity) must agree regardless of
         // backend. THEN the per-level backend must agree at each shared level:
         // shared levels are one physical header, so one backend.
+        if guardHoistBlocked then
+            Error "a later leaf co-iterates operands whose extents are known only at run time, and an earlier leaf's kernel may fail: hoisting its BL8011 extent check ahead of the earlier leaf's cells would change the failure order -- force the leaves separately with |> compute (gap G265)"
+        elif not guardLines.IsEmpty && not (backends |> List.forall isHostBackend) then
+            Error "device co-fusion of leaves whose co-iterated operands have run-time extents is not supported (no BL8011 extent check on that path) -- force the leaves separately with |> compute (gap G265)"
+        else
         checkMergeCompatible leafCgs |> Result.bind (fun _primary ->
             let backendName = function
                 | BkSerial -> "serial" | BkOmp -> "omp"
@@ -1266,7 +1331,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 hostParallelR |> Result.map (fun hostParallel ->
                     let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind leafCgs
                     registerStreamBufDecls sNew
-                    wrap (sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel None))
+                    wrap (guardLines @ sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel None))
             // ---- All cuda: device co-fusion --------------------------------
             | _ when backends |> List.forall (_.IsBkCuda) ->
                 let blockSizes = backends |> List.choose (function BkCuda b -> Some b | _ -> None) |> List.distinct
@@ -1450,7 +1515,7 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
             let code = genApplyCombinator ctx name info builder
             (code, name, Map.empty)
         | IRComposeApply info ->
-            let (code, _) = genComposeApply ctx name info info.OutputType builder
+            let (code, _) = genComposeApply ctx name info info.OutputType builder None
             (code, name, Map.empty)
         | IRVar (id, _) ->
             let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue name
@@ -1484,7 +1549,7 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
                 | IRApplyCombinator info ->
                     genApplyCombinator ctx leafName info builder @ [""]
                 | IRComposeApply info ->
-                    let (code, _) = genComposeApply ctx leafName info info.OutputType builder
+                    let (code, _) = genComposeApply ctx leafName info info.OutputType builder None
                     code @ [""]
                 | IRVar (id, _) ->
                     let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName

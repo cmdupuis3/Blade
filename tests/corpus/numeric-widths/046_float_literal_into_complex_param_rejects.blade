@@ -1,0 +1,7 @@
+// TEST: a float literal into a complex parameter (rejects)
+// ============================================================================
+// G275 (formalism 2.4): a literal adapts only within its own class at a call.
+// ============================================================================
+function g(z: Complex64) -> Complex64 = z * z
+let y = g(1.5)
+// ERROR: BL3020

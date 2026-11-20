@@ -1,0 +1,16 @@
+// TEST: A Sequence Holds Copies Of Its Members
+// ============================================================================
+// Gap G240 (5) / G60, round 4 wave 10 (lane C, C3): sequence(a, b) stacks
+// COPIES of its members (formalism copy-on-bind; the C++ lane's emission),
+// so a later write to a member does not show through the sequence. The
+// interpreter's rows used to SHARE the members' stores (w = 9.0 there).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+let mut a: A = [1.0, 2.0]
+let b: A = [3.0, 4.0]
+let s = sequence(a, b) |> compute
+let w = {
+    a(0) = 9.0
+    s(0, 0)
+}
+// EXPECT: w = 1.0

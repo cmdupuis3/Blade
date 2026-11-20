@@ -1,0 +1,9 @@
+// TEST: a Float64 predicate chosen by an `if` over Float32 cells (rejects)
+// ============================================================================
+// G276 (1): a callable EXPRESSION in a kernel slot is judged on its type
+// (Lowering's slot judgment), whatever its spelling.
+// ============================================================================
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let k = lambda(v: Float64) -> v > 1.0
+let y = mask(a, if true then k else k)
+// ERROR: BL3020

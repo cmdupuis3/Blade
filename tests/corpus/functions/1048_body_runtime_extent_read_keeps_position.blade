@@ -1,0 +1,14 @@
+// TEST: A Run-Time Extent Read Of A Deferred Map Keeps Its Position (aborts)
+// ============================================================================
+// Gap G239 / G278, round 4 wave 10 (lane C, C1; Codex diff review 03cfa2dd
+// finding 1): a RUN-TIME extent read of a deferred map forces it at its
+// position, so the per-read rewrite declines a statement holding one (the
+// statement keeps its pre-pass).
+// ============================================================================
+let n: Int64 = 2
+let d = method_for(0..n) <@> lambda(i: Int64) -> 8 / i
+let x: Array<Float64 like Idx<1>> = [-1.0]
+let bad = method_for(x) <@> lambda(v) -> Int64(floor(sqrt(v)))
+function f() -> Int64 = extents(d) + bad(0)
+let r = f()
+// ABORT: integer division by zero

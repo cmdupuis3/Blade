@@ -2162,19 +2162,52 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
                     when not (isNull loc) && Blade.Ast.DegenerateFloatLiterals.isDegenerate loc.Span ->
                     Some (LiteralDefaults.floatTextAt v loc.Span)
                 | _ -> None
-            match tree with
-            | IRUnaryOp (IRNeg, inner) -> marker inner |> Option.map (fun t -> "-" + t)
-            | _ -> marker tree
+            // (G275: the marker may sit anywhere in a literal-only tree --
+            // `v * (1e-400 + 1.0)` -- and is judged by its own spelling there.)
+            let rec find (e: IRExpr) : string option =
+                match marker e with
+                | Some t -> Some t
+                | None ->
+                match e with
+                | IRUnaryOp (IRNeg, inner) -> find inner |> Option.map (fun t -> if (marker inner).IsSome then "-" + t else t)
+                | IRUnaryOp (IRMath _, inner) -> find inner
+                | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ | IRCaret), l, r, _) ->
+                    find l |> Option.orElseWith (fun () -> find r)
+                | _ -> None
+            // only inside a LITERAL-ONLY tree (a non-literal leaf is the
+            // partner of its own operator, judged there)
+            let rec literalOnly (e: IRExpr) =
+                match e with
+                | IRLit (IRLitFloat _ | IRLitInt _) -> true
+                | IRUnaryOp (IRCast (ETFloat64, _), IRLit (IRLitFloat _)) -> (marker e).IsSome
+                | IRUnaryOp ((IRNeg | IRMath _), x) -> literalOnly x
+                | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ | IRCaret), l, r, _) ->
+                    literalOnly l && literalOnly r
+                | _ -> false
+            match marker tree with
+            | Some t -> Some t
+            | None -> if literalOnly tree then find tree else None
     let adapt (e: IRExpr) : IRExpr option =
         match e with
-        | IRBinOp (IRElementwise, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
+        | IRBinOp ((IRElementwise | IROuter) as mode, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
+            // R19 / G275 (2): a float literal tree beside a narrow partner is
+            // judged BEFORE it is narrowed -- narrowLit rounds any double, so
+            // `z * 1e100` over a Float32 `z` (a let-bound lambda's parameter
+            // the first call decided) became an infinity silently.
+            (let tl, tr = exprTypeIfKnown l, exprTypeIfKnown r
+             if isNarrow tl then
+                 degenerateAt tl r |> Option.iter (refuseMisfit loc tl)
+                 if floatTree r then floatMisfit r |> Option.iter (refuseMisfit loc tl)
+             if isNarrow tr then
+                 degenerateAt tr l |> Option.iter (refuseMisfit loc tr)
+                 if floatTree l then floatMisfit l |> Option.iter (refuseMisfit loc tr))
             (match narrowLit r, narrowLit l with
-             | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
-             | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (IRElementwise, op, l', r, loc))
+             | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (mode, op, l, r', loc))
+             | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (mode, op, l', r, loc))
              | _ ->
                  match narrowInt r, narrowInt l with
-                 | Some r', _ when op <> IRCaret && isInt32 (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
-                 | _, Some l' when isInt32 (exprTypeIfKnown r) && op <> IRCaret -> Some (IRBinOp (IRElementwise, op, l', r, loc))
+                 | Some r', _ when op <> IRCaret && isInt32 (exprTypeIfKnown l) -> Some (IRBinOp (mode, op, l, r', loc))
+                 | _, Some l' when isInt32 (exprTypeIfKnown r) && op <> IRCaret -> Some (IRBinOp (mode, op, l', r, loc))
                  | _ ->
                      let tl, tr = exprTypeIfKnown l, exprTypeIfKnown r
                      degenerateAt tl r |> Option.iter (refuseMisfit loc tl)

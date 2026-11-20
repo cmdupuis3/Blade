@@ -1,0 +1,18 @@
+// TEST: A tuple projection of an imported deferred map, folded at top level, keeps its failure order (aborts)
+// MODULE: Main
+// Round 4 wave 10 (lane A, A3, gap G107; the diff review of multifile/083's
+// fix, Codex 067cb140): the operand reaches the imported deferred map through
+// a tuple construction and a projection, which alias resolution does not
+// follow; under top the join forced d (BL8013) ahead of fail (BL8014) and
+// the C++ lane referenced an undeclared y. The operand admission follows every
+// structural step (alias, tuple, projection) to a foreign root.
+module Main
+from Lib import I, d
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let pair = (d, d)
+let y = pair[0]
+let fz: Float64 = 0.0
+let a = prodsum(x, x)
+let fail = Int64(floor(fz / fz))
+let b = prodsum(y, y)
+// ABORT: BL8014

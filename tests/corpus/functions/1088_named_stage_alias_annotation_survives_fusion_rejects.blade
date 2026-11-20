@@ -1,0 +1,11 @@
+// TEST: a named stage annotated through a single-letter type alias, fused (rejects)
+// ============================================================================
+// G276 (2): `F` is a module type alias, not a signature variable.
+// ============================================================================
+type F = Float64
+function f(x: Float32) -> Float32 = x
+function g(x: F) -> F = x
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let p = object_for(f) >>@ object_for(g)
+let y = (p <@> a) |> compute
+// ERROR: BL3001

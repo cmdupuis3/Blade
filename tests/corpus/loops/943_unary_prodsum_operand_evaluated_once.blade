@@ -1,0 +1,15 @@
+// TEST: A Unary prodsum Evaluates Its Operand Expression Once
+// Gap G265 (a) (round 4 wave 10 lane d; Codex diff review): the reproducible serial form of a
+// one-operand prodsum re-spelled its operand per element, so `tick(state)` ran once per cell
+// (state = [3.0, 3.0, 3.0], s = 6.0 under BLADE_FP_REPRO=1); the operand is now bound once in
+// every form: 1.0 + 1.0 + 1.0.
+function tick(v: mut Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = {
+    v(0) += 1.0
+    v(1) += 1.0
+    v(2) += 1.0
+    v
+}
+let mut state: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let s = prodsum(tick(state))
+// EXPECT: state = [1.0, 1.0, 1.0]
+// EXPECT: s = 3.0

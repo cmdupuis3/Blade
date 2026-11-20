@@ -1,0 +1,25 @@
+// TEST: A Loop Step Read After A Write Of The Map Input Sees The Write
+// ============================================================================
+// Gap G239, round 4 wave 10 (lane C, C1): inside a FUNCTION body a deferred
+// module map is forced AT EACH READ POSITION, in evaluation order (formalism
+// 10.2) -- an untaken read forces nothing and the evaluation count is
+// observable. The compiled lanes forced it once per body statement, before
+// the statement; a read whose order that cannot reproduce is now a call of a
+// one-statement helper and the statement spine is put in evaluation order
+// (Lowering.splitDeferredBodyReadsModule).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [1.0]
+let forcing = method_for(backing) <@> lambda(e) -> e * 2.0
+// each step writes the map's input, then reads the map: one force per step
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<4>> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: forcing(0)
+        | prefix :: n -> prefix :: { backing(0) = Float64(n); forcing(0) }
+    reduce(s, (+))
+}
+let r = f(5.0)
+// EXPECT: r = 14.0
+// EXPECT: backing = [3.0]

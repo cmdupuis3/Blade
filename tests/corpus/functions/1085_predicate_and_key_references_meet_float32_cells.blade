@@ -1,0 +1,18 @@
+// TEST: a mask predicate and a sort key passed by name are decided by Float32 cells
+// ============================================================================
+// G276 (1): the passing twin -- the references' open parameters take the
+// cells' width, and a named Float32 predicate meets them as declared.
+// ============================================================================
+function work(x: Array<Float32 like Idx<3>>) = {
+    let k = lambda(v) -> v > 0.1
+    let key = lambda(v) -> 0.0 - v
+    let m = mask(x, k)
+    let s = sort(x, key)
+    (m, s)
+}
+function p32(v: Float32) -> Bool = v < 0.25
+let a: Array<Float32 like Idx<3>> = [0.3, 0.1, 0.2]
+let r = work(a)
+let n = mask(a, p32)
+// EXPECT: r = ([true, false, true], [0.3, 0.2, 0.1])
+// EXPECT: n = [false, true, true]

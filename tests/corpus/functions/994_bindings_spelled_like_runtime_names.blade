@@ -1,0 +1,20 @@
+// TEST: Bindings spelled like names the emitted code uses unqualified
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): the print pass writes cout << ..,
+// array code calls allocate<..> (nested_array_utilities, hoisted by a
+// using-directive) and declares size_t extents tables -- a binding of one
+// of those spellings shadowed it (BL9002). Such a binding is now emitted under
+// another C++ name.
+// ============================================================================
+let cout: Float64 = 3.0
+let allocate: Float64 = 2.0
+let size_t: Float64 = 1.0
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let ys = xs * allocate |> compute
+let r = cout + size_t + reduce(ys, (+))
+// EXPECT: cout = 3.0
+// EXPECT: allocate = 2.0
+// EXPECT: size_t = 1.0
+// EXPECT: xs = [1.0, 2.0, 3.0]
+// EXPECT: ys = [2.0, 4.0, 6.0]
+// EXPECT: r = 16.0

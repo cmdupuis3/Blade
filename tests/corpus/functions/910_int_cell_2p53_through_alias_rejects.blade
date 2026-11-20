@@ -1,6 +1,6 @@
 // TEST: An Int64 Cell Through An Aliased Lambda With A Float Default Is Refused (rejects)
 // ERROR: BL3020 @ 11:37
-// ERROR-CONTAINS: the map's cells are Int64
+// ERROR-CONTAINS: widening it to Float64
 // ============================================================================
 // R11: as functions/909 with `(x + 1) - x` at 2^53 (double arithmetic would
 // round it away); g++ refused it (BL9002).

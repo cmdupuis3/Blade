@@ -1,0 +1,33 @@
+// TEST: A checkpointed step input written by a module lambda during a later statement's adjoint
+// ============================================================================
+// Round 4 wave 10 (lane A, A2: the SECOND fresh class-closure round of
+// BLADE_AD_CHECKPOINT, Codex 0d817dd5, gap G162 m23): bump is a module
+// LAMBDA (not a declared function), so the after-recurrence write check
+// missed it; its second call -- in the adjoint of s(4) * bump(..), before
+// the descending sweep's replay -- writes forcing, which the replay then
+// read (auto: dx 0.0180956572294235 for the full tape's 0.00267982482910156).
+// The replay inputs are now snapshotted whatever the body does after the
+// recurrence (blade test access compares the raw bits under auto).
+// ============================================================================
+import ad as ad
+type A = Array<Float64 like Idx<1>>
+let mut forcing: A = [0.125]
+let mut calls = Int64(0)
+let bump = lambda(v: Float64) -> {
+    calls = calls + 1
+    if calls > 1 then { forcing(0) = 0.25; v } else v
+}
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: 0.5 * prefix(n - 1) * prefix(n - 1) + forcing(0)
+    let z = s(4) * bump(Float64(1.0))
+    z
+}
+let (value, dx) = ad.grad(f)(Float64(0.5))
+// EXPECT: forcing = [0.25]
+// EXPECT: calls = 2
+// EXPECT: value = 0.134412884712219
+// EXPECT: dx = 0.00267982482910156

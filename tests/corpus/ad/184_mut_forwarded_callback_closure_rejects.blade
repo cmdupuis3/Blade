@@ -1,0 +1,18 @@
+// TEST: A Forwarded Callback Holding A Closure Stays Untraced (rejects)
+// ============================================================================
+// Gap G240 (3), round 4 wave 10 (lane C, C3): a call site passing a closure
+// held by a binding gives the forwarded parameter no resolution: untraced,
+// fail closed.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function helper(cb: Float64 -> Float64, y: mut A) -> Float64 = {
+    y(0) = cb(y(1))
+    y(0)
+}
+function outer(cb: Float64 -> Float64, y: mut A) -> Float64 = helper(cb, y)
+function factory(a: A) -> (Float64 -> Float64) = lambda(v: Float64) -> v + a(0)
+let mut g: A = [1.0, 2.0]
+let kf = factory(g)
+let r = outer(kf, g)
+// ERROR: BL4005
+// REJECT-AT: lower

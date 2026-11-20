@@ -2739,13 +2739,13 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
                 let rec renderLetPrefix nm acc e =
                     match e with
                     | IRLet (lid, v, b) ->
-                        let nm' = Map.add lid ($"__v{lid}") nm
+                        let nm' = Map.add lid ((localVarName lid)) nm
                         let lines =
                             if isUnitExpr v then
                                 match renderUnitStmts subst nm v with
                                 | "" -> []
                                 | s -> [$"    {s}"]
-                            else [$"    auto __v{lid} = {(exprToCppCore subst nm v)};"]
+                            else [$"    auto {(localVarName lid)} = {(exprToCppCore subst nm v)};"]
                         renderLetPrefix nm' (acc @ lines) b
                     | _ -> (nm, acc)
                 let (leafMap, letLines) = renderLetPrefix nameMap [] codeGen.KernelExpr
@@ -4005,6 +4005,34 @@ let tryGenRowFoldJamNest
                 // The IIFE's empty-row panic, raised where it would have been:
                 // at the first row, before any row is folded.
                 [ $$"""if (__jm > 0 && __jn == 0) { blade_rt::panic("BL8003", "reduce: empty array, no reduction possible", {{declPanicArgs ()}}); }""" ]
+        // G265 (b): THE CO-ITERATION EXTENT GUARD of the per-row prodsum
+        // (BL8011): every other operand's fold-axis extent against the head's
+        // (`__jn`), raised where the first row's prodsum IIFE would raise it
+        // -- at the first row, so no rows, no check (the interpreter's per-row
+        // guard). Emitted only when an extent is genuinely run-time.
+        let coGuard =
+            match codeGen.KernelExpr with
+            | IRProdSum args when args.Length >= 2 ->
+                // RUN-TIME extents on both sides; an operand spelled like the
+                // head (the self-dot `prodsum(row, row)`) is the head, and a
+                // STATIC pair (both the same literal -- a shape-specialized
+                // instance bakes its extents, the call site checked them) is
+                // resolved at compile time: no code (the pre-wave emission)
+                let extentOf (a: IRExpr) =
+                    match operandOf a with
+                    | Some (Choice1Of2 (e, at)) -> Some ($"{e.ArrayName}.extents[1]", literalExtentOfArray at 1)
+                    | Some (Choice2Of2 (n, at)) -> Some ($"{n}.extents[0]", literalExtentOfArray at 0)
+                    | None -> None
+                match extentOf (List.head args) with
+                | None -> []
+                | Some (headText, headLit) ->
+                args |> List.tail |> List.choose (fun a ->
+                    match extentOf a with
+                    | Some (_, lit) when lit.IsSome && lit = headLit -> None
+                    | Some (t, _) when t <> headText ->
+                        Some $$"""if (__jm > 0 && (int64_t)({{t}}) != (int64_t)({{headText}})) { blade_rt::panic("BL8011", "co-iteration extent mismatch", {{declPanicArgs ()}}); }"""
+                    | _ -> None)
+            | _ -> []
         let tile =
             [ $$"""for (; {{iv}} + {{jamR}} <= __jm; {{iv}} += {{jamR}}) {""" ]
             @ ([ 0 .. jamR - 1 ] |> List.collect (fun k -> rowDecls k $"{iv} + {k}") |> List.map (fun s -> "    " + s))
@@ -4032,7 +4060,7 @@ let tryGenRowFoldJamNest
             [ ind indent + $"// row-fold jam: {kind} over rows, {jamR} rows per tile, one accumulator per row (bitwise: each row keeps its own ascending fold)"
               ind indent + "{" ]
             @ ([ $"const size_t __jm = {rowBound};"; $"const size_t __jn = {foldLen};" ]
-               @ guard @ prelude @ [ $"size_t {iv} = 0;" ] @ tile @ remainder
+               @ guard @ coGuard @ prelude @ [ $"size_t {iv} = 0;" ] @ tile @ remainder
                |> List.map (fun s -> ind (indent + 1) + s))
             @ [ ind indent + "}" ])
     | _ -> None
@@ -4106,11 +4134,26 @@ let internal tryGenGemvDispatch
                     | [ aTy ] -> denseCellCountOfArray aTy aName
                     | _ -> "0"
                 (linalgUsedCell ()).Value <- true
+                // G265 (b): THE CO-ITERATION EXTENT GUARD of the per-row
+                // prodsum (BL8011): the vector's extent against A's trailing
+                // one, raised where the first row's prodsum would raise it (no
+                // rows, no check). A STATIC pair (both the same literal) is
+                // resolved at compile time: no code.
+                let staticPair =
+                    match operandTypes, call.NestOperands |> List.tryPick (fun (r, src) -> if r = Blade.LinAlgPatterns.RoleB then Some src else None) with
+                    | [ aTy ], Some (Blade.LinAlgPatterns.FromKernelRef (IRVar (_, ArrayElem xAt))) ->
+                        (match literalExtentOfArray aTy 1, literalExtentOfArray xAt 0 with
+                         | Some n, Some m -> n = m
+                         | _ -> false)
+                    | _ -> false
+                let xGuard =
+                    if staticPair then ""
+                    else $$"""if ((int64_t)({{mExtent}}) > 0 && (int64_t)({{xName}}.extents[0]) != (int64_t)({{aName}}.extents[1])) { blade_rt::panic("BL8011", "co-iteration extent mismatch", {{declPanicArgs ()}}); } """
                 // BLOCK comment, not `//`: an inline-form materialization
                 // space-joins its lines into a single-line IIFE, where a line
                 // comment would swallow the rest of the statement.
                 Some [ String.replicate indent "    "
-                       + $"/* linalg dispatch: gemv y = {aName} * {xName} (per-row prodsum fiber) */ {entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {xName}.data, {yName}.data);" ]
+                       + $"/* linalg dispatch: gemv y = {aName} * {xName} (per-row prodsum fiber) */ {xGuard}{entry}({mExtent}, {nExtent}, {aName}.data, {aCells}, {xName}.data, {yName}.data);" ]
             | _ -> None
     | _ -> None
 
@@ -5472,7 +5515,7 @@ let computeOwnedMoveAssigns (modul: IRModule) : Map<IRId, IRId> =
     else
     let bindingById = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
     let homeName (h: int) = homes |> List.pick (fun (k, n, _) -> if k = h then Some n else None)
-    let nameOf (id: IRId) = match Map.tryFind id bindingById with Some b -> b.Name | None -> $"__v{id}"
+    let nameOf (id: IRId) = match Map.tryFind id bindingById with Some b -> b.Name | None -> (localVarName id)
     // The definition of `id` in `home`: a module binding (main) or a let.
     let defIn (home: int) (id: IRId) : (IRExpr * IRId list) option =
         match Map.tryFind id bindingById with

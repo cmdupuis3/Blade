@@ -1,0 +1,12 @@
+// TEST: parenthesized explicit casts handed through an alias to a parameter of another width (rejects)
+// ============================================================================
+// G275 (Codex round 7): parentheses widen a cast's span, and the user-cast
+// mark follows it -- `(Float64(1e100))` is still the fixed Float64 value the
+// user wrote, never a literal that adapts to the Float32 the later direct
+// call decides (the sum would be narrowed to an infinity at the alias call).
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a = saved((Float64(1e100)) + ((1e100 |> Float64)))
+let b = h(Float32(2.0))
+// ERROR: BL3020

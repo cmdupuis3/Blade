@@ -1767,7 +1767,7 @@ let runCliSmokeTests () : TH.BlockResult =
             let matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
             let mGuard = "    let m: Int64 = match i with\n        | 5 -> 1\n"
             let dGuard = "    let q = 10 / d\n"
-            let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz = 0.0\n"
+            let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz: Float64 = 0.0\n"
             let a7c =
                 "type Ix = Idx<1003>\n"
                 + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n}\n"

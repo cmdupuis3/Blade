@@ -1,0 +1,13 @@
+// TEST: A Fold Range Bound Beside A Writing Map Reads The Map Stored At Its Binding
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 5): p writes state(0) = 2 in its kernel,
+// so it is not a deferred value -- it is evaluated at its own binding, before the fold (state = [2]).
+// The bound state(0)..p(0) then reads two stored values: no force is moved, 2 + 3 = 5 in every lane.
+let mut state: Array<Int64 like Idx<1>> = [0]
+let xs: Array<Int64 like Idx<1>> = [4]
+let p = method_for(xs) <@> lambda(x) -> {
+    state(0) = 2
+    x
+}
+let r = reduce(method_for(state(0)..p(0)) <@> lambda(k) -> k, (+), 0)
+// EXPECT: state = [2]
+// EXPECT: r = 5

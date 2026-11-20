@@ -1207,7 +1207,13 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
         // ERROR pins, EXPECT lines that cannot be checked, and a value test
         // that pins nothing without saying so.
         let isRejects = testName.EndsWith "(rejects)"
+        // An "(aborts)" probe, the single-file runner's rule (isExpectedAbort):
+        // it compiles, runs, exits nonzero, and the merged output carries every
+        // `// ABORT:` pin of any member (round 4 wave 10, lane a: the failure-order
+        // witnesses multifile/083, 085, 086 -- the runner had no such probe).
+        let isAborts = testName.EndsWith "(aborts)"
         let texts = sources |> List.map snd
+        let abortPins = texts |> List.collect parseAbortExpectations
         let unionExpected = texts |> List.collect parseExpectedValues
         let pinProblems =
             (texts |> List.collect parseMalformedDiagPinLines |> List.map (fun l -> $"{l}  <- malformed ERROR pin"))
@@ -1219,7 +1225,8 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                | Some "" -> [ "// NOPINS: needs a reason" ]
                | Some _ when not unionExpected.IsEmpty -> [ "// NOPINS: marker on a test that HAS EXPECT pins" ]
                | Some _ -> []
-               | None when not isRejects && unionExpected.IsEmpty && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
+               | None when isAborts && abortPins.IsEmpty -> [ "an (aborts) probe pins no // ABORT: message" ]
+               | None when not isRejects && not isAborts && unionExpected.IsEmpty && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
                    [ "the test pins nothing -- add // EXPECT: pins, or `// NOPINS: <reason>`" ]
                | None -> [])
         if not pinProblems.IsEmpty then
@@ -1316,6 +1323,19 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                         failedNames <- failedNames @ [testName]
                     | Ok exeFile ->
                         match runExecutable exeFile with
+                        | Ok (code, output) when isAborts ->
+                            let missing = abortPins |> List.filter (fun sub -> not (output.Contains sub))
+                            if code = 0 then
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName "abort-probe exited 0: the program was expected to abort"
+                                failed <- failed + 1
+                                failedNames <- failedNames @ [testName]
+                            elif not missing.IsEmpty then
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"""abort output lacks '{String.concat "', '" missing}': {output}""")
+                                failed <- failed + 1
+                                failedNames <- failedNames @ [testName]
+                            else
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName "aborted with the pinned message"
+                                passed <- passed + 1
                         | Ok (0, output) ->
                             // EXPECT pins are the UNION over the member files
                             // (they used to be read from the LAST file only, so

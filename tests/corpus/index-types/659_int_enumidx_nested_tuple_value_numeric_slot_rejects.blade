@@ -11,5 +11,5 @@
 type R = EnumIdx<[300, 100, 200]>
 let codes: Array<R like Idx<3>> = [100, 200, 300]
 function g(t: ((Int64, Float64), Float64)) -> Int64 = t[0][0]
-let t = ((codes(0), 1.0), 2.0)
+let t = ((codes(0), Float64(1.0)), Float64(2.0))
 let v = g(t)

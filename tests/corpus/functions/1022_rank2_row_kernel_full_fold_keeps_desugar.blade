@@ -1,0 +1,11 @@
+// TEST: a full fold of a named rank-2 map with a ROW kernel keeps its desugar
+// Gap G233, round 4 wave 10 (Codex diff review round 1, finding 1): only a
+// scalar-cell map over plain dense operands leaves the accumulator desugar
+// for the fused terminal; a row kernel (`lambda(row: T^1) -> row + 1.0`, an
+// array per cell) has no fused fold and keeps the desugar's value in every
+// lane (the first build sent it to the fused terminal: a scalar-plus-array
+// C++ fold and an interpreter BL9001).
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let p = method_for(m) <@> lambda(row: T^1) -> row + 1.0
+let s = reduce(p, (+), axes = 2)
+// EXPECT: s = 27.0

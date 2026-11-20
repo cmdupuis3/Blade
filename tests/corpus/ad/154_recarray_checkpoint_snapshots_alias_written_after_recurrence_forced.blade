@@ -1,0 +1,30 @@
+// TEST: A forced-interval checkpoint keeps the first run's input when the body writes it afterwards
+// ============================================================================
+// Round 4 wave 10 (lane A, A2, gap G162): the forced-interval twin of ad/153
+// (eleven rows; blade test access runs it at K = 2 and 3 against the full
+// tape, raw bits). Here a user call after the recurrence writes the input: a
+// callee may write a module let mut (formalism 2.7).
+// ============================================================================
+import ad as ad
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+let mut backing: A = [0.125]
+let forcing = identity(backing)
+function bump(v: Float64) -> Float64 = {
+    backing(0) = 0.25
+    v
+}
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<11>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: 0.5 * prefix(n - 1) * prefix(n - 1) + forcing(0)
+    let z = bump(x * 0.0)
+    s(10) + z
+}
+let (value, dx) = ad.grad(f)(Float64(0.5))
+// EXPECT: backing = [0.25]
+// EXPECT: forcing = [0.25]
+// EXPECT: value = 0.133974598754865
+// EXPECT: dx = 1.55553468522285e-08

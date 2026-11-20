@@ -1,0 +1,15 @@
+// TEST: a direct call decides a lambda value's open parameter, an alias call beside it does not
+// ============================================================================
+// G275 (the lead's ruling, formalism 4.3): `h` is kept as a value (`saved`),
+// so it is one body; its DIRECT call `h(a)` decides `v` as a Float32 (the
+// alias call alone would be refused: functions/1073).
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a: Float32 = 0.1
+let y = h(a)
+let z = saved(a)
+let w = y + z
+// EXPECT: y = 0.1
+// EXPECT: z = 0.1
+// EXPECT: w = 0.2

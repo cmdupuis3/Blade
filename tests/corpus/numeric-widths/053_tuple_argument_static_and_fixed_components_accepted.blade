@@ -1,0 +1,10 @@
+// TEST: a tuple argument whose integer static adapts beside a fixed Float64 component
+// ============================================================================
+// G275: adaptation is judged component by component -- the integer static
+// `k` adapts to the Int64 component, the Float64 value meets its own.
+// ============================================================================
+function pair(p: (Int64, Float64)) -> Float64 = Float64(p[0]) + p[1]
+let static k = 3
+let a: Float64 = 0.5
+let y = pair((k, a))
+// EXPECT: y = 3.5

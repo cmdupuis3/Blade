@@ -1,0 +1,9 @@
+// TEST: an explicit Int64 value handed to a width-only tuple slot the body never reads (rejects)
+// ============================================================================
+// G275: the unread slot of `Tuple<3>` is decided by its default (Float64),
+// so `Int64(7)` would be converted into it -- an explicit cast is a value,
+// never a literal that adapts (tuples/002 passes a Float64 there).
+// ============================================================================
+function mixed(t: Tuple<3>) -> Float64 = t[0] + t[2]
+let m = mixed((Float64(1.5), Int64(7), Float64(2.5)))
+// ERROR: BL3020

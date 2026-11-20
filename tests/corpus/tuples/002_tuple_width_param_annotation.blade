@@ -24,11 +24,13 @@ let fromBound = addPair(p)
 let fromLiteral = addPair((b, c))
 // EXPECT: fromLiteral = 3.0
 
-// Width 3, and element types that are NOT all the same: the annotation
-// constrains only the width, so a (Float64, Int64) pair is fine as long as
-// the body's use of each slot types.
+// Width 3: the annotation constrains only the width, and each slot is typed
+// by the body's use of it. A slot the body never reads is decided by its
+// default (Float64), so its argument must be one: an `Int64(7)` there was
+// converted silently (an explicit cast used to pass as a literal) and is
+// refused since G275 (round 4 wave 10), as a Bool there already was (R10).
 function mixed(t: Tuple<3>) -> Float64 = t[0] + t[2]
-let m = mixed((Float64(1.5), Int64(7), Float64(2.5)))
+let m = mixed((Float64(1.5), Float64(7.0), Float64(2.5)))
 // EXPECT: m = 4.0
 
 // RETURN-type position takes the annotation too.

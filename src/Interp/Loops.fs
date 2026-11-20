@@ -207,20 +207,93 @@ let private gateInputs (info: ApplyInfo) : unit =
 /// along, or the walk reads the shorter one past its end. Checked ONCE, after
 /// the operands are resolved and the captures forced, before the first cell
 /// (a fold: before its seed -- the operands are the fold's first stage).
+/// G265 (c): a VIRTUAL RANGE operand takes part too, in any position, by its
+/// extent `rangeExtent e` (the caller's: the map arm's per-application cache or
+/// the literal; a fold leg only the literal -- a run-time range's fold holder
+/// is G209's), so `zip(0..n, b)` and `zip(b, 0..n)` are compared like arrays.
 let private coIterationGuard (bindings: LoopIndexBinding list) (inputs: Dictionary<int, ArraySource>)
-                             (levelExtent: LoopIndexBinding -> int64 option) : unit =
+                             (levelExtent: LoopIndexBinding -> int64 option)
+                             (rangeExtent: ElementBinding -> int64 option) : unit =
     for b in bindings do
         match b.FusedRank, b.Elements with
-        | None, e0 :: rest when not rest.IsEmpty && (match e0.Virtual with RealArray -> true | _ -> false) ->
-          match levelExtent b with
+        | None, e0 :: rest when not rest.IsEmpty ->
+          let first =
+              match e0.Virtual with
+              | RealArray -> levelExtent b
+              | VirtualRange _ -> rangeExtent e0
+              | _ -> None
+          match first with
           | None -> ()
           | Some bound ->
             for e in rest do
                 match e.Virtual, inputs.TryGetValue e.ArrayPosition with
                 | RealArray, (true, SReal a) when e.DimIndex < a.Extents.Length && a.Extents.[e.DimIndex] <> bound ->
                     raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+                | VirtualRange _, _ ->
+                    (match rangeExtent e with
+                     | Some n when n <> bound -> raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+                     | _ -> ())
                 | _ -> ()
         | _ -> ()
+
+/// The LITERAL extent of a plain rank-1-slot range operand on an element's
+/// axis (a halo window is excluded: it has its own guard).
+let private rangeLiteralExtent (info: ApplyInfo) (e: ElementBinding) : int64 option =
+    match List.tryItem e.ArrayPosition info.Arrays with
+    | Some (IRRange (ixs, _)) when ixs |> List.forall (fun ix ->
+                                    ix.IxKind = IxKPlain && ix.Rank = 1
+                                    && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true)) ->
+        (match List.tryItem e.DimIndex ixs with
+         | Some { Extent = IRLit (IRLitInt n) } -> Some n
+         | _ -> None)
+    | _ -> None
+
+/// G209 (round 4 wave 10 lane d; the lead ruling): A RANGE IS A VALUE whose
+/// bounds are evaluated ONCE where the range expression is evaluated -- at the
+/// operand stage of the map or fold that reads it, before any cell (and, for a
+/// fold, before its seed). `lo..hi` lowers to `IRRange([hi - lo], Some lo)`:
+/// lo is evaluated ONCE, then hi (source order), the extent their wrapping
+/// difference, a negative one an EMPTY range; any other shape evaluates the
+/// start first, then each extent. The twin of CodeGenExprSupport.rangeBoundLines.
+let private evalRangeBounds (st: InterpState) (env: Env) (ixs: IRIndexType list) (offset: IRExpr option) : int64 list * int64 option =
+    let ev (e: IRExpr) = toI64 (Core.evalExpr st env e)
+    let clamp (n: int64) = if n < 0L then 0L else n
+    match ixs, offset with
+    | [ ix ], Some lo when (match ix.Extent with
+                            | IRLit _ -> false
+                            | IRBinOp (_, IRSub, _, lo2, _) -> lo2 = lo
+                            | _ -> false) ->
+        let hi = match ix.Extent with IRBinOp (_, IRSub, h, _, _) -> h | e -> e
+        let lov = ev lo
+        let hiv = ev hi
+        ([ clamp (hiv - lov) ], Some lov)
+    | _ ->
+        let offv = offset |> Option.map (fun o -> match o with IRLit (IRLitInt n) -> n | _ -> ev o)
+        let exts = ixs |> List.map (fun ix -> match ix.Extent with IRLit (IRLitInt n) -> n | e -> clamp (ev e))
+        (exts, offv)
+
+/// Does a range operand have a RUN-TIME bound (an extent or a start that is
+/// not a literal) over plain rank-1 slots?
+let private runtimeRangeOperand (ixs: IRIndexType list) (offset: IRExpr option) : bool =
+    ixs |> List.forall (fun ix -> ix.Rank = 1)
+    && (ixs |> List.exists (fun ix -> match ix.Extent with IRLit _ -> false | _ -> true)
+        || offset |> Option.exists (fun o -> match o with IRLit _ -> false | _ -> true))
+
+/// The nest read a range operand's start PER CELL from its expression; after
+/// the operand stage evaluated it (evalRangeBounds), every element of that
+/// operand reads the value.
+let private patchRangeOffsets (cg: LoopNestCodeGen) (offs: Dictionary<int, int64>) : LoopNestCodeGen =
+    if offs.Count = 0 then cg
+    else
+        { cg with
+            Bindings =
+                cg.Bindings |> List.map (fun b ->
+                    { b with
+                        Elements =
+                            b.Elements |> List.map (fun e ->
+                                match e.Virtual, offs.TryGetValue e.ArrayPosition with
+                                | VirtualRange (Some _), (true, o) -> { e with Virtual = VirtualRange (Some (IRLit (IRLitInt o))) }
+                                | _ -> e) }) }
 
 // Binary fold resolution (reduce kernels / choice sections lower to callables).
 
@@ -243,6 +316,12 @@ let private resolveBinaryFold (st: InterpState) (env: Env) (kernel: IRExpr) : (V
             |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
             |> Map.ofList
         (fun a b -> Core.evalCall st callable caps [a; b])
+    // G260, round 4 wave 10: a kernel that is a FUNCTION VALUE no resolution
+    // reaches (a closure held by a binding) is evaluated once and applied as
+    // that value -- the compiled lane's fold over a closure-valued kernel
+    | None when (match stripUnits (typeOf kernel) with FuncElem _ -> true | _ -> false) ->
+        let fv = Core.evalExpr st env kernel
+        (fun a b -> Core.applyValue st fv [a; b])
     | _ -> raise (InterpUnsupported "reduce/fold kernel does not resolve to a binary callable")
 
 // Array literal -> dense BladeArray (via ArrayOps.arrayLitFromValues). The
@@ -529,8 +608,11 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                  | VInt n -> n
                  | VInt32 n -> int64 n
                  | _ -> raise (InterpUnsupported $"range {what} did not evaluate to an integer")
-             let n = evalInt ix.Extent "extent"
-             let off = match offset with Some o -> evalInt o "offset" | None -> 0L
+             // G209: the bounds ONCE, lo before hi (evalRangeBounds)
+             let (n, off) =
+                 match evalRangeBounds st renv [ ix ] offset with
+                 | ([ n ], off) -> (n, defaultArg off 0L)
+                 | _ -> (evalInt ix.Extent "extent", (match offset with Some o -> evalInt o "offset" | None -> 0L))
              let arrType : IRArrayType =
                  { ElemType = IRTScalar ETInt64; IndexTypes = [ix]; IsVirtual = false; Identity = None }
              let vals = [ for i in 0L .. n - 1L -> VInt (off + i) ]
@@ -687,7 +769,14 @@ and private forceSequence (st: InterpState) (env: Env) (elems: IRExpr list) (wra
         // as an SNested record directly (mkDenseArray reshapes a FLAT store; the
         // rows are already nested stores). Printing keys off the binding type, so
         // the extra outer Idx<N> need not be reflected in IndexTypes here.
-        let rows = childVals |> List.map (function VArray a -> a.Data | _ -> failwith "unreachable") |> Array.ofList
+        // Each row is a COPY of its child (G240 (5) / G60, round 4 wave 10;
+        // formalism copy-on-bind): the compiled lanes assemble a sequence into
+        // fresh cells, so a later write to a member array must not show through
+        // the sequence -- the rows used to SHARE the members' stores. Every
+        // representation is copied cell for cell (copyStore: dense, nested and
+        // ragged stores alike; a compact child's cells are its store), so
+        // `sequence(a, a)` holds two independent rows (Codex probe G, wave 9).
+        let rows = childVals |> List.map (function VArray a -> copyStore a.Data | _ -> failwith "unreachable") |> Array.ofList
         let outExtents = Array.append [| int64 elems.Length |] first.Extents
         VArray { ElemType = first.ElemType; IndexTypes = first.IndexTypes; Extents = outExtents; Data = SNested rows }
     | _ ->
@@ -804,7 +893,11 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
             | IRCompose (k, f) -> let kf = wrapperFn k in let ff = wrapperFn f in (fun v -> ff (kf v))
             | _ -> resolveUnaryKernel st cenv w
         let wrapAll = wrappers |> List.fold (fun acc w -> let wf = wrapperFn w in (fun v -> wf (acc v))) id
-        let call2Wrapped v = wrapAll (call2 v)
+        // the kernels a wrapper runs (an extracted IRCompose (k, f) runs both)
+        let rec wrapperLeaves (w: IRExpr) : IRExpr list =
+            match w with
+            | IRCompose (k, f) -> wrapperLeaves k @ wrapperLeaves f
+            | _ -> [ w ]
         match cinfo.InputArrays with
         | [ arrExpr ] ->
             let a = forceInputArray st env arrExpr
@@ -871,6 +964,8 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
                 match wrappers, materializeApply st env2 i2 [] with
                 | [], out -> out
                 | _, VArray o ->
+                    // the wrapper pass is its own stage: its captures first (G242)
+                    forceKernelDeferredCaptures st cenv true (wrappers |> List.collect wrapperLeaves) Set.empty
                     let outElem =
                         wrappers |> List.fold (fun acc w ->
                             match w with
@@ -897,10 +992,29 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
                     | IRCompose _ -> acc
                     | _ -> stageElemOf w acc) s2Elem
             let s1 = A.allocDense s1Elem a.IndexTypes a.Extents
+            // G242 / G115, round 4 wave 10: each stage is its own traversal, so
+            // its kernel's deferred captures are forced at THAT stage's start --
+            // before its first cell, also over zero cells or when only an
+            // untaken branch reads them (the compiled capture prelude); the
+            // cells used to be bound without the force
+            forceKernelDeferredCaptures st cenv true [ kernelOf o1 ] Set.empty
             walk a s1 call1 0 []
-            let out = A.allocDense outElem a.IndexTypes a.Extents
-            walk s1 out call2Wrapped 0 []
-            VArray out
+            forceKernelDeferredCaptures st cenv true [ kernelOf o2 ] Set.empty
+            if wrappers.IsEmpty then
+                let out = A.allocDense outElem a.IndexTypes a.Extents
+                walk s1 out call2 0 []
+                VArray out
+            else
+                // the trailing WRAPPERS are their own stage after the composition
+                // (the compiled stage-on-stage form): stage 2 over every cell, then
+                // the wrappers' deferred captures forced, then the wrapper pass
+                // (Codex diff review 03cfa2dd, finding 3; G242)
+                let s2 = A.allocDense s2Elem a.IndexTypes a.Extents
+                walk s1 s2 call2 0 []
+                forceKernelDeferredCaptures st cenv true (wrappers |> List.collect wrapperLeaves) Set.empty
+                let out = A.allocDense outElem a.IndexTypes a.Extents
+                walk s2 out wrapAll 0 []
+                VArray out
         | _ -> raise (InterpUnsupported "compose-apply with multiple input arrays (M2.3)")
     | _ -> raise (InterpUnsupported "IRComposeApply: composition did not resolve to IRComposeObj")
 
@@ -1072,17 +1186,25 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     // extent expressions at two positions are two evaluations -- a mask
     // between them may change what they read; Codex diff review round 1)
     let rangeExtents = Dictionary<int * int, int64>()
+    // G209: the start too, ONCE, lo before hi (evalRangeBounds) -- the nest
+    // read it per cell
+    let rangeOffsets = Dictionary<int, int64>()
     info.Arrays |> List.iteri (fun i arr ->
         match arr with
         | IRVar _ -> ()
-        | IRRange (ixs, _) ->
-            if ixs |> List.forall (fun ix -> ix.Rank = 1) then
-                ixs |> List.iteri (fun k ix ->
+        | IRRange (ixs, offset) ->
+            if runtimeRangeOperand ixs offset then
+                let (exts, off) = evalRangeBounds st env ixs offset
+                List.iteri2 (fun k (ix: IRIndexType) n ->
                     match ix.Extent with
                     | IRLit _ -> ()
-                    | e -> rangeExtents.[(i, k)] <- toI64 (Core.evalExpr st env e))
+                    | _ -> rangeExtents.[(i, k)] <- n) ixs exts
+                (match offset, off with
+                 | Some o, Some v when (match o with IRLit _ -> false | _ -> true) -> rangeOffsets.[i] <- v
+                 | _ -> ())
             inputs.[i] <- resolveArraySource st env arr
         | _ -> inputs.[i] <- resolveArraySource st env arr)
+    let cg = patchRangeOffsets cg rangeOffsets
     // G207 (3): the halo extent guard runs AFTER the capture prelude, as
     // genApplyCombinator's guard does after genComputeBinding's forces
     // HALO-EXTENT RUNTIME GUARD (BL8009) -- the interpreter twin of
@@ -1159,7 +1281,10 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     // operand peeled at a co-iteration level must have the level's extent
     // (the first operand's) on the axis it is peeled along, or the walk
     // reads the shorter one past its end.
-    coIterationGuard cg.Bindings inputs (levelExtent >> Some)
+    coIterationGuard cg.Bindings inputs (levelExtent >> Some) (fun e ->
+        match rangeExtents.TryGetValue ((e.ArrayPosition, e.DimIndex)) with
+        | true, n -> Some n
+        | _ -> rangeLiteralExtent info e)
     match cg.OutputType with
     | IRTScalar et ->
         let acc = { V = zeroOfElem et }
@@ -2414,7 +2539,23 @@ let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) :
          | Some cell ->
              (match cell.V with
               | VDeferred _ when st.PrivateOperandVals.ContainsKey id -> SReal st.PrivateOperandVals.[id]
-              | VDeferred (dexpr, denv) ->
+              | VDeferred (dexpr0, denv0) ->
+                  // G266: an ALIAS chain of a deferred map (`let a = e`) is
+                  // evaluated as its ROOT map's private copy -- the C++ alias
+                  // entry carries the copied apply -- so neither the alias
+                  // nor the root is forced under its own name; the operand
+                  // reads this private value
+                  let rec rootOf (seen: Set<IRId>) (chain: IRId list) (e: IRExpr) (eEnv: Env) =
+                      match e with
+                      | IRVar (rid, _) when not (seen.Contains rid) && not (st.PrivateOperandVals.ContainsKey rid) ->
+                          (match envTryFind eEnv rid with
+                           | Some rc ->
+                               (match rc.V with
+                                | VDeferred (e2, env2) -> rootOf (seen.Add rid) (rid :: chain) e2 env2
+                                | _ -> (e, eEnv, chain))
+                           | None -> (e, eEnv, chain))
+                      | _ -> (e, eEnv, chain)
+                  let (dexpr, denv, chain) = rootOf (Set.singleton id) [] dexpr0 denv0
                   // G243: recorded as this fold's private value, so a later
                   // private operand reading it reads this value (the C++
                   // temporary) instead of forcing it under its own name
@@ -2424,6 +2565,10 @@ let private resolveFusedArraySource (st: InterpState) (env: Env) (arr: IRExpr) :
                       | VCompound cv -> A.compoundToDense cv
                       | VSparse sv -> A.sparseToDense sv
                       | _ -> raise (InterpUnsupported "deferred array input did not force to an array")
+                  // (only the operand itself: a later operand reading the ROOT
+                  // by its own name forces it there, as the C++ lane does --
+                  // the alias entry's private copy is not the root's)
+                  ignore chain
                   st.PrivateOperandVals <- Map.add id a st.PrivateOperandVals
                   SReal a
               | _ -> resolveArraySource st env arr)
@@ -2497,16 +2642,37 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
         | IRVar _, [ IRVar _ ], IRTuple _ -> false
         | IRVar _, [ IRVar _ ], _ -> true
         | _ -> false
+    // G233 (round 4 wave 10): a leaf naming a STORED array folds through its
+    // stored-leaf traversal (the identity map over the snapshot), built
+    // after the prelude -- the rebuilt computation re-enters this body,
+    // whose prelude then finds every capture already stored
+    let storedLeafRewrite () =
+        let isStored (id: IRId) =
+            match envTryFind env id with
+            | Some cell -> not cell.V.IsVDeferred
+            | None -> false
+        match Blade.IRStorage.rewriteStoredLeaves st.Builder isStored comp with
+        | Some (rewritten, true) -> Some rewritten
+        | _ -> None
     if storedRoot then
         forceKernelDeferredCaptures st env false [ kernel ] Set.empty
         match force st env (Core.evalExpr st env comp) with
         | VArray a when a.Extents.Length = 1 ->
             A.reduceArray a (resolveBinaryFold st env kernel) (Some (seedL.Force()))
-        | _ -> raise (InterpUnsupported "reduce over a stored spine that is not one rank-1 array (gap G233)")
+        | _ ->
+            match storedLeafRewrite () with
+            | Some rewritten -> forceReduceComputeBody st env rewritten kernel seedReadIds (fun () -> seedL.Force())
+            | None -> raise (InterpUnsupported "reduce over a stored spine that is not a plain dense array (gap G233)")
     else
     let infos = leaves |> List.choose (function IRApplyCombinator i -> Some i | _ -> None)
     if infos.IsEmpty || infos.Length <> leaves.Length then
-        raise (InterpUnsupported "reduce over a deferred computation with non-apply leaves")
+        // a leaf stored ON ENTRY (an earlier statement forced it; its kernel
+        // is never run, so it has no capture-prelude position): its stored-
+        // leaf traversal (G233), the C++ lane's reroute of a stored leaf
+        match storedLeafRewrite () with
+        | Some rewritten -> forceReduceComputeBody st env rewritten kernel seedReadIds seedF
+        | None -> raise (InterpUnsupported "reduce over a deferred computation with non-apply leaves")
+    else
     // JOIN ENCODING (IR.fs, IRReduceCompute): per-leg kernels and seeds. The
     // interpreter needs no shared-value machinery -- sharing a named deferred
     // map is a per-iteration CSE of a pure map, so the values are identical
@@ -2562,13 +2728,29 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
             if hasRealSymmetry cg.OutputSymmVec || cg.HasReynolds || (cg.Bindings |> List.exists _.FusedRank.IsSome) then
                 raise (InterpUnsupported "reduce over symmetric/Reynolds/fused computation (M2.5)")
             let inputs = Dictionary<int, ArraySource>()
+            // G209: a RANGE operand's bounds evaluated ONCE at its operand
+            // position (lo before hi), before the guard and the seed -- the
+            // nest read the extent at its entry (per outer cell for an inner
+            // level of an outer product) and the start per cell
+            let rangeExtents = Dictionary<int * int, int64>()
+            let rangeOffsets = Dictionary<int, int64>()
             // FUSED, not materialized: see resolveFusedArraySource. A deferred
             // binding read only by these legs must not join the print list.
             info.Arrays |> List.iteri (fun i arr ->
                 (match arr with
                  | IRVar (id, _) when seedReadIds.Contains id -> force st env (Core.evalExpr st env arr) |> ignore
+                 | IRRange (ixs, offset) when runtimeRangeOperand ixs offset ->
+                     let (exts, off) = evalRangeBounds st env ixs offset
+                     List.iteri2 (fun k (ix: IRIndexType) n ->
+                         match ix.Extent with
+                         | IRLit _ -> ()
+                         | _ -> rangeExtents.[(i, k)] <- n) ixs exts
+                     (match offset, off with
+                      | Some o, Some v when (match o with IRLit _ -> false | _ -> true) -> rangeOffsets.[i] <- v
+                      | _ -> ())
                  | _ -> ())
                 inputs.[i] <- resolveFusedArraySource st env arr)
+            let cg = patchRangeOffsets cg rangeOffsets
             let realAt (pos: int) = match inputs.TryGetValue pos with | true, SReal a -> a | _ -> raise (InterpUnsupported "reduce-compute: virtual position needs no realAt")
             let levelExtent (b: LoopIndexBinding) : int64 =
                 match b.Extent with
@@ -2576,10 +2758,23 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
                 | IRCompoundMask _ -> raise (InterpUnsupported "compound-index loop level (M2.7)")
                 | _ ->
                     let pos = match b.Elements with e :: _ -> e.ArrayPosition | [] -> 0
-                    match inputs.TryGetValue pos with | true, SReal a -> a.Extents.[b.ExtentDimRef] | _ -> toI64 (Core.evalExpr st env b.Extent)
+                    match inputs.TryGetValue pos with
+                    | true, SReal a -> a.Extents.[b.ExtentDimRef]
+                    | _ ->
+                        let cached =
+                            b.Elements |> List.tryPick (fun e ->
+                                match e.Virtual, rangeExtents.TryGetValue ((e.ArrayPosition, e.DimIndex)) with
+                                | VirtualRange _, (true, n) -> Some n
+                                | _ -> None)
+                        match cached with
+                        | Some n -> n
+                        | None -> toI64 (Core.evalExpr st env b.Extent)
             // G249: the leg's co-iteration extent guard, after its operands
             // and before its seed (the compiled lanes' order)
-            coIterationGuard cg.Bindings inputs (levelExtent >> Some)
+            coIterationGuard cg.Bindings inputs (levelExtent >> Some) (fun e ->
+                match rangeExtents.TryGetValue ((e.ArrayPosition, e.DimIndex)) with
+                | true, n -> Some n
+                | _ -> rangeLiteralExtent info e)
             let acc = { V = seedOf () }
             started ()
             interpretNest st env cg inputs realAt levelExtent (OutFold (acc, fold))
@@ -2828,14 +3023,41 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
         // a captured SPINE was forced by the prelude: fold the stored snapshot
         // (the C++ lane's genReduceBinding over the forced operand), a
         // single rank-1 operand only (the compiled lanes' limit, gap G233)
-        match leavesAfter with
-        | [ _ ] ->
-            (match force st env (Core.evalExpr st env comp) with
-             | VArray a when a.Extents.Length = 1 ->
-                 A.reduceArray a (resolveBinaryFold st env kernel) (Some (seedL.Force()))
-             | _ -> raise (InterpUnsupported "reduce over a captured deferred spine that is not one rank-1 array (gap G233)"))
-        | _ -> raise (InterpUnsupported "reduce over a fusion tree whose kernel captures one of its leaves (gap G233)")
+        let single1 =
+            match leavesAfter with
+            | [ _ ] ->
+                (match force st env (Core.evalExpr st env comp) with
+                 | VArray a when a.Extents.Length = 1 -> Some a
+                 | _ -> None)
+            | _ -> None
+        match single1 with
+        | Some a -> A.reduceArray a (resolveBinaryFold st env kernel) (Some (seedL.Force()))
+        | None ->
+            match storedLeafRewrite () with
+            | Some rewritten -> forceReduceComputeBody st env rewritten kernel seedReadIds (fun () -> seedL.Force())
+            | None -> raise (InterpUnsupported "reduce over a fusion tree whose kernel captures one of its leaves, a leaf that is not a plain dense array (gap G233)")
     else
+    // G233 (Codex design review: the forcing closure includes captures
+    // reached through PRIVATE operands): a fused TREE resolves its legs'
+    // named deferred operands first (below, before the seed); one whose
+    // kernel captures a named LEAF of this tree stores that leaf under its
+    // own name, so the leaf folds its stored-leaf traversal. The operands
+    // are resolved here once (memoized as this fold's private values, so the
+    // pass below re-reads them, nothing evaluated twice), then the tree is
+    // rebuilt and re-entered.
+    let privateStoredRewrite =
+        if isJoinEncoding || infos.Length < 2 then None
+        else
+            for info in infos do
+                for arr in info.Arrays do
+                    match arr with
+                    | IRVar (id, _) when seedReadIds.Contains id -> force st env (Core.evalExpr st env arr) |> ignore
+                    | IRVar _ -> resolveFusedArraySource st env arr |> ignore
+                    | _ -> ()
+            storedLeafRewrite ()
+    match privateStoredRewrite with
+    | Some rewritten -> forceReduceComputeBody st env rewritten kernel seedReadIds (fun () -> seedL.Force())
+    | None ->
     let accVals =
         match infos with
         | [ info ] -> [ runLeg 0 info legFolds.[0] ignore ]
@@ -2902,7 +3124,7 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
                         match storedOf arr with
                         | Some a -> stored.[i] <- SReal a
                         | None -> ())
-                    (cg, stored))
+                    (cg, stored, info))
              let firstExtent (stored: Dictionary<int, ArraySource>) (b: LoopIndexBinding) =
                 match b.FusedRank with
                 | Some _ -> None
@@ -2913,17 +3135,17 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
                      | true, SReal a when e0.DimIndex < a.Extents.Length -> Some a.Extents.[e0.DimIndex]
                      | _ -> None)
                 | None -> (match b.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
-             for (cg, stored) in units do
+             for (cg, stored, uinfo) in units do
                  coIterationGuard cg.Bindings stored (fun b ->
                      match b.Elements with
                      | e0 :: _ -> (match stored.TryGetValue e0.ArrayPosition with
                                    | true, SReal a when e0.DimIndex < a.Extents.Length -> Some a.Extents.[e0.DimIndex]
                                    | _ -> None)
-                     | [] -> None)
+                     | [] -> None) (rangeLiteralExtent uinfo)
              match units with
-             | (cg0, s0) :: rest ->
+             | (cg0, s0, _) :: rest ->
                  let ext0 = cg0.Bindings |> List.map (firstExtent s0)
-                 for (cg, s) in rest do
+                 for (cg, s, _) in rest do
                      let ext = cg.Bindings |> List.map (firstExtent s)
                      if ext.Length = ext0.Length then
                          List.iter2 (fun (a: int64 option) (b: int64 option) ->
@@ -3004,14 +3226,20 @@ and private forceReduceComputeBody (st: InterpState) (env: Env) (comp: IRExpr) (
 let private materializeVirtual (st: InterpState) (env: Env) (idxTys: IRIndexType list) (kind: VirtualKind) : Value =
     match idxTys with
     | [ ix ] ->
-        let n = match ix.Extent with IRLit (IRLitInt n) -> n | e -> toI64 (Core.evalExpr st env e)
-        let data =
+        // G209: a range's bounds ONCE, lo before hi (evalRangeBounds)
+        let (n, rangeOff) =
             match kind with
-            | VirtualReverse -> SInt (Array.init (int n) (fun i -> n - 1L - int64 i))
-            | VirtualRange (Some (IRLit (IRLitInt off))) -> SInt (Array.init (int n) (fun i -> int64 i + off))
-            | VirtualRange (Some off) -> let o = toI64 (Core.evalExpr st env off) in SInt (Array.init (int n) (fun i -> int64 i + o))
-            | VirtualRange None -> SInt (Array.init (int n) (fun i -> int64 i))
-            | RealArray -> raise (InterpUnsupported "materializeVirtual: RealArray")
+            | VirtualRange off ->
+                (match evalRangeBounds st env [ ix ] off with
+                 | ([ n ], o) -> (n, o)
+                 | _ -> (0L, None))
+            | _ -> ((match ix.Extent with IRLit (IRLitInt n) -> n | e -> toI64 (Core.evalExpr st env e)), None)
+        let data =
+            match kind, rangeOff with
+            | VirtualReverse, _ -> SInt (Array.init (int n) (fun i -> n - 1L - int64 i))
+            | VirtualRange _, Some o -> SInt (Array.init (int n) (fun i -> int64 i + o))
+            | VirtualRange _, None -> SInt (Array.init (int n) (fun i -> int64 i))
+            | RealArray, _ -> raise (InterpUnsupported "materializeVirtual: RealArray")
         VArray (A.mkDenseArray (IRTScalar ETInt64) idxTys [| n |] data)
     | _ -> raise (InterpUnsupported "standalone multi-index virtual array")
 

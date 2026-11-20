@@ -1,0 +1,17 @@
+// TEST: A Zip Of Compounds Over A Reassigned Block-Local Mask Alias Is Refused (rejects)
+// Gap G265 (d) (round 4 wave 10 lane d; Codex review of the wave-end F3 fix): inside a block, k2 is
+// an alias of keep that is REASSIGNED to another mask of equal cardinality (3 and 3), so the two
+// compounds are over two different masks; the mask alias is resolved to its root only between
+// never-written MODULE-LEVEL binders, so k2 keeps its own token and the zip is refused (BL3016)
+// instead of pairing unrelated cells by position.
+// ERROR: BL3016
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let m = {
+    let keep = mask(x, lambda(v) -> v > 3)
+    let k2 = keep
+    k2 = mask(x, lambda(v) -> v < 4)
+    let a = compound(x, keep)
+    let b = compound(x, k2)
+    method_for(zip(a, b)) <@> lambda(p, q) -> p * q |> compute
+}

@@ -136,7 +136,7 @@ let internal deviceConstraintCheck (expr: IRExpr) : bool =
 /// gate and the emission agree by construction: a refusal is a HOST FALLBACK
 /// (correct values, no device kernel), never a half-emitted one.
 let cudaDeviceBodyRefusal (declared: Set<IRId>) (names: Map<IRId, string>) (body: IRExpr) : string option =
-    let spell id = Map.tryFind id names |> Option.defaultValue ($"__v{id}")
+    let spell id = Map.tryFind id names |> Option.defaultValue ((localVarName id))
     if not (kernelBodyIsExpressionShaped body) then
         Some "a kernel-local array materialization"
     elif deviceVariableIntPow body then
@@ -443,7 +443,7 @@ with a compile-time shape are forwarded to the device)" hostName)
         else
             match deviceFreeVarIds hoisted |> Set.toList |> List.filter (fun i -> not (Map.containsKey i env)) with
             | id :: _ ->
-                fail ($"""the value '{(Map.tryFind id outerNames |> Option.defaultValue ($"__v{id}"))}' (no device binding)""")
+                fail ($"""the value '{(Map.tryFind id outerNames |> Option.defaultValue ((localVarName id)))}' (no device binding)""")
                 ""
             | [] -> withCudaDeviceDialect (fun () -> exprToCpp env hoisted)
 
@@ -2373,7 +2373,7 @@ let buildCompactRowEpilogue (plan: Blade.Optimize.CompactRowPlan) (producer: Loo
         recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined why) [ $"orbit fold of `{plan.ProducerName}`" ]
         plan.DeclinedCpp.Value <- true
         None
-    let sourceName id = Map.tryFind id names |> Option.defaultValue $"__v{id}"
+    let sourceName id = Map.tryFind id names |> Option.defaultValue (localVarName id)
     match Blade.OrbitFold.recognise id resolveCallable sourceName plan.ConsumerComp plan.ConsumerKernel plan.ConsumerSeed with
     | Blade.OrbitFold.NotOrbit -> decline "the consumer is not an orbit-class walk over the producer"
     | Blade.OrbitFold.Declined why when why.StartsWith "BLADE_FP_REPRO" ->
@@ -2457,6 +2457,35 @@ let coIterationGuardLines (ctx: CodeGenContext) (ind: string) (info: ApplyInfo)
         && (match List.tryItem pos info.ArrayTypes with
             | Some at -> (match at.IndexTypes with [ ix ] -> ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic | _ -> false)
             | None -> false)
+    // G265 (c): a VIRTUAL RANGE operand's extent on its axis -- (the literal,
+    // when static; the C++ text). A run-time extent reads the holder the
+    // emitter declared under the element's name (`realAt pos`: the map's
+    // `__range<i>_<name>`); without one the operand is not compared here.
+    let virtualExtent (e: ElementBinding) : (int64 option * string) option =
+        let rec valuesInScope (x: IRExpr) =
+            match x with
+            | IRParam _ -> false
+            | ExprShape (children, _) -> children |> List.forall valuesInScope
+        match e.Virtual, List.tryItem e.ArrayPosition info.Arrays with
+        | VirtualRange _, Some (IRRange (ixs, _))
+                when ixs |> List.forall (fun ix ->
+                        ix.IxKind = IxKPlain && ix.Rank = 1
+                        && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true)) ->
+            (match List.tryItem e.DimIndex ixs with
+             | Some ix ->
+                 (match tryEvalIntIR ix.Extent with
+                  | Some n -> Some (Some n, $"{n}LL")
+                  | None when realAt e.ArrayPosition && valuesInScope ix.Extent ->
+                      Some (None, $"(int64_t)({e.ArrayName}.extents[{e.DimIndex}])")
+                  | None -> None)
+             | None -> None)
+        | _ -> None
+    let rangeLabel (e: ElementBinding) = $"range operand {e.ArrayPosition + 1}"
+    let virtualGuard (n0: string, t0: string) (n: string, t: string) : string list =
+        [ $"{ind}if ({t} != {t0}) {{"
+          $"{ind}    std::cerr << \"Blade runtime: co-iteration over '{n0}' and '{n}' needs equal extents, but they are \" << {t0} << \" and \" << {t} << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
+          $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
+          $"{ind}}}" ]
     bindings
     |> List.collect (fun b ->
         match b.FusedRank, b.Elements with
@@ -2495,6 +2524,36 @@ let coIterationGuardLines (ctx: CodeGenContext) (ind: string) (info: ApplyInfo)
                       $"{ind}    std::cerr << \"Blade runtime: co-iteration over '{e0.ArrayName}' and '{e.ArrayName}' needs equal extents on axis {e.DimIndex}, but '{e0.ArrayName}' has \" << {e0.ArrayName}.extents[{e0.DimIndex}] << \" and '{e.ArrayName}' has \" << {e.ArrayName}.extents[{e.DimIndex}] << \" -- the walk is bounded by the first operand, so the shorter one would be read past its end\" << std::endl;"
                       $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
                       $"{ind}}}" ]
+                // G265 (c): a RANGE in a later position (`zip(b, 0..n)`) is
+                // compared too, by its literal or its holder's extent
+                | VirtualRange _ ->
+                    (match virtualExtent e with
+                     | Some (lit, text) when not (lit.IsSome && not param0 && lit = lit0) ->
+                         virtualGuard (e0.ArrayName, boundText) (rangeLabel e, text)
+                     | _ -> [])
+                | _ -> [])
+        // G265 (c): a RANGE FIRST operand (`zip(0..extents(a), b)`): the level
+        // is bounded by the range's own extent (its literal, or the holder the
+        // emitter declared for a run-time one), and every later operand --
+        // real or virtual -- is compared with it
+        | None, e0 :: rest when not rest.IsEmpty
+                                && (match e0.Virtual with VirtualRange _ -> true | _ -> false)
+                                && (virtualExtent e0).IsSome ->
+            let (lit0, text0) = (virtualExtent e0).Value
+            let litOf (e: ElementBinding) =
+                match List.tryItem e.ArrayPosition info.ArrayTypes with
+                | Some at -> literalExtentOfArray at e.DimIndex
+                | None -> None
+            rest |> List.collect (fun e ->
+                match e.Virtual with
+                | RealArray when hasExtents e.ArrayPosition ->
+                    let trusted = not (isParamOperand e.ArrayPosition) && lit0.IsSome && litOf e = lit0
+                    if trusted then []
+                    else virtualGuard (rangeLabel e0, text0) (e.ArrayName, $"(int64_t)({e.ArrayName}.extents[{e.DimIndex}])")
+                | VirtualRange _ ->
+                    (match virtualExtent e with
+                     | Some (lit, text) when not (lit.IsSome && lit = lit0) -> virtualGuard (rangeLabel e0, text0) (rangeLabel e, text)
+                     | _ -> [])
                 | _ -> [])
         | _ -> [])
 
@@ -3541,13 +3600,13 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                     (idxTys |> List.forall (fun ix -> valuesInScope ix.Extent))
                     && (offset |> Option.forall valuesInScope)
                 if plainSlots && renderable && (runtimeExtent || runtimeOffset) then
-                    let exts =
-                        idxTys |> List.map (fun ix ->
-                            match tryEvalIntIR ix.Extent with
-                            | Some n -> string n
-                            | None -> $"(size_t)({exprToCppCtx tempCtx ix.Extent})")
-                    let offStr = offset |> Option.map (exprToCppCtx tempCtx) |> Option.defaultValue "0"
-                    preCode <- preCode @ [ $"""{ind}const struct {{ size_t extents[{idxTys.Length}]; int64_t offset; }} {rname} = {{ {{ {String.concat ", " exts} }}, (int64_t)({offStr}) }};""" ]
+                    // G209: the bounds evaluated ONCE, lo then hi, a negative
+                    // extent an empty range (rangeBoundLines; the fold holder
+                    // and the bare materializer share it)
+                    let (boundDecls, exts, offStr) =
+                        rangeBoundLines (exprToCppCtx tempCtx) $"{rname}__rb" idxTys offset
+                    preCode <- preCode @ (boundDecls |> List.map (fun d -> ind + d))
+                                       @ [ $"""{ind}const struct {{ size_t extents[{idxTys.Length}]; int64_t offset; }} {rname} = {{ {{ {String.concat ", " exts} }}, (int64_t)({offStr}) }};""" ]
                     let arr' =
                         if runtimeOffset then IRRange (idxTys, Some (IRParam ($"{rname}.offset", 0, IRTScalar ETInt64)))
                         else arr

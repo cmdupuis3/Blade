@@ -611,7 +611,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit (IRLitString s) -> $"std::string({(escapeStringLit s)})"
     | IRLit IRLitUnit -> "((void)0)"
-    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
+    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ((localVarName id))
     | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRBinOp (_, op, l, r, loc) ->
         let (la, ra) = int32AdaptedLiterals inferExprType l r
@@ -2908,3 +2908,44 @@ let compactionPassLoopMulti (ind: string) (pre: string) (iv: string) (bound: str
             [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
             @ cell (body + "    ")
             @ [ $"{body}}}" ])
+
+/// G209 (round 4 wave 10 lane d; the lead ruling): A RANGE IS A VALUE whose
+/// bounds are evaluated ONCE where the range expression is evaluated, before
+/// any cell. `lo..hi` lowers to `IRRange([extent = hi - lo], Some lo)` -- lo
+/// spelled twice, and C++ leaves the order of hi and lo in `hi - lo`
+/// unspecified -- so every emitter that evaluates a run-time bound (the map
+/// holder, the fold holder, the bare materializer) renders it through this:
+/// lo ONCE, then hi ONCE (source order), the extent their wrapping Int64
+/// difference, a negative one an EMPTY range; any other shape evaluates the
+/// start first, then each extent. Returns the statements (prefixed names), the
+/// per-slot extent text (`size_t`) and the start text (`int64_t`). Mirrored by
+/// the interpreter's `Loops.evalRangeBounds`.
+let rangeBoundLines (render: IRExpr -> string) (prefix: string) (ixs: IRIndexType list) (offset: IRExpr option)
+        : string list * string list * string =
+    let clampDecl (name: string) (diff: string) =
+        $"const size_t {name} = [&]() {{ const int64_t __d = {diff}; return __d < 0 ? (size_t)0 : (size_t)__d; }}();"
+    match ixs, offset with
+    | [ ix ], Some lo when (tryEvalIntIR ix.Extent).IsNone
+                           && (match ix.Extent with IRBinOp (_, IRSub, _, lo2, _) -> lo2 = lo | _ -> false) ->
+        let hi = match ix.Extent with IRBinOp (_, IRSub, h, _, _) -> h | _ -> ix.Extent
+        let loName = $"{prefix}_lo"
+        let hiName = $"{prefix}_hi"
+        let nName = $"{prefix}_n0"
+        ([ $"const int64_t {loName} = (int64_t)({render lo});"
+           $"const int64_t {hiName} = (int64_t)({render hi});"
+           clampDecl nName $"(int64_t)((uint64_t){hiName} - (uint64_t){loName})" ],
+         [ nName ], loName)
+    | _ ->
+        let (offDecls, offText) =
+            match offset with
+            | None -> ([], "0")
+            | Some o ->
+                match tryEvalIntIR o with
+                | Some n -> ([], string n)
+                | None -> ([ $"const int64_t {prefix}_lo = (int64_t)({render o});" ], $"{prefix}_lo")
+        let extParts =
+            ixs |> List.mapi (fun k ix ->
+                match tryEvalIntIR ix.Extent with
+                | Some n -> ([], $"(size_t){n}")
+                | None -> ([ clampDecl $"{prefix}_n{k}" $"(int64_t)({render ix.Extent})" ], $"{prefix}_n{k}"))
+        (offDecls @ (extParts |> List.collect fst), extParts |> List.map snd, offText)

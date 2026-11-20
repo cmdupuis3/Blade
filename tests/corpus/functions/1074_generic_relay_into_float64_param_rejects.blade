@@ -1,0 +1,9 @@
+// TEST: a generic function relaying its parameter into a Float64 parameter, called at Float32 (rejects)
+// ============================================================================
+// G275 (1): the Float32 instance of `relay` calls `wide` with a Float32.
+// ============================================================================
+function wide(v: Float64) -> Float64 = v
+function relay(v: T) = wide(v)
+let a: Float32 = 1.0
+let y = relay(a)
+// ERROR: BL3020

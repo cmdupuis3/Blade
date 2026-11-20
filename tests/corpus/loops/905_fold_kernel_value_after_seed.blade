@@ -1,0 +1,16 @@
+// TEST: A Function-Valued Fold Kernel Is Evaluated After The Seed (aborts)
+// ============================================================================
+// Gap G260, round 4 wave 10 (lane C, C5; Codex diff review 03cfa2dd round 2): a
+// fold whose kernel is an expression producing a closure evaluates the
+// operand, the seed, then the kernel -- the seed's division fails first
+// (BL8013), not the factory's conversion (BL8014).
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+function factory(z: Int64) -> ((Int64, Int64) -> Int64) = {
+    let v = Int64(floor(sqrt(Float64(z) - 1.0)))
+    lambda(a: Int64, b: Int64) -> a + b + v
+}
+function total(y: A, z: Int64) -> Int64 = reduce(y, factory(z), 8 / z)
+let g: A = [1, 2]
+let r = total(g, 0)
+// ABORT: integer division by zero

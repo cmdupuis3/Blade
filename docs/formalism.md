@@ -1363,7 +1363,13 @@ never assigned and not self-referencing, is checked as a nested `function` is
 monomorphically is unchanged by this rule, and a block that checks under
 neither reading keeps the monomorphic reading's refusal. Any other lambda (one
 used as a VALUE: a kernel, an argument, an alias) is one body, so its first use
-decides for every later one; an array makes its application a subscript,
+decides for every later one -- a direct call by the name it is bound to, or a
+kernel slot whose cells it meets; a call THROUGH a value use (an alias, a block
+that returns the lambda, a tuple member, an argument) is monomorphic at the
+lambda's binding and decides nothing: its argument meets the width the
+parameter already has, or its default, and converts nothing (BL3020; `let h =
+lambda(v) -> v; let saved = h; saved(a32)` is refused, `h(a32)` decides `v` as
+a Float32); an array makes its application a subscript,
 checked the same way. Either way the body reads
 ONE value from the application: a higher-rank array (a partial read) or a
 function returning an array is refused at the argument, as is a scalar, or a
@@ -1525,8 +1531,10 @@ applies is an arrow (§4.3), one a loop former iterates (`method_for(v)`,
 `for (a, b) in range<I>`) is a rank-1 array with a generic element -- it reads
 `v: T^1`, so the kernels the loop applies are instantiated per call, and a
 higher rank is written `v: T^k`; a top-level `let` of a lambda that is only applied
-is the declaration, and a lambda used as a value is one body whose first call
-decides its open parameters.
+is the declaration, and a lambda used as a value is one body whose first
+direct call decides its open parameters (a call through the value -- an alias,
+a block, a tuple member, an argument -- decides nothing, §4.3), and a literal
+beside such a parameter takes the width that call decides.
 
 **Sharing at a direct call.** The argument TYPES do not say whether two
 arguments are one array, and the identity groups of §8.3 do: so a declaration
@@ -2656,7 +2664,12 @@ run-time-shaped map, a range with a run-time bound among them, is still forced
 there) -- but a kernel that captures `g`
 and reads only `extents(g)` still captures it (below). A capture also forces a
 map that the same traversal reads as an operand or folds as its own spine,
-once, under its own name: the traversal then reads that snapshot (gap G214).
+once, under its own name: the traversal then reads that snapshot (gap G214) -- a
+leaf of a `<&!>` tree or a join leg as well as a whole spine of any rank, also
+when the force comes from another leaf's kernel or from the private evaluation
+of a leaf's deferred operand (gap G233, `loops/876`-`885`); a full fold
+`reduce(g, k, s, axes = n)` of a named deferred scalar-cell map is such a fused
+fold too, forcing nothing (`loops/880`).
 A CAPTURE is made when its kernel is
 formed for a traversal -- a map, a fold, a join -- so the captured map is
 forced before that traversal's FIRST cell, captures of the join's leg kernels,
@@ -2833,7 +2846,7 @@ binding, after the block's statements); a binding's tuple value that the C++
 lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
 compute / deferred member -- the emitter's own judgment) is one region per
 leaf, left to right.
-A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239, staged): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude -- and there the evaluation COUNT is observable too, when the body writes an INPUT of the map between two forcing uses (a module array written by name, or by a callee, inside a loop step). The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude -- and there the evaluation COUNT is observable too, when the body writes an INPUT of the map between two forcing uses (a module array written by name, or by a callee, inside a loop step). Since round 4 wave 10 the compiled lanes follow it for a FUNCTION body's scalar positional reads (`functions/1030`-`1039`, `1048`): a body statement whose order the statement prefix cannot reproduce has each read replaced by a call of a one-statement helper that forces the map privately, and its spine put in evaluation order (Lowering.splitDeferredBodyReadsModule) -- a read in an untaken arm, a short-circuited operand, a loop step or after an operation that may fail is forced where the interpreter forces it; a statement the rewrite cannot prove equivalent (a read with an index that may fail, a non-scalar read or whole-array use, a fold or array event before a later read, a deferred capture of a callable the statement names) keeps the statement prefix and stays OPEN under G239. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
 compute`) evaluates g's computation without forcing it or making it print,
 and counts as an operation that may fail. Force anything else before the `if`
 (`let v = g |> compute`, or a statement that reads it) and read the value in
