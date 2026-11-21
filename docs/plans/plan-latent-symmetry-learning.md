@@ -58,6 +58,18 @@ for `y_a = g x_a`; `mmd2_*_u` assumes independent samples) and `poly_hessian_pai
 statistical half ("zero to U-noise" at `N ≈ 2000`) and M2's data-space half belong to the
 trainer's data (P3), and are not pinned here: every pin in `lie/008`–`012` is a theorem or an
 exact identity, replayed in numpy (`checks/check_m1_m2.py`, `checks/check_d1prime_n2.py`).
+`lie/013` is cell T2, the bridge, end to end at `d = 4`: three generators of a disguised
+`0 ⊕ 1` representation are canonicalized by `lie/007`'s recipe (multiplicities `(1, 1)`, encoder
+`W = U·R`), the proposed spec `[(0, 0, 1), (1, 0, 1)]` is pinned as `IrrepsIdx<SPEC>`, and a
+`derive_linear` + `gated` + `norms` readout `where ml.equiv(SO3)` is ACCEPTED by the certifier;
+its output, loss and weight gradient are unchanged (5e-15) under `m.expm` of a combination of
+the DISCOVERED generators acting on the original coordinates (the input moves by 7.0 in norm),
+and a shear moves them. One finding: the certifier raises BL4011 — with the proposed parities
+the readout is O(3)-equivariant too — which the cell pins and declines: the algebra cannot see
+the reflection, so the O(3) upgrade waits for §3.4's finite `−I` test. The proposal PRINTOUT
+(§4.5's `proposed:` lines emitted by a program) and the `U` provider store are not built; the
+cell states the proposal in its header and checks the pinned spec against the discovered
+multiplicities.
 
 ## 0. The pitch
 
@@ -665,7 +677,7 @@ rows remove it.
 | P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map); M1–M2 as identities `lie/009`–`010` (2026-11-20); the jvp-vs-grad residual pins remain | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
 | P2 `m.expm` — BUILT 2026-10-08 (`math/129`–`130`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
 | P3 Mode B trainer | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
-| P4 the bridge — the canonicalization half is `lie/007` (BUILT 2026-10-08); the proposal printout and cell T2 remain | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |
+| P4 the bridge — the canonicalization half is `lie/007` (BUILT 2026-10-08); cell T2 is `lie/013` (BUILT 2026-11-20, `d = 4`); the proposal printout and the `U` store remain | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |
 | P5 research | Mode C + the geometric regularizers (N1 as the control); joint generator training (needs the `expm` derivative); training `φ` against the Lie-derivative residual (needs reverse-over-forward); the multiplicity parity search; non-roster soft equivariance (D6) | §4.1 rows 3–5 | each its own plan row when scheduled |
 
 Sizes relative to recent arcs: P0 ≈ a corpus directory plus one oracle verb (the ml

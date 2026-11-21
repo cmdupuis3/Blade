@@ -1,0 +1,233 @@
+// TEST: lie: the bridge -- a disguised 0+1 representation is re-encoded and the certified readout is invariant
+// Lighthouse cell T2 (plan §4.5 and §5), end to end at d = 4. Input: three
+// generators J~_a = S (0 + D1_a) S^-1 of so(3) in an unknown basis (the dense
+// disguise S is used to build them and never again). The canonicalization of
+// lie/007 -- orthonormal span, Killing frame, the invariant metric as the
+// Riesz projector of the Casimir on bilinear forms, R = M^(1/2), the Casimir
+// split, the intertwiners -- returns the multiplicities (1, 1) and an encoder
+// W = U R with W J~_a = (sum_b c_ab D_b) W: in the coordinates z' = W z the
+// discovered group acts by the certifier's own real-harmonic tables. The lane
+// PROPOSES (plan §4.5; a Blade program never writes Blade source):
+//     proposed: let static SPEC = [(0, 0, 1), (1, 0, 1)]     // (l, parity, mult)
+//     proposed: type Latent = IrrepsIdx<SPEC>
+//     proposed: where ml.equiv(SO3)
+// and this file PINS that spec: `readout` below is accepted by the
+// equivariance certifier at compile time, so its norms are invariant under
+// every rotation of z' -- hence under g~ = exp(sum_a w_a J~_a) acting on the
+// ORIGINAL coordinates, a group element the program only knows through the
+// discovered generators (`m.expm`). Loss and weight gradient are unchanged too
+// (ml-equiv/021's statement, for a discovered symmetry); a shear, which is not
+// in the group, moves the output. The sign of each block of U is a gauge,
+// fixed here by a positive first entry. The certifier adds BL4011: with these
+// parities the readout is O(3)-equivariant too. The pin stays SO(3) -- a Lie
+// algebra cannot see the reflection (plan §3.4: parity needs the finite -I test).
+// WARN: BL4011
+import math as m
+import ml as ml
+import ad as ad
+import lie
+type D = Idx<4>
+type G = Idx<3>
+type V2 = Idx<16>
+type H0 = Idx<12>
+type H1r = Idx<36>
+type H1c = Idx<12>
+let static SPEC = [(0, 0, 1), (1, 0, 1)]
+let static SOUT = [(0, 0, 2), (1, 0, 2)]
+let static WD = ml.hom_dim(SPEC, SOUT)
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function maxabs(x: T^2) -> T^0 = reduce(reduce(abs(x), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0)
+function maxabs3(x: T^3) -> T^0 = reduce(reduce(reduce(abs(x), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0)
+function count_below(s: T^1, tol: T^0) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> Int64(v <= tol) |> compute, (+))
+
+// ---- the input: the certifier's l = 1 tables under a disguise ----
+let D1x: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let D1y: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
+let D1z: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+let D1: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = stack(D1x, D1y, D1z)
+function dblk(a: Int64, i: Int64, j: Int64) -> Float64 = if i >= 1 && j >= 1 then D1(a, i - 1, j - 1) else 0.0
+let Dfull: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(range<G>, range<D>, range<D>) <@> lambda(a: G, i: D, j: D) -> dblk(a, i, j) |> compute
+let S: Array<Float64 like Idx<4>, Idx<4>> = [[1.2, 0.3, -0.4, 0.2], [0.1, 0.9, 0.5, -0.3], [-0.2, 0.4, 1.1, 0.3], [0.3, -0.1, 0.2, 0.8]]
+let I4: Array<Float64 like Idx<4>, Idx<4>> = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+let SinvT: Array<Float64 like Idx<4>, Idx<4>> = method_for(I4) <@> lambda(e: Array<Float64 like Idx<4>>) -> {
+    let x = m.solve(S, e)
+    x
+} |> compute
+let Sinv: Array<Float64 like Idx<4>, Idx<4>> = transpose(SinvT, [0, 1])
+let Jt: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(Dfull) <@> lambda(d: T^2) -> lie.mm(lie.mm(S, d), Sinv) |> compute
+
+// ---- (0) Frobenius-orthonormal basis of span{J~_a}; Killing form; the (-kappa/2) frame ----
+function vec_at(p: Int64, a: Int64) -> Float64 = Jt(a, p / 4, p % 4)
+let Cv: Array<Float64 like V2, G> = method_for(range<V2>, range<G>) <@> lambda(p: V2, a: G) -> vec_at(p, a) |> compute
+let (Ue, Se, Ve) = m.svd(Cv)
+let Ec: Array<Float64 like Idx<16>, Idx<3>> = method_for(range<V2>, range<G>) <@> lambda(p: V2, a: G) -> Ue(p, a) |> compute
+function e_at(a: Int64, i: Int64, j: Int64) -> Float64 = Ec(4 * i + j, a)
+let E: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(range<G>, range<D>, range<D>) <@> lambda(a: G, i: D, j: D) -> e_at(a, i, j) |> compute
+let ce = lie.structure_constants(E)
+let Ke: Array<Float64 like G, G> = lie.killing(ce)
+let Kh: Array<Float64 like G, G> = Ke * (-0.5)
+let (KQ, KLAM) = m.eigh(Kh)
+let Wf: Array<Float64 like Idx<3>, Idx<3>> = method_for(range<G>, range<G>) <@> lambda(j: G, a: G) -> KQ(j, a) / sqrt(KLAM(a)) |> compute
+function f_at(a: Int64, i: Int64, j: Int64) -> Float64 = Wf(0, a) * E(0, i, j) + Wf(1, a) * E(1, i, j) + Wf(2, a) * E(2, i, j)
+let F: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(range<G>, range<D>, range<D>) <@> lambda(a: G, i: D, j: D) -> f_at(a, i, j) |> compute
+
+// ---- (i) the invariant metric: M = P0 vec(I), P0 the Riesz projector onto ker Omega ----
+let Fsq: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(F) <@> lambda(f: T^2) -> lie.mm(f, f) |> compute
+function cf_at(i: Int64, j: Int64) -> Float64 = Fsq(0, i, j) + Fsq(1, i, j) + Fsq(2, i, j)
+let Cf: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> cf_at(i, j) |> compute
+function omega_at(C: Array<Float64 like Idx<4>, Idx<4>>, Fr: Array<Float64 like Idx<3>, Idx<4>, Idx<4>>, row: Int64, col: Int64) -> Float64 = {
+    let p = row / 4
+    let q = row % 4
+    let r = col / 4
+    let s = col % 4
+    C(r, p) * delta(q, s) + delta(p, r) * C(s, q) + 2.0 * (Fr(0, r, p) * Fr(0, s, q) + Fr(1, r, p) * Fr(1, s, q) + Fr(2, r, p) * Fr(2, s, q))
+}
+function pi_col(P: Array<Float64 like Idx<16>, Idx<16>>, p: Int64) -> Float64 = reduce(method_for(0..4) <@> lambda(i: Int64) -> P(5 * i, p) |> compute, (+))
+// Omega is -L(L+1) on the spin-L bilinear forms of (0 + 1) x (0 + 1): L = 0 twice, L = 1 on 9
+// cells, L = 2 on 5. R = delta (Omega + delta I)^-1 at delta = 1/10 has trace 2 - 9/19 - 5/59,
+// and R^32 is the projector P0 onto the two invariant forms.
+function riesz(C: Array<Float64 like Idx<4>, Idx<4>>, Fr: Array<Float64 like Idx<3>, Idx<4>, Idx<4>>) = {
+    let A: Array<Float64 like V2, V2> = method_for(range<V2>, range<V2>) <@> lambda(r: V2, c: V2) -> omega_at(C, Fr, r, c) + 0.1 * delta(r, c) |> compute
+    let I16: Array<Float64 like V2, V2> = method_for(range<V2>, range<V2>) <@> lambda(r: V2, c: V2) -> delta(r, c) |> compute
+    let Rt: Array<Float64 like V2, V2> = method_for(I16) <@> lambda(e: Array<Float64 like V2>) -> {
+        let x = m.solve(A, e)
+        x * 0.1
+    } |> compute
+    let R2t: Array<Float64 like V2, V2> = lie.mm(Rt, Rt)
+    let R4t: Array<Float64 like V2, V2> = lie.mm(R2t, R2t)
+    let R8t: Array<Float64 like V2, V2> = lie.mm(R4t, R4t)
+    let R16t: Array<Float64 like V2, V2> = lie.mm(R8t, R8t)
+    let P0t: Array<Float64 like Idx<16>, Idx<16>> = lie.mm(R16t, R16t)
+    let tr_r = reduce(method_for(range<V2>) <@> lambda(c: V2) -> Rt(c, c) |> compute, (+))
+    let tr_p0 = reduce(method_for(range<V2>) <@> lambda(c: V2) -> P0t(c, c) |> compute, (+))
+    let mv: Array<Float64 like Idx<16>> = method_for(range<V2>) <@> lambda(p: V2) -> pi_col(P0t, p) |> compute
+    (mv, tr_r, tr_p0)
+}
+let (mv, tr_r, tr_p0) = riesz(Cf, F)
+let mvec: Array<Float64 like Idx<16>> = method_for(range<V2>) <@> lambda(p: V2) -> mv(p) |> compute
+function msym(i: Int64, j: Int64) -> Float64 = 0.5 * (mvec(4 * i + j) + mvec(4 * j + i))
+let M: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> msym(i, j) |> compute
+
+// ---- (ii, iii) R = M^(1/2); the oriented frame J_a = R F_a R^-1 ----
+let (Qm, lam_m) = m.eigh(M)
+let metric_positive = lam_m(3) > 0.0
+let Qs: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(i: D, k: D) -> Qm(i, k) * sqrt(lam_m(k)) |> compute
+let Qi: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(i: D, k: D) -> Qm(i, k) / sqrt(lam_m(k)) |> compute
+let R: Array<Float64 like Idx<4>, Idx<4>> = gram(Qs, Qm)
+let Rinv: Array<Float64 like Idx<4>, Idx<4>> = gram(Qi, Qm)
+let Jf0 = method_for(F) <@> lambda(f: T^2) -> lie.mm(lie.mm(R, f), Rinv) |> compute
+let c123 = lie.frob(Jf0(2), lie.bracket(Jf0(0), Jf0(1))) / lie.frob(Jf0(2), Jf0(2))
+let orient: Float64 = if c123 < 0.0 then -1.0 else 1.0
+let J: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = Jf0 * orient
+
+// ---- (iv) the Casimir split: the multiplicities of the proposed spec ----
+let Cas0: Array<Float64 like Idx<4>, Idx<4>> = lie.casimir(J)
+function cas_at(i: Int64, j: Int64) -> Float64 = 0.5 * (Cas0(i, j) + Cas0(j, i))
+let Cas: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> cas_at(i, j) |> compute
+let (Qc, cas_spec) = m.eigh(Cas)
+let mult_l0 = reduce(method_for(cas_spec) <@> lambda(v: T^0) -> Int64(abs(v) < 1e-9) |> compute, (+))
+let mult_l1 = reduce(method_for(cas_spec) <@> lambda(v: T^0) -> Int64(abs(v + 2.0) < 1e-9) |> compute, (+)) / 3
+let spec_matches = mult_l0 == 1 && mult_l1 == 1
+
+// ---- (v) intertwiners T J_a = D_a^(l) T, stacked into U ----
+let Z1: Array<Float64 like Idx<1>, Idx<1>> = [[0.0]]
+let D0: Array<Float64 like Idx<3>, Idx<1>, Idx<1>> = stack(Z1, Z1, Z1)
+function hom_at(Jf: Array<Float64 like Idx<3>, Idx<4>, Idx<4>>, Dt: T^3, n: Int64, row: Int64, col: Int64) -> T^0 = {
+    let a = row / (4 * n)
+    let i = (row / 4) % n
+    let j = row % 4
+    let k = col / 4
+    let q = col % 4
+    delta(i, k) * Jf(a, q, j) - Dt(a, i, k) * delta(j, q)
+}
+function hom_null0(Jf: Array<Float64 like Idx<3>, Idx<4>, Idx<4>>, Dt: Array<Float64 like Idx<3>, Idx<1>, Idx<1>>) = {
+    let A: Array<Float64 like H0, D> = method_for(range<H0>, range<D>) <@> lambda(r: H0, c: D) -> hom_at(Jf, Dt, 1, r, c) |> compute
+    let (U, S, V) = m.svd(A)
+    let t: Array<Float64 like Idx<4>> = method_for(range<D>) <@> lambda(c: D) -> V(c, 3) |> compute
+    (S, t)
+}
+function hom_null1(Jf: Array<Float64 like Idx<3>, Idx<4>, Idx<4>>, Dt: Array<Float64 like Idx<3>, Idx<3>, Idx<3>>) = {
+    let A: Array<Float64 like H1r, H1c> = method_for(range<H1r>, range<H1c>) <@> lambda(r: H1r, c: H1c) -> hom_at(Jf, Dt, 3, r, c) |> compute
+    let (U, S, V) = m.svd(A)
+    let t: Array<Float64 like Idx<12>> = method_for(range<H1c>) <@> lambda(c: H1c) -> V(c, 11) |> compute
+    (S, t)
+}
+let (S_l0, t0) = hom_null0(J, D0)
+let (S_l1, t1) = hom_null1(J, D1)
+let n_l0 = count_below(S_l0, 1e-8 * S_l0(0))
+let n_l1 = count_below(S_l1, 1e-8 * S_l1(0))
+let t0v: Array<Float64 like Idx<4>> = t0
+let t1v: Array<Float64 like Idx<12>> = t1
+let g0: Float64 = if t0v(0) < 0.0 then -1.0 else 1.0
+let g1: Float64 = if t1v(0) < 0.0 then -1.0 else 1.0
+let nrm0 = sqrt(prodsum(t0v, t0v))
+let nrm1 = sqrt(prodsum(t1v, t1v))
+function u_at(r: Int64, c: Int64) -> Float64 = if r == 0 then g0 * t0v(c) / nrm0 else g1 * sqrt(3.0) * t1v(4 * (r - 1) + c) / nrm1
+let U: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<D>, range<D>) <@> lambda(r: D, c: D) -> u_at(r, c) |> compute
+let UUt = gram(U, U)
+let UUd: Array<Float64 like Idx<4>, Idx<4>> = decompact(UUt, 0)
+function uu_at(i: Int64, j: Int64) -> Float64 = abs(UUd(i, j) - delta(i, j))
+let orthogonal = maxabs(method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> uu_at(i, j) |> compute) < 1e-12
+let Ut: Array<Float64 like Idx<4>, Idx<4>> = transpose(U, [0, 1])
+let UJU: Array<Float64 like Idx<3>, Idx<4>, Idx<4>> = method_for(J) <@> lambda(j: T^2) -> lie.mm(lie.mm(U, j), Ut) |> compute
+function fin_at(a: Int64, i: Int64, j: Int64) -> Float64 = abs(UJU(a, i, j) - dblk(a, i, j))
+let canonical = maxabs3(method_for(range<G>, range<D>, range<D>) <@> lambda(a: G, i: D, j: D) -> fin_at(a, i, j) |> compute) < 1e-10
+
+// ---- the bridge: encode with W = U R, act with a discovered group element, read out certified ----
+let W: Array<Float64 like Idx<4>, Idx<4>> = lie.mm(U, R)
+function model(w: Array<Float64 like Idx<WD>>, z: Array<Float64 like IrrepsIdx<SPEC>>) where ml.equiv(SO3) -> Array<Float64 like Idx<4>> = {
+    let h = ml.derive_linear(SPEC, SOUT, w, z)
+    let g = ml.gated(SOUT, h)
+    ml.norms(SOUT, g)
+}
+let wv = Float64([0.4, -0.3, 0.2, 0.7])
+let zt: Array<Float64 like Idx<4>> = [0.5, -1.2, 0.8, 0.3]
+let coef: Array<Float64 like Idx<3>> = [0.7, -0.4, 1.1]
+let A: Array<Float64 like Idx<4>, Idx<4>> = lie.comb(coef, Jt)
+let gt: Array<Float64 like Idx<4>, Idx<4>> = m.expm(A)
+let zt_rot: Array<Float64 like Idx<4>> = method_for(gt) <@> lambda(row: T^1) -> prodsum(row, zt) |> compute
+let shear: Array<Float64 like Idx<4>, Idx<4>> = [[1.0, 0.5, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.3, 0.0], [0.0, 0.0, 0.0, 1.0]]
+let zt_bad: Array<Float64 like Idx<4>> = method_for(shear) <@> lambda(row: T^1) -> prodsum(row, zt) |> compute
+let zc: Array<Float64 like Idx<4>> = method_for(W) <@> lambda(row: T^1) -> prodsum(row, zt) |> compute
+let zc_rot: Array<Float64 like Idx<4>> = method_for(W) <@> lambda(row: T^1) -> prodsum(row, zt_rot) |> compute
+let zc_bad: Array<Float64 like Idx<4>> = method_for(W) <@> lambda(row: T^1) -> prodsum(row, zt_bad) |> compute
+let moved_input = sqrt(prodsum(zc_rot - zc, zc_rot - zc))
+let out = model(wv, zc)
+let out_rot = model(wv, zc_rot)
+let out_bad = model(wv, zc_bad)
+let drift = reduce(abs(out_rot - out), lambda(a, b) -> if a > b then a else b, 0.0)
+let invariant = drift < 1e-12
+let drift_bad = reduce(abs(out_bad - out), lambda(a, b) -> if a > b then a else b, 0.0)
+let shear_detected = drift_bad > 1e-3
+// loss and weight gradient at the encoded sample and at its rotated copy
+let tgt = Float64([1.0, 0.5, 0.25, 0.75])
+function loss(w: Array<Float64 like Idx<WD>>) -> Float64 = {
+    let o = model(w, zc)
+    reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2)), (o(3) - tgt(3)) * (o(3) - tgt(3))], (+))
+}
+function loss_rot(w: Array<Float64 like Idx<WD>>) -> Float64 = {
+    let o = model(w, zc_rot)
+    reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2)), (o(3) - tgt(3)) * (o(3) - tgt(3))], (+))
+}
+let mut dw = Float64([0.0, 0.0, 0.0, 0.0])
+let lv = ad.grad(loss)(wv, dw)
+let mut dw_rot = Float64([0.0, 0.0, 0.0, 0.0])
+let lv_rot = ad.grad(loss_rot)(wv, dw_rot)
+let grad_drift = reduce(abs(dw_rot - dw), lambda(a, b) -> if a > b then a else b, 0.0)
+let grad_invariant = abs(lv_rot - lv) < 1e-12 && grad_drift < 1e-12
+// EXPECT: tr_p0 = 2.0
+// EXPECT: metric_positive = true
+// EXPECT: cas_spec = [0.0, -2.0, -2.0, -2.0]
+// EXPECT: spec_matches = true
+// EXPECT: n_l0 = 1
+// EXPECT: n_l1 = 1
+// EXPECT: orthogonal = true
+// EXPECT: canonical = true
+// EXPECT: invariant = true
+// EXPECT: shear_detected = true
+// EXPECT: grad_invariant = true
+// tr R = 2 - 9/19 - 5/59 = 1616/1121
+// EXPECT: tr_r = 1.44157002676182
+// EXPECT: moved_input = 6.97589424968469
+// EXPECT: out = [1.21355454577916, 0.275368287434985, 1.03999264290197, 1.10126457747267]
+// EXPECT: lv = 0.843540129539131
