@@ -1,0 +1,210 @@
+// TEST: lie: Mode B -- alternating discovery and training straightens a distorted latent; the task alone does not
+// Lighthouse cell T1 (plan §4.4 Mode B and §5), at corpus size. The true latent
+// is a 26-point octahedral design (cuboctahedron, cube and octahedron vertices
+// at three radii); the data are x = (z0 + z1^2 / 2, z1, z2) -- the symmetry is
+// NONLINEAR in x -- with the rotation-invariant label y = |z|^2. The encoder is
+// z = x + theta m(x), m the six quadratic monomials (18 weights; the truth is
+// one weight at -1/2), the task loss mean (|z|^2 - y)^2. A round is:
+//   1. DISCOVER (exact): the Gaussian-kernel Hessian ladder of the encoded
+//      sample (lie/011), its three bottom eigenvectors snapped to so(3);
+//   2. TRAIN, generators FROZEN: 20 gradient steps on
+//      task + 10 sum_a q_G(A_a; encoded sample),
+//      the Hessian form written with `gram` so `ad.grad` differentiates it;
+//   3. SAFEGUARD: keep the new weights only if the round's objective fell.
+// Three rounds against a CONTROL that takes the same 60 steps on the task
+// alone (zero generators). The task loss has near-flat directions (fields
+// delta with x . delta = 0 are invisible at third order), so the control
+// crawls: its ladder gap goes 7.4 -> 30.6 and its bottom three rungs stay
+// 16x apart (one rung resolved). With the frozen-generator term the gap reaches 627, the three
+// rungs agree to 13%, the task loss is 23x lower, and every round is accepted.
+// The found algebra closes and its Killing form is negative definite:
+// consistent with so(3) under this encoder class and this regularizer
+// (plan §4.4's sentence; RIGOR.md B5 is why it cannot say more). Replayed in
+// numpy with finite-difference gradients
+// (docs/research/latent-symmetry/checks/check_t1.py).
+import math as m
+import ad as ad
+import lie
+type D = Idx<3>
+type N = Idx<26>
+type M6 = Idx<6>
+type C9 = Idx<9>
+type G = Idx<3>
+type Epochs = Idx<21>
+type State = Idx<18>
+let Zs: Array<Float64 like Idx<26>, Idx<3>> = [[-0.9, -0.9, 0.0], [-0.9, 0.0, -0.9], [-0.9, 0.0, 0.9], [-0.9, 0.9, 0.0], [0.0, -0.9, -0.9], [0.0, -0.9, 0.9], [0.0, 0.9, -0.9], [0.0, 0.9, 0.9], [0.9, -0.9, 0.0], [0.9, 0.0, -0.9], [0.9, 0.0, 0.9], [0.9, 0.9, 0.0], [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, -0.5], [-0.5, 0.5, 0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5], [-1.2, 0.0, 0.0], [0.0, -1.2, 0.0], [0.0, 0.0, -1.2], [0.0, 0.0, 1.2], [0.0, 1.2, 0.0], [1.2, 0.0, 0.0]]
+// the data: what the trainer sees
+function xcell(n: Int64, i: Int64) -> Float64 = if i == 0 then Zs(n, 0) + 0.5 * Zs(n, 1) * Zs(n, 1) else Zs(n, i)
+let X: Array<Float64 like N, D> = method_for(range<N>, range<D>) <@> lambda(n: N, i: D) -> xcell(n, i) |> compute
+let Y: Array<Float64 like N> = method_for(Zs) <@> lambda(row: T^1) -> prodsum(row, row) |> compute
+let Xa: Array<Float64 like Idx<26>, Idx<3>> = X
+function mcell(n: Int64, k: Int64) -> Float64 =
+    if k == 0 then Xa(n, 0) * Xa(n, 0) else if k == 1 then Xa(n, 0) * Xa(n, 1) else if k == 2 then Xa(n, 0) * Xa(n, 2) else if k == 3 then Xa(n, 1) * Xa(n, 1) else if k == 4 then Xa(n, 1) * Xa(n, 2) else Xa(n, 2) * Xa(n, 2)
+let MX: Array<Float64 like N, M6> = method_for(range<N>, range<M6>) <@> lambda(n: N, k: M6) -> mcell(n, k) |> compute
+
+// ---- the objective, spelled for ad.grad: grams of named operands, range maps, folds bound to lets ----
+function objective(th: Array<Float64 like D, M6>, x: Array<Float64 like N, D>, mx: Array<Float64 like N, M6>, y: Array<Float64 like N>, a0: Array<Float64 like D, D>, a1: Array<Float64 like D, D>, a2: Array<Float64 like D, D>) -> Float64 = {
+    let q = gram(mx, th)
+    let z = method_for(range<N>, range<D>) <@> lambda(n: N, i: D) -> x(n, i) + q(n, i) |> compute
+    let gzz = gram(z, z)
+    let r2 = method_for(range<N>) <@> lambda(n: N) -> (gzz(n, n) - y(n)) * (gzz(n, n) - y(n)) |> compute
+    let task = reduce(r2, (+))
+    let z0 = gram(z, a0)
+    let g0 = gram(z0, z0)
+    let c0 = gram(z, z0)
+    let h0 = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> exp(-(gzz(a, a) + gzz(b, b) - 2.0 * gzz(a, b)) / 2.0) * (g0(a, b) - (c0(a, a) - c0(b, a)) * (c0(a, b) - c0(b, b))) |> compute
+    let h0r = reduce(h0, (+))
+    let h0s = reduce(h0r, (+))
+    let z1 = gram(z, a1)
+    let g1 = gram(z1, z1)
+    let c1 = gram(z, z1)
+    let h1 = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> exp(-(gzz(a, a) + gzz(b, b) - 2.0 * gzz(a, b)) / 2.0) * (g1(a, b) - (c1(a, a) - c1(b, a)) * (c1(a, b) - c1(b, b))) |> compute
+    let h1r = reduce(h1, (+))
+    let h1s = reduce(h1r, (+))
+    let z2 = gram(z, a2)
+    let g2 = gram(z2, z2)
+    let c2 = gram(z, z2)
+    let h2 = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> exp(-(gzz(a, a) + gzz(b, b) - 2.0 * gzz(a, b)) / 2.0) * (g2(a, b) - (c2(a, a) - c2(b, a)) * (c2(a, b) - c2(b, b))) |> compute
+    let h2r = reduce(h2, (+))
+    let h2s = reduce(h2r, (+))
+    let total = task / 26.0 + 10.0 * (h0s + h1s + h2s) / 676.0
+    total
+}
+
+// ---- flat state <-> weights; one gradient step ----
+function scell(s: Array<Float64 like Idx<18>>, i: Int64, k: Int64) -> Float64 = s(6 * i + k)
+function theta_of(s: Array<Float64 like Idx<18>>) -> Array<Float64 like D, M6> =
+    method_for(range<D>, range<M6>) <@> lambda(i: D, k: M6) -> scell(s, i, k) |> compute
+function dcell(d: Array<Float64 like Idx<3>, Idx<6>>, p: Int64) -> Float64 = d(p / 6, p % 6)
+function step(s: Array<Float64 like Idx<18>>, a0: Array<Float64 like D, D>, a1: Array<Float64 like D, D>, a2: Array<Float64 like D, D>) -> Array<Float64 like Idx<18>> = {
+    let th = theta_of(s)
+    let mut dth: Array<Float64 like D, M6> = th * 0.0
+    let mut dx: Array<Float64 like N, D> = X * 0.0
+    let mut dmx: Array<Float64 like N, M6> = MX * 0.0
+    let mut dy: Array<Float64 like N> = Y * 0.0
+    let mut da0: Array<Float64 like D, D> = a0 * 0.0
+    let mut da1: Array<Float64 like D, D> = a0 * 0.0
+    let mut da2: Array<Float64 like D, D> = a0 * 0.0
+    let v = ad.grad(objective)(th, X, MX, Y, a0, a1, a2, dth, dx, dmx, dy, da0, da1, da2)
+    let dflat: Array<Float64 like Idx<3>, Idx<6>> = dth
+    method_for(range<State>) <@> lambda(p: State) -> s(p) - 0.05 * dcell(dflat, p) |> compute
+}
+function train(s0: Array<Float64 like Idx<18>>, a0: Array<Float64 like D, D>, a1: Array<Float64 like D, D>, a2: Array<Float64 like D, D>) -> Array<Float64 like Idx<18>> = {
+    let rec traj: Array<Float64 like Epochs, State> =
+        match traj with
+        | zero -> zero
+        | zero :: n -> zero :: s0
+        | prefix :: n -> prefix :: step(prefix(n - 1), a0, a1, a2)
+    traj(20)
+}
+
+// ---- discovery: the Hessian ladder of an encoded sample (lie/011), generators from its bottom rungs ----
+function zcell(s: Array<Float64 like Idx<18>>, n: Int64, i: Int64) -> Float64 =
+    Xa(n, i) + s(6 * i) * mcell(n, 0) + s(6 * i + 1) * mcell(n, 1) + s(6 * i + 2) * mcell(n, 2) + s(6 * i + 3) * mcell(n, 3) + s(6 * i + 4) * mcell(n, 4) + s(6 * i + 5) * mcell(n, 5)
+function encode(s: Array<Float64 like Idx<18>>) -> Array<Float64 like N, D> =
+    method_for(range<N>, range<D>) <@> lambda(n: N, i: D) -> zcell(s, n, i) |> compute
+function qg(zs: Array<Float64 like N, D>, A: Array<Float64 like D, D>) -> Float64 = {
+    let ax: Array<Float64 like N, D> = gram(zs, A)
+    let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(zs(a), ax(a), zs(b), ax(b), 1.0) |> compute
+    reduce(reduce(terms, (+)), (+)) / 676.0
+}
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
+function qdiag(zs: Array<Float64 like N, D>, c: Int64) -> Float64 = qg(zs, egl(c))
+function hcell(zs: Array<Float64 like N, D>, qd: Array<Float64 like Idx<9>>, p: Int64, q: Int64) -> Float64 = {
+    let B: Array<Float64 like D, D> = egl(p) + egl(q)
+    (qg(zs, B) - qd(p) - qd(q)) / 2.0
+}
+function hess(zs: Array<Float64 like N, D>) -> Array<Float64 like C9, C9> = {
+    let qd: Array<Float64 like Idx<9>> = method_for(range<C9>) <@> lambda(c: C9) -> qdiag(zs, c) |> compute
+    method_for(range<C9>, range<C9>) <@> lambda(p: C9, q: C9) -> hcell(zs, qd, p, q) |> compute
+}
+function gcell(v: Array<Float64 like Idx<9>>, i: Int64, j: Int64) -> Float64 = (v(3 * i + j) - v(3 * j + i)) / sqrt(2.0)
+function gen(v: Array<Float64 like Idx<9>>) -> Array<Float64 like D, D> =
+    method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> gcell(v, i, j) |> compute
+function task_of(s: Array<Float64 like Idx<18>>) -> Float64 = {
+    let zs = encode(s)
+    reduce(method_for(range<N>) <@> lambda(n: N) -> (prodsum(zs(n), zs(n)) - Y(n)) * (prodsum(zs(n), zs(n)) - Y(n)) |> compute, (+)) / 26.0
+}
+let zero3: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let s_init: Array<Float64 like Idx<18>> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+// ---- round 0 ----
+let H0: Array<Float64 like C9, C9> = hess(encode(s_init))
+let (Q0, lad0) = m.eigh(H0)
+let Q0t: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q0, [0, 1])
+let A00 = gen(Q0t(6))
+let A01 = gen(Q0t(7))
+let A02 = gen(Q0t(8))
+let before0 = objective(theta_of(s_init), X, MX, Y, A00, A01, A02)
+let t0 = train(s_init, A00, A01, A02)
+let after0 = objective(theta_of(t0), X, MX, Y, A00, A01, A02)
+let ok0 = after0 < before0
+let s1: Array<Float64 like Idx<18>> = s_init + Float64(Int64(ok0)) * (t0 - s_init)
+// ---- round 1 ----
+let H1: Array<Float64 like C9, C9> = hess(encode(s1))
+let (Q1, lad1) = m.eigh(H1)
+let Q1t: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q1, [0, 1])
+let A10 = gen(Q1t(6))
+let A11 = gen(Q1t(7))
+let A12 = gen(Q1t(8))
+let before1 = objective(theta_of(s1), X, MX, Y, A10, A11, A12)
+let t1 = train(s1, A10, A11, A12)
+let after1 = objective(theta_of(t1), X, MX, Y, A10, A11, A12)
+let ok1 = after1 < before1
+let s2: Array<Float64 like Idx<18>> = s1 + Float64(Int64(ok1)) * (t1 - s1)
+// ---- round 2 ----
+let H2: Array<Float64 like C9, C9> = hess(encode(s2))
+let (Q2, lad2) = m.eigh(H2)
+let Q2t: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q2, [0, 1])
+let A20 = gen(Q2t(6))
+let A21 = gen(Q2t(7))
+let A22 = gen(Q2t(8))
+let before2 = objective(theta_of(s2), X, MX, Y, A20, A21, A22)
+let t2 = train(s2, A20, A21, A22)
+let after2 = objective(theta_of(t2), X, MX, Y, A20, A21, A22)
+let ok2 = after2 < before2
+let s3: Array<Float64 like Idx<18>> = s2 + Float64(Int64(ok2)) * (t2 - s2)
+// ---- final discovery, and the control: the same 60 steps on the task alone ----
+let H3: Array<Float64 like C9, C9> = hess(encode(s3))
+let (Q3, lad3) = m.eigh(H3)
+let c1 = train(s_init, zero3, zero3, zero3)
+let c2 = train(c1, zero3, zero3, zero3)
+let c3 = train(c2, zero3, zero3, zero3)
+let Hc: Array<Float64 like C9, C9> = hess(encode(c3))
+let (Qc, ladc) = m.eigh(Hc)
+let gap_start = lad0(5) / lad0(6)
+let gap_final = lad3(5) / lad3(6)
+let gap_control = ladc(5) / ladc(6)
+let spread_final = lad3(6) / lad3(8)
+let spread_control = ladc(6) / ladc(8)
+let task_start = task_of(s_init)
+let task_final = task_of(s3)
+let task_control = task_of(c3)
+let weight_final = s3(3)
+let weight_control = c3(3)
+let accepted = ok0 && ok1 && ok2
+let dim_final = reduce(method_for(lad3) <@> lambda(v: T^0) -> Int64(v < 0.01 * lad3(5)) |> compute, (+))
+let dim_control = reduce(method_for(ladc) <@> lambda(v: T^0) -> Int64(v < 0.01 * ladc(5)) |> compute, (+))
+// the found algebra: closure and Killing form of the final snapped generators
+let Q3t: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q3, [0, 1])
+let Lf: Array<Float64 like G, D, D> = stack(gen(Q3t(6)), gen(Q3t(7)), gen(Q3t(8)))
+let Kf: Array<Float64 like G, G> = lie.killing(lie.structure_constants(Lf))
+let (Qk, kappa) = m.eigh(Kf)
+let compact = kappa(0) < 0.0
+let closed = lie.closure_defect(Lf) < 1e-6
+// EXPECT: accepted = true
+// EXPECT: dim_final = 3
+// EXPECT: dim_control = 1
+// EXPECT: compact = true
+// EXPECT: closed = true
+// EXPECT: gap_start = 7.39220780416078
+// EXPECT: gap_final = 627.459861305958
+// EXPECT: gap_control = 30.6117758598946
+// EXPECT: spread_final = 1.13190955104258
+// EXPECT: spread_control = 16.1362634000245
+// EXPECT: task_start = 0.115593378846154
+// EXPECT: task_final = 0.000302101461309044
+// EXPECT: task_control = 0.00696404468480488
+// EXPECT: weight_final = -0.461171677675572
+// EXPECT: weight_control = -0.220414803674796

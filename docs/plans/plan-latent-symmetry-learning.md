@@ -71,6 +71,28 @@ the reflection, so the O(3) upgrade waits for §3.4's finite `−I` test. The pr
 cell states the proposal in its header and checks the pinned spec against the discovered
 multiplicities.
 
+**Build note 3 (2026-11-20): cell T1 at corpus size, `lie/014`.** Mode B runs, with no compiler
+work. The true latent is a 26-point octahedral design; the data are `x = (z₀ + z₁²/2, z₁, z₂)`
+(the symmetry is nonlinear in `x`) with the invariant label `y = |z|²`; the encoder is
+`z = x + θ·m(x)` over the six quadratic monomials (18 weights). A round discovers (the
+Gaussian-Hessian ladder of the encoded sample, three bottom eigenvectors snapped to `so(3)`),
+trains 20 gradient steps on `task + 10·Σₐ q_G(Aₐ)` with the generators frozen (the Hessian form
+spelled with `gram`, so `ad.grad` differentiates it inside a `let rec` epoch loop), and keeps
+the weights only if the round's objective fell. Three rounds against a control taking the same
+60 steps on the task alone: the control's ladder gap goes 7.4 → 30.6 with its bottom rungs 16×
+apart (the task loss has near-flat directions — fields `δ` with `x·δ = 0` are invisible at third
+order); with the frozen-generator term the gap reaches 627, the three rungs agree to 13%, the
+task loss is 23× lower (3.0e-4 against 7.0e-3), every round is accepted, and the found algebra
+closes with Killing form `−2·I` to 5e-4. So at this size the alternation is not a tie-breaker
+but the thing that makes the representation learnable in the budget. What the cell is NOT: the
+§5 experiment (`N ≈ 2000` sampled from a law, a 16-dimensional `tanh` embedding, a decoder and
+the data-space MMD term, the dynamics rows as the task) — it has no decoder, its task is an
+invariant label, its sample is an exact design so the ladder is a theorem's shape rather than
+a statistic, and its realism term is the Hessian form only (the finite-`t` paired-U MMD of
+`lie/010` is not in the loss). The numpy replay (`checks/check_t1.py`) uses finite-difference
+gradients for the Hessian term and agrees to the digits printed. Costs: 0.6 s compiled, 34 s
+in the interpreter differential (a busy box).
+
 ## 0. The pitch
 
 LieGAN (Yang et al., ICML 2023) learns Lie-algebra generators of a data symmetry by
@@ -676,7 +698,7 @@ rows remove it.
 | P0 discovery lane, Blade source — BUILT 2026-10-08 (D5, D1′, N2: `lie/008`, `011`, `012`, 2026-11-20) | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
 | P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map); M1–M2 as identities `lie/009`–`010` (2026-11-20); the jvp-vs-grad residual pins remain | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
 | P2 `m.expm` — BUILT 2026-10-08 (`math/129`–`130`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
-| P3 Mode B trainer | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
+| P3 Mode B trainer — corpus-size cell T1 BUILT 2026-11-20 (`lie/014`: label task, quadratic encoder, Hessian term; Build note 3 says what it is not); the §5 experiment proper remains | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
 | P4 the bridge — the canonicalization half is `lie/007` (BUILT 2026-10-08); cell T2 is `lie/013` (BUILT 2026-11-20, `d = 4`); the proposal printout and the `U` store remain | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |
 | P5 research | Mode C + the geometric regularizers (N1 as the control); joint generator training (needs the `expm` derivative); training `φ` against the Lie-derivative residual (needs reverse-over-forward); the multiplicity parity search; non-roster soft equivariance (D6) | §4.1 rows 3–5 | each its own plan row when scheduled |
 
