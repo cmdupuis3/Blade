@@ -24,8 +24,10 @@
 // excluded) kernel two-sample distances of §3.2 of the plan, spelled as sample
 // × sample outer products (`method_for(x, y)` over rows) so they stay generic;
 // at large n the three-`gram` spelling is the BLAS route -- see the corpus.
-// The paired V-statistic is biased toward the identity transform (RIGOR.md
-// B2.6), which is why only the U forms are offered.
+// The `_paired` forms are for y(a) = g·x(a) (the cross diagonal dropped too);
+// `mmd2_poly_v` is offered because it IS the sample moment-matching distance
+// (B2.2). A V-statistic over paired samples is biased toward the identity
+// transform (RIGOR.md B2.6): descend the U forms.
 module lie
 
 /// p·q for rank-2 p, q (Gram against the transpose).
@@ -160,4 +162,72 @@ function gauss_hessian_pair(xa: T^1, axa: T^1, xb: T^1, axb: T^1, s2: Float64) -
     let kab = gauss_kernel(xa, xb, s2)
     let u = xa - xb
     kab * (prodsum(axa, axb) / s2 - prodsum(u, axa) * prodsum(u, axb) / (s2 * s2))
+}
+
+/// The V-statistic polynomial-kernel MMD² (every pair kept). For the kernel
+/// (c + ⟨a, b⟩)^k it IS the weighted moment-matching distance
+/// Σ_j binom(k, j) c^{k−j} ‖M̂_j(x) − M̂_j(y)‖²_F of the two SAMPLE moment
+/// sequences, exactly (RIGOR.md B2.2) -- so it vanishes whenever the sample
+/// moments up to order k agree, and its second derivative at the identity along
+/// e^{tA} is twice the moment-annihilation form (B2.3; `poly_hessian_pair`).
+/// As a LOSS over paired samples it is biased toward the identity transform
+/// (B2.6): descend the U forms, read identities off this one.
+function mmd2_poly_v(x: T^2, y: T^2, c: Float64, k: Int64) -> T^0 = {
+    let n = Float64(extents(x)[0])
+    let m = Float64(extents(y)[0])
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let sxx = reduce(reduce(kxx, (+)), (+))
+    let syy = reduce(reduce(kyy, (+)), (+))
+    let sxy = reduce(reduce(kxy, (+)), (+))
+    sxx / (n * n) + syy / (m * m) - 2.0 * sxy / (n * m)
+}
+
+/// PAIRED U-statistic polynomial-kernel MMD² for y(a) = g·x(a) -- the same n
+/// samples, transformed. Every a = b pair is dropped, in the CROSS term too:
+/// that diagonal is where the dependence between x(a) and y(a) sits, so this
+/// form (and not `mmd2_poly_u`, whose cross term assumes independent samples)
+/// is unbiased for MMD²(P, g_#P) (RIGOR.md B2.6). It can be negative.
+function mmd2_poly_u_paired(x: T^2, y: T^2, c: Float64, k: Int64) -> T^0 = {
+    let n = Float64(extents(x)[0])
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let sxx = reduce(reduce(kxx, (+)), (+))
+    let syy = reduce(reduce(kyy, (+)), (+))
+    let sxy = reduce(reduce(kxy, (+)), (+))
+    let dxx = reduce(method_for(sqnorms(x)) <@> lambda(v: T^0) -> (c + v) ^ k |> compute, (+))
+    let dyy = reduce(method_for(sqnorms(y)) <@> lambda(v: T^0) -> (c + v) ^ k |> compute, (+))
+    let dxy = reduce(method_for(zip(x, y)) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute, (+))
+    ((sxx - dxx) + (syy - dyy) - 2.0 * (sxy - dxy)) / (n * (n - 1.0))
+}
+
+/// PAIRED U-statistic Gaussian-kernel MMD² for y(a) = g·x(a); see
+/// `mmd2_poly_u_paired`. At g = I it is exactly zero; the V-statistic exceeds
+/// (n−1)/n times it by (2/n²) Σ_a (1 − k(x(a), y(a))) ≥ 0, the pairing trap.
+function mmd2_gauss_u_paired(x: T^2, y: T^2, sigma: Float64) -> T^0 = {
+    let n = Float64(extents(x)[0])
+    let s2 = sigma * sigma
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let sxx = reduce(reduce(kxx, (+)), (+))
+    let syy = reduce(reduce(kyy, (+)), (+))
+    let sxy = reduce(reduce(kxy, (+)), (+))
+    let dxy = reduce(method_for(zip(x, y)) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute, (+))
+    ((sxx - n) + (syy - n) - 2.0 * (sxy - dxy)) / (n * (n - 1.0))
+}
+
+/// One pair's term of the polynomial-kernel Hessian form (RIGOR.md B2.4, scalar
+/// form) for κ(s) = (c + s)^k, k ≥ 2: with g = ⟨xa, xb⟩ and axa = A·xa, axb = A·xb,
+///     κ′(g) ⟨axa, axb⟩ + κ″(g) ⟨axa, xb⟩ ⟨xa, axb⟩.
+/// Summed over ALL ordered pairs and divided by n² it is q̂(A) = ½ F″(0) of
+/// F(t) = `mmd2_poly_v`(X, e^{tA} X) -- the moment-annihilation form
+/// Σ_j w_j ‖ρ_j(A) M̂_j‖²_F computed from Gram entries only; over a ≠ b and
+/// divided by n(n−1) it is the paired U-statistic's.
+function poly_hessian_pair(xa: T^1, axa: T^1, xb: T^1, axb: T^1, c: Float64, k: Int64) -> T^0 = {
+    let g = c + prodsum(xa, xb)
+    let kf = Float64(k)
+    kf * g ^ (k - 1) * prodsum(axa, axb) + kf * (kf - 1.0) * g ^ (k - 2) * prodsum(axa, xb) * prodsum(xa, axb)
 }

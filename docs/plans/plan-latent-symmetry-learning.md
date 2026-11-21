@@ -38,6 +38,27 @@ both lanes, formalism §3.4; corpus `index-types/486`, `ad/041`–`042`); `ppl.m
 returns flat canonical cells, not the documented `SymIdx` storage — chipped. The verdict this plan rests on is the 2026-10-01 readiness assessment:
 static certified groups strong, learned Lie symmetry weak.
 
+**Build note 2 (2026-11-20, same branch, master `0c39e4a9` merged in).** The merge met three
+of master's rulings: literal widths (the stdlib's scalar parameters are `Float64` now, the
+cells spell their `Int64` / `Float64` lets), an unconverged Jacobi iteration is BL8008 (`lie/007`'s
+60-unknown intertwiner nullspace takes `m.svd(A, 12)`; no pin moved), and no duplicate corpus
+numbers (`ad/043` → `ad/185`, `math/092`–`093` → `math/129`–`130`). The remaining §5 cells that
+need no trainer are built: `lie/008` cell D5 (the functional lane on the equivariant dynamics
+`F(z) = (1 + |z|²) z`, Jacobian columns from `ad.jvp`: the kernel on `gl(3) ⊕ gl(3)` is the pairs
+`(A, A)`, `A ∈ so(3)`, dimension 3, and the homogeneous twin `|z|² z` adds Euler's pair,
+dimension 4), `lie/009` cell M1 (the `K = 2` polynomial MMD between a whitened sample and its
+rotation by `m.expm` is zero, `K = 3` is not; `F″(0) = 2q(A)` to 4e-7 by a central difference),
+`lie/010` cell M2 (the pairing trap as the exact identity `V = (n−1)/n·U + (2/n²)Σ(1 − k(x_a, g x_a))`,
+and the same split of the Hessian forms), `lie/011` cell D1′ (the Gaussian-kernel Hessian ladder
+by polarization on an octahedral orbit: `3 | 3 | 2 | 1` by Schur, `so(3)` at the bottom, 155× gap),
+`lie/012` cell N2 (three rings of eight points: one rung, charge 1 after the snap, commutant
+`2 + 1`). The stdlib gained `mmd2_poly_v` (the exact sample moment-matching distance),
+`mmd2_poly_u_paired` / `mmd2_gauss_u_paired` (the cross diagonal dropped too — the unbiased form
+for `y_a = g x_a`; `mmd2_*_u` assumes independent samples) and `poly_hessian_pair`. M1's
+statistical half ("zero to U-noise" at `N ≈ 2000`) and M2's data-space half belong to the
+trainer's data (P3), and are not pinned here: every pin in `lie/008`–`012` is a theorem or an
+exact identity, replayed in numpy (`checks/check_m1_m2.py`, `checks/check_d1prime_n2.py`).
+
 ## 0. The pitch
 
 LieGAN (Yang et al., ICML 2023) learns Lie-algebra generators of a data symmetry by
@@ -640,8 +661,8 @@ rows remove it.
 
 | phase | deliverable | compiler work | gate |
 |---|---|---|---|
-| P0 discovery lane, Blade source — BUILT 2026-10-08 | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
-| P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map) | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
+| P0 discovery lane, Blade source — BUILT 2026-10-08 (D5, D1′, N2: `lie/008`, `011`, `012`, 2026-11-20) | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
+| P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map); M1–M2 as identities `lie/009`–`010` (2026-11-20); the jvp-vs-grad residual pins remain | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
 | P2 `m.expm` — BUILT 2026-10-08 (`math/129`–`130`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
 | P3 Mode B trainer | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
 | P4 the bridge — the canonicalization half is `lie/007` (BUILT 2026-10-08); the proposal printout and cell T2 remain | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |

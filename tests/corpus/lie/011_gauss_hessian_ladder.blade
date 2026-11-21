@@ -1,0 +1,75 @@
+// TEST: lie: the Gaussian-kernel Hessian ladder of an octahedral orbit splits by Schur, so(3) at the bottom
+// Lighthouse cell D1' (plan §5; RIGOR.md B2.5). q_G(A) is half the second
+// derivative at t = 0 of the Gaussian-kernel MMD^2 between a sample and its
+// image under e^{tA}; its population kernel is exactly sym(P). On the 24-point
+// orbit of (1, 0.6, 0.3) under the proper signed permutations the form is
+// invariant under conjugation by the octahedral group, so on gl(3) = T1 + T2 + E + A1
+// (antisymmetric; off-diagonal symmetric; traceless diagonal; trace) Schur's
+// lemma makes it scalar on each summand: the ladder is 3 | 3 | 2 | 1, read off
+// `m.eigh` of the 9 x 9 form assembled by polarization,
+// H(p, q) = (q(B_p + B_q) - q(B_p) - q(B_q)) / 2, and each rung equals q on one
+// unit representative. The bottom rung is so(3): three antisymmetric
+// eigenvectors, 155 times below the next -- small and NOT zero, because a
+// finite sample is never infinitesimally invariant (the gap is the evidence,
+// plan §4.3 step 4). Values replayed in numpy
+// (docs/research/latent-symmetry/checks/check_d1prime_n2.py).
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<24>
+type C9 = Idx<9>
+// the orbit: row r = 4 * (permutation) + (two sign bits); the third sign makes det = +1
+let base: Array<Float64 like Idx<3>> = [1.0, 0.6, 0.3]
+let perms: Array<Int64 like Idx<6>, Idx<3>> = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
+let psign: Array<Int64 like Idx<6>> = [1, -1, -1, 1, 1, -1]
+function sgn(r: Int64, i: Int64) -> Int64 = {
+    let s0 = 1 - 2 * (r % 2)
+    let s1 = 1 - 2 * ((r / 2) % 2)
+    if i == 0 then s0 else if i == 1 then s1 else psign(r / 4) * s0 * s1
+}
+function pt(r: Int64, i: Int64) -> Float64 = Float64(sgn(r, i)) * base(perms(r / 4, i))
+let X: Array<Float64 like N, D> = method_for(range<N>, range<D>) <@> lambda(r: N, i: D) -> pt(r, i) |> compute
+let s2: Float64 = 1.0
+// q_G(A) = (1/n^2) sum over ordered pairs; rows of gram(x, A) are A x_a
+function qg(A: Array<Float64 like D, D>) -> Float64 = {
+    let ax: Array<Float64 like N, D> = gram(X, A)
+    let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(X(a), ax(a), X(b), ax(b), s2) |> compute
+    reduce(reduce(terms, (+)), (+)) / 576.0
+}
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
+function qdiag(c: Int64) -> Float64 = qg(egl(c))
+let qd: Array<Float64 like Idx<9>> = method_for(range<C9>) <@> lambda(c: C9) -> qdiag(c) |> compute
+function hcell(p: Int64, q: Int64) -> Float64 = {
+    let B: Array<Float64 like D, D> = egl(p) + egl(q)
+    (qg(B) - qd(p) - qd(q)) / 2.0
+}
+let H: Array<Float64 like C9, C9> = method_for(range<C9>, range<C9>) <@> lambda(p: C9, q: C9) -> hcell(p, q) |> compute
+let (Q, ladder) = m.eigh(H)
+let gap = ladder(5) / ladder(6)
+// the three bottom eigenvectors, as matrices
+function cell(v: Array<Float64 like Idx<9>>, i: Int64, j: Int64) -> Float64 = v(3 * i + j)
+function unvec(v: Array<Float64 like Idx<9>>) -> Array<Float64 like D, D> =
+    method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> cell(v, i, j) |> compute
+function sqsym(p: Array<Float64 like D, D>) -> Float64 = {
+    let pt2: Array<Float64 like D, D> = transpose(p, [0, 1])
+    let s = p + pt2
+    lie.frob(s, s)
+}
+let Qt: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q, [0, 1])
+let q6 = Qt(6)
+let q7 = Qt(7)
+let q8 = Qt(8)
+let so3_bottom = sqsym(unvec(q6)) + sqsym(unvec(q7)) + sqsym(unvec(q8)) < 1e-20
+// Schur: each rung is q on one unit representative of its summand
+let r: Float64 = sqrt(0.5)
+let rep_t1: Array<Float64 like D, D> = [[0.0, -r, 0.0], [r, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let rep_t2: Array<Float64 like D, D> = [[0.0, r, 0.0], [r, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let rep_e: Array<Float64 like D, D> = [[r, 0.0, 0.0], [0.0, -r, 0.0], [0.0, 0.0, 0.0]]
+let t: Float64 = sqrt(1.0 / 3.0)
+let rep_a1: Array<Float64 like D, D> = [[t, 0.0, 0.0], [0.0, t, 0.0], [0.0, 0.0, t]]
+let schur = abs(qg(rep_t1) - ladder(8)) < 1e-13 && abs(qg(rep_t2) - ladder(4)) < 1e-13 && abs(qg(rep_e) - ladder(1)) < 1e-13 && abs(qg(rep_a1) - ladder(0)) < 1e-13
+// EXPECT: so3_bottom = true
+// EXPECT: schur = true
+// EXPECT: ladder = [0.194953077605963, 0.0871699299969606, 0.0871699299969606, 0.0723211406858962, 0.0723211406858962, 0.0723211406858962, 0.000465708946561333, 0.000465708946561325, 0.000465708946561317]
+// EXPECT: gap = 155.292573226037

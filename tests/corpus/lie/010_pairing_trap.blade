@@ -1,0 +1,66 @@
+// TEST: lie: the pairing trap -- V exceeds (n-1)/n U by a positive diagonal on transformed samples
+// Lighthouse cell M2 (plan §5; RIGOR.md B2.6). For PAIRED samples y_a = g x_a
+// the dependence between x_a and y_a sits on the a = b diagonal. The paired
+// U-statistic (`lie.mmd2_gauss_u_paired`) drops that diagonal in all three
+// sums and is unbiased; the V-statistic keeps it, and the two differ by an
+// exact identity:
+//     V = (n - 1)/n U + (2/n^2) sum_a (1 - k(x_a, g x_a)).
+// The last term is zero at g = I and positive at any g that moves a sample, so
+// as a loss the V-statistic prefers the identity transform to a true symmetry.
+// The same split holds for the Hessian forms: q_V = (n - 1)/n q_U +
+// tr(A M2 A^T)/(n sigma^2) (the a = b terms of `lie.gauss_hessian_pair`). The
+// unpaired `lie.mmd2_gauss_u` keeps the cross diagonal -- right for
+// independent samples, biased here. Values replayed in numpy
+// (docs/research/latent-symmetry/checks/check_m1_m2.py).
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<8>
+let X: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7], [0.3, -0.8, 0.4], [0.9, 0.2, -0.9], [-0.7, 0.5, 0.1]]
+let Ar: Array<Float64 like D, D> = [[0.0, -1.0, 0.5], [1.0, 0.0, -0.3], [-0.5, 0.3, 0.0]]
+let tAr: Array<Float64 like D, D> = Ar * 0.7
+let g: Array<Float64 like D, D> = m.expm(tAr)
+let Y: Array<Float64 like N, D> = gram(X, g)
+let sigma: Float64 = 1.5
+let s2: Float64 = 1.5 * 1.5
+// the V-statistic, spelled here: it is the trap, not a stdlib offering
+function gauss_v(x: Array<Float64 like N, D>, y: Array<Float64 like N, D>) -> Float64 = {
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> lie.gauss_kernel(a, b, s2) |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> lie.gauss_kernel(a, b, s2) |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> lie.gauss_kernel(a, b, s2) |> compute
+    (reduce(reduce(kxx, (+)), (+)) + reduce(reduce(kyy, (+)), (+)) - 2.0 * reduce(reduce(kxy, (+)), (+))) / 64.0
+}
+let u_id = lie.mmd2_gauss_u_paired(X, X, sigma)
+let u_rot = lie.mmd2_gauss_u_paired(X, Y, sigma)
+let v_rot = gauss_v(X, Y)
+let moved = reduce(method_for(zip(X, Y)) <@> lambda(a: T^1, b: T^1) -> 1.0 - lie.gauss_kernel(a, b, s2) |> compute, (+))
+let diag = 2.0 * moved / 64.0
+let identity_holds = abs(v_rot - 7.0 / 8.0 * u_rot - diag) < 1e-15
+let trap = diag > 0.0
+let u_indep = lie.mmd2_gauss_u(X, Y, sigma)
+let pu_rot = lie.mmd2_poly_u_paired(X, Y, 1.0, 3)
+// the Hessian forms of a generic A split the same way
+let Ag: Array<Float64 like D, D> = [[0.2, -1.0, 0.5], [0.4, -0.1, 0.2], [-0.5, 0.6, 0.3]]
+let AX: Array<Float64 like N, D> = gram(X, Ag)
+let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(X(a), AX(a), X(b), AX(b), s2) |> compute
+let all_pairs = reduce(reduce(terms, (+)), (+))
+let diag_pairs = reduce(method_for(range<N>) <@> lambda(a: N) -> terms(a, a) |> compute, (+))
+let qv = all_pairs / 64.0
+let qu = (all_pairs - diag_pairs) / 56.0
+let dg = diag_pairs / 64.0
+let trace_form = lie.frob(AX, AX) / (64.0 * s2)
+let hessian_split = abs(qv - 7.0 / 8.0 * qu - dg) < 1e-15
+let diag_is_trace = abs(dg - trace_form) < 1e-15
+// EXPECT: u_id = 0.0
+// EXPECT: u_rot = -0.0187881311184623
+// EXPECT: v_rot = 0.0137250186461835
+// EXPECT: diag = 0.030164633374838
+// EXPECT: identity_holds = true
+// EXPECT: trap = true
+// EXPECT: u_indep = -0.0818745917909249
+// EXPECT: pu_rot = -0.279601844178161
+// EXPECT: qv = 0.0500495201268545
+// EXPECT: qu = -0.00289856429946789
+// EXPECT: dg = 0.0525857638888889
+// EXPECT: hessian_split = true
+// EXPECT: diag_is_trace = true

@@ -1,0 +1,96 @@
+// TEST: lie: the functional lane on an equivariant dynamics finds the pairs (A, A), A in so(3)
+// Lighthouse cell D5 (plan §5). For a C^2 map F the pairs (A, B) with
+// DF(z) A z = B F(z) for every z form a Lie algebra (RIGOR.md B3.1), the kernel
+// of the stacked blocks [DF(z_n) (x) z_n^T, -I (x) F(z_n)^T] (B3.2). Every
+// rotation-equivariant map of one vector is radial, F(z) = g(|z|^2) z; with
+// g = 1 + |z|^2 the equation reads (1 + r^2)(A - B) z + 2 (z^T A z) z = 0, whose
+// degree-1 part forces B = A and whose degree-3 part forces A antisymmetric: the
+// kernel on gl(3) + gl(3) is exactly {(A, A) : A in so(3)}, dimension 3. The
+// HOMOGENEOUS twin F3(z) = |z|^2 z adds Euler's pair (I, 3 I) (B3.2), so its
+// kernel has dimension 4 -- the pair is absent from F because F is not
+// homogeneous. Twelve samples give two 36 x 18 systems; the Jacobian columns
+// come from `ad.jvp` along the coordinate directions, never a finite difference.
+import ad as ad
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<12>
+type R36 = Idx<36>
+type C18 = Idx<18>
+type G = Idx<3>
+function F(z: Array<Float64 like D>) -> Array<Float64 like D> = {
+    let r2 = z(0) * z(0) + z(1) * z(1) + z(2) * z(2)
+    let y = method_for(range<D>) <@> lambda(i: D) -> (1.0 + r2) * z(i) |> compute
+    y
+}
+function F3(z: Array<Float64 like D>) -> Array<Float64 like D> = {
+    let r2 = z(0) * z(0) + z(1) * z(1) + z(2) * z(2)
+    let y = method_for(range<D>) <@> lambda(i: D) -> r2 * z(i) |> compute
+    y
+}
+let X: Array<Float64 like Idx<12>, Idx<3>> = [[1.0, 0.3, -0.2], [0.5, -0.7, 0.4], [-0.8, 0.1, 0.9], [0.2, 0.6, 0.3], [1.3, -0.4, -0.6], [-0.3, -0.9, 0.5], [0.7, 0.8, -0.1], [-1.1, 0.2, 0.2], [0.4, 1.0, 0.7], [-0.6, -0.5, -0.8], [0.9, -0.2, 1.1], [0.1, 0.4, -0.9]]
+let E: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+// Jacobian actions: Jm(n, p, i) = dF_i/dz_p at z_n
+function jcol(z: Array<Float64 like D>, e: Array<Float64 like D>) -> Array<Float64 like D> = {
+    let (y, t) = ad.jvp(F)(z, e)
+    t
+}
+function jcol3(z: Array<Float64 like D>, e: Array<Float64 like D>) -> Array<Float64 like D> = {
+    let (y, t) = ad.jvp(F3)(z, e)
+    t
+}
+let Jm: Array<Float64 like Idx<12>, Idx<3>, Idx<3>> = method_for(X, E) <@> lambda(z: T^1, e: T^1) -> jcol(z, e) |> compute
+let Jm3: Array<Float64 like Idx<12>, Idx<3>, Idx<3>> = method_for(X, E) <@> lambda(z: T^1, e: T^1) -> jcol3(z, e) |> compute
+let Fv: Array<Float64 like Idx<12>, Idx<3>> = method_for(X) <@> lambda(z: T^1) -> F(z) |> compute
+let Fv3: Array<Float64 like Idx<12>, Idx<3>> = method_for(X) <@> lambda(z: T^1) -> F3(z) |> compute
+// row r = 3 n + i; column c < 9 is A(p, q) at c = 3 p + q, column c >= 9 is B(p, q) at c - 9 = 3 p + q
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function crow(J: Array<Float64 like Idx<12>, Idx<3>, Idx<3>>, Fx: Array<Float64 like Idx<12>, Idx<3>>, r: Int64, c: Int64) -> Float64 =
+    if c < 9 then J(r / 3, c / 3, r % 3) * X(r / 3, c % 3) else -delta(r % 3, (c - 9) / 3) * Fx(r / 3, (c - 9) % 3)
+let C: Array<Float64 like R36, C18> = method_for(range<R36>, range<C18>) <@> lambda(r: R36, c: C18) -> crow(Jm, Fv, r, c) |> compute
+let C3: Array<Float64 like R36, C18> = method_for(range<R36>, range<C18>) <@> lambda(r: R36, c: C18) -> crow(Jm3, Fv3, r, c) |> compute
+let (U, S, V) = m.svd(C)
+let (U3, S3, V3) = m.svd(C3)
+function count_zero(s: T^1) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> Int64(v < 1e-10) |> compute, (+))
+let nullity = count_zero(S)
+let nullity_hom = count_zero(S3)
+let s_gap = S(14)
+// the three null vectors, A part (cells 0..8) and B part (cells 9..17)
+function cell(v: Array<Float64 like Idx<18>>, off: Int64, i: Int64, j: Int64) -> Float64 = v(off + 3 * i + j)
+function unvec(v: Array<Float64 like Idx<18>>, off: Int64) -> Array<Float64 like D, D> =
+    method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> cell(v, off, i, j) |> compute
+let Vt: Array<Float64 like Idx<18>, Idx<18>> = transpose(V, [0, 1])
+let v15 = Vt(15)
+let v16 = Vt(16)
+let v17 = Vt(17)
+let A0 = unvec(v15, 0)
+let A1 = unvec(v16, 0)
+let A2 = unvec(v17, 0)
+let B0 = unvec(v15, 9)
+let B1 = unvec(v16, 9)
+let B2 = unvec(v17, 9)
+function sqdiff(p: T^2, q: T^2) -> T^0 = {
+    let d = p - q
+    lie.frob(d, d)
+}
+function sqsym(p: Array<Float64 like D, D>) -> Float64 = {
+    let pt: Array<Float64 like D, D> = transpose(p, [0, 1])
+    let s = p + pt
+    lie.frob(s, s)
+}
+let same_pair = sqdiff(A0, B0) + sqdiff(A1, B1) + sqdiff(A2, B2) < 1e-20
+let antisymmetric = sqsym(A0) + sqsym(A1) + sqsym(A2) < 1e-20
+// unit null vectors (A, A) have ||A||_F^2 = 1/2: rescale to a Frobenius-orthonormal so(3) basis
+let Ls: Array<Float64 like G, D, D> = stack(A0, A1, A2) * sqrt(2.0)
+let cs = lie.structure_constants(Ls)
+let K: Array<Float64 like G, G> = lie.killing(cs)
+let (Qk, kappa) = m.eigh(K)
+// closure_defect is a difference of O(1) squares, so machine zero is 1e-16, not 1e-32
+let closed = lie.closure_defect(Ls) < 1e-12
+// EXPECT: nullity = 3
+// EXPECT: nullity_hom = 4
+// EXPECT: same_pair = true
+// EXPECT: antisymmetric = true
+// EXPECT: kappa = [-1.0, -1.0, -1.0]
+// EXPECT: closed = true
+// EXPECT: s_gap = 0.252433639458133

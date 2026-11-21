@@ -1,0 +1,69 @@
+// TEST: lie: polynomial MMD along e^{tA} -- zero on rotations at K = 2 after whitening, F''(0) = 2 q(A)
+// Lighthouse cell M1 (plan §5). The V-statistic polynomial-kernel MMD^2 is the
+// weighted distance between the two SAMPLE moment sequences (RIGOR.md B2.2), so
+// for a centered, whitened sample (M1 = 0, M2 = I exactly) and a finite
+// rotation g = e^{0.7 A}, A antisymmetric, the K = 2 distance between X and g X
+// is zero -- the whitening theorem (lie/006) at the sample level -- while K = 3
+// sees the order-3 moments move. Along any A, F(t) = MMD^2(X, e^{tA} X) has
+// F(0) = F'(0) = 0 and F''(0) = 2 q(A) (B2.3), where q is the
+// moment-annihilation form computed from Gram entries only (B2.4,
+// `lie.poly_hessian_pair`): the central difference (F(h) + F(-h)) / h^2 at
+// h = 1e-3 agrees with 2 q to 4e-7, and q itself vanishes on the rotation at
+// K = 2. Group elements are `m.expm`; values replayed in numpy
+// (docs/research/latent-symmetry/checks/check_m1_m2.py).
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<8>
+let Z0: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7], [0.3, -0.8, 0.4], [0.9, 0.2, -0.9], [-0.7, 0.5, 0.1]]
+// center, then whiten with W = Q diag(lam^-1/2) Q^T
+let Zt0: Array<Float64 like D, N> = transpose(Z0, [0, 1])
+let mu: Array<Float64 like D> = method_for(Zt0) <@> lambda(col: T^1) -> reduce(col, (+)) / 8.0 |> compute
+let Zc: Array<Float64 like N, D> = method_for(range<N>, range<D>) <@> lambda(a: N, i: D) -> Z0(a, i) - mu(i) |> compute
+let Zct: Array<Float64 like D, N> = transpose(Zc, [0, 1])
+let G2 = gram(Zct, Zct)
+let M2: Array<Float64 like D, D> = decompact(G2, 0) / 8.0
+let (Q, lam) = m.eigh(M2)
+let Qs: Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, k: D) -> Q(i, k) / sqrt(lam(k)) |> compute
+let W: Array<Float64 like D, D> = gram(Qs, Q)
+let X: Array<Float64 like N, D> = gram(Zc, W)
+// a rotation generator and a generic one; rows of gram(X, g) are g x_a
+let Ar: Array<Float64 like D, D> = [[0.0, -1.0, 0.5], [1.0, 0.0, -0.3], [-0.5, 0.3, 0.0]]
+let Ag: Array<Float64 like D, D> = [[0.2, -1.0, 0.5], [0.4, -0.1, 0.2], [-0.5, 0.6, 0.3]]
+let tAr: Array<Float64 like D, D> = Ar * 0.7
+let tAg: Array<Float64 like D, D> = Ag * 0.7
+let gr: Array<Float64 like D, D> = m.expm(tAr)
+let gg: Array<Float64 like D, D> = m.expm(tAg)
+let Yr: Array<Float64 like N, D> = gram(X, gr)
+let Yg: Array<Float64 like N, D> = gram(X, gg)
+let f2_rot = lie.mmd2_poly_v(X, Yr, 1.0, 2)
+let invariant2 = abs(f2_rot) < 1e-12
+let f3_rot = lie.mmd2_poly_v(X, Yr, 1.0, 3)
+let f2_gen = lie.mmd2_poly_v(X, Yg, 1.0, 2)
+// q(A) = (1/n^2) sum over ordered pairs of the Hessian pair term; rows of gram(X, A) are A x_a
+function qform(x: Array<Float64 like N, D>, A: Array<Float64 like D, D>, k: Int64) -> Float64 = {
+    let ax: Array<Float64 like N, D> = gram(x, A)
+    let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.poly_hessian_pair(x(a), ax(a), x(b), ax(b), 1.0, k) |> compute
+    reduce(reduce(terms, (+)), (+)) / 64.0
+}
+let q2_rot = qform(X, Ar, 2)
+let annihilated2 = abs(q2_rot) < 1e-12
+let q3_rot = qform(X, Ar, 3)
+let q3_gen = qform(X, Ag, 3)
+// F''(0) by a central difference: F(0) = 0, so it is (F(h) + F(-h)) / h^2
+let h: Float64 = 0.001
+let hA: Array<Float64 like D, D> = Ag * h
+let mhA: Array<Float64 like D, D> = Ag * (-h)
+let gp: Array<Float64 like D, D> = m.expm(hA)
+let gm: Array<Float64 like D, D> = m.expm(mhA)
+let Yp: Array<Float64 like N, D> = gram(X, gp)
+let Ym: Array<Float64 like N, D> = gram(X, gm)
+let fd = (lie.mmd2_poly_v(X, Yp, 1.0, 3) + lie.mmd2_poly_v(X, Ym, 1.0, 3)) / (h * h)
+let factor_two = abs(fd - 2.0 * q3_gen) / (2.0 * q3_gen) < 1e-6
+// EXPECT: invariant2 = true
+// EXPECT: f3_rot = 2.61347697610579
+// EXPECT: f2_gen = 2.13208329204003
+// EXPECT: annihilated2 = true
+// EXPECT: q3_rot = 7.10063099744559
+// EXPECT: q3_gen = 13.7164877693352
+// EXPECT: factor_two = true

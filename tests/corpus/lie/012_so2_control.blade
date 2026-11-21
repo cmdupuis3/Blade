@@ -1,0 +1,74 @@
+// TEST: lie: an so(2)-invariant sample gives a one-dimensional algebra with charge 1 and a complex-type commutant
+// Lighthouse cell N2 (plan §5), Mode A: a fixed representation, analysed once.
+// The sample is three rings of eight points -- invariant under rotation by
+// 45 degrees about the third axis, with the third coordinate free -- so the
+// Gaussian-kernel Hessian ladder (lie/011) has ONE rung near zero (8.8e-6, a
+// finite ring is never infinitesimally invariant) and the next 1163 times
+// above it: dimension 1, hence abelian. The bottom eigenvector, scaled to
+// ||J||_F^2 = 2 and antisymmetrized (the snap), is the rotation generator about
+// the third axis: J J^T has spectrum (1, 1, 0), charge 1. Its commutant in
+// gl(3), the kernel of M -> M J - J M, has dimension 3 = 2 + 1: a complex-type
+// block (a I + b J on the plane, dim End = 2) and the trivial line -- the
+// isotypic split of plan §3.4 (vi). Values replayed in numpy
+// (docs/research/latent-symmetry/checks/check_d1prime_n2.py).
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<24>
+type C9 = Idx<9>
+let hs: Array<Float64 like Idx<3>> = [-0.7, 0.2, 0.9]
+let rads: Array<Float64 like Idx<3>> = [1.0, 0.6, 1.3]
+let two_pi: Float64 = 2.0 * acos(-1.0)
+function pt(r: Int64, i: Int64) -> Float64 = {
+    let h = hs(r / 8)
+    let th = two_pi * Float64(r % 8) / 8.0 + 0.3 * h
+    if i == 0 then rads(r / 8) * cos(th) else if i == 1 then rads(r / 8) * sin(th) else h
+}
+let X: Array<Float64 like N, D> = method_for(range<N>, range<D>) <@> lambda(r: N, i: D) -> pt(r, i) |> compute
+let s2: Float64 = 1.0
+function qg(A: Array<Float64 like D, D>) -> Float64 = {
+    let ax: Array<Float64 like N, D> = gram(X, A)
+    let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(X(a), ax(a), X(b), ax(b), s2) |> compute
+    reduce(reduce(terms, (+)), (+)) / 576.0
+}
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
+function qdiag(c: Int64) -> Float64 = qg(egl(c))
+let qd: Array<Float64 like Idx<9>> = method_for(range<C9>) <@> lambda(c: C9) -> qdiag(c) |> compute
+function hcell(p: Int64, q: Int64) -> Float64 = {
+    let B: Array<Float64 like D, D> = egl(p) + egl(q)
+    (qg(B) - qd(p) - qd(q)) / 2.0
+}
+let H: Array<Float64 like C9, C9> = method_for(range<C9>, range<C9>) <@> lambda(p: C9, q: C9) -> hcell(p, q) |> compute
+let (Q, ladder) = m.eigh(H)
+let dim = reduce(method_for(ladder) <@> lambda(v: T^0) -> Int64(v < 1e-4) |> compute, (+))
+let gap = ladder(7) / ladder(8)
+// the generator: bottom eigenvector, ||J||_F^2 = 2, antisymmetric part
+function cell(v: Array<Float64 like Idx<9>>, i: Int64, j: Int64) -> Float64 = v(3 * i + j)
+let Qt: Array<Float64 like Idx<9>, Idx<9>> = transpose(Q, [0, 1])
+let q8 = Qt(8)
+let J0: Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> cell(q8, i, j) * sqrt(2.0) |> compute
+let J0t: Array<Float64 like D, D> = transpose(J0, [0, 1])
+let J: Array<Float64 like D, D> = (J0 - J0t) / 2.0
+let snap = lie.frob(J0 - J, J0 - J)
+let snapped = snap < 1e-12
+let Jt: Array<Float64 like D, D> = transpose(J, [0, 1])
+let JJt: Array<Float64 like D, D> = lie.mm(J, Jt)
+let (Qc, charge2) = m.eigh(JJt)
+let charge_one = abs(charge2(0) - 1.0) < 1e-9 && abs(charge2(1) - 1.0) < 1e-9 && abs(charge2(2)) < 1e-9
+// the commutant: column c is vec(E_c J - J E_c)
+let Ja: Array<Float64 like Idx<3>, Idx<3>> = J
+function comm_cell(r: Int64, c: Int64) -> Float64 = {
+    let E: Array<Float64 like Idx<3>, Idx<3>> = egl(c)
+    let Rm = lie.bracket(E, Ja)
+    Rm(r / 3, r % 3)
+}
+let Cm: Array<Float64 like C9, C9> = method_for(range<C9>, range<C9>) <@> lambda(r: C9, c: C9) -> comm_cell(r, c) |> compute
+let (Uc, Sc, Vc) = m.svd(Cm)
+let commutant_dim = reduce(method_for(Sc) <@> lambda(v: T^0) -> Int64(v < 1e-9) |> compute, (+))
+// EXPECT: dim = 1
+// EXPECT: snapped = true
+// EXPECT: charge_one = true
+// EXPECT: commutant_dim = 3
+// EXPECT: ladder = [0.141796589004371, 0.0819130073770396, 0.0683516570981665, 0.0683516570981665, 0.0359400606344, 0.0359400606344, 0.0101758830988155, 0.0101758830988155, 8.75143669432398e-06]
+// EXPECT: gap = 1162.76714946877
