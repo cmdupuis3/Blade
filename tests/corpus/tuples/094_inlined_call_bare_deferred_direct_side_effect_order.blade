@@ -1,0 +1,22 @@
+// TEST: Inlined Call Bare Deferred Direct Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, the capturing (inlined) call with the direct name: tuples/082's
+// shape over `seen` itself. The bump runs first, then `seen` is forced at its
+// position: r = 1 + 11 + 2 + cnt(0) = 15 in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let h = lambda(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> k + p(0) + q(0) + cnt(0)
+let r = h(bump(cnt), seen, good |> compute)
+// EXPECT: r = 15
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

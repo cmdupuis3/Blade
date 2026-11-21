@@ -1,0 +1,19 @@
+// TEST: Tuple Bare Deferred Alias Member After Write
+// ----------------------------------------------------------------------------
+// Gap G304, the tuple twin: a bare deferred ALIAS held in a tuple after a
+// writing member is a copy made at its position, (1, [11]), and the class it
+// copies prints nothing (tuples/052's rule); the llvm lane printed it.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t = (bump(cnt), seen2)
+// EXPECT: t = (1, [11])
+// EXPECT: cnt = [1]

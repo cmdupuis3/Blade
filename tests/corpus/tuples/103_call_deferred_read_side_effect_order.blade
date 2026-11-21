@@ -1,0 +1,21 @@
+// TEST: Call Deferred Read Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, the direct-name twin of tuples/102: `seen(0)` is read after the
+// bump.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, s: Int64, q: Array<Int64 like Row>) -> Int64 = k + s + q(0)
+let r = h(bump(cnt), seen(0), good |> compute)
+// EXPECT: r = 14
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

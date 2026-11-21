@@ -1,0 +1,23 @@
+// TEST: Ordinary Call Bare Deferred After Failing Arg (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304 in a G79 call: a bare deferred alias between two arguments that
+// may fail is forced at its own position, after the failing cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let mut w: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t0 = bump(w)
+function h(k: Int64, p: Array<Int64 like Row>, s: Int64) -> Int64 = k + p(0) + s
+let r = h(a((a(0) : Row)), bad2, 1 / z(0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:19

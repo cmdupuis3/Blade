@@ -1,0 +1,21 @@
+// TEST: Inlined Call Bare Deferred Alias Last Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, the bare deferred alias as the LAST argument of the capturing
+// (inlined) call: forced after the bump and the compute.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let h = lambda(k: Int64, q: Array<Int64 like Row>, p: Array<Int64 like Row>) -> k + p(0) + q(0) + cnt(0)
+let r = h(bump(cnt), good |> compute, seen2)
+// EXPECT: r = 15
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

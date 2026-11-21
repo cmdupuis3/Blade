@@ -1,0 +1,19 @@
+// TEST: Tuple Bare Deferred Alias Member
+// ----------------------------------------------------------------------------
+// Gap G304, tuples/052 through an alias: `(seen2, 1)` copies the map at the
+// construction; neither `seen` nor `seen2` is forced under its own name, so
+// neither prints (the llvm lane printed both).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t = (seen2, Int64(1))
+// EXPECT: t = ([10], 1)
+// EXPECT: cnt = [0]

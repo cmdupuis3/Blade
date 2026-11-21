@@ -1789,6 +1789,90 @@ let private spineStatement (c: Ctx) (e: IRExpr) : bool =
         true
     else false
 
+/// THE ORDERED-CALL JUDGMENT (gap G57; emitCall's ARGUMENT ORDER block says
+/// what the ordered path does). A name is a still-deferred array argument when
+/// its slot is a producer, or when it has no slot yet and its module value is
+/// a deferred form (a deferred map may be bound lazily, at its first use).
+let private isBareDeferredCallArg (c: Ctx) (a: IRExpr) : bool =
+    match a with
+    | IRVar (id, ty) when (match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false) ->
+        (match c.ArrSlots.TryGetValue id with
+         | true, { Src = APool _ } -> false
+         | true, _ -> true
+         | _ ->
+             match Map.tryFind id c.BindingValues with
+             | Some v -> not (match v with IRCompute _ | IRArrayLit _ -> true | _ -> false)
+             | None -> false)
+    | _ -> false
+
+/// An argument that is not inert evaluates something (a literal, a parameter
+/// or a stored name evaluates nothing).
+let private inertCallArg (c: Ctx) (a: IRExpr) : bool =
+    match a with
+    | IRLit _ | IRParam _ -> true
+    | IRVar _ -> not (isBareDeferredCallArg c a)
+    | _ -> false
+
+/// Some argument satisfies `forces` and ANOTHER argument is not inert.
+let private argumentHazard (c: Ctx) (forces: IRExpr -> bool) (args: IRExpr list) : bool =
+    let indexed = List.indexed args
+    indexed |> List.exists (fun (j, a) ->
+        forces a && indexed |> List.exists (fun (i, b) -> i <> j && not (inertCallArg c b)))
+
+/// THE G57 HAZARD: a call holding an explicit `|> compute` argument and a bare
+/// deferred array argument beside another argument that evaluates something.
+/// Off the spine it is refused (emitCall), fail closed.
+let private bareComputeHazard (c: Ctx) (args: IRExpr list) : bool =
+    args |> List.exists (function IRCompute _ -> true | _ -> false)
+    && argumentHazard c (isBareDeferredCallArg c) args
+
+/// Does a call ON THE SPINE take the ordered path? The G57 hazard, and -- in
+/// MAIN, for a call the C++ lane's genOrderedCallBinding orders (an explicit
+/// compute argument, gap G57, or two or more arguments that may fail, gap
+/// G79: IRLift.memberMayFailOf, the C++ admission) -- an argument that FORCES
+/// a still-deferred array it reads positionally (`g(0)`, `f(g)`: the C++
+/// pre-pass's walk, collectPositionalReadsLl) beside another argument that
+/// evaluates something (gap G304). Unordered, that force is hoisted to the
+/// statement's start (or made there by the statement pre-pass), ahead of the
+/// earlier arguments' writes and failures; ordered, it lands at its own
+/// argument, as the C++ lane's per-argument temporary forces it. (A function
+/// body keeps the G57 hazard alone: its private maps are re-forced per
+/// positional statement, G235 (b), and the C++ lane's function-body twin of
+/// these calls is not verified -- gap G304.) Judged against the slots as they
+/// stand: the caller asks BEFORE any argument runs (forcing one upgrades its
+/// slot); emitMain asks it too, at the statement's start, for main's root.
+let private callArgsNeedOrder (c: Ctx) (args: IRExpr list) : bool =
+    bareComputeHazard c args
+    || (not c.InFunction
+        && (let deferredId (id: IRId) =
+                match c.ArrSlots.TryGetValue id with
+                | true, { Src = APool _ } -> false
+                | true, _ -> true
+                | _ -> false
+            let deferredTuple (id: IRId) =
+                match c.TupleSlots.TryGetValue id with
+                | true, parts ->
+                    not parts.IsEmpty && parts |> List.forall (function VArray { Src = (AVirt _ | AVirtFlat _) } -> true | _ -> false)
+                | _ -> false
+            let rec isWrapper (e: IRExpr) =
+                match e with
+                | IRVar (id, _) when deferredId id ->
+                    (match Map.tryFind id c.BindingValues with
+                     | Some (IRChoice _ | IRFallback _) -> true
+                     | Some (IRVar _ as inner) -> isWrapper inner
+                     | _ -> false)
+                | _ -> false
+            let dv : Blade.IRLift.DeferredView =
+                { IsDeferred = (fun id -> deferredId id || deferredTuple id)
+                  ValueOf = (fun id -> Map.tryFind id c.BindingValues)
+                  TypeOfExpr = typeOf }
+            let cppOrders =
+                args |> List.exists (function IRCompute _ -> true | _ -> false)
+                || (args |> List.filter (Blade.IRLift.memberMayFailOf dv) |> List.length) >= 2
+            let forces (a: IRExpr) =
+                isBareDeferredCallArg c a || not (collectPositionalReadsLl deferredId isWrapper a).IsEmpty
+            cppOrders && argumentHazard c forces args))
+
 /// Close the innermost scope. With `emitFrees`, each tracking slot is loaded
 /// and freed -- a null slot (branch never taken, or pool kept) frees
 /// nothing. `keepReg` spares its own entry TEXTUALLY: a tracking slot only
@@ -4498,40 +4582,19 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     // (Ctx.SpineCallArgs) -- since nested in an expression a
     // positional statement would not dominate; anything else is refused,
     // fail closed. (The C++ lane orders only a binding whose root is the
-    // call, too: the nested mixed call is OPEN under G57 / G79.)
-    // A name is a still-deferred array when its slot is a producer, or when it
-    // has no slot yet and its module value is a deferred form (a deferred map
-    // may be bound lazily, at its first use).
-    let isBareDeferredArg (a: IRExpr) =
-        match a with
-        | IRVar (id, ty) when (match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false) ->
-            (match c.ArrSlots.TryGetValue id with
-             | true, { Src = APool _ } -> false
-             | true, _ -> true
-             | _ ->
-                 match Map.tryFind id c.BindingValues with
-                 | Some v -> not (match v with IRCompute _ | IRArrayLit _ -> true | _ -> false)
-                 | None -> false)
-        | _ -> false
-    let inertArg (a: IRExpr) =
-        match a with
-        | IRLit _ | IRParam _ -> true
-        | IRVar _ -> not (isBareDeferredArg a)
-        | _ -> false
+    // call, too: the nested mixed call is OPEN under G57 / G79.) On the spine
+    // the judgment is callArgsNeedOrder (which also orders a positional
+    // deferred read beside an evaluating argument, gap G304), and main's
+    // statement pre-pass leaves such a root call's arguments to this path
+    // (emitMain); off it, bareComputeHazard refuses.
     let ordered =
-        if args |> List.exists (function IRCompute _ -> true | _ -> false) then
-            let indexed = List.indexed args
-            let hazard =
-                indexed |> List.exists (fun (j, a) ->
-                    isBareDeferredArg a
-                    && indexed |> List.exists (fun (i, b) -> i <> j && not (inertArg b)))
-            if hazard && not (c.SpineCallArgs.Contains(box args)) then
-                refuse ($"a call to '{callable.SourceName}' whose bare deferred array argument would be evaluated out of argument order (the ordered argument path needs the call to be a statement's whole value; the nested mixed call is OPEN in the C++ lane too -- gaps G57 / G79)")
-            hazard
+        if c.SpineCallArgs.Contains(box args) then callArgsNeedOrder c args
+        elif bareComputeHazard c args then
+            refuse ($"a call to '{callable.SourceName}' whose bare deferred array argument would be evaluated out of argument order (the ordered argument path needs the call to be a statement's whole value; the nested mixed call is OPEN in the C++ lane too -- gaps G57 / G79)")
         else false
     // The bare deferred arguments, judged BEFORE any argument runs (forcing
     // one upgrades its slot).
-    let bareDeferred = args |> List.map (fun a -> ordered && isBareDeferredArg a)
+    let bareDeferred = args |> List.map (fun a -> ordered && isBareDeferredCallArg c a)
     // On the spine, argument k runs as its own positional statement.
     let atArgument () =
         if ordered && c.StmtStart >= 0 then positionalStatement c
@@ -7703,7 +7766,24 @@ and private forceCopyInputs (c: Ctx) (e: IRExpr) : unit =
         match e with
         | IRVar (id, _) when c.BindingValues.ContainsKey id ->
             (match c.ArrSlots.TryGetValue id with
-             | true, { Src = (AVirt _ | AVirtFlat _) } -> markForcedChildren c id
+             | true, ({ Src = (AVirt _ | AVirtFlat _) } as slot) ->
+                 // a copy of a top-level ALIAS of a deferred map (`let g2 = g`,
+                 // chains too: one value, gap G60) is a copy of the map ITSELF
+                 // (gap G304): its inputs are forced, never the map under its
+                 // own name -- the alias's value `g` is not an input of it. It
+                 // used to mark `g` forced, so the class printed (the C++ lane
+                 // and the interpreter print nothing for a copy) and, in a
+                 // program that assigns, its snapshot was hoisted to the
+                 // statement's start, ahead of earlier members / arguments.
+                 let rec root (seen: Set<IRId>) (x: IRId) =
+                     match Map.tryFind x c.BindingValues with
+                     | Some (IRVar (src, _)) when not (seen.Contains src) && c.BindingValues.ContainsKey src
+                                                  && (match c.ArrSlots.TryGetValue src with
+                                                      | true, s -> obj.ReferenceEquals(s, slot)
+                                                      | _ -> false) ->
+                         root (seen.Add x) src
+                     | _ -> x
+                 markForcedChildren c (root Set.empty id)
              | _ ->
                  // a named deferred TUPLE (or an alias of one) copied as a
                  // member: each member is copied, so each member prerequisites
@@ -12244,8 +12324,25 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         // answer without its reader forcing -- `extents(d)` of a static
         // extent, a row view `d(0)` -- still fixes the snapshot there, so a
         // later write cannot change what a later read or the print sees.
+        // A ROOT CALL ON THE ORDERED PATH (gap G304) is the exception, as in
+        // the C++ lane, whose genOrderedCallBinding is routed ahead of the
+        // binding's pre-pass: its arguments are evaluated left to right, each
+        // at its own positional statement (emitCall), and a deferred array it
+        // reads is forced there. Forced here, a bare deferred argument would
+        // read its inputs before an earlier argument's write or failure -- and,
+        // stored by then, it no longer looked deferred to emitCall, so the
+        // call left the ordered path silently.
+        // A MEMBER-ORDERED ROOT TUPLE likewise (the C++ lane routes
+        // genMemberOrderedTupleBinding ahead of the pre-pass): each member is
+        // its own positional statement (emitTupleParts), so `(f(x), g(0))`
+        // reads g after f ran.
+        let orderedRoot =
+            match b.Value with
+            | IRApp (IRVar (fid, _), args, _) when c.Callables.ContainsKey fid -> callArgsNeedOrder c args
+            | IRTuple elems -> tupleNeedsMemberOrderLl c elems
+            | _ -> false
         (match b.Value with
-         | _ when (match b.Value with IRLet _ -> true | _ -> c.Facts.AnyAssignment) ->
+         | _ when not orderedRoot && (match b.Value with IRLet _ -> true | _ -> c.Facts.AnyAssignment) ->
              for x in c.StmtForceOrder do
                  match x with
                  | IRVar (id, _) when c.BindingValues.ContainsKey id ->

@@ -1,0 +1,24 @@
+// TEST: Call Bare Deferred Alias Chain Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, an alias chain of length 2 (`seen3 = seen2 = seen`) as the middle
+// argument after a writing one: the whole class is forced at the argument,
+// after the bump, and prints [11].
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let seen3 = seen2
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(bump(cnt), seen3, good |> compute)
+// EXPECT: r = 14
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]
+// EXPECT: seen3 = [11]

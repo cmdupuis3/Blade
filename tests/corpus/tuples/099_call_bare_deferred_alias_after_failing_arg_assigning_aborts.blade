@@ -1,0 +1,26 @@
+// TEST: Call Bare Deferred Alias After Failing Arg Assigning (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304, tuples/063 with the bare deferred argument spelled through an
+// alias, in a program that ASSIGNS (the earlier `bump(w)`): the first
+// argument's checked cast (BL8006) fires before the later alias `bad2`
+// divides by zero (BL8013). The llvm lane's statement pre-pass forced `bad2`
+// first in any program that assigns, and reported BL8013.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let mut w: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t0 = bump(w)
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(a((a(0) : Row)), bad2, good |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:22

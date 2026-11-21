@@ -1,0 +1,23 @@
+// TEST: Call Bare Deferred After Failing Arg Assigning (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304, tuples/063 itself in a program that assigns: the direct name
+// `bad` is forced at its own argument, after the failing cast.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let mut w: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t0 = bump(w)
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(a((a(0) : Row)), bad, good |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:19

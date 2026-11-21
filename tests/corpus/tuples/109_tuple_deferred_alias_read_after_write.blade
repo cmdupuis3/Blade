@@ -1,0 +1,21 @@
+// TEST: Tuple Deferred Alias Read After Write
+// ----------------------------------------------------------------------------
+// Gap G304, a positional read of a deferred alias in a tuple member after a
+// writing member: the member-ordered tuple reads it at its position (11),
+// where the llvm lane's statement pre-pass forced it before the write (10).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t = (bump(cnt), seen2(0))
+// EXPECT: t = (1, 11)
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

@@ -1,0 +1,24 @@
+// TEST: Ordinary Call Deferred Read After Failing Arg (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304 in a G79 call (no explicit compute, two arguments that may fail):
+// the cast in the first argument fails before the second argument reads the
+// failing deferred alias `bad2` (BL8013), in a program that assigns.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let mut w: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t0 = bump(w)
+function h(k: Int64, s: Int64) -> Int64 = k + s
+let r = h(a((a(0) : Row)), bad2(0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:20

@@ -1,0 +1,22 @@
+// TEST: Call Compute Of Deferred Alias Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, `seen2 |> compute` of an ALIAS as an argument after a writing one:
+// the compute is a COPY taken at its position (r = 14), and a copy forces
+// nothing under its own name, so the class prints nothing. The llvm lane
+// treated the alias's value `seen` as an input of the copy: it forced `seen`
+// at the statement's start (r = 13) and printed the class.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(bump(cnt), seen2 |> compute, good |> compute)
+// EXPECT: r = 14
+// EXPECT: cnt = [1]

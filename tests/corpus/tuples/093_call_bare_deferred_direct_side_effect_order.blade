@@ -1,0 +1,25 @@
+// TEST: Call Bare Deferred Direct Side Effect Order
+// ----------------------------------------------------------------------------
+// Gap G304, the direct-name twin of tuples/065: the first argument bumps a
+// counter that the LATER bare deferred argument `seen` reads. Left to right
+// (formalism 10.2) the bump runs first, so `seen` is forced at its own position
+// with the counter at 1: r = 1 + 11 + 2 = 14. The llvm lane forced it at the
+// statement's start -- the statement pre-pass of a program that assigns
+// anything -- and printed r = 13: the defect was never the alias.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(bump(cnt), seen, good |> compute)
+// EXPECT: r = 14
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

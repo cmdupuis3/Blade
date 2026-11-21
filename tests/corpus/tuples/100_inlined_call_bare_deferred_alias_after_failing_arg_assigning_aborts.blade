@@ -1,0 +1,22 @@
+// TEST: Inlined Call Bare Deferred Alias After Failing Arg Assigning (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304, the capturing (inlined) twin of tuples/099: the cast fails first.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let base: Array<Int64 like Row> = [100]
+let mut w: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let t0 = bump(w)
+let h = lambda(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> k + p(0) + q(0) + base(0)
+let r = h(a((a(0) : Row)), bad2, good |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:18

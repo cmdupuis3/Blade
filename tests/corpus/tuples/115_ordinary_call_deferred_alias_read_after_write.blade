@@ -1,0 +1,23 @@
+// TEST: Ordinary Call Deferred Alias Read After Write
+// ----------------------------------------------------------------------------
+// Gap G304 in a G79 call (no explicit compute; the writing call and the read
+// both may fail, so the C++ lane orders the arguments): `seen2(0)` is read
+// after `bump(cnt)` wrote the counter, r = 1 + 11 = 12. The llvm lane's
+// statement pre-pass read it first (r = 11).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, s: Int64) -> Int64 = k + s
+let r = h(bump(cnt), seen2(0))
+// EXPECT: r = 12
+// EXPECT: cnt = [1]
+// EXPECT: seen = [11]
+// EXPECT: seen2 = [11]

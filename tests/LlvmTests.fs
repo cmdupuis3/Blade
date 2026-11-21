@@ -3249,9 +3249,12 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// loop: `let rec` and whole-rank folds); `sql-group-by` with the group_by
 /// port (2026-10), so the CSR build and its BL8006 aborts stay gated; `domains`
 /// with the closed-form domain nest (structural/06, bench G4); `sibling-folds`
-/// with the sibling-fold rewrite (round 2), whose joins every lane consumes.
+/// with the sibling-fold rewrite (round 2), whose joins every lane consumes;
+/// `tuples` with the argument-order fix (gap G304): its call- and
+/// member-order programs (G57-G62, G75, G79) used to be walked only by the
+/// nightly `--llvm-backend` lane, so two wrong values went unseen there.
 /// Every other category is reachable standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds"; "multifile" ]
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds"; "tuples"; "multifile" ]
 
 /// The MULTI-FILE categories (tests/corpus/<dir>/<test>/*.blade): each test is
 /// lowered as ONE program through `lowerMultiSourceCaptured`, the lowering the
@@ -4548,7 +4551,12 @@ let private mustNativeFixtures : (string * string) list =
       // A top-level compute forces its deferred operands (formalism 10.2):
       // the alias class prints natively (wave 3 B, goal 1).
       "symmetry", "147_deferred_alias_chain_packed.blade"
-      "loops", "599_compute_operand_force_prints_deferred_map.blade" ]
+      "loops", "599_compute_operand_force_prints_deferred_map.blade"
+      // A root call's bare deferred argument forced at its own position,
+      // after an earlier argument's write (gap G304): a refusal would hide a
+      // regression of the ordered path behind the C++ fallback.
+      "tuples", "065_call_bare_deferred_alias_side_effect_order.blade"
+      "tuples", "082_inlined_call_bare_deferred_alias_side_effect_order.blade" ]
 
 let runLlvmMustNativeTestsFor (categories: string list) : BlockResult =
     let block = "LLVM Must-Native"

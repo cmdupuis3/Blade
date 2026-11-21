@@ -1,0 +1,16 @@
+// TEST: Ordinary Call Bare Deferred After Failing Arg No Assign (aborts)
+// ----------------------------------------------------------------------------
+// Gap G304, the G79 call of tuples/112 in a program with no assignment: the
+// bare alias is forced after the failing cast, not hoisted ahead of it.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+let bad2 = bad
+let good = method_for(a) <@> lambda(v) -> v + 1
+function h(k: Int64, p: Array<Int64 like Row>, s: Int64) -> Int64 = k + p(0) + s
+let r = h(a((a(0) : Row)), bad2, 1 / z(0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:12
