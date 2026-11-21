@@ -1,5 +1,16 @@
 # Compact symmetric folds — deciding what `reduce` over triangular storage means
 
+**Status update (2026-10-18): §4.3's full-domain meaning is BUILT for the FULL
+fold.** `reduce(S, op, axes = r)` over one SymIdx/AntisymIdx group of rank r is
+the logical-cell fold (rewritten by the checker into the nested `range<I>` walk
+for `(+)` -- the dense fold's terms, regrouped rows-then-total -- or into
+`decompact` when the array/index is unnamed or the kernel is anything else), and
+under the reorder licence
+the walk is the orbit-class pool fold of §4.4 / bench M4 (`src/OrbitFold.fs`,
+both back ends; the interpreter folds the logical cells directly). Partial folds
+over a compact group, Hermitian/wreath groups and `prodsum` keep the BL3999
+refusal; the canonical-cell fold still has no spelling (§4.4's `pool(A)`).
+
 **Status (2026-08-18): EXPLORATORY.** No code proposed for landing yet. This document
 reproduces the refusal, traces it to six sites, and argues a **semantics decision** (§4)
 that must be made before any of the four lanes is touched. The decision is the
@@ -407,6 +418,49 @@ These two pins are the fence against the new risk class this section introduces:
 boundary), which is silent on float data and loud on neither lane without the pins.
 
 ---
+
+### 5.7 The strict execution schedule -- the ordered orbit scatter (round 2, 2026-10-20)
+
+Section 5.6's partial reuse needs the reorder licence. A STRICT build (`BLADE_FP_REPRO=1`, or
+folds that carry no licence -- a `where repro` kernel) must keep every chain of the logical
+walk: each row's fold over its logical cells in column order from its own seed, the outer
+fold over the rows in order. That still does not require the logical traversal. Symmetric
+storage makes f(S(i, j)) and f(S(j, i)) the SAME term (one stored cell, f pure), so the
+schedule only has to decide WHERE each chain's next term comes from:
+
+* Visit canonical cells (i <= j) and append z = f(x) to row chain R[i] and, off the
+  diagonal, to R[j]. In canonical row order, R[j] first receives column j's terms from rows
+  0..j-1 (ascending) and then its own row's terms (ascending): exactly logical row j. Rows
+  complete in ascending order, so the outer chain is unchanged.
+* G-row groups (BLADE_TILE_TUNE `scatter_g`) make it vectorize without splitting a chain:
+  the G x G diagonal block in block-lex order, then per column the G row chains (one
+  application each; vector lanes = DISTINCT chains) and the column chain R[j] (the G terms in
+  row order; lanes across j). Any group sizes keep every sequence (independent symbolic
+  checks n = 1..19, G = 1..9; a tail group is the G = 1 form).
+* Rank 3: the leaf chain of (a, b) depends only on the unordered pair, so one state per pair
+  (packed C(n+1, 2) H) is common-subexpression elimination, not regrouping. Per first
+  coordinate i the slice {i <= j <= k} is a packed triangle: its group scatter serves
+  H[i, j] <- k and H[i, k] <- j, and the third event H[j, k] <- i (j > i) is fed from the
+  SAME term (no second pool pass: C(p+2, 3) reads, C(p+1, 2) p leaf applications). Then H
+  is a packed SymIdx<2, n> pool and the middle / outer folds are the rank-2 scatter over it
+  with f = identity.
+
+No licence is consumed, so the kernel need not be `+` and the seeds need not be +0: any
+pure TOTAL kernel (the closed whitelist shared with the G35 row-slot form) and any
+coordinate-free seed qualify. With a total f the walk's first-failure question does not
+arise (and at G = 1 the first failing f would be the same cell: a sorted tuple is its
+lex-least permutation). Bitwise the walk under `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`
+(`blade test orbit-scatter`, both lanes, every G); contraction may fuse the two forms
+differently. `src/OrbitFold.fs` splits the recogniser into `recogniseWalk` (shared
+shape) / `planLicensed` (the orbit-class fold, unchanged) / `planStrict` (the scatter);
+C++ `blade_orbit_scatter.hpp`, LLVM `EmitLlvm.emitOrbitScatter`. v1 declines AntisymIdx
+(mirror -x and +0 events), rank >= 4, mixed licensed/strict nests and coordinate-dependent
+seeds; the knob is `BLADE_ORBIT_SCATTER`. Threading: the column chains make it a
+wavefront, so the threaded strict form is G35 (complete rows on threads). Precedence
+where BOTH admit a walk: since round 3 (W2-0a, measured faster under mt8 repro) the
+DEFAULT takes the scatter, `BLADE_FOLD_ROW_SLOTS=prefer` takes the row slots (the
+round-2 order, when G35 won whenever taken -- historical), and `BLADE_FOLD_ROW_SLOTS=0`
+disables the row slots only (the scatter then serves the walk where it admits it).
 
 ## 6. Corpus and diagnostics
 

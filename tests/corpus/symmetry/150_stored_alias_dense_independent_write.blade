@@ -1,0 +1,19 @@
+// TEST: Stored Array Alias Stays Dense And Independent (P0 Before-Case)
+// P0 BEFORE-CASE (docs/plans/plan-identity-transpose-compute.md 2, 2.6, 6
+// P0/P1; review 2026-10-24 section 2.9). A top-level `let B = A` over a
+// STORED array deep-copies (loops/081), so B is its own array: the comm
+// product `method_for(A, B)` is DENSE today, and the later element write
+// through B leaves A intact. The deferred-alias identity rule (plan 2.1,
+// symmetry/146) does NOT reach a stored alias. P1's second step (stored
+// arrays with a proved no-write interval, plan 2.6) may change PAB's LAYOUT
+// to packed; the copy independence below must never change.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B = A
+let PAB = method_for(A, B) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+B((0 : I)) = 9.0
+let PAA = method_for(A, A) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+// EXPECT: PAB = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: PAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: A = [1.0, 2.0, 3.0]
+// EXPECT: B = [9.0, 2.0, 3.0]

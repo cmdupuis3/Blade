@@ -1,0 +1,25 @@
+// TEST: A retaining call evaluated inside a call head keeps its argument
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221; found by the Codex diff review d71e628b
+// round 2): `handlers((keep(y) : One))(1.0)` -- the outer call has a scalar argument,
+// but its HEAD runs keep(y), which retains y. The retention walk now
+// evaluates the head expression too.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    Int64(0)
+}
+let handlers: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = handlers((keep(y) : One))(1.0)
+    n
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let n = f(x)
+let result = reduce(saved, (+))
+// EXPECT: n = 1.0
+// EXPECT: result = 12.0

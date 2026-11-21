@@ -1,0 +1,16 @@
+// TEST: Function Private Map Cell Reads Per Statement
+// Gap G235 (b), round 4 wave 9 (Codex diff review round 1; pre-existing): a
+// function body forces a deferred module map privately per READING STATEMENT
+// (G75, the C++ re-force). d(1) is read, x is written, then d(0) is read: the
+// second read evaluates d over the current x, 1, not the first statement's
+// pool (the LLVM lane printed 510).
+let mut x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let a = d(1)
+    x(0) = 10
+    let b = d(0)
+    a * 100 + b
+}
+let s = f()
+// EXPECT: s = 501

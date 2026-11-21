@@ -1,0 +1,8 @@
+// TEST: complex of defaulted float literals is Complex64 (rejects)
+// ============================================================================
+// Rule 4: `complex(1.0, 2.0)` builds from two defaulted Float32 literals, so
+// it is a Complex64 VARIABLE; a Complex128 annotation of it is a mismatch.
+// ============================================================================
+let z = complex(1.0, 2.0)
+let w: Complex128 = z
+// ERROR: BL3001

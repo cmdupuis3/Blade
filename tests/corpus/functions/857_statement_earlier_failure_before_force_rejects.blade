@@ -1,0 +1,16 @@
+// TEST: Statement Earlier Failure Before Force (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, the tenth Codex look of W4B-A: the arm may read only the binder
+// whose force is the STATEMENT's first possibly-failing event. Here a checked
+// read with an index cast comes first, then g(0): the C++ pre-pass would
+// force g at the statement's start, ahead of it, so the arm's read of g is
+// refused at lowering in every lane (BL6002), the veto the dominating rule
+// keeps (the program is a top-level statement, despite the directory).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> 10 / (v + 1)
+let r = z((z(0) : Row)) + g(0) + (if z(0) > 0 then g(0) else 0)
+// ERROR: BL6002 @ 12:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

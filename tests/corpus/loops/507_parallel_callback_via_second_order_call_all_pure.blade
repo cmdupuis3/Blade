@@ -1,0 +1,14 @@
+// TEST: Parallel Callback Via Second Order Call All Pure
+// Gap G41, Codex review W2F-7 finding 25 positive control (mutability-errors/
+// 036 is the writing twin): `launch` is reached directly and through `via`'s
+// indirect call `h(f)`; every candidate that reaches launch's `f` is pure, so
+// the kernel keeps its team (the omp-pragma block pins the pragma).
+type I = Idx<2>
+function ident(v: Float64) -> Float64 = v
+function twice(v: Float64) -> Float64 = v * 2.0
+function launch(f: (Float64) -> Float64) -> Array<Float64 like I> = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: ((Float64) -> Float64) -> Array<Float64 like I>, f: (Float64) -> Float64) -> Array<Float64 like I> = h(f)
+let a = launch(ident)
+let b = via(launch, twice)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 2.0]

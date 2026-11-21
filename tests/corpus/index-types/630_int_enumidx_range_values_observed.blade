@@ -1,0 +1,19 @@
+// TEST: Every observation of a range<R> value computes on its key
+// ============================================================================
+// R3 (the D2 ruling): a value of an integer EnumIdx is one of its KEYS,
+// represented as its POSITION. R's keys are declared OUT of ascending order,
+// so a computation on positions would print a different answer here.
+// `range<R>` iterates the keys 300, 100, 200; negation, a power, an ordering,
+// an intrinsic and an arithmetic section fold each read the key.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let neg = method_for(range<R>) <@> lambda(r) -> -r |> compute
+// EXPECT: neg = [-300, -100, -200]
+let lt = method_for(range<R>) <@> lambda(r) -> r < 150 |> compute
+// EXPECT: lt = [false, true, false]
+let pw = method_for(range<R>) <@> lambda(r) -> r ^ 2 |> compute
+// EXPECT: pw = [90000, 10000, 40000]
+let ab = method_for(range<R>) <@> lambda(r) -> abs(r) |> compute
+// EXPECT: ab = [300, 100, 200]
+let tot = reduce(range<R>, (+))
+// EXPECT: tot = 600

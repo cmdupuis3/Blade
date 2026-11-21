@@ -36,7 +36,7 @@
 // jet with itself: method_for(M, M) visits every ordered pair (m_A, m_B).
 // Co-iterating the same jet, method_for(zip(M, M)), walks the m_A = m_B
 // DIAGONAL -- the gauge locus -- with no equality test on the grid.
-let M = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
+let M = Float64([0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5])
 let pairs = method_for(M, M)
 let diagonal = method_for(zip(M, M))
 
@@ -54,8 +54,8 @@ let D1 = reduce(pairs <@> distance, (+), axes = 2)
 let D_mean = D1 / 49.0
 
 // indistinguishable-at-resolution counts (eps = 1 strict, eps = 3 loose)
-let C1 = reduce(pairs <@> lambda(a, b) -> (if distance(a, b) < 1.0 then 1.0 else 0.0), (+), axes = 2)
-let C3 = reduce(pairs <@> lambda(a, b) -> (if distance(a, b) < 3.0 then 1.0 else 0.0), (+), axes = 2)
+let C1 = reduce(pairs <@> lambda(a, b) -> (if distance(a, b) < 1.0 then Float64(1.0) else Float64(0.0)), (+), axes = 2)
+let C3 = reduce(pairs <@> lambda(a, b) -> (if distance(a, b) < 3.0 then Float64(1.0) else Float64(0.0)), (+), axes = 2)
 let P_eps1 = C1 / 49.0
 let P_eps3 = C3 / 49.0
 

@@ -1,0 +1,14 @@
+// TEST: A Function-Local Sparse Range Over Deferred Module Keys Forces The Keys In The Body
+// Gap G246 (round 4 wave 9 lane d): the keys of range<SparseIdx<keys>> are a module deferred map
+// read only inside f; the body forces them privately before the statement (G75: block-scoped, not
+// printed), after the kernel captures (the G225 order). It used to emit keys undeclared (BL9002).
+// Keys 2, 4, 6, 8, 10, each plus one: 35.
+// EXPECT: r = 35
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let keys = method_for(d) <@> lambda(a) -> a * 2
+function f() -> Int64 = {
+    let s = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> i + 1 |> compute
+    reduce(s, (+))
+}
+let r = f()

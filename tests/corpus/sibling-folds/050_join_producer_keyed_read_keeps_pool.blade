@@ -1,0 +1,18 @@
+// TEST: A keyed read of the producer beside the join keeps the stored strategy
+// ============================================================================
+// Round 4 wave 4, E2 / ST04: the same region as 049 plus `p(7)` -- a branch
+// that is not a synchronized fold leg (an unbounded-lag reader). The
+// join-producer plan declines ("a consumer is not a synchronized fold leg");
+// `p` stays stored and the join reads it. Same values either way.
+// ============================================================================
+type I = Idx<11>
+function stats(a: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(a) <@> lambda(v) -> v * 0.5 + 1.0 |> compute
+    let s1 = reduce(p, (+))
+    let s2 = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))
+    let s3 = reduce(method_for(p) <@> lambda(v) -> v * v, (+))
+    s1 + s2 + s3 + p(7)
+}
+let x = Float64(range<Idx<11>>) |> compute
+let r = stats(x)
+// EXPECT: r = 320.75

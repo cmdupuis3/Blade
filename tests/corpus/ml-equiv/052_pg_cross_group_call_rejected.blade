@@ -15,14 +15,14 @@ let static ED = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 let static WED = ml.pg_hom_dim("D4", ED, ED)
 
-function d4_stage(x: Array<Float like PgIrrepsIdx<D4, ED>>, w: Array<Float like Idx<WED>>)
-                  where ml.equiv(D4) -> Array<Float like PgIrrepsIdx<D4, ED>> = {
+function d4_stage(x: Array<Float64 like PgIrrepsIdx<D4, ED>>, w: Array<Float64 like Idx<WED>>)
+                  where ml.equiv(D4) -> Array<Float64 like PgIrrepsIdx<D4, ED>> = {
     ml.derive_pg_linear(D4, ED, ED, x, w)
 }
 
-function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
-             dw: Array<Float like Idx<WED>>)
-             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function bad(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>,
+             dw: Array<Float64 like Idx<WED>>)
+             where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     let h = ml.derive_pg_linear(C4, EC, EC, x, w)
     d4_stage(h, dw)
 }

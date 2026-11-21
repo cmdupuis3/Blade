@@ -18,7 +18,7 @@ function pair_totals(x: T^1) -> T^1 = {
     reduce(s, (+))
 }
 
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let t = pair_totals(A)
 // children are [11, 12, 13] and [2, 4, 6]; innermost folds are 36 and 12.
 // EXPECT: t = [36.0, 12.0]

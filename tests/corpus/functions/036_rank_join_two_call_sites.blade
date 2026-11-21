@@ -20,6 +20,6 @@
 function tot2(m: Array<Float64 like Idx<2>, Idx<2>>) -> Float64 = m[0][1] + m[1][0]
 let g = lambda(y) -> tot2(y) * 2.0
 function f(z) = tot2(z) + g(z)
-let M = [[1.0, 2.0], [3.0, 4.0]]
+let M = Float64([[1.0, 2.0], [3.0, 4.0]])
 let r = f(M)
 // EXPECT: r = 15.0

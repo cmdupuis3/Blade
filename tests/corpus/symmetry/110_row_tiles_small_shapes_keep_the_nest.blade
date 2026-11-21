@@ -1,0 +1,24 @@
+// TEST: Row Tiles Small Shapes Keep The Nest
+// Below the crossovers -- the antisym pair at p = 23, n = 11 and the simplex at
+// p = 13, n = 201 -- the tiles decline and the per-cell nests run (`blade plan`:
+// microkernel declined, tests/OptimizeTests.fs plan_*_declines). Same values
+// either way; pinned here so the declined path stays exercised.
+/// Small-integer data: exact sums, association-invariant pins.
+type P = Idx<23>
+type C = Idx<2>
+type S = Idx<11>
+type V = Idx<13>
+type N = Idx<201>
+let (lss, l01, tss, t012) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let x = method_for(range<V>, range<N>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    let la = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let ta = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (la, l(0, 1), ta, t(0, 1, 2))
+}
+// EXPECT: lss = 285170.0
+// EXPECT: l01 = 31.0
+// EXPECT: tss = 107100352.0
+// EXPECT: t012 = 0.0

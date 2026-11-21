@@ -1,0 +1,9 @@
+// TEST: a reynolds kernel whose parameters have different widths over mixed-width operands (rejects)
+// ============================================================================
+// G275: reynolds sums the kernel over the PERMUTATIONS of its arguments, so
+// each operand reaches each parameter -- the Float32 cells meet `y: Float64`.
+// ============================================================================
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let y = method_for(a, b) <@> reynolds(lambda(x: Float32, y: Float64) -> Float64(x) + y) |> compute
+// ERROR: BL3020

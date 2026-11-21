@@ -1,0 +1,20 @@
+// TEST: A fresh call result holding closures over the argument keeps the argument
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m7, the call form): `pack` returns a
+// FRESH array literal of closures over its PARAMETER; g binds `pack(y)` and
+// returns it. The fresh-return fact made the call a propagation barrier, so
+// g freed y while the returned closures still read it.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+function wrap(a: Array<Float64 like I>) -> (Float64 -> Float64) = lambda(k: Float64) -> reduce(a, (+)) * k
+function pack(v: Array<Float64 like I>) -> Array<(Float64 -> Float64) like One> = [wrap(v)]
+function g(x: Array<Float64 like I>) -> Array<(Float64 -> Float64) like One> = {
+    let y = x * 2.0 |> compute
+    let fs = pack(y)
+    fs
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let fs = g(x)
+let result = fs(0)(1.0)
+// EXPECT: result = 12.0

@@ -1,0 +1,14 @@
+// TEST: Fold Spine Forced Through Aliased Lambda Kernel
+// Gap G235 (a), round 4 wave 9 (Codex diff review round 1): the fold kernel is
+// an ALIAS k2 of a let-bound lambda that captures q, a map of the spine p. The
+// capture forces p before the traversal, so the fold reads its snapshot after
+// the seed writes x: 21.0.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(p) <@> lambda(v) -> v + 1.0
+let k = lambda(a: Float64, b: Float64) -> a + b + Float64(extents(q))
+let k2 = k
+let s = reduce(p, k2, { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0

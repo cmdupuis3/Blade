@@ -1,0 +1,58 @@
+// twofir -- resident two-output FIR, the sibling-map fusion workload (bench/kernels/twofir/spec.md)
+//
+//   y1(i) = sum_{d = -3..3} c1(d) x(i + d)               (7 contiguous taps, n - 6 centres)
+//   y2(i) = sum_{d in {0, -4, 4, -8, 8}} c2(d) x(i + d)  (5 strided taps, n - 16 centres)
+//   checksum = s1 + s2,  s1 = sum y1^2,  s2 = sum y2^2   (two separate +0-seeded chains)
+//
+// Two direct FIR maps over ONE stored input, each a halo walk over its own interior (the
+// windows shrink by 3 and by 8, so y1 has ten centres -- five at each end -- outside y2's
+// domain). y1 and y2 are named outputs, forced with |> compute and stored. Today the two
+// maps are two passes over x (blade plan: two BLADE_OMP_PARALLEL_FOR loops); fusing them into
+// one traversal that writes both outputs from the same loads is the round-3 transformation
+// this workload measures (spec.md). The axis is a plain Idx: the catalog's resident
+// Chunked<I, kc> is invisible to a halo walk (chunk edges are not boundaries; the ghost path
+// exists only for a streamed source), so it would add a SIZE parameter and nothing else.
+// Licences: the generator map, both FIR maps and the three folds (s1, s2 and the input sum)
+// carry `where omp`; a serial build (BLADE_OMP_THREADS=1) emits none of the thread pragmas.
+
+type I = Idx<2000003>   // SIZE n
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function inputs() -> Array<Float64 like I> = {
+    method_for(range<I>) <@> lambda(i) where omp -> gen(Int64(i), 10000019, 0.0, 1.0) |> compute
+}
+
+function kernel(x: Array<Float64 like I>) -> Float64 = {
+    let y1 = method_for(halo<I, [-3, -2, -1, 0, 1, 2, 3]>) <@> lambda(w) where omp ->
+        0.0625 * x(w(-3)) + 0.125 * x(w(-2)) + 0.1875 * x(w(-1)) + 0.25 * x(w(0))
+        + 0.1875 * x(w(1)) + 0.125 * x(w(2)) + 0.0625 * x(w(3)) |> compute
+    let y2 = method_for(halo<I, [-8, -4, 0, 4, 8]>) <@> lambda(w) where omp ->
+        0.5 * x(w(0)) - 0.25 * x(w(-4)) - 0.25 * x(w(4)) + 0.125 * x(w(-8)) + 0.125 * x(w(8)) |> compute
+    // the checksum folds stream over the stored outputs (no squared temporary); each is
+    // its own let, so the licensed form opens a team (kernels/README.md section 4.10)
+    let s1 = reduce(method_for(y1) <@> lambda(v) -> v * v, lambda(p, q) where omp -> p + q, 0.0)
+    let s2 = reduce(method_for(y2) <@> lambda(v) -> v * v, lambda(p, q) where omp -> p + q, 0.0)
+    s1 + s2
+}
+
+/// The input checksum as a licensed full fold (`axes = 1` on the rank-1 input is the spelling
+/// that threads: a plain `reduce(x, (+))` in the result tuple opens no team).
+function input_sum(x: Array<Float64 like I>) -> Float64 = {
+    let s = reduce(x, lambda(p, q) where omp -> p + q, 0.0, axes = 1)
+    s
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs()
+    (kernel(x), input_sum(x))
+}

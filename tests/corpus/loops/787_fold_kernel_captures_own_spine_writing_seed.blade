@@ -1,0 +1,11 @@
+// TEST: Fold Kernel Captures Own Spine Writing Seed
+// Gap G235 (a), round 4 wave 9: the loops/710 shape (the fold kernel captures
+// its own spine p) with a seed that writes x: the capture forces p before the
+// traversal and the fold reads that snapshot, 21.0.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(p)), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: p = [2.0, 4.0, 6.0]
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0

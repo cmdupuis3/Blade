@@ -1,0 +1,9 @@
+// TEST: C05 census private sparse wildcard ordered terminal
+// Parent key order selects [4,2,3], so ((7*10+4)*10+2)*10+3 = 7423.
+// Sorting the free coordinate would select [3,2,4] and incorrectly give 7324.
+let static K = [(4, 1), (0, 3), (2, 1), (1, 0), (0, 1)]
+let vals: Array<Float64 like Idx<5>> = [4.0, 9.0, 2.0, 8.0, 3.0]
+let S = sparse(vals, K)
+let total = reduce(S((_, 1)), lambda(a: Float64, b: Float64) -> a * 10.0 + b, 7.0)
+// EXPECT: vals = [4.0, 9.0, 2.0, 8.0, 3.0]
+// EXPECT: total = 7423.0

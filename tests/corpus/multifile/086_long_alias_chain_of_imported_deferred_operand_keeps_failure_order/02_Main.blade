@@ -1,0 +1,80 @@
+// TEST: A 66-alias chain to an imported deferred map, folded at top level, keeps its failure order (aborts)
+// MODULE: Main
+// Round 4 wave 10 (lane A, A3, gap G107; the diff review round 4, Codex
+// 067cb140): the structural walk of multifile/083's fix ran out of budget on a
+// long alias chain and called the operand stored; an exhausted budget now
+// declines.
+module Main
+from Lib import I, d
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let y0 = d
+let y1 = y0
+let y2 = y1
+let y3 = y2
+let y4 = y3
+let y5 = y4
+let y6 = y5
+let y7 = y6
+let y8 = y7
+let y9 = y8
+let y10 = y9
+let y11 = y10
+let y12 = y11
+let y13 = y12
+let y14 = y13
+let y15 = y14
+let y16 = y15
+let y17 = y16
+let y18 = y17
+let y19 = y18
+let y20 = y19
+let y21 = y20
+let y22 = y21
+let y23 = y22
+let y24 = y23
+let y25 = y24
+let y26 = y25
+let y27 = y26
+let y28 = y27
+let y29 = y28
+let y30 = y29
+let y31 = y30
+let y32 = y31
+let y33 = y32
+let y34 = y33
+let y35 = y34
+let y36 = y35
+let y37 = y36
+let y38 = y37
+let y39 = y38
+let y40 = y39
+let y41 = y40
+let y42 = y41
+let y43 = y42
+let y44 = y43
+let y45 = y44
+let y46 = y45
+let y47 = y46
+let y48 = y47
+let y49 = y48
+let y50 = y49
+let y51 = y50
+let y52 = y51
+let y53 = y52
+let y54 = y53
+let y55 = y54
+let y56 = y55
+let y57 = y56
+let y58 = y57
+let y59 = y58
+let y60 = y59
+let y61 = y60
+let y62 = y61
+let y63 = y62
+let y64 = y63
+let y65 = y64
+let fz: Float64 = 0.0
+let a = prodsum(x, x)
+let fail = Int64(floor(fz / fz))
+let b = prodsum(y65, y65)
+// ABORT: BL8014

@@ -50,9 +50,9 @@ let static RSH1 = ml.pg_restrict("C4", SH1)
 let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 
-function bad(v: Array<Float like IrrepsIdx<SH1>>,
-             x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function bad(v: Array<Float64 like IrrepsIdx<SH1>>,
+             x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+             where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     ml.derive_pg_linear(C4, EC, EC, x, w)
 }
 

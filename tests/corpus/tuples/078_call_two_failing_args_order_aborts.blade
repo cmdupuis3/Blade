@@ -1,0 +1,18 @@
+// TEST: Call Two Failing Args Order (aborts)
+// ----------------------------------------------------------------------------
+// Gap G79: an ORDINARY call (no `|> compute` argument) two of whose
+// arguments fail. Arguments are evaluated LEFT TO RIGHT in every lane: the
+// first argument's checked index cast fails (BL8006) before the second's
+// integer division by zero (BL8013). C++ leaves argument order unspecified
+// (g++ evaluated right to left, BL8013 first); the C++ lane now binds each
+// argument that may fail at its own position before the call.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let a: Array<Int64 like Row> = [1, 5]
+let z: Array<Int64 like Row> = [0, 1]
+function f(p: Int64, q: Int64) -> Int64 = p + q
+function bad(k: Int64) -> Int64 = 10 / k
+let r = f(a((a(1) : Row)), 1 / z(0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:14

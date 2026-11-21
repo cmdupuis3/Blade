@@ -1,0 +1,13 @@
+// TEST: GroupBy Result Under A Plain Array Annotation (rejects)
+// ERROR: BL3017 @ 11:20
+// ERROR-CONTAINS: the binding 'g', annotated with a plain array type, cannot be a GROUPED value
+// The ascription would replace the grouped slots with plain ones, and every
+// later consumer then read the row-pointer table as a DENSE array: this
+// program printed `reduce: empty array` (BL8003) for three non-empty groups.
+// A grouped value keeps its own type -- leave it unannotated. (Codex review
+// of R7: the annotation also hid a grouped RETURN from the return check.)
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
+let gk = group_keys(region)
+let g: Float64^2 = group_by(temps, gk)
+let s = reduce(g, (+))

@@ -3,5 +3,5 @@
 // type variables (not unified to a single type) when given different
 // concrete arguments at the call site.
 function constFirst(x: T, y: U) -> T = x
-let r = constFirst(99, 1.5)
+let r = constFirst(Int64(99), Float64(1.5))
 // EXPECT: r = 99

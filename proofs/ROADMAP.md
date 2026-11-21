@@ -7,14 +7,52 @@ where it is not.
 
 ## Open items
 
-### 1. Surface-calculus progress/preservation (large; sequencing note)
+### 1. Surface-calculus progress/preservation -- CLOSED 2026-10-12
 
-The one species of theorem the tower still lacks: type soundness for
-a Blade-core surface calculus elaborating into BladeCore section 7's
-intrinsic types (where bounds safety is definitional). Estimate 500+
-lines and, more importantly, it hard-codes surface syntax -- so it
-should WAIT until the compiler rewrite settles the surface language,
-or it will be proved twice.
+`BladeSurface.v` (68 theorems): progress, preservation, normalization
+and a denotation into the one object (`BladeObject.v`) for the
+structure-first core -- loop objects from either side, application,
+compute, the elementwise pipe -- over a top-level binding environment,
+with the licence (`out_shape`) in the typing rule for application and
+the quotient proved as a theorem about typing derivations
+(`typed_app_is_quotient`). The syntax it hard-codes is the formalism's
+section 7/8/13 core, which the compiler rewrite has settled. What is
+NOT covered, each a plan item of
+`docs/plans/plan-one-model-surface-calculus.md`: T-dimensions and
+`irank` slices, compound identity groups (`s > 1`), local `let`
+(substitution), folds, `let rec`; values are `nat`.
+
+### 1b. The remaining plan items (3-7) -- BUILT 2026-10-12, scopes stated
+
+`BladeTransport.v` (item 3), `BladeAttain.v` (item 4, partial),
+`BladeInduction.v` (item 5), `BladeLicence.v` (item 6), `BladeBoundary.v`
+(item 7); item 8 is `docs/research/orbit-work-measurements.md`. Each
+file's header lists what it does NOT cover; the plan's status lines and
+docs/proofs.md "What remains unproved" collect them. The largest open
+piece is decision D1 (compound identity groups are left dense by the
+typing rule, so the typed orbit work is above the free-model optimum:
+`d1_not_built_pin`), then general split identity classes (a
+position-permuted layout), the pipeline lower bound beyond the two-node
+schema, and local `let` / `ERec` in the calculus.
+
+## Consolidation note 2 (no action yet): lemmas proved in the item 3-7 files that belong in older files
+
+Builders were barred from editing existing files, so these sit locally
+under distinct or `my_`-prefixed names. Move them when the next change
+touches the target file: BladeSurface -- `rle_mult_pos` (an inline
+sub-proof of `apply_kernel_canon`), `dense_shape_app`, `bind_names_app`,
+`out_shape_rename`, `enum_out_in_dense`, `quotient_never_costs`,
+`rle_in`, `rle_length`, `surface_data_bridge`; BladeObject --
+`block_perm_app`, `scanon_idem`, `scanon_length_w`,
+`nondecr_firstn`/`nondecr_skipn`, `insert_nondecr`/`isort_nondecr`, the
+rank-1 leading-record facts (`enumShape_lead`, `scanon_lead`,
+`block_perm_lead`, `shape_dense_lead`); BladeOptimal -- `tab_perm`,
+`tab_local`, `cD_inj2`, `svals_sep_gen` (generalizes `svals_separate`),
+`pbind`/`tr_prog` (program sequencing), `support_lower_bound` (beside
+`orbit_lower_bound`); BladeArrow -- `strict_length` (the antisymmetric
+arrow has C(u - l, r) elements), `seq_canonical`; BladeCompleteness --
+`perm_pair_2`; BladeMixedRadix -- `shapeCard_app`; BladeBinomial --
+`tr_C_n_1`; BladeDMWF -- `canonical2_inv`.
 
 ## Consolidation note (no action yet)
 
@@ -67,6 +105,30 @@ published as a standalone artifact where redundancy reads as padding.
    already have it" -- drop the `f_equal; apply map_ext` pair for a bare
    `reflexivity` (BladePointGroup pg_hom_dim_spec_sum, after
    `lsum_filter_guard`).
+13. `O` in a PATTERN is nat's zero, not a variable: `| EAppO O _ => ...`
+   is refused with "Found a constructor of inductive type nat while a
+   constructor of expr is expected". Binders named `O` in `forall` are
+   fine, which is why the inductive compiled and the `Fixpoint` after it
+   did not (BladeSurface `size`).
+14. `rewrite <- L` with `L : length t = n` rewrites EVERY `n`, including
+   the ones inside hypotheses you are about to `exact`, and `rewrite <- L
+   at k` counts occurrences in display order, which is not the order you
+   wrote. State the split lemma with the length as a premise
+   (`firstn_app_exact : length t1 = n -> firstn n (t1 ++ t2) = t1`,
+   BladeObject; `tab_nth_r`, BladeSurface) and never rewrite the length.
+15. `f_equal` on `map f l = map g l` closes the goal by conversion when
+   `f` and `g` compute to the same thing on a VARIABLE argument
+   (`group_shape false g` is `dshape g` by `false && _`), and the
+   `apply map_ext` after it then fails with "No such goal" -- the same
+   shape as trap 11, one level up (BladeSurface `comm_license_needed`).
+16. A Section-local type alias (`cquery`) is not syntactically equal to
+   its unfolding under `rewrite`; use `etransitivity; [exact H |]`
+   (BladeInduction).
+17. Stdlib `ListDec.NoDup_dec` ends in Qed, so a definition that branches
+   on it does not `vm_compute`; use a transparent boolean test with a
+   `reflect` lemma when a pin must compute (BladeAttain `nodupb`).
+18. Import order decides name clashes: BladeLicence imports
+   BladeNumericContract FIRST so the later imports win `tab`.
 12. A double quote inside a Coq comment opens a STRING, and a `*)` that
    falls inside it does not close the comment. The tower's box-comment
    headers are one `(* ... *)` per line, so a quotation that opens on

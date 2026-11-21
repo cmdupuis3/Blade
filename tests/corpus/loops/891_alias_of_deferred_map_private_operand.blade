@@ -1,0 +1,14 @@
+// TEST: an alias of a deferred map as a fold's private operand prints nothing
+// Gap G266, round 4 wave 10: `a` is a top-level alias of the deferred map e
+// and both the fold's co-iteration and f's input read it. The fold evaluates
+// a privately (the C++ alias entry carries the copied apply; G243: f reads
+// that private value), so neither e nor a is forced under its own name --
+// the LLVM lane printed both (its private-operand census did not follow the
+// alias, so f's input walk marked a and e).
+let d: Array<Int64 like Idx<3>> = [1, 2, 3]
+let e = method_for(d) <@> lambda(v) -> v + 1
+let a = e
+let f = method_for(a) <@> lambda(x) -> x + 2
+let s = reduce(method_for(zip(a, f)) <@> lambda(x, y) -> x + y, (+))
+// EXPECT: d = [1, 2, 3]
+// EXPECT: s = 24

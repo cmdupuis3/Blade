@@ -8,21 +8,21 @@
 // compares the printed text byte for byte (`2.0`, not `2.00`).
 // ============================================================================
 function addone(a: T^1) -> T^1 = a + 1.0
-let y = 2.0
-let neg = -3.0
-let fzero = 0.0
-let negzero = -0.0
-let frac = 2.5
-let tenth = 0.1
-let big = 1e20
-let small = 1e-7
-let wide = 123456789012345.0
-let n = 2
+let y: Float64 = 2.0
+let neg: Float64 = -3.0
+let fzero: Float64 = 0.0
+let negzero: Float64 = -0.0
+let frac: Float64 = 2.5
+let tenth: Float64 = 0.1
+let big: Float64 = 1e20
+let small: Float64 = 1e-7
+let wide: Float64 = 123456789012345.0
+let n: Int64 = 2
 let a = addone([1.0, 2.0])
-let ai = [2, 3]
-let m = [[1.0, 0.0], [0.0, 3.0]]
-let c = complex(1.0, -2.0)
-let cs = [complex(3.0, 0.0), complex(0.5, 4.0)]
+let ai = Int64([2, 3])
+let m = Float64([[1.0, 0.0], [0.0, 3.0]])
+let c: Complex128 = complex(1.0, -2.0)
+let cs = Complex128([complex(3.0, 0.0), complex(0.5, 4.0)])
 let f32 = Float32(4.0)
 let inf = 1.0 / fzero
 let notnum = fzero / fzero

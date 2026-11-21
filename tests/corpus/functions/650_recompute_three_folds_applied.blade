@@ -1,0 +1,19 @@
+// TEST: Recompute Selection Three Fold Consumers Applied
+// ============================================================================
+// PM05, the forked producer DAG: the recompute family (BLADE_RECOMPUTE,
+// `recompute v1`) prices 2..8 consumers. Here x = `v * 2.0` (1 model op per
+// cell, one stored read) feeds THREE folds. Recomputing it per consumer adds
+// the producer's work twice (+2 per cell) and saves x's write and its three
+// reads against two more reads of a (-2 per cell): work +6 <= traffic -6 and
+// the peak drops, so every fold reads the map in place and x has no pool.
+// Values are the materialized form's: x = [2, 4, 6], 12 + 56 + 48 = 116.
+function three(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    let s1 = reduce(x, (+))
+    let s2 = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    let s3 = reduce(x, (*))
+    s1 + s2 + s3
+}
+let a = Float64([1.0, 2.0, 3.0])
+let t = three(a)
+// EXPECT: t = 116.0

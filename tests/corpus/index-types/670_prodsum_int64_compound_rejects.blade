@@ -1,0 +1,16 @@
+// TEST: prodsum over the Int64 view of a compound selection is refused (rejects)
+// ERROR: BL4003 @ 15:24
+// ERROR-CONTAINS: prodsum is built for dense rank-1 operands only
+// ============================================================================
+// R13 (deep review): prodsum walks each operand as a dense rank-1 buffer.
+// Over a compound selection or a sparse array -- tabulated storage, at any
+// element type and in any position -- it was a g++ rejection (BL9002) after
+// `check` said OK. It is refused in the type checker, keyed on the operand's
+// STORAGE class (prodsumUnbuiltStorage), naming the fold that is built.
+// ============================================================================
+// The R13 probe itself: the Int64 twin of index-types/663 (whose EnumIdx
+// operand now meets the same refusal).
+let codes: Array<Int64 like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+let ps = prodsum(Int64(sel), Int64(sel))

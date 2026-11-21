@@ -1,0 +1,14 @@
+// TEST: Qualified forms under an import alias
+// MODULE: Main
+// The qualifier is the IMPORT ALIAS, not the module's name: `V.Red` and
+// `V.P { .. }` after `import U as V` (the twin of 056).
+module Main
+import U as V
+function order_of(c: V.Color) -> Int64 = match c with
+    | V.Red -> 1
+    | _ -> 2
+let k = order_of(V.Red)
+// EXPECT: k = 1
+let p = V.P { a = 3.0 }
+let w = p.a
+// EXPECT: w = 3.0

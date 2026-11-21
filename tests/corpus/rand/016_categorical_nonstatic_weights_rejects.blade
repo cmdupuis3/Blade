@@ -1,5 +1,5 @@
 // TEST: Rand Categorical Nonstatic Weights (rejects)
-// ERROR: BL3999
+// ERROR: BL3028
 // ERROR-CONTAINS: weights array must have a STATIC extent
 // The array-parameter channel's one hard requirement. Codegen emits the
 // weights as a POINTER PLUS A LENGTH -- `pool_base(W.data), (size_t)k` -- and

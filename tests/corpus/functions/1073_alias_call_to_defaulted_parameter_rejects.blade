@@ -1,0 +1,10 @@
+// TEST: an alias call handing a Float32 to a lambda value whose parameter defaults (rejects)
+// ============================================================================
+// G275 (1): an alias call does not decide the parameter; its default is a
+// Float64, which the Float32 argument would be converted into.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a: Float32 = 1.0
+let y = saved(a)
+// ERROR: BL3020

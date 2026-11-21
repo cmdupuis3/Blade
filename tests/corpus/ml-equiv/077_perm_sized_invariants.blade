@@ -26,13 +26,13 @@ let static W2 = ml.perm_weight_dim(1, 0, 4)
 // EXPECT: W1 = 2
 // EXPECT: W2 = 1
 
-let g: Array<Float like Idx<3>> = [1.0, 0.5, 0.25]
+let g: Array<Float64 like Idx<3>> = [1.0, 0.5, 0.25]
 
-function third() -> Array<Float like Idx<3>> = [3.0, 2.0, 1.0]
+function third() -> Array<Float64 like Idx<3>> = [3.0, 2.0, 1.0]
 
-function readout(x: Array<Float like Idx<4>>, w1: Array<Float like Idx<W1>>,
-                 w2: Array<Float like Idx<W2>>)
-                 where ml.perm_equiv(4) -> Array<Float like Idx<1>> = {
+function readout(x: Array<Float64 like Idx<4>>, w1: Array<Float64 like Idx<W1>>,
+                 w2: Array<Float64 like Idx<W2>>)
+                 where ml.perm_equiv(4) -> Array<Float64 like Idx<1>> = {
     let w1s = method_for(w1) <@> lambda(a) -> a * 2.0 |> compute
     let t = third()
     let s = reduce(g, (+), 0.0)

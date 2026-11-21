@@ -1,0 +1,8 @@
+// TEST: an if branch literal past Int32 beside an Int32 branch (rejects)
+// ============================================================================
+// R29: one judgment for every join -- a literal that does not fit the other
+// branch / arm is BL3020 at the literal; two concrete widths are BL3001.
+// ============================================================================
+let a: Int32 = 3
+let c = if a == 1 then a else 5000000000
+// ERROR: BL3020 @ 6:31

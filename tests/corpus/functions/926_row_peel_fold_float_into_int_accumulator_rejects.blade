@@ -1,0 +1,10 @@
+// TEST: A Row-Peel Fold Whose Float64 Result Feeds Its Int64 Accumulator Is Refused (rejects)
+// ERROR: BL3020 @ 9:92
+// ERROR-CONTAINS: returns a Float64 value, but its accumulator parameter
+// ============================================================================
+// R11: as functions/924 per row (base: C++ BL9002, LLVM
+// [9007199254740994, 15]).
+// ============================================================================
+type I = Idx<3>
+let xs: Array<Int64 like Idx<2>, I> = [[9007199254740993, 1, 2], [4, 5, 6]]
+let r = method_for(xs) <@> lambda(row: Array<Int64 like I>) -> reduce(row, lambda(a, b) -> Float64(a) + Float64(b)) |> compute

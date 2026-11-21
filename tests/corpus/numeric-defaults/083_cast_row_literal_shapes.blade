@@ -1,0 +1,9 @@
+// TEST: Fixed-width row casts preserve literal row shapes
+let rows = [Float64([1.0, 2.0]), Float64([3.0]), []]
+let lengths = method_for(rows) <@> lambda(row) -> extents(row) |> compute
+let triangular = [Float64([3.0, 2.0, 1.0]), Float64([5.0, 4.0]), Float64([6.0])]
+let mirrored = triangular(1, 0)
+let direct = triangular(0, 1)
+// EXPECT: lengths = [2, 1, 0]
+// EXPECT: mirrored = 2.0
+// EXPECT: direct = 2.0

@@ -1,0 +1,12 @@
+// TEST: an unrolled pack former may read a real tuple by its ordinal beside the pack
+// Gap G223 (round 4 wave 8 lane d; G206 conservative refusal lifted): the
+// dynamic-read rule ran on the kernel before the ordinal was substituted, so
+// `t[k]` (a real tuple, not the pack) was refused; it is now judged on the
+// rewritten copies, where it is `t[0]`, `t[1]`, `t[2]`.
+// EXPECT: result = 120.0
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let t: (Float64, Float64, Float64) = (10.0, 20.0, 30.0)
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> t[k] + args[k] |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

@@ -1,0 +1,22 @@
+// TEST: Llvm Simplex Tile Three K Blocks
+// The rank-3 simplex at p = 37 (6*6 + 1 prefix rows, 4*8 + 5 k lanes) over
+// n = 1001 samples: three balanced sample blocks of 334/334/333 under the 336
+// cap, so every cell's chain is stored UNSCALED and reloaded twice before the
+// one multiply by the kernel's scalar `* 0.5`. No omp licence: the serial build
+// of the same tile both lanes run (the LLVM lane's shared C core is serial).
+/// X(i, s) = ((5 i + 2 s) mod 7) - 2: small integers, exact sums, and `* 0.5` is
+/// exact -- association-invariant pins; route by `blade test llvm facts` /
+/// `blade test row-tile`, bits across the lanes by `blade test llvm tiles`.
+type V = Idx<37>
+type S = Idx<1001>
+let (ss, t111, t_mid, t_edge, t_last) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 5 + s * 2) % 7) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) * 0.5 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (total, t(1, 1, 1), t(20, 7, 33), t(35, 36, 36), t(36, 35, 34))
+}
+// EXPECT: ss = 253640771634.25
+// EXPECT: t111 = 6506.5
+// EXPECT: t_mid = -1501.5
+// EXPECT: t_edge = -1001.0
+// EXPECT: t_last = -1501.5

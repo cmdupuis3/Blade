@@ -2,8 +2,8 @@
 // Bare-call predicate over struct-typed members: the conjunct passes the
 // WHOLE members to a static predicate instead of inlining field paths.
 struct Particle {
-    vel: Float,
-    mass: Float
+    vel: Float64,
+    mass: Float64
 }
 // (Self-contained body: a predicate that captures module statics cannot yet
 // be called from a guard inside a free function — known codegen limitation

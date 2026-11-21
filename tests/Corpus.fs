@@ -146,6 +146,26 @@ let multiFileCategories () : string list =
     |> Array.sortWith (fun a b -> String.CompareOrdinal(a, b))
     |> Array.toList
 
+/// Corpus NUMBERS used twice in one directory: (directory, number, the
+/// entries carrying it) -- a single-file category's `.blade` files, a
+/// multi-file category's test subdirectories. A number names one test in
+/// docs, commit messages and gap rows (`functions/656`), so two files under
+/// one number make every such citation ambiguous (deep review R6). The
+/// corpus-wiring block refuses any.
+let duplicateNumbers () : (string * string * string list) list =
+    [ for d in Directory.GetDirectories corpusRoot.Value |> Array.sortWith (fun a b -> String.CompareOrdinal(a, b)) do
+        let entries =
+            if Directory.GetFiles(d, "*.blade").Length > 0 then
+                Directory.GetFiles(d, "*.blade") |> Array.map Path.GetFileName
+            else Directory.GetDirectories d |> Array.map Path.GetFileName
+        let numbered =
+            entries |> Array.choose (fun n ->
+                let m = System.Text.RegularExpressions.Regex.Match(n, @"^(\d+)_")
+                if m.Success then Some (int m.Groups.[1].Value, n) else None)
+        for (num, group) in numbered |> Array.groupBy fst |> Array.sortBy fst do
+            if group.Length > 1 then
+                yield (Path.GetFileName d, sprintf "%03d" num, group |> Array.map snd |> Array.sort |> List.ofArray) ]
+
 /// The WHOLLY-NEGATIVE categories: every file in them is meant to be refused,
 /// and their `// TEST:` names carry no "(rejects)" marker (the marker would be
 /// noise on every line) -- yet the runner's classifier keys on exactly that

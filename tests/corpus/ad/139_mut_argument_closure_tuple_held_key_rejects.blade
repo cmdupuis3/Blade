@@ -1,0 +1,21 @@
+// TEST: A Mut Argument Beside A Tuple-Held Closure Key Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3-kernel), round 4 wave 9 (lane C, C2; Codex design review
+// 5f64f352, probe B): a closure held in an AGGREGATE (`ks[0]`) and used as a
+// sort key is a function value no resolution reaches: refused fail closed
+// beside the `mut` argument (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf = factory(g)
+let ks = (kf, 0)
+function keyed(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    let s = sort(y, ks[0])
+    s(0)
+}
+let r = keyed(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

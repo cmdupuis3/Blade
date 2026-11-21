@@ -1,0 +1,23 @@
+// TEST: Syrk Small Triangle Keeps The Nest
+// Below the syrk-tile crossover (p = 13 < 16) the BLAS-off arm keeps the
+// per-cell nest -- a 6 x 8 tile would be mostly padding on a 13-row triangle.
+// Same values either way.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and every
+/// partial sum is an exact integer and ANY association gives the same G -- the pins
+/// below are association-invariant (CLAUDE.md fold policy), while the route is pinned
+/// by `blade plan` (tests/OptimizeTests.fs plan_syrk_tile_*) and the arithmetic
+/// bitwise by `blade test syrk-tile` and `blade test interp symmetry`.
+type V = Idx<13>
+type S = Idx<31>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(12, 3), g(11, 12), trace)
+}
+// EXPECT: ss = 200944.0
+// EXPECT: g00 = 64.0
+// EXPECT: g_mirror = -32.0
+// EXPECT: g_edge = -30.0
+// EXPECT: tr = 808.0

@@ -1,0 +1,16 @@
+// TEST: a reduction join reports the failure of its EARLIEST failing cell (aborts)
+// Gap G101 (round 4 wave 4 lane A; formalism 10.2, the join's failure order):
+// the legs share ONE traversal, so the first failure is the earliest failing
+// cell's -- here leg 1's `200 / b` at cell 2, before leg 0's `100 / a` at cell
+// 7. The interpreter used to run each leg as its own complete nest, leg 0
+// first, and reported leg 0's failure (line 10 once the harness drops the TEST
+// line, instead of 11).
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e: Array<Int64 like I> = [1, 2, 0, 4, 5, 6, 7, 8, 9, 10]
+let p = method_for(d) <@> lambda(a) -> 100 / a
+let q = method_for(e) <@> lambda(b) -> 200 / b
+let (sp, sq) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:11

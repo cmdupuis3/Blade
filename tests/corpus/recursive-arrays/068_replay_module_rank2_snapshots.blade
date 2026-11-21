@@ -1,0 +1,26 @@
+// TEST: Replay Module Rank2 Snapshots
+// ============================================================================
+// PRINT REPLAY with SNAPSHOTS: a module-level rank-2 recursion printed whole
+// (nested rows) and read at two fixed rows afterwards -- a cell of row 2 by a
+// binding and row 7 by a function body. Both reads are rewritten to the
+// snapshots `__snap_2_u` / `__snap_7_u`; the C++ lane's ring sweep fills them
+// at its slot (first run) and prints the rows at u's print (second run).
+// Row n = 2 * row(n - 1) + 1 from the seed [1, 2, 3].
+// ============================================================================
+type T = Idx<8>
+type C = Idx<3>
+
+let rec u: Array<Float64 like T, C> =
+    match u with
+    | zero -> zero
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0])
+    | prefix :: n -> prefix :: prefix(n - 1) * 2.0 + 1.0
+
+let a = u(2, 1)
+
+function last_sum() -> Float64 = reduce(u(7), (+))
+
+let b = last_sum()
+// EXPECT: u = [[1.0, 2.0, 3.0], [3.0, 5.0, 7.0], [7.0, 11.0, 15.0], [15.0, 23.0, 31.0], [31.0, 47.0, 63.0], [63.0, 95.0, 127.0], [127.0, 191.0, 255.0], [255.0, 383.0, 511.0]]
+// EXPECT: a = 11.0
+// EXPECT: b = 1149.0

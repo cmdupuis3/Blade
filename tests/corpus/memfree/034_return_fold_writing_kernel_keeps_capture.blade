@@ -1,0 +1,27 @@
+// TEST: Memfree Return Fold Writing Kernel Keeps Capture (G54 control)
+// A return-position fold whose MAP KERNEL stores a closure over `y` into
+// caller-owned storage: the kernel writes (`callableMayWrite`), so it is not
+// a proved-synchronous slot and its captures -- and the stored closure's --
+// keep `y` alive past `kernel`. Values for c = 4: y = [0, 4, 8, 12, 16],
+// r = reduce(y, (+)) = 40, v = 40 - 2.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    reduce(method_for(range<I>) <@> lambda(a) -> {
+        out(0) = lambda(k: Float64) -> reduce(y, (+)) - k
+        y(a)
+    }, (+))
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, 4.0)
+let v = out(0)(2.0)
+// EXPECT: r = 40.0
+// EXPECT: v = 38.0

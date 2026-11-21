@@ -1,0 +1,13 @@
+// TEST: an inline former whose kernel reads arity of the pack is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 3): `arity(args)`
+// inside an inline (not let-bound) former kernel kept naming the pack, an
+// undeclared name in the specialization (g++ rejected it, pre-existing). It is
+// refused with the other inline pack reads; binding the arity outside the
+// kernel compiles (arity/500).
+// ERROR: BL7004
+// ERROR-CONTAINS: Bind the former with `let` first
+// REJECT-AT: lower
+function polySum(args: Poly<Float64>) -> Float64 = {
+    reduce(method_for(range<Idx<3>>) <@> lambda(k) -> Float64(arity(args)), (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

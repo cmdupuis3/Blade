@@ -1,0 +1,8 @@
+// TEST: an array literal cell past Int32 beside an Int32 cell (rejects)
+// ============================================================================
+// R29: one judgment for every join -- a literal that does not fit the other
+// branch / arm is BL3020 at the literal; two concrete widths are BL3001.
+// ============================================================================
+let a: Int32 = 3
+let xs = [a, 5000000000]
+// ERROR: BL3020 @ 6:14

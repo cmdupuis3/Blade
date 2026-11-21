@@ -1,0 +1,12 @@
+// TEST: An empty deferred unseeded fold returns, and a later failure fires (aborts)
+// Corpus 032's empty deferred fold yields its identity and execution goes
+// on: the first failure is the later integer division by zero, BL8013 at its
+// own line (line 9 once the harness drops the TEST line) -- where an
+// unseeded fold over an empty STORED array stops at the fold (031: BL8003).
+type Z = Idx<0>
+let empty: Array<Float64 like Z> = []
+let s = reduce(method_for(empty) <@> lambda(q) -> q * 1.0, (+))
+let d = extents(empty)
+let boom = 10 / d
+// ABORT: error[BL8013]: integer division by zero
+// ABORT: .blade:9

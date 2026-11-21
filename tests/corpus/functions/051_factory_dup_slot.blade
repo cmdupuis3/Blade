@@ -4,5 +4,5 @@
 // same quantity is a routing error, not a silent overwrite.
 Unit levels: 1
 Unit cmap: 1
-function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0
+function plot(x: Float64, n: Float64<levels> = 10.0, c: Float64<cmap> = 0.0) -> Float64 = x + n * 100.0 + c * 7.0
 let r = plot(1.0, 2.0: levels, 3.0: levels)

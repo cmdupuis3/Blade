@@ -1,5 +1,30 @@
 # Paper 1 — introducing Blade through the comoment tensor
 
+**Status 2026-10-13: RELATED WORK EXTENDED** from a four-slice literature
+search (§8.1 "Added 2026-10-13"; entries in `docs/blade_literature_survey.md`):
+quotient containers, double-coset canonicalization, histomorphisms, Eberl's AFP
+oracle model. Two corrections: the model qualifier on Thm 5 (§6 item 6) and
+the DMWF name against Gibbons' metamorphism.
+
+**Status 2026-10-27: DRAFT REVISED against master `5960337a`** (263 commits after
+the draft's base). What changed in the draft: §3.3 alias and sharing-partition
+listings (a never-written `let R2 = R` is one array; an unannotated helper packs
+for `f(R, R)`), the interleaved `(R, S, R)` listing with its BL4010 (E14 FIXED
+`f882eb22`, D9 decided: formalism §8.3), a dense ascription is now accepted
+(declared layout), the compound type `SymIdx<3, <XIdx, YIdx>>` with per-dimension
+reads (E15 FIXED `70fb8a71`), a new §4.4 "Operand keys: aliases and transposes"
+(the S_k × C₂ structural map, certificates, why `f(X, transpose(X))` is dense),
+§4.5 restated from `BladeAttain` (the neighbour rule proved sound and NOT optimal;
+`surface_comm_optimal`), §4.6/§4.7 the float-licence and black-box-model
+qualifiers (`rounded_licence_coarse`, `structured_kernel_beats_bound`), type
+soundness for the structure-first fragment (`BladeSurface.v`: progress,
+preservation, `typed_app_is_quotient`), the tower at 2 205 statements, the
+FP-default-fastest policy (§5), and §6 rewritten around the Blade-vs-Fortran
+suite (comoment3: 1.34×/1.36× over gfortran/ifx experts serially, 1.55×/1.35×
+on 8 threads; stats.csv-verified). 21 listings pass `blade test docs paper-1`.
+New engineering item E16 in §10. Claim-hygiene items 2 and 5 below are
+superseded by the draft's §4.5 and §4.7.
+
 **Status 2026-10-07: VENUE DECIDED, JFP** (author, 2026-10-07; ECOOP R2 stays the
 conference alternative). The author's framing note of the same day: symmetry
 tracking matters most under DOMAIN DECOMPOSITION of comoment problems, where the
@@ -175,14 +200,17 @@ theorem (appendix, `two_node_orbit_work`) counts.
 invariant under G = H ∩ Stab(B). By formalism §8.3 the grant is comm blocks
 intersected with runs of neighbouring identical arguments, a subgroup of G, so
 that `f(A, B, A)` stays dense although G contains the (0 2) swap. **The
-compiler does not do this (E14, verified 2026-10-05):** `rawAxisGroups`
-(`src/IRLoopStructure.fs:192`) merges a level with ANY prior level of the same
-array in the same comm group, and `buildLoopLevelStructure` reorders the nest
-so the group is contiguous. For `(R, S, R)` the nest runs (R, R, S), the type
-is `SymIdx<2, AssetIdx>, AssetIdx`, and `K(i, j, k)` returns f(Rᵢ, S_k, Rⱼ).
-The paper cannot be frozen until the language picks one: dense in operand
-order (the formalism), a refusal with a "reorder to (A, A, B)" hint, or
-regrouping with a documented axis order.
+compiler did not do this until 2026-10-12 (E14, verified 2026-10-05):**
+`rawAxisGroups` (`src/IRLoopStructure.fs`) merged a level with ANY prior level
+of the same array in the same comm group, and `buildLoopLevelStructure`
+reordered the nest so the group was contiguous. For `(R, S, R)` the nest ran
+(R, R, S), the type was `SymIdx<2, AssetIdx>, AssetIdx`, and `K(i, j, k)`
+returned f(Rᵢ, S_k, Rⱼ) — and ran off the pool when the extents differed.
+**Decided and fixed per D9:** the partner test requires the ADJACENT operand,
+the result stays dense in operand order, and a BL4010 advisory names the
+adjacent spelling (`tests/corpus/symmetry/077`–`079`; formalism §8.3 carries the
+remark; `proofs/BladeAttain.v` proves the rule sound and not optimal at
+(A, B, A), the by-name quotient being the forced count).
 
 **The adjacency discipline is a design decision, not a gap, and the paper
 presents it that way.** Two reasons (author, 2026-10-05):
@@ -270,7 +298,11 @@ and must not be cited for array currying.
    once".
 5. **Type soundness, or a proved rank deduction.** Neither exists; §13.2 has no
    Coq counterpart.
-6. **Optimal time.** Thm 5 counts kernel calls and cells under generic data.
+6. **Optimal time, or minimum arithmetic.** Thm 5 counts kernel calls and
+   cells under generic data, in a black-box oracle model. Solomonik and Demmel
+   (CMAM 2021) compute symmetric contractions with fewer multiplications than
+   orbits in the bilinear model (§8.1, correction 1): say "kernel
+   evaluations", never "operations".
 7. **1362 theorems.** Cite the pillar subset (about 541) and "Rocq 9.0.1";
    88 of the total are `Example` pins, about 415 back the recurrence research
    and about 202 the ML seams.
@@ -336,6 +368,72 @@ Obsidian, Accelerate, Lift, MDH for deferred arrays; Weirich–Casinghino and
 Strickland et al. for arity genericity; Sherman–Kolda (implicit moment
 tensors win asymptotically at large n and r) and Solomonik–Demmel–Hoefler
 (fewer operations can cost more communication) as honest limits.
+
+**Added 2026-10-13, from a four-slice literature search** (full entries in
+`docs/blade_literature_survey.md`). The verdict: no single ingredient is new;
+the combination and the mechanization are, as far as the web shows. Per pillar:
+
+- *Index types as sets with a group action.* Quotient containers (Abbott,
+  Altenkirch, Ghani, McBride, MPC 2004) and action containers (Joram and
+  Veltri, TYPES 2024) are the existing theory of "positions carry a group
+  action"; species (Joyal 1981; Yorgey's thesis 2014) the combinatorial one.
+  None has storage on a transversal, an enumeration order, or a compiler.
+  Concede the object; claim the layout theorem (enumeration = image of the box
+  under canonical form, fibres = orbits, canonicalizing access) as the first
+  statement of it about a compiler. Naperian functors (Gibbons, ESOP 2017)
+  and Mullin's Mathematics of Arrays (1988: partial index = subarray, layout
+  from a denotational normal form) are the "array = function on its index
+  type" and "layout derived, not authored" precedents; cite both beside Dex.
+- *The licence group.* H ∩ Stab is the same computation as double-coset
+  tensor canonicalization (Manssur and Portugal 2001; Butler 1984; xPerm 2008;
+  Cadabra; SymPy `tensor_can`): slot symmetry against a stabilizer. They use
+  it to decide equality of expressions; Blade uses it to license a quotient.
+  One sentence saying so satisfies the group-theory reader.
+- *The feedback arm.* `let rec` is a histomorphism / dynamorphism (Uustalu
+  and Vene 1999; Kabanov and Vene 2006; Hinze and Wu 2013) and, as a library
+  function, `Data.Vector.constructN`. Blade's own: the leading-axis type, the
+  static pre-allocated buffer, the implicit zero past the prefix, the `while`
+  guard, and the orbit-work theorem. Fusion and the multi-accumulator joins
+  are Meijer–Fokkinga–Paterson 1991, banana-split and stream fusion (Coutts et
+  al. 2007) over index types; cite, do not claim.
+- *The lower bound.* No published bound is stated in terms of orbits of a
+  group action; Ben-Or 1983 is the decision-tree paradigm and Eberl's AFP
+  sorting bound (2017) the nearest mechanized oracle model (the same shape as
+  `BladeOptimal`, with no group). Liu, Bernstein, Chlipala and Ragan-Kelley
+  (POPL 2022) verify array-compiler rewrites for correctness only. "No
+  mechanized optimality result for a symmetric-storage or iteration decision
+  was found" is the sentence the search supports; Thm 5's "no published
+  statement found" stands.
+- *Symmetric compilers.* SySTeC (§8.2), CTF, Schatz et al., LGen, DASTAC
+  (Ghorbani, Bauer, Grosser, Shaikhha, arXiv 2407.13726, which concedes its
+  layouts may be suboptimal) and Hirata's TCE (2003) all keep symmetry outside
+  the type system and prove nothing. Chapel domains are the nearest "iteration
+  space as a first-class typed object"; no symmetry quotient.
+
+Two corrections the search forces:
+
+1. **The model qualifier on Thm 5.** Solomonik and Demmel, "Fast Bilinear
+   Algorithms for Symmetric Tensor Contractions" (CMAM 2021), compute a
+   symmetric contraction with fewer multiplications than distinct output
+   cells, by a factor up to (s+t+v)!/(s!t!v!), forming products of sums and
+   subtracting the unwanted terms. Those products are not kernel evaluations
+   at index tuples, so the orbit bound stands in its model and not in theirs.
+   Every statement of Thm 5 must say "kernel evaluations in a black-box oracle
+   model" (§6 item 6), and `BladeBoundary`'s scope statement, which names
+   separable kernels as the way past the query bound, must name the bilinear
+   mechanism as a second way.
+2. **The DMWF name.** In Gibbons' usage (SCP 2007) a metamorphism is a fold
+   followed by an unfold. The DMWF is an unfold with a state-dependent
+   coalgebra, a fold, and a histomorphic feedback arm, which is closer to a
+   hylomorphism. Define the term against Gibbons' sense on first use, or
+   rename it; "double metamorphism" and "metamorphism with feedback" have no
+   prior use.
+
+Not checked by the search (full texts unavailable): Yorgey's thesis body, the
+quotient-containers PDF, Hinze–Wu–Gibbons on conjugate hylomorphisms (which
+might subsume a dependent-seed unfold), Knuth §7.2.1.3, Lean's Mathlib `Sym` /
+`Sym2`, and the polyhedral literature for the rectilinear-iff-constant-residual
+characterization.
 
 ### 8.2 What SySTeC states (arXiv 2406.09266 v2, read directly)
 
@@ -452,8 +550,11 @@ listing or a claim.
 | E14 | interleaved identical operands in a comm group are regrouped: `method_for(R, S, R) <@> k` emits the nest (R, R, S) and permutes the output axes to match, silently; contradicts formalism §8.3 / §8.4 step 4, quickstart-2, and `<*>` as shape concatenation; no corpus test covers the shape | §4.4 and §8 of the draft state the neighbouring-run rule; a reader's `K(0, 1, 2)` is not f(R₀, S₁, R₂) | P0 semantics (decision D9) |
 | E15 | a six-subscript read `G3(x₁, y₁, x₂, y₂, x₃, y₃)` into a compound symmetric output passes `blade check` and is BL9002 at g++; the three-subscript flat read works | L2′ can only be shown with flat grid positions | P1 bug |
 
-Status 2026-10-05: E1, E2, E3, E5 fixed on master (`76c1714a`, `9de90481`,
-`4fe4e1a4`); E4 open (D3); E14, E15 new.
+| E16 | the never-written-alias proof (`[alias-identity v1]`) declines when the statement names a definition that reaches into another module: `method_for(R, R2) <@> cov` stays dense because `cov` calls the imported `mean`, while the same with a lambda or a same-module kernel packs | the paper's own `cov` cannot show alias transparency; §3.3 states the rule honestly | P1 (plan-identity-transpose §2.6 accepts a conservative proof; imports are the gap) |
+
+Status 2026-10-27: E1, E2, E3, E5, E14 (`f882eb22`), E15 (`70fb8a71`) fixed on
+master; E4 open (D3); E16 new. 2026-10-12: E14 FIXED on master per D9
+(dense in operand order + BL4010 advisory; corpus symmetry/077–079).
 
 **Doc corrections to land with or before the paper:** quickstart-1 lines
 521–523 (asymptotic labels at n = 3); formalism §12.4 item 4 ("r ≥ 3: open",
@@ -492,7 +593,7 @@ Amarasinghe; STUR is Ghorbani, Huot, Hashemian, Shaikhha; Dex's title ends
 | D5 | Priority wording | the sentence in §8.3: independent and earlier for the same-array commutativity mechanism (2019), nothing claimed for the 2026 layers, the older observation credited |
 | D6 | PPL formers (`ppl.moments`, `ppl.cumulants`) | one sentence: library sugar over the same mechanism; `ppl.comoments(R, 3)` is BL5100 today, so they cannot be the r ≥ 3 baseline |
 | D7 | Title | "One Function, Every Comoment: Index Types, Loop Objects and Arity Polymorphism in Blade" |
-| D9 | E14: what `f(A, B, A)` means | match the formalism (three singleton groups, dense, axes in operand order) and add a BL4010-style hint to reorder; it is the written spec, it keeps `<*>` a shape concatenation, and it is the rule the author's two reasons (§4) argue for |
+| D9 | E14: what `f(A, B, A)` means | DECIDED AND BUILT 2026-10-12: match the formalism (three singleton groups, dense, axes in operand order) and a BL4010 advisory naming the adjacent spelling; it is the written spec, it keeps `<*>` a shape concatenation, and it is the rule the author's two reasons (§4) argue for. The by-name quotient presented in source axis order stays open as an optimization |
 | D8 | How to present the lineage and the AI-assisted 2026 work | a short "history" paragraph in §7 of the paper: a 2019 C++ template library and pragma preprocessor, rewritten as a compiler in 2026 with AI assistance, disclosed per the venue's policy |
 
 ---

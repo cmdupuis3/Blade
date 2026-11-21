@@ -1,0 +1,12 @@
+// TEST: A user function spelled like the compiler's specialization of a generic one
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 1): a generic
+// function's specialization is minted <name>_HM_<n>_<type>, which a user
+// function may spell (BL9002). The generated clone moves.
+// ============================================================================
+function f(x: T) -> T = x
+function f_HM_10000_float(x: Float32) -> Float32 = x * 10.0
+let r = f(Float32(2.0))
+let s = f_HM_10000_float(Float32(2.0))
+// EXPECT: r = 2.0
+// EXPECT: s = 20.0

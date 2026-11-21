@@ -7,6 +7,6 @@
 Unit meters
 Unit seconds
 type SIdx = Idx<2>
-let A: Array<Float<meters> like SIdx> = [1.0, 2.0]
-let B: Array<Float<seconds> like SIdx> = [1.0, 2.0]
+let A: Array<Float64<meters> like SIdx> = [1.0, 2.0]
+let B: Array<Float64<seconds> like SIdx> = [1.0, 2.0]
 let bad = method_for(zip(A, B)) <@> lambda(a, b) -> a + b |> compute

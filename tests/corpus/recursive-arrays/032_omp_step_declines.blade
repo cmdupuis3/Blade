@@ -1,0 +1,55 @@
+// TEST: Recursive Array Step Request Kept Where Threading Declines (E-G5)
+// ============================================================================
+// The step-threading admission (wave 3, E-G5) declines, and the `where omp`
+// request is then honoured by the map's OWN per-step team (the slice is not
+// fused; never a silent drop):
+//   nested -- the request sits on a STAGE map, not the step's final map:
+//             slice-write fusion declines the stage as before (a parallel
+//             kernel is not a plain pointwise kernel), the stage runs as its
+//             own team per step;
+//   lagged -- `prefix(n - 2)` is a guarded read (a whole-row choice between
+//             the row and the zero history), which is no cell expression:
+//             fusion declines and the final map keeps its team;
+//   late   -- `BLADE_REC_STEP_OMP` is read by the planner, not here: with the
+//             request on the final map and the knob unset the step threads
+//             (031); this file pins the values the declining shapes print.
+// Values: nested = the rows of 031 summed with `reduce(row, (+))` = 25.875;
+// lagged: rows [1, 2, 4] -> [0.5, 1, 2] -> [0.5, 1, 2] -> [0.375, 0.75, 1.5]
+// (row n = 0.5 * row(n - 1) + 0.25 * row(n - 2), row -1 = zeros), row sums
+// 7 + 3.5 + 3.5 + 2.625 = 16.625. Exact in binary.
+// ============================================================================
+type T = Idx<4>
+type X = Idx<3>
+
+function nested_step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
+    let k1 = method_for(u) <@> lambda(v) where omp(v: 1) -> v * 0.5 |> compute
+    k1 + 1.0
+}
+
+function nested(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: nested_step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+}
+
+function lag_step(a: Array<Float64 like X>, b: Array<Float64 like X>) -> Array<Float64 like X> = {
+    method_for(zip(a, b)) <@> lambda(p, q) where omp(p: 1) -> 0.5 * p + 0.25 * q |> compute
+}
+
+function lagged(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: lag_step(prefix(n - 1), prefix(n - 2))
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+}
+
+let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]
+let n = nested(u0)
+let l = lagged(u0)
+// EXPECT: n = 25.875
+// EXPECT: l = 16.625

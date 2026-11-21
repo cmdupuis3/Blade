@@ -15,9 +15,9 @@ type Lat = Idx<3>
 let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
 
 function total(row: T^1) -> T^0 = reduce(row, (+))
-let tf = total([1.5, 2.5, 3.0])
+let tf = total(Float64([1.5, 2.5, 3.0]))
 // EXPECT: tf = 7.0
-let ti = total([1, 2, 3])
+let ti = total(Int64([1, 2, 3]))
 // EXPECT: ti = 6
 
 function half(x: Float64) -> Float64 = x / 2.0

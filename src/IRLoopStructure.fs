@@ -118,11 +118,15 @@ let fuseJointSLevels
     (commGroups: int list list)
     (arrayTypes: IRArrayType list)
     (rawLevels: LoopLevelInfo list) : LoopLevelInfo list =
+    // A partner is the ADJACENT operand only (q = k +- 1): identity groups
+    // are runs of NEIGHBOURING identical arguments (docs/formalism.md 8.3),
+    // the same adjacency rawAxisGroups.mergesWith.acrossArray requires below,
+    // so a level is never fused for a partner it then cannot group with.
     let hasIdentityPartner k =
         commGroups |> List.exists (fun cg ->
             List.contains k cg &&
             cg |> List.exists (fun q ->
-                q <> k && q < identities.Length && k < identities.Length &&
+                (q = k + 1 || q + 1 = k) && q < identities.Length && k < identities.Length &&
                 sameIdentity identities.[k] identities.[q]))
     let sRecordsByArray =
         arrayTypes |> List.map (fun arr ->
@@ -218,7 +222,21 @@ let rawAxisGroups
             (lv.IndexSpace.Symmetry = SymSymmetric ||
              lv.IndexSpace.Symmetry = SymAntisymmetric ||
              lv.IndexSpace.Symmetry = SymHermitian)
+        // ADJACENT operands only (formalism 8.3: identity groups are runs of
+        // NEIGHBOURING identical arguments; `(A, B, A)` is three singleton
+        // groups). Merging with ANY earlier occurrence of the same array --
+        // which this test did until 2026-10-12 -- is the by-name quotient:
+        // buildLoopLevelStructure then reorders the nest to (A, A, B),
+        // deduceOutputType types the result in THAT order, and a source-order
+        // subscript `K(i, j, k)` reads f(A_i, A_j, B_k) instead of
+        // f(A_i, B_j, A_k) (and runs off the pool when the extents differ).
+        // The by-name quotient is the OPTIMAL count
+        // (proofs/BladeAttain.v aba_orbit_count_forced); presenting it in
+        // source axis order needs a position-permuted layout the compiler does
+        // not have. Until it does, a non-adjacent pair stays dense and the
+        // apply seam advises the reorder (BL4010, TypeCheckInfer).
         let acrossArray =
+            lv.ArrayIndex = prior.ArrayIndex + 1 &&
             inSameCommGroup lv.ArrayIndex prior.ArrayIndex &&
             lv.LocalDimIndex = prior.LocalDimIndex &&
             sameArrayIdentity lv.ArrayIndex prior.ArrayIndex &&
@@ -403,8 +421,10 @@ let computeAllSymcomStates
 ///   (A) WITHIN one index type: consecutive arity components of a single
 ///       symmetric/antisymmetric record (a SymIdx<r> spans r levels, same
 ///       LocalDimIndex, consecutive RankIndex).
-///   (B) ACROSS arguments: the SAME ARRAY repeated in a commutative group,
-///       each occurrence's S-block one level (d = 1, or fused for d >= 2).
+///   (B) ACROSS arguments: the SAME ARRAY repeated in ADJACENT operand slots
+///       of a commutative group (formalism 8.3: `(A, B, A)` is three
+///       singleton groups), each occurrence's S-block one level (d = 1, or
+///       fused for d >= 2).
 ///       Array identity is REQUIRED -- nominal identity across distinct
 ///       arrays licenses nothing (shared_units_insufficient) -- and a
 ///       multi-dim identity group forms ONE joint group, never one per data

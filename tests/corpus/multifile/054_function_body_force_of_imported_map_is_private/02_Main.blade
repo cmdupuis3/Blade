@@ -1,0 +1,11 @@
+// TEST: A function body forces an imported deferred map privately
+// MODULE: Main
+module Main
+import H
+function g(a: Array<Float64 like Idx<3>>) -> Float64 = reduce(H.d, (+), 0.0) + a(0)
+let y: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
+let w = g(y)
+H.x(0) = 10.0
+let z = H.d(0)
+// EXPECT: w = 13.0
+// EXPECT: z = 20.0

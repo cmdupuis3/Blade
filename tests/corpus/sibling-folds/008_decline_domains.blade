@@ -1,0 +1,16 @@
+// TEST: Folds over different extents stay separate traversals
+// ============================================================================
+// Two sums in one function over Idx<7> and Idx<11> arrays: no shared axis, so
+// the sibling-fold pass records a decline and each fold keeps its loop.
+// ============================================================================
+type A = Idx<7>
+type B = Idx<11>
+
+function both(x: Array<Float64 like A>, y: Array<Float64 like B>) -> Float64 = {
+    reduce(x, (+)) + 1000.0 * reduce(y, (+), 0.0)
+}
+
+let x = method_for(range<A>) <@> lambda(i) -> Float64(i) |> compute
+let y = method_for(range<B>) <@> lambda(i) -> 2.0 * Float64(i) |> compute
+let r = both(x, y)
+// EXPECT: r = 110021.0

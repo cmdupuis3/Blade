@@ -12,7 +12,7 @@
 //
 // A tuple-typed binding prints nothing (std::tuple has no operator<<), so tail
 // is re-destructured into scalars to observe it.
-let static head :: tail = (10, 20, 30)
+let static head :: tail = (Int64(10), Int64(20), Int64(30))
 let h = head
 let (t0, t1) = tail
 // EXPECT: h = 10

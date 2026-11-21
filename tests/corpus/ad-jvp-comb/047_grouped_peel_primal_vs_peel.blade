@@ -10,7 +10,7 @@ import ad as ad
 type R = Idx<6>
 type G = Idx<3>
 
-function loss(v: Array<Float64 like R>, k: Array<Int64 like R>, cw: Array<Float64 like G>) -> Float = {
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>, cw: Array<Float64 like G>) -> Float64 = {
     let gk = group_keys(k)
     let g = group_by(v, gk)
     let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
@@ -37,8 +37,8 @@ let rL = reduce(rmd * c0, (+))
 // EXPECT: rL = 201.666666666667
 
 // WARN: BL4003
-let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-let mut dc = [0.0, 0.0, 0.0]
+let mut dv = Float64([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+let mut dc = Float64([0.0, 0.0, 0.0])
 let aL = ad.grad(loss)(v0, kk, c0, dv, dc)
 let agree = abs(aL - rL) < 1.0e-12
 // EXPECT: agree = true

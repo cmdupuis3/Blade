@@ -1,0 +1,12 @@
+// TEST: A Bare Range Whose Start Is A Call Evaluates The Call Once
+// Gap G209 (round 4 wave 10 lane d; Codex design review): the bare materializers (C++
+// materializeRangeForm, the interpreter force arm) evaluated `start(calls)` for the extent and again
+// for the start; the bounds are evaluated once, lo before hi.
+function start(a: mut Array<Int64 like Idx<1>>) -> Int64 = {
+    a(0) = a(0) + 1
+    2
+}
+let mut calls: Array<Int64 like Idx<1>> = [0]
+let r = start(calls)..6 |> compute
+// EXPECT: r = [2, 3, 4, 5]
+// EXPECT: calls = [1]

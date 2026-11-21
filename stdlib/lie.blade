@@ -115,7 +115,7 @@ function sqnorms(x: T^2) -> T^1 = method_for(x) <@> lambda(row: T^1) -> prodsum(
 /// kernel (c + ⟨a, b⟩)^k: equals Σ_j binom(k, j) c^{k−j} ‖M_j(x) − M_j(y)‖²_F,
 /// the order-k moment-matching distance (RIGOR.md B2.1), with the diagonal
 /// pairs dropped (B2.6).
-function mmd2_poly_u(x: T^2, y: T^2, c: T^0, k: Int64) -> T^0 = {
+function mmd2_poly_u(x: T^2, y: T^2, c: Float64, k: Int64) -> T^0 = {
     let n = Float64(extents(x)[0])
     let m = Float64(extents(y)[0])
     let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
@@ -130,13 +130,13 @@ function mmd2_poly_u(x: T^2, y: T^2, c: T^0, k: Int64) -> T^0 = {
 }
 
 /// The Gaussian kernel exp(−‖a − b‖² / 2σ²) on two rows, from inner products.
-function gauss_kernel(a: T^1, b: T^1, s2: T^0) -> T^0 =
+function gauss_kernel(a: T^1, b: T^1, s2: Float64) -> T^0 =
     exp(-(prodsum(a, a) + prodsum(b, b) - 2.0 * prodsum(a, b)) / (2.0 * s2))
 
 /// Unbiased (U-statistic) Gaussian-kernel MMD² between two sample sets. The
 /// Gaussian kernel is characteristic: the population MMD is zero iff the two
 /// laws are equal (RIGOR.md B2.5); the diagonal terms k(x, x) = 1 are dropped.
-function mmd2_gauss_u(x: T^2, y: T^2, sigma: T^0) -> T^0 = {
+function mmd2_gauss_u(x: T^2, y: T^2, sigma: Float64) -> T^0 = {
     let n = Float64(extents(x)[0])
     let m = Float64(extents(y)[0])
     let s2 = sigma * sigma
@@ -156,7 +156,7 @@ function mmd2_gauss_u(x: T^2, y: T^2, sigma: T^0) -> T^0 = {
 /// whose population kernel is exactly sym(P). The pair loop is the caller's
 /// (a two-range map reading its own sample rows): a zip of (x, A·x) cannot yet
 /// be one operand of a multi-array loop.
-function gauss_hessian_pair(xa: T^1, axa: T^1, xb: T^1, axb: T^1, s2: T^0) -> T^0 = {
+function gauss_hessian_pair(xa: T^1, axa: T^1, xb: T^1, axb: T^1, s2: Float64) -> T^0 = {
     let kab = gauss_kernel(xa, xb, s2)
     let u = xa - xb
     kab * (prodsum(axa, axb) / s2 - prodsum(u, axa) * prodsum(u, axb) / (s2 * s2))

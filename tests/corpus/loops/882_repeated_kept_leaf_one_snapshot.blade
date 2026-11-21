@@ -1,0 +1,13 @@
+// TEST: a kept leaf spelled twice folds one snapshot in both positions
+// Gap G233, round 4 wave 10 (Codex design review, class closure): the tree
+// `(p <&!> p) <&!> q` keeps both occurrences of p (captured by q's kernel);
+// one force under p's own name, both leaves fold that snapshot.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + p(1)
+let s = reduce((p <&!> p) <&!> q, (+), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: p = [2.0, 4.0]
+// EXPECT: s = ((6.0, 6.0), 20.0)
+// EXPECT: w = 2.0

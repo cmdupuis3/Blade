@@ -6,7 +6,7 @@
 // ascription checked). It is now part of `c`'s arrow obligation, ONE CHAIN
 // judged per call (formalism 4.3): an array of the chain's total rank, read
 // `A(i)(j)` = `A(i, j)`, or a function returning a function, called twice.
-let m = [[1.0, 2.0], [3.0, 4.0]]
+let m = Float64([[1.0, 2.0], [3.0, 4.0]])
 function f0(j: Int64) = Float64(j)
 function f1(j: Int64) = 10.0 + Float64(j)
 function pick(i: Int64) = if i == 0 then f0 else f1
@@ -39,7 +39,7 @@ let G: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 function at2(c, i, j) = c(i)(j)
 let p = at2(G, 1, 2)
 // EXPECT: p = 6.0
-let p2 = at2(pick, 1, 2)
+let p2 = at2(pick, Int64(1), Int64(2))
 // EXPECT: p2 = 12.0
 function rowsum(c) = reduce(method_for(0..3) <@> lambda(j) -> c(1)(j), (+))
 let q = rowsum(G)
@@ -65,7 +65,7 @@ let vr = viaRow(m)
 // EXPECT: vr = 34.0
 let vp = viaRow(pick)
 // EXPECT: vp = 111.0
-let m3 = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+let m3 = Float64([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])
 function c3(c) = c(0)(1)(1)
 let t3 = c3(m3)
 // EXPECT: t3 = 4.0
@@ -77,6 +77,6 @@ let tm = cmix(m3)
 function g0(x: Float64) = x
 function g1(x: Float64) = x + 1.0
 function pickx(i: Int64) = if i == 0 then g0 else g1
-function cx(c) = c(1)(2.5)
+function cx(c) = c(Int64(1))(Float64(2.5))
 let x = cx(pickx)
 // EXPECT: x = 3.5

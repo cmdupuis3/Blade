@@ -1,0 +1,10 @@
+// TEST: a generic abs called with a Bool (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: `abs` recorded no numeric
+// demand on its generic operand.
+// ============================================================================
+function ab(x) = abs(x)
+let a = ab(-2)
+let r = ab(true)
+// ERROR: BL3007

@@ -1,0 +1,27 @@
+// TEST: Memfree Kernel Referenced Twice Keeps Capture (G54 control)
+// One callable `g` over `y` is BOTH the map kernel of a return-position fold
+// (a kernel slot) AND a call argument that `stash` stores. Its references
+// are counted over the whole scope, the return included: two, so the slot is
+// not proved synchronous and `y` survives `kernel` for the stored `g`.
+// Values for c = 2 over xs = [1, 2, 3]: reduce(y, (+)) = 20, the fold
+// 20 * (1 + 2 + 3) = 120, r = 120 + 0, v = 20 * 3.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, xs: Array<Float64 like I>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let g = lambda(k: Float64) -> reduce(y, (+)) * k
+    reduce(method_for(xs) <@> g, (+)) + stash(out, g)
+}
+
+let xs: Array<Float64 like I> = [1.0, 2.0, 3.0, 0.0, 0.0]
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, xs, 2.0)
+let v = out(0)(3.0)
+// EXPECT: r = 120.0
+// EXPECT: v = 60.0

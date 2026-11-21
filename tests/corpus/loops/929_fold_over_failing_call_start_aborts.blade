@@ -1,0 +1,7 @@
+// TEST: A Fold Over A Range Whose Start Fails Reports The Start's Failure (aborts)
+// Gap G209 (round 4 wave 10 lane d; the lead ruling): the start `10 / s(0)` divides by zero; it is
+// evaluated once, at the fold's operand stage, in every lane (the C++ fold had no holder: BL9002).
+// ABORT: BL8013
+function start(s: Array<Int64 like Idx<1>>) -> Int64 = 10 / s(0)
+let z: Array<Int64 like Idx<1>> = [0]
+let s = reduce(method_for(start(z)..12) <@> lambda(k) -> k, (+))

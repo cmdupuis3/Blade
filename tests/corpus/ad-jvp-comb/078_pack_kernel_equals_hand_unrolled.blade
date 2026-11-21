@@ -16,12 +16,12 @@ function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
              head * packprod(tail) }
 }
 
-function packed(a: Array<Float like I>) -> Float = {
+function packed(a: Array<Float64 like I>) -> Float64 = {
     let m = object_for(packprod) <@> (a, a) |> compute
     m(0, 2) + m(2, 0) + m(1, 1)
 }
 
-function hand(a: Array<Float like I>) -> Float = {
+function hand(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a, a) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     m(0, 2) + m(2, 0) + m(1, 1)
 }

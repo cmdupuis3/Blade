@@ -6,7 +6,7 @@
 // case where capture analysis has to see it.
 function add0(a: T^0, b: T^0) -> T^0 = a + b
 
-let A: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
-let s = 100.0
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let s: Float64 = 100.0
 let r = add0(A, s)
 // EXPECT: r = [101.0, 102.0, 103.0]

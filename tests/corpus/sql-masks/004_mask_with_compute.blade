@@ -2,7 +2,7 @@
 // Mask over a COMPUTED array: the mask reuses the computed array's own
 // index records, so compound() matches by identity even though the
 // computed output's indices are anonymous.
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let doubled = method_for(A) <@> lambda(a) -> a * 2.0 |> compute
 let big = compound(doubled, mask(doubled, lambda(x) -> x > 5.0))
 // doubled = [2, 4, 6, 8, 10]; > 5 at coordinates {2, 3, 4}

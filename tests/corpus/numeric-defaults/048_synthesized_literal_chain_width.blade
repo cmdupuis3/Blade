@@ -1,0 +1,22 @@
+// TEST: synthesized literal arithmetic stays flexible until a fixed use
+let __a = 0.0
+let __b = 1.0 * __a
+let __c = __b + 2.0
+let wide: Float64 = __c + Float64(1.0)
+let __narrow_seed = 1.0
+let __narrow_chain = 2.0 * __narrow_seed
+let narrow: Float32 = __narrow_chain + Float32(1.0)
+let __left = 1.0
+let __right = 2.0
+let __joined = __left + __right
+let joined: Float64 = __joined + Float64(1.0)
+let __int_seed = 2147483647
+let __int_chain = __int_seed + 1
+let wrapped: Int32 = __int_chain + Int32(0)
+let __nested = 2.0
+let nested: Float64 = (1.0 * __nested) + Float64(1.0)
+// EXPECT: wide = 3.0
+// EXPECT: narrow = 3.0
+// EXPECT: joined = 4.0
+// EXPECT: wrapped = -2147483648
+// EXPECT: nested = 3.0

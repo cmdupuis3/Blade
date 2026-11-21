@@ -1,0 +1,17 @@
+// TEST: a join leg kernel capturing a deferred ALIAS forces its map before the traversal (aborts)
+// Gap G115 (round 4 wave 5 lane c; Codex review round 1): `alias` is `g` by
+// substitution (formalism 10.2), so its capture by `w`'s kernel forces `g`
+// before the join's first cell; `g` fails at its cell 7 (line 9 once the
+// harness drops the TEST line) ahead of leg `q`'s cell-2 failure, in every
+// lane.
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e: Array<Int64 like I> = [1, 2, 0, 4, 5, 6, 7, 8, 9, 10]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let alias = g
+let q = method_for(e) <@> lambda(b) -> 200 / b
+let w = method_for(range<I>) <@> lambda(i) -> if i > 4 then alias(i) else 0
+let (sw, sq) = object_for(<&!>) <@> (reduce(w, (+)), reduce(q, (+)))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:9

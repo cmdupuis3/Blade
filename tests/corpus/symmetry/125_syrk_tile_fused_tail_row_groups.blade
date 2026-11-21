@@ -1,0 +1,29 @@
+// TEST: Syrk Tile Fused Tail Row Groups
+// The same-array comm row contraction with a `/ d` tail at p = 35 (35 = 5*6 + 5
+// rows: six row panels, visited in groups of four, so one group is ragged; 35 =
+// 4*8 + 3 columns: the ragged 3-lane panel is the FIRST, top-aligned, so only
+// row 0's panel visits it) over k = 701 samples (three balanced K blocks of 234).
+// With the BLAS gate off this is the packed-triangle syrk tile in both lanes
+// (blade_pgemm::dsyrk_tri / blade_dsyrk_tri_f64): the divide is applied by the
+// LAST K block's tile as it stores each finished cell -- no post-pass over the
+// triangle -- and the earlier blocks store the exact unscaled partial.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and every
+/// partial sum is an exact integer and ANY association gives the same sum; the one
+/// division by 7 then rounds identically (association-invariant pins, CLAUDE.md
+/// fold policy). The route is pinned by `blade plan` (tests/OptimizeTests.fs
+/// plan_syrk_tile_*), the arithmetic bitwise by `blade test syrk-tile` and
+/// `blade test llvm tiles`.
+type V = Idx<35>
+type S = Idx<701>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) / 7.0 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(34, 2), g(33, 34), trace)
+}
+// EXPECT: ss = 14742100.0
+// EXPECT: g00 = 200.571428571429
+// EXPECT: g_mirror = 0.285714285714286
+// EXPECT: g_edge = -100.142857142857
+// EXPECT: tr = 7010.0

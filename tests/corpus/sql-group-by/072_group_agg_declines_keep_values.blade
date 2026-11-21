@@ -1,0 +1,73 @@
+// TEST: Group aggregate declines keep the as-written values
+// Each function below is a shape the aggregate-only one pass (gap G71)
+// DECLINES -- fail closed: the CSR, the gathers and the peels run exactly as
+// written -- and its values are pinned so a decline that went wrong shows.
+// The decline REASONS are pinned in the Optimize block (decision_group_agg_*).
+type Row = Idx<5>
+type One = Idx<1>
+
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3]
+let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]
+
+// a row-reading consumer: `r(0)` needs the gathered rows
+function first_and_sum(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let h = method_for(g) <@> lambda(r) -> r(0) |> compute
+    (s, h)
+}
+let (s1, h1) = first_and_sum(keys, vals)
+// EXPECT: s1 = [4, 7, 4]
+// EXPECT: h1 = [1, 2, 4]
+
+// a `where omp` peel: its row loop is a licensed team
+function omp_peel(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) where omp(r: 1) -> reduce(r, (+)) |> compute
+    s
+}
+let s2 = omp_peel(keys, vals)
+// EXPECT: s2 = [4, 7, 4]
+
+// a late seed: bound AFTER the grouping, so it cannot be read at the grouping
+function late_seed(k: Array<Int64 like Row>, v: Array<Int64 like Row>, base: Int64) = {
+    let gk = group_keys(k)
+    let s0 = base * 2
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), s0) |> compute
+    s
+}
+let s3 = late_seed(keys, vals, 50)
+// EXPECT: s3 = [104, 107, 104]
+
+// (a DEFERRED top-level value source also declines -- pinned in the Optimize block,
+// decision_group_agg_declined_deferred_source; its values and printed set are pinned by
+// loops/544 -- the interpreter used to print a top-level deferred map a function forced
+// and the compiled lanes did not, gap G75, fixed in round 3 wave 4)
+
+// a group fold that writes a captured counter: an ordered side effect
+let mut calls: Array<Int64 like One> = [0]
+function bump(c: mut Array<Int64 like One>, a: Int64, b: Int64) -> Int64 = {
+    c(0) = c(0) + 1
+    a + b
+}
+function counted(k: Array<Int64 like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> bump(calls, a, b)) |> compute
+    s
+}
+let s5 = counted(keys, vals)
+// EXPECT: s5 = [4, 7, 4]
+// two of the three groups have two rows, so the kernel ran twice
+// EXPECT: calls = [2]
+
+// a TOP-LEVEL grouping: its grouped array is a named top-level binding (here
+// printed, too), whose rows stay stored -- v1 plans function bodies only
+let tgk = group_keys(keys)
+let tg = group_by(vals, tgk)
+let ts = method_for(tg) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: tg = [[1, 3], [2, 5], [4]]
+// EXPECT: ts = [4, 7, 4]

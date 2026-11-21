@@ -1,0 +1,8 @@
+// TEST: A deferred map forced and its input written in the defining module
+// MODULE: Main
+module Main
+import H
+let w = H.e(1)
+let z = H.d(1)
+// EXPECT: w = 5.0
+// EXPECT: z = 4.0

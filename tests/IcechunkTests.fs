@@ -1456,7 +1456,7 @@ let total = reduce(A, (+), axes = 2)
 
     /// The refusal a diverged axis earns: the ordinary NAMED-AXIS refusal, in
     /// whichever of its two wordings applies -- the rank->=2 product rule
-    /// ("same axis tags and extents") for a 2-D variable, BL3999's rank-1
+    /// ("same axis tags and extents") for a 2-D variable, BL3027's rank-1
     /// co-iteration message for a 1-D one. Both are the same fact: two index
     /// types with different names are not one index space.
     ///
@@ -1644,7 +1644,7 @@ let total = reduce(B, (+), axes = 2)
              | newest :: _ :: [] -> newest.SplitReason = Some "coordinate content differs"
              | _ -> false)
             (sprintf "%A" (axisIdentities axisCoordRoot "lat" |> List.map (fun i -> i.SplitReason)))
-        // The refusal is the ordinary named-axis one (BL3999): the two
+        // The refusal is the ordinary named-axis one (BL3027): the two
         // identities carry DIFFERENT axis names, and a named index type does
         // not co-iterate with a differently-named one merely by matching
         // extent. Ids alone would not do this -- `unify`'s ArrayElem arm never
@@ -2520,7 +2520,7 @@ let d = B - A
 
     /// The refusal a laundered axis earns. Which seam fires first depends on
     /// the shape: an ASCRIPTION refuses in `unify` (BL3001 "Type mismatch"),
-    /// a bare difference refuses in co-iteration (BL3999). Both are the same
+    /// a bare difference refuses in co-iteration (BL3027). Both are the same
     /// fact and either one is a pass here -- what is pinned is that the
     /// program does not compile, and that it failed on the index types.
     let refusesOnAxesOrAscription (r: Result<'a, string>) : bool =
@@ -2763,7 +2763,7 @@ let a: Array<Float64 like A> = b
          (not (incompat icA icA)) ""
      check "predicate: a provider tag against a USER name is incompatible"
          (incompat icA (Some "Lat") && incompat (Some "Lat") icA) ""
-     // The escape hatch BL3999's own message advertises, and the one route by
+     // The escape hatch BL3027's own message advertises, and the one route by
      // which a user can still assert that two diverged axes are one axis.
      check "predicate: a provider tag against an UNTAGGED record stays compatible"
          (not (incompat icA None) && not (incompat None icA)) ""
@@ -3157,7 +3157,7 @@ let ck = repo.checkout("main")
         // at the load site (line 3 of this program), with zarr's own text.
         (let (zjson, zcode) =
             checkPayload "zarr_absent.blade"
-                "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a = 1\n"
+                "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a: Int64 = 1\n"
          check "check: a MISSING ZARR store refuses AT TYPECHECK too, as BL2008 at the load site"
              (zcode <> 0 && zjson.Contains "\"code\":\"BL2008\"" && zjson.Contains "\"line\":3"
               && zjson.Contains "not a Zarr store")
@@ -3878,6 +3878,45 @@ let total = reduce(F, (+), axes = 2)
             Environment.SetEnvironmentVariable("BLADE_TILE_CACHE_VERBOSE", priorVerbose)
             try Directory.Delete(store, true) with _ -> ()
      with ex -> check "tiles: revision reuse" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // The provider boundary rule (BL8015) and the masked read, BOTH lanes:
+    // Icechunk reads through the Zarr chunk core and shares its rule -- a
+    // NaN fill_value over an absent chunk is refused, a finite fill is a
+    // value, and the masked read returns the present cells.
+    // ---------------------------------------------------------------
+    printfn "\n--- boundary rule (BL8015) + masked read (both lanes) ---"
+    (try
+        let root = Path.GetFullPath(fixRepo "ic_boundary").Replace("\\", "/")
+        let arr name fill =
+            { IW.mkArray name [ "r" ] [ 4L ] [ 2L ] (IW.IceF64 [| 1.0; 2.0; 0.0; 0.0 |]) with
+                Fill = fill
+                OmitChunks = [ [ 1L ] ] }
+        IW.writeRepo root
+            { IW.emptyRepo with
+                Seed = 11
+                Snapshots = [ IW.mkSnapshot "s1" [ arr "v" (IW.IceFillFloat nan); arr "w" (IW.IceFillFloat -1.0) ] ]
+                Branches = [ ("main", "s1") ] }
+        let prog (body: string) =
+            "import icechunk as ic\nlet repo = ic.load(\"" + root + "\")\nlet ck = repo.checkout(\"main\", ic.branch)\n" + body + "\n"
+        let run (name: string) (body: string) = Blade.Tests.ProviderBoundaryTests.bothLanes e2eDir name [] (prog body)
+        (match run "ic_boundary_fill" "let v = ck.vars.v |> ic.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectRefusal check "icechunk: NaN fill_value + absent chunk refused" r
+                 [ "provider read of 'v'"; "2 cell(s) hold a missing value"; "first at [2]"; "NaN or infinite (fill_value NaN)" ]
+         | Error e -> check "icechunk boundary fill: lowers" false e)
+        (match run "ic_boundary_finite" "let w = ck.vars.w |> ic.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "icechunk: a finite fill_value stays a value" r
+                 [ "w = [1.0, 2.0, -1.0, -1.0]" ]
+         | Error e -> check "icechunk boundary finite: lowers" false e)
+        (match run "ic_boundary_present" "let t = ck.vars.v |> ic.read_present\nlet ok = ic.present(ck.vars.v)\nlet n = extents(t)\nlet total = reduce(t, (+))" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "icechunk: masked read (read_present / present)" r
+                 [ "n = 2"; "total = 3.0"; "ok = [true, true, false, false]" ]
+         | Error e -> check "icechunk masked read: lowers" false e)
+        (try Directory.Delete(root, true) with _ -> ())
+     with ex -> check "icechunk boundary rule: no unexpected exception" false ex.Message)
 
     // ---------------------------------------------------------------
     // Summary

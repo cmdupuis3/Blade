@@ -1,0 +1,20 @@
+// TEST: Compact row classes: a writer hidden in a random fill's key between the producer and the fold
+// The compact row-class schedule (`blade plan` rule `compact-row-classes`,
+// licensed builds) would sum each packed row's orbit classes right behind
+// the row; `noise`'s key `bump(p)` (a side-table operand, its binding's value
+// a placeholder) writes p(0, 1) in between. The interval audit reads every
+// intervening module binding's whole payload and declines (`noise` reads
+// `p`): 2 + 9 + 9 + 4 = 24 over the logical cells, as written (the stale
+// schedule would give 12). The cli block runs the BLADE_COMPACT_ROW_CLASSES=0
+// twin.
+import rand as r
+type I = Idx<2>
+function bump(a: mut Array<Float64 like SymIdx<2, I>>) -> Int64 = {
+    a(0, 1) = 9.0
+    7
+}
+let x: Array<Float64 like I> = [1.0, 2.0]
+let mut p = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a + b |> compute
+let noise = r.uniform(bump(p), 1)
+let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j), (+)), lambda(a, b) where omp -> a + b, 0.0)
+// EXPECT: s = 24.0

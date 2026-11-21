@@ -10,7 +10,7 @@
 function total(row: T^1) -> T^0 = reduce(row, (+))
 let g = total
 let h = g
-let s = g([1, 2])
+let s = g(Int64([1, 2]))
 // EXPECT: s = 3
-let t = h([1.5, 2.0])
+let t = h(Float64([1.5, 2.0]))
 // EXPECT: t = 3.5

@@ -1,0 +1,18 @@
+// TEST: A Returned Member Of A Deferred Module Tuple Is Forced Privately
+// ============================================================================
+// Gap G190 (d), round 4 wave 8 (lane C, C2; Codex diff review round 2): a body
+// returning a projected member of a wholly deferred module tuple hands its
+// caller a VALUE: every lane forces it inside the body, privately (G75), so
+// `delayed` is not printed (the interpreter used to force it at the caller,
+// as a module force, and print it; the C++ lane named an undeclared holder).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let backing: A = [4.0]
+let delayed = method_for(backing) <@> lambda(e) -> 8.0 / e
+let pair = (delayed, delayed)
+function f(x: Float64) -> A = {
+    let member = pair[0]
+    member
+}
+let r = f(Float64(3.0))
+// EXPECT: r = [2.0]

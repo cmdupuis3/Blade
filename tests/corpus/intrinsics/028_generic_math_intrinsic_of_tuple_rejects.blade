@@ -1,0 +1,10 @@
+// TEST: a generic math intrinsic called with a tuple (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: a tuple instance; the
+// post-monomorphization backstop refuses it.
+// ============================================================================
+function sn(x) = sin(x)
+let a = sn(1.0)
+let r = sn((1, 2))
+// ERROR: BL3007

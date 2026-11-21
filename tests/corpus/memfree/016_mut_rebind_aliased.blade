@@ -17,12 +17,12 @@ type Steps = Idx<5>
 let mut STG = method_for(range<R, C>) <@> lambda(i, j) -> 0.0 * Float64(i) + 0.0 * Float64(j) |> compute
 let brow = STG((0 : R))
 let bwhole = STG
-function stepf(n: Int64) -> Float = {
+function stepf(n: Int64) -> Float64 = {
     let t = method_for(range<R, C>) <@> lambda(i, j) -> 10.0 * Float64(i) + Float64(j) + 100.0 * Float64(n) |> compute
     STG = t
     reduce(t, (+), axes = 2) * 0.001
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

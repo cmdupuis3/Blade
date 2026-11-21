@@ -1,0 +1,18 @@
+// TEST: a kernel writes a module plain let through a captured let mut rebound to its view
+// ERROR: BL4005
+// ERROR-CONTAINS: a write reaches `a` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): the
+// whole rebinding `out = a((1 : R))` writes nothing (mutability/022), but the
+// element store after it goes through `out`, which now holds a row VIEW of
+// the plain `let a`: it writes `a`'s storage from a kernel that only captures
+// `a`. Declaring `out` `let mut` does not make `a` writable.
+type C = Idx<3>
+type R = Idx<2>
+let a = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let got = reduce(method_for(0..2) <@> lambda(t) -> {
+    out = a((1 : R))
+    out((0 : C)) = 9.0
+    Float64(t)
+}, (+), 0.0)

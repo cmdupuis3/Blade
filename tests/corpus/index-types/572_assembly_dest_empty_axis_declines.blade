@@ -1,0 +1,10 @@
+// TEST: Assembly Destination Fill Declines An Empty Axis
+// assembly-dest v1 (PM26): the fused fill takes the base pointers of its
+// operand and destination pools, which an array with an empty axis does not
+// have, so a zero extent declines and the ordinary (empty) copy runs.
+type I = Idx<0>
+type J = Idx<3>
+let A: Array<Float64 like I, J> = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let T = transpose(A * 2.0, [0, 1])
+let k: Int64 = 7
+// EXPECT: k = 7

@@ -1,0 +1,15 @@
+// TEST: Math svd of an annotated ppl former output
+// #62 twin of math/117: the annotation on the former's binding supplies the
+// element type, and the result of the elaborated svd feeds a matmul.
+// sv(0)^2 + sv(1)^2 is the squared Frobenius norm of the cross block.
+import math as m
+import ppl as ppl
+type T = Idx<4>
+let X: Array<Float64 like Idx<2>, T> = [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 1.0]]
+let Y: Array<Float64 like Idx<2>, T> = [[0.5, 1.5, 1.0, 3.0], [4.0, 3.0, 2.0, 1.0]]
+let C: Array<Float64 like Idx<2>, Idx<2>> = ppl.comoments(X, Y)
+let (U, sv, V) = m.svd(C)
+let fro_sv = sv(0) * sv(0) + sv(1) * sv(1)
+let fro_c = C(0, 0) * C(0, 0) + C(0, 1) * C(0, 1) + C(1, 0) * C(1, 0) + C(1, 1) * C(1, 1)
+let d = fro_sv - fro_c
+// EXPECT: d = 0.0

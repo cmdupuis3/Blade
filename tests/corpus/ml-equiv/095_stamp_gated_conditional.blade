@@ -42,8 +42,8 @@ import ml as ml
 // SE head is (l=0, even, mult 2); the l=1 block is scaled by
 // sigmoid(x(0)) = 0.5 and the two scalars are silu'd to 0*0.5 = 0.
 let static SE = [(0, 0, 2), (1, 1, 1)]
-let xe: Array<Float like IrrepsIdx<SE>> = [0.0, 0.0, 0.0, 6.0, 8.0]
-let ge: Array<Float like IrrepsIdx<SE>> = ml.gated(SE, xe)
+let xe: Array<Float64 like IrrepsIdx<SE>> = [0.0, 0.0, 0.0, 6.0, 8.0]
+let ge: Array<Float64 like IrrepsIdx<SE>> = ml.gated(SE, xe)
 // EXPECT: ge = [0.0, 0.0, 0.0, 3.0, 4.0]
 
 // --- 2. gated with a PSEUDOSCALAR gate block: stamped SO3 -------------------
@@ -52,8 +52,8 @@ let ge: Array<Float like IrrepsIdx<SE>> = ml.gated(SE, xe)
 // are unchanged, which is the point — the stamp is a claim about the body,
 // not a change to it.
 let static SO = [(0, 1, 2), (1, 1, 1)]
-let xo: Array<Float like IrrepsIdx<SO>> = [0.0, 0.0, 0.0, 6.0, 8.0]
-let go: Array<Float like IrrepsIdx<SO>> = ml.gated(SO, xo)
+let xo: Array<Float64 like IrrepsIdx<SO>> = [0.0, 0.0, 0.0, 6.0, 8.0]
+let go: Array<Float64 like IrrepsIdx<SO>> = ml.gated(SO, xo)
 // EXPECT: go = [0.0, 0.0, 0.0, 3.0, 4.0]
 
 // --- 3. norms: stamped O3 under either spec --------------------------------
@@ -68,7 +68,7 @@ let no = ml.norms(SO, go)
 // SQ has only parity-EVEN l = 0 blocks, so its exported entries really are
 // O(3) invariants: stamped O3.
 let static SQ = [(0, 0, 2), (1, 1, 1)]
-let xq: Array<Float like IrrepsIdx<SQ>> = [1.5, 0.0 - 2.5, 3.0, 4.0, 5.0]
+let xq: Array<Float64 like IrrepsIdx<SQ>> = [1.5, 0.0 - 2.5, 3.0, 4.0, 5.0]
 let sq = ml.scalars(SQ, xq)
 // EXPECT: sq = [1.5, -2.5]
 
@@ -77,6 +77,6 @@ let sq = ml.scalars(SQ, xq)
 // emitted offsets are block order then multiplicity order, which puts the
 // trailing (0, odd) block's single entry last: offsets [0; 4].
 let static SP = [(0, 0, 1), (1, 1, 1), (0, 1, 1)]
-let xp: Array<Float like IrrepsIdx<SP>> = [1.5, 2.0, 3.0, 4.0, 0.0 - 2.5]
+let xp: Array<Float64 like IrrepsIdx<SP>> = [1.5, 2.0, 3.0, 4.0, 0.0 - 2.5]
 let sp = ml.scalars(SP, xp)
 // EXPECT: sp = [1.5, -2.5]

@@ -1,0 +1,12 @@
+// TEST: Arithmetic on an EnumIdx value in a kernel typed before it met R
+// ============================================================================
+// `k` is a lambda VALUE, typed before it meets the R array. R3: `object_for(k)
+// <@> codes` is the map `method_for(codes) <@> k`, typed as that one, so k
+// meets the R values while it is instantiated and its `c + 1` adds one to
+// each KEY. (It was refused, BL4003: typed through the object former, `c + 1`
+// read as a value of R.)
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+let k = lambda(c) -> c + 1
+let d = object_for(k) <@> codes |> compute
+// EXPECT: d = [301, 101, 201]

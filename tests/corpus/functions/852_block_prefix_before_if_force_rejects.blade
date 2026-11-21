@@ -1,0 +1,18 @@
+// TEST: Block Prefix Before If Force (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, the third Codex look, finding 3: a BLOCK whose final `if` reads g
+// first in its condition, after a block statement whose index cast fails
+// (BL8006). The C++ lane forces the whole block's deferred reads before its
+// lets (g's BL8013 first); the interpreter and the llvm lane run the cast
+// first. A block is one hoist region: refused at lowering in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> 1 / (v - 2)
+let r = {
+    let a = z((z(0) : Row))
+    if g(0) > 0 then g(0) else 0
+}
+// ERROR: BL6002 @ 11:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

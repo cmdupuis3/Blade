@@ -1,5 +1,5 @@
 // TEST: Object For Commutative
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x, y) where comm(x, y) -> x * y
 let O = object_for(f)
 let result = O <@> (A, A) |> compute

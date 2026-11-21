@@ -1,0 +1,14 @@
+// TEST: A rank-2 full fold is the left fold of its cells in every build
+// Gap G74. `reduce(m, (+), axes = 2)` over a stored rank-2 array runs one
+// accumulator loop over the cells in storage order -- serial in every build
+// and lane, never a licensed form -- so its unseeded seed is the exact
+// identity -0.0 on every route: fifteen -0.0 cells fold to -0.0 in the
+// default build as under BLADE_FP_REPRO=1 (the default build's +0.0 seed
+// gave +0.0 before). QUOTED pins: the reciprocal carries the sign.
+type A = Idx<3>
+type B = Idx<5>
+let m: Array<Float64 like A, B> = method_for(range<A, B>) <@> lambda(i, j) -> -0.0 * Float64(i + j + 1) |> compute
+let full = reduce(m, (+), axes = 2)
+let inv = 1.0 / full
+// EXPECT: full = "-0.0"
+// EXPECT: inv = "-inf"

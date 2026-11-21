@@ -1,0 +1,10 @@
+// TEST: Diag Zip Rank Mismatch Pipe Apply (rejects)
+// Gap G99 (round 4 wave 4 lane A): a zip of plain dense operands of DIFFERENT
+// ranks shares no index space. The pipe-apply spelling (kernel |@> former) is the same application.
+// ERROR: BL3027
+// ERROR-CONTAINS: co-iteration operands must have the SAME rank
+type R = Idx<3>
+type C = Idx<4>
+let A: Array<Float64 like R, C> = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let t: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let Z = lambda(row: Array<Float64 like C>, ti: Float64) -> reduce(row, (+)) * ti |@> method_for(zip(A, t)) |> compute

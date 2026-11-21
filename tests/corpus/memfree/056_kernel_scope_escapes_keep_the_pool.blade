@@ -1,0 +1,51 @@
+// TEST: A Kernel Application Whose Pool Escapes Keeps It Alive (G184)
+// Gap G184's boundary (Codex diff review round 1): the LLVM lane's kernel
+// scope frees the pools one application allocated only when nothing that
+// existed before the application now holds a different array. A whole-array
+// rebinding of an outer `let mut` to a ROW VIEW of a local pool (`out`), or
+// to a PRODUCER reading one (`held`), escapes: those pools stay alive. A
+// named fold kernel applied at two sites (`twice`) frees its local each
+// application at both (its locals are dropped from the slot tables after
+// each application, so the second emission does not mistake them for outer
+// bindings). `blade test llvm` pins the frees; the values are the same in
+// every lane.
+type R = Idx<2>
+type C = Idx<3>
+type Big = Idx<1001>
+type Rep = Idx<7>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let change = lambda(t: Float64) -> {
+    let tmp = method_for(range<R, C>) <@> lambda(i, j) -> t + Float64(i) + Float64(j) |> compute
+    out = tmp((1 : R))
+    reduce(out, (+))
+}
+let before = change(10.0)
+let after = reduce(out, (+))
+
+let mut held = big(0.0)
+let swap = lambda(t: Float64) -> {
+    let tmp2 = big(t)
+    held = tmp2 + 1.0
+    t
+}
+let s2 = swap(2.0)
+let held_sum = reduce(held, (+))
+
+function twice(acc: Float64, x: Float64) -> Float64 = {
+    let tmp3 = big(x)
+    acc + reduce(tmp3, (+)) + reduce(tmp3, (+))
+}
+let xs = Float64(range<Rep>) |> compute
+let a = reduce(xs, twice, 0.0)
+let b = reduce(xs, twice, 1.0)
+// EXPECT: before = 36.0
+// EXPECT: after = 36.0
+// EXPECT: s2 = 2.0
+// EXPECT: held_sum = 1002001.0
+// EXPECT: a = 21021000.0
+// EXPECT: b = 21021001.0

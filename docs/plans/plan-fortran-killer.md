@@ -32,7 +32,7 @@ never-silent / fastest-way-is-the-only-way invariant is violated**: same computa
 spellings, 3x apart (fusion, anon-range); licences silently dropped (omp on materialized
 folds, wreaths, LLVM-lane lambdas); flagship features silently at war (units disable BLAS).
 The `plan-fastest-way-principles` framework (T1 SAME-EMIT gate, T2 decision census; authored
-2026-08-28, on a branch, not in this tree) would have caught most of these — this audit is
+2026-08-28; DESIGN, nothing built) would have caught most of these — this audit is
 its concrete case list.
 
 Where Blade already beats Fortran, today, with no work:
@@ -98,7 +98,7 @@ Proposal — a guard on the existing inductive arm, nothing else changes:
 
 ```blade
 type It = Idx<200>                       // a BUDGET, not a trip count
-let rec u: Array<Float like It, Y, X> =
+let rec u: Array<Float64 like It, Y, X> =
     match u with
     | zero -> zero
     | zero :: s -> zero :: u0
@@ -254,7 +254,7 @@ noted.
 | B9 | I/P | Anon range (`__anon` tag) permanently refused by the flat-elementwise gate — the documented top-rung idiom emits the slow shape | `flatShapeSignature` (`src/CodeGenLoopNest.fs:2095`) refuses all `__`; only `__anon` is `__`-tagged AND IxKPlain | `"__"` → `"__halowin"`, matching `src/CodeGenBinding.fs:2956` |
 | B10 | P | sqrt/fabs/floor/ceil loops do not vectorize — `-fno-math-errno` missing; A/B shows 32-byte vectorization with it; no errno surface exists in src/cpp | `src/Build.fs:70` (+ `:92` llvm) | add the flag; bit-exact |
 | B11 | P | `let rec` zero-prefill emits one statement per cell under 4096: N=4000 → 4001 literal stores (also dead — every cell overwritten) | `src/TypeCheckInfer.fs:10113-10125` | threshold → ~64 or `std::fill_n`; best: elide dead prefill |
-| B12 | P | `sp.ifft` is O(n²) unconditionally — no `isPow2` branch, while `fft` and both 2-D passes have one (READ-ONLY) | `src/spectra/compiler/SpectraDecls.fs:116` | mirror `fftDecl` with invTwiddles + 1/n |
+| B12 | P | `sp.ifft` is O(n²) unconditionally — no `isPow2` branch, while `fft` and both 2-D passes have one (READ-ONLY) | `src/spectra/compiler/SpectraDecls.fs:116` | mirror `fftDecl` with invTwiddles + 1/n -- DONE; every non-power-of-two n now takes Bluestein in all four transforms (2026-10, F6) |
 | B13 | P | Pool alignment lane divergence: LLVM allocator `align 64`, C++ lane plain `new` (16B) | `src/EmitLlvm.fs:855` vs `src/cpp/nested_array_utilities.hpp:239` | `align_val_t(64)` both sides of allocate/deallocate |
 | B14 | D | BL4003's suggested fix is rejected: `table(k)` warns "consider `(k : Tab)`" but `(k : Tab)` on a *variable* is BL3001 (literal works) | boundary confirmed | accept var ascription or change the advice |
 | B15 | D | BL7001: array literal in an `if` branch (`if p then [x,x,x] else [0.0,0.0,0.0]`) — bare literal return is fine; lands on the adaptive-stepping idiom | workaround: bind each with `\|> compute` | add the IRArrayLit-in-expression rule or name the branch in the note |
@@ -298,7 +298,7 @@ Arc 3's LAPACK routing extends `LinAlgPatterns.fs`'s existing table; its diff-te
 doctrine is `blade_lapack.hpp:19-30`. Arc 4's slab math reuses the existing mpi prologue;
 GPU defers to `plan-mlir-backend.md`. Arc 5's runtime-shape half is
 `plan-llvm-runtime-shapes.md`'s arc — don't duplicate. The enforcement framework for the
-whole invariant-violation class is the fastest-way-principles plan (on its branch).
+whole invariant-violation class is the fastest-way-principles plan.
 
 Audit note: the graft index covers only `protocol/` JS/TS + two Python files — the F#
 compiler is unindexed. All four agents discovered this independently and fell back to

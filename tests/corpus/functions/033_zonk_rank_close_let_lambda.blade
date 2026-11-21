@@ -10,6 +10,6 @@
 // Array<double,1> was required). Zonk is the leftover close site.
 function total(row) = reduce(row, (+))
 let f = lambda(x) -> total(x) + 1.0
-let a = [1.0, 2.0, 3.0]
+let a = Float64([1.0, 2.0, 3.0])
 let r = f(a)
 // EXPECT: r = 7.0

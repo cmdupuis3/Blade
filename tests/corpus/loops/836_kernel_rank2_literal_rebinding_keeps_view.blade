@@ -1,0 +1,14 @@
+// TEST: A Rank-2 Array Literal In A Kernel Block Compiles; A View Keeps The Old Storage
+// Gap G245 (b) (round 4 wave 9 lane d): a rank-2 literal inside a kernel block was a C++ BL7001
+// (IRArrayLit in expression position); it is now materialized in place. The view v of the OLD
+// storage keeps it across the rebinding (the G227 decision): v((1 : C)) = 2.0, row 1 of the new m
+// sums to 33.0, per trip 35.0.
+// EXPECT: total = 70.0
+type R = Idx<2>
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut m: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    let v = m((0 : R))
+    m = [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]
+    v((1 : C)) + reduce(m((1 : R)), (+))
+}, (+))

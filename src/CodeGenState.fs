@@ -85,6 +85,11 @@ and TilePlan = {
     Hoisted: bool
 }
 
+type ProgramEmissionOptions = { PrivateSpool: PrivateSpoolPolicy option }
+let defaultProgramEmissionOptions : ProgramEmissionOptions = { PrivateSpool = None }
+
+type PrivateSpoolEmission = { Plan: Blade.OptimizePrivateSpool.Plan; Committed: bool }
+
 type CodeGenContext = {
     /// Map from IR variable IDs to C++ variable names
     VarNames: Map<IRId, string>
@@ -107,6 +112,13 @@ type CodeGenContext = {
     /// Deferred computation exprs (L <@> f), materialized only when |> compute forces them;
     /// <&!> looks through variables to find the original ApplyInfo for fusion.
     DeferredComputations: Map<IRId, IRExpr>
+    /// A deferred ARRAY alias (`let g2 = g`, g a deferred map) -> the deferred
+    /// binding it names (gap G60, formalism 10.2 "Aliases and printing of
+    /// deferred maps"). The alias is the SAME deferred value: it evaluates
+    /// nothing at its `let`, and the first forcing use through it forces the
+    /// SOURCE under its own name first (forceDeferredArrayInput), then binds
+    /// the alias as an assignable copy of the stored cells.
+    DeferredAliasOf: Map<IRId, IRId>
     /// Let-bound loop-object provenances (`let o = object_for(f)`); kept SEPARATE from
     /// DeferredComputations so array-position consumers never see a bare loop object --
     /// only genComposeApply reads this, to chase a composed leaf back to its IRObjectFor
@@ -121,6 +133,18 @@ type CodeGenContext = {
     /// Streamed provider reads whose prologue is already emitted, keyed by cpp name:
     /// a hit means inline a fiber read at the S/T boundary instead of peeling.
     StreamedArrays: Map<string, ProviderReadSpec>
+    /// Whole-PROGRAM demand census for certified terminals (the rank-1 streamed
+    /// reduction join and the stored sparse wildcard scalar fold):
+    /// the sole assembler has merged every module. Low-level genModule callers
+    /// have None. Context-owned; no ambient flag or omitted resident allocation.
+    StreamTerminalModule: IRModule option
+    /// Explicit whole-program policy/certificate only. Never inherited by
+    /// generic module APIs; commit is immutable context state at the producer.
+    PrivateSpoolRegion: PrivateSpoolEmission option
+    /// An explicit capability for the CURRENT ordinary module-level provider
+    /// binding only. genModuleBinding grants/restores it; nested bindings and
+    /// generic provider API calls have no scope/cleanup proof for PM43.
+    TopLevelProviderRead: IRId option
     /// Groupings emitted by genSegmentsBinding (structural: static offsets,
     /// identity accessor), by cpp name. A group_by over a STREAMED rank-1
     /// variable and one of these reads per run (docs/plans/structural/07 §3.4).
@@ -173,9 +197,16 @@ let freshCell (storage: System.Threading.AsyncLocal<'T ref>) (v: 'T) : unit =
     storage.Value <- ref v
 
 /// Per-program table of user binding names emitted under a different C++
-/// spelling (sanitized form -> emitted form); see `installUserNameRenames`.
+/// spelling (RAW IR spelling -> emitted form); see `installCppNameTable`.
 let internal userNameRenamesStorage =
     System.Threading.AsyncLocal<Map<string, string> ref>()
+
+/// Per-program census of the C++ spellings the PROGRAM's own names take
+/// (bindings, callables, parameters, captures), against which a name the
+/// emitter mints for a body local (`localVarName`) or a renamed parameter is
+/// lengthened (gap G252); see `installCppNameTable`.
+let internal userSpellingCensusStorage =
+    System.Threading.AsyncLocal<Set<string> ref>()
 
 /// The declaration currently being emitted, for attributing an unhandled node
 /// to a source position. `genModule`/`genModuleSplit` set it around each item.
@@ -201,6 +232,61 @@ let private declShownNamesCell () : Map<string, string> ref =
         declShownNamesStorage.Value <- fresh
         fresh
     else v
+
+/// The IRId of the declaration being emitted (a top-level binding or a
+/// function), beside its name: membership hoisting's probes (the IRContains
+/// arm) read the hoisted structure only while their host binding or one of
+/// its probing kernels is the declaration being emitted. -1 outside
+/// genModule / genModuleSplit's item loop.
+let internal currentDeclIdStorage = System.Threading.AsyncLocal<IRId ref>()
+
+let currentDeclIdCell () : IRId ref =
+    let v = currentDeclIdStorage.Value
+    if isNull (box v) then
+        let fresh = ref -1
+        currentDeclIdStorage.Value <- fresh
+        fresh
+    else v
+
+/// Collector: does THIS program assembly carry a membership-hoist plan
+/// (Optimize.MemberHoistTable)? The assembler then appends
+/// `#include "blade_member.h"` and the plans' file-scope structures.
+let internal memberUsedStorage = System.Threading.AsyncLocal<bool ref>()
+
+/// The external stable sort (round 4 wave 4 D1, ST14, rule `external-sort
+/// v1`): the private-spool GRANT this assembly may use for a sort site (the
+/// CLI's BLADE_PRIVATE_SPOOL, threaded as ProgramEmissionOptions; None = no
+/// grant, every sort resident), and whether a site emitted the external form
+/// (the include of blade_external_sort.hpp is appended after generation).
+let internal externalSortGrantStorage = System.Threading.AsyncLocal<PrivateSpoolPolicy option ref>()
+let externalSortGrantCell () : PrivateSpoolPolicy option ref =
+    let v = externalSortGrantStorage.Value
+    if isNull (box v) then
+        let fresh = ref None
+        externalSortGrantStorage.Value <- fresh
+        fresh
+    else v
+let internal externalSortUsedStorage = System.Threading.AsyncLocal<bool ref>()
+let externalSortUsedCell () : bool ref =
+    let v = externalSortUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        externalSortUsedStorage.Value <- fresh
+        fresh
+    else v
+
+let memberUsedCell () : bool ref =
+    let v = memberUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        memberUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// The file-scope structure of one membership-hoist plan: a zero-initialized
+/// static (`BLADE_MEMBER_NONE`, "not built") that the host's build fills and
+/// its free resets.
+let memberHoistGlobalName (hostId: IRId) (setId: IRId) : string = $"__bl_member_{hostId}_{setId}"
 
 /// Enter the emission of declaration `name` (its emitted name), which the
 /// program wrote as `shown` -- a binding's name, or a function's SourceName.
@@ -233,6 +319,32 @@ let emittedDeclSpan (name: string) : Blade.Ast.Span =
 /// (Blade.Effects.Decisions.start), so ordinary compiles pay one AsyncLocal read.
 let decisionSpan () : Blade.Ast.Span = emittedDeclSpan (currentDeclCell ()).Value
 
+/// The `file, line` arguments of a runtime GUARD panic (a shape / extent /
+/// key / empty-reduce / solver check) that has no expression span of its
+/// own: the declaration being emitted. Such guards used to pass `nullptr, 0`,
+/// so a notebook showed their code at 1:1; the declaration's line is the
+/// nearest position the source has. The arithmetic panics keep their
+/// operator's own span (panicSpanArgs loc.Span).
+let declPanicArgs () : string = panicSpanArgs (decisionSpan ())
+
+/// G55 (the plan subject of a FUNCTION-BODY fold let): while CodeGen's
+/// genFuncBody emits a scalar fold let through the statement path, `Some
+/// (emitted C++ name, enclosing declaration, source subject)` -- the subject
+/// being `<function>.<let name>` (`fsum.s`). A decision recorded about that
+/// binding -- by its emitted name (`__v<id>`, the applied `[omp]` record), by
+/// the enclosing declaration's name, or with no subject (`""`, a decline) --
+/// is attributed to the source subject, so the fold is ONE `blade plan`
+/// subject whatever the outcome. None outside that window.
+let internal localDecisionSubjectStorage = System.Threading.AsyncLocal<(string * string * string) option ref>()
+
+let localDecisionSubjectCell () : (string * string * string) option ref =
+    let v = localDecisionSubjectStorage.Value
+    if isNull (box v) then
+        let fresh = ref None
+        localDecisionSubjectStorage.Value <- fresh
+        fresh
+    else v
+
 let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
     if Blade.Effects.Decisions.active () then
         let decl = (currentDeclCell ()).Value
@@ -241,9 +353,16 @@ let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effec
         let span =
             let s = IR.declSpanOf subject
             if s.StartLine > 0 then s else emittedDeclSpan decl
+        let localSubject =
+            match (localDecisionSubjectCell ()).Value with
+            | Some (emitted, owner, shown) when subject = "" || subject = emitted || subject = owner -> Some shown
+            | _ -> None
         Blade.Effects.Decisions.record
             { Rule = rule; Version = 1; Span = span
-              Subject = shownDeclName (if subject = "" then decl else subject)
+              Subject =
+                  (match localSubject with
+                   | Some s -> s
+                   | None -> shownDeclName (if subject = "" then decl else subject))
               Outcome = outcome; Evidence = evidence }
 
 /// Module-level expression warnings collector: exprToCpp is pure (returns a
@@ -284,6 +403,63 @@ let forcedDeferredIdsCell () : Set<int> ref =
         fresh
     else v
 
+/// The holder names a FUNCTION BODY's private forces of module deferred maps
+/// (gap G75) have declared so far, innermost body on top (G190 (b)). A body
+/// forces such a map once per reading STATEMENT (the statement pre-pass of
+/// genFuncBodyScoped and genForRangeBinding), each force at the body's own
+/// scope, so a second force of the same map -- an ad.grad derivative's forward
+/// and reverse sweep, two scalar lets -- used to redeclare `forcing` /
+/// `forcing_extents` in one C++ scope. forceDeferredArrayInput consults the
+/// top set: a name already declared there takes a fresh `__bfh<id>_<name>`
+/// holder. Empty stack = main's top level (forces there are memoized and
+/// never repeat). Reset per program assembly.
+let internal bodyForceNamesStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.HashSet<string> list ref>()
+
+let bodyForceNamesCell () : System.Collections.Generic.HashSet<string> list ref =
+    let v = bodyForceNamesStorage.Value
+    if isNull (box v) then
+        let fresh = ref []
+        bodyForceNamesStorage.Value <- fresh
+        fresh
+    else v
+
+/// main()'s FLAT tuples: the module-level ctx.TupleChildren genModule /
+/// genModuleSplit end with (C++ name -> the flat leaf names). Every fusion /
+/// join emitter builds ONE flat `std::make_tuple(t_0, t_1, t_2)` while the
+/// binding's IR type is the left-nested pair tree, so the print pass must
+/// index such a tuple by FLAT leaf (`std::get<k>(t)`) and take only the
+/// parentheses from the type. Reset per program assembly.
+let internal moduleTupleChildrenStorage =
+    System.Threading.AsyncLocal<Map<string, string list> ref>()
+
+let moduleTupleChildrenCell () : Map<string, string list> ref =
+    let v = moduleTupleChildrenStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        moduleTupleChildrenStorage.Value <- fresh
+        fresh
+    else v
+
+/// The bindings (by IRId, unique per program) whose C++ value is a FLAT tuple
+/// -- a fusion / join emitter's `std::make_tuple(t_0, t_1, t_2)`, an alias or
+/// a sub-tuple projection of one -- while their IR type is the left-nested
+/// pair tree. Read by the INLINE tuple-projection render (exprToCpp's
+/// IRTupleProj arm), which has no ctx.TupleChildren: a projection chain rooted
+/// at one of these ids is translated to flat leaf positions (`t[1]` of
+/// ((a, b), c) is `std::get<2>(t)`) instead of walking the nested type against
+/// a flat value (gap G42). Registered by genBinding wherever the binding's own
+/// C++ name gained TupleChildren. Reset per program assembly.
+let internal flatTupleIdsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+let flatTupleIdsCell () : Set<IRId> ref =
+    let v = flatTupleIdsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        flatTupleIdsStorage.Value <- fresh
+        fresh
+    else v
 /// Append-only, insertion-ordered line collector for the emission-side cells
 /// below. Replaces the `string list ref` they used to be: every contribution
 /// was `cell.Value <- cell.Value @ lines` (an O(n) list copy per append) and the
@@ -477,6 +653,37 @@ deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count
     | AllocUnsupported reason ->
         Error ($"Blade codegen: unsupported antisymmetric output storage -- {reason}")
 
+/// The free-side mirror of emitAllocRhs (above), case for case, reusing
+/// hoistSymmDecl with the identical `%s_anti` / `%s_strict` names keyed off
+/// extentsName (the hoist collector is idempotent per distinct decl, so
+/// re-hoisting the same mask is safe). Returns (routine, templateArgs); an
+/// AllocUnsupported spec returns Error and the caller skips registration
+/// entirely -- that allocation site emitted a `#error`, so there is nothing valid
+/// to free. (Lives here, beside its allocation twin, so the expression emitter
+/// can free a kernel-body `let mut` copy at its IIFE's end -- gap G46.)
+let deallocArgsFor
+        (spec: AllocSpec)
+        (elemType: string) (rank: int) (symmArg: string) (extentsName: string)
+        : Result<string * string, string> =
+    match spec with
+    | AllocAntisymmetric ->
+        let allOnes = List.replicate rank 1
+        let maskName = hoistSymmDecl ($"{extentsName}_anti") allOnes
+        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {maskName}, false")
+    | AllocDense | AllocSymmetric ->
+        Ok ("deallocate", $"typename promote<{elemType}, {rank}>::type, {symmArg}")
+    | AllocPerGroupStrict strictVec ->
+        let strictName = hoistSymmDecl ($"{extentsName}_strict") strictVec
+        Ok ("deallocate_strict", $"typename promote<{elemType}, {rank}>::type, {symmArg}, {strictName}")
+    | AllocWreath _ ->
+        // The wreath pool is a plain `new T[cells]`, freed by its own
+        // `delete[]` registration (registerRawArrayData at the emit site), not
+        // by `deallocate`'s skeleton walk -- there is no skeleton to walk.
+        Error "Blade codegen: an OrbIdx (iterated-wreath) pool is a flat new[] buffer; it is freed by \
+delete[] at its emit site, not through the skeleton deallocator"
+    | AllocUnsupported reason ->
+        Error ($"Blade codegen: unsupported storage has no representable free -- {reason}")
+
 /// The `orb_level<...>` template-argument list for an OrbIdx class, in the
 /// header's public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass`
 /// carries it. ONE spelling, shared by every wreath emitter -- the traversal
@@ -543,20 +750,10 @@ type MaterializedAlloc =
 /// emitted pragmas produce GENUINE parallel regions, not just syntactic ones.
 /// OFF by default (toggled on only by the harness, else it pollutes output).
 /// AsyncLocal so parallel test tasks don't race on the flag.
-let internal ompTestModeStorage =
-    System.Threading.AsyncLocal<bool ref>()
+let ompTestModeCell () : bool ref = Blade.Toolchain.ompCoverageModeCell ()
 
-let ompTestModeCell () : bool ref =
-    let v = ompTestModeStorage.Value
-    if isNull (box v) then
-        let fresh = ref false
-        ompTestModeStorage.Value <- fresh
-        fresh
-    else v
-
-/// Set/clear OpenMP test-mode for the current async flow (called by the harness).
-let setOmpTestMode (on: bool) : unit =
-    freshCell ompTestModeStorage on
+/// Admission and rendering read the same per-flow coverage capability.
+let setOmpTestMode (on: bool) : unit = Blade.Toolchain.setOmpCoverageMode on
 
 /// Split-timing mode: when on, main() emits TWO timing checkpoints -- input-data
 /// setup and computation -- instead of one whole-body clock, so the differential
@@ -580,30 +777,74 @@ let setSplitTimingMode (on: bool) : unit =
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
 
-// ---- Floating-point reassociation opt-in (BLADE_FP_REASSOC) -----------------
+// ---- Floating-point fold association: fast by default, BLADE_FP_REPRO opts out --
 
-/// May the emitter reassociate a SERIAL floating-point accumulation chain?
+/// Does THIS BUILD keep the serial association of every fold? The opt-in for
+/// reproducibility (docs/plans/plan-fp-default-fastest.md):
 ///
-///   BLADE_FP_REASSOC=1|on   -> yes
-///   unset / 0 / anything else -> NO (the default)
+///   BLADE_FP_REPRO=1|on      -> yes
+///   BLADE_FP_REASSOC=0|off   -> yes (the compatibility spelling of the same thing)
+///   unset (both)             -> NO -- the default emits every licensed fold in
+///                               its fastest form (the owner's 2026-10-17 policy:
+///                               "always fastest" by default, reproducibility
+///                               opt-in)
+///
+/// BLADE_FP_REPRO=1 wins over BLADE_FP_REASSOC=1 when both are set: asking for
+/// reproducibility is the stronger request. Under it, EVERY fold keeps the
+/// ascending serial association the interpreter evaluates -- the K-lane and
+/// `omp simd reduction` forms below, the LLVM lane's `reassoc nsz` flags, AND
+/// the thread-level fold forms a `where omp` kernel would otherwise get (Path A
+/// `parallel for simd reduction`, Path B's chunked partials), each of which
+/// then prints the census marker naming this knob. Map loops are untouched
+/// (their cells do not depend on an evaluation order) and so is contraction
+/// (BLADE_FP_CONTRACT is its own knob; byte identity with the interpreter
+/// needs BOTH `BLADE_FP_REPRO=1` and `BLADE_FP_CONTRACT=off`, which is exactly
+/// what the differential harnesses pin).
+///
+/// A FUNCTION, per call, never cached -- see `fpReassocEnabled` below.
+/// The predicate itself lives in Blade.Toolchain (so the optimizer reads the
+/// same one); this is its re-export.
+let fpReproEnabled () : bool = Blade.Toolchain.fpReproEnabled ()
+
+/// Which spelling selected the repro build, for the census markers and the
+/// `blade plan` fold-form lines (one phrase, so a grep finds every site).
+let fpReproReason () : string =
+    if Blade.Toolchain.envFlag "BLADE_FP_REPRO" false
+    then "BLADE_FP_REPRO=1 -- this build keeps the serial association of every fold (the reorder licence in source is unchanged)"
+    else "BLADE_FP_REASSOC=0 -- this build keeps the serial association of every fold (the reorder licence in source is unchanged)"
+
+/// May the emitter spend a fold's reorder licence -- reassociate a SERIAL
+/// floating-point accumulation chain into lanes / a vectorized reduction, or
+/// (the thread-level fold paths) into per-thread partials?
+///
+///   unset                   -> YES (the default since 2026-10-17)
+///   BLADE_FP_REASSOC=1|on   -> yes (still accepted; it is the default)
+///   BLADE_FP_REASSOC=0|off  -> no  (= BLADE_FP_REPRO=1)
+///   BLADE_FP_REPRO=1|on     -> no
 ///
 /// CONTRACT, stated where the knob lives so it cannot be read without it:
 ///
 ///  * Reassociation CHANGES BITWISE RESULTS. `(a+b)+c` and `a+(b+c)` are
-///    different doubles. Off is therefore the default, and OFF MEANS NO
-///    REASSOCIATION ANYWHERE: every site guarded by this predicate emits,
-///    character for character, the serial chain it emitted before the knob
-///    existed. (The separate `literalOrRuntimeExtent` rule below changes some
-///    of those chains' loop BOUNDS from a runtime read to the literal the type
-///    already carries. That is a textual change on both settings and a
-///    numerically inert one -- same trip count, same summands, same order.)
-///  * The INTERPRETER DIFFERENTIALS MUST RUN WITH IT OFF. `src/Interp` is a
+///    different doubles. The REPRO build therefore means NO REASSOCIATION
+///    ANYWHERE: every site guarded by this predicate emits, character for
+///    character, the serial chain it emitted before the knob existed. (The
+///    separate `literalOrRuntimeExtent` rule below changes some of those
+///    chains' loop BOUNDS from a runtime read to the literal the type already
+///    carries. That is a textual change on both settings and a numerically
+///    inert one -- same trip count, same summands, same order.)
+///  * It reorders only what a SOURCE LICENCE covers: a recognised builtin fold
+///    body or a declared `comm`, and never a `where repro` kernel
+///    (`foldReorderLicensed`). An unlicensed user kernel is serial in every
+///    build. What changed on 2026-10-17 is the polarity, not the licence.
+///  * The INTERPRETER DIFFERENTIALS RUN THE REPRO BUILD. `src/Interp` is a
 ///    byte-identity twin of exactly these chains (`ArrayOps.prodSum` walks `t`
 ///    ascending through one accumulator, and so does the fold), so
-///    `blade test interp ...` and `diff-oracle` compare two evaluators that
-///    only agree while the emitter is not reassociating. Nothing has to be
-///    done to keep them honest -- they inherit the default -- but a harness
-///    that pins this ON is asserting a false equality.
+///    `blade test interp ...`, `diff-oracle` and `opt-diff` compare two
+///    evaluators that only agree while the emitter is not reassociating; they
+///    pin `BLADE_FP_REPRO=1` for their own runs (beside the
+///    `BLADE_FP_CONTRACT=off` pin they already carried), while the default
+///    suite runs the fast default. A harness that compares bytes WITHOUT that
+///    pin is asserting a false equality.
 ///  * DETERMINISM, and this is the part that CHANGED. What the knob buys is
 ///    instruction-level and SIMD parallelism, never threads -- no site guarded
 ///    by this predicate creates a team, so a surrounding parallel region and
@@ -653,10 +894,52 @@ let splitTimingModeEnabled () : bool =
 /// test's scoped ON, a hand-run between two compiles in one process) silently
 /// ineffective. Same reason `LinAlgPatterns.blasAvailable` and `Build.fs`'s
 /// `fpContractFlag` are functions. Every consultation re-reads.
-let fpReassocEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_FP_REASSOC") with
-    | "1" | "on" -> true
-    | _ -> false
+let fpReassocEnabled () : bool = not (fpReproEnabled ())
+
+/// `BLADE_DOMAIN_DIAGONAL`: unset/`1`/`on` lets a LICENSED fold over a band
+/// domain walk it by diagonal (`Types.domainDiagonal`; both lanes), `0`/`off`
+/// keeps the row-major affine nest, for A/B. Inert under BLADE_FP_REPRO=1,
+/// whose folds keep the lex order. Changes the emission, so the exe cache keys
+/// on it for free. A function, re-read per call, like every knob here.
+let domainDiagonalEnabled () : bool =
+    Blade.Toolchain.envSwitch "BLADE_DOMAIN_DIAGONAL" <> Blade.Toolchain.SwitchOff
+
+/// The one EXPLICIT spelling `BLADE_FP_REASSOC=1` (unset does not count),
+/// for the single consumer whose reassociation is NOT a source licence: the
+/// Reynolds term merger (`canonicalKey`), which may flatten a float `+`/`*`
+/// chain the user wrote (`(x + y) + z`) -- arithmetic no `comm` or builtin
+/// fold body covers. The 2026-10-17 default flip honours SOURCE licences; it
+/// does not invent one, so that merger keeps its old opt-in polarity (corpus
+/// reynolds/026 pins the default).
+let fpReassocExplicitOptIn () : bool =
+    Blade.Toolchain.envSwitch "BLADE_FP_REASSOC" = Blade.Toolchain.SwitchOn
+    && not (fpReproEnabled ())
+
+/// Record, for `blade plan`, which FORM a fold was emitted in (rule
+/// `fold-form`). `form` is one of the census spellings
+///
+///   simd-reduction | K-lanes(k) | threaded(...) | serial (repro) | serial (<why>)
+///
+/// and `where` names the emitter site. A fast form is `applied`; every serial
+/// outcome is `declined` with its reason, so `blade plan` answers "what did
+/// this fold become" for every fold the C++ lane emits.
+let recordFoldForm (subject: string) (form: string) (where: string) : unit =
+    let outcome =
+        if form.StartsWith "serial" then Blade.Effects.Declined form
+        else Blade.Effects.Applied
+    recordCodegenDecision "fold-form" subject outcome [ $"fold form: {form}"; where ]
+
+/// `blade plan`'s line for how a `range<R>` over a static-struct domain (or a
+/// SparseIdx range in a fold) is ENUMERATED (docs/plans/structural/06): the
+/// closed-form affine nest is `applied`; a table route is `declined` with why.
+/// `domain` names the struct; `form` and `consumer` are the evidence.
+let recordDomainEnum (subject: string) (domain: string) (closedForm: bool) (form: string) (consumer: string) : unit =
+    let outcome = if closedForm then Blade.Effects.Applied else Blade.Effects.Declined form
+    recordCodegenDecision "domain-enum" subject outcome [ $"enumeration of {domain}: {form}"; consumer ]
+
+/// The serial-form label for a licensed fold this build did not reorder.
+let serialFoldForm () : string =
+    if fpReproEnabled () then "serial (repro)" else "serial (no reorder licence)"
 
 /// How many independent LANE accumulators a reassociated accumulation chain
 /// runs. A single accumulator makes the sweep a serial dependence chain through
@@ -784,10 +1067,13 @@ let internal laneCountForStreams (s: int) : int =
 /// `fpReassocEnabled`: a module-level binding freezes the environment read at
 /// first touch and would make a mid-process pin (a test's scoped guard)
 /// silently ineffective. Every consultation re-reads.
-let ompThreadEmissionEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_OMP_THREADS") with
-    | "1" | "0" | "off" -> false
-    | _ -> true
+///
+/// Not a plain switch but a THREAD COUNT with off-words: `1` (one thread)
+/// suppresses exactly as `0` / `off` / `false` do, while `on` / `true` are no
+/// count at all and leave emission on. Trimmed and case-insensitive, like
+/// Toolchain.parseSwitch. The predicate itself lives in Blade.Toolchain (so the
+/// optimizer reads the same one); this is its re-export.
+let ompThreadEmissionEnabled () : bool = Blade.Toolchain.ompThreadEmissionEnabled ()
 
 /// The reason string every site hands to the emitted-C++ marker when this knob
 /// is what suppressed a thread construct. ONE spelling, so a census over
@@ -888,15 +1174,7 @@ let ompSuppressedBlockMarker (requested: bool) (reason: string) : string =
 /// all is a loud refusal (genPrintStatements); a name that IS one but never
 /// prints (a deferred loop value, a streamed read) prints nothing, exactly
 /// as it does without the flag.
-let printSelection () : Set<string> option =
-    match System.Environment.GetEnvironmentVariable "BLADE_PRINT" with
-    | null -> None
-    | v ->
-        let names =
-            v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-            |> Array.map (fun s -> s.Trim())
-            |> Array.filter (fun s -> s <> "")
-        if names.Length = 0 then None else Some (Set.ofArray names)
+let printSelection () : Set<string> option = Blade.PrintSelection.names ()
 
 let internal tilesUsedStorage =
     System.Threading.AsyncLocal<bool ref>()
@@ -906,6 +1184,34 @@ let tilesUsedCell () : bool ref =
     if isNull (box v) then
         let fresh = ref false
         tilesUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// Set when a fold emitted a `blade_fold::` call (the explicit K-lane vector
+/// forms and the Path B chunk partition in blade_fold_lanes.hpp); the assembly
+/// appends that include only then. Same AsyncLocal collect-then-append shape
+/// as tilesUsedCell.
+let internal foldLanesUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let foldLanesUsedCell () : bool ref =
+    let v = foldLanesUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        foldLanesUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// Set when a fold took the ordered orbit scatter (a `blade_scatter::` call,
+/// blade_orbit_scatter.hpp); the assembly appends that include only then.
+let internal orbitScatterUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let orbitScatterUsedCell () : bool ref =
+    let v = orbitScatterUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        orbitScatterUsedStorage.Value <- fresh
         fresh
     else v
 
@@ -920,6 +1226,39 @@ let packedGemmUsedCell () : bool ref =
     if isNull (box v) then
         let fresh = ref false
         packedGemmUsedStorage.Value <- fresh
+        fresh
+    else v
+
+/// Hot-row fold scheduling handoff (Blade.Optimize.planHotRowFolds): the
+/// plan the compute binding being emitted carries, keyed by its C++ output
+/// name. Set by the two statement-form producer sites (CodeGen's
+/// function-body arm, genComputeBinding's top-level arm) around their
+/// `genApplyCombinator` call, because the apply emitter knows the output's
+/// NAME and not its let id; cleared right after. Same AsyncLocal shape as
+/// the cells above.
+let internal hotRowPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>>()
+
+let hotRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan> =
+    let v = hotRowPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, Blade.Optimize.HotRowPlan>()
+        hotRowPendingStorage.Value <- fresh
+        fresh
+    else v
+
+/// Compact row-class scheduling's twin of `hotRowPendingCell`: the
+/// Blade.Optimize.CompactRowPlan of the compact producer being emitted, keyed
+/// by its C++ output name, set around the statement-form `genApplyCombinator`
+/// call and cleared right after.
+let internal compactRowPendingStorage =
+    System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan>>()
+
+let compactRowPendingCell () : System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan> =
+    let v = compactRowPendingStorage.Value
+    if isNull (box v) then
+        let fresh = System.Collections.Generic.Dictionary<string, Blade.Optimize.CompactRowPlan>()
+        compactRowPendingStorage.Value <- fresh
         fresh
     else v
 
@@ -1100,6 +1439,15 @@ let splitTimingOnlyBinding () : string option =
 let ompTestModeEnabled () : bool =
     (ompTestModeCell ()).Value
 
+/// BLADE_WORKSPACE_CENSUS (round 4 wave 3 A4, PM06): COMPILE-TIME
+/// instrumentation, read by the compiler only. `1`/`on` writes `#define
+/// BLADE_WS_CENSUS 1` ahead of the includes (blade_pool then counts every pool
+/// a thread allocates while a site is open) and brackets each threaded loop
+/// nest's team with `blade_rr::ws_site_begin` / `ws_site_end`, so the C++ run
+/// record (BLADE_RUN_RECORD) carries a `workspace` row per site. Unset/`0` =
+/// no census code at all (the default emission). Read per call.
+let workspaceCensusEnabled () : bool = Blade.Toolchain.envFlag "BLADE_WORKSPACE_CENSUS" false
+
 /// Memcheck emission gate (BLADE_MEMCHECK=1): the generated program includes
 /// blade_memcheck.hpp, whose static Report object brackets main() with
 /// ASan-hook allocation accounting and prints one BLADE-MEMCHECK line on
@@ -1109,10 +1457,7 @@ let ompTestModeEnabled () : bool =
 /// set by `blade run --memcheck` before codegen starts. Default
 /// (unset/empty/"0") emits NOTHING -- default output stays byte-identical,
 /// and the interpreter/REPL lanes never pay for it.
-let memcheckEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable "BLADE_MEMCHECK" with
-    | null | "" | "0" -> false
-    | _ -> true
+let memcheckEnabled () : bool = Blade.Toolchain.envFlag "BLADE_MEMCHECK" false
 
 /// CUDA emission gate. genCudaKernel[Simplicial] emits an `extern "C"` launch
 /// call into the host .cpp plus a `__global__` kernel into a separate .cu, which
@@ -1368,12 +1713,12 @@ let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnost
 // at a call site). ProviderReadSpec.Streamed has always promised a loud
 // codegen error there instead; this is it.
 //
-// The renderers see only a name map, not the context, and `A` IS legitimately
-// declared in two scopes: a lifted free function receives a capture as a
-// parameter named `A`, and a segment run declares a window alias named `A`.
-// So the check is by the BINDING's id and emitted name, and those two scopes
-// mask the name while they emit (`maskStreamedNames`, restored on Dispose --
-// bind it with `use`).
+// The renderers see only a name map, not the context. A lifted free function
+// legitimately receives a capture parameter named `A`; that formal scope masks
+// the binding's id/emitted name while rendering (`maskStreamedNames`, restored
+// on Dispose -- bind it with `use`). Segment-window aliases are different:
+// ordinary element peels use them directly, but arbitrary source-value access
+// must retain this guard because a reused window is not the full source array.
 //
 // The refusal is DEFERRED: a render returns a sentinel identifier and queues
 // the message, and `settleStreamedValueLeaks` turns it into a BL7004 refusal
@@ -1398,12 +1743,49 @@ let private streamedBindingsCell () = asyncCell streamedBindingsStorage Map.empt
 let private streamedMaskCell () = asyncCell streamedMaskStorage Set.empty
 let private streamedLeaksCell () = asyncCell streamedLeaksStorage []
 
+/// PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1). An ADMITTED plan
+/// (CodeGenBinding.planRecPrintReplays): x is never stored; its ring sweep
+/// (the `__replay_<x>` binding) is one C++ lambda `Sweep` run through
+/// `blade_rt::replay_sweep` -- once at the replay binding's slot (filling the
+/// snapshots), once at x's print slot (printing each row).
+type RecReplayPlan =
+    { TargetId: int
+      TargetName: string
+      ReplayId: int
+      Sweep: string
+      /// The trajectory's rank (rows have rank - 1), element C++ type and
+      /// static extents (leading = the recursion axis).
+      Rank: int
+      ElemCpp: string
+      Extents: int64 list
+      /// (row p, snapshot binding id, its C++ name) -- `__snap_<p>_<x> = x(p)`.
+      Snapshots: (int64 * int * string) list }
+let internal recReplayPlansStorage = System.Threading.AsyncLocal<RecReplayPlan list ref>()
+/// The plan whose sweep body is being emitted (the IRReplayRow arm reads it).
+let internal recReplayActiveStorage = System.Threading.AsyncLocal<(RecReplayPlan * Map<int64, string>) option ref>()
+let recReplayPlansCell () = asyncCell recReplayPlansStorage []
+let recReplayActiveCell () = asyncCell recReplayActiveStorage None
+/// The LU column-major companions THIS program emitted (gap G109, round 4
+/// wave 4 lane K; Blade.Optimize.LuCompanionTable admits, the C++ emitter
+/// builds): factor binding id -> the C++ name of the `blade_lu_cm` object
+/// kept beside (LU, piv). Set only when the factor's ROUTED arm emitted it,
+/// so a solve reads a companion that exists.
+let internal luCompanionStorage = System.Threading.AsyncLocal<Map<IRId, string> ref>()
+let private luCompanionCell () = asyncCell luCompanionStorage Map.empty
+let noteLuCompanion (factorId: IRId) (cppName: string) : unit =
+    let cell = luCompanionCell ()
+    cell.Value <- Map.add factorId cppName cell.Value
+let luCompanionOf (factorId: IRId) : string option =
+    Map.tryFind factorId (luCompanionCell ()).Value
+
 /// Per-program reset, beside the other codegen channels (fresh refs: see
 /// `freshCell`).
 let resetStreamedValueState () : unit =
     freshCell streamedBindingsStorage Map.empty
     freshCell streamedMaskStorage Set.empty
     freshCell streamedLeaksStorage []
+    freshCell recReplayPlansStorage []
+    freshCell recReplayActiveStorage None
 
 /// Every per-PROGRAM cell this file owns, reset for a new assembly by
 /// installing fresh state in the current flow (`freshCell`) -- never by
@@ -1416,19 +1798,29 @@ let resetProgramStateCells () : unit =
     freshCell unhandledNodesStorage []
     freshCell codegenRefusalsStorage []
     freshCell currentDeclStorage ""
+    freshCell currentDeclIdStorage -1
+    freshCell memberUsedStorage false
+    freshCell externalSortGrantStorage None
+    freshCell externalSortUsedStorage false
     freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
+    freshCell bodyForceNamesStorage []
+    freshCell moduleTupleChildrenStorage Map.empty
+    freshCell flatTupleIdsStorage Set.empty
     cudaKernelDefsStorage.Value <- DeclCollector()
     symmDeclsStorage.Value <- DeclCollector()
     moduleGlobalDeclsStorage.Value <- DeclCollector()
     freshCell linalgUsedStorage false
     freshCell tilesUsedStorage false
     freshCell packedGemmUsedStorage false
+    freshCell orbitScatterUsedStorage false
     freshCell cudaLinalgUsedStorage false
     freshCell lapackUsedStorage false
+    freshCell luCompanionStorage Map.empty
     freshCell ompApiUsedStorage false
     freshCell mpiProgramOnStorage false
     freshCell userNameRenamesStorage Map.empty
+    freshCell userSpellingCensusStorage Set.empty
     resetStreamedValueState ()
 
 /// A `.stream` binding was emitted under C++ name `name`: from here on, a
@@ -1545,8 +1937,16 @@ let isUnitExpr (expr: IRExpr) : bool =
     match expr with
     | IRLit IRLitUnit -> true
     | IRAssign _ -> true
-    | IRForRange _ -> true
+    | IRForRange _ | IRBeginPoolScope _ | IRReleasePools _ -> true
     | _ -> false
+
+/// isUnitExpr through a let CHAIN: `let t = [..]; out = t` is a statement
+/// (gap G227: the lift pass binds an array literal assigned inside a kernel
+/// block this way; rendered as a value it became `auto x = void`, BL9002).
+let rec isUnitValue (expr: IRExpr) : bool =
+    match expr with
+    | IRLet (_, _, body) -> isUnitValue body
+    | _ -> isUnitExpr expr
 
 let emptyContext () = {
     VarNames = Map.empty
@@ -1555,10 +1955,14 @@ let emptyContext () = {
     StaticDecls = []
     TupleChildren = Map.empty
     DeferredComputations = Map.empty
+    DeferredAliasOf = Map.empty
     ObjectLoopBindings = Map.empty
     ProviderReads = Map.empty
     ProviderWrites = Map.empty
     StreamedArrays = Map.empty
+    StreamTerminalModule = None
+    PrivateSpoolRegion = None
+    TopLevelProviderRead = None
     StructuralGroupings = Set.empty
     GridGroupings = Map.empty
     RandomInits = Map.empty
@@ -1604,26 +2008,42 @@ let cppReservedWords = Set.ofList [
     "switch"; "case"; "break"; "continue"; "goto"; "default"; "try"; "catch"; "throw"
     "sizeof"; "alignof"; "decltype"; "typedef"; "using"; "operator"
     "true"; "false"; "nullptr"; "inline"; "constexpr"; "mutable"
+    // The rest of the C++17 keyword list and the alternative tokens (gap
+    // G252: `let thread_local = 1.0` reached g++ verbatim), plus the C++20
+    // keywords a newer -std would reserve.
+    "alignas"; "asm"; "char16_t"; "char32_t"; "char8_t"; "const_cast"; "dynamic_cast"
+    "explicit"; "export"; "friend"; "noexcept"; "reinterpret_cast"; "static_assert"
+    "static_cast"; "thread_local"; "typeid"; "wchar_t"; "concept"; "requires"
+    "consteval"; "constinit"; "co_await"; "co_return"; "co_yield"
+    "and"; "and_eq"; "bitand"; "bitor"; "compl"; "not"; "not_eq"; "or"; "or_eq"; "xor"; "xor_eq"
 ]
 
 /// The spelling rule alone: dots to `__`, reserved words `_`-suffixed.
 let private baseCppName (name: string) : string =
     // A module member's IR name is qualified with dots (`units.SI.x`, see
-    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, so
-    // `M__x` can only meet a user name spelled `M__x` itself.
+    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, but a
+    // user name may SPELL `M__x` itself (gap G252) -- `installCppNameTable`
+    // moves the dotted member then.
     if name.Contains '.' then name.Replace(".", "__")
     elif Set.contains name cppReservedWords then name + "_"
     else name
 
-/// Sanitize a name to avoid C++ reserved word conflicts -- and, through the
-/// per-program rename table (`installUserNameRenames`), collisions with the
-/// names codegen DERIVES from another top-level binding (see there).
-/// Idempotent: a renamed spelling is never itself a key.
+/// The C++ name of a binding: through the per-program rename table
+/// (`installCppNameTable`) when its RAW IR spelling was moved there -- a
+/// collision with another binding's spelling, a generated suffix, a reserved
+/// spelling of the emitted translation unit -- else the spelling rule.
+/// THE TABLE IS KEYED BY THE RAW SPELLING (gap G252): at module scope a raw
+/// spelling is one binding (a dotted `Lib.a` is one module member; an
+/// undotted name is one binding, BL2009; a reserved spelling moves every
+/// binding of that spelling alike), while the MANGLED spelling is not
+/// (`Lib.a` and a user `Lib__a` both mangle to `Lib__a`; keying by it moved
+/// the importer's binding together with the import's reads, wave 9). The
+/// binding that keeps its spelling is never a key and no emitted spelling is
+/// one, so re-sanitizing an already emitted name is the identity.
 let sanitizeCppName (name: string) : string =
-    let s = baseCppName name
     let r = userNameRenamesStorage.Value
-    if isNull (box r) then s
-    else match Map.tryFind s r.Value with Some t -> t | None -> s
+    if isNull (box r) then baseCppName name
+    else match Map.tryFind name r.Value with Some t -> t | None -> baseCppName name
 
 /// The suffixes the emitters append to a binding's C++ name (a census of the
 /// `{name}_...` spellings in CodeGen*.fs and the provider emitters; a
@@ -1661,26 +2081,22 @@ let private generatedNameSuffix (suffix: string) : bool =
 /// with a trailing `_` (the reserved-word convention), lengthened until it
 /// collides with nothing. `x` beside `x_mean` is not such a pair and emits
 /// as before; programs without a pair emit byte for byte what they did.
-/// Installed per program assembly (after `resetProgramStateCells`).
-let installUserNameRenames (bindingNames: string list) : unit =
+/// The RAW spellings of the bindings at risk (`installCppNameTable` moves them).
+let private generatedSuffixAtRisk (bindingNames: string list) : Set<string> =
     let names =
         bindingNames
-        |> List.filter (fun n -> not (n.StartsWith "_"))   // `__` internals, `_(` tuple temps
-        |> List.map baseCppName
-        |> Set.ofList
-    let atRisk =
-        names |> Set.filter (fun n ->
-            names |> Set.exists (fun b -> b <> n && n.StartsWith (b + "_") && generatedNameSuffix (n.Substring b.Length)))
-    let mutable used = names
-    let renames =
-        atRisk
-        |> Seq.map (fun n ->
-            let mutable r = n + "_"
-            while used.Contains r do r <- r + "_"
-            used <- used.Add r
-            n, r)
-        |> Map.ofSeq
-    freshCell userNameRenamesStorage renames
+        // `__` internals and `_(` tuple temps stay out; a SINGLE-underscore
+        // user name (`_g`, `_a`) is an ordinary binding whose generated names
+        // (`_g__win`, `_a_extents`) a user binding may spell too (round 4 wave
+        // 9, lane A, A4, Codex 0219820a: `let _g__sga_n = 42` beside a grouping
+        // `_g` redeclared the generated count)
+        |> List.filter (fun n -> not (n.StartsWith "__") && not (n.StartsWith "_("))
+        |> List.distinct
+    let bases = names |> List.map baseCppName |> Set.ofList
+    names |> List.filter (fun raw ->
+        let n = baseCppName raw
+        bases |> Set.exists (fun b -> b <> n && n.StartsWith (b + "_") && generatedNameSuffix (n.Substring b.Length)))
+    |> Set.ofList
 
 /// Identifiers the generated TU's own includes declare at GLOBAL scope. None
 /// of them is a C++ keyword, so `cppReservedWords` does not catch them, but a
@@ -1752,12 +2168,252 @@ let cppLibraryGlobals = Set.ofList [
 /// generated C++ for the overwhelming majority of index types is byte-identical
 /// to what it was before this guard existed.
 let indexTypeCppName (name: string) : string =
+    // A non-main module's index type is `Geo.Cell` (D11): `Geo__Cell`.
+    let name = Blade.Types.TypeOrigins.cppName name
     if Set.contains name cppReservedWords || Set.contains name cppLibraryGlobals
     then name + "_"
     else name
 
-let addVarName id name ctx = 
+let addVarName id name ctx =
     { ctx with VarNames = Map.add id (sanitizeCppName name) ctx.VarNames }
+
+/// THE RESERVED SPELLINGS OF THE EMITTED TRANSLATION UNIT (gap G252), generated
+/// mechanically from the configured prelude by
+/// tools/cpp-reserved-names/generate.sh into src/CppReservedNames.txt (an
+/// embedded resource): the object-like and function-like macros (`g++ -dM -E`),
+/// the functions of the global namespace and of every named namespace, the
+/// global types / variables / templates, and nested_array_utilities, which the
+/// runtime hoists with a using-directive (`g++ -fdump-lang-raw`). Read once per
+/// process: it is data about the toolchain, not a gate.
+let private cppReservedNameSets : Lazy<Map<string, System.Collections.Generic.HashSet<string>>> =
+    lazy (
+        let asm = System.Reflection.Assembly.GetExecutingAssembly()
+        use s = asm.GetManifestResourceStream "CppReservedNames.txt"
+        if isNull s then failwith "internal compiler error: the CppReservedNames.txt resource is missing from Blade.dll"
+        use r = new System.IO.StreamReader(s)
+        let sets = System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>>()
+        let mutable cur : System.Collections.Generic.HashSet<string> = null
+        let mutable line = r.ReadLine()
+        while not (isNull line) do
+            let t = line.Trim()
+            if t.StartsWith "[" && t.Contains "]" then
+                cur <- System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                sets.[t.Substring(1, t.IndexOf ']' - 1)] <- cur
+            elif t <> "" && not (t.StartsWith "#") && not (isNull cur) then
+                for w in t.Split([| ' ' |], System.StringSplitOptions.RemoveEmptyEntries) do cur.Add w |> ignore
+            line <- r.ReadLine()
+        sets |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq)
+
+let private reservedIn (section: string) (s: string) : bool =
+    match Map.tryFind section (cppReservedNameSets.Force()) with
+    | Some h -> h.Contains s
+    | None -> false
+
+/// Names the emitter itself writes UNQUALIFIED into every scope it emits user
+/// names into (the print pass's `cout << .. << endl`, the `^` operator's
+/// `pow(..)`), and the prefixes of its runtime entry points and scaffolding
+/// (`blade_member_init_i64`, `__blade_t0` of the timing scaffold).
+let private emitterScopeNames = Set.ofList [ "cout"; "endl"; "pow" ]
+let private emitterReservedPrefix (s: string) = s.StartsWith "__blade_" || s.StartsWith "blade_"
+
+/// Would a VALUE (a binding, a parameter, a capture) spelled `s` meet a
+/// declaration or a macro of the emitted TU? An object-like macro expands at
+/// every use; a function-like one only before `(`, i.e. for a function-typed
+/// value that is called.
+let private valueSpellingReserved (functionValued: bool) (s: string) : bool =
+    reservedIn "objectMacros" s
+    || (functionValued && reservedIn "functionMacros" s)
+    || reservedIn "globalValueNames" s || reservedIn "runtimeNamespaceNames" s
+    // a namespace name (std, blade_rt): a declaration at namespace scope redeclares it
+    || reservedIn "namespaceNames" s
+    || emitterScopeNames.Contains s || emitterReservedPrefix s
+
+/// Would a user FUNCTION spelled `s` meet one? Besides the value rule: the
+/// global functions ordinary lookup finds beside it (and `main`), and -- when
+/// an argument may have a class type (`adl`) -- every named namespace's
+/// functions, which argument-dependent lookup brings in: `apply(add, t)` over a
+/// tuple `t` called std::apply (r = 3.0 for 30.0, gap G252).
+let private callableSpellingReserved (adl: bool) (s: string) : bool =
+    valueSpellingReserved true s
+    || reservedIn "globalFunctions" s || Set.contains s cppLibraryGlobals || s = "main"
+    || (adl && reservedIn "namespaceFunctions" s)
+
+/// `s`, lengthened with `_` past every spelling of the census.
+let private lengthenPast (census: Set<string>) (s: string) : string =
+    if not (census.Contains s) then s
+    else
+        let mutable r = s + "_"
+        while census.Contains r do r <- r + "_"
+        r
+
+/// A name the emitter MINTS (a body local, a renamed parameter) that keeps its
+/// spelling unless the program spells it too (gap G252: `let __v3 = 10.0` read
+/// inside a function whose own local is `__v3` read 6.0 for 13.0).
+let avoidUserSpelled (s: string) : string =
+    let c = userSpellingCensusStorage.Value
+    if isNull (box c) then s else lengthenPast c.Value s
+
+/// The C++ name of the body-local / temporary for IR id `id`: `__v<id>`, unless
+/// the program spells that.
+let localVarName (id: IRId) : string = avoidUserSpelled $"__v{id}"
+
+/// THE C++ NAME TABLE OF ONE PROGRAM (gap G252), installed per program assembly
+/// (after `resetProgramStateCells`). It returns the module with its CALLABLES
+/// renamed at IR level (Name only: SourceName, which frames and diagnostics
+/// print, is kept; call sites resolve by id through VarNames, so the rename is
+/// total), installs the RAW-keyed rename table of the BINDINGS
+/// (`sanitizeCppName`), and the census of the program's spellings that the
+/// emitter's minted names avoid (`avoidUserSpelled`, `localVarName`). A program
+/// with no collision and no reserved spelling emits what it emitted before.
+///   CALLABLES: a callable moves (`<name>_`, lengthened) when its spelling is
+///   reserved (`callableSpellingReserved`), is a binding's spelling plus a
+///   generated suffix (`a_extents` beside an array `a`), equals a binding's spelling (a
+///   generated `walk__arrow1` beside `let walk__arrow1`), or equals another
+///   callable's with a different id (a generated arrow instance / HM clone /
+///   lifted lambda beside a user function of that name, a qualified `Lib.f`
+///   beside `Lib__f`): the user-written one (Name = SourceName) keeps it.
+///   BINDINGS: the generated-suffix rule (`generatedSuffixAtRisk`); a reserved
+///   VALUE spelling; then, per emitted spelling shared by several bindings
+///   (`Lib.a` and `Lib__a`; a keyword `auto` emitted `auto_` beside a user
+///   `auto_`), the binding whose raw spelling IS the emitted one keeps it and
+///   the others move.
+///   PARAMETERS and CAPTURES: a reserved or keyword spelling moves at IR level
+///   (they were emitted raw).
+let installCppNameTable (modul: IRModule) : IRModule =
+    let rec plainScalar (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> plainScalar inner
+        | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETBool | ETUnit) | IRTNat _ | IRTUnit -> true
+        | _ -> false
+    let rec functionValued (t: IRType) =
+        match t with
+        | IRTUnitAnnotated (inner, _) -> functionValued inner
+        | FuncElem _ -> true
+        | _ -> false
+    let bindingRaws =
+        modul.Bindings |> List.map (fun b -> b.Name) |> List.filter (fun n -> not (n.StartsWith "_(")) |> List.distinct
+    let mutable census =
+        seq {
+            for n in bindingRaws do yield n; yield baseCppName n
+            for f in modul.Functions do
+                yield f.Name; yield baseCppName f.Name
+                for p in f.Params do yield p.Name; yield baseCppName p.Name
+                for c in f.Captures do yield c.Name; yield baseCppName c.Name }
+        |> Set.ofSeq
+    // a fresh spelling is itself neither taken nor reserved (BLADE_RR_STR moved to
+    // BLADE_RR_STR_ met another macro: the diff review, Codex 067cb140)
+    let reservedAny (s: string) = Set.contains s cppReservedWords || callableSpellingReserved true s
+    // A spelling under an emitter PREFIX (blade_x, __blade_t0) cannot leave it by
+    // lengthening (the diff review, Codex 067cb140 round 4: an endless loop), so it
+    // is moved under u_ first; the other reserved sets are finite.
+    // Nor may a fresh spelling be the BASE of a program spelling plus a generated
+    // suffix (`blade_a` moved to `u_blade_a_` brings `u_blade_a__extents`, which a
+    // user binding may spell: the diff review, round 5, Codex 00f0ebe8). Each
+    // lengthening outgrows a finite census, so the loop terminates.
+    let suffixTaken (r: string) =
+        census |> Set.exists (fun n -> n.StartsWith (r + "_") && generatedNameSuffix (n.Substring r.Length))
+    let fresh (s: string) =
+        let s = if emitterReservedPrefix s then "u_" + s else s
+        let mutable r = lengthenPast census (s + "_")
+        while reservedAny r || suffixTaken r do r <- lengthenPast census (r + "_")
+        census <- census.Add r
+        r
+    // CALLABLES.
+    let bindingSpellings = bindingRaws |> List.map baseCppName |> Set.ofList
+    let keptOfGroup =
+        modul.Functions
+        |> List.groupBy (fun f -> baseCppName f.Name)
+        |> List.choose (fun (_, fs) ->
+            match fs |> List.distinctBy (fun f -> f.Id) with
+            | [] | [_] -> None
+            | many ->
+                let keep = many |> List.sortBy (fun f -> (if f.Name = f.SourceName then 0 else 1), f.Id) |> List.head
+                Some (many |> List.filter (fun f -> f.Id <> keep.Id) |> List.map (fun f -> f.Id)))
+        |> List.concat |> Set.ofList
+    let callableNames = System.Collections.Generic.Dictionary<IRId, string>()
+    for f in modul.Functions do
+        if not (callableNames.ContainsKey f.Id) then
+            let s = baseCppName f.Name
+            let adl =
+                (f.Params |> List.exists (fun p -> not (plainScalar p.Type)))
+                || (f.Captures |> List.exists (fun c -> not (plainScalar c.Type)))
+            // a callable spelled as a binding's name plus a GENERATED suffix: the
+            // binding's generated name (an array `a` declares `a_extents` in main)
+            // shadows the file-scope function at its calls (the wave-end review,
+            // F5: `function a_extents(k: Int64)` beside `let a = [1.0, 2.0]`, BL9002)
+            let besideGenerated =
+                bindingSpellings |> Set.exists (fun b -> b <> s && s.StartsWith (b + "_") && generatedNameSuffix (s.Substring b.Length))
+            if callableSpellingReserved adl s || bindingSpellings.Contains s || keptOfGroup.Contains f.Id || besideGenerated then
+                callableNames.[f.Id] <- fresh s
+    // BINDINGS.
+    let renames = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
+    for raw in generatedSuffixAtRisk bindingRaws do renames.[raw] <- fresh (baseCppName raw)
+    for b in modul.Bindings do
+        if not (b.Name.StartsWith "_(") && not (renames.ContainsKey b.Name)
+           && valueSpellingReserved (functionValued b.Type) (baseCppName b.Name) then
+            renames.[b.Name] <- fresh (baseCppName b.Name)
+    let emitted (raw: string) = match renames.TryGetValue raw with | true, t -> t | _ -> baseCppName raw
+    for (spelling, raws) in bindingRaws |> List.groupBy emitted do
+        if raws.Length > 1 then
+            let keep = match raws |> List.tryFind (fun r -> r = spelling) with Some r -> r | None -> List.min raws
+            for r in raws do
+                if r <> keep then renames.[r] <- fresh spelling
+    // PARAMETERS and CAPTURES (emitted raw): a keyword or reserved spelling moves.
+    let rawSpellings =
+        seq {
+            yield! bindingRaws
+            for f in modul.Functions do
+                for p in f.Params do yield p.Name
+                for c in f.Captures do yield c.Name }
+        |> Set.ofSeq
+    let valueMoves = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
+    let localSpelling (functionValuedName: bool) (name: string) =
+        if name.Contains '.' then name
+        else
+            let moved () =
+                match valueMoves.TryGetValue name with
+                | true, t -> Some t
+                | _ ->
+                    let t =
+                        if valueSpellingReserved functionValuedName name then fresh name
+                        else
+                            // a keyword: its `_` spelling, unless the program spells that too
+                            let b = baseCppName name
+                            if rawSpellings.Contains b || reservedAny b then fresh b else b
+                    valueMoves.[name] <- t
+                    Some t
+            if Set.contains name cppReservedWords || valueSpellingReserved functionValuedName name then
+                (moved ()).Value
+            else name
+    let mutable anyChanged = false
+    let functions =
+        modul.Functions |> List.map (fun f ->
+            let name = match callableNames.TryGetValue f.Id with | true, n -> n | _ -> f.Name
+            let ps = f.Params |> List.map (fun p -> let n = localSpelling (functionValued p.Type) p.Name in if n = p.Name then p else { p with Name = n })
+            let cs = f.Captures |> List.map (fun c -> let n = localSpelling (functionValued c.Type) c.Name in if n = c.Name then c else { c with Name = n })
+            let changed =
+                name <> f.Name
+                || List.exists2 (fun (a: IRParam) (b: IRParam) -> a.Name <> b.Name) ps f.Params
+                || List.exists2 (fun (a: CaptureInfo) (b: CaptureInfo) -> a.Name <> b.Name) cs f.Captures
+            if not changed then f
+            else
+                anyChanged <- true
+                { f with Name = name; Params = ps; Captures = cs })
+    freshCell userNameRenamesStorage (renames |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq)
+    // The census of the program's FINAL spellings the minted names avoid. A
+    // lowering temporary named `__v<id>` after its own id is the emitter's own
+    // name, not a user spelling.
+    let userSpellings =
+        seq {
+            for b in modul.Bindings do
+                if b.Name <> $"__v{b.Id}" && not (b.Name.StartsWith "_(") then yield emitted b.Name
+            for f in functions do
+                yield baseCppName f.Name
+                for p in f.Params do if p.Name <> $"__v{p.VarId}" then yield p.Name
+                for c in f.Captures do if c.Name <> $"__v{c.Id}" then yield c.Name }
+        |> Set.ofSeq
+    freshCell userSpellingCensusStorage userSpellings
+    if not anyChanged then modul else { modul with Functions = functions }
 
 
 // Type Inference Helper (for code generation)
@@ -1989,7 +2645,9 @@ and irTypeToCpp = function
         cell.Value <- cell.Value @ ["irTypeToCpp: IRTDist reached codegen -- Dist erasure was skipped at lowering"]
         "BLADE_ERROR_DIST_TYPE"
     | IRTNamed "String" -> "std::string"  // Blade String -> C++ std::string
-    | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
+    // Named types (structs, etc.) use their name directly -- a non-main
+    // module's IDENTITY `A.P` through the one sanitizer (D11), `A__P`.
+    | IRTNamed name -> Blade.Types.TypeOrigins.cppName name
     | IRTInfer n ->
         let cell = exprWarningsCell ()
         cell.Value <- cell.Value @ [$"unresolved type variable _{n} reached codegen"]

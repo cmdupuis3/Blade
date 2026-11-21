@@ -1,0 +1,8 @@
+// TEST: conj Of A Generic Bool Array Is Refused (rejects)
+// ERROR: BL3007 @ 6:1
+// ERROR-CONTAINS: conj expects a numeric operand, and this one is a Bool value
+// ============================================================================
+// R11: base accepted `conj` of Bools and printed them back.
+// ============================================================================
+function outer(b) = conj(b)
+let r = outer([true, false])

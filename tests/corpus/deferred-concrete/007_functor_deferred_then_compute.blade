@@ -4,7 +4,7 @@
 // (the original bug), the functor wrapper would have been dropped and `d` would
 // already equal A, so `result` would be [1, 2, 3]. Pinning result = [-1, -2, -3]
 // certifies that `d` carried the unforced computation to the compute site.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let negate = lambda(x) -> 0.0 - x
 let d = negate <$> A
 let result = d |> compute

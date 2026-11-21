@@ -1,0 +1,6 @@
+// TEST: A tuple projection of an imported deferred map, folded at top level, keeps its failure order (aborts)
+// MODULE: Lib
+module Lib
+type I = Idx<3>
+let iv: Array<Int64 like I> = [1, 0, 2]
+let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)

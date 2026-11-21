@@ -1,0 +1,17 @@
+// TEST: statics converted explicitly, an integer static and literals adapt
+// ============================================================================
+// G275's passing twin at compile time.
+// ============================================================================
+static function f(x: Float64) -> Float64 = x
+static function g(n: Int64) -> Int64 = n + 1
+let static a: Float32 = 0.1
+let static b: Float64 = 2.0
+let static k = 3
+let static y = f(Float64(a))
+let static z = Float64(a) + b
+let static m = g(k)
+let static w = f(0.25)
+let out = y + z + w
+let km = m
+// EXPECT: out = 2.45000000298023
+// EXPECT: km = 4

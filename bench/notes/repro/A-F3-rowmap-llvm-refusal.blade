@@ -1,0 +1,19 @@
+// REPRO A-F3 (blade-A, 2026-10-17, compiler 0.20.0): LLVM-LANE REFUSAL.
+// A T^1 -> T^1 row map (column centering) is refused by the LLVM lane.
+// Lanes affected: LLVM (falls back to C++). C++ and the interpreter run it.
+// Run: BLADE_LLVM=1 BLADE_BLAS=0 blade run A-F3-rowmap-llvm-refusal.blade
+// Expected: the LLVM lane compiles it.
+// Observed (stderr): [blade] llvm lane refused: the IR node IRApplyCombinator in value
+//   position -- no arm in the llvm lane; falling back to C++
+// Values: both lanes print checksum = 0.0 (the data are affine in the index, so every
+//   centred third moment vanishes; the refusal, not the value, is the point).
+// Accepted in both lanes: `let mu = reduce(x, (+)) / 7.0` then
+//   `method_for(range<Var>, range<Obs>) <@> lambda(j, i) -> x(j, i) - mu(j) |> compute`.
+type Obs = Idx<7>
+type Var = Idx<4>
+let checksum = {
+    let x = method_for(range<Var>, range<Obs>) <@> lambda(j, i) -> 1.0 + 0.25 * Float64(i * 4 + j) |> compute
+    let xc = method_for(x) <@> lambda(col: T^1) -> col - reduce(col, (+)) / 7.0 |> compute
+    let s = method_for(xc, xc, xc) <@> lambda(a: T^1, b: T^1, c: T^1) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    s((0 : Var), (0 : Var), (0 : Var)) + s((1 : Var), (2 : Var), (3 : Var))
+}

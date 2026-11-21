@@ -1,0 +1,11 @@
+// TEST: A Join Initializes Its Seeds In Leg Order Before Any Cell (aborts)
+// Gap G207 (round 4 wave 8 lane d; Codex design review probe D): both legs
+// fold the shared `e`; the seeds run before the joint traversal, leg 0 first
+// (integer modulo by zero), ahead of leg 1 seed (integer division by zero) and
+// of e at cell 7.
+// ABORT: integer modulo by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let z: Int64 = 0
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let (s, t) = object_for(<&!>) <@> (reduce(e, (+), 7 % z), reduce(e, (+), 100 / z))

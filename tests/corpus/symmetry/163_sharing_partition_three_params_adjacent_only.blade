@@ -1,0 +1,33 @@
+// TEST: Sharing-Partition Instances Of A Three-Parameter Comm Kernel Keep The Adjacent-Only Rule
+// docs/plans/plan-identity-transpose-compute.md section 2.2 (wave 2):
+// positions are preserved. `t(A, A, A)` is the instance over [0,0,0] -- one
+// array in all three commuting positions, packed SymIdx<3, I>.
+// `t(A, A, B)` is [0,0,1]: the adjacent pair packs (SymIdx<2, I>, then I).
+// `t(A, B, A)` is [0,1,0]: the repeat is NOT adjacent, so formalism 8.3's
+// adjacent-only rule keeps it dense in operand order, exactly as the direct
+// spelling `method_for(A, B, A)` is (whose BL4010 advisory names the
+// adjacent spelling; the instance's own advisory stays with the generic
+// declaration's warnings, which already ran). `t(A, B, C)` is generic.
+type I = Idx<2>
+let A: Array<Float64 like I> = [1.0, 2.0]
+let B: Array<Float64 like I> = [3.0, 5.0]
+let C: Array<Float64 like I> = [7.0, 11.0]
+function t(x: T^1, y: T^1, z: T^1) where comm(x, y, z) =
+    method_for(x, y, z) <@> lambda(a, b, c) where comm(a, b, c) -> a * b * c |> compute
+let TAAA = t(A, A, A)
+let TAAB = t(A, A, B)
+let TABA = t(A, B, A)
+let TABC = t(A, B, C)
+let DABA = method_for(A, B, A) <@> lambda(a, b, c) where comm(a, b, c) -> a * b * c |> compute
+let S3: Array<Float64 like SymIdx<3, I>> = t(A, A, A)
+let S21: Array<Float64 like SymIdx<2, I>, I> = t(A, A, B)
+let D3: Array<Float64 like I, I, I> = t(A, B, A)
+// EXPECT: TAAA = [1.0, 2.0, 4.0, 8.0]
+// EXPECT: TAAB = [3.0, 5.0, 6.0, 10.0, 12.0, 20.0]
+// EXPECT: TABA = [3.0, 6.0, 5.0, 10.0, 6.0, 12.0, 10.0, 20.0]
+// EXPECT: TABC = [21.0, 33.0, 35.0, 55.0, 42.0, 66.0, 70.0, 110.0]
+// EXPECT: DABA = [3.0, 6.0, 5.0, 10.0, 6.0, 12.0, 10.0, 20.0]
+// EXPECT: S3 = [1.0, 2.0, 4.0, 8.0]
+// EXPECT: S21 = [3.0, 5.0, 6.0, 10.0, 12.0, 20.0]
+// EXPECT: D3 = [3.0, 6.0, 5.0, 10.0, 6.0, 12.0, 10.0, 20.0]
+// WARN: BL4010

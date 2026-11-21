@@ -1,0 +1,9 @@
+// TEST: a Float32 static into a static function's Float64 parameter (rejects)
+// ============================================================================
+// G275: a float static is a constant of its own width (formalism 2.4), at
+// compile time as at run time.
+// ============================================================================
+static function f(x: Float64) -> Float64 = x
+let static a: Float32 = 1.0
+let static y = f(a)
+// ERROR: BL3020

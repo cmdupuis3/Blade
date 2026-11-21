@@ -32,8 +32,8 @@
 // different identities (different filter predicates).
 // Dynamic-extent runtime-derived operands via unique() (mask now returns
 // a Bool array; the point here is Reynolds over runtime extents).
-let above2 = unique([3.0, 4.0, 5.0, 3.0])
-let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
+let above2 = unique(Float64([3.0, 4.0, 5.0, 3.0]))
+let below5 = unique(Float64([1.0, 2.0, 3.0, 4.0, 1.0]))
 let g = lambda(x, y) -> x * y
 let result = method_for(above2, below5) <@> g |> compute
 // above2 = [3, 4, 5]; below5 = [1, 2, 3, 4]; 3x4 rectangular.

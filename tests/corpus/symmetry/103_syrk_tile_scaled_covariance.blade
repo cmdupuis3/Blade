@@ -1,0 +1,23 @@
+// TEST: Syrk Tile Scaled Covariance
+// The covariance shape prodsum(a, b) / N at p = 97, k = 257: the tile computes
+// the packed triangle, then the kernel's own scalar divides the FINISHED sums
+// (the same post-pass the BLAS route applies; never a reciprocal multiply).
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and every
+/// partial sum is an exact integer and ANY association gives the same G -- the pins
+/// below are association-invariant (CLAUDE.md fold policy), while the route is pinned
+/// by `blade plan` (tests/OptimizeTests.fs plan_syrk_tile_*) and the arithmetic
+/// bitwise by `blade test syrk-tile` and `blade test interp symmetry`.
+type V = Idx<97>
+type S = Idx<257>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) / 4.0 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(96, 3), g(95, 96), trace)
+}
+// EXPECT: ss = 46634949.9375
+// EXPECT: g00 = 128.75
+// EXPECT: g_mirror = -1.0
+// EXPECT: g_edge = -64.25
+// EXPECT: tr = 12464.75

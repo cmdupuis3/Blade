@@ -1,0 +1,18 @@
+// TEST: Mut Param View Write (rejects)
+// ----------------------------------------------------------------------------
+// Finding 2's parameter view: the callee writes through a VIEW of its `mut`
+// parameter (`let row = a(0); row(1) = ..`), which writes the parameter, so
+// passing the deferred rank-2 map writes it (BL4005, every lane).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let mut m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+function poke(a: mut Array<Float64 like Y, X>) -> Float64 = {
+    let row = a(0)
+    row(1) = 9.0
+    row(1)
+}
+let r = poke(m)
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

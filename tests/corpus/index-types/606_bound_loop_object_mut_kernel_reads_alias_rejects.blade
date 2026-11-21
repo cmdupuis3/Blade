@@ -1,0 +1,21 @@
+// TEST: A Bound Loop Object Whose Mut Kernel Reads An Alias Of The Operand Is Refused (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C; wave-end fable review F5): the refused
+// twin of index-types/605 -- the application `K <@> m` of a bound loop
+// object is judged like the map it is: poke writes its row through a `mut`
+// parameter and reads `view`, an alias of m (BL4005, every lane).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function identity_m(a: M) -> M = a
+let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+let view = identity_m(m)
+function poke(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    view(0, 0)
+}
+let K = object_for(poke)
+let r = K <@> m |> compute
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter
+// REJECT-AT: lower

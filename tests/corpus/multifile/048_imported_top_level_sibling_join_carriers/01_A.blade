@@ -1,0 +1,17 @@
+// TEST: An imported module's internal bindings do not print under their qualified name
+// MODULE: A
+// Round 4 wave 6 (the class-closure round of BLADE_SIBLING_FOLDS=top, gap
+// G107): under the `top` arm A's folds `a` and `b` join into internal
+// carriers `__sfj<id>`; imported, they are QUALIFIED (`A.__sfj18`) and used to
+// print beside A's own bindings. The internal-name test now reads the last
+// dotted segment (CodeGen.isInternalBindingName, all three lanes), so the
+// output is the same with the arm on or off.
+module A
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let a = prodsum(x, x)
+let note = a + 1.0
+let b = reduce(x, (+))
+// EXPECT: A.a = 14.0
+// EXPECT: A.note = 15.0
+// EXPECT: A.b = 6.0

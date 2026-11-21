@@ -1,0 +1,42 @@
+// TEST: Antisym Tile Row Groups
+// The antisym pair L = X Y^T - Y X^T over `method_for(z, z)` with
+// `where anticomm(a, b)` (strict AntisymIdx<2, p>) at the antisym bench's chain
+// length n = 401 and p = 61 (rows 0..59 meet the triangle: 10 row panels of 6),
+// with a `* 0.5` tail. Both lanes run the sequential 6x8 antisym tile
+// (blade_pgemm::dantisym_tri / blade_dantisym_tri_f64). The corpus runs it under
+// the DEFAULT row group, G = 1; under BLADE_TILE_TUNE anti_g=0 the cache budget
+// groups the panels 4, 4 and a ragged 2 (4 A pairs + the active B pair = 200.5
+// KiB of 256 KiB), visiting each column panel's X(j) / Y(j) pair with every
+// member row panel that reaches it -- the same tile calls in another order.
+// That grouped run of this program is `blade test cli`'s twin ("antisym row
+// groups of 4 (anti_g=0) print the default build's values", both lanes).
+/// Z(i, c, s) = ((5 i + 3 c + s) mod 7) - 3: small integers, so every product and
+/// every partial sum is an exact integer and ANY association gives the same P and
+/// Q; the scale 0.5 is a power of two -- association-invariant pins, checked
+/// against NumPy. Cells straddle the group boundaries (rows 23 / 24, 47 / 48)
+/// and the ragged last group of the anti_g=0 schedule. The groups are pinned by
+/// `blade plan` (tests/OptimizeTests.fs plan_antisym_tile_row_groups_default /
+/// plan_antisym_tile_budget_auto), the bits for G in {1, 2, 3, 4, 8} by
+/// `blade test row-tile` and `blade test llvm tiles`.
+type P = Idx<61>
+type C = Idx<2>
+type S = Idx<401>
+let (ss, l01, l02, l0_last, l_mirror, l_last, l_g0_end, l_g0_cross, l_g1_start, l_g1_mid, l_g2_start, l_g2_far, l_diag) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))) * 0.5 |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    (total, l(0, 1), l(0, 2), l(0, 60), l(60, 3), l(59, 60), l(23, 24), l(23, 26), l(24, 30), l(36, 41), l(48, 53), l(47, 59), l(5, 5))
+}
+// EXPECT: ss = 598045803.5
+// EXPECT: l01 = 401.5
+// EXPECT: l02 = -600.5
+// EXPECT: l0_last = 202.5
+// EXPECT: l_mirror = -401.5
+// EXPECT: l_last = 401.5
+// EXPECT: l_g0_end = 401.5
+// EXPECT: l_g0_cross = -199.0
+// EXPECT: l_g1_start = -401.5
+// EXPECT: l_g1_mid = 604.0
+// EXPECT: l_g2_start = 600.5
+// EXPECT: l_g2_far = 597.0
+// EXPECT: l_diag = 0.0

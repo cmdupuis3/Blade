@@ -102,7 +102,14 @@ type IRExpr =
     | IRIndex of array: IRExpr * index: IRExpr list * identity: ArrayIdentity option
     | IRSlice of array: IRExpr * dim: int * start: IRExpr * stop: IRExpr
     | IRCurry of array: IRExpr * index: IRExpr * resultRank: int
-    | IRApp of func: IRExpr * args: IRExpr list * retType: IRTypeG<IRExpr>
+    /// A call. `loc` is the source position of the call (R11: the
+    /// post-monomorphization argument judgment, Lowering.refuseArgumentConversions,
+    /// reports a refused argument there); equality-inert like every SrcLoc.
+    /// Written and matched through the `IRApp` constructor / view below, which
+    /// carry no location: only the builders that know the span (Lowering) and
+    /// the rebuilders that must keep it (IR.withChildren, substTypes, the
+    /// monomorphizers' call redirections) name `IRAppAt`.
+    | IRAppAt of func: IRExpr * args: IRExpr list * retType: IRTypeG<IRExpr> * loc: SrcLoc
     | IRTuple of IRExpr list
     // std::complex<double>(re, im) at codegen. Distinct from IRTuple: Complex
     // is a scalar throughout the IR. Components are arbitrary float-typed
@@ -114,6 +121,14 @@ type IRExpr =
     /// pair: it is bit-identical on every lane REGARDLESS of BLADE_FP_CONTRACT,
     /// where a*b + c is not (see the header of Build.fs).
     | IRFma of a: IRExpr * b: IRExpr * c: IRExpr
+    /// ONE SAMPLE of an addressed rand family (`<fam>_at`, D13): args are the
+    /// key, the stream key, the sample index, then the family's Float64
+    /// parameters; `weights` is categorical's array and its static extent.
+    /// A pure function of its operands -- `blade_rand::<kind>_one` in C++,
+    /// RandMirror.drawsAt at one sample in the interpreter -- so it is an
+    /// ordinary scalar (Float64; Int64 for categorical_at). Its range guards
+    /// are explicit checks beside it (TypeCheckInfer's inline draw).
+    | IRRandAt of kind: string * args: IRExpr list * weights: (IRExpr * int) option
     | IRTupleProj of IRExpr * int * bool  // expr, index, isFlat (true=flat leaf index, false=structural type index)
     | IRTupleCons of head: IRExpr * tail: IRExpr
     | IRTupleDecons of tuple: IRExpr
@@ -122,6 +137,12 @@ type IRExpr =
     | IRIf of cond: IRExpr * thenBr: IRExpr * elseBr: IRExpr
     | IRMatch of scrutinee: IRExpr * cases: IRMatchCase list
     | IRLet of IRId * value: IRExpr * body: IRExpr
+    /// Resource statements, bound by unit lets. The begin let's id is the
+    /// lifetime identity; the release names that id and the owned pools as
+    /// ordinary IRVar children, so cloning/substitution cannot strand ids.
+    /// This is an allocation boundary, not a source write or numeric licence.
+    | IRBeginPoolScope of call: string
+    | IRReleasePools of scope: IRExpr * pools: IRExpr list * call: string
     | IRMethodFor of MethodForInfo
     | IRObjectFor of ObjectForInfo
     | IRApplyCombinator of ApplyInfo
@@ -255,7 +276,32 @@ type IRExpr =
     /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
     /// the node so HM substitution reaches it like any other carried type.
     | IRZero of ty: IRTypeG<IRExpr>
+    /// THE SEED OF AN UNSEEDED FOLD (gap G74): the checker-synthesized `(+)`
+    /// seed of a fused fold the program wrote WITHOUT an init, carried with
+    /// its provenance from Lowering.lowerUnseededSeed (the only builder; no
+    /// source syntax reaches it) to Lowering.resolveUnseededSeedsModule, which
+    /// runs after monomorphization and BEFORE the optimizer and replaces every
+    /// one by an ordinary seed: on an OBLIGATORILY SERIAL route -- the
+    /// reproducible build, a `where repro` body (`inRepro`), a repro-vetoed
+    /// kernel, or a deferred map body that MAY WRITE (the fact each compiled
+    /// lane's effective licence reads: C++ `licensedFold`, LLVM
+    /// `foldFmfLicensed`) -- by the EXACT identity (`addIdentityLiteralOf`:
+    /// `-0.0`, `-0.0f`, `(-0.0, -0.0)`, `0`), so the chain is the left fold of
+    /// the cells; on a licensed route by `baseSeed`, unchanged byte for byte.
+    /// No pass after that one, no emitter and no interpreter sees the node.
+    | IRUnseededSeed of baseSeed: IRExpr * ty: IRTypeG<IRExpr> * inRepro: bool
+    /// A FRESH array of the carried (dense, statically shaped) array type
+    /// whose cells are written before any is read, so no fill is emitted:
+    /// the recursive-array buffer when the desugar PROVED every row is
+    /// written before it is read (TypeCheckInfer's let-rec desugar,
+    /// `__recu_` buffers; formalism 7.5 "Zero-fill elision"). Built ONLY
+    /// there, and only for a binding (`Lowering.lowerTypedBlock`). The
+    /// compiled lanes allocate without filling (allocate<> / blade_alloc_cells
+    /// already return uninitialized storage); the interpreter allocates
+    /// zeros, which no read can observe -- the license is that none happens.
+    | IRUninit of ty: IRTypeG<IRExpr>
     | IRRank of array: IRExpr
+
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
     // pack view" behaving as a Poly pack of arity one less than `pack`,
@@ -342,6 +388,15 @@ type IRExpr =
     /// (genForRangeBinding's alloc scope) or each guarded loop leaks its
     /// breaking iteration's slice materializations.
     | IRBreakIf of cond: IRExpr
+    /// PRINT REPLAY of a module-level recursive array (rec-print-replay v1,
+    /// round 4 wave 4 B1): one row of `target`'s trajectory, completed by
+    /// the ring sweep of the hidden `__replay_<x>` binding that holds it.
+    /// Statement-positioned and unit-valued. Only the C++ lane executes it
+    /// (the sweep runs once at x's slot filling the snapshots, again at x's
+    /// print slot printing each row); the interpreter and the LLVM lane skip
+    /// the whole replay binding (IR.isRecReplayBinding) and keep x's full
+    /// buffer. Counted as an effect (never moved, merged or dropped).
+    | IRReplayRow of target: IRId * row: IRExpr
 
 /// Abstract callable in IR: the merged form of source-level functions and
 /// lambdas. Lives in the IRExpr mutual-recursion group because
@@ -431,6 +486,23 @@ and IRCallable = {
     // unmarked callables), which each consumer reads as "run your own
     // analysis or decline" -- never as pure.
     Effects: Blade.Effects.EffectSummary
+    // `Some compiledLanesCall` marks a KERNEL-INVARIANT HOIST HELPER
+    // (Optimize.hoistKernelInvariantsModule): the part of a map kernel that
+    // does not read the element, evaluated once before the nest. Its shadow
+    // frame must be the one the PER-CELL evaluation had (gap G151: same
+    // failure site, same frames). The compiled lanes CALL a kernel per cell
+    // exactly when its body is not expression-shaped
+    // (`IRLift.kernelBodyIsExpressionShaped`, the C++ lane's
+    // `routeKernelBodyThroughCall`) and inline it otherwise, so the C++ and
+    // LLVM lanes push this helper's frame iff `compiledLanesCall`; the
+    // interpreter evaluates every such kernel inline (its nests push no
+    // kernel frame) and never pushes it. `None` = an ordinary callable,
+    // whose frame every lane pushes as always. `Some false` also marks a G239
+    // READ HELPER (Lowering.splitDeferredBodyReadsModule): a one-statement
+    // function forcing a deferred module map at a read position, inline code
+    // of its caller -- no frame in any lane, located at the caller's
+    // declaration, and not counted against the interpreter's depth budget.
+    HoistFrame: bool option
 }
 
 /// Semantic-marker alias for IRCallable naming "top-level function in
@@ -563,6 +635,20 @@ and SparseKeysSource =
 // the prototype's extent representation. Everything downstream uses
 // these names; swapping the extent representation (the rewrite's
 // dedicated Extent DU) is a type-argument change here, nothing more.
+/// A call with no source location (a synthesized call): see IRAppAt.
+let IRApp (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
+    IRAppAt (func, args, retType, SrcLoc.Nowhere)
+/// The location-free view of a call: matches every IRAppAt.
+let (|IRApp|_|) (e: IRExpr) : (IRExpr * IRExpr list * IRTypeG<IRExpr>) option =
+    match e with
+    | IRAppAt (f, args, rt, _) -> Some (f, args, rt)
+    | _ -> None
+/// The same call with new parts, keeping its location.
+let withAppParts (call: IRExpr) (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
+    match call with
+    | IRAppAt (_, _, _, loc) -> IRAppAt (func, args, retType, loc)
+    | _ -> IRApp (func, args, retType)
+
 type IRType = IRTypeG<IRExpr>
 type IRIndexType = IRIndexTypeG<IRExpr>
 type IRArrayType = IRArrayTypeG<IRExpr>
@@ -802,6 +888,11 @@ let placementOf (ix: IRIndexType) : PlacementClass =
     | _ when ix.IxKind = IxKTree -> PlaceDense
     | _ -> placementClassOf ix.Symmetry
 
+/// True when an integer literal's value fits Int32 -- the range in which a
+/// bare literal adapts to an Int32 partner (typeOf's literal rule below).
+let fitsInt32 (n: int64) : bool =
+    n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue
+
 /// Compute the promoted element type for two numeric types per section 3.4.2.
 /// Returns None if the types are incompatible for promotion. Index nominal
 /// tags are not represented at the ElemType level; their strict unification
@@ -879,6 +970,20 @@ let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
     | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 0.0f), IRLit (IRLitFloat32 0.0f)))
     | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat 0.0), IRLit (IRLitFloat 0.0)))
     | AnyPrimElem ETString -> Some (IRLit (IRLitString ""))
+    | _ -> None
+
+/// The EXACT `(+)` identity at a scalar type (gap G74): the seed a STRICT
+/// route gives an UNSEEDED fold (Lowering.resolveUnseededSeedsModule),
+/// so the seeded chain `id + c0 + ..` is the left fold of the cells bit for
+/// bit (formalism 2.4): `-0.0` / `-0.0f` for a real float, `(-0.0, -0.0)` for
+/// a complex one (componentwise), `0` for an integer. None otherwise.
+let addIdentityLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
+    match ty with
+    | AnyPrimElem (ETInt32 | ETInt64) -> Some (IRLit (IRLitInt 0L))
+    | AnyPrimElem ETFloat32 -> Some (IRLit (IRLitFloat32 -0.0f))
+    | AnyPrimElem ETFloat64 -> Some (IRLit (IRLitFloat -0.0))
+    | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 -0.0f), IRLit (IRLitFloat32 -0.0f)))
+    | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat -0.0), IRLit (IRLitFloat -0.0)))
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -1693,6 +1798,12 @@ type ProviderReadSpec = {
     /// binding would render as a value (CodeGenState, "STREAMED VALUES NEVER
     /// REACH C++"), never an undeclared name handed to g++.
     Streamed: bool
+    /// The masked read's hidden RAW half (`alias.read_present` /
+    /// `alias.present`, ProviderDesugar): the provider boundary rule
+    /// (ProviderRegistry.MissingRule, BL8015) is NOT applied -- the masked
+    /// read derives its presence mask from these cells instead. Never set by
+    /// a spelling a program can write.
+    AllowMissing: bool
 }
 
 /// Specification for a deferred provider data write (`alias.write("path", A)`),
@@ -1772,6 +1883,11 @@ type IRModule = {
     /// would silently corrupt `Z`. CodeGen/interpreter deep-copy at the
     /// binding site when the id is in this set.
     MutableArrayLets: Set<IRId>
+    /// The binders declared `let mut` (module bindings and block / body lets
+    /// of any type). `IsMutable` and MutableArrayLets say ASSIGNABLE, which a
+    /// plain `let` is too; this is the declaration, read by the rule on who
+    /// may write a captured binding (formalism 2.7; deep review D9).
+    LetMutBinders: Set<IRId>
     /// EMISSION-ORDER PROXY for functions a compiler pass SYNTHESIZED from an
     /// existing one: `derived id -> origin id`. Codegen emits bindings and
     /// functions interleaved in IRId order (a lower id means "written earlier
@@ -1789,6 +1905,9 @@ type IRModule = {
     /// synthesized copies; populated by `shapeMonomorphizeModules`, which
     /// records a copy in the module that DEFINES its origin even when the call
     /// site that earned it lives in another module.
+    /// (Also holds BINDING ids since round 4 wave 4: the sibling-fold pass keys a
+    /// synthesized top-level binding on the original binding it precedes, as an
+    /// emission-order key only -- a key is not necessarily in Functions.)
     DerivedFuncOrigins: Map<IRId, IRId>
     /// NAMES of top-level bindings removed because they only aliased a
     /// generic function (`let g = total`, IRMono.eliminateGenericAliases).
@@ -1801,6 +1920,13 @@ type IRModule = {
 /// IR Program
 type IRProgram = {
     Modules: IRModule list
+    /// The program's DECLARATION SPANS (name -> span, Lowering's table; gap
+    /// G76): carried BY THE RECORD, so every `{ p with .. }` copy (module
+    /// qualification, dead-polymorph elimination, the AD and elaborator
+    /// passes) keeps it, and a consumer in ANOTHER execution flow (the
+    /// interpreter differential) locates guards from the program it runs,
+    /// never from another program's ambient table (`installDeclSpansOf`).
+    DeclSpans: Map<string, Blade.Ast.Span>
 }
 
 /// Query: the fully-deduced IR type of a top-level binding by name, searched
@@ -1933,6 +2059,8 @@ let mkCallable
         // Grafted by Lowering.lowerTypedFuncDecl from the typed declaration;
         // unknown everywhere else (see the field's comment).
         Effects = Blade.Effects.unknown
+        // Set by the one site that mints a hoist helper (see the field).
+        HoistFrame = None
     }
 
 /// Build a fresh IRCallable for an anonymous inline lambda: synthesized
@@ -2029,6 +2157,10 @@ type AnalysisContext = {
     /// in-place accumulation; a per-flow AsyncLocal field, so concurrent
     /// module compilations don't interfere.
     SyntheticCallables: System.Collections.Generic.Dictionary<IRId, IRCallable>
+    /// The synthetic callables registered as the POST-SUM stages of a
+    /// Reynolds kernel (registerReynoldsPost / splitReynoldsPost, R20).
+    /// Reset with SyntheticCallables.
+    ReynoldsPosts: System.Collections.Generic.HashSet<IRId>
 }
 
 let private analysisCtxStorage =
@@ -2037,7 +2169,8 @@ let private analysisCtxStorage =
 let private emptyAnalysisCtx : AnalysisContext =
     { Callables = Map.empty
       Visited = Set.empty
-      SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+      SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+      ReynoldsPosts = System.Collections.Generic.HashSet<IRId>() }
 
 let internal currentAnalysisCtx () : AnalysisContext =
     let v = analysisCtxStorage.Value
@@ -2053,7 +2186,8 @@ let setCallablesContext (callables: CallablesTable) : AnalysisContext =
     analysisCtxStorage.Value <-
         { prev with
             Callables = callables
-            SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>() }
+            SyntheticCallables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+            ReynoldsPosts = System.Collections.Generic.HashSet<IRId>() }
     prev
 
 /// Restore a previously-captured context.
@@ -2162,6 +2296,132 @@ let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
         else transformed
     | None -> expr
 
+// Functor-wrapper composition (R20, review round 3)
+//
+// `f <$> c` applies f to each value c yields (formalism 10.1: f <$> c =
+// c >>= pure . f), and `c1 @>> c2` applies c2's kernel to each value c1
+// yields. Both emitters (genComputeBinding and the interpreter's
+// materializeApply) compose such a stack into the map's KERNEL -- map fusion,
+// one pass and no temporary: `f <$> (L <@> g)` is `L <@> (f . g)`.
+//
+// A REYNOLDS map yields the SYMMETRIZED value K(x) = sum over the
+// permutations sigma of g(x_sigma) (formalism 5.3), so the stack applies to
+// that sum: f(K(x)), never sum f(g(x_sigma)). Composing f into g's body put
+// it INSIDE every term (a nonlinear f, an affine one, a Bool-valued one all
+// computed something else -- `sq <$> reynolds map` printed sum sq(term)). The
+// composed kernel therefore keeps its IRReynolds wrapper and g's parameters,
+// and its body becomes the ENVELOPE
+//     IRFunctorMap (IRVar post, term)
+// where `term` is g's body (the per-permutation term the sum adds) and `post`
+// a synthetic one-parameter callable whose parameter receives the sum and
+// whose body is the stack applied to it, registered with
+// registerReynoldsPost. Every renderer of a Reynolds sum
+// (CodeGenLoopNest.genKernelExprWithReynolds, the interpreter's nest)
+// splits the envelope with splitReynoldsPost, sums `term` and applies `post`
+// once per cell, in the same single pass; any renderer that does not know
+// the envelope meets an IRFunctorMap in value position, which every lane
+// refuses (fail closed, never a per-term application).
+
+/// Register `post` (a synthetic one-parameter callable) as the post-sum stage
+/// of a Reynolds kernel envelope; returns its IRVar reference.
+let registerReynoldsPost (post: IRCallable) : IRExpr =
+    let ctx = currentAnalysisCtx ()
+    ctx.ReynoldsPosts.Add post.Id |> ignore
+    registerSyntheticCallable post
+
+/// Split a Reynolds kernel body into (term, post stage). A body that is not
+/// an envelope returns (body, None).
+let splitReynoldsPost (body: IRExpr) : IRExpr * IRCallable option =
+    match body with
+    | IRFunctorMap ((IRVar (id, _) as p), term) when (currentAnalysisCtx ()).ReynoldsPosts.Contains id ->
+        match resolveCallable p with
+        | Some c when c.Params.Length = 1 -> (term, Some c)
+        | _ -> (body, None)
+    | _ -> (body, None)
+
+/// The value a wrapper stage hands back: a callable's return type, or for an
+/// `@>>` stage's extracted kernel `IRCompose (k, f)` (f after k), f's.
+let rec functorWrapperRetType (w: IRExpr) : IRType option =
+    match w with
+    | IRCompose (_, f) -> functorWrapperRetType f
+    | _ -> resolveCallable w |> Option.map (fun c -> c.RetType)
+
+/// Beta-reduce one wrapper over `body`: a one-parameter callable's body with
+/// its parameter replaced by `body`; anything else (an unresolved reference,
+/// an `IRCompose`) is applied as a call.
+let betaReduceFunctorWrapper (wrapper: IRExpr) (body: IRExpr) : IRExpr =
+    match resolveCallable wrapper with
+    | Some c when c.Params.Length = 1 ->
+        let paramId = c.Params.[0].VarId
+        let rec subst (expr: IRExpr) =
+            match expr with
+            | IRVar (id, _) when id = paramId -> body
+            | IRVar _ | IRLit _ | IRParam _ -> expr
+            | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
+            | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
+            | IRIf (c2, t, e) -> IRIf (subst c2, subst t, subst e)
+            | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)
+            | IRIndex (a, idxs, ty) -> IRIndex (subst a, idxs |> List.map subst, ty)
+            | IRTuple es -> IRTuple (es |> List.map subst)
+            | IRComplex (re, im) -> IRComplex (subst re, subst im)
+            | IRFma (a, b, c3) -> IRFma (subst a, subst b, subst c3)
+            | IRRandAt (k, args, w) -> IRRandAt (k, List.map subst args, w |> Option.map (fun (x, n) -> (subst x, n)))
+            | IRTupleProj (e, i, flat) -> IRTupleProj (subst e, i, flat)
+            | IRFieldAccess (e, f) -> IRFieldAccess (subst e, f)
+            | IRLet (id, v, b) -> IRLet (id, subst v, subst b)
+            | _ -> expr  // For complex nodes, leave as-is
+        subst c.Body
+    | _ ->
+        let retTy = functorWrapperRetType wrapper |> Option.defaultValue (IRTScalar ETFloat64)
+        IRApp (wrapper, [body], retTy)
+
+/// Compose a wrapper stack (innermost first) into a map's kernel and its
+/// output type -- the ONE composition both lanes run (CodeGenBinding's and
+/// the interpreter's applyFunctorWrappers). Each per-use-site composition is
+/// a fresh synthetic callable (`freshId` mints its ids). Over a Reynolds
+/// kernel of two or more parameters the stack becomes the post-sum stage of
+/// an envelope (above); a unary Reynolds kernel is the kernel itself (one
+/// permutation), so the stack composes into it as into any map.
+let composeFunctorWrappers (freshId: unit -> IRId) (kernel: IRExpr) (outputType: IRType)
+                           (wrappers: IRExpr list) : IRExpr * IRType =
+    if List.isEmpty wrappers then (kernel, outputType)
+    else
+    let wrapBody (body: IRExpr) = wrappers |> List.fold (fun b w -> betaReduceFunctorWrapper w b) body
+    let (_, desc) = peelReynolds kernel
+    let composed =
+        mapKernelInner (fun (c: IRCallable) ->
+            if desc.HasReynolds && c.Params.Length >= 2 then
+                let sumId = freshId ()
+                let sumParam : IRParam = { Name = "__reynolds_sum"; Type = c.RetType; Index = 0; VarId = sumId }
+                let post =
+                    { c with Id = freshId ()
+                             Params = [ sumParam ]
+                             Body = wrapBody (IRVar (sumId, c.RetType))
+                             RetType = (List.last wrappers |> functorWrapperRetType |> Option.defaultValue c.RetType)
+                             IsCommutative = false
+                             CommGroups = []
+                             AntisymGroups = [] }
+                let postRef = registerReynoldsPost post
+                registerSyntheticCallable { c with Id = freshId (); Body = IRFunctorMap (postRef, c.Body) }
+            else
+                registerSyntheticCallable { c with Id = freshId (); Body = wrapBody c.Body }) kernel
+    // The cells are what the OUTERMOST stage returns (the wrappers are
+    // innermost first). An array keeps its shape: a stage whose return type
+    // is not a scalar here (an open one) leaves the element type as typed.
+    let cellTy = List.last wrappers |> functorWrapperRetType
+    let rec isCell (t: IRType) =
+        match t with
+        | IRTScalar _ -> true
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> isCell inner
+        | _ -> false
+    let outTy =
+        match outputType, cellTy with
+        | ArrayElem arr, Some t when isCell t -> mkArrayLike { arr with ElemType = t }
+        | ArrayElem _, _ -> outputType
+        | _, Some t -> t
+        | _, None -> outputType
+    (composed, outTy)
+
 
 
 // Canonical expression traversal -- ExprShape (audit section 3.2)
@@ -2187,14 +2447,23 @@ let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
 let private badChildren (ctor: string) : 'a =
     failwith $"ExprShape.rebuild: child list does not match {ctor}'s shape"
 
+/// The buffer-name prefix by which the let-rec desugar (TypeCheckInfer) tells
+/// Lowering that a recursive array's buffer needs NO zero fill: every cell is
+/// provably written before it is read (formalism 7.5). Lowering then binds
+/// the buffer to `IRUninit` instead of the checked zero former. Ordinary
+/// buffers keep the `__rec_` prefix. Reserved: `__`-names are internal.
+let recUninitBufferPrefix = "__recu_"
+
 /// Total active pattern: an expression's immediate children, plus a function
 /// rebuilding the same variant around replacement children.
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
-    | IRVirtualReverse _ | IRArity _ ->
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUninit _ | IROpaqueExtent
+    | IRVirtualReverse _ | IRArity _ | IRBeginPoolScope _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
+    // the unseeded-fold seed's base value is its one child (gap G74)
+    | IRUnseededSeed (b, ty, r) -> [b], (function [b'] -> IRUnseededSeed (b', ty, r) | _ -> badChildren "IRUnseededSeed")
     | IRRange (idxTys, offset) ->
         Option.toList offset,
         (function
@@ -2285,15 +2554,26 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
     | IRConstraintCheck (c, code, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', code, msg, sp) | _ -> badChildren "IRConstraintCheck")
     | IRBreakIf c -> [c], (function [c'] -> IRBreakIf c' | _ -> badChildren "IRBreakIf")
+    | IRReplayRow (t, r) -> [r], (function [r'] -> IRReplayRow (t, r') | _ -> badChildren "IRReplayRow")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRGramApply (l, r, x) -> [l; r; x], (function [l'; r'; x'] -> IRGramApply (l', r', x') | _ -> badChildren "IRGramApply")
     | IRMatmul (l, r) -> [l; r], (function [l'; r'] -> IRMatmul (l', r') | _ -> badChildren "IRMatmul")
+    | IRReleasePools (scope, pools, call) ->
+        scope :: pools, (function
+            | scope' :: pools' when pools'.Length = pools.Length -> IRReleasePools (scope', pools', call)
+            | _ -> badChildren "IRReleasePools")
     | IRLet (id, v, b) -> [v; b], (function [v'; b'] -> IRLet (id, v', b') | _ -> badChildren "IRLet")
 
     // -- Three children -------------------------------------------------------
     | IRIf (c, t, e) -> [c; t; e], (function [c'; t'; e'] -> IRIf (c', t', e') | _ -> badChildren "IRIf")
     | IRFma (a, b, c) -> [a; b; c], (function [a'; b'; c'] -> IRFma (a', b', c') | _ -> badChildren "IRFma")
+    | IRRandAt (kind, args, weights) ->
+        (args @ (weights |> Option.map fst |> Option.toList)),
+        (fun cs ->
+            match weights with
+            | Some (_, n) -> IRRandAt (kind, List.take args.Length cs, Some (List.last cs, n))
+            | None -> IRRandAt (kind, cs, None))
     | IRSlice (arr, d, s, e) -> [arr; s; e], (function [arr'; s'; e'] -> IRSlice (arr', d, s', e') | _ -> badChildren "IRSlice")
     | IRSubset (arr, d, s, len) -> [arr; s; len], (function [arr'; s'; len'] -> IRSubset (arr', d, s', len') | _ -> badChildren "IRSubset")
     | IRForRange (vid, lo, hi, body) -> [lo; hi; body], (function [lo'; hi'; b'] -> IRForRange (vid, lo', hi', b') | _ -> badChildren "IRForRange")
@@ -2312,10 +2592,10 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
         (function
          | arr' :: idxs' when idxs'.Length = idxs.Length -> IRIndex (arr', idxs', ident)
          | _ -> badChildren "IRIndex")
-    | IRApp (f, args, rt) ->
+    | IRAppAt (f, args, rt, loc) ->
         f :: args,
         (function
-         | f' :: args' when args'.Length = args.Length -> IRApp (f', args', rt)
+         | f' :: args' when args'.Length = args.Length -> IRAppAt (f', args', rt, loc)
          | _ -> badChildren "IRApp")
 
     // -- Lists ----------------------------------------------------------------
@@ -2386,6 +2666,18 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
 
 /// Immediate expression children of a node, in canonical order.
 let childrenOf (ExprShape (children, _)) : IRExpr list = children
+
+/// Does `e` subscript an array with two or more indices anywhere? The guard a
+/// band fold's diagonal walk (Types.domainDiagonal) takes: along a diagonal a
+/// rank-1 read `x(i)` / `x(j)` stays unit-stride, a matrix read `A(i, j)`
+/// strides by a row, so a kernel that reads one keeps the row walk. Reads
+/// inside a called function are not followed -- the walk is a cost choice,
+/// never a correctness one.
+let rec kernelSubscriptsRank2 (e: IRExpr) : bool =
+    match e with
+    | IRIndex (_, idxs, _) when idxs.Length >= 2 -> true
+    | IRIndex (IRIndex _, _, _) -> true   // curried A(i)(j)
+    | _ -> childrenOf e |> List.exists kernelSubscriptsRank2
 
 /// Rebuild a node around replacement children (same count/order as
 /// childrenOf handed out).
@@ -2465,7 +2757,7 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
 let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _ | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
@@ -2485,20 +2777,20 @@ let irNodeMayAbort (e: IRExpr) : bool =
     // A cast to an integer type aborts on a NaN / out-of-range float
     // operand (BL8014). Judged without the operand type, like `/`.
     | IRUnaryOp (IRCast ((ETInt64 | ETInt32), _), _) -> true
-    | IRBinOp _ | IRComplex _ | IRFma _ -> false
+    | IRBinOp _ | IRComplex _ | IRFma _ | IRRandAt _ -> false
     | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
     | IRUnaryOp _ -> false
     | IRTuple _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _
     | IRFieldAccess _ | IRStructLit _ -> false
     | IRIf _ | IRLet _ | IRSequence _ -> false
-    | IRApp _ -> false
+    | IRAppAt _ -> false
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
     | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRPure _ | IRReynolds _ -> false
     | IRRank _ | IRExtent _ -> false
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
     | IROrbitClass _ | IRSegments _ | IRSegmentsGrid _ -> false
     | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> false
-    | IRAssign _ | IRForRange _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRBreakIf _ | IRReplayRow _ | IRBeginPoolScope _ | IRReleasePools _ -> false
     | IRArrayLit _ | IRArrayNegate _ | IRArrayConjugate _ | IRContains _ -> false
     // -- may abort (checked reads, folds, factorizations, refusals) ---------
     | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRPolyIndex _ | IRPolyTail _
@@ -2545,6 +2837,14 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRCompute inner -> isFreshPoolFormWith appFresh inner
     | IRApplyCombinator _ | IRComposeApply _ -> true
     | IRArrayLit _ -> true
+    // An unfilled fresh pool, registered for freeing exactly like a
+    // materialized map (MatPool in the C++ lane, a tracked allocPool in LLVM).
+    | IRUninit _ -> true
+    // A mask over a COMPOUND (G128) is `Compound<bool, R>` over fresh bits that
+    // BORROWS its source's index: not fresh, so escape propagation reaches the
+    // source (Codex review round 2: a returned mask kept an index its scope
+    // freed). Leaks, never frees early.
+    | IRMask (IRVar (_, ArrayElem a), _) when a.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKCompound) -> false
     | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
     | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
     // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
@@ -2553,15 +2853,15 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IREigh _ | IRLu _ | IRLuSolve _ | IRSolve _ -> true
     | IRArrayNegate _ | IRArrayConjugate _ -> true
     | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
-    | IRApp (f, _, _) -> appFresh f
+    | IRAppAt (f, _, _, _) -> appFresh f
     // -- not fresh (see above) ----------------------------------------------
     | IRChoice _ | IRFallback _ | IRGuard _ | IRComposeMeth _ -> false
     | IRSequence _ | IRReplicate _ -> false
     | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
     | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
     | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
-    | IRLit _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent | IRArity _ | IRRange _
-    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _
+    | IRLit _ | IRParam _ | IRNth | IRZero _ | IRUnseededSeed _ | IROpaqueExtent | IRArity _ | IRRange _
+    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
     | IRReynolds _ | IRArrayProduct _ | IRContains _
@@ -2570,7 +2870,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
     | IRPolyIndex _ | IRPolyTail _ | IRHaloUnhash _ | IRRank _ | IRExtent _
     | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
-    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ | IRBeginPoolScope _ | IRReleasePools _ -> false
 
 // Expression Mapping (bottom-up rewriter)
 
@@ -2597,6 +2897,31 @@ let rec iterIRExpr (f: IRExpr -> unit) (expr: IRExpr) : unit =
      | ExprShape ([], _) -> ()
      | ExprShape (children, _) -> children |> List.iter (iterIRExpr f))
     f expr
+
+/// Resource sequencing is independent of language writes and FP licences.
+/// Motion passes use this predicate rather than pretending cleanup mutates
+/// source storage. The canonical children include scope/pool references.
+let containsPoolLifetimeEvent (expr: IRExpr) : bool =
+    let mutable found = false
+    iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> found <- true | _ -> ()) expr
+    found
+
+/// PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1). The module binding
+/// `__replay_<x>` the typechecker adds beside a module-level `let rec x`
+/// holds x's ring sweep with one IRReplayRow per completed row. Only the C++
+/// lane runs it (CodeGenBinding's replay arm: once at its slot, filling x's
+/// snapshots, once at x's print); the interpreter and the LLVM lane SKIP the
+/// binding and keep x's full buffer, so they run exactly the program as
+/// written. Structural: a binding whose value holds an IRReplayRow.
+let recReplayBindingPrefix = "__replay_"
+/// The row marker let the typechecker places in the sweep (`__replay_row_<x>`).
+let recReplayRowPrefix = "__replay_row_"
+let containsReplayRow (expr: IRExpr) : bool =
+    let mutable found = false
+    iterIRExpr (function IRReplayRow _ -> found <- true | _ -> ()) expr
+    found
+let isRecReplayBinding (b: IRBinding) : bool =
+    b.Name.StartsWith recReplayBindingPrefix && containsReplayRow b.Value
 
 /// Collect every variable id referenced (IRVar) anywhere in an expression.
 /// The one var-ref collector (audit section 3.2): capture computation and
@@ -2666,7 +2991,9 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
         | IRZero ty -> IRZero (st ty)
-        | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
+        | IRUnseededSeed (b, ty, r) -> IRUnseededSeed (b, st ty, r)
+        | IRUninit ty -> IRUninit (st ty)
+        | IRAppAt (fn, args, retType, loc) -> IRAppAt (fn, args, st retType, loc)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
         | IRMethodFor info ->
@@ -2713,6 +3040,8 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
     | IRZero ty -> Some ty
+    | IRUnseededSeed (_, ty, _) -> Some ty
+    | IRUninit ty -> Some ty
     | _ -> None
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
@@ -2804,6 +3133,13 @@ let declSpansCell () : Map<string, Blade.Ast.Span> ref =
         fresh
     else v
 
+/// Start a program's table: install a FRESH ref for this flow, never clear
+/// the one found (#65). A child flow (Task.Run, a large-stack thread) copies
+/// the parent's REFERENCE, so mutating it in place would wipe a sibling
+/// pipeline's spans mid-codegen; the CodeGenState.freshCell pattern.
+let resetDeclSpans () : unit =
+    declSpansStorage.Value <- ref Map.empty
+
 /// Record one declaration's span. Later declarations with the same name (a
 /// shadowing `let`) win, matching what the emitted code refers to last.
 let recordDeclSpan (name: string) (span: Blade.Ast.Span) : unit =
@@ -2817,6 +3153,17 @@ let declSpanOf (name: string) : Blade.Ast.Span =
     match Map.tryFind name (declSpansCell ()).Value with
     | Some s -> s
     | None -> Blade.Ast.noSpan
+
+/// The declaration-span table TRAVELS WITH THE PROGRAM (gap G76): lowering
+/// stores the table it recorded in the IRProgram it returns
+/// (`IRProgram.DeclSpans`, after module qualification), and a consumer running
+/// in another execution flow (the interpreter differential runs the
+/// interpreter in a Task beside the flow that lowered) installs it into its
+/// own flow before it reads `declSpanOf` -- REPLACING whatever another program
+/// left there: a program that carries no table installs an empty one, never a
+/// stale one.
+let installDeclSpansOf (program: IRProgram) : unit =
+    declSpansStorage.Value <- ref program.DeclSpans
 
 /// A named struct's fields in DECLARATION order, out of the same per-module
 /// cache `tryLookupFieldType` reads. The order is what lets a name-erased
@@ -3009,9 +3356,31 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          // C++ overload set promotes integer operands to double), so they do
          // NOT follow the promote-the-operands rule below -- `atan2(1, 1)` over
          // two Int64s is a double, not an int.
-         | IRMath2 _ -> IRTScalar ETFloat64
+         // ... except over two Float32 operands (or a Float32 beside a float
+         // literal, which Lowering already narrowed to IRLitFloat32): the
+         // double function rounded once to float is a Float32 (formalism 2.4).
+         | IRMath2 _ ->
+             (match stripUnits (typeOf left), stripUnits (typeOf right) with
+              | IRTScalar ETFloat32, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+              | _ -> IRTScalar ETFloat64)
          | _ ->
              match typeOf left, typeOf right with
+             // An INTEGER exponent keeps the base's type (formalism 2.4: the
+             // exponent of `^` is polymorphic) -- `x32 ^ 2` is a Float32,
+             // `i32 ^ 2` an Int32, never promoted by the exponent's width.
+             | IRTScalar e1, IRTScalar (ETInt32 | ETInt64) when op = IRCaret
+                                                              && (match e1 with
+                                                                  | ETInt32 | ETInt64 | ETFloat32 | ETFloat64
+                                                                  | ETComplex64 | ETComplex128 -> true
+                                                                  | _ -> false) -> IRTScalar e1
+             // A bare integer LITERAL that fits Int32 adapts to an Int32
+             // partner (formalism 2.4: "`i32 + 1` is Int32"; the checker's
+             // literal rule, stated once more here because IRLitInt carries
+             // no width of its own). Every lane computes such a node in 32 bits.
+             | IRTScalar ETInt32, IRTScalar ETInt64 when (match right with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                 IRTScalar ETInt32
+             | IRTScalar ETInt64, IRTScalar ETInt32 when (match left with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                 IRTScalar ETInt32
              | IRTScalar e1, IRTScalar e2 ->
                  IRTScalar (promoteElemType e1 e2 |> Option.defaultValue e1)
              | lt, _ -> lt)
@@ -3032,20 +3401,32 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          // abs always yields the real magnitude (Float64); other intrinsics on
          // a complex operand preserve the complex type (std::exp(complex)->
          // complex), and stay Float64 on a real operand.
-         | IRMath "abs" -> IRTScalar ETFloat64
+         // A Float32 operand keeps Float32 (formalism 2.4: a transcendental
+         // of a Float32 is the double function rounded once to float, and
+         // sqrt / floor / ceil / abs are the float operations); the magnitude
+         // of a Complex64 is its component width.
+         | IRMath "abs" ->
+             (match stripUnits (typeOf operand) with
+              | IRTScalar (ETFloat32 | ETComplex64) -> IRTScalar ETFloat32
+              | _ -> IRTScalar ETFloat64)
          | IRMath _ ->
              (match typeOf operand with
               | IRTScalar (ETComplex64 | ETComplex128) as ct -> ct
+              | t when stripUnits t = IRTScalar ETFloat32 -> IRTScalar ETFloat32
               | _ -> IRTScalar ETFloat64)
          // A cast's type is its target, whatever the operand resolved to.
          | IRCast (et, _) -> IRTScalar et)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
-    | IRFma _ -> IRTScalar ETFloat64
+    | IRFma (a, b, c) ->
+        (match stripUnits (typeOf a), stripUnits (typeOf b), stripUnits (typeOf c) with
+         | IRTScalar ETFloat32, IRTScalar ETFloat32, IRTScalar ETFloat32 -> IRTScalar ETFloat32
+         | _ -> IRTScalar ETFloat64)
+    | IRRandAt (kind, _, _) -> if kind = "categorical_at" then IRTScalar ETInt64 else IRTScalar ETFloat64
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 -> Complex64,
         // Float64 -> Complex128. Reports as a scalar (NOT a tuple) -- that's
         // the whole point of having a separate IRComplex node.
-        (match typeOf re with
+        (match stripUnits (typeOf re) with
          | IRTScalar ETFloat32 -> IRTScalar ETComplex64
          | _ -> IRTScalar ETComplex128)
     | IRTupleProj (e, i, isFlat) ->
@@ -3130,8 +3511,8 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
               | _ -> elemType))
     | IRAssign _ -> IRTUnit
     | IRForRange _ -> IRTUnit
-    | IRConstraintCheck _ -> IRTUnit
-    | IRBreakIf _ -> IRTUnit
+    | IRBeginPoolScope _ | IRReleasePools _ | IRConstraintCheck _ -> IRTUnit
+    | IRBreakIf _ | IRReplayRow _ -> IRTUnit
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
         // above), populated both at liftInlineFormsModule entry and at
@@ -3552,8 +3933,8 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // a brand-new IRExpr variant still fails to compile until it gets a
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
-    | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ ->
+    | IRVar _ | IRParam _ | IRAppAt _ | IRArrayLit _ | IRStructLit _
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ | IRUnseededSeed _ | IRUninit _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _
@@ -3604,6 +3985,14 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         if comps |> List.forall Option.isSome then
             Some (IRTTuple (comps |> List.map Option.get))
         else None
+    // A STRUCTURAL PROJECTION of a tuple whose type is known: that component.
+    // A pack named by a tuple-typed variable reaches its specialization as
+    // the projections `p[0], p[1], ..` (IRMono.tupleVarPackElems), and each
+    // must teach the callee its element type as a written component does.
+    | IRTupleProj (e, i, false) ->
+        (match exprTypeIfKnown e with
+         | Some (IRTTuple ts) when i >= 0 && i < ts.Length -> Some ts.[i]
+         | _ -> None)
     // COMPUTATION WRAPPERS erase at the type level (they are `TypeVia`
     // pass-throughs): `xs |> compute` materializes a deferred computation
     // without changing WHAT it computes. Written inline in an argument slot --
@@ -3630,6 +4019,15 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
     | IRIndex (arr, _, _) ->
         (match exprTypeIfKnown arr with
          | Some (ArrayElem _) -> Some (typeOf expr)
+         | _ -> None)
+    // A rank-one fold over a known array answers its element type. This
+    // knowledge must survive specialization: a Float32/Complex64 fold beside
+    // a literal keeps that component width, and an Int32 fold keeps wrapping
+    // arithmetic at Int32. Use the canonical fold rule only after proving the
+    // operand shape; unknown operands still answer None.
+    | IRReduce (arr, _, _) ->
+        (match exprTypeIfKnown arr with
+         | Some (ArrayElem a) when a.IndexTypes.Length = 1 -> Some (typeOf expr)
          | _ -> None)
     // ---- Scalar-valued constructions over KNOWN operands ----------------
     // An argument WRITTEN INLINE -- `idg(complex(1.0, 2.0))`, `idg(Float32(x))`,
@@ -3659,11 +4057,13 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
          | IRArg, Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
-         | IRMath "abs", Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
+         | IRMath "abs", Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
+         | IRMath "abs", Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
          | IRMath "abs", Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 as et)) ->
              Some (IRTScalar et)
          | IRMath _, Some (AnyPrimElem (ETComplex64 | ETComplex128 as et)) -> Some (IRTScalar et)
-         | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64)) ->
+         | IRMath _, Some (AnyPrimElem ETFloat32) -> Some (IRTScalar ETFloat32)
+         | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat64)) ->
              Some (IRTScalar ETFloat64)
          | _ -> None)
     | IRBinOp (_, op, l, r, _) ->
@@ -3671,6 +4071,7 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | Some (AnyPrimElem e1), Some (AnyPrimElem e2) ->
              (match op with
               | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> Some (IRTScalar ETBool)
+              | IRMath2 _ when e1 = ETFloat32 && e2 = ETFloat32 -> Some (IRTScalar ETFloat32)
               | IRMath2 _ -> Some (IRTScalar ETFloat64)
               // `^` is left alone off the all-Float64 case: an integer power's
               // result class is not the plain promotion rule's to state.
@@ -3683,6 +4084,14 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
                                  | ETComplex64 | ETComplex128 -> true
                                  | _ -> false) -> Some (IRTScalar e1)
               | IRCaret -> None
+              // typeOf's literal rule: a bare fitting integer literal adapts
+              // to an Int32 partner.
+              | IRAdd | IRSub | IRMul | IRDiv | IRMod when e1 = ETInt32 && e2 = ETInt64
+                                                       && (match r with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                  Some (IRTScalar ETInt32)
+              | IRAdd | IRSub | IRMul | IRDiv | IRMod when e1 = ETInt64 && e2 = ETInt32
+                                                       && (match l with IRLit (IRLitInt n) -> fitsInt32 n | _ -> false) ->
+                  Some (IRTScalar ETInt32)
               | IRAdd | IRSub | IRMul | IRDiv | IRMod ->
                   promoteElemType e1 e2 |> Option.map IRTScalar)
          | _ -> None)
@@ -3695,7 +4104,10 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         (match exprTypeIfKnown a, exprTypeIfKnown b, exprTypeIfKnown c with
          | Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64) ->
              Some (IRTScalar ETFloat64)
+         | Some (AnyPrimElem ETFloat32), Some (AnyPrimElem ETFloat32), Some (AnyPrimElem ETFloat32) ->
+             Some (IRTScalar ETFloat32)
          | _ -> None)
+    | IRRandAt _ -> Some (typeOf expr)
     // ---- Value-preserving wrappers --------------------------------------
     // A block's value IS its body's; sort, whole-array negate and conjugate
     // keep their operand's shape and element.

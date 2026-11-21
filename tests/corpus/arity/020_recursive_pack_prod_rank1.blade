@@ -10,7 +10,7 @@ function packprod1(A: Poly<T^1>) -> T^1 = {
         head * packprod1(tail)
     }
 }
-let x = [2.0, 3.0]
-let y = [5.0, 7.0]
+let x = Float64([2.0, 3.0])
+let y = Float64([5.0, 7.0])
 let result = packprod1(x, y)
 // EXPECT: result = [10.0, 21.0]

@@ -1,0 +1,11 @@
+// TEST: Group Row Map Choosing Between Rows (rejects)
+// ERROR: BL3027
+// G90: an `if` whose arms are rows is outside the length-preservation
+// grammar (unify does not compare member axes' lengths: either arm could be
+// another group's row), so the per-group map is refused at the type checker.
+type I = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = Float64(0..7) |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(r) -> if reduce(r, (+)) > 5.0 then r else r * 2.0 |> compute

@@ -11,5 +11,5 @@ import ml as ml
 // basis-dependent" but "this map provably fails Df(x)(A x) = A f(x)", at a
 // named generator, in a named component, at a named monomial.
 let static S = [(0, 0, 2), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
   x(2)

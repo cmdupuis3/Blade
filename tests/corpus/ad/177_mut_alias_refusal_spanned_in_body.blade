@@ -1,0 +1,21 @@
+// TEST: A Mut Argument Refusal Inside A Function Body Is Spanned At The Call (rejects)
+// ============================================================================
+// Gap G240 (1), round 4 wave 10 (lane C, C3): inside a function body the
+// refused call is located on its own line, not at the function declaration.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+function twice(a: A) -> (A, A) = (a, a)
+let mut g: A = [1.0, 2.0]
+let mut h: A = [3.0, 4.0]
+function f(s: Float64) -> Float64 = {
+    let pair = twice(g)
+    let mut x = pair[1]
+    bump(pair[0], x) + s
+}
+let r = f(1.0)
+// ERROR: BL4005 @ 16:5
+// REJECT-AT: lower

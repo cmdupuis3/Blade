@@ -14,13 +14,13 @@
 // (genFusionTree), a compose-apply on the LEFT of `@>>`, and a plain `@>>`
 // whose right kernel is the block-bodied one. Values are the same as the
 // originals pinned, since a decline is not a semantic change.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x) -> x + 1.0
 let h = lambda(x) -> x - 1.0
 let hm5 = lambda(x) -> x - 5.0
 let L = method_for(A)
-function dbl_blocky(x: Float) -> Float = { x * 2.0 }
-function sq_blocky(y: Float) -> Float = { y * y }
+function dbl_blocky(x: Float64) -> Float64 = { x * 2.0 }
+function sq_blocky(y: Float64) -> Float64 = { y * y }
 
 // plain compose-apply, unfused: (x+1)*2
 let blk = (object_for(f) >>@ object_for(dbl_blocky)) <@> A |> compute

@@ -1,0 +1,12 @@
+// TEST: A sort inside a generic function at R orders the keys
+// ============================================================================
+// R3, a defect fixed: `sort(x, lambda(e) -> e)` in a generic body at an array
+// of R sorted by POSITION (the base computed [300, 100, 200]). A sort key
+// that is a value of the generic variable marks it observed; the call hands
+// the array over as keys, so the result is the sorted keys (Int64).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes2: Array<R like Idx<3>> = [200, 300, 100]
+function srt(x: T^1) = sort(x, lambda(e) -> e)
+let sr = srt(codes2)
+// EXPECT: sr = [100, 200, 300]

@@ -1,0 +1,28 @@
+// TEST: Nested Alias Of Deferred Map Is A Copy
+// ----------------------------------------------------------------------------
+// Gap G60's scope line (formalism 10.2): only a TOP-LEVEL alias of a deferred
+// map is the same deferred value. An assignable alias bound inside a function
+// body or a block is a local COPY, made at the alias -- a forcing use of the
+// source -- so an element write through it is the copy's, and a later fold
+// reads the written cells. The interpreter used to bind the deferred value
+// and force a fresh copy at each use, losing the write (r = 12.0 where the
+// compiled lanes printed 110.0). The block's force is at module level, so it
+// registers `g` and g prints; the function's is private.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function f(k: Float64) -> Float64 = {
+    let mut a = g
+    a(0) = k
+    reduce(a, (+))
+}
+let r = f(100.0)
+let blk = {
+    let mut b = g
+    b(1) = 50.0
+    reduce(b, (+))
+}
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: r = 110.0
+// EXPECT: blk = 58.0

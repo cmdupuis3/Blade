@@ -1,0 +1,12 @@
+// TEST: A Nested Lambda Calling A Closure Of Its Enclosing Function Is Not Refused
+// Gap G247 (round 4 wave 9 lane d; wave-end review F2): the inner kernel lambda(k) calls f through
+// the closure (its captures are f and v, both received), so the foreign-capture refusal does not
+// apply: 2 * 2 * v + 0 + 1 per cell, the master value in the C++ and LLVM lanes.
+// EXPECT: r = [5.0, 9.0, 13.0]
+function outer(a: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * scale
+    method_for(a) <@> (lambda(v: Float64) -> reduce(method_for(0..2) <@> lambda(k) -> f(v) + Float64(k), (+))) |> compute
+}
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = outer(xs)

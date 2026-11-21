@@ -1,0 +1,7 @@
+// TEST: imported statics retain explicit wide and intentional narrow widths
+// MODULE: Widths
+module Widths
+let static real_wide = Float64(0.1)
+let static real_small = Float32(0.1)
+let static int_wide = Int64(2147483647)
+let static int_small = Int32(21)

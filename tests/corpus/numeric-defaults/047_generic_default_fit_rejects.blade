@@ -1,0 +1,4 @@
+// TEST: generic default literals must fit a supplied argument width (rejects)
+function offset(x: T^0, origin: T^0 = 1e300) = x - origin
+let result = offset(Float32(1.0))
+// ERROR: BL3001

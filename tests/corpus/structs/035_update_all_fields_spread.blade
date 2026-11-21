@@ -2,8 +2,8 @@
 // ERROR: BL3008
 // Providing every field explicitly makes the spread dead — reject it.
 struct Point {
-    x: Float,
-    y: Float
+    x: Float64,
+    y: Float64
 }
 let p = Point { x = 1.0, y = 2.0 }
 let q = Point { x = 3.0, y = 4.0, ..p }

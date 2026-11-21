@@ -1,0 +1,11 @@
+// TEST: PPL converts a Float32 argument to Float64
+import ppl as ppl
+// Round 6 (numeric defaults): PPL computes in Float64 this round, and a user
+// scalar the elaborator hoists is read through a Float64 cast -- so a Float32
+// VARIABLE passed as an evaluation point (or weight, or family parameter) is
+// CONVERTED, not refused. The converted value is the Float32 0.1 widened,
+// 0.100000001490116..., which the 15-digit pin tells apart from the double
+// 0.1 (-1.75551212348465, ppl/141).
+let w: Float32 = 0.1
+let lp = ppl.logpdf(gaussian(1.5, 2.0), w)
+// EXPECT: lp = -1.75551212244156

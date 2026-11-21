@@ -5,5 +5,5 @@
 // is open -- Float64 -- which every real row keeps (functions/447). A complex
 // row's product is Complex128, which Float64 cells cannot hold: the call is
 // refused at its argument instead of reaching g++ (it was BL9002).
-function half(a: T^1) = a * 0.5
-let z = half([complex(1.0, 2.0), complex(3.0, 4.0)])
+function half(a: T^1) = a * Float64(0.5)
+let z = half(Complex128([complex(1.0, 2.0), complex(3.0, 4.0)]))

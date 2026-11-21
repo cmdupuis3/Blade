@@ -1,0 +1,10 @@
+// TEST: A Comparison Section Folding Stored Number Cells Is Refused (rejects)
+// ERROR: BL3001 @ 8:1
+// ERROR-CONTAINS: the fold kernel (<) returns a Bool
+// ============================================================================
+// R11: as functions/971 over a stored array (base printed `r = 1`, `s = 2`).
+// A comparison fold over Bools (`reduce(bs, (==))`) stays legal.
+// ============================================================================
+let xs: Array<Int64 like Idx<3>> = [1, 2, 3]
+let r = reduce(xs, (<), Int64(0))
+let s = r + Int64(1)

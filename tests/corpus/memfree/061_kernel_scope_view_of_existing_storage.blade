@@ -1,0 +1,44 @@
+// TEST: A Kernel Application Still Frees Beside A Rebinding To A View Of Existing Storage (G204)
+// Gap G204 (2): an outer `let mut` rebound to a ROW VIEW of storage that
+// existed before the application (`out = a((1 : R))`) used to read as an
+// escape in the LLVM lane -- the view is a fresh GEP register, not the pool
+// it points into -- so every pool of that application (`big`'s result) kept
+// the arena. The kernel scope now follows a view to its root pool; a root
+// that existed before the application is not an escape. `blade test llvm`
+// pins the free of `big`'s result in `pick`. The view of a pool the
+// application allocated itself (`pick3`'s `m`) is still an escape: kept,
+// and recorded in the IR. (A rebinding inside a kernel applied PER CELL is
+// refused by the LLVM lane: memfree/063.)
+// sum big(w) = 500500 w: got = 1501500, got3 = 3003000
+type Big = Idx<1001>
+type R = Idx<2>
+type C = Idx<3>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+function mk(w: Float64) -> Array<Float64 like R, C> = {
+    method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) * w + Float64(j) |> compute
+}
+
+let a = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let pick = lambda(t: Float64) -> {
+    out = a((1 : R))
+    reduce(big(t), (+))
+}
+let got = pick(3.0)
+let after = reduce(out, (+))
+
+let mut out3: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let pick3 = lambda(t: Float64) -> {
+    let m = mk(t)
+    out3 = m((1 : R))
+    reduce(big(t), (+))
+}
+let got3 = pick3(6.0)
+let after3 = reduce(out3, (+))
+// EXPECT: got = 1501500.0
+// EXPECT: after = 6.0
+// EXPECT: got3 = 3003000.0
+// EXPECT: after3 = 21.0

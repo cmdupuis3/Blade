@@ -1,0 +1,19 @@
+// TEST: Fold Ring Declines Lag Past Extent
+// ============================================================================
+// PM35 decline control (Codex review round 1): a guarded lag at or beyond the
+// recursion's extent is never selected (zero history), but it would size the
+// ring (and K + 1 could overflow): v1 declines it.
+// ============================================================================
+type T = Idx<11>
+
+function far(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 9223372036854775807) + 1.0
+    reduce(s, (+))
+}
+
+let v = far(1.0)
+// EXPECT: v = 11.0

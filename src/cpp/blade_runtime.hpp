@@ -18,9 +18,17 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <atomic>
 #include <type_traits>
 #include <locale>
+#include <initializer_list>
+#include <functional>
+#include <unordered_set>
+#include <sstream>
+#include <string>
+#include <vector>
+#include "blade_shortest.h"  // the display print form's float spelling (P3-26)
 #if !defined(__CUDA_ARCH__)
 // ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
 //
@@ -190,11 +198,67 @@ namespace blade_libm {
     return narrow_(pow(static_cast<double>(x), std::complex<double>(y))); }
 }
 
+// ---- Complex64 `*` and `/` (round 6): Blade's OWN algorithms over plain
+// float operations, so the interpreter (Numerics.c64Mul / c64Div) and this
+// lane agree bit for bit by construction under BLADE_FP_CONTRACT=off --
+// libgcc's __mulsc3 / __divsc3 (NaN recovery, scaling, a double-precision
+// intermediate in newer GCCs) are not reproduced. Complex128 keeps libgcc's.
+//   mul: (a + bi)(c + di) = (ac - bd) + (ad + bc)i, each product rounded.
+//   div: Smith's algorithm -- scale by the larger of |c|, |d|.
+// Panic-free (blade_arith is in codegen's panicFreeNamespaces).
+namespace blade_arith {
+  inline std::complex<float> c64_mul(std::complex<float> x, std::complex<float> y) {
+    const float a = x.real(), b = x.imag(), c = y.real(), d = y.imag();
+    const float ac = a * c, bd = b * d, ad = a * d, bc = b * c;
+    return std::complex<float>(ac - bd, ad + bc);
+  }
+  inline std::complex<float> c64_div(std::complex<float> x, std::complex<float> y) {
+    const float a = x.real(), b = x.imag(), c = y.real(), d = y.imag();
+    if (std::fabs(c) >= std::fabs(d)) {
+      const float r = d / c;
+      const float den = c + d * r;
+      return std::complex<float>((a + b * r) / den, (b - a * r) / den);
+    } else {
+      const float r = c / d;
+      const float den = c * r + d;
+      return std::complex<float>((a * r + b) / den, (b * r - a) / den);
+    }
+  }
+}
+
 // The PANIC-FREE half of the arithmetic contract (docs/formalism.md section
 // 2.4). Nothing in this namespace may reach blade_rt::panic: codegen lists
 // `blade_arith::` in panicFreeNamespaces, so a kernel that calls only these
 // keeps its shadow frame elided. The faulting forms live in blade_rt below.
 namespace blade_arith {
+  // Float64(x) of an Int64: the correctly rounded conversion, spelled so a
+  // vectorizer can widen it. AVX2 has no packed int64 -> double instruction
+  // (that is AVX-512DQ's vcvtqq2pd), and g++ will not vectorize a loop that
+  // holds one -- it does not narrow by value range either -- so a domain fold
+  // computing `Float64(i - j)` per cell stayed scalar (bench gap G30). Split
+  // v = hi * 2^32 + lo with hi the signed high word and lo the unsigned low
+  // word: hi converts through the packed int32 form, lo through the 2^52
+  // magic-exponent bit pattern (exact: lo < 2^32 < 2^52), hi * 2^32 is exact,
+  // so the one addition (or the fma a contracting build makes of it) rounds the
+  // exact value v once -- bit for bit what cvtsi2sd returns, in every rounding
+  // mode. With AVX-512DQ the plain conversion vectorizes and is used as is.
+  // Codegen calls it ONLY in a closed-form domain's cell code (the domain map
+  // kernel and what it calls; CodeGenExprSupport, "WHERE Float64(x)"): in
+  // scalar code the split costs ~6 instructions over one cvtsi2sd for the same
+  // double (+27% on an integer generator loop), so everywhere else codegen
+  // keeps static_cast<double>.
+  inline double i64_to_f64(int64_t v) {
+#if defined(__AVX512DQ__)
+    return static_cast<double>(v);
+#else
+    const uint64_t u = static_cast<uint64_t>(v);
+    const double hi = static_cast<double>(static_cast<int32_t>(static_cast<uint32_t>(u >> 32)));
+    const uint64_t lo_bits = (u & 0xFFFFFFFFull) | 0x4330000000000000ull;
+    double lo;
+    std::memcpy(&lo, &lo_bits, sizeof lo);
+    return hi * 4294967296.0 + (lo - 4503599627370496.0);
+#endif
+  }
   // b^e for e >= 0, exact modulo 2^w: square-and-multiply in the UNSIGNED
   // type, whose wraparound is defined, then back to T -- the two's-complement
   // residue every lane computes (any multiplication order gives the same
@@ -269,6 +333,44 @@ namespace blade_arith {
   // would cost the kernel its frame elision.
   inline int64_t ipow_nn64(int64_t b, int64_t e) { return ipow_nn<int64_t>(b, e); }
   inline int32_t ipow_nn32(int32_t b, int32_t e) { return ipow_nn<int32_t>(b, e); }
+  // The key table of an INTEGER EnumIdx (F5): a value of the type is a key
+  // represented as its position, and an observation reads
+  // `key_table<k0, k1, ...>::tab[p]` -- ONE static table per distinct key
+  // list in the whole program (a template instantiation), read in O(1).
+  // No call shape, so the frame-elision scan sees nothing to follow.
+  template <int64_t... K> struct key_table { static constexpr int64_t tab[sizeof...(K)] = { K... }; };
+}
+namespace blade_rt {
+  // sort(A, key)'s key order (docs/features/sql.md section 9; the
+  // interpreter's F# `compare`): ascending under a TOTAL preorder -- every NaN
+  // key before every other key and all NaNs tie, -0.0 and +0.0 tie, other keys
+  // by `<`. A strict weak order, so std::stable_sort's result is unique (the
+  // plain `<` with a NaN key was not one: its result was unspecified).
+  template <class K> inline bool sort_key_less(const K& a, const K& b) {
+    if constexpr (std::is_floating_point<K>::value) return a < b || (a != a && b == b);
+    else return a < b;
+  }
+  // The SET EQUALITY of unique / intersect / union (docs/features/sql.md
+  // section 3; gap G126): the classes of sort's key order -- every NaN ONE
+  // value, -0.0 and +0.0 one value, other keys by `==` -- the interpreter's
+  // `compare = 0`. Each class keeps its FIRST occurrence. (`contains` stays
+  // the scalar `==`: NaN matches nothing.)
+  template <class K> struct set_eq {
+    bool operator()(const K& a, const K& b) const {
+      if constexpr (std::is_floating_point<K>::value) return a == b || (a != a && b != b);
+      else return a == b;
+    }
+  };
+  template <class K> struct set_hash {
+    std::size_t operator()(const K& k) const {
+      if constexpr (std::is_floating_point<K>::value) {
+        if (k != k) return static_cast<std::size_t>(0x9e3779b97f4a7c15ull); // every NaN: one class
+        if (k == K(0)) return std::hash<K>{}(K(0));                           // -0.0 and +0.0
+      }
+      return std::hash<K>{}(k);
+    }
+  };
+  template <class K> using set_of = std::unordered_set<K, set_hash<K>, set_eq<K>>;
 }
 namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };
@@ -315,8 +417,15 @@ namespace blade_rt {
   // private registry rather than at_quick_exit, which not every C++ runtime
   // Blade targets provides.
   inline void (*failure_exit_hooks[8])() = {};
+  // Checked registration for mandatory resources. Existing callers retain
+  // their void API; a new owner must not silently lose its exit cleanup.
+  inline bool try_on_failure_exit(void (*f)()) {
+    if (!f) return false;
+    for (auto& h : failure_exit_hooks) if (!h) { h = f; return true; }
+    return false;
+  }
   inline void on_failure_exit(void (*f)()) {
-    for (auto& h : failure_exit_hooks) if (!h) { h = f; return; }
+    (void)try_on_failure_exit(f);
   }
   //
   // `panicking` is set by the FIRST panic. OpenMP workers routinely fail
@@ -350,6 +459,21 @@ namespace blade_rt {
     std::fflush(nullptr);
     std::_Exit(1);
   }
+  // The generated main's catch-all for a C++ exception. A runtime header
+  // that must fail with a specific code (but may not call panic itself --
+  // see the shadow-frame elision note in tests/Test_Diagnostics.fs) throws
+  // a std exception whose what() starts "[BLnnnn] ": that code is reported
+  // with the rest of the message. Anything else is BL8005, as before.
+  [[noreturn]] inline void panic_exception(const std::exception& e) {
+    static char code[8];
+    const char* w = e.what();
+    if (w && w[0] == '[' && w[1] == 'B' && w[2] == 'L' && w[7] == ']' && w[8] == ' ') {
+      for (int i = 0; i < 6; ++i) code[i] = w[i + 1];
+      code[6] = '\0';
+      panic(code, w + 9, nullptr, 0);
+    }
+    panic("BL8005", w, nullptr, 0);
+  }
   // The entry point a Blade-built DLL fails through (blade_dll_panic.hpp).
   // The DLL is its own image and must not carry a second copy of this
   // header's state, so the host binds this function into it at static
@@ -359,6 +483,94 @@ namespace blade_rt {
   // symbol the shadow-frame analysis cannot follow, so it keeps its frame.
   [[noreturn]] inline void dll_panic(const char* code, const char* msg) {
     panic(code, msg, nullptr, 0);
+  }
+
+  // ---- The provider boundary rule (BL8015) --------------------------------
+  //
+  // A missing value never crosses a provider boundary disguised as a number:
+  // a cell a store marks missing (NaN / +-Inf in a floating variable, a
+  // NetCDF _FillValue / missing_value / valid-range sentinel) refuses the
+  // read instead of reaching the program as data. The provider emitters
+  // decide WHICH cells are missing (one rule per variable, baked at compile
+  // time: ProviderRegistry.MissingRule, whose F# predicate the interpreter
+  // and the static fold apply to the same cells); these helpers only count
+  // and report. The message is the interpreter's
+  // ProviderRegistry.missingMessage, character for character.
+  //
+  // `lead` are fixed leading coordinates (a streamed fiber's site), `origin`
+  // the per-dimension offset of the scanned buffer inside the variable (a
+  // window), `ext` the buffer's own row-major shape: the first offending
+  // cell is reported in the VARIABLE's coordinates.
+  struct missing_tally {
+    size_t count = 0;
+    size_t first = 0;
+    // The smallest flat index, whatever order the cells were visited in
+    // (chunked assembly is not row-major): the report names the same cell
+    // the interpreter's row-major scan finds first.
+    void note(size_t i) { if (count == 0 || i < first) first = i; ++count; }
+  };
+  [[noreturn]] inline void missing_report(size_t count, size_t first,
+                                          const char* var, const char* path, const char* rule,
+                                          std::initializer_list<long long> lead,
+                                          std::initializer_list<long long> origin,
+                                          std::initializer_list<long long> ext) {
+    std::vector<long long> coords(lead.begin(), lead.end());
+    const size_t r = ext.size();
+    std::vector<long long> local(r, 0);
+    size_t rem = first;
+    for (size_t d = r; d-- > 0;) {
+      long long n = ext.begin()[d];
+      if (n > 0) { local[d] = (long long)(rem % (size_t)n); rem /= (size_t)n; }
+    }
+    for (size_t d = 0; d < r; ++d)
+      coords.push_back(local[d] + (d < origin.size() ? origin.begin()[d] : 0));
+    std::ostringstream os;
+    os << "provider read of '" << var << "' from '" << path << "': " << count
+       << " cell(s) hold a missing value (first at [";
+    for (size_t i = 0; i < coords.size(); ++i) os << (i ? ", " : "") << coords[i];
+    os << "]; missing here: " << rule
+       << ") -- read it with .read_present for the present cells as a compound array, or .present for the presence mask";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
+  }
+  // Scan a filled destination buffer; refuse if any cell is missing.
+  template <class T, class Missing>
+  inline void refuse_missing(const T* buf, size_t n, Missing missing,
+                             const char* var, const char* path, const char* rule,
+                             std::initializer_list<long long> lead,
+                             std::initializer_list<long long> origin,
+                             std::initializer_list<long long> ext) {
+    missing_tally t;
+    for (size_t i = 0; i < n; ++i) if (missing(buf[i])) t.note(i);
+    if (t.count) missing_report(t.count, t.first, var, path, rule, lead, origin, ext);
+  }
+  // The write side of the same rule: a floating cell that is NaN or infinite
+  // is not written, since every reader of the store would refuse it.
+  // The report itself, shared with provider-sink-stream v1's validation pass
+  // (which tallies recomputed cells block by block, then reports here).
+  inline void refuse_nonfinite_report(const missing_tally& t, const char* var, const char* path) {
+    if (t.count == 0) return;
+    std::ostringstream os;
+    os << "provider write of '" << var << "' to '" << path << "': " << t.count
+       << " cell(s) are NaN or infinite (first at flat cell " << t.first
+       << ") -- a read of the store would refuse them; mask or replace them before writing";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
+  }
+  template <class T>
+  inline void refuse_nonfinite_write(const T* buf, size_t n, const char* var, const char* path) {
+    missing_tally t;
+    for (size_t i = 0; i < n; ++i) if (!std::isfinite((double)buf[i])) t.note(i);
+    if (t.count == 0) return;
+    std::ostringstream os;
+    os << "provider write of '" << var << "' to '" << path << "': " << t.count
+       << " cell(s) are NaN or infinite (first at flat cell " << t.first
+       << ") -- a read of the store would refuse them; mask or replace them before writing";
+    static std::string msg;
+    msg = os.str();
+    panic("BL8015", msg.c_str(), nullptr, 0);
   }
 
   // ---- Typed float spelling: a floating value prints with a decimal point.
@@ -375,10 +587,30 @@ namespace blade_rt {
   // the facet. Other streams (display-frame JSON, provider writers) are not
   // imbued and keep their own number rules. The interpreter's twin is
   // src/Interp/CppFormat.fs markFloat; the LLVM lane's is blade_fmt_f64.
+  //
+  // BLADE_PRINT_BITS (read once, when main installs the facet; a RUN-TIME
+  // test instrument, never read by the compiler): `1`/`on` appends each
+  // double's raw IEEE-754 bit pattern, ` #<16 hex digits>`, after its decimal
+  // text -- the exact-bits channel the differential tests compare (signed
+  // zero and NaN payload included). The LLVM lane's blade_fmt_f64 reads the
+  // same variable; unset / `0` / `off` = the ordinary text.
+  inline bool print_bits_requested() {
+    const char* e = std::getenv("BLADE_PRINT_BITS");
+    if (!e || !*e) return false;
+    return !(std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 || std::strcmp(e, "OFF") == 0
+             || std::strcmp(e, "false") == 0);
+  }
+  // THE DISPLAY PRINT FORM (P3-26; src/PrintForm.fs): set by a generated main
+  // built under BLADE_PRINT_FORM=display, before any print. A float then
+  // prints at its SHORTEST round-trip digits (blade_shortest.h, the text the
+  // LLVM shim runs too), and BLADE_PRINT_BITS -- a test instrument of the
+  // test form -- appends nothing.
+  inline bool& print_display_flag() { static bool f = false; return f; }
   struct float_put : std::num_put<char> {
     using base = std::num_put<char>;
     using iter_type = base::iter_type;
     using base::do_put;  // keep the integral/bool/pointer overloads visible
+    const bool bits_ = print_bits_requested();
   protected:
     // A fixed sink for one rendering; overflow (never reached at the
     // precisions marked here) leaves the iterator failed and the text cut.
@@ -397,13 +629,30 @@ namespace blade_rt {
         return base::do_put(out, io, fill, v);
       const std::streamsize w = io.width(0);
       sink s;
-      base::do_put(iter_type(&s), io, fill, v);
-      std::size_t n = s.size();
-      std::size_t i = (n > 0 && (s.b[0] == '-' || s.b[0] == '+')) ? 1 : 0;
-      bool bare = n > i;
-      for (std::size_t k = i; k < n; ++k)
-        if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
-      if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
+      std::size_t n;
+      std::size_t i;
+      if (print_display_flag()) {
+        // The display form: shortest round-trip digits, marked as a float
+        // (blade_shortest.h); no bit suffix.
+        blade_fmt_display_f64(s.b, sizeof s.b, static_cast<double>(v));
+        n = std::strlen(s.b);
+        i = (n > 0 && s.b[0] == '-') ? 1 : 0;
+      } else {
+        base::do_put(iter_type(&s), io, fill, v);
+        n = s.size();
+        i = (n > 0 && (s.b[0] == '-' || s.b[0] == '+')) ? 1 : 0;
+        bool bare = n > i;
+        for (std::size_t k = i; k < n; ++k)
+          if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
+        if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
+        if constexpr (std::is_same<F, double>::value) {
+          if (bits_ && n + 20 < sizeof s.b) {
+            unsigned long long u;
+            std::memcpy(&u, &v, sizeof u);
+            n += (std::size_t)std::snprintf(s.b + n, sizeof s.b - n, " #%016llx", u);
+          }
+        }
+      }
       // Re-apply the width the rendering was taken without.
       std::size_t pad = w > static_cast<std::streamsize>(n) ? static_cast<std::size_t>(w) - n : 0;
       const auto adjust = io.flags() & std::ios_base::adjustfield;
@@ -423,6 +672,78 @@ namespace blade_rt {
   };
   inline void typed_float_print(std::ostream& os) {
     os.imbue(std::locale(os.getloc(), new float_put));
+  }
+
+  // ---- Float32 spelling (round 6 rule 8): a Float32 prints with 6
+  // significant digits (FLT_DIG), "%.6g" -- scientific iff the decimal
+  // exponent is < -4 or >= 6 -- where a Float64 keeps 15 (DBL_DIG). The
+  // facet above cannot tell a promoted float from a double, so every value
+  // print site in the generated code streams `blade_rt::pv(x)`: the identity
+  // for every other type, a print proxy for `float` and
+  // `std::complex<float>` (Complex64 prints "(re,im)", each part like a
+  // Float32). Same rules as the double spelling: "nan" with no sign,
+  // "inf"/"-inf", a bare digit run gains ".0" ("2.0", "-0.0"); under
+  // BLADE_PRINT_BITS the FLOAT's own raw bits follow as " #<8 hex digits>".
+  // Twins: CppFormat.formatFloat32 (interpreter), blade_fmt_f32 (LLVM shim).
+  inline bool print_bits_cached() {
+    static const bool b = print_bits_requested();
+    return b;
+  }
+  inline void fmt_f32(char* buf, std::size_t cap, float v) {
+    if (print_display_flag()) { blade_fmt_display_f32(buf, cap, v); return; }
+    if (std::isnan(v)) std::snprintf(buf, cap, "nan");
+    else if (std::isinf(v)) std::snprintf(buf, cap, v < 0.0f ? "-inf" : "inf");
+    else {
+      int n = std::snprintf(buf, cap, "%.6g", (double)v);
+      if (n > 0 && (std::size_t)n + 3 <= cap) {
+        int i = (buf[0] == '-') ? 1 : 0;
+        bool bare = n > i;
+        for (int k = i; k < n; ++k)
+          if (buf[k] < '0' || buf[k] > '9') { bare = false; break; }
+        if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+      }
+    }
+    if (print_bits_cached()) {
+      std::uint32_t u;
+      std::memcpy(&u, &v, sizeof u);
+      std::size_t used = std::strlen(buf);
+      if (used + 12 < cap) std::snprintf(buf + used, cap - used, " #%08x", (unsigned)u);
+    }
+  }
+  struct f32_out { float v; };
+  inline std::ostream& operator<<(std::ostream& os, f32_out x) {
+    char b[64];
+    fmt_f32(b, sizeof b, x.v);
+    return os << b;
+  }
+  struct c64_out { std::complex<float> v; };
+  inline std::ostream& operator<<(std::ostream& os, const c64_out& x) {
+    return os << '(' << f32_out{x.v.real()} << ',' << f32_out{x.v.imag()} << ')';
+  }
+  template <class T> inline const T& pv(const T& x) { return x; }
+  inline f32_out pv(float x) { return f32_out{x}; }
+  inline c64_out pv(const std::complex<float>& x) { return c64_out{x}; }
+
+  // PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1): a module-level
+  // recursion's ring sweep is ONE lambda run twice -- at its slot with
+  // emit = false (filling the snapshots; a failing step fails there, before
+  // any print) and at the trajectory's print with emit = true (printing each
+  // row). Both runs go through this one call, never inlined into either site
+  // nor cloned per constant argument, so they execute the same machine code:
+  // the printed rows are the bits the first run computed, whatever
+  // -ffp-contract decides for the sweep body.
+  template <class F>
+#if defined(__GNUC__) && !defined(__clang__)
+  __attribute__((noipa))
+#elif defined(__clang__)
+  __attribute__((noinline))
+#elif defined(_MSC_VER)
+  __declspec(noinline)
+#endif
+  void replay_sweep(F& f, bool emit) {
+    // An opaque flag: no compiler may specialize the sweep body per run.
+    volatile bool e = emit;
+    f(e);
   }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
@@ -537,7 +858,7 @@ namespace blade_rt {
     s += 1.5056327351493116e-7 / (x + 7.0);
     const double t = x + 6.5;   // (x - 1) + g + 0.5, with g = 7
     // 0.9189385332046727 = log(2*pi) / 2
-    return 0.9189385332046727 + (x - 0.5) * std::log(t) - t + std::log(s);
+    return 0.9189385332046727 + (x - 0.5) * blade_libm_log(t) - t + blade_libm_log(s);
   }
 
   // ---- digamma(x) = psi(x) = d/dx log Gamma(x), x > 0.
@@ -611,7 +932,7 @@ namespace blade_rt {
     s = s +         (1.0 / 132.0)     / p;  p = p * x2;
     s = s +      (-691.0 / 32760.0)   / p;  p = p * x2;
     s = s +         (1.0 / 12.0)      / p;
-    return r + std::log(x) - 0.5 / x - s;
+    return r + blade_libm_log(x) - 0.5 / x - s;
   }
 }
 #define BLADE_FRAME(fn, file, line) blade_rt::Scope __blade_frame_(fn, file, line)

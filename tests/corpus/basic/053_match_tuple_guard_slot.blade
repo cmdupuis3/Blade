@@ -6,7 +6,7 @@
 // a silent wrong answer. The last-arm path always carried the slot; both do
 // now.
 
-let t = (10, 20, 30)
+let t = (Int64(10), Int64(20), Int64(30))
 let r = match t with
     | (_, b, _) if b > 0 -> b
     | _ -> 0

@@ -1,0 +1,14 @@
+// TEST: static unfolding preserves both wide and narrow folded argument widths
+static function shift_by(x, k) = lambda(a) -> match k with | m -> a + m * x(0)
+let wide_values = Float64([10.0, 20.0])
+let wide_input = Float64([1.0, 2.0, 3.0])
+let wide = (static object_for(shift_by(wide_values, Float64(2.0)))) <@> wide_input |> compute
+let narrow_values = Float32([10.0, 20.0])
+let narrow_input = Float32([1.0, 2.0, 3.0])
+let narrow = (static object_for(shift_by(narrow_values, Float32(2.0)))) <@> narrow_input |> compute
+let wc: Float64 = wide(0)
+let nc: Float32 = narrow(0)
+// EXPECT: wide = [21.0, 22.0, 23.0]
+// EXPECT: narrow = [21.0, 22.0, 23.0]
+// EXPECT: wc = 21.0
+// EXPECT: nc = 21.0

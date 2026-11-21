@@ -2,8 +2,8 @@
 // Fused fold over a multi-dim Cartesian pipeline (the sum-reduce over a
 // full method_for(A, B) grid), the 3-arg init form, and the (*) section's
 // implicit identity seed (1).
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let grid = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, (+), axes = 2)
 let grid_init = reduce(method_for(A, B) <@> lambda(x, y) -> x * y, (+), 100.0, axes = 2)
 let prod = reduce(method_for(A) <@> lambda(x) -> x + 1.0, (*))

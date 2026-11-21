@@ -2,5 +2,5 @@
 // Nested guard with outer false
 let p = false
 let q = true
-let result = guard(p, guard(q, 99))
+let result = guard(p, guard(q, Int64(99)))
 // EXPECT: result = 0

@@ -1,0 +1,17 @@
+// TEST: A Member Of A Deferred Module Tuple Read In A Body
+// ============================================================================
+// Gap G190 (d), round 4 wave 8 (lane C, C2, Codex design review): a body
+// projecting a member of a wholly DEFERRED module tuple binds a deferred
+// member; the body now keeps that record (it used to read an undeclared
+// `__v<id>`, BL9002) and forces the member where a statement reads it.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [4.0]
+let delayed = method_for(backing) <@> lambda(e) -> 8.0 / e
+let pair = (delayed, delayed)
+function f(x: Float64) -> Float64 = {
+    let member = pair[0]
+    member(0) * x
+}
+let r = f(Float64(3.0))
+// EXPECT: r = 6.0

@@ -1,5 +1,5 @@
 // TEST: Idx Card Box Cap (rejects)
-// ERROR: BL3999
+// ERROR: BL4002
 // ============================================================================
 // THE CAP IS ON THE BOX, NOT ON THE SOLUTION COUNT — and that is the whole
 // content of this test. The struct below has exactly ONE solution (the
@@ -27,9 +27,9 @@
 // all of them, and the extent list is what shows which.
 // ============================================================================
 static struct Wide {
-    a: Int<min=0, max=100>,
-    b: Int<min=0, max=100>,
-    c: Int<min=0, max=100>
+    a: Int32<min=0, max=100>,
+    b: Int32<min=0, max=100>,
+    c: Int32<min=0, max=100>
 } where a == 50, b == 50, c == 50
 
 let static CARD = idx_card(Wide)

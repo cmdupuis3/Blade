@@ -1,0 +1,21 @@
+// TEST: Producer-input legs ride, and a later intervening failure still comes first (aborts)
+// The legs over x and y ride y2's producer loop (total kernels and seeds), but
+// their results are bound where the join was -- after `boom`, whose integer
+// division by zero aborts BL8013 at its own line, after y2 is stored and s
+// folded, exactly as the as-written program (line 15 once the harness drops the TEST line).
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+let (s, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let z0 = Int64(floor(x((0 : Ix))))
+    let boom = 10 / z0
+    (s, reduce(x, (+)) + reduce(y, (+)) + Float64(boom))
+}
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:15

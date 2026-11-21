@@ -1,0 +1,6 @@
+// TEST: Imported results of elaborated calls feed math and spectra
+// MODULE: Lib
+module Lib
+import math as m
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 2.0]]
+let (Q, lam) = m.eigh(S)

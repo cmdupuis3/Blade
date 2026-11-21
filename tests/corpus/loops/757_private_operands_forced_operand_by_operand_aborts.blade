@@ -1,0 +1,15 @@
+// TEST: A Fold Forces Its Private Operands One By One, Inputs Then Cells (aborts)
+// Gap G207 (iii) (round 4 wave 8 lane d; Codex design review probe B): the
+// first private operand `e` (integer division by zero at cell 7) is
+// evaluated completely before the second operand `g`, whose capture `h`
+// fails with an integer modulo by zero. (The LLVM lane hoists that capture
+// force to the statement start, ahead of the in-place private `e`: a
+// recorded refusal there, the C++ lane takes it.)
+// ABORT: integer division by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let h = method_for(d) <@> lambda(a) -> 200 % (a - 3)
+let g = method_for(d) <@> lambda(a) -> a + h(0)
+let p = method_for(zip(e, g)) <@> lambda(a, b) -> a + b
+let s = reduce(p, (+), 0)

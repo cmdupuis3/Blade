@@ -1,0 +1,10 @@
+// TEST: False in a pattern is refused (rejects)
+// ============================================================================
+// Rule 2: a match arm on `False` is refused like the value spelling.
+// ============================================================================
+let b = true
+let r = match b with
+    | False -> 0
+    | _ -> 1
+// ERROR: BL1003
+// ERROR-CONTAINS: is spelled `false`

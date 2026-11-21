@@ -1,0 +1,19 @@
+// TEST: a non-adjacent repeat with a different middle extent reads in operand order
+// WARN: BL4010
+// A over 4, B over 6, `comm(x, z)` on the two A slots. Dense in operand order
+// means result(0, 5, 3) is a valid read (A_0, B_5, A_3) = 1*15 + 4*15 = 75.0.
+// The pre-2026-10-12 regrouping typed this as SymIdx<2, 4>, Idx<6> and the
+// same read indexed the symmetric pair with 5: an access violation.
+let A = 1.0 + Float64(0..4)
+let B = 10.0 + Float64(0..6)
+let f = lambda(x, y, z) where comm(x, z) -> x * y + z * y
+let result = method_for(A, B, A) <@> f |> compute
+let r053 = result(0, 5, 3)
+let r350 = result(3, 5, 0)
+let r012 = result(0, 1, 2)
+let total = reduce(result, (+), axes = 3)
+// EXPECT: r053 = 75.0
+// EXPECT: r350 = 75.0
+// EXPECT: r012 = 44.0
+// 2 * (sum A) * (sum B) * 4 = 2 * 10 * 75 * 4
+// EXPECT: total = 6000.0

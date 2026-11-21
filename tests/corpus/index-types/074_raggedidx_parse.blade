@@ -15,7 +15,7 @@
 // RaggedIdx<lengths>: externally parameterized via a lengths array.
 // The required prior index (Idx<3>) provides the iteration position used to
 // look up lengths internally.
-let lens = [2, 3, 1]
+let lens = Int64([2, 3, 1])
 function h(A: Array<Float64 like Idx<3>, RaggedIdx<lens>>) -> Float64 = {
     0.0
 }

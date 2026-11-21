@@ -1,0 +1,12 @@
+// TEST: A generic function handed an array of EnumIdx keys that computes on them
+// ============================================================================
+// `inc(codes)` hands `T` the R array itself. R3: its body observes `x` (`x +
+// 1`), so the call hands it the KEYS (`Int64(codes)`): the instance is an
+// Int64 one, as for a scalar of R (index-types/503). (It was refused after
+// monomorphization, BL4003: the instance at the R array would have added one
+// to the positions that represent the keys.)
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<3>> = [300, 100, 200]
+function inc(x: T) = x + 1
+let v = inc(codes)
+// EXPECT: v = [301, 101, 201]

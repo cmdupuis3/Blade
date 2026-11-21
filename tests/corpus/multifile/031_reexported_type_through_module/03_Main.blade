@@ -1,0 +1,14 @@
+// TEST: A type reaching main through another module's API
+// MODULE: Main
+// ============================================================================
+// D11: main imports only B, whose API mentions A's `P` (through the alias
+// `Q`): the identity `A.P` travels with B's exports, so the field read and
+// the print resolve although main never imports A.
+module Main
+import B
+let s = B.mkq()
+// EXPECT: s = P { x = 1.5 }
+let v = B.g(s)
+// EXPECT: v = 1.5
+let fx = s.x
+// EXPECT: fx = 1.5

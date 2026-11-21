@@ -1,0 +1,15 @@
+// REPRO A-F7 (blade-A, 2026-10-17, compiler 0.20.0): LLVM-LANE REFUSAL.
+// A function returning a tuple, destructured at top level (also `let r = run()` + `r[0]`).
+// Lanes affected: LLVM (falls back to C++). C++ runs it.
+// Run: BLADE_LLVM=1 BLADE_BLAS=0 blade run A-F7-tuple-return-llvm.blade
+// Expected: the LLVM lane compiles it and prints checksum = 3.0, input_checksum = 1.0.
+// Observed (stderr): [blade] llvm lane refused: the IR node IRApp in pack position -- the
+//   llvm lane builds packs from tuples, <&>/<&!> legs and reduction joins only; falling back to C++
+// Accepted in both lanes (the suite's shape): a top-level BLOCK returning the tuple,
+//   `let (checksum, input_checksum) = { ...; (a, b) }`.
+type I = Idx<4>
+function run() -> (Float64, Float64) = {
+    let v = method_for(range<I>) <@> lambda(i) -> 0.5 * Float64(i) |> compute
+    (reduce(v, (+)), 1.0)
+}
+let (checksum, input_checksum) = run()

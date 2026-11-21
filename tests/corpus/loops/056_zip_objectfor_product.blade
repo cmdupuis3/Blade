@@ -1,7 +1,7 @@
 // TEST: Zip ObjectFor Product
 // object_for with zip and multiplicative kernel
-let A = [2.0, 3.0, 4.0]
-let B = [5.0, 6.0, 7.0]
+let A = Float64([2.0, 3.0, 4.0])
+let B = Float64([5.0, 6.0, 7.0])
 let f = lambda(a, b) -> a * b
 let O = object_for(f)
 let result = O <@> zip(A, B) |> compute

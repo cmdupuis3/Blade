@@ -8,7 +8,7 @@
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-type Speed = Float<mps>
+type Speed = Float64<mps>
 function top(vs: Speed^1) -> Speed = reduce(vs, (+))
-let w: Array<Float<seconds> like Idx<2>> = [1.0, 2.0]
+let w: Array<Float64<seconds> like Idx<2>> = [1.0, 2.0]
 let t = top(w)

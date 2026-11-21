@@ -1,0 +1,16 @@
+// TEST: a nested generic increment called with a Bool (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14): a
+// generic body's arithmetic needs a NUMBER at every instance, judged at the
+// call (GONumericOperand) or, for an instance with no element class, after
+// monomorphization (IRValidate check 1d). On master 1e6a871a this type-checked
+// (the nested declaration is generic too).
+// ============================================================================
+function f() -> Int32 = {
+    function inc(x) = x + 1
+    let a = inc(1)
+    let b = inc(true)
+    a
+}
+let r = f()
+// ERROR: BL3001

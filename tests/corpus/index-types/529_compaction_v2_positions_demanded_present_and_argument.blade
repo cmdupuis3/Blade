@@ -1,0 +1,21 @@
+// TEST: Compaction fusion v2: a present read and a call argument keep the kept positions
+// The positions demand census (T4b), continued from 524: a `<|:>` present
+// read (the compound is the allocation record: `present` binary-searches the
+// kept positions) and an argument to a function that subscripts it (the
+// census does not look inside calls) each demand the table, so it is built
+// and every value is the as-written program's. x(i) = (3 i) % 13: kept
+// (> 5.5) at source positions 2, 3, 4, 7, 8, 11, 12.
+type Ix = Idx<13>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute
+// a present read
+let k2 = mask(x, lambda(v) -> v > 5.5)
+let y2 = compound(x, k2)
+let dense: Array<Float64 like Ix> = [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+let over2 = y2 <|:> dense |> compute
+// EXPECT: over2 = [-1.0, -1.0, 6.0, 9.0, 12.0, -1.0, -1.0, 8.0, 11.0, -1.0, -1.0, 7.0, 10.0]
+// an argument (the callee subscripts it)
+let k3 = mask(x, lambda(v) -> v > 5.5)
+let y3 = compound(x, k3)
+function at4(c: Array<Float64 like CompoundIdx<k3>>) -> Float64 = c(4)
+let y3_4 = at4(y3)
+// EXPECT: y3_4 = 12.0

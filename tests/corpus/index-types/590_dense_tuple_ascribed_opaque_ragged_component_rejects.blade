@@ -1,0 +1,15 @@
+// TEST: A tuple ascription giving a dense component an opaque RaggedIdx type is refused (rejects)
+// ============================================================================
+// Gap G190 (a), round 4 wave 8 (lane C, C3; Codex diff review round 2): an
+// ascription of an AGGREGATE checks its components -- a dense array ascribed
+// an opaque `RaggedIdx<_>` inside a tuple hid its provenance (the interpreter
+// printed 3.0, the C++ lane could not convert it). BL4003 in every lane.
+// ============================================================================
+type R = Array<Float64 like RaggedIdx<_>>
+let d: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = ((d, 1) : (R, Int64))
+function f(a: R) -> Float64 = reduce(a, (+))
+let s = f(p[0])
+// ERROR: BL4003
+// ERROR-CONTAINS: a dense array ascribed an opaque
+// REJECT-AT: lower

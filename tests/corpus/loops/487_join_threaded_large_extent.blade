@@ -1,0 +1,22 @@
+// TEST: Threaded Reduction Join Non-Dyadic Extent
+// Bench gap G7 at an extent large enough for every worker of an 8-thread team
+// to own a chunk, and not a power of two (1009 = 8 * 126 + 1: ragged chunks).
+// The join sits inside a block (a function-scope emission) and folds four
+// power sums of x(i) = (i mod 7) - 2 under an explicit `where omp` fold
+// kernel. Integer-valued cells: exact under any association.
+//   one cycle (-2 .. 4): sums 7, 35, 91, 371; 144 cycles plus x(1008) = -2
+type Ix = Idx<1009>
+
+let (s1, s2, s3, s4) = {
+    let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) - 2.0 |> compute
+    let l = method_for(x)
+    reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v)
+        <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v),
+        lambda(u, v) where omp -> u + v, 0.0)
+}
+let checksum = s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4
+// EXPECT: s1 = 1006.0
+// EXPECT: s2 = 5044.0
+// EXPECT: s3 = 13096.0
+// EXPECT: s4 = 53440.0
+// EXPECT: checksum = 264142.0

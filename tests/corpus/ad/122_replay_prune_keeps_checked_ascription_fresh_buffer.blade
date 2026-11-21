@@ -1,0 +1,27 @@
+// TEST: AD Replay Prune Keeps A Dead Checked Ascription Beside A Fresh Buffer
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 (opt-in): the fresh-buffer twin of ad/058 (round 4 wave
+// 9, lane A, A1). The replayed `let unused = (a(0) : Float64<min=1.0>)` is
+// dead but its ascription is a run-time bound check (BL8001), so the prune
+// KEEPS it, while the trap-free dead `let spare = a(0) * 2.0` is dropped;
+// `blade test access` pins the decision. ad/058's trap needed the buffer to
+// share the primal input, refused since round 4 wave 8 (G190 (c), BL4005).
+// f = 3 * (-a0), df/da0 = -3.
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function k(a: A) -> Float64 = {
+    let unused = (a(0) : Float64<min=1.0>)
+    let spare = a(0) * 2.0
+    (-a(0))
+}
+function f(a: A) -> Float64 = {
+    let ys = method_for(range<Idx<3>>)
+        <@> lambda(i) -> k(a) |> compute
+    reduce(ys, (+))
+}
+let a: A = [2.0]
+let mut da: A = [0.0]
+let r = ad.grad(f)(a, da)
+// EXPECT: r = -6.0
+// EXPECT: da = [-3.0]

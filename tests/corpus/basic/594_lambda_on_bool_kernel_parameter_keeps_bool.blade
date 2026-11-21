@@ -1,0 +1,13 @@
+// TEST: lambdas applied to Bool kernel parameters keep them Bools
+// ============================================================================
+// R10 remainder: a lambda applied inside a kernel to the kernel's own (still
+// open) parameter shares its variable, so a Bool cell stays a Bool: logical
+// operators, explicit casts and String concatenation keep working, while the
+// arithmetic twin (basic/595) is refused.
+// ============================================================================
+let a = method_for([true, false]) <@> lambda(b) -> (lambda(x) -> !x)(b) |> compute
+// EXPECT: a = [false, true]
+let c = method_for([true, false]) <@> lambda(b) -> (lambda(x) -> Float64(x))(b) |> compute
+// EXPECT: c = [1.0, 0.0]
+let s = method_for(["a", "b"]) <@> lambda(b) -> (lambda(x) -> x + x)(b) |> compute
+// EXPECT: s = ["aa", "bb"]

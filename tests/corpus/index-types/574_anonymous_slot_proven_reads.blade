@@ -1,0 +1,20 @@
+// TEST: Anonymous slot proven reads need no check
+// ============================================================================
+// Gap G192 (1): the PROVEN reads of an anonymous slot -- an iteration index
+// of a range whose static bounds lie inside the slot (`0..3`,
+// `range<Idx<3>>`), a proven value of a named index type whose extent fits
+// (`range<L>` over `Idx<3>`), a literal -- carry no run-time check (the
+// emission is pinned by `blade test instance-guards`); every read here is in
+// range and prints its value.
+// ============================================================================
+type L = Idx<3>
+let v: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let doubled = method_for(0..3) <@> lambda(i) -> v(i) * 2.0 |> compute
+let total = reduce(method_for(range<Idx<3>>) <@> lambda(i) -> v(i), (+))
+let named = reduce(method_for(range<L>) <@> lambda(i) -> v(i) * v(i), (+))
+let ends = v(2) + v(0)
+// EXPECT: v = [1.0, 2.0, 3.0]
+// EXPECT: doubled = [2.0, 4.0, 6.0]
+// EXPECT: total = 6.0
+// EXPECT: named = 14.0
+// EXPECT: ends = 4.0

@@ -1,0 +1,16 @@
+// TEST: A parameter typed R is observed as its key inside its function
+// ============================================================================
+// R3: arithmetic, negation (the base refused it, BL4003) and an ordering on
+// a `Nat<R>` parameter read the key.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function f(r: Nat<R>) -> Int64 = r * 2
+let a = f(codes(0))
+// EXPECT: a = 200
+function g(r: Nat<R>) = -r
+let b = g(codes(1))
+// EXPECT: b = -200
+function h(r: Nat<R>) = r < 150
+let c = h(codes(2))
+// EXPECT: c = false

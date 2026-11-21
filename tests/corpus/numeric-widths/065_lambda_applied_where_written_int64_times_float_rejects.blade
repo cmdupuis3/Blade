@@ -1,0 +1,8 @@
+// TEST: an Int64 argument of a lambda applied where it is written meets a float literal in its body (rejects)
+// ============================================================================
+// G275: the argument decides `x` as an Int64, so `x * 2.5` mixes an integer
+// with a float -- refused, where the base defaulted `x` to Float64 and
+// converted the argument silently (7.5).
+// ============================================================================
+let r = (lambda(x) -> x * 2.5)(Int64(3))
+// ERROR: BL3020

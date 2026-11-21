@@ -1,0 +1,33 @@
+// TEST: Hot-Row Fold Licensed Inside A Function
+// The bench stencil's shape (bench/kernels/stencil/stencil.blade) at corpus
+// size: the halo map carries `omp(wr: 1)` and the fold kernel `where omp`, so
+// in a threaded build the row folds run inside the producer's team and the
+// outer combine folds the row sums (Blade.Optimize.planHotRowFolds; the
+// serial build emits the same schedule with no team). Function-local lets
+// take CodeGen's function-body producer arm, not genBinding's. Values are
+// integer-valued: u(i, j) = 3 i^2 - j^2 has Laplacian 6 - 2 = 4 on every
+// interior cell (5 x 4 = 20 of them): ss = 20 * 16, total = 20 * 4.
+type Y = Idx<7>
+type X = Idx<6>
+function inputs() -> Array<Float64 like Y, X> = {
+    method_for(range<Y, X>) <@> lambda(i, j) where omp(i: 1) ->
+        Float64(3 * Int64(i) * Int64(i) - Int64(j) * Int64(j)) |> compute
+}
+function kernel(u: Array<Float64 like Y, X>) -> Float64 = {
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+function total(u: Array<Float64 like Y, X>) -> Float64 = {
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let t = reduce(method_for(lap) <@> lambda(row) -> reduce(row, (+)), (+))
+    t
+}
+let (ss, tot) = {
+    let u = inputs()
+    (kernel(u), total(u))
+}
+// EXPECT: ss = 320.0
+// EXPECT: tot = 80.0

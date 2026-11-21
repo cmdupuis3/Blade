@@ -4,5 +4,5 @@
 // arrives as a plain Float64 variable and refuses like any other.
 // ERROR: BL3019
 // ERROR-CONTAINS: spell the rounding at the cast site
-let r = floor(2.9)
+let r: Float64 = floor(2.9)
 let bad = Int64(r)

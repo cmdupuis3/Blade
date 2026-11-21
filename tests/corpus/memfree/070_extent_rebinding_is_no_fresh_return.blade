@@ -1,0 +1,26 @@
+// TEST: A local rebound to a mut parameter in a range bound is not a fresh return
+// ============================================================================
+// Round 4 wave 7 (lane c, gap G220; the class found by the Codex design review
+// 5909d69a): an assignment or alias hidden in a TYPE-CARRIED expression -- a
+// range bound `0..{ t = a; 3 }`, which the C++ lane evaluates -- was invisible
+// to the C++ ownership scans (they followed expression children only).
+// The fresh-return facts: `r = a` in a range bound, then `return r` -- the
+// callee was taken to hand back a FRESH pool and the caller freed it (x's).
+// The scans now read every expression a type carries (embeddedExtentExprs).
+// ============================================================================
+type I = Idx<3>
+function borrowed(a: mut Array<Float64 like I>) -> Array<Float64 like I> = {
+    let r: Array<Float64 like I> = [0.0, 0.0, 0.0]
+    let n = extents(0..{ r = a; 3 })
+    r(0) = r(0) + Float64(n) - 3.0
+    r
+}
+function consume(a: mut Array<Float64 like I>) -> Float64 = {
+    let b = borrowed(a)
+    reduce(b, (+))
+}
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let value = consume(x)
+let after = reduce(x, (+))
+// EXPECT: value = 6.0
+// EXPECT: after = 6.0

@@ -38,8 +38,13 @@ type TypeError =
     /// duplicate `type`/`struct` silently let the last one win. `kind` names
     /// the namespace ("value", "type", "unit"); `firstSite` is preformatted.
     /// `crossModule` carries the module that declared the name first when the
-    /// clash spans modules (type identity is not module-qualified yet).
+    /// clash spans modules (no producer today: type identity is
+    /// module-qualified, D11, so two modules may share a name).
     | DuplicateDecl of kind: string * name: string * firstSite: string * crossModule: string option
+    /// An unqualified type / constructor name that two imported modules
+    /// both declare (D11, BL2010): `kind` is "type" or "constructor",
+    /// `candidates` the qualified spellings (`A.Red`, `B.Red`).
+    | AmbiguousImport of kind: string * name: string * candidates: string list
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
     /// BL3002, kernel-apply seam. The WIDTH SCHEMA did not cover the pack
@@ -67,7 +72,7 @@ type TypeError =
     /// where Lowering turns it into a neighbour position and the reach check
     /// (BL4019) judges its offset. Passed on, the read was typed against
     /// nothing (BL6001) or emitted as a call of an integer (BL9002).
-    | HaloWindowEscapes
+    | HaloWindowEscapes of unit
     /// Rank disagreement between a declared parameter and the argument
     /// supplied at a DIRECT application. Raised by dispatchAppOrIndex's
     /// FuncElem arm, which does not unify args against params (see the
@@ -257,6 +262,11 @@ type TypeError =
     | JoinDimRange of dim: int * totalDims: int
     | JoinShapeMismatch of pos: int * detail: string
     | StackJoinCompactSlot of op: string * slot: int
+    /// G67: a map whose KERNEL returns a compact (SymIdx / AntisymIdx /
+    /// HermitianIdx) array -- a row map with a packed cell. No lane stores it
+    /// (a grouped compact output is not built); refused by name. cell names
+    /// the cell's compact slot.
+    | RowMapCompactCell of cell: string
     // Unit mismatch (BL3006)
     | UnitMismatch of context: string * left: string * right: string
     // Quantity (nominal unit) violations
@@ -290,6 +300,10 @@ type TypeError =
     /// so the callee's writes through one alias are visible through the other
     /// mid-call -- the Fortran no-alias rule.
     | MutArgAliased of func: string * mutPos: int * otherPos: int * name: string
+    /// N16: the binding passed to a `mut` parameter is a module-level/captured
+    /// binding the callee also reads or writes DIRECTLY (by name, not through
+    /// a parameter) -- the other half of the no-alias rule.
+    | MutArgAliasesCalleeGlobal of func: string * mutPos: int * name: string
     /// BL3016 (same family as ExtentArgMismatch, the halo twin): a kernel body
     /// reads an array through a halo window (`A(w(o))`), the halo's declared
     /// inner extent and the array's extent on that slot are BOTH compile-time
@@ -344,7 +358,7 @@ type TypeError =
     /// quoted/described (`the kernel 'cov'`, `this kernel`); `posB = None` means the
     /// partner is an array the body fixes, of extent `extB`.
     | CoIterKernelExtentMismatch of owner: string * posA: int * posB: int option * extA: int64 * extB: int64
-    /// BL3999 (the NOMINAL half of the co-iteration obligation, the call-site
+    /// BL3027 (the NOMINAL half of the co-iteration obligation, the call-site
     /// twin of `TypeLower.zipHeadClash`'s "DIFFERENT index types" refusal): a
     /// body co-iterates two of its parameters (or one with an array it fixes)
     /// and the call -- or the kernel application -- hands them fibers over two
@@ -472,13 +486,20 @@ type TypeError =
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
     // `where comm(p1, p2)` on a body the checker DISPROVES by a concrete
-    // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
+    // counterexample (Deduce.witnessSwapLawFailure): the witness is rendered
     // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
     | CommContradictsWitness of param1: string * param2: string * witness: string
     // `where anticomm(p1, p2)` on a body disproved the same way: a point where
     // f(b, a) is not -f(a, b) (Deduce.witnessSwapLawFailure, negate = true).
     // Same code (BL4013).
     | AnticommContradictsWitness of param1: string * param2: string * witness: string
+    // `where anticomm(p1, p2)` on a body whose DIAGONAL is not 0: strict
+    // `AntisymIdx` storage has no diagonal cell and answers every (i, i) read
+    // with 0, so the clause asserts f(a, a) = 0 -- which the sign law alone
+    // does not force (f(a, a) = -f(a, a) also holds at Int64.MinValue under
+    // wrap), and a body can obey the law off the diagonal and lie on it.
+    // Same code (BL4013).
+    | AnticommDiagonalNonzero of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced
@@ -504,7 +525,7 @@ type TypeError =
     // refuse rather than silently emit a serial loop. `kernelDesc` names it.
     | FoldOmpNeedsLicense of kernelDesc: string
     | PlaceholderNeedsAllBound of got: int * total: int
-    | GroupKeysRank1
+    | GroupKeysRank1 of unit
     /// BL3017: a `group_keys` result reached a position other than its own
     /// `let` RHS or a `group_by` grouping slot. The value is NAME-KEYED, not
     /// a value: `genGroupKeysBinding` puts the whole CSR structure in C++
@@ -517,6 +538,19 @@ type TypeError =
     /// TypeCheck's same-gk co-iteration check already ASSUMES this invariant
     /// (it compares gk operands by binding NAME); this enforces it.
     | GroupKeysEscapes of what: string * pos: string
+    /// BL3017's other half (deep review R7): a GROUPED value -- a `group_by`
+    /// result, a per-group map of one, or one of its rows -- leaving its
+    /// grouped type: a function's return value, a non-row-kernel lambda's,
+    /// a plainly annotated binding or assignment, a struct field. Its row
+    /// lengths live in the grouping's side state, which none of those carry
+    /// (it died in g++, BL9002). `what` names the position.
+    | GroupedValueEscapes of what: string
+    /// Deep review R1 (D11 leftover): a provider load synthesizes C++ GLOBAL
+    /// type names (`<b>__vars`, `<b>__dims`, `<b>_cols`, one alias per store
+    /// axis) that are not module-qualified; a second origin of one name --
+    /// another module's load, or a declaration emitted bare -- passed check
+    /// and died in g++ (BL9002, a redefinition). BL2009's family.
+    | ProviderTypeClash of name: string * kind: string * binding: string * site: string * other: string
     // The grouping ACCESSORS (`group_bucket`, `extents`) take a gk by NAME, for
     // the same reason BL3017 exists -- the state is reachable only through the
     // binding. These two are the accessor-side argument checks, raised during
@@ -535,7 +569,7 @@ type TypeError =
     | ImplMissingMethods of iface: string * typeName: string * methods: string
     // <|:> allocated-fallback operand violations (BL3007)
     | FallbackNeedsArrays of leftDesc: string * rightDesc: string
-    | FallbackSymmetricLeft
+    | FallbackSymmetricLeft of unit
     | FallbackRightNotDense of what: string
     | FallbackRankMismatch of leftRank: int * rightRank: int
     // Struct construction (BL3008)
@@ -577,6 +611,25 @@ type TypeError =
     /// stays machine-readable; `got` is the rendered actual. Distinct from
     /// `IndexRankMismatch`/BL4004 (component-rank WITHIN a slot).
     | RankBoundViolation of needed: int * got: string
+    /// BL3001. A generic parameter variable the BODY settled as a scalar
+    /// (`function gt0(a: T, b: T) -> Bool = a > b`: the comparison is "T with
+    /// element Bool", and the declared `-> Bool` makes that a scalar, so `T`
+    /// is one) met an array. Accepting it truncated the elementwise result to
+    /// one value (formalism 6.1: comparison is elementwise at every rank).
+    | ScalarPinnedArray of got: string
+    /// BL4003. A RANGE used as a subscript (`A(1..3)`): a slice, which is
+    /// planned but not built. Carries the slot's rendered index type.
+    | SubscriptIsRange of slot: string
+    /// BL4003. A value of an integer EnumIdx type is a KEY represented as its
+    /// position (D2); a use that would compute on it and still call the
+    /// result a value of the type (a kernel parameter typed before it met the
+    /// type, a fold, an array cast, a display) has no faithful reading.
+    /// Carries the whole sentence.
+    | EnumKeyObserved of message: string
+    /// BL4003. A literal integer KEY subscripting an integer-valued EnumIdx
+    /// slot that is not one of the type's keys (the D2 ruling: an integer
+    /// EnumIdx subscript is a key, mapped to its ordinal like a string label).
+    | EnumIdxUnknownKey of enumName: string * key: int64 * available: string list
     // Constraint / where-clause violations (BL4001)
     | StructWhereNotBool of structName: string * got: string
     | StructWhereError of structName: string * inner: string
@@ -607,7 +660,7 @@ type TypeError =
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string
-    | MutualMixedGroups
+    | MutualMixedGroups of unit
     | MutualDuplicateMember of describe: string
     | MutualIncompleteAnnotation of describe: string
     | MutualJointAnnotationOnly of describe: string
@@ -622,7 +675,7 @@ type TypeError =
     | MutualScalarBare of memberName: string * field: string
     | MutualStructNeedsField of memberName: string
     | MutualUnknownIdent of name: string
-    | MutualUnsupportedExpr
+    | MutualUnsupportedExpr of unit
     | MutualConstraintNotBool of groupId: string * got: string
     | MutualConstraintError of groupId: string * inner: string
     // Provider (import/read/write/stream) argument errors (BL3007 / BL2003)
@@ -639,6 +692,57 @@ type TypeError =
     | ProviderWriteModuleScope of alias: string
     | ProviderImportByModule of suggestion: string * providers: string
     | ProviderNoSelectiveImport of pname: string
+    // ---- The BL3999 split (deep review #49, 2026-10-26). Each family
+    // below used to be an `Other` message under the catch-all BL3999; the
+    // case now names its code. The payload is the finished message.
+    /// BL3007: a builtin, intrinsic or provider verb was given an argument it cannot take.
+    | BuiltinArgErr of string
+    /// BL3002: the wrong number of arguments or subscripts.
+    | ArgCountErr of string
+    /// BL3001: a value of the wrong kind in a typed position.
+    | TypeMismatchErr of string
+    /// BL3003: an application the callee cannot take.
+    | InvalidApplicationErr of string
+    /// BL3004: a pattern that cannot match the value's shape.
+    | PatternErr of string
+    /// BL3006: same dimensions, different magnitudes, where no conversion is inserted.
+    | UnitMagnitudeErr of string
+    /// BL3016: two extents that must agree do not.
+    | ExtentErr of string
+    /// BL2002: a store axis path (`store.index.dim`) that names nothing.
+    | UnknownAxisPathErr of string
+    /// BL4001: a declared constraint that is violated or cannot be enforced.
+    | ConstraintErr of string
+    /// BL4002: a `let static` that does not evaluate at compile time.
+    | StaticEvalErr of string
+    /// BL4003: an index-type declaration or use that breaks the index-type rules.
+    | IndexTypeErr of string
+    /// BL5100: an operation the dist (cumulant) algebra does not define.
+    | DistAlgebraErr of string
+    /// BL9001: a compiler invariant failed during type checking.
+    | InternalErr of string
+    /// BL3024: one generic type variable (or caret rank claim) bound two incompatible ways.
+    | GenericVarErr of string
+    /// BL3025: a reduce / prodsum / reduction-join form the fold rules refuse.
+    | ReductionFormErr of string
+    /// BL3026: an operation that would read compact (SymIdx / AntisymIdx / HermitianIdx) storage wrongly.
+    | CompactStorageErr of string
+    /// BL3027: co-iterated or elementwise operands over different index spaces.
+    | IndexSpaceErr of string
+    /// BL3028: a value the type needs at compile time is only known at run time.
+    | StaticValueErr of string
+    /// BL3029: an ill-formed `Chunked<..>` / segments / files / ungroup declaration or use.
+    | SegmentedDomainErr of string
+    /// BL3030: an ill-formed `let rec` recursive array definition.
+    | RecArrayFormErr of string
+    /// BL3031: an ill-formed `halo<..>` window or window read.
+    | HaloFormErr of string
+    /// BL3032: a wildcard `_` where no wildcard is meaningful.
+    | WildcardErr of string
+    /// BL3033: a construct that is planned but not built yet.
+    | NotYetSupportedErr of string
+    /// BL3034: a `where` clause on a declaration it cannot apply to.
+    | WhereClauseErr of string
     | Other of string
 
 /// A compile error with source location and context stack
@@ -701,6 +805,7 @@ type Subst() =
     /// `let x = 1` stays Int64) and its *kind* for the no-narrowing bind
     /// guard in `unify`. Parallels `arityConstraints`.
     let mutable literalDefaults : Map<int, ElemType> = Map.empty
+    let mutable wideDefaultVars : Set<int> = Set.empty
     let mutable knownTypeVarNames : Set<string> = Set.empty
     /// IDs of type variables HM-polymorphic at a function boundary:
     /// preserved by zonking (not defaulted to Float64) so IR-phase HM
@@ -741,6 +846,29 @@ type Subst() =
     /// The memo of `elemCasts`: one result variable per (source, target), so
     /// `Float64(x) - Float64(x)` meets ONE variable.
     let mutable elemCastMemo : Map<int * ElemType, int> = Map.empty
+    /// ELEMENTWISE RESULTS of a comparison / logical op over an open generic
+    /// operand (formalism 6.1, the D1 ruling): `a > b` over `a: T` is "T with
+    /// element Bool", an `elemCasts` entry. Two DIFFERENT open operands
+    /// (`a: T, b: U`) give the shape of whichever is an array -- the other
+    /// broadcasts -- so the entry has a second source here; and a comparison
+    /// drops the operand's unit (a cast keeps it).
+    let mutable elemCastPartner : Map<int, int> = Map.empty
+    let mutable elemCastDropUnits : Set<int> = Set.empty
+    let mutable elemBoolMemo : Map<int * int * ElemType, int> = Map.empty
+    /// Variables PINNED TO RANK 0: a generic parameter variable whose
+    /// elementwise result (`elemCasts`) the body settled as a SCALAR (an
+    /// explicit `-> Bool` over `a > b`, an `if` condition). Refuses an array
+    /// at unification (ScalarPinnedArray), travels on var-to-var binds and
+    /// with a call's instantiated copy (CopyArityConstraint).
+    let mutable scalarPins : Set<int> = Set.empty
+    /// ELEMENT HINTS (gap G114, formalism 2.4's partner rule): the element a
+    /// kernel parameter will receive, known from its map operand at the apply
+    /// site while the parameter's RANK is still decided by its body (a cell or
+    /// a row). Read ONLY by the literal partner rule (TypeCheckSupport
+    /// adaptLiteralOperands): a literal beside the still-open parameter takes
+    /// the hinted width instead of its class's wide width. Never a binding, so
+    /// no shape decision changes; travels on var-to-var binds.
+    let mutable elemHints : Map<int, ElemType> = Map.empty
 
     member _.Fresh() =
         let id = nextId
@@ -773,13 +901,41 @@ type Subst() =
          | IRTInfer id2, Some et when not (Map.containsKey id2 paramDefaults) ->
              paramDefaults <- Map.add id2 et paramDefaults
          | _ -> ())
+        (match ty, Map.tryFind id elemHints with
+         | IRTInfer id2, Some et when not (Map.containsKey id2 elemHints) ->
+             elemHints <- Map.add id2 et elemHints
+         // G172 (a): a hinted kernel parameter that turns out to be a ROW
+         // (bound to an array shape -- requireArrayArg's synthesized one,
+         // `prodsum(r, r)`, `reduce(r, ..)`) hands its hint to the row's
+         // open ELEMENT variable: the element is the operand's, so a fold of
+         // the row is the operand width and its literal partner takes it.
+         // Metadata only (no bind); a cast relation or a literal default on
+         // the element wins.
+         | ArrayElem at, Some et ->
+             (match at.ElemType with
+              | IRTInfer id2 when not (Map.containsKey id2 elemHints)
+                                  && not (Map.containsKey id2 elemCasts)
+                                  && not (Map.containsKey id2 literalDefaults) ->
+                  elemHints <- Map.add id2 et elemHints
+              | _ -> ())
+         | _ -> ())
         // An element-cast variable deferring to another variable hands its
         // relation to the survivor (an unannotated return variable unified
         // with `Float64(x)`'s result), or the relation is lost behind the bind.
         (match ty, Map.tryFind id elemCasts with
          | IRTInfer id2, Some rel when id2 <> id && not (Map.containsKey id2 elemCasts) ->
              elemCasts <- Map.add id2 rel elemCasts
-             elemCastMemo <- Map.add rel id2 elemCastMemo
+             (match Map.tryFind id elemCastPartner with
+              | Some p ->
+                  elemCastPartner <- Map.add id2 p elemCastPartner
+                  elemBoolMemo <- Map.add (fst rel, p, snd rel) id2 elemBoolMemo
+              | None when Set.contains id elemCastDropUnits ->
+                  elemBoolMemo <- Map.add (fst rel, fst rel, snd rel) id2 elemBoolMemo
+              | None -> elemCastMemo <- Map.add rel id2 elemCastMemo)
+             if Set.contains id elemCastDropUnits then elemCastDropUnits <- Set.add id2 elemCastDropUnits
+         | _ -> ())
+        (match ty with
+         | IRTInfer id2 when Set.contains id scalarPins -> scalarPins <- Set.add id2 scalarPins
          | _ -> ())
         map <- Map.add id ty map
 
@@ -792,6 +948,12 @@ type Subst() =
 
     member _.GetParamDefault(id: int) : ElemType option =
         Map.tryFind id paramDefaults
+
+    member _.SetElemHint(id: int, et: ElemType) =
+        elemHints <- Map.add id et elemHints
+
+    member _.GetElemHint(id: int) : ElemType option =
+        Map.tryFind id elemHints
 
     member _.IsIndexDefault(id: int) : bool =
         Set.contains id indexDefaults
@@ -869,9 +1031,36 @@ type Subst() =
                 IRTInfer r
             | t -> t
 
+    /// The result variable of an elementwise COMPARISON / LOGICAL op (D1)
+    /// over the open variable `src` beside `partner` (the same variable, or a
+    /// second open one): "the array operand's shape with element `target`",
+    /// unit dropped. See `elemCastPartner`.
+    member this.ElemBoolVar(src: int, partner: int, target: ElemType) : IRType =
+        match Map.tryFind (src, partner, target) elemBoolMemo with
+        | Some r when (this.TryFind r).IsNone -> IRTInfer r
+        | _ ->
+            match this.Fresh() with
+            | IRTInfer r ->
+                elemCasts <- Map.add r (src, target) elemCasts
+                if partner <> src then elemCastPartner <- Map.add r partner elemCastPartner
+                elemCastDropUnits <- Set.add r elemCastDropUnits
+                elemBoolMemo <- Map.add (src, partner, target) r elemBoolMemo
+                if Set.contains src polymorphicIds || Set.contains partner polymorphicIds then
+                    polymorphicIds <- Set.add r polymorphicIds
+                IRTInfer r
+            | t -> t
+
     /// `Some (source, target)` when `id` is an element-cast result variable.
     member _.GetElemCast(id: int) : (int * ElemType) option =
         Map.tryFind id elemCasts
+
+    /// Every source variable of an element-cast result (one, or two for a
+    /// comparison over two open operands).
+    member _.GetElemCastSources(id: int) : int list =
+        match Map.tryFind id elemCasts with
+        | Some (src, _) ->
+            src :: (match Map.tryFind id elemCastPartner with Some p -> [p] | None -> [])
+        | None -> []
 
     /// Instantiation: `toId` (the copy of `fromId`) is the element cast of
     /// `remap source` -- the call's copy of the source variable.
@@ -880,24 +1069,72 @@ type Subst() =
         | Some (src, tgt) ->
             let src' = remap src
             elemCasts <- Map.add toId (src', tgt) elemCasts
-            if not (Map.containsKey (src', tgt) elemCastMemo) then
-                elemCastMemo <- Map.add (src', tgt) toId elemCastMemo
+            let drop = Set.contains fromId elemCastDropUnits
+            if drop then elemCastDropUnits <- Set.add toId elemCastDropUnits
+            match Map.tryFind fromId elemCastPartner with
+            | Some p ->
+                let p' = remap p
+                elemCastPartner <- Map.add toId p' elemCastPartner
+                if not (Map.containsKey (src', p', tgt) elemBoolMemo) then
+                    elemBoolMemo <- Map.add (src', p', tgt) toId elemBoolMemo
+            | None when drop ->
+                if not (Map.containsKey (src', src', tgt) elemBoolMemo) then
+                    elemBoolMemo <- Map.add (src', src', tgt) toId elemBoolMemo
+            | None ->
+                if not (Map.containsKey (src', tgt) elemCastMemo) then
+                    elemCastMemo <- Map.add (src', tgt) toId elemCastMemo
         | None -> ()
 
+    /// Pin `id` (through the substitution, to its leaf variable) to rank 0.
+    member this.PinScalar(id: int) =
+        match IR.stripUnits (this.Resolve (IRTInfer id)) with
+        | IRTInfer leaf -> scalarPins <- Set.add leaf scalarPins
+        | _ -> ()
+
+    member _.IsScalarPinned(id: int) : bool = Set.contains id scalarPins
+
     /// An UNBOUND element-cast variable whose source now has a shape is bound
-    /// here, lazily, to the source's type with the element replaced.
+    /// here, lazily, to the source's type with the element replaced. With two
+    /// sources (a comparison over two open operands) an ARRAY source settles
+    /// it at once -- the other operand broadcasts or zips at that shape -- and
+    /// two scalar sources settle it as the scalar.
     member private this.SettleElemCast(id: int) : IRType option =
         match Map.tryFind id elemCasts with
         | Some (src, tgt) ->
-            (match this.Resolve (IRTInfer src) with
-             | IRTInfer _ -> None
-             | IRTUnitAnnotated (IRTInfer _, _) -> None
-             | srcTy ->
-                 match elemCastResultType srcTy tgt with
-                 | Some r ->
-                     map <- Map.add id r map
-                     Some r
-                 | None -> None)
+            let shapeOf (v: int) =
+                match this.Resolve (IRTInfer v) with
+                | IRTInfer _ -> None
+                | IRTUnitAnnotated (IRTInfer _, _) -> None
+                | t -> Some t
+            let isArr (t: IRType) = match IR.stripUnits t with ArrayElem _ -> true | _ -> false
+            let srcShape =
+                match Map.tryFind id elemCastPartner with
+                | None -> shapeOf src
+                | Some p ->
+                    let shapes = [shapeOf src; shapeOf p]
+                    match shapes |> List.tryPick (function Some t when isArr t -> Some t | _ -> None) with
+                    | Some a -> Some a
+                    | None -> if List.forall Option.isSome shapes then shapes.Head else None
+            match srcShape with
+            | None -> None
+            | Some srcTy ->
+                let dropUnits (t: IRType) =
+                    match t with
+                    | IRTUnitAnnotated (inner, _) -> inner
+                    | ArrayElem arr -> mkArrayLike { arr with ElemType = IR.stripUnits arr.ElemType }
+                    | _ -> t
+                match elemCastResultType srcTy tgt with
+                | Some r ->
+                    let r = if Set.contains id elemCastDropUnits then dropUnits r else r
+                    map <- Map.add id r map
+                    Some r
+                // A comparison of a non-numeric, non-array value (a struct, a
+                // variant, a tuple) is one Bool.
+                | None when Set.contains id elemCastDropUnits ->
+                    let r = IRTScalar tgt
+                    map <- Map.add id r map
+                    Some r
+                | None -> None
         | None -> None
 
     member _.CopyPolymorphic(fromId: int, toId: int) =
@@ -920,6 +1157,8 @@ type Subst() =
         match Map.tryFind fromId arityConstraints with
         | Some k -> arityConstraints <- Map.add toId k arityConstraints
         | None -> ()
+        // The rank-0 pin (scalarPins) is the same kind of exact claim.
+        if Set.contains fromId scalarPins then scalarPins <- Set.add toId scalarPins
 
     /// The `rankLowerBounds` twin of CopyArityConstraint, for `instantiate`:
     /// a generalized value's fresh use-site var must inherit its scheme
@@ -943,6 +1182,14 @@ type Subst() =
 
     member _.GetLiteralDefault(id: int) : ElemType option =
         Map.tryFind id literalDefaults
+
+    /// Round 6: a literal var of a COMPILER-SYNTHESIZED literal-only binding
+    /// (a `__` binder an elaborator wrote): its uses fix its width, and if
+    /// nothing does it defaults to its class's OLD wide width (Int64 /
+    /// Float64 / Complex128), not the seed -- an isolated synthesized
+    /// constant keeps today's value. Read by Zonk.
+    member _.MarkWideDefault(id: int) = wideDefaultVars <- Set.add id wideDefaultVars
+    member _.IsWideDefault(id: int) : bool = Set.contains id wideDefaultVars
 
     member _.SetLiteralDefault(id: int, et: ElemType) =
         literalDefaults <- Map.add id et literalDefaults
@@ -972,6 +1219,41 @@ type Subst() =
     member _.PopTypeVarScope(saved: Map<string, IRType * int> * Set<string>) =
         typeVarScope <- fst saved
         knownTypeVarNames <- snd saved
+
+    /// The whole substitution state (every table is a persistent map or set,
+    /// so this is a handful of references), for a SPECULATIVE check whose
+    /// result may be discarded (TypeCheckInfer.checkUnderDeclaredLayout):
+    /// `Restore` puts every binding and constraint back. The fresh-id counter
+    /// is NOT rolled back -- ids minted by the discarded attempt stay unused,
+    /// so nothing it built can collide with what is minted next.
+    member _.Snapshot() : obj =
+        box (map, typeVarScope, arityConstraints, literalDefaults, wideDefaultVars, knownTypeVarNames, polymorphicIds,
+             rankLowerBounds, indexDefaults, paramDefaults,
+             (elemCasts, elemCastMemo, elemCastPartner, elemCastDropUnits, elemBoolMemo, scalarPins), elemHints)
+
+    member _.Restore(s: obj) =
+        let (m, tvs, ac, ld, wd, kn, poly, rlb, idd, pd, (ec, ecm, ecp, ecd, ebm, sp), eh) =
+            unbox<Map<int, IRType> * Map<string, IRType * int> * Map<int, int> * Map<int, ElemType> * Set<int> * Set<string>
+                  * Set<int> * Map<int, int> * Set<int> * Map<int, ElemType>
+                  * (Map<int, int * ElemType> * Map<int * ElemType, int> * Map<int, int> * Set<int>
+                     * Map<int * int * ElemType, int> * Set<int>) * Map<int, ElemType>> s
+        elemHints <- eh
+        map <- m
+        typeVarScope <- tvs
+        arityConstraints <- ac
+        literalDefaults <- ld
+        wideDefaultVars <- wd
+        knownTypeVarNames <- kn
+        polymorphicIds <- poly
+        rankLowerBounds <- rlb
+        indexDefaults <- idd
+        paramDefaults <- pd
+        elemCasts <- ec
+        elemCastMemo <- ecm
+        elemCastPartner <- ecp
+        elemCastDropUnits <- ecd
+        elemBoolMemo <- ebm
+        scalarPins <- sp
 
     /// Instrumented twin of the `IRTInfer` hop below, used ONLY when
     /// `PerfCounters.enabled` (docs/plan-compile-speed.md Stage 5): the same
@@ -1145,7 +1427,7 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     ///
     /// Provider-vs-untagged stays COMPATIBLE (this arm needs `Some` on both
     /// sides): an unnamed index is "some axis of this extent" and co-iterates
-    /// with either -- the escape hatch BL3999's own message advertises, and
+    /// with either -- the escape hatch BL3027's own message advertises, and
     /// the route by which a user can still assert two diverged axes are one.
     /// Provider-vs-other-`__` stays compatible too: those are kind sentinels,
     /// and gating them would refuse sound code.
@@ -1264,7 +1546,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
               | IRTInfer id2 -> id2 = id
               | _ -> false) -> Ok ()
     | IRTInfer id, ty | ty, IRTInfer id ->
-        if occursIn id ty then Error (Other "Infinite type detected")
+        if occursIn id ty then Error (TypeMismatchErr "Infinite type detected")
         else
             // A var-to-var bind must carry the HM-polymorphic flag to the
             // SURVIVING var. `polymorphicIds` is populated only at
@@ -1298,6 +1580,26 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             match rankBoundViolation with
             | Some e -> Error e
             | None ->
+            // RANK-0 PIN (D1): a generic variable the body settled as a scalar
+            // refuses an array; a var-to-var bind carries the pin (Bind).
+            let scalarPinViolation =
+                if subst.IsScalarPinned id then
+                    match IR.stripUnits ty with
+                    | ArrayElem _ -> Some (ScalarPinnedArray (ppIRType ty))
+                    | _ -> None
+                else None
+            match scalarPinViolation with
+            | Some e -> Error e
+            | None ->
+            // An ELEMENTWISE RESULT (`a > b` over `a: T`, "T with element
+            // Bool") settled as a SCALAR says its open sources are scalars:
+            // pin them, so an array instance is refused instead of the
+            // elementwise result being truncated to one value (an explicit
+            // `-> Bool`, an `if` condition).
+            (match IR.stripUnits ty, subst.GetArityConstraint(id) with
+             | IRTScalar _, (None | Some 0) ->
+                 for s in subst.GetElemCastSources id do subst.PinScalar s
+             | _ -> ())
             // Check arity invariant: T^k must unify with rank-k array
             match subst.GetArityConstraint(id) with
             | Some k when k > 0 ->
@@ -1324,7 +1626,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // bind, so no loss) refused the scalar correctly.
                     (match subst.GetArityConstraint(id2) with
                      | Some k2 when k2 <> k ->
-                        Error (Other $"a `^{k}` type variable cannot unify with a `^{k2}` one: the caret pins an EXACT rank, so the two annotations describe different shapes")
+                        Error (GenericVarErr $"a `^{k}` type variable cannot unify with a `^{k2}` one: the caret pins an EXACT rank, so the two annotations describe different shapes")
                      | _ ->
                         subst.CopyArityConstraint(id, id2)
                         subst.Bind(id, ty); Ok ())
@@ -1333,7 +1635,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // ("got IRTScalar ETInt64") leaked F# constructor names
                     // into user-facing output, and the fold-kernel seam above
                     // now routes ordinary programs here.
-                    Error (Other ($"a `^{k}` type variable is a rank-{k} array, but this position supplies {(ppIRType ty)} -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."))
+                    Error (GenericVarErr ($"a `^{k}` type variable is a rank-{k} array, but this position supplies {(ppIRType ty)} -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->
@@ -1522,7 +1824,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // through. The scalar +/-/comparison seam is where a conversion
             // is actually inserted.
             elif not (unitSameScale u1 u2) then
-                Error (Other (sprintf
+                Error (UnitMagnitudeErr (sprintf
                         "these values relate %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
                         (ppUnitSig u1) (ppUnitSig u2)
                         (ppUnitScale (unitConversionFactor u2 u1)) (ppUnitSig u1)))

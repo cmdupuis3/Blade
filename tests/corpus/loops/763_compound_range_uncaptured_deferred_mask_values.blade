@@ -1,0 +1,10 @@
+// TEST: A Compound Range Map Over An Uncaptured Deferred Mask Keeps Its Values
+// Gap G225 (round 4 wave 8 lane d): the value twin of loops/761 -- the
+// positions 0, 2, 4 of the odd cells, the last one replaced by g(0).
+// EXPECT: m = [true, false, true, false, true]
+// EXPECT: s = [0, 2, 100]
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let m = method_for(d) <@> lambda(a) -> a % 2 > 0
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<CompoundIdx<m>>) <@> lambda(i) -> if i > 3 then g(0) else i |> compute

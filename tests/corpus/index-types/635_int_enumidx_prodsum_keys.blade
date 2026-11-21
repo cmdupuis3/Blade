@@ -1,0 +1,11 @@
+// TEST: prodsum over R values multiplies and adds their keys
+// ============================================================================
+// R3: each operand of R values contributes its keys, beside an Int64 one too.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let p = prodsum(codes, codes)
+// EXPECT: p = 140000
+let w: Array<Int64 like Idx<3>> = [1, 2, 3]
+let q = prodsum(codes, w)
+// EXPECT: q = 1400

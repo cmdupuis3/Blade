@@ -1,0 +1,13 @@
+// TEST: A Function-Body Fold Evaluates Its Private Operands On Every Call
+// Gap G243 (round 4 wave 9 lane d; Codex design review): each call of total evaluates e and f
+// afresh (the second call sees the d write; the interpreter memoized e in the first call).
+// EXPECT: s1 = 50
+// EXPECT: s2 = 66
+type I = Idx<5>
+let mut d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + 2
+function total() -> Int64 = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a + b, (+))
+let s1 = total()
+d((0 : I)) = 9
+let s2 = total()

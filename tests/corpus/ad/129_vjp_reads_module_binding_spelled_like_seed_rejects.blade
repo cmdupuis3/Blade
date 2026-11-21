@@ -1,0 +1,17 @@
+// TEST: AD A vjp Body Reading A Module Binding Spelled Like The Seed Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 diff review, Codex 5a8b7b7d): `f__vjp` takes
+// the output cotangent as its parameter `__seed`, which shadowed the module
+// array `__seed` the body reads -- r = ([6.0], 4.0) for ([21.0], 14.0). The
+// reserved-name gate now covers the names the body reads (BL5500).
+// ============================================================================
+let __seed: Array<Float64 like Idx<1>> = [7.0]
+function f(x: Float64) -> Array<Float64 like Idx<1>> = {
+    let y = [x * __seed(0)]
+    y
+}
+let w = [Float64(2.0)]
+let r = ad.vjp(f)(Float64(3.0), w)
+// ERROR: BL5500
+// ERROR-CONTAINS: a name spelled like a reserved AD name

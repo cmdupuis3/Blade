@@ -1,0 +1,16 @@
+// TEST: A top-level assignment between fold lets is a barrier
+// ============================================================================
+// Gap G107 (3), the OPT-IN top-level region (BLADE_SIBLING_FOLDS=top): it judges each binding by its whole payload
+// (the shared scheduling write analysis): a fold before an element write to
+// its array stays out of any join (it must read the array before the write),
+// while the folds after the write share one traversal.
+// ============================================================================
+type R = Idx<7>
+let mut x: Array<Float64 like R> = [1.0, 7.0, -3.0, 4.0, 5.0, 0.5, -2.0]
+let s = reduce(x, (+))
+x((2 : R)) = 9.0
+let ss = reduce(method_for(x) <@> lambda(v) -> v * v, (+))
+let t = reduce(x, (+), 0.0)
+// EXPECT: s = 12.5
+// EXPECT: ss = 176.25
+// EXPECT: t = 24.5

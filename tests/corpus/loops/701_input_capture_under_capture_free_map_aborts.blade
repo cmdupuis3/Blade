@@ -1,0 +1,9 @@
+// TEST: an anonymous map with no capture still evaluates its input's capture (aborts)
+// Gap G199 (Codex diff review round 9): the anonymous map handed to prodsum
+// captures nothing, but its deferred input p captures the failing d; the
+// evaluation forces d first in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> v + extents(d)
+let z = prodsum(method_for(p) <@> lambda(v) -> v + 1, x)
+// ABORT: BL8013

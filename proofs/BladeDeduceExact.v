@@ -74,11 +74,11 @@
 (* to their completeness.  Associativity is deliberately NOT a law: it   *)
 (* is not licensed for floating point, and the free model agrees.        *)
 (*                                                                       *)
-(* Imports BladeOptimal, BladeOrbitWork.  Coq 8.18, stdlib only.         *)
+(* Imports BladeOptimal, BladeOrbitWork.  Rocq 9.0, stdlib only.         *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeOptimal BladeOrbitWork.
-Require Import List Arith Lia Bool Permutation.
+From Stdlib Require Import List Arith Lia Bool Permutation.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -584,7 +584,7 @@ Section YoungGeneration.
     - change (pre ++ (x :: l1) ++ post) with (pre ++ [x] ++ l1 ++ post).
       change (pre ++ (x :: l2) ++ post) with (pre ++ [x] ++ l2 ++ post).
       rewrite !(app_assoc pre [x]). apply IH.
-      intros i H1 H2. rewrite app_length in H1, H2. simpl in H1, H2.
+      intros i H1 H2. rewrite length_app in H1, H2. simpl in H1, H2.
       apply Hin; simpl; lia.
     - simpl. apply Hpos. apply Hin; simpl; lia.
     - rewrite IH1 by exact Hin. apply IH2.
@@ -614,7 +614,7 @@ Section YoungGeneration.
     - rewrite (block_perm b b' HP pre r).
       + rewrite !app_assoc. apply IH.
         intros i Hi. apply Hin. right.
-        rewrite app_length, <- (Permutation_length HP), Hn in Hi. exact Hi.
+        rewrite length_app, <- (Permutation_length HP), Hn in Hi. exact Hi.
       + intros i H1 H2. apply Hin. left. rewrite Hn in H2. split; assumption.
   Qed.
 

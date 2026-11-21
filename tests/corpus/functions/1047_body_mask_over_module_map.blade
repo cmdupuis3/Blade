@@ -1,0 +1,18 @@
+// TEST: A Function Body Mask Over A Deferred Module Map
+// ============================================================================
+// Gap G255, round 4 wave 10 (lane C, C2): a module map that only function
+// bodies use is evaluated privately inside each body (formalism 10.2): a body
+// COPY (`q |> compute`) or a MASK over it evaluates its own map form there --
+// its kernel's captures forced first, as any map's. The C++ lane named the
+// module binder, which nothing declared (BL9002).
+// ============================================================================
+type R = Idx<3>
+let mut x: Array<Int64 like R> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let a = mask(d, lambda(v) -> v > 4)
+    x(0) = 10
+    d(0) * 100 + extents(a)
+}
+let s = f()
+// EXPECT: s = 103

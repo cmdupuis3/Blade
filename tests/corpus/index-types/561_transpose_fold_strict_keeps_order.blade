@@ -1,0 +1,24 @@
+// TEST: Transpose Fold Strict Keeps Order
+// The STRICT side of plan section 3's fold-order rule (transpose-normal-form
+// v1, rule 3): a fold whose kernel has no reorder licence -- an ordinary
+// lambda, a `where repro` function, a builtin `(+)` inside a `where repro`
+// body -- keeps the transposed copy and folds it in ITS ascending storage
+// order: absorption is declined and the bits are the materialized form's.
+// The values make the order observable: folding C's transpose visits
+// 1e16, -1e16, 1, 1 (= 2.0); C's own source order visits 1e16, 1, -1e16, 1,
+// and 1e16 + 1 rounds back to 1e16 (= 1.0, `ss`). Each strict fold equals the
+// fold of the NAMED materialized transpose `Ct` bit for bit (`sm`).
+function radd(a: Float64, b: Float64) where repro = a + b
+function tot(m: Array<Float64 like Idx<2>, Idx<2>>) where repro = reduce(transpose(m, [0, 1]), (+), 0.0, axes = 2)
+let C: Array<Float64 like Idx<2>, Idx<2>> = [[1.0e16, 1.0], [-1.0e16, 1.0]]
+let st = reduce(transpose(C, [0, 1]), lambda(a, b) -> (a + b) * 1.0, 0.0, axes = 2)
+let sr = reduce(transpose(C, [0, 1]), radd, 0.0, axes = 2)
+let sf = tot(C)
+let Ct = transpose(C, [0, 1])
+let sm = reduce(Ct, lambda(a, b) -> (a + b) * 1.0, 0.0, axes = 2)
+let ss = reduce(C, lambda(a, b) -> (a + b) * 1.0, 0.0, axes = 2)
+// EXPECT: st = 2.0
+// EXPECT: sr = 2.0
+// EXPECT: sf = 2.0
+// EXPECT: sm = 2.0
+// EXPECT: ss = 1.0

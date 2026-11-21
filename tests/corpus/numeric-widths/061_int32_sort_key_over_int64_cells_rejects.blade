@@ -1,0 +1,9 @@
+// TEST: an Int32 sort key over Int64 cells (rejects)
+// ============================================================================
+// G276 (1): a kernel slot has no call-site narrowing proof; each cell would
+// be wrapped into the narrower integer.
+// ============================================================================
+function key(v: Int32) -> Int32 = v
+let a: Array<Int64 like Idx<2>> = [5000000000, 1]
+let y = sort(a, key)
+// ERROR: BL3020

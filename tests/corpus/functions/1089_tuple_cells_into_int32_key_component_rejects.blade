@@ -1,0 +1,8 @@
+// TEST: a sort key whose tuple parameter has an Int32 component over Int64 tuple cells (rejects)
+// ============================================================================
+// G276: a kernel slot has no narrowing proof, component by component too.
+// ============================================================================
+let a: Array<(Int64, Int64) like Idx<2>> = [(4294967296, 1), (1, 2)]
+let k = lambda(t: (Int32, Int64)) -> t[1]
+let y = sort(a, if true then k else k)
+// ERROR: BL3020

@@ -1,0 +1,34 @@
+// TEST: An invariant array call inside a threaded kernel is evaluated once
+// ============================================================================
+// Gap G97: `method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(a), (+), w)`
+// re-evaluated `prep(a)` -- a call and a fresh pool -- for every cell (call
+// elision declines a kernel with a parallel strategy). Kernel-invariant
+// hoisting (BLADE_HOIST) now binds an ARRAY-valued call of invariant arguments
+// once before the nest (read-only in the kernel and its team) when it is
+// pure and cannot abort, the nest is statically non-empty, and the host is
+// a NAMED FUNCTION body (its scope frees the pool at exit); a fold operand is
+// a strict position. Kept as a call: a kernel that assigns (`mutk`, a
+// `let mut` copy written per cell) and a top-level host (`top`).
+// Values: prep(A) sums to 12 (A = [1, 2, 3]).
+// ============================================================================
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 |> compute }
+type K = Idx<3>
+type W = Idx<2>
+function up(a: Array<Float64 like K>, ws: Array<Float64 like W>) -> Array<Float64 like W> = {
+    method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(a), (+), w) |> compute
+}
+function mutk(a: Array<Float64 like K>, ws: Array<Float64 like W>) -> Array<Float64 like W> = {
+    method_for(ws) <@> lambda(w) -> {
+        let mut t = prep(a)
+        t(0) = w
+        reduce(t, (+))
+    } |> compute
+}
+let A: Array<Float64 like K> = [1.0, 2.0, 3.0]
+let ws: Array<Float64 like W> = [10.0, 20.0]
+let u = up(A, ws)
+let m = mutk(A, ws)
+let top = method_for(ws) <@> lambda(w) where omp(w: 1) -> reduce(prep(A), (+), w) |> compute
+// EXPECT: u = [22.0, 32.0]
+// EXPECT: m = [20.0, 30.0]
+// EXPECT: top = [22.0, 32.0]

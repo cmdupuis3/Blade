@@ -1,0 +1,21 @@
+// TEST: A Tuple Member Beside Its Whole Carrier Is One Storage (rejects)
+// ============================================================================
+// Gap G240 (2), round 4 wave 10 (lane C, C3): a binder initialized by a tuple
+// LITERAL and never rebound holds its members at distinct identities (the
+// strict walk of the mut-argument rule). `let mut x = pair[1]` may alias the
+// member it projects, so x's storage includes that member -- before, the
+// member was the whole carrier, so x and `pair[0]` looked like one storage.
+// The whole carrier holds every member identity: refused.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function poke(t: (A, A), y: mut A) -> Float64 = {
+    y(0) = 9.0
+    t[0](0) + y(0)
+}
+let mut g: A = [1.0, 2.0]
+let mut h: A = [3.0, 4.0]
+let pair = (g, h)
+let mut x = pair[1]
+let r = poke(pair, x)
+// ERROR: BL4005
+// REJECT-AT: lower

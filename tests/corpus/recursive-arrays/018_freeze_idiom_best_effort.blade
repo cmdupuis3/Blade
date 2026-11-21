@@ -7,7 +7,7 @@
 // `while` spelling alone (recursive-arrays/013 pins that side).
 
 type It = Idx<8>
-let rec zs: Array<Float like It> =
+let rec zs: Array<Float64 like It> =
     match zs with
     | zero -> zero
     | zero :: s -> zero :: 1.0

@@ -11,7 +11,7 @@ import ad as ad
 
 type H = Idx<5>
 
-function f(a: Array<Float like H>) -> Float = {
+function f(a: Array<Float64 like H>) -> Float64 = {
     let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute
     reduce(d, (+))
 }

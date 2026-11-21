@@ -1,0 +1,22 @@
+// TEST: Tuple Of Views Of Stored Array Write
+// ----------------------------------------------------------------------------
+// A tuple of row VIEWS of a STORED array is a carrier, not a copy: `pair[0]`
+// is still a view of mc, so `row(1) = 9.0` writes mc(0, 1), and every name
+// (mc, pair, row) and the fold see it. The stored mc is a copy of the
+// deferred m (formalism 10.2), so m itself is never forced and prints
+// nothing (the llvm lane used to print it; the absence is pinned by the
+// differential gates). The deferred-owner twin is tuples/069 (refused).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let mc = m |> compute
+let pair = (mc(0), mc(1))
+let row = pair[0]
+row(1) = 9.0
+let probe = mc(0, 1)
+let s = reduce(mc, (+), axes = 2)
+// EXPECT: mc = [[0.0, 9.0, 2.0], [10.0, 11.0, 12.0]]
+// EXPECT: row = [0.0, 9.0, 2.0]
+// EXPECT: probe = 9.0
+// EXPECT: s = 44.0

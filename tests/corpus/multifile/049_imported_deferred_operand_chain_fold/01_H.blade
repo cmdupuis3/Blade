@@ -1,0 +1,14 @@
+// TEST: An imported deferred map under a deferred chain to fold
+// MODULE: H
+// Round 4 wave 6 (the class-closure round of BLADE_COMPUTE_ELIDE=chain, gap
+// G108): Main folds q3 over p3 over H.d, a DEFERRED map of THIS module. The
+// chain arm read Main's deferred census only and took H.d as a stored operand
+// -- a hidden third level: the nest forced H.d privately, where the fold
+// forces it persistently, so Main's later write to H.x changed the later read
+// z (2.0 -> 20.0) and dropped H.d's print. The arm now asks every operand of
+// p3 for POSITIVE storage evidence in its own module (storedArrayProof); an
+// imported one declines. Same values in every build.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+// EXPECT: H.d = [2.0, 4.0, 6.0]

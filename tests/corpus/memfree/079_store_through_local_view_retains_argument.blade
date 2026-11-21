@@ -1,0 +1,27 @@
+// TEST: A store through a callee-local view of caller storage retains the argument
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m4): `slot` is let-bound in the
+// callee but is a VIEW of the caller's `fns` (lexical locality is not storage
+// provenance); storing a closure over the argument through it keeps the
+// argument alive past f.
+// ============================================================================
+type R = Idx<1>
+type One = Idx<1>
+type I = Idx<3>
+let mut fns: Array<(Float64 -> Float64) like R, One> = [[lambda(k: Float64) -> 0.0 * k]]
+function stash(out: mut Array<(Float64 -> Float64) like R, One>, a: Array<Float64 like I>) -> Int64 = {
+    let slot = out((0 : R))
+    slot(0) = lambda(k: Float64) -> reduce(a, (+)) * k
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = stash(fns, y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let s = f(x)
+let result = fns(0)(0)(1.0)
+// EXPECT: s = 21.0
+// EXPECT: result = 12.0

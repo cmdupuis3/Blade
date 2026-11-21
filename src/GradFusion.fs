@@ -45,12 +45,38 @@ let internal asKernelLambda (ctx: Ctx) (k: Expr)
         Ok (ps, wc, body, Some isAnti)
     | ExprKind.ExprVar f when Map.containsKey f ctx.Decls ->
         let fd = ctx.Decls.[f]
+        // G276 (2): a named function's DECLARED parameter and return types are
+        // constraints on what flows through the stage, as a lambda's are --
+        // carried onto the lambda (a parameter annotation, a return
+        // ascription), so a fused pipeline refuses what the unfused one does.
+        // Only an annotation with no SIGNATURE VARIABLE in it (`x: T`, `T^1`
+        // have no meaning outside their declaration); a single-letter name
+        // that is a module type alias (`type F = Float64`) is a type.
+        let isVar (n: string) =
+            List.contains n fd.TypeParams
+            || (n.Length = 1 && System.Char.IsUpper n.[0] && not (Map.containsKey n ctx.TypeAliases))
+        let rec concrete (t: TypeExpr) =
+            match t with
+            | TyVar (n, _) -> not (isVar n) && Map.containsKey n ctx.TypeAliases
+            | TyNamed (n, args) -> not (isVar n) && List.forall concrete args
+            | TyArray (e, idxs) -> concrete e && List.forall concrete idxs
+            | TyAbstractArray (e, _, _) -> concrete e
+            | TyTuple ts -> List.forall concrete ts
+            | TyFunc (args, r) -> List.forall concrete args && concrete r
+            | TyBounded (b, _, _) -> concrete b
+            | TyDist (_, e, axes) -> concrete e && List.forall concrete axes
+            | _ -> true
+        let annot (t: TypeExpr option) = t |> Option.filter concrete
         (match fd.Body.Kind with
          | ExprKind.ExprBlock _ -> Error (KernBlockBody f)
          | _ ->
+             let body =
+                 match annot fd.ReturnType with
+                 | Some rt -> inheritSpan fd.Body (ExprTyped (fd.Body, rt))
+                 | None -> fd.Body
              Ok (fd.Params |> List.map (fun p ->
-                     { Name = p.Name; Type = None; Default = None; NameSpan = noSpan }),
-                 fd.WhereClause, fd.Body, None))
+                     { Name = p.Name; Type = annot p.Type; Default = None; NameSpan = noSpan }),
+                 fd.WhereClause, body, None))
     | ExprKind.ExprVar name when isMathIntrinsic name ->
         let p = fresh ctx "__ck"
         Ok ([ { Name = p; Type = None; Default = None; NameSpan = noSpan } ],

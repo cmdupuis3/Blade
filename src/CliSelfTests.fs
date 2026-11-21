@@ -49,6 +49,91 @@ open Blade.Lowering
 module TH = Blade.Tests.TestHarness
 open Blade.CliCommands
 
+/// The environment knobs that change what the compiler EMITS, how the program
+/// is BUILT, or what it PRINTS -- every one read per call from the process
+/// environment, so a developer's shell reaches straight into a test run.
+/// `blade test` clears them all for its duration (and restores them after).
+///
+/// The suites were written against the pristine default, and that is a
+/// correctness matter, not a preference: corpus EXPECT pins are exact printed
+/// values (BLAS routes and reassociated folds are licensed to differ in the
+/// last ULP; FP contraction likewise), emission-shape tests assert the default
+/// loop nests and pass set (BLADE_FUSION / BLADE_CSE / ... off changes the
+/// emitted text), `interp` / `diff-oracle` must never run gate-on
+/// (MathElaborate: the synthesized Jacobi is the verification truth), and
+/// BLADE_PRINT would silently drop every binding a pin reads. A developer whose
+/// shell carried OPENBLAS_DIR for notebook work saw ~8 reds that vanished when
+/// run "clean" -- the same shape as every knob below.
+///
+/// The BLAS explicit tier's keys (BLADE_BLAS_LINK / _INCLUDE / _FLAVOR,
+/// BLADE_LAPACK_LINK / _INCLUDE) are here too: BLADE_BLAS_LINK alone selects
+/// that tier. Clearing is not enough for the BLAS gate, though: an unset
+/// variable falls back to blade.toolchain.json (Toolchain.get), which
+/// `blade setup` writes, so the suite would still run BLAS-on wherever setup
+/// had recorded a BLAS install. `suitePinnedKnobs` therefore pins BLADE_BLAS
+/// OFF for the run, which outranks every tier key from either source.
+///
+/// Blocks that exercise a knob set and restore it in-process, which this clear
+/// does not disturb. Deliberately NOT here: BLADE_MEMCHECK (an ASan corpus
+/// run is a real workflow -- it changes the build profile, not what a correct
+/// program prints), BLADE_EXE_CACHE (where binaries are cached, not what they
+/// are; the cache keys on the emitted text), BLADE_STDLIB, the non-BLAS
+/// toolchain locators (BLADE_LLVM_CLANG, BLADE_TOOLCHAIN_FILE, NETCDF_DIR,
+/// MSMPI_BIN) and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
+let internal suiteClearedKnobs =
+    [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
+      "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
+      "BLADE_LAPACK_LINK"; "BLADE_LAPACK_INCLUDE"
+      "BLADE_PRINT"; "BLADE_PRINT_BITS"; "BLADE_MEMBER_VERBOSE"; "BLADE_JOIN_REPORT"
+      "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
+      "BLADE_OMP_THREADS"
+      "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
+      "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
+      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD"
+      "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
+      "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
+      "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS"
+      "BLADE_POOL_RETAIN"; "BLADE_OWNED_MOVE"; "BLADE_WORKSPACE_CENSUS"; "BLADE_PRIVATE_SPOOL" ]
+    @ Blade.Optimize.optimizerGates
+
+/// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
+/// because unset falls back to blade.toolchain.json. Blocks that test BLAS set
+/// BLADE_BLAS themselves, which overrides this in their scope. The BLAS
+/// preference is pinned to `native` (today's default) for the same reason: a
+/// machine whose toolchain file says `library` -- or `BLADE_BLAS_FLAVOR=mkl`,
+/// under which `auto` resolves to `library` -- would otherwise flip every
+/// BLAS-on dispatch pin. The preference's own cases set it in their scope.
+/// BLADE_POOL_RETAIN is pinned `default` (the default policy; since round 4
+/// wave 6 `off` is the pre-wave-6 arm) for the same reason:
+/// a toolchain file that persisted the retention arm would otherwise put its
+/// defines into every program the suite emits.
+/// BLADE_PRINT_FORM is pinned `test` (P3-26): every corpus pin, doc fence and
+/// harness reads the test print form, and a program a block spawns through
+/// `blade run` (which defaults to the DISPLAY form) inherits the pin.
+let internal suitePinnedKnobs = [ "BLADE_BLAS", "off"; "BLADE_BLAS_PREFER", "native"; "BLADE_POOL_RETAIN", "default"; "BLADE_PRINT_FORM", "test" ]
+
+/// A program the LLVM lane REFUSES (it has no complex values), so `blade plan`
+/// under BLADE_LLVM=1 falls back to the C++ lane -- the cli case that pins the
+/// pool-retention scope of a fallback (a Float32 program, before round 6).
+let private poolFallbackSource = "let z: Complex128 = complex(1.5, 2.0)\nlet w = z * z\n"
+
+/// Run `f` in the suite's pristine environment: every `suiteClearedKnobs`
+/// variable unset, every `suitePinnedKnobs` variable pinned, the caller's
+/// values restored afterwards. Says in one line which ambient values it is
+/// ignoring (unless `quiet`).
+let internal withSuiteEnvironment (quiet: bool) (f: unit -> 'a) : 'a =
+    let keys = (suiteClearedKnobs @ List.map fst suitePinnedKnobs) |> List.distinct
+    let saved = keys |> List.map (fun k -> (k, System.Environment.GetEnvironmentVariable k))
+    let ambient = saved |> List.filter (fun (_, v) -> not (isNull v))
+    if not quiet && not ambient.IsEmpty then
+        let names = ambient |> List.map (fun (k, v) -> $"{k}={v}") |> String.concat " "
+        eprintfn "test: ignoring ambient %s for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)" names
+    for (k, _) in ambient do System.Environment.SetEnvironmentVariable(k, null)
+    for (k, v) in suitePinnedKnobs do System.Environment.SetEnvironmentVariable(k, v)
+    try f ()
+    finally
+        for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
+
 let runCliSmokeTests () : TH.BlockResult =
     let blockName = "CLI Smoke"
     TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
@@ -64,7 +149,7 @@ let runCliSmokeTests () : TH.BlockResult =
         Directory.CreateDirectory(tmpDir) |> ignore
         try
             let srcFile = Path.Combine(tmpDir, "smoke.edgi")
-            File.WriteAllText(srcFile, "let x = 1 + 2 * 3\n")
+            File.WriteAllText(srcFile, "let x: Int64 = 1 + 2 * 3\n")
             match compileToExe srcFile None false false with
             | Error e ->
                 record runTest TH.Fail (e.Replace("\n", " | "))
@@ -88,6 +173,33 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(tmpDir, true) with _ -> ()
 
+    // --- the suite environment: BLAS stays off whatever the shell or the
+    // toolchain file says. Clearing alone left two ways in: the explicit
+    // tier's own keys (BLADE_BLAS_LINK selects it) and blade.toolchain.json,
+    // which an UNSET variable falls back to.
+    (let blasCase = "suite environment: BLAS off despite ambient tier keys and a toolchain file"
+     let tcFile = Path.Combine(Path.GetTempPath(), $"blade_suite_env_{Guid.NewGuid():N}.json")
+     let pinned = [ "BLADE_TOOLCHAIN_FILE", tcFile; "BLADE_BLAS_LINK", "-lmkl_rt"; "BLADE_BLAS", "1" ]
+     let prior = pinned |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+     try
+        File.WriteAllText(tcFile, "{\"BLADE_BLAS\": \"1\", \"OPENBLAS_DIR\": \"C:/opt/openblas\", \"BLADE_BLAS_LINK\": \"-lopenblas\"}")
+        Blade.Toolchain.refresh ()
+        for (k, v) in pinned do Environment.SetEnvironmentVariable(k, v)
+        let inside =
+            withSuiteEnvironment true (fun () ->
+                (Blade.LinAlgPatterns.resolveBlasTier (), Blade.LinAlgPatterns.blasAvailable (),
+                 Environment.GetEnvironmentVariable "BLADE_BLAS_LINK"))
+        let restored = Environment.GetEnvironmentVariable "BLADE_BLAS_LINK" = "-lmkl_rt"
+                       && Environment.GetEnvironmentVariable "BLADE_BLAS" = "1"
+        match inside with
+        | (Blade.LinAlgPatterns.TierOff, false, null) when restored -> record blasCase TH.Pass ""
+        | (tier, avail, link) ->
+            record blasCase TH.Fail $"tier {tier}, blasAvailable {avail}, BLADE_BLAS_LINK inside = {link}, restored after = {restored}"
+     finally
+        for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+        (try File.Delete tcFile with _ -> ())
+        Blade.Toolchain.refresh ())
+
     // --- `--print <names>`: which top-level bindings the program prints ---
     //
     // The CLI has always printed EVERY top-level binding, which is what makes
@@ -99,9 +211,9 @@ let runCliSmokeTests () : TH.BlockResult =
     //
     // Emission-only cases need no toolchain; the run cases skip without g++.
     let printSrc =
-        "let x = 1 + 2 * 3\n\
+        "let x: Int64 = 1 + 2 * 3\n\
          let y = x * 2\n\
-         let z = [1.0, 2.0, 3.0]\n"
+         let z = Float64([1.0, 2.0, 3.0])\n"
     let withPrint (v: string option) (f: unit -> unit) =
         let prior = System.Environment.GetEnvironmentVariable "BLADE_PRINT"
         System.Environment.SetEnvironmentVariable("BLADE_PRINT", (match v with Some s -> s | None -> null))
@@ -157,7 +269,7 @@ let runCliSmokeTests () : TH.BlockResult =
          function total(x: T^1) -> T^0 = reduce(x, (+))\n\
          let g = sq\n\
          let h = total\n\
-         let r = g(3.0) + h([1.0, 2.0])\n"
+         let r = g(3.0) + h(Float64([1.0, 2.0]))\n"
     for (sel, what) in [ ("g", "a non-generic function alias"); ("h", "an eliminated generic function alias") ] do
         withPrint (Some sel) (fun () ->
             (match cppOf ("print_fn_" + sel) fnSrc with
@@ -172,6 +284,65 @@ let runCliSmokeTests () : TH.BlockResult =
                  let r = Blade.Interp.Run.runProgram ir ("print_fn_interp_" + sel) Blade.Interp.Value.defaultLimits
                  recordCase $"print: the interpreter refuses {what} the same way"
                      (r.ExitCode <> 0 && r.Stderr.Contains $"{sel} is a function") r.Stderr))
+    // A TUPLE and a STRUCT print now (spelled like their literals), so
+    // selecting one prints it; a binding of a kind with NO printed form (a
+    // sum-type value) is refused by name in both lanes -- it used to emit an
+    // empty print block and exit 0.
+    let aggSrc =
+        "struct P {\n    a: Float64,\n    b: Float64\n}\n\
+         type Direction = North | South\n\
+         let t = (Int64(1), Float64(2.0))\n\
+         let p = P { a = 1.0, b = 2.0 }\n\
+         let d = South\n"
+    for sel in [ "t"; "p" ] do
+        withPrint (Some sel) (fun () ->
+            match cppOf ("print_agg_" + sel) aggSrc with
+            | Error e -> record $"print: selecting the aggregate {sel} prints it" TH.Fail e
+            | Ok cpp ->
+                recordCase $"print: selecting the aggregate {sel} prints it"
+                    (cpp.Contains $"cout << \"{sel} = \";" && not (cpp.Contains "#error")) "")
+    withPrint (Some "d") (fun () ->
+        (match cppOf "print_agg_d" aggSrc with
+         | Error e -> record "print: selecting a binding with no printed form refuses" TH.Fail e
+         | Ok cpp ->
+             recordCase "print: selecting a binding with no printed form splices a refusal"
+                 (cpp.Contains "#error" && cpp.Contains "d : " && cpp.Contains "has no printed form") "")
+        (match Blade.Lowering.lower aggSrc with
+         | Error e -> record "print: the interpreter refuses a binding with no printed form" TH.Fail e
+         | Ok ir ->
+             let r = Blade.Interp.Run.runProgram ir "print_agg_interp" Blade.Interp.Value.defaultLimits
+             recordCase "print: the interpreter refuses a binding with no printed form the same way"
+                 (r.ExitCode <> 0 && r.Stderr.Contains "has no printed form") r.Stderr))
+    // Elaborator-internal `__` bindings (`__ppl_cen_A`, `__dist_dx_k1`) are not
+    // echoed by default -- a ppl program printed a screenful of them -- but a
+    // bare expression's `__expr<n>` is the user's value and prints, and a
+    // selected internal name prints.
+    let internalSrc = "let __hidden = 1\nlet shown: Int64 = 2\n3 + 4\n"
+    (match cppOf "internal_names" internalSrc with
+     | Error e -> record "print: elaborator-internal bindings are not echoed" TH.Fail e
+     | Ok cpp ->
+         recordCase "print: elaborator-internal bindings are not echoed (a bare expression still is)"
+             (cpp.Contains "\"shown = \"" && not (cpp.Contains "\"__hidden = \"") && cpp.Contains "\"__expr") "")
+    withPrint (Some "__hidden") (fun () ->
+        match cppOf "internal_names_sel" internalSrc with
+        | Error e -> record "print: a selected internal binding prints" TH.Fail e
+        | Ok cpp -> recordCase "print: a selected internal binding prints" (cpp.Contains "\"__hidden = \"") "")
+    (match Blade.Lowering.lower internalSrc with
+     | Error e -> record "print: the interpreter hides internal bindings too" TH.Fail e
+     | Ok ir ->
+         let r = Blade.Interp.Run.runProgram ir "internal_names_interp" Blade.Interp.Value.defaultLimits
+         let out = r.Stdout.Replace("\r\n", "\n")
+         recordCase "print: the interpreter hides internal bindings too"
+             (out.Contains "shown = 2" && not (out.Contains "__hidden") && out.Contains "__expr") out)
+    // A runtime GUARD panic (here the computed-row extent check, BL8006) is
+    // located at the declaration being emitted: it used to pass `nullptr, 0`,
+    // which a notebook showed at 1:1. (No file here -- the source is a string
+    // -- so the location is the line alone; `blade run` adds the file.)
+    (match cppOf "guard_line" "let n = reduce(Int64([1, 2]), (+))\nlet row = Float64(0..n)\nlet final: Array<Float64 like Idx<2>, Idx<4>> = [row, row]\n" with
+     | Error e -> record "guards: a runtime guard panic carries its declaration's line" TH.Fail e
+     | Ok cpp ->
+         recordCase "guards: a runtime guard panic carries its declaration's line"
+             (cpp.Contains "\"array literal extent mismatch\", nullptr, 3)" && not (cpp.Contains "\"array literal extent mismatch\", nullptr, 0)")) "")
     // The two lanes agree under one pin: the interpreter prints the same set.
     withPrint (Some "y") (fun () ->
         match Blade.Lowering.lower printSrc with
@@ -279,11 +450,16 @@ let runCliSmokeTests () : TH.BlockResult =
     let selfExe =
         [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
         |> List.tryFind File.Exists
-    let spawn (cwd: string) (args: string list) : int * string * string =
+    let rec spawn (cwd: string) (args: string list) : int * string * string = spawnWith [] cwd args
+    /// `spawn` with extra environment for the CHILD only (null unsets), so a
+    /// knob a case needs never leaks into this process's other blocks.
+    and spawnWith (env: (string * string) list) (cwd: string) (args: string list) : int * string * string =
         match selfExe with
         | None -> (-1, "", "no Blade executable beside the test assembly")
         | Some exe ->
             let psi = System.Diagnostics.ProcessStartInfo(exe)
+            for (k, v) in env do
+                if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
             for a in args do psi.ArgumentList.Add a
             psi.WorkingDirectory <- cwd
             psi.RedirectStandardOutput <- true
@@ -310,7 +486,7 @@ let runCliSmokeTests () : TH.BlockResult =
             let ok = code = 0 && out.Contains "Usage:" && not (Directory.Exists(Path.Combine(dir, "generated_cpp_tests")))
             recordCase "cli: bare `blade` prints usage (and does not start the suite)" ok
                 (if ok then "" else out.Substring(0, min 200 out.Length))
-            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x: Int64 = 1 + 2 * 3\n")
             let (code, out, err) = spawn dir [ "check"; "v.blade"; "--verbose" ]
             recordCase "cli: `check f --verbose` is a check, not an unrecognized command"
                 (code = 0 && out.Contains "OK") (out + err)
@@ -328,12 +504,12 @@ let runCliSmokeTests () : TH.BlockResult =
             // rule where it sits is refused by check itself -- coded BL6002 and
             // spanned at the expression -- not first by `emit`, spanless.
             File.WriteAllText(Path.Combine(dir, "cf.blade"),
-                "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+                "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
                 + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
                 + "    let c = compound(x, m)\n"
                 + "    reduce(c, (+))\n"
                 + "}\n"
-                + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+                + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
                 + "let s = f(a)\n")
             let (code, out, err) = spawn dir [ "check"; "cf.blade" ]
             recordCase "cli: `check` reports a lowering refusal as spanned BL6002"
@@ -357,6 +533,1989 @@ let runCliSmokeTests () : TH.BlockResult =
                 (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
                  && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
                 (out + err)
+            // BLADE_POOL_RETAIN (round-3 A4, gap G52): the plan's build line
+            // names the runtime pool-retention policy -- the default, the
+            // opt-in arm with its per-thread honesty, a malformed value read
+            // as the default (with a warning line) -- and the JSON carries it.
+            // Every case names its toolchain file (an isolated fixture): an
+            // UNSET variable falls back to the file, and a machine whose
+            // blade.toolchain.json persisted the arm must not move these pins.
+            let emptyToolchain = Path.Combine(dir, "pool_tc_empty.json")
+            File.WriteAllText(emptyToolchain, "{}")
+            let armToolchain = Path.Combine(dir, "pool_tc_retain1.json")
+            File.WriteAllText(armToolchain, "{\"BLADE_POOL_RETAIN\": \"1\"}")
+            let poolEnv (file: string) (v: string) = [ ("BLADE_TOOLCHAIN_FILE", file); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", null) ]
+            let buildLine (out: string) =
+                out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "build: ") |> Option.defaultValue "<none>"
+            let defaultLine = "build: pool retention: default (32 MB / 64 MB per thread)"
+            let (codeU, outU, errU) = spawnWith (poolEnv emptyToolchain null) dir [ "plan"; "cov.blade" ]
+            let (codeO, outO, errO) = spawnWith (poolEnv emptyToolchain "default") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line for an unset and a `default` default is exactly the plain default line (no provenance)"
+                (codeU = 0 && codeO = 0 && buildLine outU = defaultLine && buildLine outO = defaultLine)
+                ($"unset: '{buildLine outU}' / default: '{buildLine outO}' {errU}{errO}")
+            // round 4 wave 6 (G185 (a)): `off` / `0` is the PRE-WAVE-6 limits,
+            // a non-default arm restated as defines
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "off") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line names `off` as the pre-wave-6 4 MB / 8 MB limits"
+                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=0 (env BLADE_POOL_RETAIN) -> 4 MB / 8 MB per thread (the pre-wave-6 limits, C++ lane blade_pool, restated as defines; the default since round 4 wave 6 is 32 MB / 64 MB per thread; the run record's policy.pool says which arm ran)")
+                (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "1") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` build line names the BLADE_POOL_RETAIN=1 arm in the C++ lane, per thread"
+                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per thread (opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. 64 MB stays committed until reuse, eviction, flush or thread exit, so T threads may retain T x 96 MB and the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; the run record's policy.pool says which arm ran)")
+                (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv armToolchain null) dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` reads the arm from the toolchain file when the variable is unset"
+                (code = 0 && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (blade.toolchain.json) -> 64 MB / 96 MB per thread")
+                (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv armToolchain "default") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` lets env `default` override a toolchain file's arm"
+                (code = 0 && buildLine out = defaultLine) (buildLine out + err)
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "16:48") dir [ "plan"; "cov.blade"; "--json" ]
+            recordCase "cli: `plan --json` carries an explicit retention pair, per-thread in the C++ lane"
+                (code = 0 && out.Contains "\"build\":{\"pool_retain\":{\"arm\":\"pair\",\"setting\":\"16:48\""
+                 && out.Contains "\"max_block\":16777216,\"budget\":50331648,\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\"")
+                (out + err)
+            let (code, out, err) = spawnWith (poolEnv emptyToolchain "96:64") dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` reads a malformed retention pair (max > budget) as the default, with a warning"
+                (code = 0 && (buildLine out).StartsWith "build: pool retention: default (32 MB / 64 MB per thread) -- BLADE_POOL_RETAIN='96:64'"
+                 && err.Contains "warning: BLADE_POOL_RETAIN='96:64'")
+                (out + err)
+            // The LLVM lane holds its pools in the shim allocator: ONE process
+            // budget, an atexit flush, and no run record. The scope follows
+            // the lane that BUILDS the program -- an LLVM refusal falls back to
+            // the C++ lane, and so does the scope.
+            if (Blade.Build.resolveClang ()).IsNone then
+                record "cli: `plan` under BLADE_LLVM=1 scopes the pool budget per process" TH.Skip "no clang (the LLVM lane is unavailable)"
+            else
+                let llvmEnv (v: string) = [ ("BLADE_TOOLCHAIN_FILE", emptyToolchain); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", "1") ]
+                let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "cov.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 scopes the arm to the shim's ONE process budget, no run record"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per process (opt-in arm, LLVM lane shim allocator: ONE 96 MB budget for the process"
+                     && (buildLine out).Contains "atexit flush" && (buildLine out).Contains "writes NO run record"
+                     && not ((buildLine out).Contains "per thread") && not ((buildLine out).Contains "T threads"))
+                    (out + err)
+                let (code, out, err) = spawnWith (llvmEnv "default") dir [ "plan"; "cov.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 names the default as the shim's process budget"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && buildLine out = "build: pool retention: default (32 MB / 64 MB per process, the LLVM lane's shim allocator)")
+                    (buildLine out + err)
+                let (code, out, err) = spawnWith (llvmEnv "16:48") dir [ "plan"; "cov.blade"; "--json" ]
+                recordCase "cli: `plan --json` under BLADE_LLVM=1 says budget_scope process"
+                    (code = 0 && out.Contains "\"lane\":\"llvm\""
+                     && out.Contains "\"budget_scope\":\"process\",\"runtime\":\"llvm-shim\"" && not (out.Contains "per-thread"))
+                    (out + err)
+                File.WriteAllText(Path.Combine(dir, "pool_fallback.blade"), poolFallbackSource)
+                let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade"; "--json" ]
+                let (code2, out2, err2) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 with an LLVM refusal keeps the C++ lane's per-thread scope"
+                    (code = 0 && code2 = 0 && out.Contains "\"lane\":\"cpp\"" && out.Contains "\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\""
+                     && out2.Contains "but the LLVM lane refused" && (buildLine out2).Contains "96 MB per thread (opt-in arm, C++ lane blade_pool")
+                    (out + err + out2 + err2)
+            // LANE-CORRECT PLAN (bench gap G23 / G11). The same gram with the
+            // BLAS gate forced on routes to syrk in the C++ lane; with
+            // BLADE_LLVM=1 the LLVM lane takes the program, links no OpenBLAS
+            // and opens no thread team, so the plan must say declined for both
+            // -- never `[blas-routing v1] ...: applied`. The C++ twin (same
+            // knobs minus BLADE_LLVM) is the control that keeps it non-vacuous.
+            File.WriteAllText(Path.Combine(dir, "lane.blade"),
+                "type V = Idx<7>\ntype S = Idx<11>\n"
+                + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) where omp(i: 1) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+                + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
+            let laneEnv llvm = [ ("BLADE_BLAS", "1"); ("BLADE_LLVM", llvm); ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null) ]
+            let (code, out, err) = spawnWith (laneEnv null) dir [ "plan"; "lane.blade" ]
+            recordCase "cli: `plan` (C++ lane) reports the BLAS route and the thread pragma applied"
+                (code = 0 && out.Contains "[blas-routing v1] g" && out.Contains ": applied [Syrk" && not (out.Contains "lane: ")
+                 && out.Contains "[omp v1] x" && not (out.Contains "the LLVM lane"))
+                (out + err)
+            if (Blade.Build.resolveClang ()).IsNone then
+                record "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions" TH.Skip "no clang (the LLVM lane is unavailable)"
+            else
+                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade" ]
+                let lines = out.Split('\n') |> Array.map (_.Trim())
+                let routeLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[blas-routing v1]")
+                let ompLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[omp v1]")
+                recordCase "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions"
+                    (code = 0 && out.Contains "lane: LLVM (BLADE_LLVM=1)"
+                     && routeLines.Length > 0
+                     && routeLines |> Array.forall (fun l -> l.Contains "declined -- the LLVM lane has no BLAS/LAPACK route")
+                     && ompLines.Length > 0
+                     && ompLines |> Array.forall (fun l ->
+                            l.Contains "declined -- the LLVM lane has no thread-level form"
+                            && l.Contains "[omp] requested but emitted serial"))
+                    (out + err)
+                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade"; "--json" ]
+                recordCase "cli: `plan --json` under BLADE_LLVM=1 names the lane"
+                    (code = 0 && out.Contains "\"lane\":\"llvm\"") (out + err)
+                // THE ROW-SLOT FORM (G35) is the C++ lane's thread team; the
+                // LLVM lane runs the same rows serially, and its plan says so
+                // in its own words -- never the generic `reassoc nsz` line a
+                // fold form it does not know would get. C++ twin as control.
+                File.WriteAllText(Path.Combine(dir, "rowslots.blade"),
+                    "type Var = Idx<521>\ntype Obs = Idx<3>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
+                let slotEnvKnob llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", knob) ]
+                let slotEnv llvm = slotEnvKnob llvm null
+                // THE PRECEDENCE (round 3, W2-0a): this walk is one BOTH the row
+                // slots and the ordered orbit scatter admit; by default the
+                // scatter is taken and the row-slot record says it yielded.
+                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the ordered orbit scatter taken over the admitted row-slot form"
+                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains ("declined -- row-slot form: " + Blade.OrbitFold.rowSlotsYieldedToScatter + " [" + Blade.OrbitFold.rowSlotsYieldedForm)
+                     && out.Contains "the ordered orbit scatter runs serially (its chains thread only as a wavefront; the threaded complete-row form admitted but yielded"
+                     && not (out.Contains "fold form: threaded complete rows (repro): 521"))
+                    (out + err)
+                // BLADE_FOLD_ROW_SLOTS=prefer: the round-2 order and its records.
+                let (code, out, err) = spawnWith (slotEnvKnob null "prefer") dir [ "plan"; "rowslots.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1, BLADE_FOLD_ROW_SLOTS=prefer) reports the threaded complete-row form applied"
+                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
+                     // G35 PRECEDENCE under prefer: the scatter the same walk admits is recorded as yielded
+                     && out.Contains "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request (BLADE_FOLD_ROW_SLOTS=prefer")
+                    (out + err)
+                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots.blade" ]
+                // The LLVM lane (no threads, no row slots) is unchanged: its
+                // emitter's own record says it scatters, and the C++ lane's
+                // yielded row-slot record is restated in this lane's words.
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the yielded row-slot form, and the LLVM emitter's own record says it scatters"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: ordered orbit scatter (repro"))
+                    (out + err)
+                let (code, out, err) = spawnWith (slotEnvKnob "1" "prefer") dir [ "plan"; "rowslots.blade" ]
+                // ...and under prefer the C++ lane's row slots are restated as
+                // the serial walk the LLVM lane scatters (both records say so).
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_FOLD_ROW_SLOTS=prefer restates the row-slot form, and the LLVM emitter's own record says it scatters"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs this walk serially in the same association"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: declined -- ordered orbit scatter not taken: the threaded complete-row form (G35)"
+                     && out.Contains "C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
+                    (out + err)
+                // A walk the scatter declines (the body reads the mirror cell
+                // too): the row slots are the C++ form by default, and the LLVM
+                // lane's form is the serial walk.
+                File.WriteAllText(Path.Combine(dir, "rowslots_walk.blade"),
+                    File.ReadAllText(Path.Combine(dir, "rowslots.blade")).Replace("g(i, j) * g(i, j)", "g(i, j) * g(j, i)"))
+                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots_walk.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) keeps the threaded complete-row form where the scatter declines"
+                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
+                     && not (out.Contains "admitted but yielded"))
+                    (out + err)
+                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots_walk.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk (scatter declined)"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
+                     && out.Contains "C++ lane: applied"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
+                    (out + err)
+                // THE ROW-OWNED PULL (round 3, D-P3) is the C++ lane's thread
+                // team over the rank-3 scatter's leaf chains: the C++ plan
+                // says applied (form + omp record); under BLADE_LLVM=1 the
+                // record is the LLVM emitter's own serial scatter (the C++
+                // verdict trailing) and the team's omp record is declined;
+                // the pull's decline (knob off) is restated as this lane's.
+                File.WriteAllText(Path.Combine(dir, "pull3.blade"),
+                    "type Var = Idx<13>\ntype Obs = Idx<2>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+                    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
+                let pullEnv llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_TILE_TUNE", "pull_min=0"); ("BLADE_ORBIT_PULL", knob) ]
+                let (code, out, err) = spawnWith (pullEnv null null) dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the row-owned pull applied with its team"
+                    (code = 0 && out.Contains "row-owned pull on a thread team" && out.Contains "applied [omp parallel num_threads(T) + ascending row claims + team-completion barrier")
+                    (out + err)
+                let (code, out, err) = spawnWith (pullEnv "1" null) dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull as the LLVM emitter's serial scatter, its team declined"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 3, extent 13, row groups of 4, shared pair chains 91 of 169): one pass"
+                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
+                     && not (out.Contains "row-owned pull on a thread team; ")
+                     && out.Contains "declined -- the LLVM lane has no thread-level form"
+                     && not (out.Contains "applied [omp parallel num_threads(T) + ascending row claims"))
+                    (out + err)
+                let (code, out, err) = spawnWith (pullEnv "1" "0") dir [ "plan"; "pull3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull's decline in this lane's words"
+                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no row-owned pull form)"
+                     && out.Contains "C++ lane: declined -- row-owned pull scatter not taken: disabled by BLADE_ORBIT_PULL=0"
+                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: row-owned pull"))
+                    (out + err)
+                // THE LLVM SCATTER RECORD IS THE EMITTER'S OWN: an unforced map
+                // over a stored pool (C++: a deferred computation; LLVM: a
+                // producer it would have to execute) is declined by each lane
+                // in its own words, never translated into a taken scatter; a
+                // Float32 strict walk the C++ lane scatters is not claimed for
+                // a lane that cannot emit it.
+                File.WriteAllText(Path.Combine(dir, "scatter_unforced.blade"),
+                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+                    + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let h = method_for(g) <@> lambda(v: Float64) -> v * 0.25 + 1.0\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> h(i, j), radd, 0.5), radd, 0.0)\n")
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_unforced.blade" ]
+                // Round 4 wave 7 (lane B, G199): the kernel CAPTURES the
+                // deferred h, and a kernel capture of a deferred module map is
+                // forced (stored) before the fold in the LLVM lane too, as the
+                // C++ lane forces it (collectDeferredKernelCaptures): the walk
+                // then reads a stored pool and BOTH lanes take the scatter (it
+                // used to stay a producer in this lane only, which declined)
+                recordCase "cli: `plan` under BLADE_LLVM=1 scatters a captured deferred source once it is forced, as the C++ lane does"
+                    (code = 0 && out.Contains "lane: LLVM"
+                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5"
+                     && not (out.Contains "the compact array is an unforced computation, not a stored pool (LLVM lane"))
+                    (out + err)
+                File.WriteAllText(Path.Combine(dir, "scatter_f32.blade"),
+                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float32(Float64((i * 7 + s * 3) % 11) * 0.37) |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float32 like Obs>, b: Array<Float32 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))\n")
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", null); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
+                recordCase "cli: `plan` (C++ lane) scatters a Float32 strict walk"
+                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5") (out + err)
+                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
+                // Since round 6 the LLVM lane EMITS this Float32 program; its own
+                // scatter is Float64 / Int64 only, so its emitter declines it
+                // (the walk, bitwise the scatter under repro) and the record
+                // says so beside the C++ lane's applied scatter.
+                recordCase "cli: `plan` under BLADE_LLVM=1 does not claim a Float32 scatter for the LLVM lane"
+                    (code = 0
+                     && out.Contains "lane: LLVM"
+                     && out.Contains "declined -- ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)"
+                     && not (out.Contains "applied [fold form: ordered orbit scatter"))
+                    (out + err)
+                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
+                // materializes through the shared C core in the LLVM lane, and
+                // the plan says so in this lane's words (not the C++ lane's
+                // dsyrk_tri, which this executable does not contain).
+                File.WriteAllText(Path.Combine(dir, "tile.blade"),
+                    "type V = Idx<61>\ntype S = Idx<31>\n"
+                    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
+                let tileEnv knob = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_SYRK_TILE", knob); ("BLADE_FP_REPRO", null) ]
+                let (code, out, err) = spawnWith (tileEnv null) dir [ "plan"; "tile.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1 reports the syrk tile through the shared C core"
+                    (code = 0 && out.Contains "fold form: syrk tile (shared C core) 6x8, KC=31"
+                     && out.Contains "[microkernel v1] g @ "
+                     && out.Contains ": applied [packed syrk tile (shared C core")
+                    (out + err)
+                let (code, out, err) = spawnWith (tileEnv "0") dir [ "plan"; "tile.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SYRK_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_SYRK_TILE=0/off: the brick nest"
+                     && not (out.Contains "fold form: syrk tile (shared C core)"))
+                    (out + err)
+                // THE ROW-CONTRACTION TILE CORES (M7 / M8): the antisym pair
+                // and the rank-3 simplex through the same shared C core, in
+                // the default AND the repro build (no reorder licence used),
+                // declined by their knobs -- in this lane's words.
+                File.WriteAllText(Path.Combine(dir, "anti.blade"),
+                    "type P = Idx<61>\ntype C = Idx<2>\ntype S = Idx<401>\n"
+                    + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64(i * 3 + c + s) |> compute\n"
+                    + "let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute\n")
+                File.WriteAllText(Path.Combine(dir, "sym3.blade"),
+                    "type V = Idx<29>\ntype S = Idx<67>\nlet static n: Int64 = 67\n"
+                    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
+                    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / Float64(n) |> compute\n")
+                let rowEnv (knob: string) (value: string) (repro: string) =
+                    [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", repro)
+                      ("BLADE_ANTISYM_TILE", null); ("BLADE_SIMPLEX_TILE", null); (knob, value) ]
+                for repro in [ null; "1" ] do
+                    let build = if isNull repro then "default" else "BLADE_FP_REPRO=1"
+                    let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" null repro) dir [ "plan"; "anti.blade" ]
+                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
+                        (code = 0 && out.Contains "fold form: antisym tile (shared C core) sequential 6x8"
+                         // the LLVM lane is the serial regime: anti_g's default is 1 there
+                         && out.Contains ("whole chain per tile, " + Blade.CodeGenExprSupport.antisymSerialDefaultNote Blade.CodeGenExprSupport.antisymNoTeamRequested)
+                         && out.Contains "[microkernel v1] l @ "
+                         && out.Contains ": applied [antisym tile (shared C core")
+                        (out + err)
+                    let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" null repro) dir [ "plan"; "sym3.blade" ]
+                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the simplex tile through the shared C core"
+                        (code = 0 && out.Contains "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, live-accumulator edges, then / d per cell"
+                         && out.Contains "[microkernel v1] t @ "
+                         && out.Contains ": applied [simplex tile (shared C core")
+                        (out + err)
+                let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" "0" null) dir [ "plan"; "anti.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_ANTISYM_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
+                     && not (out.Contains "fold form: antisym tile (shared C core)"))
+                    (out + err)
+                // THE ANTISYM ROW GROUPS, EXECUTED (corpus symmetry/173's
+                // program -- which the corpus runs under the default G = 1 --
+                // under the cache-budget policy, anti_g=0: row groups of 4, 4
+                // and a ragged 2 at p = 61, n = 401): the same printed values
+                // as the default build, and the NumPy-checked pins, both lanes.
+                File.WriteAllText(Path.Combine(dir, "anti132.blade"),
+                    "type P = Idx<61>\ntype C = Idx<2>\ntype S = Idx<401>\n"
+                    + "let (ss, l02, l0_last, l_g0_cross, l_g1_mid, l_g2_far) = {\n"
+                    + "    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute\n"
+                    + "    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))) * 0.5 |> compute\n"
+                    + "    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))\n"
+                    + "    (total, l(0, 2), l(0, 60), l(23, 26), l(36, 41), l(47, 59))\n"
+                    + "}\n")
+                let values (out: string) =
+                    out.Replace("\r\n", "\n").Split('\n') |> Array.filter (fun l -> l.Contains " = ") |> String.concat "; "
+                for lane in [ null; "1" ] do
+                    let laneName = if isNull lane then "C++" else "LLVM"
+                    let env (tune: string) =
+                        [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", lane); ("BLADE_FP_REPRO", null)
+                          ("BLADE_ANTISYM_TILE", null); ("BLADE_TILE_TUNE", tune); ("BLADE_EXE_CACHE", "0") ]
+                    let (c0, o0, e0) = spawnWith (env null) dir [ "run"; "anti132.blade" ]
+                    let (c1, o1, e1) = spawnWith (env "anti_g=0") dir [ "run"; "anti132.blade" ]
+                    let v0, v1 = values o0, values o1
+                    recordCase $"cli: antisym row groups of 4 (anti_g=0) print the default build's values ({laneName} lane)"
+                        (c0 = 0 && c1 = 0 && v0 = v1
+                         && v1.Contains "ss = 598045803.5" && v1.Contains "l02 = -600.5" && v1.Contains "l0_last = 202.5"
+                         && v1.Contains "l_g0_cross = -199.0" && v1.Contains "l_g1_mid = 604.0" && v1.Contains "l_g2_far = 597.0")
+                        ($"default: {v0} | anti_g=0: {v1} | " + e0 + e1)
+                let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" "0" null) dir [ "plan"; "sym3.blade" ]
+                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SIMPLEX_TILE=0 reports the tile declined"
+                    (code = 0 && out.Contains "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
+                     && not (out.Contains "fold form: simplex tile (shared C core)"))
+                    (out + err)
+                // THE COMPOUND REPRESENTATION (G9): a rank-1 `compound(dense,
+                // mask)` is the compaction in both lanes (the plan line passes
+                // through unchanged under BLADE_LLVM=1, which emits exactly
+                // these compounds); a rank-2 mask keeps the hashed index.
+                File.WriteAllText(Path.Combine(dir, "compound1.blade"),
+                    "type I = Idx<9>\n"
+                    + "let a: Array<Int64 like I> = [5, -1, 4, -2, 3, -3, 2, -4, 1]\n"
+                    + "let keep = mask(a, lambda(v) -> v > 0)\n"
+                    + "let y = compound(a, keep)\n"
+                    + "let s = reduce(y, (+))\n")
+                File.WriteAllText(Path.Combine(dir, "compound2.blade"),
+                    "type R = Idx<2>\ntype C = Idx<3>\n"
+                    + "let g: Array<Int64 like R, C> = [[1, 2, 3], [4, 5, 6]]\n"
+                    + "let h = compound(g, mask(g, lambda(v) -> v % 2 == 0))\n")
+                let compoundEnv llvm = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", null) ]
+                // compound1's let-bound mask takes compaction fusion
+                // (Blade.Optimize.planCompactionFusion): the same
+                // representation, counted in the mask pass and gathered in one
+                // pass at the compound, and -- `s` only folds it -- its kept
+                // positions elided (v2, T4b's demand census).
+                let compactionLine =
+                    ": applied [representation: rank-1 compaction (counted in the mask pass, gathered in one pass -- compaction fusion; no hash table; positions elided: the demand census found no consumer that reads them)"
+                let hashedLine =
+                    "declined -- hashed SparseIdx: a rank-2 mask has no closed-form rank, so compound_index_t<2> keeps one tuple->rank hash entry per present cell"
+                for llvm in [ null; "1" ] do
+                    let lane = if isNull llvm then "C++ lane" else "BLADE_LLVM=1"
+                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound1.blade" ]
+                    recordCase $"cli: `plan` ({lane}) reports the rank-1 compound as the compaction"
+                        (code = 0 && out.Contains "[compound v1] y @ " && out.Contains compactionLine
+                         && (isNull llvm || out.Contains "lane: LLVM (BLADE_LLVM=1)"))
+                        (out + err)
+                    // The rank-2 compound stays hashed; under BLADE_LLVM=1 the
+                    // lane refuses the program (the plan is the C++ lane's,
+                    // which is the executable that will run).
+                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound2.blade" ]
+                    recordCase $"cli: `plan` ({lane}) reports the rank-2 compound as the hashed index"
+                        (code = 0 && out.Contains "[compound v1] h @ " && out.Contains hashedLine
+                         && not (out.Contains compactionLine))
+                        (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- COMPACTION FUSION, run (Blade.Optimize.planCompactionFusion) ---
+    // The licensed fold form and the LLVM lane's arithmetic are invisible to
+    // the repro-pinned differentials, so the knob is compared here, at run
+    // time, over NON-DYADIC data (n = 1003: four 256-cell blocks and a tail):
+    // full fusion, and the fold alone (B4a: a mask read between the mask and
+    // the compound declines the compaction), in both lanes. Identity regime
+    // (BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off): gate off and on print the SAME
+    // checksum AND the same residual `checksum - floor(checksum)`, whose 15
+    // printed digits resolve every bit of the checksum (the subtraction is
+    // exact). Default build: within 1e-12 relative.
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "compaction fusion: gate off vs on at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_cfuse_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            let body (between: string) =
+                "type Ix = Idx<1003>\n"
+                + "function gen(k: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + 10000019) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+                + "let x = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i)) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+                + between
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+))\n"
+                + "let resid = checksum - floor(checksum)\n"
+            File.WriteAllText(Path.Combine(dir, "full.blade"), body "")
+            File.WriteAllText(Path.Combine(dir, "b4a.blade"), body "let k0 = keep(3)\n")
+            // v2 with the kept positions DEMANDED (an alias: the census does
+            // not follow it), so they are filled (in the mask pass under
+            // `gather`).
+            File.WriteAllText(Path.Combine(dir, "held.blade"),
+                body "" + "let w = y\nlet held = reduce(w, (+))\n")
+            // T4c: THREE companions over one mask (x itself, an Int64 column,
+            // a Float64 column) share ONE selection index; an alias of the
+            // last (the census does not follow it) keeps the shared positions,
+            // a form both lanes take. The folds over two of them are the
+            // self-product (fed in the joint pass under repro), the third a
+            // plain sum.
+            File.WriteAllText(Path.Combine(dir, "shared.blade"),
+                (body "let c2 = method_for(range<Ix>) <@> lambda(i) -> (Int64(i) * 7) % 13 |> compute\nlet c3 = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i) + 77) |> compute\n")
+                + "let y2 = compound(c2, keep)\n"
+                + "let y3 = compound(c3, keep)\n"
+                + "let w3 = y3\n"
+                + "let t3 = reduce(y3 * y3, (+)) + Float64(reduce(y2, (+))) + reduce(w3, (+))\n"
+                + "let both = checksum + t3\n")
+            let valueOf (key: string) (out: string) =
+                out.Split('\n') |> Array.tryPick (fun l ->
+                    let t = l.Trim()
+                    if t.StartsWith(key + " = ") then Some (t.Substring(key.Length + 3)) else None)
+            // The settings compared: the gate off, the b4 mirror (round 2),
+            // the v2 default (T4b), the opt-in mask-site gather (`gather`, T4a
+            // + T4b), and `gather` with the selectivity cap at 0 (its two-pass
+            // fallback).
+            let settings = [ ("0", null); ("b4", null); ("1", null); ("unshared", null); ("gather", null); ("gather", "sel_cap=0") ]
+            let label (gate: string, tune: string) = if isNull tune then gate else $"{gate}+{tune}"
+            for llvm in [ null; "1" ] do
+                for prog in [ "full"; "b4a"; "held"; "shared" ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let runWith (gate: string, tune: string) (repro: bool) =
+                        let env =
+                            [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
+                              ("BLADE_TILE_TUNE", tune)
+                              ("BLADE_FP_REPRO", (if repro then "1" else null))
+                              ("BLADE_FP_CONTRACT", (if repro then "off" else null)) ]
+                        spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; (if prog = "shared" then "checksum,resid,both" else "checksum,resid"); "--verbose" ]
+                    // `--verbose` names the emitted file on stderr: `.ll` is the LLVM lane.
+                    let laneOk (o: string) = isNull llvm || o.Contains ".ll"
+                    let key = if prog = "shared" then "both" else "checksum"
+                    let ident = settings |> List.map (fun s -> let (c, o, e) = runWith s true in (s, c, valueOf key o, valueOf "resid" o, o + e))
+                    let (_, _, k0, r0, _) = List.head ident
+                    let same = ident |> List.forall (fun (_, c, k, r, oe) -> c = 0 && laneOk oe && k = k0 && r = r0 && r.IsSome)
+                    let shown = ident |> List.map (fun (s, _, k, r, _) -> $"{label s}: {k} / {r}") |> String.concat "; "
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) identity regime: gate off == b4 == on == unshared == gather (and sel_cap=0), every bit"
+                        same shown
+                    let dflt = settings |> List.map (fun s -> let (c, o, e) = runWith s false in (s, c, valueOf key o, o + e))
+                    let close =
+                        match dflt with
+                        | (_, c0, Some a, _) :: rest when c0 = 0 ->
+                            let fa = Double.Parse a
+                            rest |> List.forall (fun (_, c, k, oe) ->
+                                match k with
+                                | Some b when c = 0 && laneOk oe -> abs (fa - Double.Parse b) <= 1e-12 * abs fa
+                                | _ -> false)
+                        | _ -> false
+                    let shownD = dflt |> List.map (fun (s, _, k, _) -> $"{label s}: {k}") |> String.concat "; "
+                    recordCase $"cli: compaction fusion ({lane}, {prog}) default build: gate off vs b4 vs on vs unshared vs gather (and sel_cap=0) within 1e-12"
+                        close shownD
+            // A RUN-TIME source extent (C++ lane: the LLVM lane bakes range
+            // extents): `gather`'s single pass runs under a run-time cap test,
+            // and with sel_cap=0 that test fails, so the mask pass only counts and
+            // the compound runs B4's pass into the same buffers and feeds the
+            // same chain. Identity regime: every setting, every bit.
+            File.WriteAllText(Path.Combine(dir, "dyn.blade"),
+                "function gen(k: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + 10000019) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+                + "let k = reduce(Int64([300, 400, 303]), (+))\n"
+                + "let ks = 0..k |> compute\n"
+                + "let x = method_for(ks) <@> lambda(i) -> gen(i) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+))\n"
+                + "let resid = checksum - floor(checksum)\n"
+                + "let m = extents(y)\n")
+            // T4c over the same run-time axis: two companions (x and a second
+            // column) share one selection; under `gather` the mask pass
+            // gathers both while n is under the cap, else the first companion
+            // runs the joint pass into the same buffers and chains.
+            File.WriteAllText(Path.Combine(dir, "dyn2.blade"),
+                "function gen(k: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + 10000019) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+                + "let k = reduce(Int64([300, 400, 303]), (+))\n"
+                + "let ks = 0..k |> compute\n"
+                + "let x = method_for(ks) <@> lambda(i) -> gen(i) |> compute\n"
+                + "let c2 = method_for(ks) <@> lambda(i) -> gen(i + 5) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 1.0)\n"
+                + "let y = compound(x, keep)\n"
+                + "let y2 = compound(c2, keep)\n"
+                + "let checksum = reduce(y * y, (+)) + reduce(y2 * y2, (+))\n"
+                + "let resid = checksum - floor(checksum)\n"
+                + "let m = extents(y2)\n")
+            let dynRunOf (prog: string) (gate: string, tune: string) =
+                let env =
+                    [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", null); ("BLADE_COMPACTION_FUSION", gate); ("BLADE_TILE_TUNE", tune)
+                      ("BLADE_FP_REPRO", "1"); ("BLADE_FP_CONTRACT", "off") ]
+                let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; "checksum,resid,m" ]
+                ((gate, tune), c, valueOf "checksum" o, valueOf "resid" o, valueOf "m" o, e)
+            let dynSameOf (dyn: ((string * string) * int * string option * string option * string option * string) list) =
+                let (_, _, dk, dr, dm, _) = List.head dyn
+                dyn |> List.forall (fun (_, c, k, r, m, _) -> c = 0 && k = dk && r = dr && m = dm && r.IsSome && m.IsSome)
+            let dyn = settings |> List.map (dynRunOf "dyn")
+            let dynSame = dynSameOf dyn
+            let dyn2 = settings |> List.map (dynRunOf "dyn2")
+            let dyn2Same = dynSameOf dyn2
+            // W1-4 review finding 7, the KNOB-OFF TWINS of corpus loops/537-539
+            // and symmetry/137: a writer hidden in a side-table operand (a
+            // random key, another compound's operand) between a producer and
+            // its fold. With the schedule's knob on, the interval audit sees
+            // the payload and declines; off, the two-pass form runs. Both
+            // print the as-written value, in each regime the schedule exists.
+            let hiddenBump = "function bump(a: mut Array<Float64 like I>) -> Int64 = {\n    a(0) = 9.0\n    7\n}\n"
+            File.WriteAllText(Path.Combine(dir, "hb1.blade"),
+                "import rand as r\ntype I = Idx<2>\n" + hiddenBump
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+                + "let noise = r.uniform(bump(p), 1)\nlet s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hb1c.blade"),
+                "type I = Idx<2>\nfunction bumped(a: mut Array<Float64 like I>) -> Array<Float64 like I> = {\n    a(0) = 9.0\n    let b = a + 0.0 |> compute\n    b\n}\n"
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet other = mask(x, lambda(v) -> v > 0.5)\nlet mut p = method_for(x) <@> lambda(v) -> v + 1.0 |> compute\n"
+                + "let zz = compound(bumped(p), other)\nlet s = reduce(method_for(p) <@> lambda(v) -> v * v, (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hhot.blade"),
+                "import rand as r\ntype I = Idx<2>\ntype J = Idx<2>\nfunction bump(a: mut Array<Float64 like I, J>) -> Int64 = {\n    a(0, 0) = 9.0\n    7\n}\n"
+                + "let mut p = method_for(range<I, J>) <@> lambda(i, j) -> Float64(1.0) |> compute\nlet noise = r.uniform(bump(p), 1)\n"
+                + "let s = reduce(method_for(p) <@> lambda(row) -> prodsum(row, row), (+), 0.0)\n")
+            File.WriteAllText(Path.Combine(dir, "hcrow.blade"),
+                "import rand as r\ntype I = Idx<2>\nfunction bump(a: mut Array<Float64 like SymIdx<2, I>>) -> Int64 = {\n    a(0, 1) = 9.0\n    7\n}\n"
+                + "let x: Array<Float64 like I> = [1.0, 2.0]\nlet mut p = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a + b |> compute\n"
+                + "let noise = r.uniform(bump(p), 1)\n"
+                + "let s = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> p(i, j), (+)), lambda(a, b) where omp -> a + b, 0.0)\n")
+            for (prog, knob, regimes, want) in
+                    [ ("hb1", "BLADE_CELL_EPILOGUE", [ true; false ], "90.0")
+                      ("hb1c", "BLADE_CELL_EPILOGUE", [ true; false ], "90.0")
+                      ("hhot", "BLADE_HOT_ROW", [ true; false ], "84.0")
+                      ("hcrow", "BLADE_COMPACT_ROW_CLASSES", [ false ], "24.0") ] do
+                for repro in regimes do
+                    let runK (v: string) =
+                        let env =
+                            [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", null); (knob, v)
+                              ("BLADE_FP_REPRO", (if repro then "1" else null))
+                              ("BLADE_FP_CONTRACT", (if repro then "off" else null)) ]
+                        let (c, o, _) = spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; "s" ]
+                        (c, valueOf "s" o)
+                    let (c1, s1) = runK null
+                    let (c0, s0) = runK "0"
+                    let build = if repro then "identity regime" else "default build"
+                    recordCase $"cli: hidden side-table writer ({prog}, {build}): {knob} on == off == the as-written s = {want}"
+                        (c1 = 0 && c0 = 0 && s1 = Some want && s0 = Some want) ($"on: {s1}; off: {s0}")
+            recordCase "cli: compaction fusion (C++, run-time extent) identity regime: gate off == b4 == on == gather == gather over the cap (the guarded fallback), every bit"
+                dynSame (dyn |> List.map (fun (s, c, k, r, m, e) -> $"{label s}: exit {c} {k} / {r} / {m} {e}") |> String.concat "; ")
+            recordCase "cli: compaction fusion (C++, run-time extent, two companions sharing one selection) identity regime: gate off == b4 == on == unshared == gather == gather over the cap (the first companion's guarded joint pass), every bit"
+                dyn2Same (dyn2 |> List.map (fun (s, c, k, r, m, e) -> $"{label s}: exit {c} {k} / {r} / {m} {e}") |> String.concat "; ")
+            // dyn2's ROUTE (T4c fix round, review finding 3): the emitted C++
+            // takes the shared selection -- by default one joint pass at `y`;
+            // under `gather` the run-time cap comparison at the mask and the
+            // first companion's guarded joint pass (its false edge) -- so the
+            // value twins above compare the shared route, not two private ones.
+            let emitWith (gate: string) =
+                let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", null); ("BLADE_COMPACTION_FUSION", gate); ("BLADE_TILE_TUNE", null) ]
+                let (c, o, e) = spawnWith env dir [ "emit"; "dyn2.blade" ]
+                (c, o + e)
+            let (cd, od) = emitWith null
+            let (cg, og) = emitWith "gather"
+            recordCase "cli: dyn2's emission takes the shared selection (one index, one joint pass at `y` over the run-time grid)"
+                (cd = 0 && od.Contains "compound_index_t<1>* keep__sel = new compound_index_t<1>(\"keep__sel\", keep__sel_grid, keep__count, compound_index_t<1>::positions_elided)"
+                 && od.Contains "keep__sel_q += (size_t)keep__sel_pool[keep__sel_i];")
+                (if od.Length > 400 then od.Substring(0, 400) else od)
+            recordCase "cli: dyn2 under `gather`: the run-time cap comparison at the mask, the guarded joint pass at the first companion"
+                (cg = 0 && og.Contains "const bool keep__one = (size_t)(" && og.Contains "if (!keep__one) {"
+                 && og.Contains "keep__sv0[keep__sel_q] = keep__sel_d0[keep__sel_i];" && og.Contains "keep__sv1[keep__sel_q] = keep__sel_d1[keep__sel_i];")
+                (if og.Length > 400 then og.Substring(0, 400) else og)
+            // T4c fix round (review findings 1-2): the NEWLY admitted singleton
+            // shapes and the storage-proof probes, each run by default, gate
+            // off, `unshared` and `gather`, in both lanes: the same printed
+            // values, and -- for the failing twin -- the same first failure
+            // (code and line). Integer-valued data: exact in every build.
+            let t4cHead = "type Ix = Idx<1003>\nlet x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 37) % 11) - 4.0 |> compute\nlet c = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7) |> compute\n"
+            let semiHead = "type Row = Idx<2003>\ntype Ev = Idx<101>\nlet elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) * 199) % 20011 |> compute\nlet cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7919 + 13) % 20011 |> compute\nlet amt = method_for(range<Row>) <@> lambda(i) -> Float64((Int64(i) * 31) % 1000) |> compute\n"
+            let boomLine = "let z0 = Int64(floor(x(1)))\nlet boom = 10 / z0\n"
+            let semiBoom = "let z0 = cust(0) - 13\nlet boom = 10 / z0\n"
+            let twins =
+                [ ("s_other", t4cHead + "let keep = mask(x, lambda(v) -> v > 1.0)\nlet y = compound(c, keep)\nlet chk = reduce(y * y, (+)) + Float64(extents(y))\n", "chk")
+                  ("s_other_fail", t4cHead + "let keep = mask(x, lambda(v) -> v > 1.0)\n" + boomLine + "let y = compound(c, keep)\nlet chk = reduce(y * y, (+)) + Float64(extents(y))\n", "chk")
+                  ("s_probe_src", semiHead + "let keep = mask(cust, lambda(c) -> contains(elig, c))\nlet y = compound(cust, keep)\nlet chk = Float64(reduce(y, (+))) + Float64(extents(y))\n", "chk")
+                  ("s_probe_src_fail", semiHead + "let keep = mask(cust, lambda(c) -> contains(elig, c))\n" + semiBoom + "let y = compound(cust, keep)\nlet chk = Float64(reduce(y, (+))) + Float64(extents(y))\n", "chk")
+                  ("s_semiagg", semiHead + "let keep = mask(cust, lambda(c) -> contains(elig, c))\nlet y = compound(amt, keep)\nlet chk = reduce(y, (+)) + Float64(extents(y))\n", "chk")
+                  ("s_semiagg_fail", semiHead + "let keep = mask(cust, lambda(c) -> contains(elig, c))\n" + semiBoom + "let y = compound(amt, keep)\nlet chk = reduce(y, (+)) + Float64(extents(y))\n", "chk")
+                  ("p_alias_deferred", "type I = Idx<3>\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\nlet lazy_col = method_for(x) <@> lambda(v) -> v + 10.0\nlet alias_col = lazy_col\nlet keep = mask(x, lambda(v) -> v > 0.0)\nlet y1 = compound(x, keep)\nlet y2 = compound(alias_col, keep)\nlet n = extents(y2)\nlet chk = reduce(y2, (+))\n", "n,chk")
+                  ("p_alias_stored", "type I = Idx<3>\nlet x: Array<Float64 like I> = [1.0, 2.0, 3.0]\nlet col = method_for(x) <@> lambda(v) -> v + 10.0 |> compute\nlet alias_col = col\nlet keep = mask(x, lambda(v) -> v > 1.5)\nlet y1 = compound(x, keep)\nlet y2 = compound(alias_col, keep)\nlet chk = reduce(y2, (+)) + reduce(y1, (+))\n", "chk")
+                  ("p_mask_src_deferred", "type Ix = Idx<13>\nlet x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13)\nlet c2 = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 |> compute\nlet c3 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) * 0.5 |> compute\nlet keep = mask(x, lambda(v) -> v > 5.5)\nlet y2 = compound(c2, keep)\nlet y3 = compound(c3, keep)\nlet chk = Float64(reduce(y2, (+))) + reduce(y3, (+))\n", "chk")
+                  ("p_mask_src_stored", "type Ix = Idx<13>\nlet x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute\nlet c2 = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 |> compute\nlet c3 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) * 0.5 |> compute\nlet keep = mask(x, lambda(v) -> v > 5.5)\nlet y2 = compound(c2, keep)\nlet y3 = compound(c3, keep)\nlet chk = Float64(reduce(y2, (+))) + reduce(y3, (+))\n", "chk") ]
+            for (prog, src, prints) in twins do
+                File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
+            let firstFailure (out: string) =
+                let m = Text.RegularExpressions.Regex.Match(out, @"error\[(BL\d{4})\][^\n]*(?:\n[^\n]*?\.blade:(\d+))?")
+                if m.Success then Some (m.Groups.[1].Value + "@" + m.Groups.[2].Value) else None
+            for llvm in [ null; "1" ] do
+                let lane = if isNull llvm then "C++" else "LLVM"
+                for (prog, _, prints) in twins do
+                    let runT (gate: string) =
+                        let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate); ("BLADE_TILE_TUNE", null); ("BLADE_FP_REPRO", null); ("BLADE_FP_CONTRACT", null) ]
+                        let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--print"; prints ]
+                        let vals = prints.Split(',') |> Array.map (fun k -> valueOf k o) |> List.ofArray
+                        (gate, c, vals, firstFailure (o + "\n" + e))
+                    let rs = [ null; "0"; "unshared"; "gather" ] |> List.map runT
+                    let (_, c0, v0, f0) = List.head rs
+                    let fails = prog.EndsWith "_fail"
+                    let same = rs |> List.forall (fun (_, c, v, f) -> c = c0 && v = v0 && f = f0)
+                    let shaped =
+                        if fails then c0 <> 0 && (match f0 with Some f -> f.StartsWith "BL8013@" | None -> false)
+                        else c0 = 0 && v0 |> List.forall Option.isSome
+                    let what = if fails then "the same first failure (BL8013 at its own line)" else "the same values"
+                    recordCase $"cli: T4c twins ({lane}, {prog}): default == gate off == unshared == gather -- {what}"
+                        (same && shaped)
+                        (rs |> List.map (fun (g, c, v, f) -> let gn = (if isNull g then "default" else g) in $"{gn}: exit {c} {v} {f}") |> String.concat "; ")
+            // The empty unseeded fold aborts BL8003 at the FOLD's own line (5),
+            // after the fused compaction (line 4), gate on and off, both
+            // lanes, both builds (under repro the chain was fed in the pass).
+            File.WriteAllText(Path.Combine(dir, "empty.blade"),
+                "type Ix = Idx<1003>\n"
+                + "let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute\n"
+                + "let keep = mask(x, lambda(v) -> v > 5000.0)\n"
+                + "let y = compound(x, keep)\n"
+                + "let checksum = reduce(y * y, (+)) + Float64(extents(y))\n")
+            for llvm in [ null; "1" ] do
+                for repro in [ false; true ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let build = if repro then "repro" else "default"
+                    let ok =
+                        [ "0"; "b4"; "1"; "gather" ] |> List.forall (fun gate ->
+                            let env =
+                                [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_COMPACTION_FUSION", gate)
+                                  ("BLADE_FP_REPRO", (if repro then "1" else null)) ]
+                            let (code, out, err) = spawnWith env dir [ "run"; "empty.blade" ]
+                            let all = out + err
+                            code <> 0 && all.Contains "error[BL8003]" && all.Contains "empty.blade:5")
+                    recordCase $"cli: compaction fusion ({lane}, {build}): the empty fold aborts BL8003 at its own line, gate off, b4, on and gather" ok ""
+            // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the
+            // licensed checksum of a compact producer's orbit fold is summed
+            // per packed row and combined in row order, so its bits do not
+            // depend on the team: OMP_NUM_THREADS 1 / 3 / 8 and the serial
+            // build (BLADE_OMP_THREADS=1) print the same checksum AND exact
+            // residual. Non-dyadic cells (exp); within 1e-12 of the gate-off
+            // orbit pass.
+            File.WriteAllText(Path.Combine(dir, "rows.blade"),
+                "type Pts = Idx<101>\n"
+                + "type Dim = Idx<2>\n"
+                + "let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 37 + Int64(d) * 11) % 97) / 97.0 |> compute\n"
+                + "let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b), omp(a: 1) -> {\n"
+                + "    let dx = a((0 : Dim)) - b((0 : Dim))\n"
+                + "    let dy = a((1 : Dim)) - b((1 : Dim))\n"
+                + "    exp(-(dx * dx + dy * dy))\n"
+                + "} |> compute\n"
+                + "let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
+                + "let resid = ss - floor(ss)\n")
+            let rowsRun (env: (string * string) list) =
+                let (code, out, err) = spawnWith ([ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", null) ] @ env) dir [ "run"; "rows.blade"; "--print"; "ss,resid" ]
+                (code, valueOf "ss" out, valueOf "resid" out, err)
+            // OBSERVED teams: the omp-coverage instrumentation (codegen test
+            // mode) prints each parallel region's actual team size; the
+            // program prints every binding, so the stored producer cells are
+            // compared too, not only the checksum. OMP_DYNAMIC=false and no
+            // thread limit; a team the host cannot give is reported as such.
+            let instrumented =
+                CodeGen.setOmpTestMode true
+                try compileToExe (Path.Combine(dir, "rows.blade")) (Some (Path.Combine(dir, "rows_instr.exe"))) false false
+                finally CodeGen.setOmpTestMode false
+            match instrumented with
+            | Error e -> recordCase "cli: compact row classes: observed teams 1 / 3 / 8 give identical output" false e
+            | Ok exe ->
+                let envKeys = [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "BLADE_COMPACT_ROW_CLASSES" ]
+                let prior = envKeys |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+                let runT (t: string) =
+                    Environment.SetEnvironmentVariable("OMP_NUM_THREADS", t)
+                    Environment.SetEnvironmentVariable("OMP_DYNAMIC", "false")
+                    Environment.SetEnvironmentVariable("OMP_THREAD_LIMIT", null)
+                    match runExecutable exe with
+                    | Ok (0, out) ->
+                        let lines = out.Replace("\r\n", "\n").Split('\n')
+                        let team =
+                            lines |> Array.tryPick (fun l ->
+                                let m = Text.RegularExpressions.Regex.Match(l, @"^\[omp-coverage\] region=k teamsz=(\d+)")
+                                if m.Success then Some (int m.Groups.[1].Value) else None)
+                        let values =
+                            lines |> Array.filter (fun l -> not (l.StartsWith "[omp-coverage]") && not (l.Contains " completed in "))
+                            |> String.concat "\n"
+                        Some (team, values)
+                    | _ -> None
+                let runs =
+                    try [ for t in [ 1; 3; 8 ] -> (t, runT (string t)) ]
+                    finally for (k, v) in prior do Environment.SetEnvironmentVariable(k, v)
+                let teamOf (r: (int option * string) option) = match r with Some (Some n, _) -> string n | _ -> "unobserved"
+                let observed = runs |> List.map (fun (t, r) -> $"T={t}: team {teamOf r}") |> String.concat ", "
+                let available = runs |> List.filter (fun (t, r) -> match r with Some (Some n, _) -> n = t | _ -> false)
+                match runs with
+                | (_, Some (Some 1, v1)) :: _ when available.Length = 3 ->
+                    let same = runs |> List.forall (fun (_, r) -> match r with Some (_, v) -> v = v1 | None -> false)
+                    recordCase "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)" same observed
+                | _ when available.Length >= 2 ->
+                    let vs = available |> List.choose (fun (_, r) -> match r with Some (_, v) -> Some v | None -> None)
+                    record "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)"
+                        (if vs |> List.forall ((=) vs.Head) then TH.Skip else TH.Fail) $"not every team was available ({observed}); the available ones agree: {(vs |> List.forall ((=) vs.Head))}"
+                | _ ->
+                    record "cli: compact row classes: observed teams 1 / 3 / 8 print identical output (stored cells and checksum)" TH.Skip $"teams unavailable on this host: {observed}"
+            // The uninstrumented binary, requested teams and the serial build.
+            let teams =
+                [ for t in [ "1"; "3"; "8" ] -> rowsRun [ ("OMP_NUM_THREADS", t); ("OMP_DYNAMIC", "false"); ("BLADE_OMP_THREADS", null); ("BLADE_COMPACT_ROW_CLASSES", null) ] ]
+                @ [ rowsRun [ ("OMP_NUM_THREADS", null); ("BLADE_OMP_THREADS", "1"); ("BLADE_COMPACT_ROW_CLASSES", null) ] ]
+            let (_, s0, r0, _) = teams.Head
+            let identical = teams |> List.forall (fun (c, s, r, _) -> c = 0 && s.IsSome && r.IsSome && s = s0 && r = r0)
+            let shown = teams |> List.map (fun (c, s, r, e) -> $"{c}:{s}/{r} {e}") |> String.concat "; "
+            recordCase "cli: compact row classes: T = 1 / 3 / 8 and the serial build print identical bits" identical shown
+            let (c9, s9, _, e9) = rowsRun [ ("OMP_NUM_THREADS", "8"); ("BLADE_OMP_THREADS", null); ("BLADE_COMPACT_ROW_CLASSES", "0") ]
+            let close =
+                match s0, s9 with
+                | Some a, Some b when c9 = 0 -> abs (Double.Parse a - Double.Parse b) <= 1e-12 * abs (Double.Parse a)
+                | _ -> false
+            recordCase "cli: compact row classes: within 1e-12 of the gate-off orbit pass" close ($"on: {s0}; off: {s9} {e9}")
+            // BOTH LANES, gate off vs on (<= 1e-12 within each lane), and C++
+            // vs LLVM at the same tolerance (their per-row trees differ: the
+            // C++ lane's sq/sum<8> or eight lanes, the LLVM vectorizer's
+            // own). Non-dyadic symmetric data with a NONZERO outer seed, and a
+            // strict pool with a kernel of unknown parity (two classes plus
+            // the zero class; the last row's class is empty); n = 101 leaves
+            // row tails of every length.
+            File.WriteAllText(Path.Combine(dir, "rows2.blade"),
+                "type Pts = Idx<101>\n"
+                + "type Dim = Idx<2>\n"
+                + "let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 37 + Int64(d) * 11) % 97) / 97.0 |> compute\n"
+                + "let k = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> exp(-(a((0 : Dim)) - b((0 : Dim))) * (a((0 : Dim)) - b((0 : Dim))) - a((1 : Dim)) * b((1 : Dim))) |> compute\n"
+                + "let ss = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> k(i, j) * k(i, j), (+)), (+), 0.37)\n"
+                + "let w = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where anticomm(a, b) -> a((0 : Dim)) * b((1 : Dim)) - b((0 : Dim)) * a((1 : Dim)) |> compute\n"
+                + "let sa = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * w(i, j) + w(i, j), (+)), (+))\n")
+            let runLane (llvm: string) (gate: string) =
+                let (code, out, err) =
+                    spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", llvm); ("BLADE_COMPACT_ROW_CLASSES", gate) ]
+                        dir [ "run"; "rows2.blade"; "--print"; "ss,sa"; "--verbose" ]
+                let laneOk = isNull llvm || err.Contains ".ll" || out.Contains ".ll"
+                (code = 0 && laneOk, valueOf "ss" out, valueOf "sa" out)
+            let near (a: string option) (b: string option) =
+                match a, b with
+                | Some x, Some y -> let (fx, fy) = (Double.Parse x, Double.Parse y) in abs (fx - fy) <= 1e-12 * max (abs fx) 1.0
+                | _ -> false
+            let cOn = runLane null "1"
+            let cOff = runLane null "0"
+            let lOn = runLane "1" "1"
+            let lOff = runLane "1" "0"
+            let show ((ok, a, b): bool * string option * string option) = $"{ok}:{a}/{b}"
+            for (lane, (okOn, ssOn, saOn), (okOff, ssOff, saOff)) in [ ("C++", cOn, cOff); ("LLVM", lOn, lOff) ] do
+                recordCase $"cli: compact row classes ({lane}): gate off vs on within 1e-12 (symmetric + seed, strict unknown parity)"
+                    (okOn && okOff && near ssOn ssOff && near saOn saOff)
+                    ($"on {show (okOn, ssOn, saOn)}; off {show (okOff, ssOff, saOff)}")
+            let (_, cSs, cSa) = cOn
+            let (_, lSs, lSa) = lOn
+            recordCase "cli: compact row classes: C++ vs LLVM within 1e-12" (near cSs lSs && near cSa lSa)
+                ($"C++ {cSs}/{cSa}; LLVM {lSs}/{lSa}")
+            // The bench shape itself (p = 2503), when the checkout is beside
+            // the binary: gate off vs on within 1e-12 in both lanes.
+            let pairSrc =
+                let root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."))
+                Path.Combine(root, "bench", "kernels", "pairkernel", "pairkernel.blade")
+            if not (File.Exists pairSrc) then
+                record "cli: compact row classes: pairkernel p=2503 gate off vs on within 1e-12" TH.Skip "bench/kernels/pairkernel/pairkernel.blade is not beside the binary"
+            else
+                File.Copy(pairSrc, Path.Combine(dir, "pairkernel.blade"), true)
+                let runPk (llvm: string) (gate: string) =
+                    let (code, out, err) =
+                        spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_LLVM", llvm); ("BLADE_COMPACT_ROW_CLASSES", gate) ]
+                            dir [ "run"; "pairkernel.blade"; "--print"; "checksum"; "--verbose" ]
+                    let laneOk = isNull llvm || err.Contains ".ll" || out.Contains ".ll"
+                    (code = 0 && laneOk, valueOf "checksum" out)
+                for llvm in [ null; "1" ] do
+                    let lane = if isNull llvm then "C++" else "LLVM"
+                    let (ok1, v1) = runPk llvm "1"
+                    let (ok0, v0) = runPk llvm "0"
+                    recordCase $"cli: compact row classes ({lane}): pairkernel p=2503 gate off vs on within 1e-12" (ok1 && ok0 && near v1 v0) ($"on {v1}; off {v0}")
+            // B4's fold-only LLVM product stays UNDECORATED in the default
+            // build (no `contract`, so it cannot fuse into the add); with the
+            // gate off the materialized map keeps its ordinary flags.
+            let emitLl (gate: string) =
+                let (code, out, _) =
+                    spawnWith [ ("BLADE_BLAS", "off"); ("BLADE_FP_REPRO", null); ("BLADE_FP_CONTRACT", null); ("BLADE_LLVM", "1"); ("BLADE_COMPACTION_FUSION", gate) ]
+                        dir [ "emit"; "b4a.blade" ]
+                (code, out)
+            let (eOn, llOn) = emitLl "1"
+            let (eOff, llOff) = emitLl "0"
+            let bare (ll: string) = Text.RegularExpressions.Regex.IsMatch(ll, @"= fmul double %")
+            recordCase "cli: compaction fusion (LLVM, b4a) default build: the fold's self-product is an undecorated fmul"
+                (eOn = 0 && eOff = 0 && bare llOn && not (bare llOff)) ""
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, round 3 W3-1, gap G71) ---
+    // (1) The key -> group map (blade_member.h, the C core both lanes run): a
+    // g++-built driver streams keys of several shapes (few / many distinct,
+    // Int64 extremes, a run of growth) and checks every answer against a
+    // first-occurrence std::unordered_map reference, that a new group's record
+    // is all-zero, that records written before a growth survive it, and that
+    // an injected allocation failure is REPORTED (init 0 / group -1, the map
+    // unchanged) and every free releases every allocation. (2) Run time: gate
+    // off vs on, per lane, comparing the COMPLETE output (exit status, stdout
+    // with every Float64's raw bits through BLADE_PRINT_BITS, the complete
+    // stderr of an abort) with the route and the plan asserted -- every state
+    // machine, signed zeros, a final-row singleton, nonzero seeds, the ordered
+    // 3a+b fold, an empty group, the three failure orders (066 / 073 / 074),
+    // the review's failing count-only / unused producers and its mixed-type
+    // fold; and every arm of the CANCELLATION fixture with its exact expected
+    // value (the licensed arm's chain changes today's C++ K-lane result).
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "group aggregate: the C core and the knob at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_gagg_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "#include <unordered_map>"
+                      "static unsigned long long g_fail = 0;"
+                      "static int g_ord = 0, g_live = 0;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "int main() {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    const int distinct[] = {1, 2, 15, 16, 17, 1009, 100003};"
+                      "    long rows = 0, bad = 0;"
+                      "    for (int shape = 0; shape < 3; shape++)"
+                      "    for (int di = 0; di < 7; di++) {"
+                      "        const int d = distinct[di];"
+                      "        std::vector<int64_t> pool((size_t)d);"
+                      "        for (int i = 0; i < d; i++) pool[i] = shape == 0 ? (int64_t)i * 7919 + 13 : shape == 1 ? (int64_t)nx() : ex[i % 7] ^ (int64_t)(i / 7);"
+                      "        blade_gkmap_i64 t;"
+                      "        g_fail = 0; g_ord = 0; g_live = 0;"
+                      "        if (!blade_gkmap_init_i64(&t, 3)) { bad++; continue; }"
+                      "        std::unordered_map<int64_t, int64_t> ref;"
+                      "        const int n = d * 3 + 11;"
+                      "        for (int r = 0; r < n; r++) {"
+                      "            int64_t k = pool[(size_t)(r < d ? r : (int)(nx() % (uint64_t)d))];"
+                      "            auto it = ref.find(k);"
+                      "            int64_t want = it == ref.end() ? (int64_t)ref.size() : it->second;"
+                      "            if (it == ref.end()) ref.emplace(k, want);"
+                      "            int64_t g = blade_gkmap_group_i64(&t, k);"
+                      "            if (g != want) { bad++; if (bad < 5) std::printf(\"BAD group d=%d r=%d got %lld want %lld\\n\", d, r, (long long)g, (long long)want); continue; }"
+                      "            blade_gk_slot* rec = blade_gkmap_record_i64(&t, g);"
+                      "            if (rec[0].i == 0 && (rec[1].i != 0 || rec[2].d != 0.0)) bad++;"
+                      "            rec[0].i++; rec[1].i += k; rec[2].d += 1.0;"
+                      "            rows++;"
+                      "        }"
+                      "        if (blade_gkmap_count_i64(&t) != (int64_t)ref.size()) bad++;"
+                      "        // every record survived every growth: count, key sum, float count"
+                      "        for (auto& kv : ref) { blade_gk_slot* rec = blade_gkmap_record_i64(&t, kv.second); if (rec[0].i <= 0 || (double)rec[0].i != rec[2].d || (int64_t)((uint64_t)rec[0].i * (uint64_t)kv.first) != rec[1].i) bad++; }"
+                      "        blade_gkmap_free_i64(&t);"
+                      "        if (g_live != 0) { bad++; std::printf(\"BAD leak d=%d live=%d\\n\", d, g_live); }"
+                      "    }"
+                      "    // allocation failure: init's k-th allocation, then a growth's (table or records)"
+                      "    long reported = 0;"
+                      "    for (int k = 0; k < 4; k++) {"
+                      "        blade_gkmap_i64 t; g_fail = 1ull << k; g_ord = 0; g_live = 0;"
+                      "        if (blade_gkmap_init_i64(&t, 2)) bad++; else reported++;"
+                      "        if (g_live != 0) bad++;"
+                      "    }"
+                      "    for (int k = 4; k < 12; k++) {"
+                      "        blade_gkmap_i64 t; g_fail = 0; g_ord = 0; g_live = 0;"
+                      "        if (!blade_gkmap_init_i64(&t, 2)) { bad++; continue; }"
+                      "        g_fail = 1ull << k;"
+                      "        int64_t last = 0, failedAt = -1;"
+                      "        for (int64_t key = 0; key < 200; key++) { last = blade_gkmap_group_i64(&t, key * 31); if (last < 0) { failedAt = key; break; } }"
+                      "        if (failedAt < 0) bad++; else {"
+                      "            reported++;"
+                      "            if (blade_gkmap_count_i64(&t) != failedAt) bad++;"
+                      "            for (int64_t key = 0; key < failedAt; key++) if (blade_gkmap_group_i64(&t, key * 31) != key) bad++;"
+                      "        }"
+                      "        blade_gkmap_free_i64(&t);"
+                      "        if (g_live != 0) bad++;"
+                      "    }"
+                      "    std::printf(\"GKMAP CORE: %ld rows, %ld failures reported, %ld bad\\n\", rows, reported, bad);"
+                      "    return bad == 0 ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "gkmap_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "group aggregate: the key -> group map (blade_member.h) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "group aggregate: the key -> group map (blade_member.h) driver" false e
+                 | Ok (code, out) ->
+                     let summary = out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "GKMAP CORE:") |> Option.defaultValue out
+                     recordCase "group aggregate: the key -> group map numbers groups by first occurrence, zeroes new records, keeps records across growth, reports every allocation failure and frees everything"
+                         (code = 0 && summary.EndsWith " 12 failures reported, 0 bad") summary)
+            // (2) RUN TIME. Every comparison below is of the COMPLETE output
+            // -- stdout with BLADE_PRINT_BITS=1 (each Float64 followed by its
+            // raw IEEE-754 bits, so the comparison is of bits, not of printed
+            // digits), the exit status, and the full stderr for an abort --
+            // between the gate OFF (`BLADE_GROUP_AGG=0`) and ON, per lane, with
+            // the route asserted (the LLVM runs must take the `.ll` lane) and
+            // the plan asserted applied (gate on) / disabled (gate off) by
+            // `blade plan`, in the identity regime (BLADE_FP_REPRO=1
+            // BLADE_FP_CONTRACT=off) unless named otherwise.
+            let gen =
+                "function gen(k: Int64, seed: Int64) -> Float64 = {\n"
+                + "    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648\n"
+                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+                + "}\n"
+            // a scalar fingerprint over random data, positional and dynamic
+            let prog (keyType: string) (keyExpr: string) =
+                "type Ix = Idx<3001>\ntype G = Idx<37>\n" + gen
+                + $"function agg(k: Array<{keyType} like Ix>, x: Array<Float64 like Ix>) -> Float64 = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a * 0.75 + b, 0.5) |> compute\n"
+                + "    prodsum(s, s) + reduce(q, (+)) + reduce(t, (+))\n}\n"
+                + $"let keys = method_for(range<Ix>) <@> lambda(i) -> {keyExpr} |> compute\n"
+                + "let xs = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038) |> compute\n"
+                + "let checksum = agg(keys, xs)\n"
+            File.WriteAllText(Path.Combine(dir, "gpos.blade"), prog "G" "Int64(floor(gen(Int64(i), 10000019) * 18.5))")
+            File.WriteAllText(Path.Combine(dir, "gdyn.blade"), prog "Int64" "7919 * Int64(floor(gen(Int64(i), 10000019) * 18.5)) + 13")
+            // EVERY state printed per group: the four state machines; signed
+            // zeros (an all -0.0 group, a -0.0 seed); a singleton at the FINAL
+            // row (group 3); a nonzero seed; the ordered non-commutative Int64
+            // fold, seeded and unseeded; cancellation inside a group (1e16,
+            // -1e16, 1.0); a positional EMPTY group (4) for the seeded, prodsum
+            // and count states. Positional, so both lanes route it.
+            let statesBody (regimeKeys: string) (keyType: string) =
+                "type Row = Idx<9>\n" + regimeKeys
+                + $"function st(k: Array<{keyType} like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 0.75) |> compute\n"
+                + "    let z = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a + b, -0.0) |> compute\n"
+                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 5) |> compute\n"
+                + "    (t, z, q, n, f)\n}\n"
+                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+                + "let (t, z, q, n, f) = st(keys, x, w)\n"
+            File.WriteAllText(Path.Combine(dir, "gstates.blade"),
+                statesBody "type G = Idx<5>\nlet keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n" "G")
+            // the UNSEEDED machine over the same data (no empty group: an
+            // unseeded empty group is the BL8003 fixture below)
+            File.WriteAllText(Path.Combine(dir, "gunseeded.blade"),
+                "type Row = Idx<9>\ntype G = Idx<4>\n"
+                + "function un(k: Array<G like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+                + "    let u = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (u, f)\n}\n"
+                + "let keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n"
+                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+                + "let (u, f) = un(keys, x, w)\n")
+            // the dynamic regime's arrays (the LLVM lane refuses a function's
+            // dynamic-extent array result -- pre-existing -- so C++ only)
+            File.WriteAllText(Path.Combine(dir, "gdynstates.blade"),
+                statesBody "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 9, 7, 3, 11]\n" "Int64")
+            File.WriteAllText(Path.Combine(dir, "gcancel.blade"),
+                "type Row = Idx<12>\n"
+                + "function agg(k: Array<Int64 like Row>, x: Array<Float64 like Row>) -> Float64 = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+                + "    prodsum(s, s)\n}\n"
+                + "let keys: Array<Int64 like Row> = [5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6]\n"
+                + "let xs: Array<Float64 like Row> = [1e16, -1e16, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1e8, -1e8, 1.0]\n"
+                + "let checksum = agg(keys, xs)\n")
+            // COMPLETE-FAILURE fixtures (review finding 4): 066's unseeded
+            // empty group (BL8003 at the peel), 073's positional key past the
+            // last group (BL8006 at the grouping), 074's intervening BL8013 --
+            // tuple results, so the LLVM lane routes them too.
+            File.WriteAllText(Path.Combine(dir, "f066.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (n, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (n, s) = agg(keys, vals)\n")
+            File.WriteAllText(Path.Combine(dir, "f073.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<5>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+                + "    (s, s)\n}\n"
+                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet (s, s2) = agg(keys, vals)\n")
+            File.WriteAllText(Path.Combine(dir, "f074.blade"),
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>, d: Int64) = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n    let z = 10 / d\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    (z, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (z, s) = agg(keys, vals, 0)\n")
+            // FINDING 1's producers: a COUNT-only and an UNUSED grouped array
+            // whose producer FAILS (10 / 0). Module-level deferred (`lazy`):
+            // declined (not proved stored), as written in both gates; the LLVM
+            // lane refuses the deferred module read (pre-existing) and the C++
+            // lane runs. Body producer (`|> compute`d at its own site, so
+            // stored and admitted): the producer fails at its own statement,
+            // before the grouping, in both gates and both lanes.
+            let lazyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet lazy = method_for(den) <@> lambda(d) -> 10 / d\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+            File.WriteAllText(Path.Combine(dir, "wcount.blade"),
+                lazyHead + "function counts(key: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(lazy, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k)\n")
+            File.WriteAllText(Path.Combine(dir, "wunused.blade"),
+                lazyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(lazy, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v)\n")
+            let bodyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+            File.WriteAllText(Path.Combine(dir, "wbodycount.blade"),
+                bodyHead + "function counts(key: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(p, gk)\n"
+                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k, den)\n")
+            File.WriteAllText(Path.Combine(dir, "wbodyunused.blade"),
+                bodyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(p, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v, den)\n")
+            // FINDING 2's type witness: a singleton Int64 group of
+            // 9007199254740993 and a multirow one, folded by a Float64-valued
+            // kernel into an Int64 aggregate. The plan declines; each lane's
+            // own outcome is identical in both gates (the C++ lane rejects the
+            // emitted conversion, BL9002, and the LLVM lane rounds through
+            // double -- a pre-existing ordinary-fold typing discrepancy,
+            // recorded in gap G71, not fixed here).
+            File.WriteAllText(Path.Combine(dir, "wtype.blade"),
+                "type Row = Idx<3>\ntype Region = Idx<2>\n"
+                + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
+                + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n")
+            let laneOf (llvm: string) = if isNull llvm then "C++" else "LLVM"
+            let routedLl (oe: string) = oe.Contains ".ll" && not (oe.Contains "falling back to C++")
+            let routeOk (llvm: string) (oe: string) = if isNull llvm then not (oe.Contains ".ll") else routedLl oe
+            let envOf (llvm: string) (gate: string) (repro: bool) (extra: (string * string) list) =
+                [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_GROUP_AGG", gate)
+                  ("BLADE_FP_REPRO", (if repro then "1" else null))
+                  ("BLADE_FP_CONTRACT", (if repro then "off" else null))
+                  ("BLADE_PRINT_BITS", "1") ] @ extra
+            /// (exit, stdout, stderr) of one run, the build's `--verbose` lines stripped from stderr
+            let runIt (prog: string) (env: (string * string) list) =
+                let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
+                let strip (s: string) =
+                    s.Replace("\r\n", "\n").Split('\n')
+                    |> Array.filter (fun l -> not (l.StartsWith "[Emit]" || l.StartsWith "[Build]" || l.StartsWith "[cache]" || l.Contains " completed in "))
+                    |> String.concat "\n"
+                (c, strip o, strip e, o + e)
+            let planned (prog: string) (fn: string) (env: (string * string) list) =
+                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
+                let t = o + e
+                if t.Contains $"[group-aggregate v1] {fn} @ " && t.Contains $"[group-aggregate v1] {fn} @ " then
+                    let line = t.Replace("\r\n", "\n").Split('\n') |> Array.find (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ")
+                    if line.Contains ": applied [" then "applied" elif line.Contains "disabled by BLADE_GROUP_AGG" then "disabled" else "declined"
+                else "no record"
+            let planLine (prog: string) (fn: string) (env: (string * string) list) =
+                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
+                (o + e).Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ") |> Option.defaultValue ""
+            /// Gate off vs on, one lane: identical exit, stdout (raw bits) and
+            /// stderr; route; the plan applied on / disabled off (or the
+            /// expected decline in both); an abort fixture also pins its
+            /// expected code in BOTH gates, so a build failure (BL9002) or any
+            /// other abort cannot stand in for the intended run-time one.
+            let gateIdentity (prog: string) (fn: string) (llvm: string) (expectPlan: string) (expectExit: int -> bool) (expectCode: string option) (what: string) =
+                let lane = laneOf llvm
+                let (c0, o0, e0, oe0) = runIt prog (envOf llvm "0" true [])
+                let (c1, o1, e1, oe1) = runIt prog (envOf llvm null true [])
+                let p0 = planned prog fn (envOf llvm "0" true [])
+                let p1 = planned prog fn (envOf llvm null true [])
+                let planOk = if expectPlan = "applied" then p0 = "disabled" && p1 = "applied" else p1 = expectPlan
+                let codeOk =
+                    match expectCode with
+                    | Some code -> (o0 + e0).Contains $"error[{code}]" && (o1 + e1).Contains $"error[{code}]" && not ((o1 + e1).Contains "error[BL9002]")
+                    | None -> true
+                let ok = c0 = c1 && expectExit c1 && o0 = o1 && e0 = e1 && routeOk llvm oe0 && routeOk llvm oe1 && planOk && codeOk
+                let codeText = match expectCode with Some code -> $", code {code} in both gates" | None -> ""
+                recordCase $"cli: group aggregate ({lane}, {prog}) {what}: gate off == on (exit, stdout with raw bits, complete stderr), route {lane}, plan {expectPlan}{codeText}"
+                    ok ($"exit {c0}/{c1}; plan {p0}/{p1}; stdout same={o0 = o1}; stderr same={e0 = e1}; on: {o1.Trim()} {e1.Trim()}")
+            for llvm in [ null; "1" ] do
+                gateIdentity "gpos" "agg" llvm "applied" ((=) 0) None "random positional data, scalar fingerprint"
+                gateIdentity "gdyn" "agg" llvm "applied" ((=) 0) None "random dynamic data, scalar fingerprint"
+                gateIdentity "gstates" "st" llvm "applied" ((=) 0) None "every state per group (seeded 0.75 / -0.0, prodsum, count, 3a+b seeded; signed zeros; final-row singleton; empty group)"
+                gateIdentity "gunseeded" "un" llvm "applied" ((=) 0) None "the unseeded machine per group (Float64 and the ordered 3a+b Int64; signed zeros; final-row singleton)"
+                gateIdentity "f066" "agg" llvm "applied" ((<>) 0) (Some "BL8003") "complete failure: unseeded empty group, BL8003 at the peel"
+                gateIdentity "f073" "agg" llvm "applied" ((<>) 0) (Some "BL8006") "complete failure: positional key past the last group, BL8006 at the grouping"
+                gateIdentity "f074" "agg" llvm "applied" ((<>) 0) (Some "BL8013") "complete failure: an intervening BL8013 before the peel's BL8003"
+                gateIdentity "wbodycount" "counts" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of a COUNT-only grouped array fails at its own statement"
+                gateIdentity "wbodyunused" "sums" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of an UNUSED grouped array fails at its own statement"
+            gateIdentity "gdynstates" "st" null "applied" ((=) 0) None "every state per group, the dynamic regime (C++ only: the LLVM lane refuses a function's dynamic-extent ARRAY result; gdyn's dynamic scalar and gcancel run both lanes)"
+            // the deferred-producer forms decline, so both gates run the CSR;
+            // the C++ lane, and the LLVM lane, which since W4B-B (gap G75)
+            // evaluates the deferred module map privately in the function body
+            // instead of refusing the read: the same BL8013, no fallback
+            for (prog, fn) in [ ("wcount", "counts"); ("wunused", "sums") ] do
+                let (c0, o0, e0, _) = runIt prog (envOf null "0" true [])
+                let (c1, o1, e1, _) = runIt prog (envOf null null true [])
+                let p1 = planned prog fn (envOf null null true [])
+                let (cl, oll, ell, ol) = runIt prog (envOf "1" null true [])
+                // the abort's identity, as the LLVM differential reads it: the
+                // first `error[...]` line and its `  --> file:line` location
+                // `blade run` relays the program's stderr behind a `[stderr]: `
+                // prefix, so the diagnostic is found by its `error[` token
+                let firstDiag (s: string) =
+                    let ls = s.Replace("\r\n", "\n").Split('\n')
+                    match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+                    | Some i ->
+                        let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+                        let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+                        d + " | " + loc
+                    | None -> "<no diagnostic>"
+                let dCpp = firstDiag (o1 + "\n" + e1)
+                let dLl = firstDiag (oll + "\n" + ell)
+                recordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++) and in the LLVM lane (routed there, the same first diagnostic, location and exit)"
+                    (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && dCpp.StartsWith "error[BL8013]"
+                     && routedLl ol && cl = c1 && dLl = dCpp)
+                    ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; C++ [{dCpp}]; LLVM [{dLl}]")
+            // THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
+            // a Float64-valued kernel folded into an Int64 accumulator. Base
+            // split on it (the C++ lane BL9002, the LLVM lane rounding through
+            // double: 9007199254740992, 9007199254740994 for 9007199254740993);
+            // since R11 the lowering refuses it, BL3020 at one location, in both
+            // lanes and both gates (nothing is emitted, so no route to check).
+            // The group-aggregate type decline keeps its own fixture
+            // (OptimizeTests decision_group_agg_declined_mixed_type_fold).
+            let firstDiagLoc (s: string) =
+                let ls = s.Replace("\r\n", "\n").Split('\n')
+                match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+                | Some i ->
+                    let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+                    let code = if d.Length >= 13 then d.Substring(0, 13) else d
+                    let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+                    code + " | " + loc
+                | None -> "<no diagnostic>"
+            let wtypeRuns =
+                [ for llvm in [ null; "1" ] do
+                    for gate in [ "0"; null ] do
+                        let (c, o, e, _) = runIt "wtype" (envOf llvm gate true [])
+                        yield (c, firstDiagLoc (o + "\n" + e)) ]
+            let wtypeFirst = snd (List.head wtypeRuns)
+            recordCase "cli: group aggregate (wtype) a Float64-valued fold into an Int64 aggregate: refused BL3020 at one location in both lanes and both gates (R11)"
+                (wtypeRuns |> List.forall (fun (c, d) -> c <> 0 && d = wtypeFirst)
+                 && wtypeFirst.StartsWith "error[BL3020]" && not (wtypeFirst.EndsWith "<no location>"))
+                (wtypeRuns |> List.map (fun (c, d) -> $"exit {c}: {d}") |> String.concat "; ")
+            // THE INLINE EFFECTFUL KEY PRODUCER (Codex second look at e6eadfa2,
+            // BLOCKER): a top-level `group_keys` over an unforced inline map
+            // whose kernel bumps a captured counter. Every lane evaluates the
+            // producer once per CSR pass (pre-existing: calls = [6] over two
+            // rows and three passes); the LLVM lane's C-core map route is taken
+            // ONLY over a stored key pool, so this program keeps the linear scan
+            // (an unknown key lands in bucket 0: sizes = [2, 0]) and never
+            // numbers a group past the CSR it sized. The C++ lane refuses the
+            // program (BL7004, pre-existing). Per lane, both gates, routed.
+            File.WriteAllText(Path.Combine(dir, "winline.blade"),
+                "type One = Idx<1>\ntype Two = Idx<2>\nlet mut calls: Array<Int64 like One> = [0]\nlet rows: Array<Int64 like Two> = [0, 0]\n"
+                + "function next_key(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
+                + "let gk = group_keys(method_for(rows) <@> lambda(x) -> next_key(calls, x))\nlet sizes = extents(gk)\n")
+            for llvm in [ null; "1" ] do
+                let lane = laneOf llvm
+                let (c0, o0, e0, oe0) = runIt "winline" (envOf llvm "0" false [])
+                let (c1, o1, e1, oe1) = runIt "winline" (envOf llvm null false [])
+                let ok =
+                    if isNull llvm then
+                        c0 <> 0 && c1 <> 0 && (o0 + e0).Contains "error[BL7004]" && (o1 + e1).Contains "error[BL7004]" && o0 = o1 && e0 = e1
+                    else
+                        routedLl oe0 && routedLl oe1 && c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
+                        && o1.Contains "sizes = [2, 0]" && o1.Contains "calls = [6]"
+                let expectText = if isNull llvm then "BL7004 in both gates (the C++ lane refuses it, pre-existing)" else "routed, exit 0, sizes = [2, 0], calls = [6] in both gates (the linear scan: no group past the CSR)"
+                recordCase $"cli: group keys ({lane}, winline) an inline writing key producer: {expectText}"
+                    ok ($"exit {c0}/{c1}; {o1.Trim()} {e1.Trim()}")
+            // THE GUARD LOCATION RULE (gap G76), ONE failure text in all three
+            // lanes: a runtime guard panic (BL8002 non-exhaustive match, BL8003
+            // empty fold, BL8006 key) raised in the body of a callable the
+            // program NAMED -- a function, a let-bound lambda -- is located at
+            // that name's recorded declaration, through a plain `let x = f(..)`
+            // and a destructuring `let (a, b) = f(..)` alike (the LLVM lane
+            // INLINES a tuple-returning call: it used to locate the guard at the
+            // caller's binding, which a destructuring let does not have, and
+            // print no `-->` line); a block-local one has no recorded
+            // declaration and is located nowhere in every lane; an anonymous
+            // lambda's guard takes its enclosing declaration. An operator panic
+            // (BL8013 / BL8014) names its own line. The frames are the
+            // functions the program called, innermost first: the scalar ragged
+            // peel runs its kernel body INLINED in every lane (no `lambda in s`
+            // frame -- the LLVM lane used to push one). Each fixture's COMPLETE
+            // failure lines (error, `-->`, every frame, in order) are pinned and
+            // must be IDENTICAL in the C++ lane, the LLVM lane and the
+            // interpreter (run in-process on the lowered file, its declaration
+            // table installed from the program), gate on and off (T3's planned
+            // grouping and peels), and with the A7c kept inline requested
+            // (BLADE_EPILOGUE_LEGS=1: a callee that may fail is never inlined,
+            // so its guard keeps the function's location). The ORDER: ord1 /
+            // ord2 swap a match guard and a division.
+            let gkFn (ret: string) (tail: string) =
+                "type Region = Idx<3>\ntype Row = Idx<5>\n"
+                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+                + $"    {tail}\n}}\n"
+                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
+            let peelFn (ret: string) (tail: string) =
+                "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + $"    {tail}\n}}\n"
+                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\n"
+            let matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
+            let mGuard = "    let m: Int64 = match i with\n        | 5 -> 1\n"
+            let dGuard = "    let q = 10 / d\n"
+            let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz: Float64 = 0.0\n"
+            let a7c =
+                "type Ix = Idx<1003>\n"
+                + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n}\n"
+                + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, k: Int64) -> Float64 = {\n"
+                + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
+                + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+                + "    let m: Int64 = match k with\n        | 5 -> 1\n"
+                + "    s + Float64(m)\n}\n"
+                + "let (checksum, input_checksum) = {\n    let x = inputs(7)\n    let y = inputs(5)\n"
+                + "    (kernel(x, y, 4), reduce(x, (+)) + reduce(y, (+)))\n}\n"
+            let blockFn (destructure: bool) =
+                "let base = Int64([10, 20, 30])\nlet r = {\n    let k: Int64 = 0\n"
+                + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m: Int64 = match q with\n            | 5 -> 1\n"
+                + (if destructure then "        (q, m)\n    }\n    let (u, v) = cap(5)\n    u + v\n}\n" else "        q + m\n    }\n    cap(5)\n}\n")
+            let bl8006 = "error[BL8006]: index out of bounds: a group_keys key outside 0 .. 2"
+            let bl8003 = "error[BL8003]: reduce: empty array, no reduction possible"
+            let bl8002 = "error[BL8002]: Blade: non-exhaustive match"
+            let bl8013 = "error[BL8013]: integer division by zero"
+            let bl8014 = "error[BL8014]: float-to-integer conversion of NaN or an out-of-range value"
+            // (fixture, source, error line, `-->` line (None = unlocated), frames, extra env)
+            let locCases =
+                [ ("gloc_tuple", gkFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
+                  ("gloc_plain", gkFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
+                  ("eloc_tuple", peelFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
+                  ("eloc_plain", peelFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
+                  ("mloc_tuple", matchFn "" mGuard "(m, m + 1)" + "let (a, b) = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("mloc_plain", matchFn " -> Int64" mGuard "m + 1" + "let a = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("ord1", matchFn "" (mGuard + dGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8002, Some 1, [ "cls" ], [])
+                  ("ord2", matchFn "" (dGuard + mGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8013, Some 2, [ "cls" ], [])
+                  ("cast_tuple", castFn "" "(n, n + 1)" + "let (a, b) = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
+                  ("cast_plain", castFn " -> Int64" "n + 1" + "let a = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
+                  ("nested", matchFn "" mGuard "(m, m)" + "function outer(i: Int64) -> Int64 = {\n    let (x, y) = cls(i, 1)\n    x + y\n}\nlet a = outer(4)\n", bl8002, Some 1, [ "cls"; "outer" ], [])
+                  ("lam_in_fn", "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> Int64(1)\n    |> compute\n    (v, Int64(1))\n}\nlet (a, b) = f(1)\n", bl8002, Some 2, [ "f" ], [])
+                  ("let_lambda", "let k = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = k(base(0) - 6)\n", bl8002, Some 1, [ "k" ], [])
+                  ("block_tuple", blockFn true, bl8002, None, [ "cap" ], [])
+                  ("block_plain", blockFn false, bl8002, None, [ "cap" ], [])
+                  ("a7c_default", a7c, bl8002, Some 5, [ "kernel" ], [])
+                  ("a7c_kept_inline", a7c, bl8002, Some 5, [ "kernel" ], [ ("BLADE_EPILOGUE_LEGS", "1") ])
+                  // W4B-D (the second Codex look of W4-3, NEW 4): a PROGRAM-WRITTEN
+                  // name that merely starts with `lambda` is a named callable, located
+                  // at its own declaration in every lane (the interpreter's
+                  // anonymous test used to be a prefix test)
+                  ("lname_tuple", (matchFn "" mGuard "(m, m + 1)").Replace("function cls(", "function lambda_guard(") + "let (a, b) = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
+                  ("lname_plain", (matchFn " -> Int64" mGuard "m + 1").Replace("function cls(", "function lambda_guard(") + "let a = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
+                  ("lname_let", "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = lambda_kernel(base(0) - 6)\n", bl8002, Some 1, [ "lambda_kernel" ], [])
+                  // ...and a MULTI-MODULE program (NEW 3): a guard raised in an
+                  // IMPORTED function's body is located at that function's line in
+                  // ITS file (GuardLib.blade, written below) -- module qualification
+                  // copies the program record, and the declaration table travels in
+                  // it -- through a destructuring call, a plain call (BL8002) and a
+                  // ragged peel (BL8003)
+                  ("mm_tuple", "import GuardLib\nlet (a, b) = GuardLib.classify(4)\n", bl8002, Some 3, [ "classify" ], [])
+                  ("mm_plain", "import GuardLib\nlet a = GuardLib.pick(4)\n", bl8002, Some 8, [ "pick" ], [])
+                  ("mm_peel", "import GuardLib\nlet keys: Array<GuardLib.Region like GuardLib.Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like GuardLib.Row> = [1, 2, 3, 4]\nlet t = GuardLib.agg(keys, vals)\n", bl8003, Some 15, [ "agg" ], [])
+                  // an IMPORTED fold kernel folded in a `where repro` body runs its repro
+                  // TWIN (gap G80): the first failure, its location in the defining
+                  // module's file and the frames are the origin's
+                  ("mm_fold", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.idiv, 100)\nlet s = folded()\n", bl8013, Some 21, [ "idiv"; "folded" ], [])
+                  // ...and a GUARD in the twin, located at the ORIGIN's declaration (the
+                  // twin's span is copied from it after module qualification)
+                  // a guard in a NAMED fold kernel used OUTSIDE a repro body: the C++ lane
+                  // calls the function, so it is located at its declaration -- the LLVM
+                  // lane, which inlines the kernel, used to say the fold's line (W4B-D
+                  // found it; EmitLlvm.applyKernelFramed now takes the callee's declaration)
+                  ("fk_local", "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n", bl8002, Some 2, [ "gsel"; "folded" ], [])
+                  ("mm_foldguard", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.gsel, 100)\nlet s = folded()\n", bl8002, Some 22, [ "gsel"; "folded" ], []) ]
+            // the imported module of the mm_ cases; its line numbers are pinned above
+            File.WriteAllText(Path.Combine(dir, "GuardLib.blade"),
+                "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
+                + "function pick(i: Int64) -> Int64 = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    m + 1\n}\n"
+                + "type Region = Idx<3>\ntype Row = Idx<4>\n"
+                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) -> Int64 = {\n"
+                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+                + "    reduce(s, (+))\n}\n"
+                + "function idiv(a: Int64, b: Int64) -> Int64 = a / b\n"
+                + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\n")
+            let locFileOf (prog: string) = if prog.StartsWith "mm_" then "GuardLib" else prog
+            let failureLines (e: string) =
+                e.Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> " || l.StartsWith "  at ")
+                |> List.ofArray
+            // the `-->` path names the file as each lane was given it: compare its file name
+            let normLoc (l: string) =
+                if l.StartsWith "  --> " then "  --> " + Path.GetFileName(l.Substring 6) else l
+            for (prog, src, errLine, line, frames, extra) in locCases do
+                File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
+                let wantLines =
+                    [ errLine ]
+                    @ (match line with Some n -> [ $"  --> {locFileOf prog}.blade:{n}" ] | None -> [])
+                    @ (frames |> List.map (fun f -> "  at " + f))
+                let laneLines =
+                    [ for llvm in [ null; "1" ] do
+                        for gate in [ null; "0" ] do
+                            let (c, o, e, oe) = runIt prog (envOf llvm gate false extra)
+                            let tag = $"""{laneOf llvm}, gate {(if isNull gate then "on" else "off")}"""
+                            yield (tag, c <> 0 && routeOk llvm oe, failureLines (o + "\n" + e) |> List.map normLoc) ]
+                let interpLines =
+                    let path = Path.Combine(dir, prog + ".blade")
+                    let guards = extra |> List.map (fun (k, v) -> let prior = Environment.GetEnvironmentVariable k in Environment.SetEnvironmentVariable(k, v); (k, prior))
+                    try
+                        match fst (Blade.Lowering.lowerFileDiag path src) with
+                        | Error _ -> ("interpreter", false, [ "<lowering failed>" ])
+                        | Ok (ir, _) ->
+                            // the program is run AFTER another program's lowering
+                            // replaced this flow's ambient declaration table, and in
+                            // ANOTHER flow (a Task, as the interpreter differential
+                            // runs it): the table it locates guards from is the one
+                            // the program carries (IRProgram.DeclSpans), never an
+                            // ambient one (the second Codex look of W4-3, NEW 3)
+                            Blade.Lowering.lower "function decoy(i: Int64) -> Int64 = i + 1\nlet zz = decoy(1)\n" |> ignore
+                            let res =
+                                System.Threading.Tasks.Task.Run(fun () ->
+                                    Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits).Result
+                            ("interpreter", res.ExitCode <> 0, failureLines res.Stderr |> List.map normLoc)
+                    finally
+                        for (k, prior) in guards do Environment.SetEnvironmentVariable(k, prior)
+                let all = laneLines @ [ interpLines ]
+                let bad = all |> List.filter (fun (_, ran, ls) -> not ran || ls <> wantLines)
+                let (_, _, firstLines) = all.Head
+                recordCase $"""cli: guard location ({prog}) G76: ONE failure text in C++ / LLVM (gate on and off) and the interpreter: [{String.concat " | " (wantLines |> List.map (fun l -> l.Trim()))}]"""
+                    bad.IsEmpty
+                    (match bad with
+                     | (tag, ran, ls) :: _ -> $"""{tag}: ran={ran}: {String.concat " | " ls}"""
+                     | [] -> String.concat " | " firstLines)
+            // ...and the PLANNED paths those fixtures cross (the second Codex look
+            // of W4-3, NEW 5): T3's aggregate-only grouping APPLIES to the
+            // gk / peel fixtures with the gate on (so the planned guards are the
+            // ones located) and is disabled with it off; the A7c fixture records
+            // NO applied producer-input-leg plan in either arm -- its callee may
+            // fail, so the call stays a call and its guard the function's. (mm_peel's
+            // imported gg is NOT a T3 path: its key is a parameter whose call site is
+            // in another module, which v1 does not audit -- the ordinary peel runs.)
+            for prog in [ "gloc_tuple"; "gloc_plain"; "eloc_tuple"; "eloc_plain" ] do
+                let fn = "agg"
+                let on = planned prog fn (envOf null null false [])
+                let off = planned prog fn (envOf null "0" false [])
+                recordCase $"cli: guard location ({prog}) G76: T3's grouping is the planned path -- applied with the gate on, disabled off"
+                    (on = "applied" && off = "disabled") $"on: {on}; off: {off}"
+            // A7c: the plan RUNS (exit 0) and says what it did with the region --
+            // the sibling pass joins the two INPUT folds (`reduce(x, (+)) +
+            // reduce(y, (+))`, applied, 2 folds) WITHOUT inlining `kernel` (a
+            // callee that may fail is not inlined, so there is no producer for
+            // A7c's legs to ride and no `[epilogue-legs v1]` record at all) --
+            // and no producer-input-leg plan is applied, in either arm
+            for (prog, extra) in [ ("a7c_default", []); ("a7c_kept_inline", [ ("BLADE_EPILOGUE_LEGS", "1") ]) ] do
+                let (code, o, e) = spawnWith (envOf null null false extra) dir [ "plan"; $"{prog}.blade" ]
+                let ls = (o + e).Replace("\r\n", "\n").Split('\n')
+                let sibling = ls |> Array.filter (fun l -> l.Contains "[sibling-folds v1]" && l.Contains ": applied [2 folds over ")
+                let legs = ls |> Array.filter (fun l -> l.Contains "[epilogue-legs v1]")
+                let applied = legs |> Array.filter (fun l -> l.Contains ": applied [")
+                let ok = code = 0 && sibling.Length = 1 && Array.isEmpty applied
+                recordCase $"cli: guard location ({prog}) G76: the plan runs, joins the two input folds without inlining the failing callee, and applies no producer-input-leg plan"
+                    ok
+                    $"plan exit {code}; sibling joins applied: {sibling.Length}; epilogue-legs records {legs.Length}, applied {applied.Length}"
+            // THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
+            // the route, and the exact expected value with its bits.
+            // prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain
+            // gives 2 for the first group (5.0 in all); today's C++ K-lane
+            // form gives 0 (1.0); the LLVM lane's flagged recurrence gives 2.
+            let five = "checksum = 5.0 #4014000000000000"
+            let one = "checksum = 1.0 #3ff0000000000000"
+            for llvm in [ null; "1" ] do
+                let lane = laneOf llvm
+                let arms =
+                    [ ("strict, gate on", envOf llvm null true [], five, "applied")
+                      ("strict, gate off", envOf llvm "0" true [], five, "disabled")
+                      ("default build, gate on (declined)", envOf llvm null false [], (if isNull llvm then one else five), "declined")
+                      ("default build, gate off", envOf llvm "0" false [], (if isNull llvm then one else five), "declined")
+                      ("licensed arm", envOf llvm "licensed" false [], five, "applied") ]
+                for (arm, env, want, wantPlan) in arms do
+                    let (c, o, _, oe) = runIt "gcancel" env
+                    let p = planned "gcancel" "agg" env
+                    let got = o.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "checksum = ")
+                    recordCase $"cli: group aggregate ({lane}) cancellation fixture [1e16, -1e16, 1, 0, 0, 0, 0, 0, 1], {arm}: exit 0, route {lane}, plan {wantPlan}, value {want}"
+                        (c = 0 && routeOk llvm oe && p = wantPlan && got = Some want)
+                        ($"exit {c}; plan {p}; got {got}")
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- MEMBERSHIP HOISTING (Blade.Optimize.planMembershipHoist, round 3 B-T1) ---
+    // (1) The C core itself (blade_member.h, the one text both lanes run): a
+    // g++-built driver builds 220 sets -- empty, tiny, at the linear
+    // crossover, dense, near the bitmap density bound, wide random 64-bit,
+    // Int64 extremes, heavy duplicates -- under each of the four chooser
+    // settings, checks every probe (each key, its +/-1 neighbours, the
+    // extremes, random keys) against the naive scan and that every free
+    // releases every allocation, and prints the representation each build
+    // chose, which must be Optimize.memberChooseRep's PREFERRED answer (the
+    // plan record's restatement of the chooser) since every allocation
+    // succeeds. Then DETERMINISTIC ALLOCATOR-FAILURE INJECTION through the
+    // header's allocation hooks (Codex diff review of W2-1, finding 3): the
+    // bitmap's words failing (-> hash), then also the hash keys or its
+    // occupancy failing (-> linear), a hash-preferred set's keys or occupancy
+    // failing (-> linear): each answers the naive booleans, leaves nothing
+    // allocated after its free (a half-made table freed at once), and REPORTS
+    // the route -- preferred, actual and why -- in the struct and through
+    // `blade_member_note_i64`'s stderr line (BLADE_MEMBER_VERBOSE=1). (2) One
+    // program with a host of each shape, run in BOTH lanes under the knob
+    // unset, off and forced linear / bitmap / hash: every run prints the same
+    // output AND, under BLADE_MEMBER_VERBOSE=1, each lane's builds report
+    // exactly the expected hosts and representations (none at all with the
+    // knob off) -- a route assertion, not only a value one. (3) `blade plan`
+    // names each forced representation.
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "member hoist: the C core and the knob at run time" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_member_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "// the header's allocation hooks: bit k of g_fail fails the k-th allocation of a build"
+                      "static unsigned long long g_fail = 0;"
+                      "static int g_ord = 0, g_live = 0;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "static int64_t wrapAdd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }"
+                      "static long probe_all(const blade_member_i64& t, const std::vector<int64_t>& v, const std::vector<int64_t>& ps) {"
+                      "    long bad = 0;"
+                      "    for (size_t q = 0; q < ps.size(); q++) {"
+                      "        int naive = 0;"
+                      "        for (size_t i = 0; i < v.size(); i++) if (v[i] == ps[q]) { naive = 1; break; }"
+                      "        if (blade_member_test_i64(&t, ps[q]) != naive) bad++;"
+                      "    }"
+                      "    return bad;"
+                      "}"
+                      "static std::vector<int64_t> probes_of(const std::vector<int64_t>& v) {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    std::vector<int64_t> ps;"
+                      "    for (size_t i = 0; i < v.size(); i++) { ps.push_back(v[i]); ps.push_back(wrapAdd(v[i], 1)); ps.push_back(wrapAdd(v[i], -1)); }"
+                      "    for (int k = 0; k < 7; k++) ps.push_back(ex[k]);"
+                      "    for (int k = 0; k < 64; k++) ps.push_back((int64_t)nx());"
+                      "    return ps;"
+                      "}"
+                      "int main() {"
+                      "    const int sizes[] = {0, 1, 2, 15, 16, 17, 63, 64, 65, 211, 1009};"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    long cases = 0, probes = 0, bad = 0;"
+                      "    for (int shape = 0; shape < 5; shape++)"
+                      "    for (int si = 0; si < 11; si++) {"
+                      "        const int m = sizes[si];"
+                      "        std::vector<int64_t> v((size_t)m);"
+                      "        for (int i = 0; i < m; i++) {"
+                      "            uint64_t r = nx();"
+                      "            if (shape == 0) v[i] = (int64_t)(r % 101) - 50;"
+                      "            else if (shape == 1) v[i] = (int64_t)(r % (uint64_t)(64 * (m + 1))) - 1000;"
+                      "            else if (shape == 2) v[i] = (int64_t)r;"
+                      "            else if (shape == 3) v[i] = ex[r % 7];"
+                      "            else v[i] = (int64_t)(r % 3) * 1000003;"
+                      "        }"
+                      "        int64_t lo = 0, hi = 0;"
+                      "        for (int i = 0; i < m; i++) { if (i == 0 || v[i] < lo) lo = v[i]; if (i == 0 || v[i] > hi) hi = v[i]; }"
+                      "        std::vector<int64_t> ps = probes_of(v);"
+                      "        for (int forced = 0; forced <= 3; forced++) {"
+                      "            blade_member_i64 t;"
+                      "            g_fail = 0; g_ord = 0;"
+                      "            blade_member_build_i64(&t, m ? v.data() : nullptr, (int64_t)m, forced);"
+                      "            std::printf(\"K %d %d %d %lld %lld %d %d\\n\", m, forced, t.kind, (long long)lo, (long long)hi, t.preferred, t.fallback);"
+                      "            long b = probe_all(t, v, ps);"
+                      "            probes += (long)ps.size();"
+                      "            if (b) { bad += b; std::printf(\"BAD m=%d forced=%d kind=%d: %ld probes\\n\", m, forced, t.kind, b); }"
+                      "            blade_member_free_i64(&t);"
+                      "            if (t.kind != BLADE_MEMBER_NONE) { bad++; std::printf(\"BAD free did not reset\\n\"); }"
+                      "            if (g_live != 0) { bad++; std::printf(\"BAD leak m=%d forced=%d live=%d\\n\", m, forced, g_live); g_live = 0; }"
+                      "            cases++;"
+                      "        }"
+                      "    }"
+                      "    std::printf(\"MEMBER CORE: %ld builds, %ld probes, %ld bad\\n\", cases, probes, bad);"
+                      "    // ---- allocator-failure injection ----"
+                      "#if defined(_WIN32)"
+                      "    _putenv(\"BLADE_MEMBER_VERBOSE=1\");"
+                      "#else"
+                      "    setenv(\"BLADE_MEMBER_VERBOSE\", \"1\", 1);"
+                      "#endif"
+                      "    std::vector<int64_t> dense, wide;"
+                      "    for (int i = 0; i < 17; i++) dense.push_back((int64_t)(i * 3) - 7);       // bitmap-preferred (span 49)"
+                      "    for (int i = 0; i < 40; i++) wide.push_back((int64_t)(nx() | 1ull));      // hash-preferred (a wide span)"
+                      "    struct F { const char* id; const std::vector<int64_t>* v; unsigned long long fail; };"
+                      "    const F fs[] = { {\"F1\", &dense, 1ull}, {\"F2\", &dense, 3ull}, {\"F3\", &dense, 5ull},"
+                      "                     {\"F4\", &wide, 1ull}, {\"F5\", &wide, 2ull}, {\"F6\", &wide, 0ull} };"
+                      "    for (const F& c : fs) {"
+                      "        std::vector<int64_t> ps = probes_of(*c.v);"
+                      "        blade_member_i64 t;"
+                      "        g_live = 0; g_ord = 0; g_fail = c.fail;"
+                      "        blade_member_build_i64(&t, c.v->data(), (int64_t)c.v->size(), 0);"
+                      "        int liveBuild = g_live;"
+                      "        blade_member_note_i64(&t, c.id, \"s\");"
+                      "        long b = probe_all(t, *c.v, ps);"
+                      "        int pref = t.preferred, kind = t.kind, fb = t.fallback;"
+                      "        blade_member_free_i64(&t);"
+                      "        std::printf(\"F %s %d %d %d %d %d %ld\\n\", c.id, pref, kind, fb, liveBuild, g_live, b);"
+                      "    }"
+                      "    return bad == 0 ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "member_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "member hoist: the C core (blade_member.h) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "member hoist: the C core (blade_member.h) driver" false e
+                 | Ok (code, out) ->
+                     let lines = out.Replace("\r\n", "\n").Split('\n')
+                     let kinds =
+                         lines |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 8 && p.[0] = "K" then
+                                 Some (int64 p.[1], int p.[2], int p.[3], int64 p.[4], int64 p.[5], int p.[6], int p.[7])
+                             else None)
+                     let disagree =
+                         kinds |> Array.filter (fun (m, forced, kind, lo, hi, pref, fb) ->
+                             let want = Blade.Optimize.memberChooseRep m lo hi forced
+                             want <> kind || want <> pref || fb <> 0)
+                     let used = kinds |> Array.map (fun (_, _, k, _, _, _, _) -> k) |> Set.ofArray
+                     let summary = lines |> Array.tryFind (fun l -> l.StartsWith "MEMBER CORE:") |> Option.defaultValue "(no summary)"
+                     recordCase "member hoist: the C core (blade_member.h): every probe of every representation is integer == against every cell, every free releases every allocation"
+                         (code = 0 && summary.EndsWith " 0 bad" && kinds.Length = 220) summary
+                     recordCase "member hoist: the C core's chooser is Optimize.memberChooseRep's PREFERRED representation (the plan record's restatement), case for case, and with every allocation made the actual one is it"
+                         // G185 (b), round 4 wave 6: 1 <= M <= 16 under the chooser is 0 = none (nothing built, the as-written scan)
+                         (kinds.Length = 220 && disagree.Length = 0 && used = set [ 0; 1; 2; 3 ])
+                         ($"{disagree.Length} disagreements of {kinds.Length}; representations seen: {used}")
+                     // (id, preferred, actual, fallback bits, live after build, report text)
+                     let wantF =
+                         [ ("F1", 2, 3, 1, 2, "preferred bitmap, actual hash -- the bitmap's words could not be allocated")
+                           ("F2", 2, 1, 3, 0, "preferred bitmap, actual linear -- the bitmap's words, then the hash table, could not be allocated")
+                           ("F3", 2, 1, 3, 0, "preferred bitmap, actual linear -- the bitmap's words, then the hash table, could not be allocated")
+                           ("F4", 3, 1, 2, 0, "preferred hash, actual linear -- the hash table could not be allocated")
+                           ("F5", 3, 1, 2, 0, "preferred hash, actual linear -- the hash table could not be allocated")
+                           ("F6", 3, 3, 0, 2, "preferred hash, actual hash") ]
+                     for (id, pref, kind, fb, liveB, report) in wantF do
+                         let got =
+                             lines |> Array.tryPick (fun l ->
+                                 let p = l.Split(' ')
+                                 if p.Length = 8 && p.[0] = "F" && p.[1] = id then Some (int p.[2], int p.[3], int p.[4], int p.[5], int p.[6], int64 p.[7]) else None)
+                         let reported =
+                             lines |> Array.exists (fun l ->
+                                 let t = l.Replace("[stderr]: ", "")
+                                 t.StartsWith $"[member] {id}: set s, M " && t.TrimEnd().EndsWith report)
+                         recordCase $"member hoist: allocator-failure injection {id}: preferred {pref} -> actual {kind} (fallback {fb}), the naive booleans, nothing left allocated after free, the route reported"
+                             (got = Some (pref, kind, fb, liveB, 0, 0L) && reported) ($"saw {got}; report found {reported}"))
+            // (2) one program, a host of each shape, both lanes, every setting
+            let prog =
+                String.concat "\n"
+                    [ "type Row = Idx<11>"
+                      "type Ev = Idx<37>"
+                      "type Big = Idx<211>"
+                      "let customer: Array<Int64 like Row> = [3, 1, 3, 2, 1, 4, 3, 9, -5, 0, -5]"
+                      "let small = Int64([3, 3, 1, -5])"
+                      "let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])"
+                      "let wide = [9223372036854775807, -9223372036854775807 - 1, 0, -1, 1, 1000000007, -1000000007, 4611686018427387904, -4611686018427387904, 123456789012345, -98765432109876, 77, -77, 1 - 9223372036854775807, 9223372036854775806, 5, 5, 0]"
+                      "let none = compound(customer, mask(customer, lambda(v) -> v > 100))"
+                      "let picked = compound(customer, mask(customer, lambda(v) -> v % 3 == 0))"
+                      "let k_small = mask(customer, lambda(c) -> contains(small, c))"
+                      "let k_even = mask(customer, lambda(c) -> contains(evens, c + 1))"
+                      "let k_wide = mask(customer, lambda(c) -> contains(wide, c * 1000000007))"
+                      "let k_none = mask(customer, lambda(c) -> contains(none, c))"
+                      "let k_pick = mask(customer, lambda(c) -> !contains(picked, c))"
+                      "let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) - 18) * 1000003 |> compute"
+                      "let cust = method_for(range<Big>) <@> lambda(i) -> ((Int64(i) * 7) % 61 - 30) * 1000003 |> compute"
+                      "let flags = method_for(cust) <@> lambda(c) where omp -> contains(elig, c) |> compute"
+                      "let fp = reduce(method_for(range<Big>) <@> lambda(i) -> if flags(i) then Int64(i) * 31 else 1, (+), 7)"
+                      "" ]
+            File.WriteAllText(Path.Combine(dir, "hosts.blade"), prog)
+            // the printed VALUES only: `blade run` relays the program's stderr after
+            // its stdout (`[stderr]: ...`), where the build reports go
+            let strip (o: string) =
+                o.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> not (l.Contains " completed in ") && l.Trim() <> "" && not (l.StartsWith "[stderr]") && not (l.StartsWith "[member] "))
+                |> String.concat "\n"
+            let memberReports (o: string) (e: string) =
+                (o + "\n" + e).Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "[member] ")
+                |> List.ofArray
+            // each setting's EXPECTED builds: host -> the representation it
+            // prefers and builds (every allocation succeeds here); the knob
+            // off builds nothing. G185 (b), round 4 wave 6: under the chooser
+            // the LITERAL 4-key `small` is not hoisted (no build, no report),
+            // the run-time 5-key `picked` builds `none` (the as-written scan),
+            // and `elig` (span 36,000,109 within the 2^26-bit cap) is a bitmap
+            let hosts = [ "k_small"; "k_even"; "k_wide"; "k_none"; "k_pick"; "flags" ]
+            let expectedReps (s: string) : (string * string) list option =
+                let all reps = Some (List.zip hosts reps)
+                match s with
+                | null -> Some [ ("k_even", "bitmap"); ("k_wide", "hash"); ("k_none", "linear"); ("k_pick", "none"); ("flags", "bitmap") ]
+                | "linear" -> all [ "linear"; "linear"; "linear"; "linear"; "linear"; "linear" ]
+                | "bitmap" -> all [ "bitmap"; "bitmap"; "hash"; "linear"; "bitmap"; "bitmap" ]
+                | "hash" -> all [ "hash"; "hash"; "hash"; "linear"; "hash"; "hash" ]
+                | _ -> None
+            let settings = [ null; "0"; "linear"; "bitmap"; "hash" ]
+            let runs =
+                [ for llvm in [ null; "1" ] do
+                    for s in settings do
+                        let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_MEMBER_HOIST", s); ("BLADE_MEMBER_VERBOSE", "1") ]
+                        let (c, o, e) = spawnWith env dir [ "run"; "hosts.blade"; "--verbose" ]
+                        let lane = if isNull llvm then "C++" else "LLVM"
+                        let laneOk = isNull llvm || e.Contains ".ll"
+                        let reports = memberReports o e
+                        let routeOk =
+                            match expectedReps s with
+                            | None -> reports.IsEmpty
+                            | Some reps ->
+                                reports.Length = reps.Length
+                                && reps |> List.forall (fun (h, r) ->
+                                        reports |> List.exists (fun l -> l.StartsWith $"[member] {h}: " && l.EndsWith $"preferred {r}, actual {r}"))
+                        yield (lane, (if isNull s then "unset" else s), c, strip o, laneOk, routeOk, reports.Length) ]
+            let (_, _, c0, o0, _, _, _) = List.head runs
+            let agree = runs |> List.forall (fun (_, _, c, o, laneOk, _, _) -> c = 0 && laneOk && o = o0)
+            let routes = runs |> List.forall (fun (_, _, _, _, _, routeOk, _) -> routeOk)
+            let shown =
+                runs |> List.map (fun (l, s, c, o, laneOk, routeOk, n) ->
+                    let verdict = if o = o0 then "same" else "DIFFERS"
+                    $"{l}/{s}: exit {c}, lane {laneOk}, {verdict}, {n} build report(s), route {routeOk}") |> String.concat "; "
+            recordCase "member hoist: both lanes, knob unset / 0 / linear / bitmap / hash -- every run prints the same output"
+                (c0 = 0 && agree && o0.Contains "k_small = [true, true, true, false, true, false, true, false, true, false, true]") shown
+            recordCase "member hoist: both lanes report every expected build (host, preferred = actual representation) under each setting, and none with the knob off"
+                routes shown
+            // (2b) ALIAS CHAINS (Codex diff review of W2-1, finding 2), gate on
+            // and off, both lanes: a one- and a two-hop alias of a DEFERRED map
+            // build nothing (no report: never a build ahead of the map's
+            // materialization; the LLVM lane stores the alias class at its
+            // forcing event, gap G60, and runs it itself), a two-hop alias
+            // of a literal builds exactly one structure with the gate on and
+            // none with it off; every run prints the same values.
+            File.WriteAllText(Path.Combine(dir, "alias_deferred.blade"),
+                String.concat "\n"
+                    [ "type Three = Idx<3>"
+                      "type Row = Idx<5>"
+                      "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
+                      "let lazy = method_for(range<Three>) <@> lambda(i) -> Int64(i) + 1"
+                      "let B = lazy"
+                      "let C = B"
+                      "let flags_b = method_for(src) <@> lambda(v) -> contains(B, v) |> compute"
+                      "let flags_c = method_for(src) <@> lambda(v) -> contains(C, v) |> compute"
+                      "" ])
+            File.WriteAllText(Path.Combine(dir, "alias_stored.blade"),
+                String.concat "\n"
+                    [ "type Row = Idx<5>"
+                      "let src: Array<Int64 like Row> = [1, 4, 3, 9, 2]"
+                      "let stored = Int64([4, 9, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])"
+                      "let S1 = stored"
+                      "let S2 = S1"
+                      "let flags_s = method_for(src) <@> lambda(v) -> contains(S2, v) |> compute"
+                      "" ])
+            for (prog, onReports) in [ ("alias_deferred", 0); ("alias_stored", 1) ] do
+                let aliasRuns =
+                    [ for llvm in [ null; "1" ] do
+                        for gate in [ null; "0" ] do
+                            let env = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_MEMBER_HOIST", gate); ("BLADE_MEMBER_VERBOSE", "1") ]
+                            let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
+                            let reports = (memberReports o e).Length
+                            let want = if isNull gate then onReports else 0
+                            // the LLVM lane runs both chains itself: since W4-1 (gap G60) a
+                            // force of a deferred alias class stores ONE pool for every
+                            // member, so the deferred chain's contains reads stored cells
+                            // there too (it used to refuse an unstored set and fall back)
+                            let laneOk =
+                                if isNull llvm then true
+                                else e.Contains ".ll"
+                            let lane = if isNull llvm then "C++" else "LLVM"
+                            let g = if isNull gate then "on" else "off"
+                            yield ($"{lane}/{g}", c, strip o, reports = want && laneOk, reports) ]
+                let (_, ca, oa, _, _) = List.head aliasRuns
+                let okAll = aliasRuns |> List.forall (fun (_, c, o, r, _) -> c = 0 && o = oa && r)
+                let shownA = aliasRuns |> List.map (fun (k, c, _, r, n) -> $"{k}: exit {c}, {n} report(s), route {r}") |> String.concat "; "
+                recordCase $"member hoist: {prog} -- gate on / off, both lanes: the same values, {onReports} build(s) with the gate on, none off"
+                    (ca = 0 && okAll) shownA
+            // (3) the plan names each forced representation
+            for (knob, rep) in [ ("linear", "linear"); ("bitmap", "bitmap"); ("hash", "hash") ] do
+                let (c, o, _) = spawnWith [ ("BLADE_MEMBER_HOIST", knob) ] dir [ "plan"; "hosts.blade" ]
+                recordCase $"member hoist: `plan` under BLADE_MEMBER_HOIST={knob} names the forced (preferred) representation"
+                    (c = 0 && o.Contains "[member-hoist v1] k_even" && o.Contains $"preferred representation: {rep} (span 61, M 20) -- forced by BLADE_MEMBER_HOIST={knob}") ""
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // --- HASH EQUIJOIN (Blade.Optimize.planEquiJoin, round 3 W3-2, item T2) ---
+    // (1) The join's C core (blade_join_* in blade_member.h): a g++-built
+    // driver builds the CSR over right-key sets of several shapes -- empty,
+    // one row, all equal (skew), a small span with negatives, a span at the
+    // counting-sort bound, wide random 64-bit, Int64 extremes, heavy
+    // duplicates -- with the positional flag off and on, and checks, for every
+    // probe key (each right key, its +/-1 neighbours, the extremes, random
+    // keys), that the bucket's rows are EXACTLY the right rows j holding that
+    // key, ASCENDING (the naive scan's list: forward-filled, stable, bags kept),
+    // and -1 exactly when the scan finds none; every free releases every
+    // allocation; then each allocation of a build fails in turn (the header's
+    // hooks): the build returns -1 with nothing left allocated. (2) The run
+    // time: sql-joins-shaped programs COMPILED with BLADE_JOIN_REPORT=1 report
+    // the form each build took (`[join] ...`: the counting sort for a small or
+    // positional span, the hash for a wide one) and print the same values as
+    // the gate off (the six as-written passes).
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "hash join: the C core and the run-time route" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_join_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            Blade.CodeGen.deployRuntimeHeaders dir
+            let driver =
+                String.concat "\n"
+                    [ "#include <cstdio>"
+                      "#include <cstdint>"
+                      "#include <cstdlib>"
+                      "#include <vector>"
+                      "static int g_ord = 0, g_live = 0, g_failat = -1;"
+                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k == g_failat) return nullptr; void* p = std::malloc(n ? n : 1); if (p) g_live++; return p; }"
+                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k == g_failat) return nullptr; void* p = std::calloc(n ? n : 1, s ? s : 1); if (p) g_live++; return p; }"
+                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
+                      "#include \"blade_member.h\""
+                      "static uint64_t s_ = 0x9E3779B97F4A7C15ull;"
+                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+                      "static int64_t wrapAdd(int64_t a, int64_t b) { return (int64_t)((uint64_t)a + (uint64_t)b); }"
+                      "static long check(const blade_join_csr_i64& t, const std::vector<int64_t>& rk) {"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    std::vector<int64_t> ps;"
+                      "    for (size_t i = 0; i < rk.size(); i++) { ps.push_back(rk[i]); ps.push_back(wrapAdd(rk[i], 1)); ps.push_back(wrapAdd(rk[i], -1)); }"
+                      "    for (int k = 0; k < 7; k++) ps.push_back(ex[k]);"
+                      "    for (int k = 0; k < 64; k++) ps.push_back((int64_t)nx());"
+                      "    long bad = 0;"
+                      "    if (t.off[t.nb] != (int64_t)rk.size()) bad++;"
+                      "    for (size_t q = 0; q < ps.size(); q++) {"
+                      "        std::vector<int64_t> naive;"
+                      "        for (size_t j = 0; j < rk.size(); j++) if (rk[j] == ps[q]) naive.push_back((int64_t)j);"
+                      "        int64_t b = blade_join_lookup_i64(&t, ps[q]);"
+                      "        std::vector<int64_t> got;"
+                      "        if (b >= 0) { if (b >= t.nb) { bad++; continue; } for (int64_t x = t.off[b]; x < t.off[b + 1]; x++) got.push_back(t.perm[x]); }"
+                      "        if (got != naive) bad++;"
+                      "    }"
+                      "    return bad;"
+                      "}"
+                      "int main() {"
+                      "    const int sizes[] = {0, 1, 2, 7, 64, 211, 1009};"
+                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+                      "    long builds = 0, bad = 0, direct = 0, hash = 0;"
+                      "    for (int shape = 0; shape < 7; shape++)"
+                      "    for (int si = 0; si < 7; si++) {"
+                      "        const int m = sizes[si];"
+                      "        std::vector<int64_t> rk((size_t)m);"
+                      "        for (int i = 0; i < m; i++) {"
+                      "            uint64_t r = nx();"
+                      "            if (shape == 0) rk[i] = 5;"
+                      "            else if (shape == 1) rk[i] = (int64_t)(r % 17) - 8;"
+                      "            else if (shape == 2) rk[i] = (int64_t)(r % 4096);"
+                      "            else if (shape == 3) rk[i] = (int64_t)r;"
+                      "            else if (shape == 4) rk[i] = ex[r % 7];"
+                      "            else if (shape == 5) rk[i] = (int64_t)(r % 3) * 1000003;"
+                      "            else rk[i] = (int64_t)(r % 401);"
+                      "        }"
+                      "        for (int positional = 0; positional <= 1; positional++) {"
+                      "            blade_join_csr_i64 t;"
+                      "            g_ord = 0; g_live = 0; g_failat = -1;"
+                      "            if (blade_join_build_i64(&t, m ? rk.data() : nullptr, (int64_t)m, positional) != 0) { bad++; std::printf(\"BAD build failed m=%d\\n\", m); continue; }"
+                      "            if (t.kind == BLADE_JOIN_DIRECT) direct++; else if (t.kind == BLADE_JOIN_HASH) hash++;"
+                      "            { int64_t lo = 0, hi = 0; for (int i = 0; i < m; i++) { if (i == 0 || rk[i] < lo) lo = rk[i]; if (i == 0 || rk[i] > hi) hi = rk[i]; }"
+                      "              std::printf(\"K %d %d %d %lld %lld\\n\", m, positional, t.kind, (long long)lo, (long long)hi); }"
+                      "            long b = check(t, rk);"
+                      "            if (b) { bad += b; std::printf(\"BAD shape=%d m=%d positional=%d kind=%d: %ld\\n\", shape, m, positional, t.kind, b); }"
+                      "            blade_join_free_i64(&t);"
+                      "            if (t.kind != BLADE_JOIN_NONE || g_live != 0) { bad++; std::printf(\"BAD free m=%d live=%d\\n\", m, g_live); }"
+                      "            builds++;"
+                      "        }"
+                      "    }"
+                      "    // allocation failures: every allocation of a direct and of a hash build, in turn"
+                      "    long fails = 0, failbad = 0;"
+                      "    for (int form = 0; form < 2; form++) {"
+                      "        std::vector<int64_t> rk;"
+                      "        for (int i = 0; i < 97; i++) rk.push_back(form == 0 ? (int64_t)(i % 13) : (int64_t)nx());"
+                      "        for (int k = 0; k < 8; k++) {"
+                      "            blade_join_csr_i64 t;"
+                      "            g_ord = 0; g_live = 0; g_failat = k;"
+                      "            int rc = blade_join_build_i64(&t, rk.data(), (int64_t)rk.size(), 0);"
+                      "            if (rc == 0) { if (g_ord <= k) { blade_join_free_i64(&t); break; } failbad++; blade_join_free_i64(&t); }"
+                      "            else if (g_live != 0 || t.kind != BLADE_JOIN_NONE) failbad++;"
+                      "            fails++;"
+                      "        }"
+                      "    }"
+                      "    // the chooser's THRESHOLDS, below / at / above each, both positional flags:"
+                      "    // the max(4 M, 4096) switch (its 4096 floor at M = 5, its 4 M branch at M = 1025"
+                      "    // and 2000), the 2^20 positional force (M = 5, and M = 300000 where 4 M > 2^20),"
+                      "    // the 2^26 span cap (M = 5, and M = 2^25 where 4 M > 2^26), M = 0, a negative lo,"
+                      "    // the full Int64 span. blade_join_choose_i64 itself (no build: the shapes are too"
+                      "    // large to allocate), compared with Optimize.joinChooseDirect line by line."
+                      "    struct BC { long long m; long long lo; unsigned long long span_m1; };"
+                      "    std::vector<BC> bc;"
+                      "    const unsigned long long d[] = {0ull, 1ull, 2ull};"
+                      "    for (int k = 0; k < 3; k++) {"
+                      "        bc.push_back({5, 0, 4095ull + d[k]}); bc.push_back({5, -7, 4095ull + d[k]});"
+                      "        bc.push_back({1025, 0, 4099ull + d[k]}); bc.push_back({2000, 0, 7999ull + d[k]});"
+                      "        bc.push_back({5, 0, (1ull << 20) - 1 + d[k]}); bc.push_back({300000, 0, (1ull << 20) - 1 + d[k]});"
+                      "        bc.push_back({5, 0, (1ull << 26) - 1 + d[k]}); bc.push_back({1ll << 25, 0, (1ull << 26) - 1 + d[k]});"
+                      "    }"
+                      "    bc.push_back({0, 0, 0}); bc.push_back({0, INT64_MIN, ~0ull}); bc.push_back({5, INT64_MIN, ~0ull}); bc.push_back({1, 42, 0});"
+                      "    long nbc = 0;"
+                      "    for (const BC& c : bc)"
+                      "        for (int positional = 0; positional <= 1; positional++) {"
+                      "            int64_t lo = (int64_t)c.lo; int64_t hi = (int64_t)((uint64_t)lo + c.span_m1);"
+                      "            int kind = blade_join_choose_i64((int64_t)c.m, lo, hi, positional);"
+                      "            std::printf(\"B %lld %d %d %lld %lld\\n\", c.m, positional, kind, (long long)lo, (long long)hi);"
+                      "            nbc++;"
+                      "        }"
+                      "    std::printf(\"JOIN CORE: %ld builds (%ld counting sort, %ld hash), %ld bad; %ld injected failures, %ld bad\\n\", builds, direct, hash, bad, fails, failbad);"
+                      "    return (bad == 0 && failbad == 0) ? 0 : 1;"
+                      "}"
+                      "" ]
+            let drv = Path.Combine(dir, "join_core.cpp")
+            File.WriteAllText(drv, driver)
+            (match Build.compileCpp drv dir with
+             | Error e -> recordCase "hash join: the C core (blade_join_*) driver" false e
+             | Ok exe ->
+                 match runExecutable exe with
+                 | Error e -> recordCase "hash join: the C core (blade_join_*) driver" false e
+                 | Ok (code, out) ->
+                     let summary =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "JOIN CORE:") |> Option.defaultValue "(no summary)"
+                     let formsSeen = not (summary.Contains "(0 counting sort") && not (summary.Contains ", 0 hash)")
+                     recordCase "hash join: the C core -- every bucket is exactly the right rows holding its key, ascending (forward-filled, bags kept), -1 exactly when none; both forms built; every free and every failed build releases everything"
+                         (code = 0 && summary.Contains "98 builds" && summary.Contains " 0 bad; " && summary.EndsWith " 0 bad" && formsSeen) summary
+                     // the plan record's restatement of the chooser
+                     // (Optimize.joinChooseDirect) agrees with the C core, case for case
+                     let kinds =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 6 && p.[0] = "K" then Some (int64 p.[1], p.[2] = "1", int p.[3], int64 p.[4], int64 p.[5]) else None)
+                     let disagree =
+                         kinds |> Array.filter (fun (m, pos, kind, lo, hi) ->
+                             let wantDirect = Blade.Optimize.joinChooseDirect m lo hi pos
+                             (kind = 1) <> wantDirect)
+                     recordCase "hash join: the C core's form chooser is Optimize.joinChooseDirect's (the plan record's restatement), case for case"
+                         (kinds.Length = 98 && disagree.Length = 0) ($"{disagree.Length} disagreements of {kinds.Length}")
+                     // ... and at every THRESHOLD (below / at / above), both flags
+                     let bounds =
+                         out.Replace("\r\n", "\n").Split('\n') |> Array.choose (fun l ->
+                             let p = l.Split(' ')
+                             if p.Length = 6 && p.[0] = "B" then Some (int64 p.[1], p.[2] = "1", int p.[3], int64 p.[4], int64 p.[5]) else None)
+                     let bDisagree =
+                         bounds |> Array.filter (fun (m, pos, kind, lo, hi) -> (kind = 1) <> Blade.Optimize.joinChooseDirect m lo hi pos)
+                     // the thresholds really switch: each below / at pair differs where the rule says it must
+                     let kindOf (m: int64) (pos: bool) (lo: int64) (spanM1: uint64) =
+                         bounds |> Array.tryPick (fun (m', pos', kind, lo', hi') ->
+                             if m' = m && pos' = pos && lo' = lo && uint64 hi' - uint64 lo' = spanM1 then Some kind else None)
+                     let switches =
+                         [ kindOf 5L false 0L 4095UL, kindOf 5L false 0L 4096UL                          // 4096 floor
+                           kindOf 2000L false 0L 7999UL, kindOf 2000L false 0L 8000UL                    // the 4 M branch
+                           kindOf 1025L false 0L 4099UL, kindOf 1025L false 0L 4100UL
+                           kindOf 5L true 0L ((1UL <<< 20) - 1UL), kindOf 5L true 0L (1UL <<< 20)        // the positional force
+                           kindOf (1L <<< 25) false 0L ((1UL <<< 26) - 1UL), kindOf (1L <<< 25) false 0L (1UL <<< 26) ] // the span cap
+                         |> List.forall (fun (a, b) -> a = Some 1 && b = Some 2)
+                     recordCase "hash join: the chooser's thresholds -- max(4 M, 4096) (its 4096 floor and its 4 M branch, M > 1024), the 2^20 positional force, the 2^26 span cap, M = 0, both positional flags -- below / at / above each: C core = Optimize.joinChooseDirect, and each switches DIRECT -> HASH exactly at its threshold"
+                         (bounds.Length = 56 && bDisagree.Length = 0 && switches) ($"{bDisagree.Length} disagreements of {bounds.Length}; thresholds switch: {switches}"))
+            // (2) the run-time route, gate on vs off
+            let progs =
+                [ ("hj_small",
+                   [ "type L = Idx<7>"; "type R = Idx<5>"
+                     "let lk: Array<Int64 like L> = [3, -1, 3, 8, 0, -1, 3]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4, 5, 6, 7]"
+                     "let rk: Array<Int64 like R> = [-1, 3, 0, 3, -1]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form counting sort, buckets 5; N 7, |J| 11")
+                  ("hj_wide",
+                   [ "type L = Idx<4>"; "type R = Idx<5>"
+                     "let lk: Array<Int64 like L> = [1000000007, -5, 42, 1000000007]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4]"
+                     "let rk: Array<Int64 like R> = [42, 1000000007, 7, 1000000007, -5]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form hash, buckets 4; N 4, |J| 6")
+                  ("hj_positional",
+                   [ "type K = Idx<6>"; "type L = Idx<4>"; "type R = Idx<5>"
+                     "let lk: Array<K like L> = [5, 0, 2, 5]"
+                     "let la: Array<Int64 like L> = [1, 2, 3, 4]"
+                     "let rk: Array<K like R> = [5, 1, 5, 0, 5]"
+                     "let ra: Array<Int64 like R> = [10, 20, 30, 40, 50]"
+                     "let rel = compound(method_for(la, ra) <@> lambda(l, r) -> l * 100 + r, mask(method_for(lk, rk) <@> lambda(l, r) -> l == r, lambda(e) -> e))"
+                     "let n_rel = extents(rel)"
+                     "let fp = reduce(rel, lambda(a, b) -> 3 * a + b, 0)" ],
+                   "form counting sort, buckets 6; N 4, |J| 7") ]
+            let strip (o: string) =
+                o.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> not (l.Contains " completed in ") && l.Trim() <> "" && not (l.StartsWith "[stderr]") && not (l.StartsWith "[join] "))
+                |> String.concat "\n"
+            let joinReports (o: string) (e: string) =
+                (o + "\n" + e).Replace("\r\n", "\n").Split('\n')
+                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+                |> Array.filter (fun l -> l.StartsWith "[join] ")
+                |> List.ofArray
+            // BLADE_JOIN_REPORT is a COMPILE-TIME gate (review W3-2 finding
+            // 3): each program is COMPILED under one environment and its
+            // executable RUN under another, so the two settings are pinned
+            // independently -- compile-on / run-off reports, compile-off /
+            // run-on (BLADE_JOIN_REPORT and BLADE_MEMBER_VERBOSE both set at
+            // run time) does not; the gate off builds no CSR.
+            let runExe (env: (string * string) list) (exe: string) =
+                let psi = System.Diagnostics.ProcessStartInfo(exe)
+                for (k, v) in env do
+                    if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
+                psi.WorkingDirectory <- dir
+                psi.RedirectStandardOutput <- true
+                psi.RedirectStandardError <- true
+                psi.UseShellExecute <- false
+                psi.CreateNoWindow <- true
+                use p = System.Diagnostics.Process.Start psi
+                let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+                let e = Blade.Runtime.readToEndOffPool p.StandardError
+                if p.WaitForExit 120000 then (p.ExitCode, o.Result, e.Result) else ((try p.Kill() with _ -> ()); (-1, o.Result, "timed out"))
+            let quiet = [ ("BLADE_JOIN_REPORT", null); ("BLADE_MEMBER_VERBOSE", null) ]
+            let loud = [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_MEMBER_VERBOSE", "1") ]
+            for (nm, lines, wantForm) in progs do
+                File.WriteAllText(Path.Combine(dir, nm + ".blade"), String.concat "\n" (lines @ [ "" ]))
+                let compileTo (tag: string) (env: (string * string) list) =
+                    let exe = Path.Combine(dir, $"{nm}_{tag}.exe")
+                    let (c, _, e) = spawnWith ([ ("BLADE_BLAS", "off"); ("BLADE_EXE_CACHE", "0") ] @ env) dir [ "compile"; nm + ".blade"; "-o"; exe ]
+                    if c = 0 && File.Exists exe then Ok exe else Error ($"compile {tag}: exit {c}: {e}")
+                match compileTo "rep" [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_MEMBER_VERBOSE", null) ],
+                      compileTo "norep" [ ("BLADE_JOIN_REPORT", null); ("BLADE_MEMBER_VERBOSE", "1") ],
+                      compileTo "off" [ ("BLADE_JOIN_REPORT", "1"); ("BLADE_HASH_JOIN", "0") ] with
+                | Ok exeRep, Ok exeNoRep, Ok exeOff ->
+                    let (c1, o1, e1) = runExe quiet exeRep     // compile-on / run-off
+                    let (c2, o2, e2) = runExe loud exeNoRep    // compile-off / run-on
+                    let (c3, o3, e3) = runExe loud exeOff      // the gate off
+                    let r1, r2, r3 = joinReports o1 e1, joinReports o2 e2, joinReports o3 e3
+                    let same = strip o1 = strip o2 && strip o2 = strip o3
+                    let routeOk = (r1 = [ $"[join] rel: CSR over rk, M 5, {wantForm}" ]) && r2.IsEmpty && r3.IsEmpty
+                    recordCase $"hash join: {nm} -- compiled with BLADE_JOIN_REPORT=1 and run with no switch it reports `{wantForm}`; compiled without it and run with BLADE_JOIN_REPORT=1 BLADE_MEMBER_VERBOSE=1 it reports nothing; the gate off builds no CSR; all three print the same values"
+                        (c1 = 0 && c2 = 0 && c3 = 0 && same && routeOk) ($"compile-on/run-off: {r1}; compile-off/run-on: {r2.Length} report(s); gate off: {r3.Length}; values same: {same}")
+                | a, b, c ->
+                    let why = [ a; b; c ] |> List.choose (function Error e -> Some e | Ok _ -> None) |> String.concat " | "
+                    recordCase $"hash join: {nm} -- compile-time report gate" false why
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then
@@ -365,8 +2524,8 @@ let runCliSmokeTests () : TH.BlockResult =
         let dir = Path.Combine(Path.GetTempPath(), "blade_cli_build_" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory dir |> ignore
         try
-            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x = 1 + 2 * 3\n")
-            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y = 40 + 2\n")
+            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x: Int64 = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y: Int64 = 40 + 2\n")
             // A header of the user's own that happens to share a runtime
             // header's name: no compile may touch it.
             File.WriteAllText(Path.Combine(dir, "index_types.h"), "// mine\n")
@@ -471,7 +2630,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // BL2009 refusal now) instead of replacing the first.
     recordCase "repl: struct, static struct, interface and impl cells have a rebind key"
         (Blade.ReplSession.bindingName "struct P { x: Float64 }" = Some "P"
-         && Blade.ReplSession.bindingName "static struct Band { i: Int<min=0, max=3> }" = Some "Band"
+         && Blade.ReplSession.bindingName "static struct Band { i: Int32<min=0, max=3> }" = Some "Band"
          && Blade.ReplSession.bindingName "interface Shape {" = Some "Shape"
          && Blade.ReplSession.bindingName "impl Shape for Box {" = Some "impl Shape for Box") ""
     (let (src, _) =
@@ -531,7 +2690,7 @@ let runCliSmokeTests () : TH.BlockResult =
         + "let s = outer(A)\n"
     let hmAbort =
         "function divide(x: T^0, y: T^0) = x / y\n"
-        + "let a = divide(4.0, 2.0)\n"
+        + "let a = divide(Float64(4.0), Float64(2.0))\n"
         + "let i: Int64 = 1\n"
         + "let z: Int64 = 0\n"
         + "let b = divide(i, z)\n"
@@ -546,7 +2705,7 @@ let runCliSmokeTests () : TH.BlockResult =
            + "let r = call_it(4)\n",
            [ "  at f"; "  at call_it" ])
           ("kernel-lambda",
-           "let xs = [4, 2, 0]\n"
+           "let xs = Int64([4, 2, 0])\n"
            + "let r = reduce(xs, lambda(a, b) -> a / b)\n",
            [ "  at lambda in r" ])
           ("returned-closure",
@@ -572,7 +2731,7 @@ let runCliSmokeTests () : TH.BlockResult =
            + "let v = h(7)\n",
            [ "  at pick"; "  at h" ])
           ("section",
-           "let xs = [4, 2, 0]\n"
+           "let xs = Int64([4, 2, 0])\n"
            + "let r = reduce(xs, (/))\n",
            [ "  at (/) in r" ])
           ("partial-application",
@@ -631,7 +2790,7 @@ let runCliSmokeTests () : TH.BlockResult =
             // the callee as written (`mymean`, not its specialization).
             File.WriteAllText(Path.Combine(dir, "l.blade"),
                 "function mymean(row: Float64^1) -> Float64 = reduce(row, (+)) / Float64(extents(row))\n"
-                + "let a = [1.0, 2.0, 3.0, 4.0]\n"
+                + "let a = Float64([1.0, 2.0, 3.0, 4.0])\n"
                 + "let c = a - mymean(a)\n"
                 + "let e = method_for(a) <@> lambda(x) -> x - mymean(a) |> compute\n"
                 + "let k = lambda(x: Float64) -> {\n"
@@ -647,6 +2806,106 @@ let runCliSmokeTests () : TH.BlockResult =
                  && out.Contains "[invariant-hoist v1] lambda in e: applied [`mymean(a)` does not read the element"
                  && out.Contains "[cse v2] k: applied"
                  && not (internalName (out + err))) (out + err)
+            // Closed-form enumerable domains (docs/plans/structural/06, bench
+            // G4): `plan` names the ENUMERATION FORM per consumer -- the affine
+            // nest's bounds in the struct's own field names, and whether the
+            // consumer streams it (a fold) or fills an array (a map).
+            File.WriteAllText(Path.Combine(dir, "d.blade"),
+                "let static n: Int64 = 13\n"
+                + "let static w: Int64 = 3\n"
+                + "static struct Band {\n"
+                + "    i: Int32<min=0, max=n-1>,\n"
+                + "    j: Int32<min=0, max=n-1>\n"
+                + "} where abs(i - j) <= w\n"
+                + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * j, (+))\n"
+                + "let R = method_for(range<Band>) <@> lambda(i, j) -> i + j |> compute\n")
+            let (code, out, err) = spawn dir [ "plan"; "d.blade" ]
+            expectCase "domains: plan names the closed-form affine nest and its consumer"
+                (code = 0
+                 && out.Contains "[domain-enum v1] s @ 7:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 12], j in [max(0, i - 3), min(12, i + 3)]), 79 cell(s); consumer: streamed fold"
+                 && out.Contains "[domain-enum v1] R @ 8:1: applied [enumeration of Band: closed-form affine nest"
+                 && out.Contains "consumer: map (the fill streams the nest") (out + err)
+            // WHERE `Float64(x)` of an Int64 takes the split (CodeGenExprSupport):
+            // only the closed-form domain's cell code -- the band kernel's callee
+            // `phi` -- gets the vectorizable split; the scalar generator `gen`
+            // keeps the one-instruction plain conversion (bench loose-ends item
+            // 1: the split everywhere cost the input generators +27%). The two
+            // spellings are the same double, so only the emission is pinned.
+            File.WriteAllText(Path.Combine(dir, "c.blade"),
+                "let static n: Int64 = 13\n"
+                + "let static w: Int64 = 3\n"
+                + "type Nx = Idx<n>\n"
+                + "static struct Band {\n"
+                + "    i: Int64<min=0, max=n-1>,\n"
+                + "    j: Int64<min=0, max=n-1>\n"
+                + "} where abs(i - j) <= w\n"
+                + "function gen(k: Int64) -> Float64 = Float64((k * 1103515245 + 12345) % 2147483648) / 2147483648.0\n"
+                + "function phi(i: Int64, j: Int64) -> Float64 = Float64(i - j) / Float64(w + 1)\n"
+                + "let x = method_for(range<Nx>) <@> lambda(k) -> gen(Int64(k)) |> compute\n"
+                + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> phi(i, j) * x((i : Nx)), (+))\n")
+            let (code, out, err) = spawn dir [ "emit"; "c.blade" ]
+            // A function's body follows its definition line: a file-scope
+            // `double gen(...) {`, or -- for one that reads a module binding,
+            // like `phi` reading `w` -- a main-local `... phi = [&](...) -> double {`.
+            let cppLine (fn: string) =
+                let lines = out.Split('\n')
+                lines
+                |> Array.tryFindIndex (fun l ->
+                    let t = l.Trim()
+                    t.EndsWith "{" && (t.StartsWith $"double {fn}(" || t.Contains $" {fn} = [&]("))
+                |> Option.map (fun i -> lines.[i + 1 .. min (lines.Length - 1) (i + 4)] |> String.concat "\n")
+                |> Option.defaultValue ""
+            let phiCpp, genCpp = cppLine "phi", cppLine "gen"
+            expectCase "conversion: C++ splits Float64(Int64) only in domain cell code (phi), plain cast in the scalar generator"
+                (code = 0
+                 && phiCpp.Contains "blade_arith::i64_to_f64(" && not (phiCpp.Contains "static_cast<double>(")
+                 && genCpp.Contains "static_cast<double>(" && not (genCpp.Contains "i64_to_f64")) (out + err)
+            let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1") ] dir [ "emit"; "c.blade" ]
+            let llBody (fn: string) =
+                out.Split("\ndefine ")
+                |> Array.tryFind (fun d -> d.Split('\n').[0].Contains $"@bl_{fn}_")
+                |> Option.map (fun d -> d.Split("\n}").[0])
+                |> Option.defaultValue ""
+            let phiLl, genLl = llBody "phi", llBody "gen"
+            expectCase "conversion: LLVM splits Float64(Int64) only in domain cell code (phi), plain sitofp in the scalar generator"
+                (code = 0
+                 && phiLl.Contains "lshr i64" && phiLl.Contains "sitofp i32" && not (phiLl.Contains "sitofp i64")
+                 && genLl.Contains "sitofp i64" && not (genLl.Contains "lshr i64")) (out + err)
+            // Gap G62 (round 3 wave 4, W4-1): a tuple with at most one member
+            // that may fail keeps its single `std::make_tuple` line (no member
+            // temporaries); two failing members are bound in SOURCE order, so
+            // g++'s right-to-left argument order cannot pick the later failure.
+            File.WriteAllText(Path.Combine(dir, "tup.blade"),
+                "type Row = Idx<1>\n"
+                + "let a: Array<Int64 like Row> = [1]\n"
+                + "let z: Array<Int64 like Row> = [1]\n"
+                + "let x0: Float64 = 3.0\n"
+                + "let t: (Float64, Float64) = (1.0, 2.0)\n"
+                + "let p = (x0 + 1.0, x0 * 2.0)\n"
+                + "let u = (a((a(0) : Row)), 1 / z(0))\n")
+            let (code, out, err) = spawn dir [ "emit"; "tup.blade" ]
+            let i0 = out.IndexOf "u__m0 ="
+            let i1 = out.IndexOf "u__m1 ="
+            expectCase "tuples: an ordinary tuple keeps one make_tuple line; two failing members bind in source order (G62)"
+                (code = 0
+                 && out.Contains "std::tuple<double, double> t = std::make_tuple(1.0, 2.0);"
+                 && out.Contains "std::tuple<double, double> p = std::make_tuple((x0 + 1.0), (x0 * 2.0));"
+                 && not (out.Contains "t__m0") && not (out.Contains "p__m0")
+                 && i0 >= 0 && i1 > i0
+                 && out.Contains "std::make_tuple(u__m0, u__m1)") (out + err)
+            // Gap G60: a fold through an alias of a deferred map fuses and
+            // forces nothing, so neither name is materialized -- asked for by
+            // name, `--print` refuses them (the absence the corpus pins cannot
+            // state; loops/541).
+            File.WriteAllText(Path.Combine(dir, "alias.blade"),
+                "type Row = Idx<3>\n"
+                + "let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]\n"
+                + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
+                + "let g2 = g\n"
+                + "let s = reduce(g2, (+))\n")
+            let (code, out, err) = spawn dir [ "run"; "alias.blade"; "--print"; "g,g2" ]
+            expectCase "deferred alias: a fold through it forces neither name, so `--print g,g2` is refused (G60)"
+                (code <> 0 && (out + err).Contains "never materialized") (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,
@@ -654,7 +2913,7 @@ let runCliSmokeTests () : TH.BlockResult =
     (let src =
         "type L = Idx<3>\n"
         + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
-        + "let v = [10.0, 20.0, 30.0, 40.0]\n"
+        + "let v = Float64([10.0, 20.0, 30.0, 40.0])\n"
         + "function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)\n"
         + "let s = walk(A, 2)\n"
         + "let sv = walk(v, 3)\n"
@@ -690,7 +2949,7 @@ let runCliSmokeTests () : TH.BlockResult =
         + "let f = lambda(x: Int64) -> x / z\n"
         + "function mk(i: Int64) = lambda(j: Int64) -> j / i\n"
         + "let g = mk(2)\n"
-        + "let xs = [4, 2, 1]\n"
+        + "let xs = Int64([4, 2, 1])\n"
         + "let r = reduce(xs, lambda(a, b) -> a / b)\n"
         + "let s = reduce(xs, (/))\n"
         + "function add(a: Int64, b: Int64) -> Int64 = a + b\n"
@@ -731,7 +2990,7 @@ let private runStrictPinTests () : TH.BlockResult =
     let unpinned =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let pinned = unpinned.Replace("function covariance(a, b) =",
                                   "function covariance(a, b) where comm(a, b) =")
@@ -832,7 +3091,7 @@ let private runValidationCodeTests () : TH.BlockResult =
         "function toint(x: T^0) -> Int64 = Int64(x)\n\
          function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)\n\
          function outer(x: T^0) -> Int64 = applyG(toint, x)\n\
-         let r = outer(2.5)\n"
+         let r = outer(Float64(2.5))\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_validation_codes_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
     let quietly (f: unit -> 'a) : 'a =
@@ -887,7 +3146,7 @@ let private runSurfacingTests () : TH.BlockResult =
     let unpinned =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     // Plus an unrelated hard type error in a LATER declaration: the checker
     // must record the suggestion before it fails on the later error.
@@ -1082,13 +3341,13 @@ let private runIdeServeTests () : TH.BlockResult =
     // An HM-polymorphic value binding: the typed AST keeps `T` for both lets
     // (the scheme is only instantiated per call site), while monomorphization
     // during lowering resolves them. Exactly the fast/full split.
-    let hmSource = "function id(x: T) -> T = x\nlet r = id(42)\nlet s = id(3.5)\n"
+    let hmSource = "function id(x: T) -> T = x\nlet r = id(Int64(42))\nlet s = id(Float64(3.5))\n"
     // Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
     // whose ABSENCE proves the next request started clean.
     let warnSource =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_ideserve_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
@@ -1166,7 +3425,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // against the REQUEST file's directory.
         let provPath = Path.Combine(tmpDir, "prov.blade")
         let provSource =
-            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a = 1\n"
+            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a: Int64 = 1\n"
         let (code, responses, _) =
             drive [ checkReq 15 "full" provPath provSource; pingReq 16; shutdownReq ]
         let name = "full tier: a missing store is refused at its load site, payload and loop intact"
@@ -1257,7 +3516,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // different file and must inherit none of it.
         let (code, responses, _) =
             drive [ checkReq 21 "fast" warnPath warnSource
-                    checkReq 22 "fast" cleanPath "let a = 1\n"
+                    checkReq 22 "fast" cleanPath "let a: Int64 = 1\n"
                     shutdownReq ]
         let name = "consecutive checks of different files share no state"
         match responses with
@@ -1340,40 +3599,82 @@ let private runIdeServeTests () : TH.BlockResult =
         // g++ build and the risk lives here: a slot mapped to the wrong
         // binding renders a plausible picture of the wrong place.
         let camSrc =
-            "import plot\n\nlet a = 1\n\nlet cam_cx = -0.5\n"
-            + "let cam_cy = 0.25\nlet cam_r = 0.004\nlet cam_px = 256\n"
+            "import plot\n\nlet a: Int64 = 1\n\nlet cam_cx: Float64 = -0.5\n"
+            + "let cam_cy: Float64 = 0.25\nlet cam_r: Float64 = 0.004\nlet cam_px: Int64 = 256\n"
             + "\nlet z = cam_cx + cam_r\n"
         let name = "the camera erasure rewrites each binding to its own CSV slot"
         match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"]
                                                 @"C:\tmp\camera.csv" with
         | Ok out when out.StartsWith "import csv as __blade_cam_csv"
-                      && out.Contains "let cam_cx = __blade_cam_slots(0, 0)"
-                      && out.Contains "let cam_cy = __blade_cam_slots(0, 1)"
-                      && out.Contains "let cam_r = __blade_cam_slots(0, 2)"
+                      && out.Contains "let cam_cx: Float64 = __blade_cam_slots(0, 0)"
+                      && out.Contains "let cam_cy: Float64 = __blade_cam_slots(0, 1)"
+                      && out.Contains "let cam_r: Float64 = __blade_cam_slots(0, 2)"
                       // Not named, so not erased: the resolution stays literal.
-                      && out.Contains "let cam_px = 256"
+                      && out.Contains "let cam_px: Int64 = 256"
                       // Forward slashes -- a Windows separator inside a Blade
                       // string literal would read as an escape.
                       && out.Contains "__blade_cam_csv.load(\"C:/tmp/camera.csv\")"
                       // The reader precedes the EARLIEST camera binding, and so
                       // precedes every use of the camera.
-                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx =" ->
+                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx: Float64 =" ->
             record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure preserves bounded annotations and trailing comments"
+        let bounded = "let cam_r: Float64<min=0.0, max=1.0> = 0.1 // keep\r\n"
+        match Blade.IdeServe.cameraErasedSource bounded ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "let cam_r: Float64<min=0.0, max=1.0> = __blade_cam_slots(0, 0) // keep\r\n" ->
+            record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure accepts an unannotated binding without counting a local shadow"
+        let local = "function f() = { let cam_r = 0.2; cam_r }\nlet cam_r = 0.1\n"
+        match Blade.IdeServe.cameraErasedSource local ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "let cam_r = __blade_cam_slots(0, 0)"
+                      && out.Contains "function f() = { let cam_r = 0.2; cam_r }" ->
+            record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure is unchanged when only typed camera values move"
+        let moved = camSrc.Replace("-0.5", "0.750000001").Replace("0.25", "-1.0").Replace("0.004", "0.000000000001")
+        match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"] "c.csv",
+              Blade.IdeServe.cameraErasedSource moved ["cam_cx"; "cam_cy"; "cam_r"] "c.csv" with
+        | Ok before, Ok after when before = after -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure refuses static and destructured targets"
+        let invalidTargets = [ "let static cam_r = 0.1\n"; "let (cam_r, other) = (0.1, 0.2)\n" ]
+        let refused =
+            invalidTargets |> List.forall (fun src ->
+                match Blade.IdeServe.cameraErasedSource src ["cam_r"] "c.csv" with
+                | Error e -> e.Contains "simple runtime let"
+                | _ -> false)
+        if refused then record name TH.Pass "" else record name TH.Fail "an unsupported target was not refused"
 
         // ...and the refusals, which are the safety property. A camera name the
         // erasure cannot pin down exactly once would leave a literal standing
         // and render from a camera the caller never set -- silently, and to a
         // picture that looks entirely reasonable.
         let name = "the camera erasure refuses a name bound more than once"
-        let dupSrc = "let cam_r = 0.1\n\nlet cam_r = 0.2\n"
+        let dupSrc = "let cam_r: Float64 = 0.1\n\nlet cam_r = 0.2\n"
         match Blade.IdeServe.cameraErasedSource dupSrc ["cam_r"] "c.csv" with
         | Error e when e.Contains "cam_r" && e.Contains "2 times" -> record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
 
         let name = "the camera erasure refuses a name that is not bound at all"
-        match Blade.IdeServe.cameraErasedSource ("let q = 1\n") ["cam_r"] "c.csv" with
+        match Blade.IdeServe.cameraErasedSource ("let q: Int64 = 1\n") ["cam_r"] "c.csv" with
         | Error e when e.Contains "cam_r" && e.Contains "0 times" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure refuses repeated requested binding names"
+        match Blade.IdeServe.cameraErasedSource "let cam_r: Float64 = 0.1\n" ["cam_r"; "cam_r"] "c.csv" with
+        | Error e when e.Contains "requested more than once" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera reader preserves an indented declaration's whitespace"
+        match Blade.IdeServe.cameraErasedSource "  let cam_r: Float64 = 0.1\r\n" ["cam_r"] "c.csv" with
+        | Ok out when out.Contains "read\n  let cam_r: Float64 = __blade_cam_slots(0, 0)\r\n" ->
+            record name TH.Pass ""
         | other -> record name TH.Fail (sprintf "%A" other)
 
         // The camera crosses as text, so it has to cross EXACTLY: a lens moved
@@ -1460,7 +3761,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // advisories (which ride the warning log alone). Skipping the code
         // wholesale to avoid a duplicate dropped the second kind entirely.
         let domainSource =
-            "static struct Prod { i: Int<min=0, max=6>, j: Int<min=0, max=6> } where (i * j) % 3 == 1\n"
+            "static struct Prod { i: Int32<min=0, max=6>, j: Int32<min=0, max=6> } where (i * j) % 3 == 1\n"
             + "let R = method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j |> compute\n"
         let body = oneCheck "fast" "domain.blade" domainSource
         let name = "a constrained-domain advisory (BL4010 off the warning log) reaches the payload, at its span"
@@ -1475,12 +3776,12 @@ let private runIdeServeTests () : TH.BlockResult =
         // A lowering refusal carries a span, and the full tier used to throw
         // it away: the CLI pointed at the expression, the editor at 1:1.
         let lowerRefusal =
-            "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+            "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
             + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
             + "    let c = compound(x, m)\n"
             + "    reduce(c, (+))\n"
             + "}\n"
-            + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+            + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
             + "let s = f(a)\n"
         let body = oneCheck "full" "lower.blade" lowerRefusal
         // This is also the file that TYPECHECKS but will not lower: the fast
@@ -1495,7 +3796,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // "Void" is not a more concrete spelling of a static tuple's type; it
         // is what lowering leaves behind once the static evaluator has
         // consumed the binding.
-        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n = 4\n"
+        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n: Int64 = 4\n"
         let name = "tier=full never upgrades a binding's type to Void"
         if body.Contains "\"name\":\"dims\"" && not (body.Contains "\"concreteType\":\"Void\"") then
             record name TH.Pass ""
@@ -1507,7 +3808,7 @@ let private runIdeServeTests () : TH.BlockResult =
         // the full one.
         let body =
             oneCheck "fast" "nostore.blade"
-                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n = 1\n"
+                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n: Int64 = 1\n"
         let name = "a store that cannot be read is BL2008 at the load site, on the fast tier"
         if body.Contains "\"code\":\"BL2008\"" && body.Contains "\"line\":2,\"col\":9"
            && body.Contains "not a Zarr store" then record name TH.Pass ""
@@ -1537,7 +3838,7 @@ let private runIdeServeTests () : TH.BlockResult =
         let mkSession (suffix: string) (owner: int option) (ageHours: float) =
             let dir = Path.Combine(sweepRoot, Blade.ReplSession.sessionDirPrefix + suffix)
             Directory.CreateDirectory dir |> ignore
-            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x = 1\n")
+            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x: Int64 = 1\n")
             (match owner with
              | Some pid -> File.WriteAllText(Path.Combine(dir, Blade.ReplSession.ownerMarkerName), string pid)
              | None -> ())
@@ -1696,7 +3997,11 @@ let private runSurfaceTests () : TH.BlockResult =
             yield sprintf "ternary intrinsics = %A" (mathIntrinsic "ternary")
           if mathIntrinsic "unary" |> List.isEmpty then yield "unary intrinsics empty"
           if mathIntrinsic "complex" |> List.isEmpty then yield "complex intrinsics empty"
-          if scalarTypes.Length <> 16 then yield $"{scalarTypes.Length} scalar types"
+          if scalarTypes.Length <> 13 then yield $"{scalarTypes.Length} scalar types (expected 13)"
+          for t in [ "Int32"; "Int64"; "Float32"; "Float64"; "Complex64"; "Complex128" ] do
+              if not (List.contains t scalarTypes) then yield $"scalarTypes lacks {t}"
+          for t in [ "Int"; "Float"; "Double" ] do
+              if List.contains t scalarTypes then yield $"scalarTypes still lists removed spelling {t}"
           if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
           for b in coreBuiltins do
             if not (Set.contains b builtins) then yield $"builtins lacks {b}"
@@ -1880,7 +4185,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         // its "return value" (a trailing bare expression) and nothing else, so
         // the binding's value is read back by a later bare-identifier cell.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "x"; shutdownReq ]
         let name = "eval keeps a declaration silently; a bare identifier reads it back"
         match responses with
         | [decl; probe] when code = 0 && decl.Contains "\"id\":1" && decl.Contains "\"kept\":true"
@@ -1896,7 +4201,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         // it, and reports under the EMPTY name -- the transient wrapper's own
         // name is an implementation detail the client never sees.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x + 1"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "x + 1"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a bare expression echoes under the empty name and is not kept"
         match responses with
@@ -1914,8 +4219,8 @@ let private runIdeEvalTests () : TH.BlockResult =
         // PLACE, so the dependent expression recomputes rather than seeing a
         // shadowed duplicate (which would not even compile).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "let y = x * 10"
-                    evalReq 3 "nb" "let x = 5"; evalReq 4 "nb" "y"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; evalReq 2 "nb" "let y = x * 10"
+                    evalReq 3 "nb" "let x: Int64 = 5"; evalReq 4 "nb" "y"; shutdownReq ]
         let name = "rebinding a name splices in place and dependents recompute"
         match responses with
         | [_; _; rebind; after] when code = 0
@@ -1938,9 +4243,9 @@ let private runIdeEvalTests () : TH.BlockResult =
         // (no comment above it) spliced correctly while `a` did not, so the
         // cell half-applied. 456 is the fixed answer; 756 was the bug.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let a = 1.0\nlet b = 2.0\nlet c = 3.0"
+            drive [ evalReq 1 "nb" "let a: Float64 = 1.0\nlet b: Float64 = 2.0\nlet c: Float64 = 3.0"
                     evalReq 2 "nb" "let s = a * 100.0 + b * 10.0 + c"
-                    evalReq 3 "nb" "// the camera\nlet a = 4.0\nlet b = 5.0\nlet c = 6.0"
+                    evalReq 3 "nb" "// the camera\nlet a: Float64 = 4.0\nlet b: Float64 = 5.0\nlet c: Float64 = 6.0"
                     evalReq 4 "nb" "s"; shutdownReq ]
         let name = "a comment-led rebind still supersedes (every binding in the cell)"
         match responses with
@@ -1981,7 +4286,7 @@ let (a, b) = pair(7.0)
         // 4. Two notebooks, one serve process, the same name in both: the
         // sessions are keyed independently or this whole design is unusable.
         let (code, responses, _) =
-            drive [ evalReq 1 "nbA" "let x = 2"; evalReq 2 "nbB" "let x = 99"
+            drive [ evalReq 1 "nbA" "let x: Int64 = 2"; evalReq 2 "nbB" "let x: Int64 = 99"
                     evalReq 3 "nbA" "x"; evalReq 4 "nbB" "x"; shutdownReq ]
         let name = "two sessions with clashing names do not leak into each other"
         match responses with
@@ -1995,7 +4300,7 @@ let (a, b) = pair(7.0)
         // binding goes, and an unknown key is a no-op rather than an error
         // (restart fires before the first cell has ever run).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"; resetReq 2 "nb"; evalReq 3 "nb" "x"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"; resetReq 2 "nb"; evalReq 3 "nb" "x"
                     resetReq 4 "never-seen"; shutdownReq ]
         let name = "resetSession clears the session and tolerates unknown keys"
         match responses with
@@ -2012,8 +4317,8 @@ let (a, b) = pair(7.0)
         // line, four lines into the assembled session file), no bindings are
         // claimed, and the session evaluates afterwards exactly as before.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    evalReq 2 "nb" "let bad = 1\nlet worse = undefined_name_xyz"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    evalReq 2 "nb" "let bad: Int64 = 1\nlet worse = undefined_name_xyz"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a rejected snippet reports cell-local spans and leaves the session intact"
         match responses with
@@ -2035,8 +4340,8 @@ let (a, b) = pair(7.0)
         Directory.CreateDirectory(tmpDir) |> ignore
         let otherPath = Path.Combine(tmpDir, "other.blade")
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    checkReq 2 otherPath "let unrelated = 41 + 1\n"
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    checkReq 2 otherPath "let unrelated: Int64 = 41 + 1\n"
                     evalReq 3 "nb" "x + 1"; shutdownReq ]
         let name = "a check interleaved between two evals disturbs neither"
         match responses with
@@ -2054,9 +4359,9 @@ let (a, b) = pair(7.0)
         // meaning in this cell. Those clamp to 1:1 and say where they really
         // came from, instead of squiggling an innocent line.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let xs = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let xs = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let tot = reduce(xs, (+))"
-                    evalReq 3 "nb" "let xs = 1.0"
+                    evalReq 3 "nb" "let xs: Float64 = 1.0"
                     evalReq 4 "nb" "tot"; shutdownReq ]
         let name = "a rebind that breaks a LATER snippet clamps and says so"
         match responses with
@@ -2082,7 +4387,7 @@ let (a, b) = pair(7.0)
         // 10. Framing, on a response whose own content contains newlines: the
         // multi-line submission escapes INTO the line, never through it.
         let (code, responses, raw) =
-            drive [ evalReq 1 "nb" "let a = 1\nlet b = undefined_name_xyz"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let a: Int64 = 1\nlet b = undefined_name_xyz"; shutdownReq ]
         let name = "an eval response is exactly one newline-terminated line"
         if code = 0 && responses.Length = 1 && raw.EndsWith "\n" && raw.Split('\n').Length = 2 then
             record name TH.Pass ""
@@ -2106,7 +4411,7 @@ let (a, b) = pair(7.0)
         // 12. A :paste-shaped cell declares several names at once. All of them
         // bind -- silently. A later cell reads any of them back.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let m = 3\nlet n = m + 4"; evalReq 2 "nb" "n"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let m: Int64 = 3\nlet n = m + 4"; evalReq 2 "nb" "n"; shutdownReq ]
         let name = "a multi-declaration cell is silent and binds every name"
         match responses with
         | [decls; probe] when code = 0
@@ -2123,7 +4428,7 @@ let (a, b) = pair(7.0)
                     "{\"id\":32,\"cmd\":\"eval\",\"source\":\"let x = 1\"}"
                     "{\"id\":33,\"cmd\":\"resetSession\"}"
                     "{\"id\":34,\"cmd\":\"evaluate\",\"session\":\"nb\",\"source\":\"let x = 1\"}"
-                    evalReq 35 "nb" "let x = 1"; shutdownReq ]
+                    evalReq 35 "nb" "let x: Int64 = 1"; shutdownReq ]
         let name = "incomplete eval requests error without stopping the loop"
         match responses with
         | [noSource; noSession; noKey; unknownCmd; good] when
@@ -2145,7 +4450,7 @@ let (a, b) = pair(7.0)
         // line (`--> line 1`, cell coordinates), and the diagnostic is rebuilt
         // from it at that line (column 1 -- the panic carries no column).
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"
+            drive [ evalReq 1 "nb" "let z: Int64 = 1 / 0"; evalReq 2 "nb" "let ok: Int64 = 6"
                     evalReq 3 "nb" "ok"; shutdownReq ]
         let name = "a runtime panic is not kept and names itself"
         match responses with
@@ -2170,7 +4475,7 @@ let (a, b) = pair(7.0)
         // span in an EARLIER cell says "elsewhere in session" rather than
         // squiggling this one.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let a = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
+            drive [ evalReq 1 "nb" "let a: Float64 = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
                     evalReq 2 "nb2" "struct Pos {\n    v: Float64\n} where v >= 0.0"
                     evalReq 3 "nb2" "let p = Pos { v = -5.0 }"
                     shutdownReq ]
@@ -2206,7 +4511,7 @@ let (a, b) = pair(7.0)
         // that failed. It is neither: it is three statements -- and the cell
         // displays exactly ONE value, its trailing expression's.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let t1 = 2\nlet t2 = 3\nt1 + t2"
+            drive [ evalReq 1 "nb" "let t1: Int64 = 2\nlet t2: Int64 = 3\nt1 + t2"
                     evalReq 2 "nb" "t2"; shutdownReq ]
         let name = "a cell mixing declarations with a trailing expression runs whole"
         match responses with
@@ -2225,7 +4530,7 @@ let (a, b) = pair(7.0)
         // whole-array `bindings` equality, because "exactly one echo" is the
         // property under test.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let p = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
+            drive [ evalReq 1 "nb" "let p: Int64 = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
                     shutdownReq ]
         let name = "an interleaved cell displays only its final expression"
         let expectedOrder =
@@ -2239,7 +4544,7 @@ let (a, b) = pair(7.0)
         // still evaluates against the session without joining it. Only the
         // last expression displays; the earlier one runs for effect.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let e1 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
+            drive [ evalReq 1 "nb" "let e1: Int64 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
                     evalReq 3 "nb" "e1 + 1\ne1 * 2"; shutdownReq ]
         let name = "an expression-only cell echoes its final value and joins nothing"
         let finalValue =
@@ -2258,8 +4563,8 @@ let (a, b) = pair(7.0)
         // declared twice (which would not compile) and the expressions -- being
         // transient -- leave no second copy behind either.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let m = 1\nlet n = m + 1\nn * 10"
-                    evalReq 2 "nb" "let m = 5\nlet n = m + 1\nn * 10"
+            drive [ evalReq 1 "nb" "let m: Int64 = 1\nlet n = m + 1\nn * 10"
+                    evalReq 2 "nb" "let m: Int64 = 5\nlet n = m + 1\nn * 10"
                     evalReq 3 "nb" "n"; shutdownReq ]
         let name = "re-running a mixed cell replaces it instead of redeclaring it"
         match responses with
@@ -2278,8 +4583,8 @@ let (a, b) = pair(7.0)
         // a later cell rebinding `g1` would supersede the snippet entire,
         // taking `g2` down with it and leaving every downstream cell unbound.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let g1 = 1\nlet g2 = 2\ng1 + g2"
-                    evalReq 2 "nb" "let mut g1 = 7"
+            drive [ evalReq 1 "nb" "let g1: Int64 = 1\nlet g2: Int64 = 2\ng1 + g2"
+                    evalReq 2 "nb" "let mut g1: Int64 = 7"
                     evalReq 3 "nb" "g1 + g2"; shutdownReq ]
         let name = "rebinding one name of a mixed cell leaves its other names standing"
         match responses with
@@ -2295,8 +4600,8 @@ let (a, b) = pair(7.0)
         // read on the next line of the SAME cell has to see.
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
-                        ("let mut buf = [0.0, 0.0, 0.0]\n"
-                         + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+                        ("let mut buf = Float64([0.0, 0.0, 0.0])\n"
+                         + "function fill(out: mut Array<Float64 like Idx<3>>) = {\n"
                          + "    out(0) += 1.5\n}\nfill(buf)\nbuf")
                     shutdownReq ]
         let name = "a call-for-effect statement mutates what the next statement reads"
@@ -2312,7 +4617,7 @@ let (a, b) = pair(7.0)
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
                         ("function csum(a: T^1, b: T^1)\nwhere comm(a, b) = {\n    a + b\n}\n"
-                         + "csum([1.0, 2.0], [3.0, 4.0])")
+                         + "csum(Float64([1.0, 2.0]), Float64([3.0, 4.0]))")
                     shutdownReq ]
         let name = "a where clause on its own line does not start a new statement"
         match responses with
@@ -2327,7 +4632,7 @@ let (a, b) = pair(7.0)
         // echoed a binding literally called `rec`, with no type and no value.
         let (code, responses, _) =
             drive [ evalReq 1 "nb"
-                        ("let rec seq: Array<Float like Idx<4>> =\n    match seq with\n"
+                        ("let rec seq: Array<Float64 like Idx<4>> =\n    match seq with\n"
                          + "    | zero -> zero\n    | zero :: s -> zero :: 1.0\n"
                          + "    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
                          + "reduce(seq, (+))")
@@ -2348,7 +4653,7 @@ let (a, b) = pair(7.0)
         // pattern it read as a bare expression, was wrapped in a TRANSIENT
         // binding, and its write left the session with the wrapper.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let arr = [1.0, 2.0, 3.0]\narr(0) = 9.0"
+            drive [ evalReq 1 "nb" "let arr = Float64([1.0, 2.0, 3.0])\narr(0) = 9.0"
                     evalReq 2 "nb" "arr"; shutdownReq ]
         let name = "an element write is a reassignment and persists in the session"
         match responses with
@@ -2366,8 +4671,8 @@ let (a, b) = pair(7.0)
         // CELL's coordinates -- which is what the per-statement placements are
         // for, since each statement is now its own snippet in the session file.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let keepme = 1"
-                    evalReq 2 "nb" "let bad1 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
+            drive [ evalReq 1 "nb" "let keepme: Int64 = 1"
+                    evalReq 2 "nb" "let bad1: Int64 = 1\nlet bad2 = undefined_name_xyz + 1\nbad1"
                     evalReq 3 "nb" "keepme"; shutdownReq ]
         let name = "a failing mixed cell reports cell-local spans and keeps nothing"
         match responses with
@@ -2395,7 +4700,7 @@ let (a, b) = pair(7.0)
             drive [ evalReq 1 "nb" "from stats import mean"
                     evalReq 2 "nb" "function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }"
                     evalReq 3 "nb" "covariance"
-                    evalReq 4 "nb" "let after = 6"
+                    evalReq 4 "nb" "let after: Int64 = 6"
                     shutdownReq ]
         let name = "a bare reference to an unapplied generic echoes without diagnostics"
         match responses with
@@ -2435,7 +4740,7 @@ let (a, b) = pair(7.0)
                     evalReq 3 "nb" "poly   // : the commented spelling"
                     evalReq 4 "nb" "// a note above it\npoly"
                     evalReq 5 "nb" "function conc(x: Float64) -> Float64 = x + 1.0\nconc"
-                    evalReq 6 "nb" "let plainval = 6\nplainval"
+                    evalReq 6 "nb" "let plainval: Int64 = 6\nplainval"
                     shutdownReq ]
         let name = "a bare function reference echoes the declaration, comments and all"
         let pretty = "{\"name\":\"poly\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
@@ -2514,7 +4819,7 @@ let (a, b) = pair(7.0)
         let mlCell = "let static s2 = [(0, 0, 2)]\nlet lout = ml.linear(s2, s2, [2.0, 1.0, 0.0, 3.0], [5.0, 7.0])"
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "import ml as ml"
-                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 3 "nb" mlCell
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
@@ -2533,7 +4838,7 @@ let (a, b) = pair(7.0)
         // worth anything if the skipped initializer would have produced this.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "import ml as ml"
-                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 3 "nb" mlCell
                     evalReq 4 "nb" "base_a"
                     shutdownReq ]
@@ -2549,9 +4854,9 @@ let (a, b) = pair(7.0)
         // longer matches and the whole memo goes. Shape agreement is not
         // permission to reuse a value whose defining text changed.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let derived = reduce(base_a, (+))"
-                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    evalReq 3 "nb" "let base_a = Float64([4.0, 5.0, 6.0])"
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
         let name = "editing an earlier binding still drops the memo"
@@ -2562,9 +4867,9 @@ let (a, b) = pair(7.0)
 
         // ...and the dependent recomputes off the NEW value, not the cached one.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let base_a = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" "let derived = reduce(base_a, (+))"
-                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    evalReq 3 "nb" "let base_a = Float64([4.0, 5.0, 6.0])"
                     evalReq 4 "nb" "derived"
                     shutdownReq ]
         let name = "a dependent of an edited binding recomputes from the new value"
@@ -2587,7 +4892,7 @@ let (a, b) = pair(7.0)
         let plotCell = "import display as d
 let pic = d.emit(\"image/png\", \"AA==\")"
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" plotCell
                     evalReq 3 "nb" "let tail_v = reduce(seed, (+))"
                     shutdownReq ]
@@ -2614,9 +4919,9 @@ let pic = d.emit(\"image/png\", \"AA==\")"
 let total = reduce(seed, (+))
 let shown = d.emit(\"image/png\", \"AA==\")"
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
                     evalReq 2 "nb" readingPlot
-                    evalReq 3 "nb" "let seed = [10.0, 20.0, 30.0]"
+                    evalReq 3 "nb" "let seed = Float64([10.0, 20.0, 30.0])"
                     shutdownReq ]
         let adopted = Blade.Interp.Run.lastMemoAdopted
         let name = "editing the data under a plot drops its cached frame too"
@@ -2633,7 +4938,7 @@ let shown = d.emit(\"image/png\", \"AA==\")"
         let firstRun = responses |> List.tryHead |> Option.defaultValue ""
         let (code2, responses2, _) =
             drive [ evalReq 1 "nb" plotCell
-                    evalReq 2 "nb" "let unrelated = 1"
+                    evalReq 2 "nb" "let unrelated: Int64 = 1"
                     shutdownReq ]
         let name = "a replayed frame is byte-identical to the computed one"
         // Just the display array: the rest of the response legitimately
@@ -2651,6 +4956,59 @@ let shown = d.emit(\"image/png\", \"AA==\")"
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d/%d, first %s, second %A"
                                         code code2 (frameOf firstRun) responses2)
+
+        // 31. A MIXED cell with a MID-CELL expression. The cell runs as
+        // `[a; it = a; b]` but commits `[a; b]`, so the next candidate never
+        // lined up with the run's own snippet list: the prefix test matched
+        // through `a`, called `b` dropped, and recomputed it -- measured at
+        // 20-25 s under the plot cell after a training cell. The memo now
+        // knows which of its snippets were transient and skips them, so `seed`,
+        // `a` and `b` are all adopted and only the new cell's binding runs.
+        let midCell = "let a = reduce(seed, (+))\na\nlet b = a * 2.0"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
+                    evalReq 2 "nb" midCell
+                    evalReq 3 "nb" "let c = b + 1.0"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let evaluated = Blade.Interp.Run.lastMemoEvaluated
+        let name = "a mid-cell expression does not drop the cell's later bindings from the memo"
+        match responses with
+        | [_; _; last] when code = 0 && last.Contains "\"kept\":true" && adopted = 3 && evaluated = 1 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, evaluated %d, responses: %A"
+                                        code adopted evaluated responses)
+
+        // ...and the adopted values are the ones the cell computed.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = Float64([1.0, 2.0, 3.0])"
+                    evalReq 2 "nb" midCell
+                    evalReq 3 "nb" "let c = b + 1.0\nc"
+                    shutdownReq ]
+        let name = "bindings adopted past a mid-cell expression read back correctly"
+        match responses with
+        | [_; _; readback] when code = 0 && readback.Contains "\"value\":\"13.0\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // ...and the line it must not cross: a mid-cell expression that WRITES
+        // through a `mut` parameter may have changed what a later binding
+        // read, so its run is not reusable and the memo goes, exactly as for
+        // any other dropped snippet that is not provably mutation-free.
+        let pokeCell =
+            "let mut buf = Float64([0.0, 0.0, 0.0])\n"
+            + "function fill(out: mut Array<Float64 like Idx<3>>) = {\n"
+            + "    out(0) += 1.5\n}\nfill(buf)\nlet after = buf(0)"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" pokeCell
+                    evalReq 2 "nb" "let d = after + 1.0"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let name = "a mid-cell expression that writes through mut still drops the memo"
+        match responses with
+        | [_; last] when code = 0 && last.Contains "\"kept\":true" && adopted = 0 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, responses: %A" code adopted responses)
 
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
@@ -2744,9 +5102,9 @@ let private runIdeCellsTests () : TH.BlockResult =
         // so neither "drop the earlier" nor "drop the later" is enough on its
         // own -- the later text has to take the earlier one's place.
         let demoCells =
-            [ "let xs = [1.0, 2.0, 3.0]"
+            [ "let xs = Float64([1.0, 2.0, 3.0])"
               "reduce(xs, (+)) |> compute"
-              "let xs = [10.0, 20.0, 30.0, 40.0]"
+              "let xs = Float64([10.0, 20.0, 30.0, 40.0])"
               "let xloop = method_for(xs, xs)" ]
 
         // 1. The shape contract: one window per cell, in cell order.
@@ -2809,8 +5167,8 @@ let private runIdeCellsTests () : TH.BlockResult =
         // every keystroke, so committing anything to a session would corrupt
         // the notebook the user is actually running.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let x = 2"
-                    cellsReq 2 "fast" nbPath [ "let unrelated = 9" ]
+            drive [ evalReq 1 "nb" "let x: Int64 = 2"
+                    cellsReq 2 "fast" nbPath [ "let unrelated: Int64 = 9" ]
                     evalReq 3 "nb" "x"; shutdownReq ]
         let name = "checkCells commits nothing to an eval session"
         match responses with
@@ -2824,7 +5182,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // 8. The full tier reaches monomorphization here exactly as it does
         // for a single file -- a notebook is where HM values are most common.
         let (code, responses, _) =
-            drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(42)" ]; shutdownReq ]
+            drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(Int64(42))" ]; shutdownReq ]
         let fullBody = match responses with [r] -> r | _ -> ""
         // The HM binding is concrete in the typed AST itself now (the call
         // judgment instantiates `id` per call), so the full tier has nothing
@@ -2891,7 +5249,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // WHOLE notebook, so a single mixed cell used to blank every other
         // cell's hovers and squiggles.
         let mixedCells =
-            [ "let mx = 2\nlet my = 3\nmx + my"
+            [ "let mx: Int64 = 2\nlet my: Int64 = 3\nmx + my"
               "let mz = mx * my" ]
         let (code, responses, _) = drive [ cellsReq 71 "fast" nbPath mixedCells; shutdownReq ]
         let mixedBody = match responses with [r] -> r | _ -> ""
@@ -2912,7 +5270,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // first (there is one wrap pair on the wire); what matters here is that
         // all of them parsed.
         let (code, responses, _) =
-            drive [ cellsReq 72 "fast" nbPath [ "let ma = 1\nma + 1\nlet mb = 2\nmb + 1" ]
+            drive [ cellsReq 72 "fast" nbPath [ "let ma: Int64 = 1\nma + 1\nlet mb: Int64 = 2\nmb + 1" ]
                     shutdownReq ]
         let multiBody = match responses with [r] -> r | _ -> ""
         let name = "several bare expressions in one cell each take their own wrapper"
@@ -2985,7 +5343,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
 
     // 1. The base case: a value binding, and both of its uses on the next line.
     expect "a let binding reports its name token and every use"
-        "let x = 10\nlet y = x + x\n"
+        "let x: Int64 = 10\nlet y = x + x\n"
         [ "x value 1:5-1:6 [2:9-2:10 2:13-2:14]"
           "y value 2:5-2:6 []" ]
 
@@ -2994,7 +5352,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // name instead of IRId, this would be one entry with a merged use list and
     // rename would corrupt the file.
     expect "a shadowed name yields two entries with disjoint uses"
-        "let x = 1\nfunction shadow(p) = {\n    let x = p + 1\n    x * 2\n}\n"
+        "let x: Int64 = 1\nfunction shadow(p) = {\n    let x = p + 1\n    x * 2\n}\n"
         [ "x value 1:5-1:6 []"
           "shadow function 2:10-2:16 []"
           "p param 2:17-2:18 [3:13-3:14]"
@@ -3019,7 +5377,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 5. Kernel parameters: a lambda can sit anywhere in an expression, so
     // these come from a full-tree sweep rather than the declaration walk.
     expect "lambda kernel parameters are reported like any other param"
-        "let data = [[1.0, 2.0], [3.0, 4.0]]\n\
+        "let data = Float64([[1.0, 2.0], [3.0, 4.0]])\n\
          let out = object_for(lambda(u, w) -> u * w) <@> (data, data) |> compute\n"
         [ "data value 1:5-1:9 [2:50-2:54 2:56-2:60]"
           "out value 2:5-2:8 []"
@@ -3029,7 +5387,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 6. `type` names have no IRId and nothing ever refers to one through a
     // variable node, so they are def-only entries located in the source text.
     expect "a type declaration is a def-only entry of kind \"type\""
-        "type Small = Idx<4>\nlet g = 1\n"
+        "type Small = Idx<4>\nlet g: Int64 = 1\n"
         [ "Small type 1:6-1:11 []"
           "g value 2:5-2:6 []" ]
 
@@ -3040,7 +5398,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     let broadSource =
         "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
+         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
     let broad = refsOf broadSource
     let name = "no synthesized names and no declaration-wide phantom spans"
@@ -3066,14 +5424,14 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 8. A file with a type error still navigates: the checker's PARTIAL typed
     // program feeds references exactly as it already feeds bindings and calls.
     expect "a type error still yields references for the parts that checked"
-        "let good = 5\nfunction useit(v) = v + good\nlet bad: Int64 = \"nope\"\n"
+        "let good: Int64 = 5\nfunction useit(v) = v + good\nlet bad: Int64 = \"nope\"\n"
         [ "good value 1:5-1:9 [2:25-2:29]"
           "useit function 2:10-2:15 []"
           "v param 2:16-2:17 [2:21-2:22]" ]
 
     // 9. A binding nobody reads is still renameable, so it still gets an entry.
     expect "an unused binding keeps an entry with an empty use list"
-        "let orphan = 42\n"
+        "let orphan: Int64 = 42\n"
         [ "orphan value 1:5-1:11 []" ]
 
     // 10. `let rec` used to stamp the whole `match ... with` block onto its
@@ -3114,10 +5472,10 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // 12. The `bindings[]` companion change: `endLine`/`endCol` close the
     // DECLARATION span that `line`/`col` already opened, appended last so the
     // leading field run every existing client matches on is byte-identical.
-    let (json, _) = Blade.Ide.ideCheckSource "refs.blade" "let x = 10\n"
+    let (json, _) = Blade.Ide.ideCheckSource "refs.blade" "let x: Int64 = 10\n"
     let name = "bindings[] gained end corners without disturbing the leading fields"
     if json.Contains "\"name\":\"x\",\"kind\":\"let\",\"line\":1,\"col\":1,\"type\":\"Int64\""
-       && json.Contains "\"endLine\":1,\"endCol\":11" then
+       && json.Contains "\"endLine\":1,\"endCol\":18" then
         record name TH.Pass ""
     else
         record name TH.Fail json
@@ -3303,6 +5661,21 @@ let internal resolveCategoryKey (cat: string) : (string * (string * string) list
             Some (key, Blade.Tests.Corpus.categoryTests key)
         | _ -> None
 
+/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
+/// single-file category, plus the lane's own extra spellings (`opt-diff`
+/// runs the multi-file corpus too; `interp` walks EVERY multi-file directory,
+/// as its no-category form does; `llvm` takes its reserved words -- `all`,
+/// `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
+let private corpusCategoryExists (lane: string) (cat: string) : bool =
+    let extras () =
+        match lane with
+        | "opt-diff" | "optdiff" -> [ "multifile" ]
+        | "interp" -> (try Blade.Tests.Corpus.multiFileCategories () with _ -> [])
+        | _ -> []
+    List.contains cat (extras ())
+    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
+    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
+
 /// CORPUS WIRING: every directory under tests/corpus is consumed, by name, by
 /// the lanes that claim to sweep the corpus. Part of the default suite.
 ///
@@ -3343,6 +5716,20 @@ let internal runCorpusWiringTests () : TH.BlockResult =
     let interpExcluded = Blade.Tests.InterpDiff.interpExcluded |> List.map fst
     record "every interpreter-differential exclusion names a directory" (missing interpExcluded).IsEmpty
         (listed (missing interpExcluded))
+    // ...and its expected-unsupported set names real tests (a renamed test
+    // would otherwise fail the differential as an unexpected skip, but a
+    // DELETED one would leave a dead entry behind).
+    let allTestNames =
+        single |> List.collect (fun d -> Blade.Tests.Corpus.categoryTests d |> List.map fst) |> Set.ofList
+    let deadUnsupported =
+        Blade.Tests.InterpDiff.interpExpectedUnsupported |> List.map fst
+        |> List.filter (fun n -> not (allTestNames.Contains n))
+    record "every expected interp-unsupported entry names a corpus test" deadUnsupported.IsEmpty
+        (listed deadUnsupported)
+    // `test interp <dir>` accepts every directory it walks, multi-file ones
+    // included (it used to refuse `multifile` as an unknown category).
+    let interpRefused = (single @ multi) |> List.filter (fun d -> not (corpusCategoryExists "interp" d))
+    record "every corpus directory is accepted by `test interp <dir>`" interpRefused.IsEmpty (listed interpRefused)
     // `blade test <dir>`: every single-file directory resolves, to ITS OWN
     // tests (an alias wired to the wrong list would resolve to other names).
     let misKeyed =
@@ -3385,6 +5772,17 @@ let internal runCorpusWiringTests () : TH.BlockResult =
             |> List.map (fun (c, hits) -> $"{c} ({hits.Length} files, e.g. {snd hits.Head})")
             |> String.concat "; "
             |> fun s -> s + " -- add it to Diagnostics.Codes.registryEntries, protocol/data/diagnostics.json and regenerate protocol/surface.json")
+    // One test per NUMBER per directory (deep review R6): a citation like
+    // `functions/656` must name one file.
+    let dupNumbers = Blade.Tests.Corpus.duplicateNumbers ()
+    record "no corpus number names two tests in one directory" dupNumbers.IsEmpty
+        (if dupNumbers.IsEmpty then ""
+         else
+            let shown =
+                dupNumbers |> List.truncate 8
+                |> List.map (fun (d, n, names) -> $"""{d}/{n}: {String.concat " | " names}""")
+                |> String.concat "; "
+            $"{dupNumbers.Length} duplicated: {shown} -- renumber one file above the directory's highest number")
     // The pin grammar every lane reads (the compiled run, the interpreter
     // differential, the diff oracles all go through Expect): a NESTED Bool
     // pin -- what a rank-2 comparison prints -- is an assertion, not a
@@ -3425,56 +5823,11 @@ let internal runFullSuite opts =
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
          runCorpusWiringTests] opts
 
-/// The environment knobs that change what the compiler EMITS, how the program
-/// is BUILT, or what it PRINTS -- every one read per call from the process
-/// environment, so a developer's shell reaches straight into a test run.
-/// `blade test` clears them all for its duration (and restores them after).
-///
-/// The suites were written against the pristine default, and that is a
-/// correctness matter, not a preference: corpus EXPECT pins are exact printed
-/// values (BLAS routes and reassociated folds are licensed to differ in the
-/// last ULP; FP contraction likewise), emission-shape tests assert the default
-/// loop nests and pass set (BLADE_FUSION / BLADE_CSE / ... off changes the
-/// emitted text), `interp` / `diff-oracle` must never run gate-on
-/// (MathElaborate: the synthesized Jacobi is the verification truth), and
-/// BLADE_PRINT would silently drop every binding a pin reads. A developer whose
-/// shell carried OPENBLAS_DIR for notebook work saw ~8 reds that vanished when
-/// run "clean" -- the same shape as every knob below.
-///
-/// Blocks that exercise a knob set and restore it in-process, which this clear
-/// does not disturb. Deliberately NOT here: BLADE_MEMCHECK (an ASan corpus
-/// run is a real workflow -- it changes the build profile, not what a correct
-/// program prints), BLADE_EXE_CACHE (where binaries are cached, not what they
-/// are; the cache keys on the emitted text), BLADE_STDLIB, the toolchain
-/// locators (BLADE_LLVM_CLANG, BLADE_TOOLCHAIN_FILE, BLADE_*_INCLUDE/LINK)
-/// and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
-let internal suiteClearedKnobs =
-    [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
-      "BLADE_PRINT"
-      "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
-      "BLADE_OMP_THREADS"
-      "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
-      "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
-      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
-    @ Blade.Optimize.optimizerGates
-
-/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
-/// single-file category, plus the lane's own extra spellings (`opt-diff`
-/// runs the multi-file corpus too; `llvm` takes its reserved words --
-/// `all`, `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
-let private corpusCategoryExists (lane: string) (cat: string) : bool =
-    let extras =
-        match lane with
-        | "opt-diff" | "optdiff" -> [ "multifile" ]
-        | _ -> []
-    List.contains cat extras
-    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
-    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
-
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 ///
-/// Runs with every `suiteClearedKnobs` variable UNSET, restoring the caller's
-/// values afterwards, and says in one line which ones it found set. `--print`
+/// Runs in `withSuiteEnvironment`: every `suiteClearedKnobs` variable UNSET and
+/// BLADE_BLAS pinned off, the caller's values restored afterwards; says in one
+/// line which ones it found set. `--print`
 /// is refused outright: it selects which bindings a program prints, and the
 /// corpus pins read the bindings it would drop.
 let rec internal dispatchTest (rest: string list) : int =
@@ -3492,21 +5845,22 @@ let rec internal dispatchTest (rest: string list) : int =
         eprintfn "Error: --print is not valid on `blade test`: the corpus pins read every top-level binding, and --print would silence the ones it does not name."
         eprintfn "       Select a category instead (`blade test <category>`), or run one program with `blade run prog.blade --print a,b`."
         2
+    elif (match testVerbAt with Some _ -> argv |> Array.contains "--print-form" | None -> false) then
+        eprintfn "Error: --print-form is not valid on `blade test`: every pin, harness and differential gate reads the TEST print form, which `blade test` pins for its whole run (BLADE_PRINT_FORM=test)."
+        eprintfn "       The display form is checked by its own block (`blade test print-form`); run one program with `blade run prog.blade --print-form display`."
+        2
     else
-    let saved =
-        suiteClearedKnobs
-        |> List.distinct
-        |> List.choose (fun k ->
-            match System.Environment.GetEnvironmentVariable k with
-            | null -> None
-            | v -> Some (k, v))
-    if not saved.IsEmpty then
-        let names = saved |> List.map (fun (k, v) -> $"{k}={v}") |> String.concat " "
-        eprintfn "test: ignoring ambient %s for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)" names
-    for (k, _) in saved do System.Environment.SetEnvironmentVariable(k, null)
-    try dispatchTestClean rest
-    finally
-        for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
+    // `--timings <path>`: write the timing record (TestHarness.Timings) as
+    // JSON. The table itself is printed after every run.
+    let (timingsPath, rest) =
+        match rest |> List.tryFindIndex (fun a -> a = "--timings") with
+        | Some i when i + 1 < rest.Length ->
+            (Some rest.[i + 1], (rest |> List.take i) @ (rest |> List.skip (i + 2)))
+        | Some i -> (None, rest |> List.take i)
+        | None -> (None, rest)
+    let code = withSuiteEnvironment false (fun () -> dispatchTestClean rest)
+    TH.Timings.report timingsPath
+    code
 
 /// `dispatchTest` after the environment is made pristine.
 and internal dispatchTestClean (rest: string list) : int =
@@ -3584,8 +5938,27 @@ and internal dispatchTestClean (rest: string list) : int =
         // must be REFUSED, not handed to BLAS past its pool.
         let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
         let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
+        let tileFailed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
+                         + (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
         let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
-        if emitFailed + probeFailed + tierFailed = 0 then 0 else 1
+        if emitFailed + probeFailed + tileFailed + tierFailed = 0 then 0 else 1
+    | [ "row-tile" ] | [ "rowtile" ] | [ "antisym-tile" ] | [ "simplex-tile" ] ->
+        // The antisym-pair and rank-3 simplex tiles alone: emission routes,
+        // raw-bit vs the serial forms (contract=off) and the one-fma chains
+        // (contract=fast), vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "syrk-tile" ] | [ "syrktile" ] ->
+        // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
+        // (contract=off) and the one-fma chain (contract=fast), vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "fold-lanes" ] | [ "foldlanes" ] ->
+        // The explicit K-lane vector fold forms (review M9/M14): raw-bit vs
+        // the scalar model of the lane tree in both contraction modes, the
+        // Path B partition threaded vs serial-within-chunk, vfmadd census.
+        let failed = (Blade.Tests.LinAlgTests.runFoldLanesTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "doctor" ] ->
         // Structural pins for the doctor's rows and JSON shape; the probes
         // run for real but machine-dependent statuses are not asserted.
@@ -3629,8 +6002,9 @@ and internal dispatchTestClean (rest: string list) : int =
         if failed = 0 then 0 else 1
     | [ "instance-guards" ] | [ "instanceguards" ] ->
         // Which caret-parameter reads carry a BL8006 guard: the array
-        // instance at a named axis does, a proven position and an anonymous
-        // caller do not. Pure lowering + codegen, no toolchain.
+        // instance at a named axis does, a proven position does not, and an
+        // anonymous slot is proven or checked like a named one (G192 (1), both
+        // lanes' emission). Pure lowering + codegen, no toolchain.
         let failed = (Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "access" ] ->
@@ -3643,6 +6017,34 @@ and internal dispatchTestClean (rest: string list) : int =
         // The RNG mirror's Philox4x32-10 generator against Random123's
         // published known-answer vectors, and the `_at` address identities.
         let failed = (Blade.Tests.RandMirrorTests.runRandMirrorTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "pch" ] ->
+        // The precompiled prelude (Build.fs, BLADE_PCH): built at the second
+        // sighting, used after, and a compile that fails with it re-run without.
+        let failed = (Blade.Tests.PchTests.runPchTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "owned-move" ] | [ "ownedmove" ] ->
+        // Gap G92: a reassigned array frees its previous pool (owned move).
+        let failed = (Blade.Tests.OwnedMoveTests.runOwnedMoveTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "cell-epilogue" ] | [ "cellepilogue" ] ->
+        // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms
+        // by raw bits, NEW vs BLADE_CELL_EPILOGUE=0, both contraction modes,
+        // fixed team sizes; the LLVM lane's parity under the identity regime.
+        let failed = (Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "rec-step" ] | [ "recstep" ] ->
+        // Wave 3 (E-G5): the threaded `let rec` step -- the threaded build
+        // vs the threads-off build by raw bits (trajectory, scalar, observed
+        // team) at fixed team sizes, licensed and repro.
+        let failed = (Blade.Tests.RecStepTests.runRecStepTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "orbit-scatter" ] | [ "orbitscatter" ] ->
+        // The ordered orbit scatter executed in both lanes against walk-forced
+        // twins under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: finite-value
+        // identity, signed zero, NaN-equivalence, at every scatter_g and with
+        // the knob off.
+        let failed = (Blade.Tests.OrbitScatterTests.runOrbitScatterTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "optimize" ] ->
         // The semantic-equivalence layer's emission pins: freeze-idiom
@@ -3878,8 +6280,11 @@ and internal dispatchTestClean (rest: string list) : int =
     | [ "cuda" ] ->
         // CUDA kernel block (differential vs host-loop oracle) plus cuBLAS
         // swap-table verification. Skips without nvcc/GPU; on Windows run from x64 Native Tools prompt.
+        // The toolchain-free buffer/emission checks ride along (they also run
+        // in the full suite), so a targeted `test cuda` reaches them.
         let failed =
-            (Blade.Tests.CudaTests.runCudaTests ()).Failed
+            (Blade.Tests.CudaTests.runBufferTypeTests ()).Failed
+            + (Blade.Tests.CudaTests.runCudaTests ()).Failed
             + (Blade.Tests.CudaTests.runCublasSwapTests ()).Failed
             + (Blade.Tests.CudaTests.runCublasFailureExitTests ()).Failed
         if failed = 0 then 0 else 1
@@ -3979,6 +6384,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // on the fly by IcechunkWrite; only the e2e compile+run block needs
         // g++ and skips without it.
         Blade.Tests.IcechunkTests.runIcechunkTests ()
+    | [ "print-form" ] | [ "printform" ] ->
+        // The display print form (P3-26, src/PrintForm.fs): emission facts and
+        // the three lanes' display text. Also in the default suite (RunAll.fs
+        // yields `printForm`).
+        let failed = (Blade.Tests.PrintFormTests.runPrintFormTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "run-record" ] | [ "runrecord" ] ->
         // Input manifests + run records (plan-fortran-killer-2 section 7).
         // Also in the default suite (RunAll.fs yields `runRecord`).

@@ -14,23 +14,23 @@
 // cancels and the result is dimensionless (units/066); a mismatched pair
 // rejects (unit-errors/006), as does a magnitude mismatch (unit-errors/009).
 // ============================================================================
-let q1 = atan2(1.0, 1.0)
-let q2 = atan2(1.0, 0.0 - 1.0)
-let q3 = atan2(0.0 - 1.0, 0.0 - 1.0)
-let q4 = atan2(0.0 - 1.0, 1.0)
+let q1: Float64 = atan2(1.0, 1.0)
+let q2: Float64 = atan2(1.0, 0.0 - 1.0)
+let q3: Float64 = atan2(0.0 - 1.0, 0.0 - 1.0)
+let q4: Float64 = atan2(0.0 - 1.0, 1.0)
 // The axes -- where atan(y/x) would divide by zero.
-let up = atan2(1.0, 0.0)
-let down = atan2(0.0 - 1.0, 0.0)
+let up: Float64 = atan2(1.0, 0.0)
+let down: Float64 = atan2(0.0 - 1.0, 0.0)
 
-let Y: Array<Float like Idx<4>> = [1.0, 1.0, 0.0 - 1.0, 0.0 - 1.0]
-let X: Array<Float like Idx<4>> = [1.0, 0.0 - 1.0, 0.0 - 1.0, 1.0]
+let Y: Array<Float64 like Idx<4>> = [1.0, 1.0, 0.0 - 1.0, 0.0 - 1.0]
+let X: Array<Float64 like Idx<4>> = [1.0, 0.0 - 1.0, 0.0 - 1.0, 1.0]
 let ang = atan2(Y, X) |> compute
 let angman = (zip(Y, X) <@> lambda(y, x) -> atan2(y, x)) |> compute
 let angeta = (method_for(zip(Y, X)) <@> atan2) |> compute
 let bcastY = atan2(Y, 1.0) |> compute
 let bcastX = atan2(1.0, X) |> compute
 
-let static s = atan2(1.0, 1.0)
+let static s: Float64 = atan2(1.0, 1.0)
 let folded = s + s
 
 // EXPECT: q1 = 0.785398163397448

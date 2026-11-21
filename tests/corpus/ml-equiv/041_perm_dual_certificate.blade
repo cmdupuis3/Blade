@@ -31,9 +31,9 @@ let static WD = ml.perm_weight_dim(1, 0, 3)
 
 // v, w: the per-node scalar speeds of three nodes (one cell per node).
 // wt   : the readout weight -- Bell(1) = 1 slot, the total-sum form.
-function drift(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
-               wt: Array<Float like Idx<WD>>)
-               where ml.perm_equiv(3), ml.galilean(v, w) -> Array<Float like Idx<1>> = {
+function drift(v: Array<Float64 like Idx<3>>, w: Array<Float64 like Idx<3>>,
+               wt: Array<Float64 like Idx<WD>>)
+               where ml.perm_equiv(3), ml.galilean(v, w) -> Array<Float64 like Idx<1>> = {
     let d = v - w
     ml.derive_perm_linear(1, 0, 3, d, wt)
 }

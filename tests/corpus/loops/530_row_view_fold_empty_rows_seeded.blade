@@ -1,0 +1,18 @@
+// TEST: Row View Fold Empty Rows Seeded
+// Gap G51 (round 3, A2): a SEEDED fold over an EMPTY row view is its seed --
+// the empty fold is defined (no BL8003, at no extent). Each of the 521 rows is
+// 7 + i, so the total is 0.5 + 521 * 7 + (0 + 1 + ... + 520) = 139107.5 in
+// every spelling and every form (the row-slot form declines here below its
+// work gate, 0 inner steps; the licensed helper arm requires a non-empty row).
+// The UNSEEDED fold over the same empty row is refused at its own site
+// (loops/531, BL3007).
+type Y = Idx<521>
+type X = Idx<0>
+let (view, nested) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(i + j) |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+), 7.0 + Float64(i)), lambda(p, q) where omp -> p + q, 0.5)
+    (a, b)
+}
+// EXPECT: view = 139107.5
+// EXPECT: nested = 139107.5

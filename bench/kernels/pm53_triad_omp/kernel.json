@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "name": "pm53_triad_omp",
+  "group": "M",
+  "title": "PM53 worker bandwidth saturation: the threaded triad recurrence at P = 1/3/5/8",
+  "sizes": {
+    "smoke": {
+      "n": 2003,
+      "k": 5,
+      "kl": 4
+    },
+    "full": {
+      "n": 1500007,
+      "k": 21,
+      "kl": 20
+    },
+    "l3": {
+      "n": 300007,
+      "k": 101,
+      "kl": 100
+    }
+  },
+  "regimes": [
+    "mt8-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "P sweep inside ONE mt8 block: the variants override OMP_NUM_THREADS at run time (same executable text as blade-cpp); the LLVM lane has no threads and is not an arm.",
+  "arms": [
+    "blade-cpp",
+    "blade-cpp@p1",
+    "blade-cpp@p3",
+    "blade-cpp@p5"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
+  "variants": {
+    "p1": {
+      "run": {
+        "OMP_NUM_THREADS": "1"
+      }
+    },
+    "p3": {
+      "run": {
+        "OMP_NUM_THREADS": "3"
+      }
+    },
+    "p5": {
+      "run": {
+        "OMP_NUM_THREADS": "5"
+      }
+    }
+  }
+}

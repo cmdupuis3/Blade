@@ -5,7 +5,7 @@
 // the function-side mirror of array dimensional currying.
 // ----------------------------------------------------------------------------
 function scale_add(a, b) = a * 10.0 + b
-let f = scale_add(2.0)
+let f = scale_add(Float64(2.0))
 let r1 = f(5.0)
 let r2 = f(0.5)
 // EXPECT: r1 = 25.0

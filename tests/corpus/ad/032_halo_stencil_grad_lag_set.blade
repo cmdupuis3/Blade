@@ -10,12 +10,12 @@ import ad as ad
 //         = [0, 0, 5, 6, 3+7, 4+8, 5, 6].
 // ============================================================================
 type T = Idx<8>
-function f(a: Array<Float like T>) -> Float = {
+function f(a: Array<Float64 like T>) -> Float64 = {
     let d = method_for(halo<T, [-2, -4]>) <@> lambda(w) -> a(w(0)) * a(w(-2)) |> compute
     reduce(d, (+))
 }
-let a0: Array<Float like T> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-let mut da: Array<Float like T> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let a0: Array<Float64 like T> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let mut da: Array<Float64 like T> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 let fv = ad.grad(f)(a0, da)
 // EXPECT: fv = 122.0
 // EXPECT: da = [0.0, 0.0, 5.0, 6.0, 10.0, 12.0, 5.0, 6.0]

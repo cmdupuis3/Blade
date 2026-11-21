@@ -1,0 +1,18 @@
+// TEST: A Packed Comm Contraction Returned By A Direct Call Is Accepted (G67 control)
+// The boundary of symmetry/142's BL4004: the refusal is on an APPLICATION whose
+// kernel returns a compact array (every S-cell would hold its own packed
+// pool). The same function CALLED directly returns its packed SymIdx<2, P>
+// array as usual: canonical h(0, 1) = sum_s (24 + s)(28 + s) = 3014 and the
+// mirrored read h(2, 1) = sum_s (32 + s)(28 + s) = 3958.
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute
+let h = group_h(jg)
+let canon = h((0 : P), (1 : P))
+let mirror = h((2 : P), (1 : P))
+// EXPECT: h = [[2606.0, 3014.0, 3422.0], [3486.0, 3958.0], [4494.0]]
+// EXPECT: canon = 3014.0
+// EXPECT: mirror = 3958.0

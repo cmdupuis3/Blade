@@ -1,0 +1,14 @@
+// TEST: copying a nested deferred tuple evaluates its leaves in order (aborts)
+// Gap G199 (Codex diff review round 10): (t, 0) copies t = (u, q) with
+// u = (p, q): the leaves in order, p (a modulo by zero at cell 1) first, so
+// p fails before q's captured d is forced, in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> 20 % v
+let q = method_for(x) <@> lambda(v) -> v + extents(d)
+let u = (p, q)
+let t = (u, q)
+let z = (t, 0)
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:6

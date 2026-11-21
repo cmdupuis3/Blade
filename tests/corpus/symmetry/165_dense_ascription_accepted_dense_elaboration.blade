@@ -1,0 +1,28 @@
+// TEST: A Dense Ascription Over A Comm Same-Array Product Is Accepted And Dense
+// docs/plans/plan-identity-transpose-compute.md section 2.3 (LANGUAGE
+// CHANGE, wave 2). `let P: Array<Float64 like I, I> = method_for(A, A) <@>
+// comm-kernel |> compute` was BL3001 (got SymIdx<2, I>): the ascription now
+// FIXES the layout and the elaboration of its value -- every operand at the
+// value's own level is a distinct array, so the product is elaborated dense
+// (full box, both triangles stored). A SymIdx ascription stays accepted and
+// packed, as before. The same rule covers `gram(A, A)` and a call the
+// sharing partition would specialize (`f(A, A)` under a dense ascription
+// keeps the generic, dense declaration; `blade plan`: `[sharing-partition
+// v1] f: declined -- a dense ascription fixes the layout ...`). Values are
+// the same products either way; only the storage differs.
+type I = Idx<3>
+type K = Idx<2>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let M: Array<Float64 like I, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let P: Array<Float64 like I, I> = method_for(A, A) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let Q: Array<Float64 like SymIdx<2, I>> = method_for(A, A) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let G: Array<Float64 like I, I> = gram(M, M)
+let F: Array<Float64 like I, I> = f(A, A)
+let FP = f(A, A)
+// EXPECT: P = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: Q = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: G = [[5.0, 11.0, 17.0], [11.0, 25.0, 39.0], [17.0, 39.0, 61.0]]
+// EXPECT: F = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: FP = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]

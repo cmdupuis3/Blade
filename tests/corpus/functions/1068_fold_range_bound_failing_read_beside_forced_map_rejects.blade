@@ -1,0 +1,11 @@
+// TEST: A Fold Range Whose Low Bound Reads An Empty Run-Time Array Beside A Forced Map Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 5): the low bound a(0) reads an array
+// of run-time extent 0 (BL8006 in source order) before the high bound p(0) forces p, which fails
+// (integer modulo by zero); hoisting the force would report p first. Refused, BL7004.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: evaluates a range bound that reads a deferred map beside another name
+// WARN-CODEGEN: evaluates a range bound that reads a deferred map beside another name
+let a = Int64(0..0) |> compute
+let xs: Array<Int64 like Idx<2>> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> 200 % (x - 3)
+let r = reduce(method_for(a(0)..p(0)) <@> lambda(k) -> k, (+), 0)

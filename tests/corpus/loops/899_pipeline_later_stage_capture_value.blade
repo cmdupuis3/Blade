@@ -1,0 +1,22 @@
+// TEST: A Later Pipeline Stage Capture After A Stage That May Fail
+// ============================================================================
+// Gap G242, round 4 wave 10 (lane C, C4): a pipeline's stages run as successive
+// traversals, so a LATER stage's deferred capture is forced at that stage's
+// start -- after an earlier stage that may fail. The C++ two-sweep emitter now
+// forces it between the sweeps (a per-stage capture prelude); it was a coded
+// refusal (BL7004). The first stage is a block-bodied named function, so the
+// pipeline is not fused.
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> v + delayed(0))
+let ys = k <@> backing |> compute
+// the stage-2 force stored the map: a later read reads it (Codex 03cfa2dd)
+let after = delayed(0)
+// EXPECT: ys = [8, 6]
+// EXPECT: after = 4

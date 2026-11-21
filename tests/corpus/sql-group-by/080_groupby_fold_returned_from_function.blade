@@ -1,0 +1,19 @@
+// TEST: GroupBy Per-Group Fold Returned From A Function
+// The accepted twin of 077-079: what leaves the function is computed FROM
+// the groups -- a per-group fold keeps only the group axis and is an
+// ordinary array -- so it travels like any other result. A per-group map
+// whose row kernel returns a row stays legal too (the kernel is not a
+// function's return value).
+function sums(t: Float64^1, c: Int64^1) = {
+    let gk = group_keys(c)
+    let g = group_by(t, gk)
+    reduce(g, (+))
+}
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
+let s = sums(temps, region)
+// EXPECT: s = [42.0, 52.0, 62.0]
+let gk = group_keys(region)
+let g = group_by(temps, gk)
+let h = method_for(g) <@> lambda(r) -> r - reduce(r, (+)) / Float64(extents(r)) |> compute
+// EXPECT: h = [[-1.0, 1.0], [-1.0, 1.0], [-1.0, 1.0]]

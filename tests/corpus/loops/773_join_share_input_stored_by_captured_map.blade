@@ -1,0 +1,15 @@
+// TEST: A Join Share Whose Input A Captured Map Stores Is One Level Of Sharing
+// Gap G244 (round 4 wave 9 lane d; Codex review of the wave-end fixes): p captures h, whose
+// forcing first stores its input e (both print), so the share f reads a stored map -- one level,
+// in every lane (the interpreter judges the share set after its capture prelude, as C++ does).
+// EXPECT: e = [2, 3, 4]
+// EXPECT: h = [2, 3, 4]
+// EXPECT: s = 21
+// EXPECT: t = 12
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 2, 3]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let h = method_for(e) <@> lambda(a) -> a
+let f = method_for(e) <@> lambda(a) -> a + 1
+let p = method_for(f) <@> lambda(a) -> a + Int64(extents(h))
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(f, (+)))

@@ -6,7 +6,7 @@
 // literal to an auto-let binding, then references it by name in the
 // struct lit.
 struct Trace {
-    id: Int,
+    id: Int32,
     samples: Array<Float64 like Idx<3>>
 }
 let t = Trace { id = 7, samples = [1.0, 2.0, 3.0] }

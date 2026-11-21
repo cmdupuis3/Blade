@@ -1,0 +1,12 @@
+// TEST: A Map Over A Zip Led By A Run-Time Range Checks Its Extents (aborts)
+// Gap G265 (c) (round 4 wave 10 lane d): the co-iteration guard required a REAL first operand,
+// so a range of 5 cells beside b (3 cells) read b past its end (m = [0.0, 2.0, 4.0, 3.0, 4.0]).
+// A range operand is now compared by its extent in every position, in both lanes.
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let m = method_for(zip(0..extents(a), b)) <@> lambda(i, v) -> v + Float64(i) |> compute

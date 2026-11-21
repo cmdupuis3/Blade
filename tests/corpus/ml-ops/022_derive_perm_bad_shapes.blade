@@ -24,14 +24,14 @@ import ml as ml
 //
 // Both come from Blade.ML.PermSpec.checkPermSizing, the SAME precondition the
 // sizing builtins run (ml-ops/019 is its `let static` half, reported through
-// the BL3999 static-evaluation channel), so the two can never drift. The op
+// the BL4002 static-evaluation channel), so the two can never drift. The op
 // side reports as BL5000, the ML-elaboration channel.
 // ============================================================================
 
 // (1) K = 0 for the linear form — use ml.derive_perm_bias(2, 3, b) instead.
-let unit: Array<Float like Idx<1>> = [1.0]
+let unit: Array<Float64 like Idx<1>> = [1.0]
 let bad_k0 = ml.derive_perm_linear(0, 2, 3, unit, [1.0, 0.0])
 
 // (2) N = 3 < K + L = 4 (the Maron layer needs N >= 4).
-let x: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let x: Array<Float64 like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
 let bad_n = ml.derive_perm_linear(2, 2, 3, x, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])

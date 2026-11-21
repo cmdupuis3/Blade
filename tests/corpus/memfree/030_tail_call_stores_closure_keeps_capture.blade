@@ -1,0 +1,28 @@
+// TEST: Memfree Tail Call Stores Closure Keeps Capture (G54 control)
+// The return is a TAIL CALL whose argument stores a closure over the local
+// `y` into caller-owned storage: `stash(out, lambda(k) -> ...)` is the whole
+// (scalar-typed) return. The let's fold kernel also captures `y` and is a
+// proved-synchronous slot, but the closure is a call ARGUMENT -- a
+// function-typed node the slot classification never enters -- so its
+// captures are seeded and `y` survives `kernel`; the stored closure is
+// invoked after `kernel` returned. Values for c = 2: y = [0, 2, 4, 6, 8],
+// s = sum(y * y) = 120, r = 0, v = reduce(y, (+)) * 3 + s = 60 + 120.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    let s = reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+))
+    stash(out, lambda(k: Float64) -> reduce(y, (+)) * k + s)
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, 2.0)
+let v = out(0)(3.0)
+// EXPECT: r = 0.0
+// EXPECT: v = 180.0

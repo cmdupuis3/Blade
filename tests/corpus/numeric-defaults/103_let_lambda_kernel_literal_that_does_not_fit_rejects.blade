@@ -1,0 +1,11 @@
+// TEST: a let-bound lambda kernel whose literal does not fit the operand width is refused (rejects)
+// Gap G205 (round 4 wave 7 lane d): spliced at its kernel use, a let-bound
+// lambda is typed exactly as the same lambda written there (G114): the
+// literal partner of a parameter seeded by a Float32 operand takes Float32,
+// and `1e100` does not fit it (BL3020, like numeric-defaults/097). It used
+// to be accepted as a Float64 map.
+// ERROR: BL3020
+type I = Idx<3>
+let a32: Array<Float32 like I> = [1.0, 2.0, 3.0]
+let big = lambda(x) -> x * 1e100
+let p = method_for(a32) <@> big |> compute

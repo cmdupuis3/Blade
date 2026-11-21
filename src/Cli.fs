@@ -82,7 +82,30 @@ let private dispatchInner (args: string[]) : int =
         | Some i when i + 1 < args.Length && not (args.[i + 1].StartsWith "--") ->
             Array.append args.[.. i - 1] args.[i + 2 ..]
         | _ -> args
-    match printFlagErr with
+    // `--print-form test|display` (P3-26, Blade.PrintForm): WHICH spelling the
+    // program's prints use. A MODE like `--print`: pinned as BLADE_PRINT_FORM
+    // for the process (codegen, the LLVM lane and the interpreter read it at
+    // their own sites) and stripped as a pair from argv. `blade test` refuses
+    // it (dispatchTest): the suite pins the test form.
+    let printFormFlagIdx = args |> Array.tryFindIndex (fun a -> a = "--print-form")
+    let printFormFlagErr =
+        match printFormFlagIdx with
+        | None -> None
+        | Some i ->
+            if i + 1 >= args.Length || args.[i + 1].StartsWith "--" then
+                Some "--print-form requires test or display (e.g. run prog.blade --print-form test)"
+            else
+                match Blade.PrintForm.parse args.[i + 1] with
+                | Some form ->
+                    System.Environment.SetEnvironmentVariable(Blade.PrintForm.envVar, Blade.PrintForm.name form)
+                    None
+                | None -> Some $"--print-form: '{args.[i + 1]}' is not a print form (expected test or display)"
+    let args =
+        match printFormFlagIdx with
+        | Some i when i + 1 < args.Length && not (args.[i + 1].StartsWith "--") && args.[0] <> "test" ->
+            Array.append args.[.. i - 1] args.[i + 2 ..]
+        | _ -> args
+    match printFlagErr |> Option.orElse printFormFlagErr with
     | Some msg -> eprintfn "Error: %s" msg; 1
     | None ->
     match args with
@@ -101,6 +124,18 @@ let private dispatchInner (args: string[]) : int =
     | _ when args.Length >= 1 && (args.[0] = "run" || args.[0] = "compile" || args.[0] = "emit"
                                   || args.[0] = "check" || args.[0] = "plan") ->
         let verb = args.[0]
+        // The print form of the human-facing verbs: the flag or the
+        // environment, else the toolchain file, else Blade.PrintForm.cliDefault
+        // -- the one place the default lives. `check` prints nothing.
+        let formErr =
+            if verb = "check" then None
+            else
+                match Blade.PrintForm.applyCliDefault printFormFlagIdx.IsSome with
+                | Ok _ -> None
+                | Error why -> Some why
+        match formErr with
+        | Some why -> usageFailure why
+        | None ->
         match parseVerbArgs verb (args.[1..] |> Array.toList) with
         | Error msg -> usageFailure msg
         | Ok o ->
@@ -136,18 +171,32 @@ let private dispatchInner (args: string[]) : int =
                 let dir =
                     try Some (System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f))
                     with _ -> None
-                Blade.ProviderRegistry.SourceBase.within dir body
+                // ...and these five whole-program verbs are the ones that share
+                // one hidden raw read among a module's masked reads of one
+                // variable (ProviderDesugar.withRawReadSharing; every other
+                // entry point -- sessions, IDE, tests -- keeps one per binding).
+                Blade.ProviderRegistry.SourceBase.within dir (fun () -> Blade.ProviderDesugar.withRawReadSharing body)
+            // The private-spool GRANT (BLADE_PRIVATE_SPOOL, env-only, read
+            // per call): parsed HERE, by the verbs that emit, and threaded as
+            // explicit options -- no other caller of the C++ back end sees it.
+            // A value that does not parse is a hard failure, never a silent
+            // resident run. `check` emits nothing and ignores it.
+            let withGrant (body: Blade.CodeGenState.ProgramEmissionOptions -> int) : int =
+                match Blade.CodeGenPrivateSpool.knobPolicy () with
+                | Error why -> reportFailure $"BLADE_PRIVATE_SPOOL: {why} (expected root=<absolute local-drive dir>,mem=<size>,disk=<size>[,resident=<size>]; unset or off = no grant)"
+                | Ok policy -> body { Blade.CodeGenState.defaultProgramEmissionOptions with PrivateSpool = policy }
             match verb, o.File with
             | _, None -> usageFailure $"{verb} needs a source file (e.g. {verb} prog.blade)"
-            | "run", Some f -> inSourceDir f (fun () -> runFile f o.Verbose o.Mpi strictPins)
+            | "run", Some f -> withGrant (fun opts -> inSourceDir f (fun () -> runFile opts f o.Verbose o.Mpi strictPins))
             | "compile", Some f ->
+                withGrant (fun opts ->
                 inSourceDir f (fun () ->
-                    match compileToExe f o.Output o.Verbose strictPins with
+                    match compileToExeWith opts f o.Output o.Verbose strictPins with
                     | Ok path -> printfn "%s" path; 0
-                    | Error e -> reportFailure e)
-            | "emit", Some f -> inSourceDir f (fun () -> emitFile f o.Output o.Verbose strictPins)
+                    | Error e -> reportFailure e))
+            | "emit", Some f -> withGrant (fun opts -> inSourceDir f (fun () -> emitFile opts f o.Output o.Verbose strictPins))
             | "check", Some f -> inSourceDir f (fun () -> checkFile f strictPins)
-            | _, Some f -> inSourceDir f (fun () -> planFile f o.Json)
+            | _, Some f -> withGrant (fun opts -> inSourceDir f (fun () -> planFile opts f o.Json))
 
     // Native-toolchain health report (docs/plans/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false

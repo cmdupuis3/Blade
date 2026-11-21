@@ -1,0 +1,21 @@
+// TEST: Fold-Map Elision Normalizes Without The Centered Pool
+// ============================================================================
+// Row normalization (bench PM12) in a function body: `c = a - m` is read only
+// by the operand map of the variance fold, `c * c` -- one co-iteration reading
+// c at TWO operand positions, nested in `/ n`. Compute elision's fold-of-map
+// consumer (BLADE_FOLD_MAP_ELIDE, rule `fold-map-elision`) collapses the two
+// positions to one, splices `a - m` into the fold's map (bound once per cell)
+// and keeps the fold node as written: c is never stored. The output keeps its
+// own `(a - m) / sqrt(v)` (fusion already recomputes it from a). Values are the
+// knob-off build's.
+type I = Idx<7>
+function normalize(a: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let n = Float64(extents(a))
+    let m = reduce(a, (+)) / n
+    let c = a - m
+    let v = reduce(c * c, (+)) / n
+    (a - m) / sqrt(v) |> compute
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0]
+let z = normalize(x)
+// EXPECT: z = [-0.807243880494433, -0.760154654132257, -0.665976201407907, -0.477619295959206, -0.100905485061804, 0.652522136733, 2.15937738032261]

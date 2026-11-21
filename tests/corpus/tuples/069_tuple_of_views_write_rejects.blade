@@ -1,0 +1,18 @@
+// TEST: Tuple Of Views Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a): an ORDINARY tuple holding row VIEWS of the deferred map m. The
+// tuple is a carrier, not a copy, so `pair[0]` is still a view of m and
+// `row(1) = 9.0` writes m -- which the fused fold below would never see. The
+// provenance walk follows the tuple's initializer along the projection's path
+// (by binder identity), so the write is refused at lowering in every lane.
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let pair = (m(0), m(1))
+let row = pair[0]
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

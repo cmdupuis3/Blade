@@ -10,7 +10,7 @@
 // Direct index access into a ragged literal. The row-pointer table makes
 // r(i)(j) generate r[i][j] in C++, which works correctly because each r[i]
 // points into the flat buffer at the right offset.
-let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let r = Float64([[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]])
 let a = r(0)(2)
 let b = r(1)(0)
 let c = r(2)(3)

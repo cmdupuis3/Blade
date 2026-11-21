@@ -35,7 +35,20 @@ Euler simulation), and several examples also pin internal cross-checks.
 Beyond the numbered tour: `lsdft.blade` and `lswosa.blade` are full Lomb-Scargle
 paper pipelines (the largest single programs in the repo), `lseof.bladenb` is their
 notebook-form EOF sibling, and `physics/` is a separate 47-program corpus of short
-physics derivations with its own README. `tools/` holds the `.fsx` reference
+physics derivations with its own README.
+
+Four notebooks show equivariant networks whose symmetry is in the types
+(`where ml.equiv(O3)` clauses the compiler verifies), each running in about a
+minute in the notebook interpreter and illustrated throughout with plots:
+`tetris_shapes.bladenb` (the deduction suite: refusals, a compiler-written clause,
+chirality as a compile error, then a frozen certified body whose pseudoscalar
+separates the mirror pair before training), `aspirin_energy.bladenb` (MD17 aspirin
+CCSD: a certified energy model whose `ad.grad` forces rotate with the molecule to
+1e-15), `matched_moments.bladenb` (clouds identical per sample through second
+moments, and the rung x class confusion staircase predicted from representation
+theory) and `cod_crystals.bladenb` (the same theorem on 1104 real crystal shells
+from COD). Cells introduced as failing on purpose are the refusals; the
+`// EXPECT:` pins hold for the other code cells concatenated into one program. `tools/` holds the `.fsx` reference
 implementations the pins above cite; `data/` is the committed zarr store for `09`.
 `tools/check_pins.ps1 <file.blade>` verifies one example's `// EXPECT:` pins in place (it runs
 the program from its own directory and applies the harness's comparison rule), since

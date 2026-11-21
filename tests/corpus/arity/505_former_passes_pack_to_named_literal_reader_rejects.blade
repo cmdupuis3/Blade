@@ -1,0 +1,13 @@
+// TEST: a pack former passing its pack to a named literal reader is refused (rejects)
+// Gap G223 (round 4 wave 8 lane d): the same rolled shape with a callee that
+// reads its pack at a literal (`first`) -- refused by the same rule; read the
+// element in the kernel and pass it instead.
+// ERROR: BL7004
+// ERROR-CONTAINS: names the pack as a value
+// REJECT-AT: lower
+function first(p: Poly<Float64>) -> Float64 = p[0]
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> first(args) + Float64(k) |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

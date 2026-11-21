@@ -1,0 +1,25 @@
+// TEST: Memfree Return Fold Plus Stored Closure Keeps Capture (G54 control)
+// The return holds BOTH a proved-synchronous fold kernel over `y` (a kernel
+// slot of the scalar fold `reduce(method_for(range<I>) <@> lambda(a) ->
+// y(a) * y(a), (+))`) and a closure over `y` passed to `stash`, which stores
+// it. The fold kernel's exemption does not cover the closure: an argument of
+// function type is never a kernel slot, so its captures are seeded and `y`
+// survives `kernel`. Values for c = 2: r = 120 + 0, v = reduce(y, (+)) * 3.
+type I = Idx<5>
+type One = Idx<1>
+
+function stash(out: mut Array<(Float64 -> Float64) like One>, f: Float64 -> Float64) -> Float64 = {
+    out(0) = f
+    0.0
+}
+
+function kernel(out: mut Array<(Float64 -> Float64) like One>, c: Float64) -> Float64 = {
+    let y = Float64(0..5) * c |> compute
+    reduce(method_for(range<I>) <@> lambda(a) -> y(a) * y(a), (+)) + stash(out, lambda(k: Float64) -> reduce(y, (+)) * k)
+}
+
+let mut out: Array<(Float64 -> Float64) like One> = [lambda(k: Float64) -> k]
+let r = kernel(out, 2.0)
+let v = out(0)(3.0)
+// EXPECT: r = 120.0
+// EXPECT: v = 60.0

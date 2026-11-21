@@ -5,12 +5,12 @@
 // so the declaration itself was invalid C++ (`double class = ...`) or the
 // first use was (`'final_' was not declared in this scope`). Printed LABELS
 // keep the source spelling -- the pins below are what holds the two apart.
-let final = 2.0
+let final: Float64 = 2.0
 let s = final + 1.0
-let arr = [1.0, 2.0, 3.0]
+let arr = Float64([1.0, 2.0, 3.0])
 let class = arr(0)
 let delete = class * 4.0
-let template = [[1.0, 2.0], [3.0, 4.0]]
+let template = Float64([[1.0, 2.0], [3.0, 4.0]])
 let operator = template(1, 1)
 // EXPECT: final = 2.0
 // EXPECT: s = 3.0

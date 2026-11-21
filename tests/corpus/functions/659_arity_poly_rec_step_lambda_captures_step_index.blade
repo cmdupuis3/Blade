@@ -1,0 +1,24 @@
+// TEST: an arity-poly body keeps a recursion loop whose step holds a lambda capturing the step index
+// Gap G95 (round 4 wave 4 lane A; G93's class): specializing `f` at its
+// call's arity unrolled the `let rec` loop (literal bounds), substituting the
+// step index `n` by a literal in the step body only -- the lambda `g`
+// captures `n` and its call still forwarded `n`, which no unrolled copy
+// declared (the C++ lane named an undeclared `n`). The unroll now declines a
+// loop whose variable a reachable callable captures.
+//   x = [1, 3, 7, 13] (x(n) = x(n - 1) + 2 n); sum 24, plus arity 2.
+type Step = Idx<4>
+function f(a: Poly<T^0>) -> Float64 = {
+    let rec x: Array<Float64 like Step> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: {
+            let g = lambda(k: Float64) -> k * Float64(n)
+            let t = g(2.0)
+            prefix(n - 1) + t
+        }
+    let s = reduce(x, (+))
+    s + Float64(arity(a))
+}
+let r = f(1.0, 2.0)
+// EXPECT: r = 26.0

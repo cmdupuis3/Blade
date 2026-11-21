@@ -322,7 +322,12 @@ let domainPlanOf (env: StaticEnv) (spec: StructBoxSpec) : Result<DomainPlan, str
                 match f.Vars |> Map.toList with
                 | [] -> if f.K > 0L then infeasible <- true
                 | [ (k, a) ] when abs a = 1L ->
-                    if a = 1L then tighten k -1 (-f.K) else tighten -1 k f.K
+                    // a = +1:  x_k + K <= 0  ->   x_k <= -K, key (k, -1)
+                    // a = -1: -x_k + K <= 0  ->  -x_k <= -K, key (-1, k)
+                    // Both store -K: key (-1, k) with c means -x_k <= c.
+                    // (Storing +K here dropped every single-field lower
+                    // bound -- `where i > 5` enumerated the whole box.)
+                    if a = 1L then tighten k -1 (-f.K) else tighten -1 k (-f.K)
                 | [ (i, ai); (j, aj) ] when abs ai = 1L && abs aj = 1L && ai = -aj ->
                     if ai = 1L then tighten i j (-f.K) else tighten j i (-f.K)
                 | coefs ->

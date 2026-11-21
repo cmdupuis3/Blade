@@ -1,0 +1,15 @@
+// TEST: An observing generic with a mut parameter is not handed a converted copy (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: the parameter is `mut`
+// ============================================================================
+// R3: an array of R handed to an observing generic parameter goes over as an
+// Int64 copy of its keys -- but a `mut` parameter's writes alias the caller's
+// array and would land in the copy. Refused, naming the explicit spelling.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+function bump(x: mut Array<T like Idx<3>>) -> T = {
+    x(0) = x(1)
+    x(1) + 1
+}
+let mut cs: Array<R like Idx<3>> = [100, 200, 300]
+let v = bump(cs)

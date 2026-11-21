@@ -83,7 +83,7 @@ foreach ($line in ($src -split "`r?`n")) {
 }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 Push-Location (Split-Path -Parent $full)
-try { $out = & $Blade run $full 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
+try { $out = & $Blade run $full --print-form test 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
 $sw.Stop()
 # case-sensitive tables: a PowerShell @{} is not, and c0 / C0 are different bindings
 $actual = New-Object System.Collections.Hashtable

@@ -1,0 +1,19 @@
+// TEST: real intrinsics over Float32 are Float32
+// ============================================================================
+// Formalism 2.4: a Float32 transcendental is rounded once to Float32 --
+// `sqrt(4.0)`, `atan2(0.0, 1.0)` and `fma(p, p, 1.0)` over Float32 values
+// are Float32 (the annotations hold); over Float64 they stay Float64.
+// ============================================================================
+let s = sqrt(4.0)
+let s32: Float32 = s
+let a = atan2(0.0, 1.0)
+let a32: Float32 = a
+let p: Float32 = 2.0
+let f = fma(p, p, 1.0)
+let f32: Float32 = f
+let d: Float64 = 9.0
+let sd: Float64 = sqrt(d)
+// EXPECT: s32 = 2.0
+// EXPECT: a32 = 0.0
+// EXPECT: f32 = 5.0
+// EXPECT: sd = 3.0

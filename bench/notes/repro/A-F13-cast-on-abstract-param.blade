@@ -1,0 +1,25 @@
+// REPRO A-F13 (blade-A, 2026-10-17, compiler 0.20.0): AN INDEX CAST DOES NOT PROVE A LITERAL
+// SUBSCRIPT ON AN ABSTRACT (T^k) KERNEL PARAMETER (C++ lane).
+// `a((0 : Dim))` on `a: T^1` still emits a runtime literal-bound check per read, because the
+// parameter's extent is abstract: `if (!(0 < a.extents[0])) panic("BL8006", "index out of
+// bounds: a literal position outside the array's extent")` -- 6 checks per cell here. On a
+// T^2 parameter with `prodsum(a((0 : Comp)), ...)` the check sits in the dot loop CONDITION.
+// Typing the parameter concretely (`a: Array<Float64 like Dim>`) removes every check
+// (0 BL8006 in the emitted .cpp) with identical values; the pairkernel and antisym sources
+// do that.
+// Lanes affected: C++ (performance, values right).
+// Run: BLADE_BLAS=0 BLADE_PRINT=checksum blade emit A-F13-cast-on-abstract-param.blade
+// Expected: no BL8006 in the kernel (the cast names the declared component index).
+// Observed: BL8006 literal-bound checks per read inside the triangular nest.
+type Pts = Idx<6>
+type Dim = Idx<3>
+let checksum = {
+    let p = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> 0.125 * Float64(i * 3 + d) |> compute
+    let k = method_for(p, p) <@> lambda(a: T^1, b: T^1) where comm(a, b) -> {
+        let dx = a((0 : Dim)) - b((0 : Dim))
+        let dy = a((1 : Dim)) - b((1 : Dim))
+        let dz = a((2 : Dim)) - b((2 : Dim))
+        exp(-(dx * dx + dy * dy + dz * dz))
+    } |> compute
+    k((0 : Pts), (1 : Pts)) + k((2 : Pts), (5 : Pts))
+}

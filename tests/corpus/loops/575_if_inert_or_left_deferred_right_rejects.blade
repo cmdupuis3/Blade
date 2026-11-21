@@ -1,0 +1,14 @@
+// TEST: If Inert Or Left Deferred Right (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, finding 2's `||` twin: `!c` is inert and true, so `g(0) > 0` is
+// short-circuited away in the interpreter while the C++ lane forced g first.
+// Refused at lowering in every lane (BL6002).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let c = z(0) > 0
+let r = if (!c || g(0) > 0) then 0 else g(0)
+// ERROR: BL6002 @ 10:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

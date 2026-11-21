@@ -61,13 +61,13 @@ let tau = [m00 - mu0 * mu0, m01 - mu0 * mu1, m02 - mu0 * mu2, m11 - mu1 * mu1, m
 let c2 = ppl.comoments(A, 2)
 // EXPECT: c2 = [0.2532518480175457, 0.023596559909789594, -0.08610568558444831, 0.8664234203346483, -0.7664919700416587, 1.0160853438383561]
 
-let mut agree = [0.0]
+let mut agree = Float64([0.0])
 let agree_done = {
     let s_agree = reduce(method_for(range<Idx<6>>) <@> lambda(p) -> (tau(p) - c2(p)) * (tau(p) - c2(p)), (+), 0.0)
     agree(0) = s_agree
-    0.0
+    Float64(0.0)
 }
-let routes_agree = if agree(0) < 0.000000000000000000000001 then 1.0 else 0.0
+let routes_agree: Float64 = if agree(0) < 0.000000000000000000000001 then 1.0 else 0.0
 // EXPECT: routes_agree = 1.0
 
 // (3) the Galilean pin: same stress on the boosted field
@@ -81,14 +81,14 @@ let nu2 = reduce(s2, (+)) / 8.0
 let tau_shift = [m2v(0, 0) - nu0 * nu0, m2v(0, 1) - nu0 * nu1, m2v(0, 2) - nu0 * nu2, m2v(1, 1) - nu1 * nu1, m2v(1, 2) - nu1 * nu2, m2v(2, 2) - nu2 * nu2]
 // EXPECT: tau_shift = [0.2532518480175457, 0.02359655990978959, -0.08610568558444831, 0.8664234203346481, -0.7664919700416586, 1.0160853438383564]
 
-let mut gal = [0.0, 0.0]
+let mut gal = Float64([0.0, 0.0])
 let gal_done = {
     let s_gal0 = reduce(method_for(range<Idx<6>>) <@> lambda(p) -> (tau(p) - tau_shift(p)) * (tau(p) - tau_shift(p)), (+), 0.0)
     gal(0) = s_gal0
     gal(1) = (m00 - m2v(0, 0)) * (m00 - m2v(0, 0)) + (m22 - m2v(2, 2)) * (m22 - m2v(2, 2))
-    0.0
+    Float64(0.0)
 }
-let tau_is_boost_invariant = if gal(0) < 0.000000000000000000000000000001 then 1.0 else 0.0
+let tau_is_boost_invariant: Float64 = if gal(0) < 0.000000000000000000000000000001 then 1.0 else 0.0
 // EXPECT: tau_is_boost_invariant = 1.0
-let raw_moments_are_not = if gal(1) > 0.001 then 1.0 else 0.0
+let raw_moments_are_not: Float64 = if gal(1) > 0.001 then 1.0 else 0.0
 // EXPECT: raw_moments_are_not = 1.0

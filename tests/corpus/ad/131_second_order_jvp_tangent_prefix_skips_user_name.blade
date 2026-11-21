@@ -1,0 +1,15 @@
+// TEST: AD A Second-Order jvp Does Not Capture A Module Binding Spelled Like Its Tangent Prefix
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 review round 3, Codex 5a8b7b7d). A composition
+// round picks a depth-indexed tangent prefix (`__t_`, `__t1_`, ...) that its
+// own names do not use; the trusted second round skips the reserved-name
+// gate, and the prefix choice saw only the function's own names, so the
+// module binding `__t1_x` became the outer tangent PARAMETER: r = (15.0,
+// 10.0, 25.0, 0.0). The prefix now also avoids every name the program spells.
+// f = 7 x; at x = 3 with inner seed 2 and outer seed 5: (21, 14, 35, 0).
+// ============================================================================
+let __t1_x = Float64(7.0)
+function f(x: Float64) -> Float64 = x * __t1_x
+let r = ad.jvp(ad.jvp(f))(Float64(3.0), Float64(2.0), Float64(5.0), Float64(0.0))
+// EXPECT: r = (21.0, 14.0, 35.0, 0.0)

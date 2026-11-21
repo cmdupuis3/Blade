@@ -5,8 +5,8 @@
 // fused loop computes x0 + dx * base in a single pass.
 
 type I = Idx<5>
-let dx = 0.25
-let x0 = 10.0
+let dx: Float64 = 0.25
+let x0: Float64 = 10.0
 let base_arr = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
 
 let axis = x0 + dx * base_arr

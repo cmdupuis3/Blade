@@ -5,8 +5,8 @@
 // <&!> with Reynolds antisym and Reynolds sym
 // g(x,y) = 2x+y, antisym: (2x+y)-(2y+x) = x-y → [-2, -3, -1, -2]
 // h(x,y) = x*y,  sym: 2xy → [6, 8, 12, 16]
-let A = [1.0, 2.0]
-let B = [3.0, 4.0]
+let A = Float64([1.0, 2.0])
+let B = Float64([3.0, 4.0])
 let L = method_for(A, B)
 let g = lambda(x, y) -> 2.0 * x + y
 let h = lambda(x, y) -> x * y

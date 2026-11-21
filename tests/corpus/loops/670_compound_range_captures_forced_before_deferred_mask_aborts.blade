@@ -1,0 +1,13 @@
+// TEST: Compound Range Map Forces Its Captures Before Its Deferred Mask (aborts)
+// Gap G207 (2) (round 4 wave 7 lane d): the MASK of a range<CompoundIdx<m>>
+// map is a deferred map the kernel also captures and that fails (integer
+// modulo by zero), beside a captured failing map `g` (integer division by
+// zero, captured FIRST). The compiled lanes force the kernel captures in
+// capture order in the binding prelude, the mask with them; the interpreter
+// resolved the mask first. It now forces the captures first.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 0, 5]
+let m = method_for(d) <@> lambda(a) -> 200 % a > 0
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<CompoundIdx<m>>) <@> lambda(i) -> if i > 4 then g(0) else (if m(0) then i else i) |> compute

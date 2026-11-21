@@ -1,0 +1,36 @@
+// TEST: Llvm Row Tiles Small Shapes Keep The Nest
+// One extent below each crossover keeps the per-cell nest in BOTH lanes: the
+// antisym pair at p = 23 (n = 40 clears its bar) and at n = 7 (p = 40 clears
+// its bar), the simplex at p = 23 (n = 50) and at n = 3 (p = 30). The LLVM
+// lane's tile cores decline there exactly as the C++ lane's tiles do (the same
+// `packedAntiWorth` / `packedSym3Worth`; `blade test llvm facts` pins the
+// declines). Same values either way; pinned so the declined paths stay run.
+/// Small-integer data: exact sums, association-invariant pins.
+type P = Idx<23>
+type Q = Idx<40>
+type C = Idx<2>
+type S = Idx<40>
+type S7 = Idx<7>
+type V = Idx<23>
+type W = Idx<30>
+type N = Idx<50>
+type N3 = Idx<3>
+let (la, lb, ta, tb) = {
+    let za = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l1 = method_for(za, za) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let zb = method_for(range<Q>, range<C>, range<S7>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l2 = method_for(zb, zb) <@> lambda(a: Array<Float64 like C, S7>, b: Array<Float64 like C, S7>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C))) |> compute
+    let xa = method_for(range<V>, range<N>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t1 = method_for(xa, xa, xa) <@> lambda(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    let xb = method_for(range<W>, range<N3>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t2 = method_for(xb, xb, xb) <@> lambda(a: Array<Float64 like N3>, b: Array<Float64 like N3>, c: Array<Float64 like N3>) where comm(a, b, c) -> prodsum(a, b, c) |> compute
+    let s1 = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l1(i, j) * l1(i, j), (+)), (+))
+    let s2 = reduce(method_for(range<Q>) <@> lambda(i) -> reduce(method_for(range<Q>) <@> lambda(j) -> l2(i, j) * l2(i, j), (+)), (+))
+    let s3 = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t1(i, j, k) * t1(i, j, k), (+)), (+)), (+))
+    let s4 = reduce(method_for(range<W>) <@> lambda(i) -> reduce(method_for(range<W>) <@> lambda(j) -> reduce(method_for(range<W>) <@> lambda(k) -> t2(i, j, k) * t2(i, j, k), (+)), (+)), (+))
+    (s1, s2, s3, s4)
+}
+// EXPECT: la = 3396632.0
+// EXPECT: lb = 313208.0
+// EXPECT: ta = 36510000.0
+// EXPECT: tb = 540000.0

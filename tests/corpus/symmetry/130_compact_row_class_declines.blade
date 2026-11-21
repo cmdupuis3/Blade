@@ -1,0 +1,20 @@
+// TEST: Compact row classes over a strict pool, and the decline when the producer is read first
+// AntisymIdx<2, 29> (strict: no stored diagonal) folded through a kernel of
+// UNKNOWN parity, f(x) = x * x + x: the orbit plan keeps two class sums,
+// f(x) and f(-x), plus the repeated-coordinate class f(+0); with compact row
+// classes each packed row stores both partials as it is produced (`blade
+// plan`: `[compact-row-classes v1] ... applied [compact row classes (2
+// classes) ...]`). A read of the producer between it and the fold declines
+// the schedule (`declined -- ... reads ...`): the orbit pass runs as before.
+// Same values either way. Integer-valued cells.
+type Pts = Idx<29>
+type Dim = Idx<2>
+let pts = method_for(range<Pts>, range<Dim>) <@> lambda(i, d) -> Float64((Int64(i) * 5 + Int64(d) * 2) % 9) - 4.0 |> compute
+let w = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where anticomm(a, b) -> a((0 : Dim)) * b((1 : Dim)) - b((0 : Dim)) * a((1 : Dim)) |> compute
+let s = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w(i, j) * w(i, j) + w(i, j), (+)), (+))
+// EXPECT: s = 76034.0
+let w2 = method_for(pts, pts) <@> lambda(a: Array<Float64 like Dim>, b: Array<Float64 like Dim>) where comm(a, b) -> a((0 : Dim)) * b((0 : Dim)) + a((1 : Dim)) + b((1 : Dim)) |> compute
+let probe = w2(3, 7)
+// EXPECT: probe = 9.0
+let s2 = reduce(method_for(range<Pts>) <@> lambda(i) -> reduce(method_for(range<Pts>) <@> lambda(j) -> w2(i, j) * w2(i, j), (+)), (+))
+// EXPECT: s2 = 49981.0

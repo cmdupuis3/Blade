@@ -7,7 +7,7 @@
 // f(x) = 10x is odd, so out(j,i) = f(C(j,i)) = f(-C(i,j)) = -f(C(i,j)), which
 // is exactly what NegateOnSwap returns; and the diagonal reads 0 because
 // C(i,i) = 0 and f(0) = 0.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let out = method_for(C) <@> lambda(v) -> v * 10.0 |> compute

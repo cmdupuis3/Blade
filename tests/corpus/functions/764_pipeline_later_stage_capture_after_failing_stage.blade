@@ -1,0 +1,19 @@
+// TEST: A Pipeline Stage Capture After A Possibly-Failing Stage
+// ============================================================================
+// Gap G242, round 4 wave 9 (lane C; wave-end fable review F4) and round 4 wave
+// 10 (lane C, C4): the first stage `first` may fail (an integer division), so
+// the SECOND stage's capture of the deferred map `delayed` is forced at the
+// second stage's own start -- the interpreter runs the stages as successive
+// traversals. The C++ lane refused it (BL7004: no per-stage capture prelude);
+// its two-sweep path now forces the capture between the sweeps (loops/898-899).
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+function first(v: Int64) -> Int64 = {
+    let q = 8 / v
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> v + delayed(0))
+let ys = k <@> backing |> compute
+// EXPECT: ys = [8, 6]

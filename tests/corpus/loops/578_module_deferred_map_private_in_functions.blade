@@ -1,0 +1,31 @@
+// TEST: Module Deferred Map Private In Functions
+// ----------------------------------------------------------------------------
+// Gap G75 (formalism 10.2, the print rule): a module deferred map that only
+// function bodies force is evaluated inside each call, privately, from the
+// CURRENT values of its inputs, and never prints. Here the reads are a
+// positional read (`at`), a map kernel (`scaled`) and a block-local
+// assignable alias written through (`patched`: a private copy). The input `z`
+// is written between two calls, so the second `at` sees it. (loops/544-545
+// hold the same contract; 544's dynamic-extent group_by return keeps the
+// llvm lane out of that file, so this one gives the rule llvm evidence.)
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let mut z: Array<Int64 like Row> = [1, 2, 3]
+let lazy = method_for(z) <@> lambda(v) -> v * 10
+function at(n: Int64) -> Int64 = lazy(1) + n
+function scaled(n: Int64) -> Int64 = reduce(method_for(range<Row>) <@> lambda(i) -> lazy(i) * n, (+))
+function patched(k: Int64) -> Int64 = {
+    let mut b = lazy
+    b(0) = k
+    reduce(b, (+))
+}
+let one = at(1)
+let two = scaled(2)
+let three = patched(7)
+z(1) = 5
+let four = at(1)
+// EXPECT: z = [1, 5, 3]
+// EXPECT: one = 21
+// EXPECT: two = 120
+// EXPECT: three = 57
+// EXPECT: four = 51

@@ -1,0 +1,19 @@
+// TEST: a let mut in a lambda cloned by pack unrolling stays let mut
+// R12 (deep review, defect 3; formalism 2.7): `scale` captures the pack
+// former's ordinal, so the unroll CLONES it per element, freshening its
+// binders; `y` is `let mut` in every copy, so `put` may write it. The clone
+// used to lose the declaration and the program was refused.
+function poly(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let scale = lambda(s: Float64) -> {
+            let mut y: Array<Float64 like Idx<1>> = [0.0]
+            let put = lambda(v: Float64) -> { y(0) = v; v }
+            let z = put(s + Float64(k))
+            z + y(0)
+        }
+        scale(1.5) + args[k]
+    } |> compute
+    reduce(terms, (+))
+}
+let result = poly(10.0, 20.0)
+// EXPECT: result = 38.0

@@ -1,0 +1,44 @@
+// TEST: Row Fold And Slice Write Splices Keep A Nested Capturing Lambda
+// ============================================================================
+// Gap G93's class (the fable review): two more passes splice a kernel body by
+// substituting its parameters and renaming its lets in the BODY only --
+// row-fold fusion (the row kernel's parameter becomes the step's row) and
+// slice-write fusion (the step map's parameter becomes the cell). A lambda
+// nested in that kernel that captures the parameter would be left naming a
+// binder that no longer exists (on the base, `rowfold`'s row-fold fusion
+// applied and the LLVM lane refused an unbound array, the C++ lane named an
+// undeclared one). Both passes now decline such a kernel
+// (IRMono.nestedCapturesOwnBinder; slice-write fusion's `slice` declines
+// earlier, a nested fold may abort), so the values are the program's.
+// rows: u0 = [1, 2, 4], then row(n) = row(n - 1) * 0.5 + 1.
+//   rowfold: sum over rows of row(0) * sum(row) = 7 + 9.75 + 10.9375
+//            + 11.484375 + 11.74609375 + 11.8740234375 = 62.7919921875
+//   slice:   each step a * 0.5 + (a * 0 + a * 1) = 1.5a: row sums 7 * 1.5^n,
+//            summed over 6 rows = 7 * 20.78125 = 145.46875
+// ============================================================================
+type T = Idx<6>
+type X = Idx<3>
+
+function rowfold(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, lambda(p, q) -> p + q * row((0 : X)), 0.0), (+))
+}
+
+function slice(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: (method_for(prefix(n - 1)) <@> lambda(a) -> a * 0.5 + reduce(method_for(0..2) <@> lambda(t) -> a * Float64(t), (+)) |> compute)
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+}
+
+let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]
+let r = rowfold(u0)
+let s = slice(u0)
+// EXPECT: r = 62.7919921875
+// EXPECT: s = 145.46875

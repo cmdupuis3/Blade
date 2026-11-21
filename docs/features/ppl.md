@@ -106,11 +106,51 @@ this arc). Sections 2.7-2.13 are the P1-P5 additions: named families and
 their densities, exact and approximate sampling, the two MCMC engines and
 their diagnostics, and closed-form/exact multivariate inference.
 
+**Numeric width (round 6).** PPL computes in Float64 this round. Every user
+scalar a former hoists into a synthesized binding -- a mixture weight, a family
+parameter, an evaluation point, a chain's start, scale or step -- is read
+through `Float64(...)` (an RNG key through `Int64(...)`). So a literal argument
+takes Float64 exactly, as if annotated (`ppl.dist_mix(1.0, d1, 2.0, d2)`,
+`ppl.logpdf(gaussian(1.5, 2.0), 0.1)`: corpus `ppl/141`), and a Float32 or
+Int32 VARIABLE passed there is CONVERTED, not refused (`ppl/142`); so is an integer
+weight or parameter (`ppl.dist_mix(1, d1, 2, d2)`), which the mixing rule used to refuse. A
+width-generic PPL is a follow-up.
+
 ### 2.1 Estimators
 
 Single-sweep, fused sufficient-statistic pipelines over a compile-time-shaped
 array. The **last declared index of the source array is always the sample
 (fiber) axis**; its static extent is `N`, the estimator's normalizer.
+
+One exception to "single sweep", and it is the point: when a real-element array's
+whole demand in a module is order-2 `moments`/`comoments` (nothing asks it for
+order 3+, and no `cumulants`/`free_cumulants`/`mstate` reads it), the pair block
+is spelled as a `gram` instead of `d(d+1)/2` fused accumulators: `gram(A, A)/N`
+for the raw `moments(A, 2)`, and `gram(Ac, Ac)/N` for `comoments(A, 2)`, where
+`Ac` stacks the central pool's rows already shifted by their means -- so the
+covariance keeps the no-cancellation guarantee of the central pool (a raw gram
+corrected by `N c_i c_j` would reintroduce exactly the cancellation centering
+removes). The block IS that contraction, so this is a lowering choice, not an
+approximation, and where it is a contraction the compiler's own BLAS gate
+(`OPENBLAS_DIR` / `BLADE_BLAS`) routes it to `syrk` into the same packed upper
+triangle the cells read. Only the `O(d N)` singles stay a sweep. The condition is
+derived from the statistic demand rather than a size threshold: the fused sweep
+is better when a higher order shares its power sums, but it does not scale on its
+own -- `d(d+1)/2` accumulators in one tuple join exceed g++'s template
+instantiation depth near `d = 41`, so wide covariance blocks had no lowering at
+all without this route (`tests/corpus/ppl/140_comoments_wide_contraction.blade`
+pins a 44-variable block). Complex elements keep the sweep: the complex `gram` is
+Hermitian (`x_i · conj x_j`), a different tensor from the raw comoment.
+
+Measured when the route was first built (2026-08-14, OpenBLAS 0.3.34, chrono
+around the contraction; the non-BLAS path is already OMP-parallel):
+`d=300, n=3000` 8.63 ms -> 2.51 ms, `d=700, n=3000` 38.8 ms -> 7.39 ms; at
+`d=96, n=60000` a wash (bandwidth-bound, ~6 flops/byte). The remaining cost is
+compile time: each packed cell is still assembled as its own read, about 8 ms of
+g++ per cell (8.6 s at `d=48`, 92 s at `d=150`). Emitting the block as one
+elementwise `gram/N` would delete the assembly -- the former's flat packed layout
+is already `gram`'s storage -- and wants a rank-2-symmetric to flat-rank-1
+reinterpret.
 
 | Former | Signature (informal) | What it computes |
 |---|---|---|
@@ -313,9 +353,9 @@ let post = ppl.dist_reweight(d, 1.0 - 0.2*vhat*vhat, 0.4*vhat, 0.0 - 0.2)
 // degree-2 weight: order-4 prior -> order-2 posterior
 let p1 = ppl.cumulant(post, 1)
 let p2 = ppl.cumulant(post, 2)
-// EXPECT: evidence = 0.794666666666667
-// EXPECT: p1 = [1.20134228187919]
-// EXPECT: p2 = [0.570199540561236]
+// EXPECT: evidence = 0.794666687647502
+// EXPECT: p1 = [1.2013423145663]
+// EXPECT: p2 = [0.570199528875265]
 ```
 
 Tests: `ppl/043-048`.

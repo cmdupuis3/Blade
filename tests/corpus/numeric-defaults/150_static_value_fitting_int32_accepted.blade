@@ -1,0 +1,13 @@
+// TEST: a static integer value that fits Int32 adapts to an Int32 annotation
+// ============================================================================
+// R28's accepted twin: an integer static adapts its width like a literal
+// (formalism 2.4) -- narrowing when its value fits, widening always.
+// ============================================================================
+let static small = 7
+let static n: Int32 = small
+let static w: Int64 = small
+let static lo = -2147483648
+let static m: Int32 = lo
+// EXPECT: n = 7
+// EXPECT: w = 7
+// EXPECT: m = -2147483648

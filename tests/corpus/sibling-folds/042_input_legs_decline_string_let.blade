@@ -1,0 +1,24 @@
+// TEST: A callee holding a String let is not inlined for the input legs
+// ============================================================================
+// A String is not an allocation-free value (the C++ lane's std::string owns
+// heap storage that follows its scope -- W2-4 fifth review NEW 2): the kept
+// inline's admission takes numeric / Bool / complex / index scalars and their
+// tuples only, so this callee declines and is not retained for A7c.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let label = "a label long enough to leave any small-string buffer behind, well past sixty chars"
+    s
+}
+let (checksum, input_checksum) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))
+}
+// EXPECT: checksum = 82065.0
+// EXPECT: input_checksum = 5007.0

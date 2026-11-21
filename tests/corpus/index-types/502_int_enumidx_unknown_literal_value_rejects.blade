@@ -1,0 +1,6 @@
+// TEST: An integer EnumIdx literal value must be a key (rejects)
+// ERROR: BL4003 @ 5:41
+// ============================================================================
+// A literal typed `R` -- here a cell of an R array -- is one of R's keys.
+type R = EnumIdx<[100, 200, 300]>
+let codes: Array<R like Idx<2>> = [100, 250]

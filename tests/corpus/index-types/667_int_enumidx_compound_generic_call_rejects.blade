@@ -1,0 +1,15 @@
+// TEST: A compound array of R values handed to an observing generic is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a compound array
+// ============================================================================
+// R3 (Codex review of the lead round): the call would hand the callee the
+// keys as an Int64 COMPOUND array, and the callee's body may do to it what is
+// not built over compound storage (`prodsum(y, y)` here is a g++ rejection
+// for an Int64 compound too). Only a dense array of keys is handed over.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+function f(y: T) = prodsum(y, y)
+let o = f(sel)

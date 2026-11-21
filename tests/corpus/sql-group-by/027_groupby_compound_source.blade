@@ -10,7 +10,7 @@
 // view preserves the view's shape, which is the honest result (a value per
 // present cell). gk__perm indexes that same compact order, so the gather
 // lines up.
-let t = [0.2, 0.8, 1.4, 2.1, 2.7]
+let t = Float64([0.2, 0.8, 1.4, 2.1, 2.7])
 let m = mask(t, lambda(x) -> x >= 0.5)
 // tk = the surviving cells: [0.8, 1.4, 2.1, 2.7]
 let tk = compound(t, m)

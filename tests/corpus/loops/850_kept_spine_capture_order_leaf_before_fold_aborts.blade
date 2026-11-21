@@ -1,0 +1,13 @@
+// TEST: kept spine name keeps the leaf-then-fold capture order (aborts)
+// Gap G235 (a), round 4 wave 9 (Codex design review): the fold over p keeps
+// the name p (its kernel captures q over p), and the capture prelude still
+// forces the LEAF kernel captures (d, through p) before the FOLD kernel
+// captures (r): d fails first, at its own line, in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let r = method_for(x) <@> lambda(v) -> 20 % v
+let p = method_for(x) <@> lambda(v) -> v + extents(d)
+let q = method_for(p) <@> lambda(v) -> v + 1
+let s = reduce(p, lambda(a, b) -> a + b + extents(r) + extents(q), 0)
+// ABORT: BL8013
+// ABORT: .blade:6

@@ -1,0 +1,27 @@
+// TEST: A writing call earlier in the same statement keeps an inlinable callee a call
+// ============================================================================
+// `bump(xm) + stats(xm)` evaluates left to right: bump writes xm(0) through a
+// `mut` parameter, THEN stats folds the written array twice. stats is a
+// pure-total scalar callee whose two folds could join -- but inlining places
+// the callee's body ahead of the WHOLE statement, which would run its folds
+// before bump's write (20.0 instead of 2568.0). The sibling-fold pass keeps
+// a call as a call whenever its statement may write; stats' own body still
+// joins its two folds where it stands.
+// ============================================================================
+type R = Idx<3>
+
+function bump(a: mut Array<Float64 like R>) -> Float64 = {
+    a((0 : R)) = 50.0
+    0.0
+}
+
+function stats(x: Array<Float64 like R>) -> Float64 = {
+    let s = reduce(x, (+))
+    let p = prodsum(x, x)
+    s + p
+}
+
+let mut xm: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let answer = bump(xm) + stats(xm)
+// EXPECT: answer = 2568.0
+// EXPECT: xm = [50.0, 2.0, 3.0]

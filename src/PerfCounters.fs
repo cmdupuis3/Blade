@@ -101,9 +101,7 @@ let noteIRNodes (n: int64) = add SlotIRNodes n
 /// flip the gate mid-process.
 let refresh () =
     enabled <-
-        match System.Environment.GetEnvironmentVariable "BLADE_PERF_COUNTERS" with
-        | null | "" | "0" | "off" -> false
-        | _ -> true
+        Blade.Toolchain.envFlag "BLADE_PERF_COUNTERS" false
 
 let reset () =
     for i in 0 .. NSlots - 1 do

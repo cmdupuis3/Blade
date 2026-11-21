@@ -23,10 +23,10 @@ function inner(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
 }
 function outer(buf: mut Array<Float64 like Idx<3>>) -> Float64 = { inner(buf) }
 
-let mut direct = [1.0, 2.0, 3.0]
+let mut direct = Float64([1.0, 2.0, 3.0])
 let rd = inner(direct)
 
-let mut chained = [5.0, 6.0, 7.0]
+let mut chained = Float64([5.0, 6.0, 7.0])
 let rc = outer(chained)
 // EXPECT: direct = [11.0, 2.0, 3.0]
 // EXPECT: rd = 11.0

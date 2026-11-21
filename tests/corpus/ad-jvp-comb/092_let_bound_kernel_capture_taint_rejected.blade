@@ -22,8 +22,8 @@ type I = Idx<3>
 
 let table = [1.0, 2.0, 3.0]
 
-function f(s: Float) -> Float = {
-    let L = object_for(lambda(x: Float) -> x * s)
+function f(s: Float64) -> Float64 = {
+    let L = object_for(lambda(x: Float64) -> x * s)
     let m = L <@> table |> compute
     m(0) + m(1) + m(2) + 0.0 * s
 }

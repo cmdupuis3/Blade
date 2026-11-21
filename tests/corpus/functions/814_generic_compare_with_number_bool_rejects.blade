@@ -1,0 +1,12 @@
+// TEST: a generic comparison with a number called with a Bool (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14): a
+// generic body's arithmetic needs a NUMBER at every instance, judged at the
+// call (GONumericOperand) or, for an instance with no element class, after
+// monomorphization (IRValidate check 1d). On master 1e6a871a this printed
+// `b = true`.
+// ============================================================================
+function lt2(x) = x < 2
+let a = lt2(1)
+let b = lt2(true)
+// ERROR: BL3001

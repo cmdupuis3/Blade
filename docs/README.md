@@ -7,7 +7,7 @@ Hub for most documentation, including guides, formalisms, and proof explanations
 | Document | Description | Canonical For |
 |----------|-----|---------------|
 | [formalism.md](formalism.md) | The language semantics: types, index types, loop objects, combinators, symmetry system, operational semantics, concrete syntax | What Blade programs *mean* |
-| [proofs.md](proofs.md) | Theorem-by-theorem correspondence to the Coq proof stack (1362 theorems; the count is checked by `proofs/count-theorems.ps1 -Check`) | What is *proved*, and exactly how much |
+| [proofs.md](proofs.md) | Theorem-by-theorem correspondence to the Coq proof stack (the theorem count, and the script that checks it, are stated at the top of proofs.md) | What is *proved*, and exactly how much |
 | [features.md](features.md) | Catalog of every language feature with one-paragraph semantics and pointers | What Blade *has* |
 | [quickstart-1.md](quickstart-1.md) | Quickstart part 1: basics through arity polymorphism and units | Tutorial |
 | [quickstart-2.md](quickstart-2.md) | Quickstart part 2: advanced features | Tutorial |

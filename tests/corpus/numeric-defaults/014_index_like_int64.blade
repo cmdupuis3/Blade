@@ -1,0 +1,15 @@
+// TEST: index-like integers stay Int64
+// ============================================================================
+// Extents, counts, range elements and subscripts are Int64 whatever the
+// literal defaults: `extents(a) == 3` compares Int64s, the elements of `0..4`
+// are Int64, and a literal subscript reads a cell.
+// ============================================================================
+let a = [1.5, 2.5, 3.5]
+let n = extents(a)
+let three = n == 3
+let r = 0..4
+let e: Int64 = r(2)
+let cell = a(1)
+// EXPECT: three = true
+// EXPECT: e = 2
+// EXPECT: cell = 2.5

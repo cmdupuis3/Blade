@@ -17,7 +17,7 @@ function f(st: Tuple<U^1, V^1>) = {
     prodsum(s, t)
 }
 let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let tt = [0.0, 1.0, 2.0]
+let tt = Float64([0.0, 1.0, 2.0])
 let direct = method_for(A) <@> lambda(row: R^1) -> f((row, tt)) |> compute
 // EXPECT: direct = [8.0, 17.0]
 let via_let = method_for(A) <@> lambda(row: R^1) -> {

@@ -1,0 +1,17 @@
+// TEST: a reduction-join leg captured by another leg folds its snapshot
+// Gap G233, round 4 wave 10: the join keeps the leg name p (written
+// `reduce(p, (+))`) and the leg q's kernel captures p, so the prelude forces
+// p under its own name; the C++ lane refused the join (BL7001, the stored
+// leaf had no traversal) and the interpreter fell back. The p leg folds the
+// stored snapshot through its stored-leaf traversal.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + p(1)
+let (s1, s2) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))
+x(0) = 10.0
+let w = p(0)
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: p = [2.0, 4.0]
+// EXPECT: s1 = 6.0
+// EXPECT: s2 = 11.0
+// EXPECT: w = 2.0

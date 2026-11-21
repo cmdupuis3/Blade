@@ -10,8 +10,8 @@
 // not an error in your program"), which was the wrong diagnosis twice over:
 // it is a rule about the program, and the note invited a bug report for a
 // hole nobody intends to fill.
-let region = [0, 1, 0, 0, 1]
-let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let v = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gv = group_by(v, group_keys(region))
 let s = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
 // EXPECT: BL3017 -- bind the keys to a name first, then hand that name to

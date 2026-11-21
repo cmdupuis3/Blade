@@ -1,0 +1,32 @@
+// TEST: A leg capture or seed bound after the producer keeps the legs in their own pass
+// ============================================================================
+// The legs would run at the producer, so everything they read must exist
+// there. In the first region the leg kernels capture `c`, bound between the
+// producer and the legs; in the second the legs' seed `s0` is bound there.
+// Both joins form; the epilogue-legs admission declines both (dominance),
+// and the values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+let (s, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let c = x((1 : Ix)) + 1.0
+    (s, reduce(x, lambda(a, b) -> a + c * b, 0.0) + reduce(y, lambda(a, b) -> a + c * b, 0.0))
+}
+let (s2, t2) = {
+    let x = inputs(9)
+    let y = inputs(4)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u - v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let s0 = x((2 : Ix)) * 10.0
+    (s, reduce(x, (+), s0) + 3.0 * reduce(y, (+), s0))
+}
+// EXPECT: s = 31021.0
+// EXPECT: t = 10014.0
+// EXPECT: s2 = 14179.0
+// EXPECT: t2 = 8591.0

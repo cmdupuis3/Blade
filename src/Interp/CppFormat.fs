@@ -56,8 +56,8 @@ let private Prec = 15
 // digit) and the decimal exponent `x` of that leading digit (the value is
 // d0.d1...d14 * 10^x, exactly what C's "%e" reports after rounding to 15
 // digits), produce the "%.15g" text.
-let private assemble (sign: string) (digits: string) (x: int) : string =
-    if x < -4 || x >= Prec then
+let private assembleP (prec: int) (sign: string) (digits: string) (x: int) : string =
+    if x < -4 || x >= prec then
         // scientific: d[.ddd]e{+|-}dd
         let lead = digits.Substring(0, 1)
         let frac = digits.Substring(1).TrimEnd('0')
@@ -93,33 +93,17 @@ let markFloat (s: string) : string =
         if not (Char.IsAsciiDigit s.[i]) then bare <- false
     if bare then s + ".0" else s
 
-/// printf "%.15g" as rendered by ucrt64 iostreams, before the float marker.
-let private render15 (x: float) : string =
-    if Double.IsNaN x then "nan"
-    elif Double.IsPositiveInfinity x then "inf"
-    elif Double.IsNegativeInfinity x then "-inf"
-    elif x = 0.0 then
-        // IsNegative distinguishes -0.0 from +0.0 by the sign bit.
-        if Double.IsNegative x then "-0" else "0"
-    else
-        let sign = if x < 0.0 then "-" else ""
-        let ax = abs x
-        // "E14" yields exactly 15 significant digits (1 before, 14 after the
-        // point) rounded to nearest, ties-to-even, from the EXACT double value
-        // -- matching ucrt's correctly-rounded %g. A rounding carry (9.99..9 ->
-        // 10.0..0) is normalized by .NET into the reported exponent.
-        let s = ax.ToString("E14", inv)
-        let eidx = s.IndexOf('E')
-        let mantStr = s.Substring(0, eidx)      // "d.dddddddddddddd"
-        let x10 = Int32.Parse(s.Substring(eidx + 1), NumberStyles.Integer, inv)
-        let digits = mantStr.Replace(".", "")   // exactly 15 significant digits
-        assemble sign digits x10
-
-/// Byte-exact mirror of `cout << setprecision(15) << x` (defaultfloat) for a
-/// double: printf "%.15g" as rendered by ucrt64 iostreams, plus the float
-/// marker (`2.0`, never `2`).
-let formatFloat15 (x: float) : string =
-    markFloat (render15 x)
+/// BLADE_PRINT_BITS, the exact-bits channel (round 6: the interpreter reads it
+/// too, so `test interp` can compare a Float32's last bit, which "%.6g" text
+/// hides): `1`/`on` appends each printed float's raw IEEE-754 bits, ` #<16 hex
+/// digits>` for a Float64 and ` #<8 hex digits>` for a Float32 -- the C++
+/// lane's blade_rt::float_put / fmt_f32 and the LLVM shim's blade_fmt_f64 /
+/// blade_fmt_f32 append the same text. Read per call (an env gate is a
+/// function, never a cached value); unset / `0` / `off` / `false` = plain text.
+let printBitsRequested () : bool =
+    match Environment.GetEnvironmentVariable "BLADE_PRINT_BITS" with
+    | null | "" -> false
+    | e -> not (e = "0" || e = "off" || e = "OFF" || e = "false")
 
 /// Layout of the shortest-digit rendering: "%.17g" conventions (fixed notation
 /// for decimal exponents in [-4, 17), scientific otherwise) applied to a digit
@@ -175,11 +159,201 @@ let formatFloatShortest (x: float) : string =
         let x10 = intLen - 1 - (raw.Length - trimmed.Length) + e10
         assembleShortest sign digits x10
 
-/// Byte-exact mirror of `cout << setprecision(15) << f` for a 32-bit float.
-/// iostreams promotes the float to double before formatting, so this is simply
-/// the 15-significant-digit rendering of the float's exact double value.
+/// Shortest round-trip rendering of a FLOAT (the display-frame JSON rule for a
+/// Float32: blade_display::jsonfloat<float>, std::to_chars on the float):
+/// the fewest digits that parse back to the same float32, laid out like
+/// formatFloatShortest.
+let formatFloat32Shortest (x: float32) : string =
+    if Single.IsNaN x then "nan"
+    elif Single.IsPositiveInfinity x then "inf"
+    elif Single.IsNegativeInfinity x then "-inf"
+    elif x = 0.0f then (if Single.IsNegative x then "-0" else "0")
+    else
+        let sign = if x < 0.0f then "-" else ""
+        let s = (abs x).ToString("R", inv)
+        let eidx = s.IndexOf('E')
+        let mant = if eidx < 0 then s else s.Substring(0, eidx)
+        let e10 =
+            if eidx < 0 then 0
+            else Int32.Parse(s.Substring(eidx + 1), NumberStyles.AllowLeadingSign, inv)
+        let pidx = mant.IndexOf('.')
+        let intLen = if pidx < 0 then mant.Length else pidx
+        let raw = mant.Replace(".", "")
+        let trimmed = raw.TrimStart('0')
+        let digits = trimmed.TrimEnd('0')
+        let x10 = intLen - 1 - (raw.Length - trimmed.Length) + e10
+        assembleShortest sign digits x10
+
+/// The `prec` significant decimal digits of a finite nonzero |x| and the
+/// decimal exponent of the first, rounded from the EXACT binary value with
+/// ties to even (IEEE 754 / ucrt's "%.Ng" since Windows 10 2004, glibc's in
+/// the default rounding mode). Exact BigInteger arithmetic: a Float32 has
+/// many exact decimal ties at 6 digits (123456.5f), so no shortcut through
+/// .NET's own digit generation is taken here.
+let private exactDigits (prec: int) (ax: float) : string * int =
+    let bits = BitConverter.DoubleToInt64Bits ax
+    let bexp = int ((bits >>> 52) &&& 0x7FFL)
+    let frac = bits &&& 0xFFFFFFFFFFFFFL
+    let (m, e2) =
+        if bexp = 0 then (frac, -1074) else (frac ||| 0x10000000000000L, bexp - 1075)
+    let num0 = Numerics.BigInteger(m)
+    let (num, den) =
+        if e2 >= 0 then (num0 * Numerics.BigInteger.Pow(Numerics.BigInteger(2), e2), Numerics.BigInteger.One)
+        else (num0, Numerics.BigInteger.Pow(Numerics.BigInteger(2), -e2))
+    // k = floor(log10(ax)), corrected exactly against 10^k <= num/den < 10^(k+1).
+    let ten = Numerics.BigInteger(10)
+    let pow10 (k: int) = Numerics.BigInteger.Pow(ten, k)
+    let geq (k: int) = // num/den >= 10^k
+        if k >= 0 then num >= pow10 k * den else num * pow10 (-k) >= den
+    let mutable k = int (Math.Floor(Math.Log10 ax))
+    while not (geq k) do k <- k - 1
+    while geq (k + 1) do k <- k + 1
+    // q = round(num/den * 10^(prec-1-k)), ties to even.
+    let s = prec - 1 - k
+    let (n2, d2) = if s >= 0 then (num * pow10 s, den) else (num, den * pow10 (-s))
+    let mutable q = Numerics.BigInteger.Divide(n2, d2)
+    let r = n2 - q * d2
+    let c = Numerics.BigInteger.Compare(r * Numerics.BigInteger(2), d2)
+    if c > 0 || (c = 0 && not q.IsEven) then q <- q + Numerics.BigInteger.One
+    if q >= pow10 prec then
+        q <- q / ten
+        k <- k + 1
+    (q.ToString(inv), k)
+
+/// THE DISPLAY FORM's digits (P3-26), step for step blade_shortest.h's
+/// blade_shortest_try / blade_fmt_display_*: the shortest p in [1, 17] (a
+/// Float32: [1, 9]) for which SOME p-digit decimal reads back to the value --
+/// the correctly rounded one (exactDigits), else its neighbour on the other
+/// side of the value -- found by a binary search (it is monotone in p). Not
+/// .NET's "R": at some powers of two it answers 17 digits where 16 read back
+/// (2^-44: "R" says 5.6843418860808015E-14, the shortest is
+/// 5.684341886080802e-14).
+let private displayDigits (isFloat: bool) (ax: float) : string * int =
+    let text (d: string) (k: int) =
+        d.Substring(0, 1) + (if d.Length > 1 then "." + d.Substring(1) else "") + "E" + string k
+    let readsBack (d: string) (k: int) =
+        if isFloat then Single.Parse(text d k, inv) = float32 ax
+        else Double.Parse(text d k, inv) = ax
+    let tryP (p: int) : (string * int) option =
+        let (d, k) = exactDigits p ax
+        if readsBack d k then Some (d, k)
+        else
+            let back = Double.Parse(text d k, inv)
+            let m = Numerics.BigInteger.Parse(d, inv)
+            let lo = Numerics.BigInteger.Pow(Numerics.BigInteger(10), p - 1)
+            let hi = lo * Numerics.BigInteger(10)
+            let m2 = if back < ax then m + Numerics.BigInteger.One else m - Numerics.BigInteger.One
+            let (m2, k2) =
+                if m2 >= hi then (lo, k + 1)
+                elif m2 < lo then (hi - Numerics.BigInteger.One, k - 1)
+                else (m2, k)
+            let d2 = m2.ToString(inv)
+            if readsBack d2 k2 then Some (d2, k2) else None
+    let mutable lo = 1
+    let mutable hi = if isFloat then 9 else 17
+    while lo < hi do
+        let mid = (lo + hi) / 2
+        if (tryP mid).IsSome then hi <- mid else lo <- mid + 1
+    match tryP lo with
+    | Some (d, k) -> (d.TrimEnd('0') |> fun s -> if s = "" then "0" else s), k
+    | None -> exactDigits lo ax
+
+/// The display spelling of a finite or special value (`isFloat`: a Float32's
+/// own digits).
+let private formatDisplay (isFloat: bool) (x: float) : string =
+    if Double.IsNaN x then "nan"
+    elif Double.IsPositiveInfinity x then "inf"
+    elif Double.IsNegativeInfinity x then "-inf"
+    elif x = 0.0 then (if Double.IsNegative x then "-0.0" else "0.0")
+    else
+        let sign = if x < 0.0 then "-" else ""
+        let (digits, k) = displayDigits isFloat (abs x)
+        markFloat (assembleShortest sign digits k)
+
+/// THE DISPLAY FORM's float spelling (P3-26): the shortest round-trip digits,
+/// marked as a float (`2.0`, `-0.0`) -- the twin of blade_shortest.h's
+/// blade_fmt_display_f64 (both compiled lanes). No bit suffix:
+/// BLADE_PRINT_BITS is a test-form instrument.
+let formatDisplayF64 (x: float) : string = formatDisplay false x
+
+/// The display spelling of a Float32: its OWN shortest digits
+/// (blade_fmt_display_f32).
+let formatDisplayF32 (x: float32) : string = formatDisplay true (float x)
+/// THE DISPLAY PRINT FORM (P3-26; Blade.PrintForm), for the duration of one
+/// print pass: set by Print.printBindingsOnly, so a float in a binding's line
+/// (a scalar, an array cell, a struct field, a complex part) prints at its
+/// shortest round-trip digits -- the twin of blade_rt::print_display_flag /
+/// the LLVM shim's blade_print_display. Scoped, never ambient: every other
+/// caller of this module keeps the test spelling.
+let private displaySlot = System.Threading.AsyncLocal<bool>()
+let displayActive () : bool = displaySlot.Value
+let withDisplay (on: bool) (f: unit -> 'a) : 'a =
+    let prior = displaySlot.Value
+    displaySlot.Value <- on
+    try f () finally displaySlot.Value <- prior
+/// printf "%.15g" as rendered by ucrt64 iostreams, before the float marker.
+let private render15 (x: float) : string =
+    if Double.IsNaN x then "nan"
+    elif Double.IsPositiveInfinity x then "inf"
+    elif Double.IsNegativeInfinity x then "-inf"
+    elif x = 0.0 then
+        // IsNegative distinguishes -0.0 from +0.0 by the sign bit.
+        if Double.IsNegative x then "-0" else "0"
+    else
+        let sign = if x < 0.0 then "-" else ""
+        let ax = abs x
+        // "E14" yields exactly 15 significant digits (1 before, 14 after the
+        // point) rounded to nearest, ties-to-even, from the EXACT double value
+        // -- matching ucrt's correctly-rounded %g. A rounding carry (9.99..9 ->
+        // 10.0..0) is normalized by .NET into the reported exponent.
+        let s = ax.ToString("E14", inv)
+        let eidx = s.IndexOf('E')
+        let mantStr = s.Substring(0, eidx)      // "d.dddddddddddddd"
+        let x10 = Int32.Parse(s.Substring(eidx + 1), NumberStyles.Integer, inv)
+        let digits = mantStr.Replace(".", "")   // exactly 15 significant digits
+        assembleP Prec sign digits x10
+
+/// Byte-exact mirror of `cout << setprecision(15) << x` (defaultfloat) for a
+/// double: printf "%.15g" as rendered by ucrt64 iostreams, plus the float
+/// marker (`2.0`, never `2`).
+let formatFloat15 (x: float) : string =
+    if displaySlot.Value then formatDisplayF64 x else
+    let s = markFloat (render15 x)
+    if printBitsRequested () then s + " #" + (uint64 (BitConverter.DoubleToInt64Bits x)).ToString("x16", inv)
+    else s
+
+/// printf "%.Ng" (N = `prec`) of a double, before the float marker.
+let private renderG (prec: int) (x: float) : string =
+    if Double.IsNaN x then "nan"
+    elif Double.IsPositiveInfinity x then "inf"
+    elif Double.IsNegativeInfinity x then "-inf"
+    elif x = 0.0 then (if Double.IsNegative x then "-0" else "0")
+    else
+        let sign = if x < 0.0 then "-" else ""
+        let (digits, k) = exactDigits prec (abs x)
+        assembleP prec sign digits k
+
+/// Float32 print precision: 6 significant digits (FLT_DIG; round 6 rule 8).
+[<Literal>]
+let private Prec32 = 6
+
+/// Byte-exact mirror of the compiled lanes' Float32 spelling: "%.6g" of the
+/// float's value plus the float marker -- blade_rt::fmt_f32 (C++, streamed
+/// through blade_rt::pv) and blade_fmt_f32 (LLVM shim). `0.1f` is "0.1",
+/// `1234567.0f` is "1.23457e+06", `2.0f` is "2.0".
 let formatFloat32 (x: float32) : string =
-    formatFloat15 (float x)
+    if displaySlot.Value then formatDisplayF32 x else
+    let s = markFloat (renderG Prec32 (float x))
+    if printBitsRequested () then s + " #" + (BitConverter.SingleToUInt32Bits x).ToString("x8", inv)
+    else s
+
+/// A Float32 cell the interpreter holds double-backed: rounded to float first
+/// (the compiled lanes store a `float`), then spelled as a Float32.
+let formatFloat32Of (x: float) : string = formatFloat32 (float32 x)
+
+/// `blade_rt::pv(std::complex<float>)`: "(re,im)", each part a Float32.
+let formatComplex64 (re: float) (im: float) : string =
+    "(" + formatFloat32Of re + "," + formatFloat32Of im + ")"
 
 /// Byte-exact mirror of `cout << std::complex<double>(re, im)`:
 /// "(re,im)" with no spaces, each component via formatFloat15 -- so a

@@ -1,7 +1,7 @@
 // TEST: Decompact Out Of Range (rejects)
 // ERROR: BL4004
 // Dimension 5 does not exist.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> x + y
 let sym = L <@> g |> compute

@@ -6,5 +6,5 @@
 // the result type comes from U alone. The pack is passed as a tuple
 // literal; the scalar follows as a separate argument.
 function g(pack: Poly<T^0>, scalar: U) -> U = scalar
-let r = g((1.0, 2.0, 3.0), 42)
+let r = g((Float64(1.0), Float64(2.0), Float64(3.0)), Int64(42))
 // EXPECT: r = 42

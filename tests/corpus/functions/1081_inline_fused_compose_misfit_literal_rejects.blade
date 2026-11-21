@@ -1,0 +1,7 @@
+// TEST: an inline compose whose second stage multiplies by a literal that does not fit the Float32 cells (rejects)
+// ============================================================================
+// G276 (2): the inline spelling of functions/1080.
+// ============================================================================
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let r = ((object_for(lambda(v) -> [v, v]) >>@ object_for(lambda(v) -> v * 1e100)) <@> a) |> compute
+// ERROR: BL3020

@@ -1,0 +1,14 @@
+// TEST: A literal tuple component over a leading opaque RaggedIdx is refused (rejects)
+// ============================================================================
+// Gap G190 (a), Codex diff review of A4: a TUPLE component typed with a
+// leading `RaggedIdx<_>` (and a block-wrapped literal) bypassed the
+// let-annotation refusal: the interpreter printed s = 2.0, the C++ lane
+// emitted `#error ragged literal value count (1) does not match sum of row
+// lengths (0)`. Refused at lowering in every lane.
+// ============================================================================
+type A = Array<Float64 like RaggedIdx<_>>
+let t: (A, Int64) = ([2.0], 1)
+let s = reduce(t[0], (+))
+// ERROR: BL4003
+// ERROR-CONTAINS: has no outer axis for its row lengths to vary over
+// REJECT-AT: lower

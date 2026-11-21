@@ -33,18 +33,10 @@ module Blade.SimplexBlocksCore
 // The landed math (identities shared with the provider)
 // ---------------------------------------------------------------------------
 
-/// C(m, k) -- cardinality arithmetic. Byte-for-byte the provider's `binom`
-/// (ZarrProvider.fs), including its zero answer for k < 0 or m < k, because
-/// the empty-diagonal rule below depends on that zero.
-let binom (m: int64) (k: int) : int64 =
-    if k < 0 || m < int64 k then 0L
-    else
-        let mutable num = 1L
-        let mutable den = 1L
-        for i in 0 .. k - 1 do
-            num <- num * (m - int64 i)
-            den <- den * int64 (i + 1)
-        num / den
+/// C(m, k) -- cardinality arithmetic, with its zero answer for k < 0 or m < k
+/// (the empty-diagonal rule below depends on that zero). One spelling for the
+/// whole compiler: OrbRank.binomOrZero (exact, overflow-checked).
+let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
 
 /// Combinadic rank of a canonical coordinate tuple in ascending-lex order
 /// (sorted; strictly increasing when `strict`). Mirrors
@@ -229,6 +221,40 @@ let packedOffsetR (strict: bool) (n: int64) (coords: int64[]) : int64 =
     for k in 0 .. r - 1 do
         acc <- acc + prefixTerm strict n r k lo coords.[k]
         lo <- coords.[k] + s
+    acc
+
+/// THE PER-COORDINATE SPLIT of `packedOffsetR` (bench G34). Level k's term
+/// reads its lower bound `lo_k = i_(k-1) + strict` and its own coordinate
+/// `i_k`, and is a difference of a function of each -- so regrouping the sum
+/// by coordinate instead of by level gives
+///     offset = sum_{k < r-1} coordTerm k (i_k)  +  i_(r-1)
+/// with every `coordTerm k` a function of ONE sorted coordinate:
+///     -C(n - i_k + d_k, m_k + 1)                      (level k's own end)
+///     + C(n - (i_k + s) + d_(k+1), m_(k+1) + 1)       (level k+1's start, k+1 < r-1)
+///       or -(i_k + s)                                 (the affine last level's start)
+///     + C(n + d_0, m_0 + 1)                           (level 0's start, k = 0 only)
+/// (m_k = r-k-1, d_k = m_k symmetric / 0 strict, s = strict). For a static
+/// extent each `coordTerm k` tabulates over 0 .. n-1, so the canonicalizing
+/// read is r-1 table loads and r-1 adds where the level form spends 2(r-1)
+/// runtime binomials. Holds for r >= 2; the property pins assert it equals
+/// `packedOffsetR` on every canonical cell.
+let coordTerm (strict: bool) (n: int64) (r: int) (k: int) (x: int64) : int64 =
+    let s = if strict then 1L else 0L
+    let dOf m = if strict then 0L else int64 m
+    let m = r - k - 1
+    let own = - binom (n - x + dOf m) (m + 1)
+    let next =
+        if k + 1 < r - 1 then binom (n - (x + s) + dOf (m - 1)) m
+        else - (x + s)
+    let head = if k = 0 then binom (n + dOf m) (m + 1) else 0L
+    head + own + next
+
+/// `packedOffsetR` through `coordTerm` (the regrouped sum above).
+let packedOffsetSplit (strict: bool) (n: int64) (coords: int64[]) : int64 =
+    let r = coords.Length
+    let mutable acc = coords.[r - 1]
+    for k in 0 .. r - 2 do
+        acc <- acc + coordTerm strict n r k coords.[k]
     acc
 
 /// Cells in a whole rank-r pool: C(n+r-1, r) symmetric, C(n, r) antisymmetric.

@@ -8,9 +8,10 @@
 // explicitly.
 //
 // The pinned values are the proof of width: 0.1 is not representable in
-// float32, so a Float32 result prints the f32-rounded quantity
-// (0.100000001490116) while a promoted Float64 result prints clean halves
-// and tenths. The negated-literal spelling (`* -2.0`) rides the same
+// float32, so a Float32 result widened to Float64 shows the f32-rounded
+// quantity (`sw`: 0.349999994039536) while a promoted Float64 result prints
+// clean halves and tenths (a Float32 itself prints its 6 significant digits,
+// round 6 rule 8). The negated-literal spelling (`* -2.0`) rides the same
 // adaptation (the unary node is rebuilt with its inner literal).
 // ============================================================================
 type I2 = Idx<2>
@@ -19,12 +20,14 @@ let b = a * 1.0
 let s = reduce(b, (+))
 let neg = a * -2.0
 let sn = reduce(neg, (+))
+let sw = Float64(s)
 let sc = a((0 : I2)) * 0.5
-let w = 1.0
+let w: Float64 = 1.0
 let wide = Float64(a((1 : I2))) * w
-// EXPECT: b = [0.100000001490116, 0.25]
-// EXPECT: s = 0.349999994039536
-// EXPECT: neg = [-0.200000002980232, -0.5]
-// EXPECT: sn = -0.699999988079071
-// EXPECT: sc = 0.0500000007450581
+// EXPECT: b = [0.1, 0.25]
+// EXPECT: s = 0.35
+// EXPECT: sw = 0.349999994039536
+// EXPECT: neg = [-0.2, -0.5]
+// EXPECT: sn = -0.7
+// EXPECT: sc = 0.05
 // EXPECT: wide = 0.25

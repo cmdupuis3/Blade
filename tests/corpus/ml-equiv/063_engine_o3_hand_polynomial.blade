@@ -44,8 +44,8 @@ let static Q = [(2, 0, 1)]
 // The engine sees Σ u_i v_i, whose defect vanishes at every generator, and
 // whose monomials all carry two odd factors — even under −I, matching the
 // invariant return.
-function dot3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-              where ml.equiv(O3) -> Float =
+function dot3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+              where ml.equiv(O3) -> Float64 =
     u(0) * v(0) + u(1) * v(1) + u(2) * v(2)
 
 // --- 2. THE CROSS PRODUCT ---------------------------------------------------
@@ -53,8 +53,8 @@ function dot3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V
 // derive_poly family never covered. The real-basis component order is
 // (m = −1, 0, +1) = (y, z, x), a cyclic relabelling of the Cartesian axes, so
 // the cyclic formula transcribes unchanged.
-function cross3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<VE>> =
+function cross3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<VE>> =
     [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
 
 // THE UNCERTIFIED TWIN. Stage 6a's inference channel runs the same judgment
@@ -62,17 +62,17 @@ function cross3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx
 // changed for either engine half.
 //
 // SUGGEST: function 'cross_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: u transforms as IrrepsIdx<[(1, 1, 1)]>, v transforms as IrrepsIdx<[(1, 1, 1)]> -> IrrepsIdx<[(1, 0, 1)]>]
-function cross_loose(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>)
-                     -> Array<Float like IrrepsIdx<VE>> =
+function cross_loose(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>)
+                     -> Array<Float64 like IrrepsIdx<VE>> =
     [u(1) * v(2) - u(2) * v(1), u(2) * v(0) - u(0) * v(2), u(0) * v(1) - u(1) * v(0)]
 
 // --- 3. THE SCALAR TRIPLE PRODUCT -------------------------------------------
 // Trilinear, degree 3, and a PSEUDOscalar: three odd factors per monomial, so
 // it flips under −I and only an (l = 0, ODD) return is true. Corpus 064 pins
 // all three verdicts of the same body.
-function triple(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
-                w: Array<Float like IrrepsIdx<V>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<PS>> =
+function triple(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>,
+                w: Array<Float64 like IrrepsIdx<V>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<PS>> =
     [u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0))]
@@ -84,8 +84,8 @@ function triple(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx
 // componentwise zero in that vector. This is the anchor for §3.5's claim that
 // the linearity resolution beats the old l ≤ 1 restriction: nothing here would
 // be checkable if the discharge had to multiply radicals, and it never does.
-function radial(x: Array<Float like IrrepsIdx<Q>>)
-                where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> = {
+function radial(x: Array<Float64 like IrrepsIdx<Q>>)
+                where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<Q>> = {
     let r2 = x(0) * x(0) + x(1) * x(1) + x(2) * x(2) + x(3) * x(3) + x(4) * x(4)
     [r2 * x(0), r2 * x(1), r2 * x(2), r2 * x(3), r2 * x(4)]
 }
@@ -99,12 +99,12 @@ function radial(x: Array<Float like IrrepsIdx<Q>>)
 // INTEGER table this stage derives, so the equivariance conclusion can be
 // pinned with no floating-point tolerance at all.
 // ============================================================================
-let u = [1.0, 2.0, 3.0]
-let v = [4.0, 5.0, 6.0]
-let w = [7.0, 8.0, 10.0]
+let u = Float64([1.0, 2.0, 3.0])
+let v = Float64([4.0, 5.0, 6.0])
+let w = Float64([7.0, 8.0, 10.0])
 // R₉₀ᶻ applied to each input, by the signed permutation above.
-let ru = [3.0, 2.0, 0.0 - 1.0]
-let rv = [6.0, 5.0, 0.0 - 4.0]
+let ru = Float64([3.0, 2.0, 0.0 - 1.0])
+let rv = Float64([6.0, 5.0, 0.0 - 4.0])
 
 let d0 = dot3(u, v)
 // EXPECT: d0 = 32.0
@@ -130,8 +130,8 @@ let t1 = triple([0.0 - 1.0, 0.0 - 2.0, 0.0 - 3.0], [0.0 - 4.0, 0.0 - 5.0, 0.0 - 
                 [0.0 - 7.0, 0.0 - 8.0, 0.0 - 10.0])
 // EXPECT: t1 = [3.0]
 
-let q = [1.0, 2.0, 3.0, 4.0, 5.0]
-let rq = [0.0 - 1.0, 4.0, 3.0, 0.0 - 2.0, 0.0 - 5.0]
+let q = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
+let rq = Float64([0.0 - 1.0, 4.0, 3.0, 0.0 - 2.0, 0.0 - 5.0])
 let g0 = radial(q)
 // EXPECT: g0 = [55.0, 110.0, 165.0, 220.0, 275.0]
 // ρ(R)·radial(q) = (−55, 220, 165, −110, −275) = radial(ρ(R)q).

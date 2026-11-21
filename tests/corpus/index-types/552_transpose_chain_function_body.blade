@@ -1,0 +1,22 @@
+// TEST: Transpose Chain Function Body
+// Inside a function body (transpose-normal-form v1): an identity chain as an
+// assignable let's whole value becomes `let t = m`, which deep-copies m like
+// any assignable array let; an identity chain RETURNED over a parameter is
+// declined (the operand would alias the caller's argument) and keeps its
+// copies; an odd chain is one swap. The caller's array is never changed.
+function keep(m: T^2) -> T^2 = {
+    let t = transpose(transpose(m, [0, 1]), [0, 1])
+    t
+}
+function back(m: T^2) -> T^2 = transpose(transpose(m, [0, 1]), [0, 1])
+function flip3(m: T^2) -> T^2 = transpose(transpose(transpose(m, [0, 1]), [0, 1]), [0, 1])
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let K = keep(M)
+let B = back(M)
+let F = flip3(M)
+K(0, 0) = 9.0
+B(0, 1) = 8.0
+// EXPECT: M = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: K = [9.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: B = [1.0, 8.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: F = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]

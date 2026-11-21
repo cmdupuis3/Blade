@@ -1,0 +1,15 @@
+// TEST: A Map Kernel Forwarding Generic Bool Cells To A Float-Decided Lambda Is Refused (rejects)
+// ERROR: BL3001 @ 11:26
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: `h` forwards each Bool cell to `g`, an alias of `f`, whose parameter
+// `f(1.0)` decided: base printed `r = 2.0` (true doubled), both lanes.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x * 2.0
+    let a = f(1.0)
+    let g = f
+    let h = lambda(y) -> g(y)
+    reduce(method_for(b) <@> h, (+))
+}
+let r = outer([true, false])

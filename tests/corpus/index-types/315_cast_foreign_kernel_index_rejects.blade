@@ -7,5 +7,5 @@
 // 3.10's nominal rule). The refusal names the spelling that converts.
 type State = Idx<6>
 type W = Idx<3>
-let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+let s: Array<Float64 like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
 let bad = method_for(range<W>) <@> lambda(k) -> s((k : State)) |> compute

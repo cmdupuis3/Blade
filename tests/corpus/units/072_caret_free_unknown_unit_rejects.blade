@@ -12,5 +12,5 @@
 // nominal mismatch at the first call.
 Unit second
 function f(t: T<secnd>) -> Float64 = 1.0
-let r = f(1.0)
+let r = f(Float64(1.0))
 // EXPECT: typecheck failure -- 'secnd' is not a declared unit

@@ -7,5 +7,5 @@ import ml as ml
 // Wigner action). Gate with ml.gated, or extract invariants first. BL4008.
 // ============================================================================
 let static S = [(0, 0, 1), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
   exp(x)

@@ -1,0 +1,24 @@
+// TEST: Compaction fusion T4c: a probe membership hoisting declines is not certified
+// The set `logged` is built by a call that WRITES (`make` bumps a `mut`
+// parameter), so membership hoisting declines `keep`'s probe (the per-probe
+// scan stays as written) and the predicate is NOT certified: the shared
+// selection declines with that reason (`blade plan`: `the membership probe is
+// not certified: member-hoist did not admit ...`), and the compound keeps its
+// own passes. Every value is the as-written program's.
+type One = Idx<1>
+type Three = Idx<3>
+type Row = Idx<6>
+let mut log: Array<Int64 like One> = [0]
+function make(l: mut Array<Int64 like One>) -> Array<Int64 like Three> = {
+    l(0) = l(0) + 1
+    [4, 8, 15]
+}
+let src: Array<Int64 like Row> = [4, 8, 9, 15, 16, 23]
+let amt: Array<Float64 like Row> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let logged = make(log)
+let keep = mask(src, lambda(v) -> contains(logged, v))
+let y = compound(amt, keep)
+// EXPECT: y = [1.0, 2.0, 4.0]
+let s = reduce(y, (+))
+// EXPECT: s = 7.0
+// EXPECT: log = [1]

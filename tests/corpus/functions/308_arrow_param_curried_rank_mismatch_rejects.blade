@@ -4,6 +4,6 @@
 // `c(0)(1)` reads a rank-2 array (or calls a function returning a function).
 // Before the chain was one obligation, `v(0)` was the element and `(1)` was
 // applied to it vacuously -- this checked with a `Bool` result.
-function cc(c) = c(0)(1)
-let v = [1.0, 2.0]
+function cc(c) = c(Int64(0))(Int64(1))
+let v = Float64([1.0, 2.0])
 let x: Bool = cc(v)

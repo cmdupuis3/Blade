@@ -1,9 +1,9 @@
 // TEST: Static Conditional
 // Static function with conditional
 static function clamp(x, lo, hi) = if x < lo then lo else if x > hi then hi else x
-let static a = clamp(15, 0, 10)
-let static b = clamp(-5, 0, 10)
-let static c = clamp(7, 0, 10)
+let static a = clamp(Int64(15), Int64(0), Int64(10))
+let static b = clamp(Int64(-5), Int64(0), Int64(10))
+let static c = clamp(Int64(7), Int64(0), Int64(10))
 let x = a
 let y = b
 let z = c

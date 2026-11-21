@@ -3,8 +3,8 @@
 // s = [0, x^2, 2x^2, 3x^2], reduce = 6x^2; at x = 2: primal 24, d = 12x = 24.
 import ad as ad
 
-function f(x: Float) -> Float = {
-    let rec s: Array<Float like Idx<4>> =
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<4>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: 0.0
@@ -12,8 +12,8 @@ function f(x: Float) -> Float = {
     reduce(s, (+))
 }
 
-let (gv, gd) = ad.grad(f)(2.0)
-let (jv, jt) = ad.jvp(f)(2.0, 1.0)
+let (gv, gd) = ad.grad(f)(Float64(2.0))
+let (jv, jt) = ad.jvp(f)(Float64(2.0), Float64(1.0))
 let tresid = jt - gd
 // EXPECT: jv = 24.0
 // EXPECT: jt = 24.0

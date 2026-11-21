@@ -1,0 +1,8 @@
+// TEST: a named Float64 predicate over Float32 cells (rejects)
+// ============================================================================
+// G276 (1): each cell would be converted into the predicate's parameter.
+// ============================================================================
+function p64(v: Float64) -> Bool = v > 1.5
+let a: Array<Float32 like Idx<2>> = [2.0, 1.0]
+let r = mask(a, p64)
+// ERROR: BL3020

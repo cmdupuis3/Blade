@@ -1,0 +1,20 @@
+// TEST: a lambda applied where it is written takes its parameters' widths from its one call
+// ============================================================================
+// G275: the call is the lambda's one use, so it decides the parameters the
+// body left open -- a fixed argument before the body is typed, a literal at
+// the call. The base defaulted them to Float64 and converted every argument:
+// r1 was 7.0, r3 the Float64 3.5 (an integer division computed in floats).
+// ============================================================================
+let a: Float32 = 1.5
+let r1 = (lambda(x) -> x)(7)
+// EXPECT: r1 = 7
+let r2 = (lambda(x) -> x)(Int64(7))
+// EXPECT: r2 = 7
+let r3 = (lambda(x) -> x / 2)(Int64(7))
+// EXPECT: r3 = 3
+let r4 = (lambda(x) -> x + 1.0)(a)
+// EXPECT: r4 = 2.5
+let r5 = (lambda(x, y) -> x + y)(Int64(3), Int64(4))
+// EXPECT: r5 = 7
+let r6 = (lambda(x) -> x * 2.5)(Float64(3.0))
+// EXPECT: r6 = 7.5

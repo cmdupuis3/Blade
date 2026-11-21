@@ -1,0 +1,17 @@
+// TEST: a field of a struct stored in a captured plain let array, written through a tuple alias (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review; Codex review of the fix, round 3): the store's target is a
+// FIELD, but the struct that holds it is a cell of `G`, so the store writes
+// `G` -- a field store is judged by the storage that CONTAINS the field (a
+// first cut that judged field stores by struct carriers only accepted this).
+struct Cell { x: Int64 }
+type A = Array<Cell like Idx<1>>
+let G: A = [Cell { x = 1 }]
+function f() -> Int64 = {
+    let t = (G, 0)
+    t[0](0).x = 7
+    t[0](0).x
+}
+let z = f()

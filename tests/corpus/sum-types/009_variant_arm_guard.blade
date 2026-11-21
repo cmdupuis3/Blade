@@ -32,8 +32,8 @@ let s = match y with
 // Enum-like (no payload) arms take the same path: tag test, then guard.
 type Direction = North | South | East | West
 let d = South
-let t = match d with
-    | South if 1 > 2 -> 100
+let t: Int64 = match d with
+    | South if Int64(1) > Int64(2) -> 100
     | South -> 2
     | North -> 1
     | East -> 3

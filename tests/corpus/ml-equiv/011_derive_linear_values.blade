@@ -12,5 +12,5 @@ let static SOUT = [(0, 0, 1), (1, 1, 2)]
 let static WD = ml.hom_dim(SIN, SOUT)
 let wd = WD
 // EXPECT: wd = 4
-let out: Array<Float like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, [0.5, -1.0, 2.0, 0.25], [1.0, 2.0, 3.0, -1.0, 0.5])
+let out: Array<Float64 like IrrepsIdx<SOUT>> = ml.derive_linear(SIN, SOUT, Float64([0.5, -1.0, 2.0, 0.25]), Float64([1.0, 2.0, 3.0, -1.0, 0.5]))
 // EXPECT: out = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]

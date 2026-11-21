@@ -1,0 +1,34 @@
+// st05_costly -- ST05 inputonly twin of the producer -> distant consumers frontier (bench/RESULTS.md section 20 (round 4 wave 5, lane E))
+//
+//   p = exp(sin v) cos v;  a = sum p;  mid = sum x * y;  b = 1 + sum p;  checksum = a + mid + b
+// Two fold consumers of p separated by an unrelated pass. Arms (each arm's plan.txt records the
+// rules it took): the default plan; `share` (BLADE_RECOMPUTE=0: the sibling-fold join + the join
+// producer, p evaluated once per cell inside ONE traversal); `nojoin` (no sibling-fold join, no
+// join producer: the recompute cost model decides replay vs materialization); `materialize`
+// (all three off: p stored once, read by two passes).
+
+type Ix = Idx<3000017>   // SIZE n
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function hash(k: Int64, seed: Int64) -> Int64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    (h4 * 1103515245 + 12345) % 2147483648
+}
+
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    lo + (hi - lo) * (Float64(hash(k, seed)) / 2147483648.0)
+}
+
+function inputs(seed: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), seed, 0.0, 1.0) |> compute
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs(10000019)
+    let y = inputs(20000038)
+    (Float64(0.0), reduce(x, (+)) + reduce(y, (+)))
+}

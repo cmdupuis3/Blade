@@ -7,14 +7,14 @@
 // Fusion now declines when an inlined kernel's free name is bound
 // differently at the site, and the staged application keeps the kernel's
 // own scope.
-let scale = 10.0
+let scale: Float64 = 10.0
 function add_global(x: Float64) -> Float64 = x + scale
 function piped(scale: Float64) = {
-    let a = [1.0, 2.0]
+    let a = Float64([1.0, 2.0])
     (object_for(add_global) >>@ object_for(lambda(y) -> y)) <@> a |> compute
 }
-let result = piped(100.0)
-let direct = add_global(1.0)
+let result = piped(Float64(100.0))
+let direct = add_global(Float64(1.0))
 // EXPECT: scale = 10.0
 // EXPECT: result = [11.0, 12.0]
 // EXPECT: direct = 11.0

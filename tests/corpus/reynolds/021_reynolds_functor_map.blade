@@ -5,8 +5,8 @@
 // re-wraps the inner with IRReynolds preserving isAntisymmetric;
 // without this rewrap, `twice` would be applied to the bare kernel
 // output instead of the Reynolds permutation sum.
-let A = [1.0, 2.0]
-let B = [3.0, 4.0]
+let A = Float64([1.0, 2.0])
+let B = Float64([3.0, 4.0])
 let g = lambda(x, y) -> x * y
 let twice = lambda(z) -> z * 2.0
 let result = twice <$> (method_for(A, B) <@> reynolds(g)) |> compute

@@ -1,6 +1,6 @@
 // TEST: Cons Destructure
 // :: destructuring pattern
-let t = (1, 2, 3)
+let t = (Int64(1), Int64(2), Int64(3))
 let head :: tail = t
 // head binds tuple element 0; tail binds the REMAINDER — the 2-tuple (2, 3),
 // NOT element 1. (It used to bind element 1, and both names came out Float64

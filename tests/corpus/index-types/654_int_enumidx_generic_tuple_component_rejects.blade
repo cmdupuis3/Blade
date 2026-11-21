@@ -1,0 +1,14 @@
+// TEST: A generic body computing on an R component of a tuple is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: POSITIONS
+// ============================================================================
+// R3, a defect closed: the base computed `t[0] + 1` on the POSITION of the
+// tuple's R component (and typed it Float64). The call observes a value of
+// R, or an array of them, not one inside a tuple; the specialized body is
+// judged by the whitelist backstop, where arithmetic on a value of R is
+// refused.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function f(t: T) = t[0] + 1
+let v = f((codes(0), Float64(2.0)))

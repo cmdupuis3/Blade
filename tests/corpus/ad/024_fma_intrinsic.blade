@@ -9,7 +9,7 @@ import ad as ad
 // value does.
 //   f(x) = fma(x, x, 3x) = x^2 + 3x,  f'(x) = 2x + 3;  at x = 2: (10, 7)
 // ============================================================================
-function f(x: Float) -> Float = fma(x, x, 3.0 * x)
+function f(x: Float64) -> Float64 = fma(x, x, 3.0 * x)
 let (fv, dfdx) = ad.grad(f)(2.0)
 // EXPECT: fv = 10.0
 // EXPECT: dfdx = 7.0

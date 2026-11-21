@@ -16,7 +16,7 @@
 // operand reaching the multi-array nest.
 let lens: Array<Int64 like Idx<2>> = [2, 1]
 let r: Array<Float64 like Idx<2>, RaggedIdx<lens>> = [[1.0, 2.0], [3.0]]
-let d = [10.0, 20.0]
+let d = Float64([10.0, 20.0])
 let x = method_for(r, d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>, y) -> reduce(g, (+)) + y |> compute
 // This program TYPE-CHECKS and LOWERS: the gate is the codegen `#error` guard
 // emitted for multi-array method_for over a ragged operand, which g++ then

@@ -1,0 +1,27 @@
+// TEST: AD Inlined Callee Locals Do Not Capture User Bindings Spelled Like Them
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3, the class-closure review of ad-checkpoint:
+// synthesized-name HYGIENE). The AD normalizer inlines `sq` into `f`,
+// renaming its locals `__in<N>_t` / `__in<N>_u` with a fresh tag. The tag was
+// minted from a counter alone, so a user binding spelled `__in1_t` was
+// SHADOWED by the inlined local: master printed r = (990.0, 654.0) in every
+// lane (the default build, no knob). `fresh` / `freshTag` now skip every
+// spelling the program uses (GradCommon.mintedTaken, Grad.programIdentifiers).
+// y = x^2 + 1 = 10, the sum is 100: value 1000, d/dx = 2 x * 100 = 600.
+// ============================================================================
+function sq(p: Float64) -> Float64 = {
+    let t = p * p
+    let u = t + 1.0
+    u
+}
+function f(x: Float64) -> Float64 = {
+    let __in1_t = 10.0
+    let __in2_t = 20.0
+    let __in3_t = 30.0
+    let __in4_t = 40.0
+    let y = sq(x)
+    y * (__in1_t + __in2_t + __in3_t + __in4_t)
+}
+let r = ad.grad(f)(Float64(3.0))
+// EXPECT: r = (1000.0, 600.0)

@@ -1,0 +1,19 @@
+// TEST: A Forwarded Callback Parameter Is Judged By Its Call Sites
+// ============================================================================
+// Gap G240 (3), round 4 wave 10 (lane C, C3): a function forwarding its OWN
+// function-typed parameter to a mut helper was refused (the callback's reads
+// untraced) even when every call site passes a resolved function. The
+// parameter now runs the callables its direct call sites pass there; safe
+// reads nothing the mut argument holds.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function helper(cb: Float64 -> Float64, y: mut A) -> Float64 = {
+    y(0) = cb(y(1))
+    y(0)
+}
+function outer(cb: Float64 -> Float64, y: mut A) -> Float64 = helper(cb, y)
+function safe(v: Float64) -> Float64 = v * 2.0
+let mut g: A = [1.0, 2.0]
+let r = outer(safe, g)
+// EXPECT: r = 4.0
+// EXPECT: g = [4.0, 2.0]

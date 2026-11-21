@@ -1,0 +1,17 @@
+// TEST: Replay Declines Deferred Input
+// ============================================================================
+// The C++ lane's replay admission (rule `rec-print-replay`) DECLINES a sweep
+// that reads a DEFERRED module map (`g`, no `|> compute`): each read forces
+// its kernel, which a print-time replay would run again. The trajectory is
+// stored in full, as written.
+// ============================================================================
+type Step = Idx<6>
+
+let g = method_for(0..4) <@> lambda(i) -> Float64(i) * 0.5
+
+let rec x: Array<Float64 like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) + g(2)
+// EXPECT: x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]

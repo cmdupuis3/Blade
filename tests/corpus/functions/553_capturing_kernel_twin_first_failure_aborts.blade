@@ -1,0 +1,17 @@
+// TEST: A failing capturing kernel folded in a repro body keeps its first failure (aborts)
+// Gap G80. The repro twin of `divc` fails exactly as `divc` does: the first
+// application divides by the zero cell inside the lambda `h` it lifts (which
+// captures the parameter `a`), BL8013 at that division's own line, the
+// frames `h`, `divc` (the twin prints its origin's name), `rf`.
+type N = Idx<3>
+let v: Array<Int64 like N> = [4, 0, 2]
+function divc(a: Int64, b: Int64) -> Int64 = {
+    let h = lambda(x: Int64) -> a / x
+    h(b)
+}
+function rf() where repro -> Int64 = reduce(v, divc, 100)
+let s = rf()
+// ABORT: error[BL8013]: integer division by zero
+// ABORT:   at h
+// ABORT:   at divc
+// ABORT:   at rf

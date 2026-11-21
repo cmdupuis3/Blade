@@ -24,9 +24,9 @@ function test2(a: Nat) = {
 type Slot = Idx<4>
 function test3(i: Nat<Slot>) = {
     match i with
-    | 0 -> 10
-    | 1 -> 20
-    | _ -> 30
+    | 0 -> Int64(10)
+    | 1 -> Int64(20)
+    | _ -> Int64(30)
 }
 
 let a1 = test1(2)

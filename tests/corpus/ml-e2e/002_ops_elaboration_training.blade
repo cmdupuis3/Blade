@@ -34,10 +34,10 @@ let static sh2 = ml.sh_spec(2)
 let static cfg1 = (spec_in, sh2, spec_h)
 let static cfg2 = (spec_h, sh2, spec_out)
 
-let static nn = 5                      // nodes per graph
-let static ne = 20                     // edges (complete digraph)
-let static ng = 4                      // graphs
-let static nsteps = 30                 // training steps
+let static nn: Int64 = 5                      // nodes per graph
+let static ne: Int64 = 20                     // edges (complete digraph)
+let static ng: Int64 = 4                      // graphs
+let static nsteps: Int64 = 30                 // training steps
 
 let static dh = ml.total_dim(spec_h)      // 13
 let static dout = ml.total_dim(spec_out)  // 2
@@ -50,33 +50,33 @@ let static w2dim = ml.linear_weight_dim(spec_h, spec_h) // 9
 let static w3dim = ml.tp_weight_dim(cfg2)              // 10
 
 // ---- graph structure: complete digraph on 5 nodes -------------------------
-let edge_src = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
-let edge_tgt = [1, 2, 3, 4, 0, 2, 3, 4, 0, 1, 3, 4, 0, 1, 2, 4, 0, 1, 2, 3]
+let edge_src = Int64([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4])
+let edge_tgt = Int64([1, 2, 3, 4, 0, 2, 3, 4, 0, 1, 3, 4, 0, 1, 2, 4, 0, 1, 2, 3])
 // incoming edges per node (inverse of edge_tgt, increasing edge order = scatter order)
-let in_edges = [4, 8, 12, 16, 0, 9, 13, 17, 1, 5, 14, 18, 2, 6, 10, 19, 3, 7, 11, 15]
+let in_edges = Int64([4, 8, 12, 16, 0, 9, 13, 17, 1, 5, 14, 18, 2, 6, 10, 19, 3, 7, 11, 15])
 
 // ---- dataset (identical to ml-e2e/001) -------------------------------------
-let all_pos = [
+let all_pos = Float64([
     -0.9277730174026326, 0.260674155904294, -0.12888052180822962, -0.8205080795197319, -0.39991573961447724, -0.07277131503111278, -0.6650382940028973, -0.7183629198551005, -0.41897464237128135, 0.38793312636573485, 0.20681197997499812, -0.570749689624994, 0.7254539596501057, -0.7475951722579055, 0.32338732915156854,
     -0.21552024838306016, 0.5496585804734653, 0.32854333488668463, 0.8653912552936893, -0.7259869248261615, 0.24281667417046449, -0.21346190721423453, -0.015324770014418676, -0.5335476182091737, 0.9990452323104466, 0.4360941161569647, 0.9032514355626198, 0.5348355153272093, 0.2919918556194714, 0.6444815404920288,
     -0.6112289827369288, -0.6028697423650277, -0.9408586937658762, -0.22424746734287937, 0.3559937315788091, -0.9234784636290178, -0.060761681320500416, 0.2505289023977373, -0.6876353601401837, 0.30309757092180556, 0.9638697439636428, -0.2640141757503218, 0.7476885196509251, 0.1503391913838401, 0.06235980105696237,
-    -0.8593094078168783, 0.3502864760115214, 0.8151846983540731, -0.41801987468172785, 0.9518390102087702, 0.30356054441237856, -0.10558520495220325, -0.5665378959693657, -0.39207671274993416, 0.7370725179729389, -0.012177581438877372, 0.04081812921949579, -0.19540978185618751, 0.8276909272315405, -0.319256235528391]
-let all_feat = [
+    -0.8593094078168783, 0.3502864760115214, 0.8151846983540731, -0.41801987468172785, 0.9518390102087702, 0.30356054441237856, -0.10558520495220325, -0.5665378959693657, -0.39207671274993416, 0.7370725179729389, -0.012177581438877372, 0.04081812921949579, -0.19540978185618751, 0.8276909272315405, -0.319256235528391])
+let all_feat = Float64([
     -0.15274026857350964, -0.0024717110220676686, -0.6380246801478904, 0.9032669458087845, 0.06951478173468018,
     0.5863148111786296, 0.8594373128653678, 0.9567101597584367, 0.5573851017082971, -0.9244239814227558,
     -0.4774315978760978, 0.9321308210176094, 0.005728222898081059, 0.9054788453064295, 0.35726758621505805,
-    -0.6126505060180325, 0.4905172742393413, -0.4472091977704359, -0.49060247628511977, -0.8025084611971436]
-let targets = [2.4891719023683296, 2.4811582292885235, 3.238512152035927, 2.0886398140556697]
+    -0.6126505060180325, 0.4905172742393413, -0.4472091977704359, -0.49060247628511977, -0.8025084611971436])
+let targets = Float64([2.4891719023683296, 2.4811582292885235, 3.238512152035927, 2.0886398140556697])
 
-let w1_init = [-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814]
-let w2_init = [-0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046]
-let w3_init = [0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613]
-let wr_init = [-0.34236242381965853, -0.03847419262792645]
-let br_init = [0.0]
-let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731]
+let w1_init = Float64([-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814])
+let w2_init = Float64([-0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046])
+let w3_init = Float64([0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613])
+let wr_init = Float64([-0.34236242381965853, -0.03847419262792645])
+let br_init = Float64([0.0])
+let rot = Float64([0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731])
 
 // edge-vector buffer: ev(s*60+e*3+c) = pos(src) - pos(tgt), built per flat slot.
-function evslot(i: Int64) -> Float = {
+function evslot(i: Int64) -> Float64 = {
     let s = i / ev_len
     let rem = i - s * ev_len
     let ed = rem / 3
@@ -84,7 +84,7 @@ function evslot(i: Int64) -> Float = {
     all_pos(s * 15 + edge_src(ed) * 3 + c) - all_pos(s * 15 + edge_tgt(ed) * 3 + c)
 }
 let all_ev = {
-    let rec ev: Array<Float like Idx<240>> =
+    let rec ev: Array<Float64 like Idx<240>> =
         match ev with
         | zero -> zero
         | prefix :: i -> prefix :: evslot(i)
@@ -96,7 +96,7 @@ let all_ev = {
 // conv1: gather source scalar per incoming edge, expand the edge vector in Y<=2,
 // tensor-product into a 13-dim message. Slot j (node j/dh, component c=j%dh) is
 // the sum over the node's incoming edges of the elaborated-TP message(c).
-function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64, j: Int64) -> Float = {
+function conv1_slot(evs: Array<Float64 like Idx<240>>, w: Array<Float64 like Idx<5>>, s: Int64, j: Int64) -> Float64 = {
     let node = j / dh
     let c = j - node * dh
     let vb = s * ev_len
@@ -119,8 +119,8 @@ function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>
     let m3 = ml.tensor_product(cfg1, xf3, sh3, w)
     m0(c) + m1(c) + m2(c) + m3(c)
 }
-function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64) -> Array<Float like Idx<65>> = {
-    let rec out: Array<Float like Idx<65>> =
+function conv1(evs: Array<Float64 like Idx<240>>, w: Array<Float64 like Idx<5>>, s: Int64) -> Array<Float64 like Idx<65>> = {
+    let rec out: Array<Float64 like Idx<65>> =
         match out with
         | zero -> zero
         | prefix :: j -> prefix :: conv1_slot(evs, w, s, j)
@@ -129,8 +129,8 @@ function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: 
 
 // the source node's 13-dim feature block, built by construction so grad's
 // cotangent flows back into h (an array literal would not carry it).
-function hblock(h: Array<Float like Idx<65>>, sb: Int64) -> Array<Float like Idx<13>> = {
-    let rec r: Array<Float like Idx<13>> =
+function hblock(h: Array<Float64 like Idx<65>>, sb: Int64) -> Array<Float64 like Idx<13>> = {
+    let rec r: Array<Float64 like Idx<13>> =
         match r with
         | zero -> zero
         | prefix :: c -> prefix :: h(sb + c)
@@ -139,7 +139,7 @@ function hblock(h: Array<Float like Idx<65>>, sb: Int64) -> Array<Float like Idx
 // conv2: specH (x) Y<=2 -> specOut, gathered per node. Slot k (node k/dout,
 // component mo=k%dout) is the sum over incoming edges of the elaborated-TP
 // message(mo) built from the source node's h-block.
-function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64, kk: Int64) -> Float = {
+function conv2_slot(h: Array<Float64 like Idx<65>>, evs: Array<Float64 like Idx<240>>, w: Array<Float64 like Idx<10>>, s: Int64, kk: Int64) -> Float64 = {
     let node = kk / dout
     let mo = kk - node * dout
     let vb = s * ev_len
@@ -161,8 +161,8 @@ function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>
     let m3 = ml.tensor_product(cfg2, xf3, sh3, w)
     m0(mo) + m1(mo) + m2(mo) + m3(mo)
 }
-function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64) -> Array<Float like Idx<10>> = {
-    let rec out: Array<Float like Idx<10>> =
+function conv2(h: Array<Float64 like Idx<65>>, evs: Array<Float64 like Idx<240>>, w: Array<Float64 like Idx<10>>, s: Int64) -> Array<Float64 like Idx<10>> = {
+    let rec out: Array<Float64 like Idx<10>> =
         match out with
         | zero -> zero
         | prefix :: kk -> prefix :: conv2_slot(h, evs, w, s, kk)
@@ -170,11 +170,11 @@ function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w:
 }
 
 // invariant readout: pred = br + sum_k wr(k%dout) * g2(k), in original order.
-function readout(wr: Array<Float like Idx<2>>, br: Float, g2: Array<Float like Idx<10>>) -> Float =
+function readout(wr: Array<Float64 like Idx<2>>, br: Float64, g2: Array<Float64 like Idx<10>>) -> Float64 =
     br + wr(0) * g2(0) + wr(1) * g2(1) + wr(0) * g2(2) + wr(1) * g2(3) + wr(0) * g2(4) + wr(1) * g2(5) + wr(0) * g2(6) + wr(1) * g2(7) + wr(0) * g2(8) + wr(1) * g2(9)
 
 // per-graph squared error: the full elaborated pipeline for graph s.
-function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int64) -> Float = {
+function graph_sqerr(w1: Array<Float64 like Idx<5>>, w2: Array<Float64 like Idx<9>>, w3: Array<Float64 like Idx<10>>, wr: Array<Float64 like Idx<2>>, brA: Array<Float64 like Idx<1>>, evs: Array<Float64 like Idx<240>>, s: Int64) -> Float64 = {
     let f1 = conv1(evs, w1, s)
     let g1 = ml.gated_rows(spec_h, nn, f1)
     let h = ml.linear_rows(spec_h, spec_h, nn, w2, g1)
@@ -186,23 +186,23 @@ function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>,
 }
 
 // full-batch MSE: additive reduce over the 4 per-graph errors.
-function loss_ev(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>) -> Float = {
-    let rec errs: Array<Float like Idx<4>> =
+function loss_ev(w1: Array<Float64 like Idx<5>>, w2: Array<Float64 like Idx<9>>, w3: Array<Float64 like Idx<10>>, wr: Array<Float64 like Idx<2>>, brA: Array<Float64 like Idx<1>>, evs: Array<Float64 like Idx<240>>) -> Float64 = {
+    let rec errs: Array<Float64 like Idx<4>> =
         match errs with
         | zero -> zero
         | prefix :: s -> prefix :: graph_sqerr(w1, w2, w3, wr, brA, evs, s)
     reduce(errs, (+)) / 4.0
 }
 
-function loss(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>) -> Float =
+function loss(w1: Array<Float64 like Idx<5>>, w2: Array<Float64 like Idx<9>>, w3: Array<Float64 like Idx<10>>, wr: Array<Float64 like Idx<2>>, brA: Array<Float64 like Idx<1>>) -> Float64 =
     loss_ev(w1, w2, w3, wr, brA, all_ev)
 
 // ---- step-0 gradients: dedicated buffers (same pins as ml-e2e/001) ---------
-let mut dw1_s0 = replicate(w1dim, pure(0.0)) |> compute
-let mut dw2_s0 = replicate(w2dim, pure(0.0)) |> compute
-let mut dw3_s0 = replicate(w3dim, pure(0.0)) |> compute
-let mut dwr_s0 = [0.0, 0.0]
-let mut dbr_b = [0.0]
+let mut dw1_s0 = replicate(w1dim, pure(Float64(0.0))) |> compute
+let mut dw2_s0 = replicate(w2dim, pure(Float64(0.0))) |> compute
+let mut dw3_s0 = replicate(w3dim, pure(Float64(0.0))) |> compute
+let mut dwr_s0 = Float64([0.0, 0.0])
+let mut dbr_b = Float64([0.0])
 let step0_loss = ad.grad(loss)(w1_init, w2_init, w3_init, wr_init, br_init, dw1_s0, dw2_s0, dw3_s0, dwr_s0, dbr_b)
 let dbr_s0 = dbr_b(0)
 
@@ -210,17 +210,17 @@ let dbr_s0 = dbr_b(0)
 // state row = [w1(5), w2(9), w3(10), wr(2), br(1), loss(1)] = 28 slots.
 type Epochs = Idx<32>
 type State = Idx<28>
-function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
+function sgd_step(s: Array<Float64 like State>) -> Array<Float64 like State> = {
     let w1 = [s(0), s(1), s(2), s(3), s(4)]
     let w2 = [s(5), s(6), s(7), s(8), s(9), s(10), s(11), s(12), s(13)]
     let w3 = [s(14), s(15), s(16), s(17), s(18), s(19), s(20), s(21), s(22), s(23)]
     let wr = [s(24), s(25)]
     let br = [s(26)]
-    let mut dw1 = replicate(w1dim, pure(0.0)) |> compute
-    let mut dw2 = replicate(w2dim, pure(0.0)) |> compute
-    let mut dw3 = replicate(w3dim, pure(0.0)) |> compute
-    let mut dwr = [0.0, 0.0]
-    let mut dbr = [0.0]
+    let mut dw1 = replicate(w1dim, pure(Float64(0.0))) |> compute
+    let mut dw2 = replicate(w2dim, pure(Float64(0.0))) |> compute
+    let mut dw3 = replicate(w3dim, pure(Float64(0.0))) |> compute
+    let mut dwr = Float64([0.0, 0.0])
+    let mut dbr = Float64([0.0])
     let lv = ad.grad(loss)(w1, w2, w3, wr, br, dw1, dw2, dw3, dwr, dbr)
     let n1 = w1 - 0.1 * dw1
     let n2 = w2 - 0.1 * dw2
@@ -238,10 +238,10 @@ function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
 // are plain reads of it. (Row n carries the loss at row n-1's weights, so
 // train_out(0..29) are the pre-step losses and train_out(30) is the final loss.)
 let train_out = {
-    let rec wtraj: Array<Float like Epochs, State> =
+    let rec wtraj: Array<Float64 like Epochs, State> =
         match wtraj with
         | zero -> zero
-        | zero :: n -> zero :: [-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814, -0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046, 0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613, -0.34236242381965853, -0.03847419262792645, 0.0, 0.0]
+        | zero :: n -> zero :: Float64([-0.3482108222545175, 0.2680045951940141, -0.1638447049371175, 0.08167740543451041, -0.48241225582659814, -0.1499458540463568, -0.42221854204415277, -0.3077518380283154, -0.38518397271874544, 0.060956569184063225, 0.3270919950805101, -0.07314545501635666, -0.47438434277399644, -0.39994124225338046, 0.4674427131970612, 0.019242270625774882, -0.2090272203595504, 0.2385805904579259, -0.08804323877582476, -0.4737834064167847, 0.0910533706615928, -0.24711189267556738, -0.17869719242616428, -0.2123539390565613, -0.34236242381965853, -0.03847419262792645, 0.0, 0.0])
         | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
     let r1 = wtraj(1)
     let r2 = wtraj(2)
@@ -277,7 +277,7 @@ let train_out = {
     let wf = wtraj(30)
     [r1(27), r2(27), r3(27), r4(27), r5(27), r6(27), r7(27), r8(27), r9(27), r10(27), r11(27), r12(27), r13(27), r14(27), r15(27), r16(27), r17(27), r18(27), r19(27), r20(27), r21(27), r22(27), r23(27), r24(27), r25(27), r26(27), r27(27), r28(27), r29(27), r30(27), r31(27), wf(0), wf(1), wf(2), wf(3), wf(4), wf(5), wf(6), wf(7), wf(8), wf(9), wf(10), wf(11), wf(12), wf(13), wf(14), wf(15), wf(16), wf(17), wf(18), wf(19), wf(20), wf(21), wf(22), wf(23), wf(24), wf(25), wf(26)]
 }
-let traj = [train_out(0), train_out(1), train_out(2), train_out(3), train_out(4), train_out(5), train_out(6), train_out(7), train_out(8), train_out(9), train_out(10), train_out(11), train_out(12), train_out(13), train_out(14), train_out(15), train_out(16), train_out(17), train_out(18), train_out(19), train_out(20), train_out(21), train_out(22), train_out(23), train_out(24), train_out(25), train_out(26), train_out(27), train_out(28), train_out(29), train_out(30)]
+let traj = [train_out(Int64(0)), train_out(1), train_out(2), train_out(3), train_out(4), train_out(5), train_out(6), train_out(7), train_out(8), train_out(9), train_out(10), train_out(11), train_out(12), train_out(13), train_out(14), train_out(15), train_out(16), train_out(17), train_out(18), train_out(19), train_out(20), train_out(21), train_out(22), train_out(23), train_out(24), train_out(25), train_out(26), train_out(27), train_out(28), train_out(29), train_out(30)]
 let final_loss = train_out(30)
 let w1v = [train_out(31), train_out(32), train_out(33), train_out(34), train_out(35)]
 let w2v = [train_out(36), train_out(37), train_out(38), train_out(39), train_out(40), train_out(41), train_out(42), train_out(43), train_out(44)]
@@ -286,13 +286,13 @@ let wrv = [train_out(55), train_out(56)]
 let brv = [train_out(57)]
 
 // ---- equivariance: rotate the geometry by R = Rz(0.7) . Ry(1.1) ------------
-function rotslot(evsrc: Array<Float like Idx<240>>, i: Int64) -> Float = {
+function rotslot(evsrc: Array<Float64 like Idx<240>>, i: Int64) -> Float64 = {
     let kk = i / 3
     let r = i - kk * 3
     rot(r * 3 + 0) * evsrc(kk * 3 + 0) + rot(r * 3 + 1) * evsrc(kk * 3 + 1) + rot(r * 3 + 2) * evsrc(kk * 3 + 2)
 }
 let rot_loss = {
-    let rec ev_r: Array<Float like Idx<240>> =
+    let rec ev_r: Array<Float64 like Idx<240>> =
         match ev_r with
         | zero -> zero
         | prefix :: i -> prefix :: rotslot(all_ev, i)

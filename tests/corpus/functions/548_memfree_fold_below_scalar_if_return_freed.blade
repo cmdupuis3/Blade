@@ -1,0 +1,71 @@
+// TEST: Memfree Fold Below A Scalar If Return Freed (G54)
+// The second Codex look of W4B-C, finding 1: a pure fold kernel BELOW a
+// scalar conditional return -- `if choose then reduce(method_for(range<I>) <@>
+// lambda(i) -> y(i) * y(i), (+)) else 0.0` -- is a proved-synchronous slot:
+// the return classification walks a scalar `if`'s condition and both arms
+// (each arm runs inside the return, before the scope frees), so the capture
+// pins nothing and `y` is freed on EVERY call, both branches (c5817da5 seeded
+// it and leaked one `y` per call; the base freed it). The third look's
+// finding: a JOINED fold as the whole return, `kjoin`'s `reduce(m1 <&!> m2,
+// (+))` -- a tuple of scalar accumulators evaluated into a local before the
+// frees -- has its fold kernel and every fusion leaf's map kernel as slots
+// too, so `kjoin` frees its `y` as well (9077f88b leaked it per call). The
+// fourth look's finding: the return walk is GENERIC -- every child of a scalar
+// node -- so a fold under `fma` (`kfma`, IRFma) is a slot too (2c3a724a leaked
+// its `y`; the IRComplex twin is functions/549's `kcplx`). The fifth look's:
+// the walk admits every POOL-FREE type, so an INDEX-TAGGED fold -- `ktag`'s
+// `Int64(reduce(ids, ..))` over `Nat<I>` -- is a slot too (9fce2520 leaked its `y`).
+// All are called once per step of a recursion, the branch alternating: `blade
+// test cell-epilogue` pins the exact frees and that the ASan outstanding
+// blocks do not grow with the step count. y = [1, 2, 3, 4, 5]: sum(y * y) =
+// 55 on 20 of the 40 steps; kjoin gives (s, ss) = (15, 55), s + ss = 70 per
+// step; kfma = fma(15, 2, 1) = 31; ktag = the argmax of y over ids = 4.
+type I = Idx<5>
+type Steps = Idx<40>
+
+function kernel(x: Array<Float64 like I>, choose: Bool) -> Float64 = {
+    let y = x + 1.0 |> compute
+    if choose then reduce(method_for(range<I>) <@> lambda(i) -> y(i) * y(i), (+)) else 0.0
+}
+
+function kjoin(x: Array<Float64 like I>) = {
+    let y = x + 1.0 |> compute
+    reduce((method_for(range<I>) <@> lambda(i) -> y(i)) <&!> (method_for(range<I>) <@> lambda(i) -> y(i) * y(i)), (+))
+}
+
+function kfma(x: Array<Float64 like I>) -> Float64 = {
+    let y = x + 1.0 |> compute
+    fma(reduce(x, lambda(p, q) -> p + y((Int64(floor(q)) : I)), 0.0), 2.0, 1.0)
+}
+
+function ktag(xi: Array<Int64 like I>, ids: Array<Nat<I> like I>) -> Int64 = {
+    let y = xi + 1 |> compute
+    Int64(reduce(ids, lambda(p: Nat<I>, q: Nat<I>) -> if y(q) > y(p) then q else p))
+}
+
+function kj(x: Array<Float64 like I>) -> Float64 = {
+    let (s, ss) = kjoin(x)
+    s + ss
+}
+
+let x: Array<Float64 like I> = [0.0, 1.0, 2.0, 3.0, 4.0]
+let xi: Array<Int64 like I> = [0, 1, 2, 3, 4]
+let ids: Array<Nat<I> like I> = [0, 1, 2, 3, 4]
+let yes = kernel(x, true)
+let no = kernel(x, false)
+let (s, ss) = kjoin(x)
+let r = kfma(x)
+let rt = ktag(xi, ids)
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: kernel(x, true) + kj(x) + kfma(x) + Float64(ktag(xi, ids))
+    | prefix :: n -> prefix :: kernel(x, n % 2 == 0) + kj(x) + kfma(x) + Float64(ktag(xi, ids))
+let total = reduce(acc, (+))
+// EXPECT: yes = 55.0
+// EXPECT: no = 0.0
+// EXPECT: s = 15.0
+// EXPECT: ss = 55.0
+// EXPECT: r = 31.0
+// EXPECT: rt = 4
+// EXPECT: total = 5300.0

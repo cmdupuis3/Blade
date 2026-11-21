@@ -9,17 +9,17 @@ import ad as ad
 // loss = sum s(n) over four steps, dL/dx = 1 + 1.5 + 1.75 + 1.875 = 6.125
 // exactly, primal 12.25 at x = 2.
 // ============================================================================
-function f(x: Float) -> Float = {
-    let rec s: Array<Float like Idx<4>> =
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<4>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: x
         | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + x
     reduce(s, (+))
 }
-let (gv, gx) = ad.grad(f)(2.0)
+let (gv, gx) = ad.grad(f)(Float64(2.0))
 // EXPECT: gv = 12.25
 // EXPECT: gx = 6.125
-let (fv, ft) = ad.jvp(f)(2.0, 1.0)
+let (fv, ft) = ad.jvp(f)(Float64(2.0), Float64(1.0))
 // EXPECT: fv = 12.25
 // EXPECT: ft = 6.125

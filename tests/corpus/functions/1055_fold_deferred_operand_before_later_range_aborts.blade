@@ -1,0 +1,9 @@
+// TEST: A Fold Forces A Deferred Operand Before A Later Range Operand (aborts)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review): the reversed twin of functions/1054 -- the
+// deferred map p at operand 1 is forced (its modulo by zero) before the range at operand 2 divides.
+// ABORT: integer modulo by zero
+type I = Idx<5>
+let xs: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let z: Int64 = 0
+let p = method_for(xs) <@> lambda(a) -> 200 % (a - 3)
+let r = reduce(method_for(p, 0..(100 / z)) <@> lambda(v, i) -> i + v, (+), 0, axes = 2)

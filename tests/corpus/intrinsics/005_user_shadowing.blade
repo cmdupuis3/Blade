@@ -3,6 +3,6 @@
 // A user-defined function with an intrinsic's name wins: the OpMath rewrite
 // fires only when the name is NOT user-bound.
 // ============================================================================
-function exp(x: Float) -> Float = x * 2.0
+function exp(x: Float64) -> Float64 = x * 2.0
 let doubled = exp(3.0)
 // EXPECT: doubled = 6.0

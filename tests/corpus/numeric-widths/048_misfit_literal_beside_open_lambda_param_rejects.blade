@@ -1,0 +1,11 @@
+// TEST: a literal that does not fit the width a later call gives a lambda value's parameter (rejects)
+// ============================================================================
+// G275 (2) / R19: `z * 1e100` is typed while `z` is open; the call makes `z`
+// a Float32, which 1e100 does not fit -- refused by the literal's spelling,
+// never rounded to an infinity.
+// ============================================================================
+let h = lambda(z) -> z * 1e100
+let saved = h
+let f: Float32 = 1.5
+let w = h(f)
+// ERROR: BL3020

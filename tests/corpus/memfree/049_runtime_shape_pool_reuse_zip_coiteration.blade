@@ -1,0 +1,15 @@
+// TEST: Run-time-shaped scratch reuse admits a co-iteration of one provenance
+// PM60 (review finding 2): q is a pointwise map of the parameter x; c and d
+// are zips of x with q, so every operand is keyed by x's run-time extents. c
+// is dead once its sum is taken, so d takes c's pool.
+function zips(x: Array<Float64 like I>) -> Float64 = {
+    let q = x * 1.5 |> compute
+    let c = method_for(zip(x, q)) <@> lambda(a, b) -> a + b |> compute
+    let sc = reduce(c, (+))
+    let d = method_for(zip(q, x)) <@> lambda(a, b) -> a * b - sc |> compute
+    reduce(d, (+)) + reduce(q, (+))
+}
+let n = Int64(floor(5.5))
+let s = zips(Float64(0..n))
+// EXPECT: n = 5
+// EXPECT: s = -65.0

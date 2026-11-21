@@ -1,0 +1,24 @@
+// TEST: GroupBy subscript by key over an EnumIdx grouping
+// ============================================================================
+// G1 + D2: a value whose TYPE is the grouping's key type is a KEY -- here a
+// literal cast `(205 : LandType)` and a computed key read out of the key
+// column -- and it selects that key's group whatever order the rows came in.
+// A plain integer is a POSITION (the groups are in key-declaration order,
+// 101, 205, 307), range-checked against the group count.
+// ============================================================================
+type LandType = EnumIdx<[101, 205, 307]>
+let codes: Array<LandType like Idx<6>> = [307, 101, 205, 307, 101, 205]
+let temps: Array<Float64 like Idx<6>> = [30.0, 20.0, 25.0, 32.0, 22.0, 27.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let g205 = grouped((205 : LandType))
+// EXPECT: g205 = [25.0, 27.0]
+let c0 = codes(0)
+let first307 = grouped(c0, 0)
+// EXPECT: first307 = 30.0
+let second307 = grouped(c0)(1)
+// EXPECT: second307 = 32.0
+let pos1 = grouped(1, 1)
+// EXPECT: pos1 = 27.0
+let g101 = grouped(0)
+// EXPECT: g101 = [20.0, 22.0]

@@ -35,13 +35,13 @@ let s = sumEnds((A, B))
 // and `r[0][1]` resolves through both levels.
 function outer(r: Tuple<Tuple<Float64, Float64>, Tuple<Float64, Float64>>) -> Float64 =
     r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
-let deep = outer(((1.0, 2.0), (3.0, 4.0)))
+let deep = outer(((Float64(1.0), Float64(2.0)), (Float64(3.0), Float64(4.0))))
 // EXPECT: deep = 4321.0
 
 // Component types are ordinary TypeExprs: mixed scalars are as fine here as
 // under `Tuple<3>`, and the width still comes from the LIST length.
 function mixed(t: Tuple<Float64, Int64, Float64>) -> Float64 = t[0] + t[2]
-let m = mixed((1.5, 7, 2.5))
+let m = mixed((Float64(1.5), Int64(7), Float64(2.5)))
 // EXPECT: m = 4.0
 
 // RETURN-type position, like the width-only spelling.
@@ -52,7 +52,7 @@ let rv = r[0] + r[1]
 
 // LAMBDA parameter position.
 let lam = lambda(q: Tuple<Float64, Float64>) -> q[0] * q[1]
-let lv = lam((3.0, 4.0))
+let lv = lam((Float64(3.0), Float64(4.0)))
 // EXPECT: lv = 12.0
 
 // WIDTH SCHEMA (6c): a component-typed parameter is a schema node of width k,

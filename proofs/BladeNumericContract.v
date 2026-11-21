@@ -49,7 +49,7 @@
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure.
-Require Import List Arith Lia ZArith Ring Bool Eqdep_dec QArith Qcanon.
+From Stdlib Require Import List Arith Lia ZArith Ring Bool Eqdep_dec QArith Qcanon.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -252,7 +252,7 @@ Section Wrap.
     rewrite <- (wrap_Gm U r N alpha beta alphaW betaW Ha Hb).
     rewrite <- (moment_step_closed Z 0%Z 1%Z Z.add Z.mul Z.sub Z.opp
                   Zth U r N alpha beta u xs HN).
-    apply IH. unfold Fm. rewrite map_length. exact HN.
+    apply IH. unfold Fm. rewrite length_map. exact HN.
   Qed.
 
   (* The signed reading of a residue, for an even modulus: the           *)
@@ -296,7 +296,7 @@ Section Wrap.
                Ha Hb w xs HN).
     change zm0 with (wrap 0). rewrite map_nth.
     unfold qr. rewrite (nth_map_lt Z nat _ (seq 1 r) k 0%Z 0%nat)
-      by (rewrite seq_length; exact Hk).
+      by (rewrite length_seq; exact Hk).
     rewrite seq_nth by exact Hk. apply sread_wrap; assumption.
   Qed.
 

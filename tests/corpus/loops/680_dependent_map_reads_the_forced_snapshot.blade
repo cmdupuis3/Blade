@@ -1,0 +1,24 @@
+// TEST: Dependent Map Reads The Forced Snapshot
+// Gap G199: p was bound over d while d was still deferred; d is then forced
+// (z = d(0)) and x written. Forcing p reads d BY NAME -- the stored
+// snapshot -- so w = 3.0. The LLVM lane captured d as a producer when p was
+// bound and reran it over the written x (w = 21.0); it now rebuilds a
+// producer whose operand was re-pointed. The same through a deferred alias
+// (pa over a = d), a later fold over q, and a mask over p.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let a = d
+let pa = method_for(a) <@> lambda(v) -> v + 1.0
+let q = method_for(p) <@> lambda(v) -> v * v
+let z = d(0)
+x(0) = 10.0
+let w = p(0)
+let wa = pa(0)
+let s = reduce(q, (+), 0.0)
+let m = mask(p, lambda(v) -> v < 10.0)
+// EXPECT: z = 2.0
+// EXPECT: w = 3.0
+// EXPECT: wa = 3.0
+// EXPECT: s = 83.0
+// EXPECT: m = [true, true, true]

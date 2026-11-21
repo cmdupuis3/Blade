@@ -84,6 +84,15 @@ packaging), or ride the MLIR/LLVM stack that `cuda-tile` bundles. The plan pins
 ONE LLVM version; textual MLIR is not stable across major versions and golden
 `.mlir` pins must be against our emission, never against `mlir-opt` output.
 
+**RESOLVED (2026-10-17): no vendoring needed on the MSYS2 toolchain.** MSYS2
+packages MLIR as `mingw-w64-clang-x86_64-mlir` 22.1.8 (also ucrt64 and
+clangarm64) -- the SAME 22.1.8 as the clang the llvm lane already drives from
+`C:\msys64\clang64`, so one pinned LLVM version covers both lanes, exactly as
+this section asks. It is not installed on the dev host yet (`pacman -S
+mingw-w64-clang-x86_64-mlir` is the whole step); P0's doctor row would probe
+`mlir-opt`/`mlir-translate` beside the clang it already finds. `cuda-tile`'s
+own bundled stack remains the question for the GPU phases only.
+
 ---
 
 ## 3. Where emission forks from the existing pipeline

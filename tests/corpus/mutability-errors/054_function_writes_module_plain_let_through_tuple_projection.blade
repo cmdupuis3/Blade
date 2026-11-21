@@ -1,0 +1,12 @@
+// TEST: a function writes a member of a module-level plain let tuple
+// ERROR: BL4005 @ 10:27
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a plain
+// `let` is writable in the callable that defines it, nested blocks included.
+// A callable that only CAPTURES it writes it only when it was declared
+// `let mut`. A store through a tuple PROJECTION writes
+// the tuple's member: it used to have no root, so no rule judged it at all
+// (Codex review of the D9 change) and g printed ([9.0, 2.0], [3.0, 4.0]).
+let g = ([1.0, 2.0], [3.0, 4.0])
+function f() -> Int32 = { g[0](0) = 9.0; 0 }
+let r = f()

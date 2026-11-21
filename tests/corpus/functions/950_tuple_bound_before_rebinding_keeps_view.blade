@@ -1,0 +1,16 @@
+// TEST: a tuple bound before a rebinding still holds the view (rejects)
+// ERROR: BL4005 @ 8:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review, defect 4; formalism 2.7): only the NAME being written is
+// read by what reaches the store; `w` was bound while `v` was the view of
+// `g`, so the store through `w[0]` writes `g` whatever `v` holds later.
+let g: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+function f() -> Float64 = {
+    let v = g(0)
+    let w = (v, 1.0)
+    v = [5.0, 6.0]
+    w[0](0) = 9.0
+    v(0)
+}
+let r = f()

@@ -1,0 +1,16 @@
+// TEST: an unrolled pack former whose kernel also passes the pack to a nested lambda is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d): when the kernel itself reads `args[k]`,
+// the former unrolls per pack element -- but a nested lambda handed the WHOLE
+// pack (`h(args)`) would be copied with a pack the specialization no longer
+// has. Refused at lowering, like the rolled form (arity/491).
+// ERROR: BL7004
+// ERROR-CONTAINS: passes the pack
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let h = lambda(p: Poly<T^0>) -> p[k]
+        h(args) + args[k]
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

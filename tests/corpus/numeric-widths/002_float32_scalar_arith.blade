@@ -1,0 +1,36 @@
+// TEST: Float32 Scalar Arith
+// ============================================================================
+// Every Float32 operation rounds to float32: a chain a * b + c is two float
+// operations (no double intermediate), so the interpreter, the C++ lane and
+// the LLVM lane agree bit for bit under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off.
+// ============================================================================
+let a: Float32 = 16777216.0
+let one: Float32 = 1.0
+let s = a + one - a
+let x: Float32 = 0.1
+let y: Float32 = 0.2
+let z: Float32 = 0.3
+let fused = x * y + z
+let ratio = x / y - z
+let neg = -x
+let lt = x + y < z
+let eq = x + y == z
+let lit = x * 0.7 + 0.3
+let sq = x ^ 2
+let cube = x ^ 3
+let half = x ^ Float32(0.5)
+// EXPECT: a = 1.67772e+07
+// EXPECT: one = 1.0
+// EXPECT: s = 0.0
+// EXPECT: x = 0.1
+// EXPECT: y = 0.2
+// EXPECT: z = 0.3
+// EXPECT: fused = 0.32
+// EXPECT: ratio = 0.2
+// EXPECT: neg = -0.1
+// EXPECT: lt = false
+// EXPECT: eq = true
+// EXPECT: lit = 0.37
+// EXPECT: sq = 0.01
+// EXPECT: cube = 0.001
+// EXPECT: half = 0.316228

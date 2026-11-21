@@ -1,5 +1,5 @@
 // TEST: Bind Chained
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let c1 = method_for(A) <@> lambda(x) -> x + 1.0
 let k1 = lambda(arr) -> method_for(arr) <@> lambda(y) -> y * 2.0
 let k2 = lambda(arr) -> method_for(arr) <@> lambda(z) -> z - 1.0

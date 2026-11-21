@@ -326,7 +326,9 @@ let rec canonTypeKey (ty: IRType) : string =
     | IRTScalar ETString -> "string"
     | IRTScalar ETComplex64 -> "c64"
     | IRTScalar ETComplex128 -> "c128"
-    | IRTNamed n -> n
+    // A spec NAME is built from this key (C++ identifier): a non-main
+    // module's identity `A.P` sanitizes to `A__P` (D11).
+    | IRTNamed n -> Blade.Types.TypeOrigins.cppName n
     | IRTUnit -> "unit"
     | IRTIdxTagged (inner, _) -> canonTypeKey inner
     | IRTUnitAnnotated (inner, _) -> canonTypeKey inner
@@ -425,7 +427,7 @@ let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
                          | _ -> a)
                     | _ -> a)
             if List.forall2 (fun (x: IRExpr) y -> obj.ReferenceEquals (x, y)) args args' then e
-            else IRApp (head, args', retTy)
+            else withAppParts e (head, args', retTy)
         | _ -> e
     | IRCompose (l, r) when isHmRef l || isHmRef r ->
         let single (ps: IRType list) = match ps with [p] -> p | _ -> IRTTuple ps
@@ -571,8 +573,9 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
 /// variables at a module-level call. Iterated (a learned result can make the
 /// next call's arguments concrete); only fully concrete teachings are kept,
 /// and a variable already bound is never rebound.
-let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
-                                (bindings: Map<int, IRType>) : Map<int, IRType> =
+let rec private learnFromInnerCallsAt (memo: System.Collections.Generic.Dictionary<string, Map<int, IRType>>)
+                                      (depth: int) (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
+                                      (bindings: Map<int, IRType>) : Map<int, IRType> =
     let concrete (t: IRType) = Set.isEmpty (collectInferIds t)
     // The closures the body builds over its own parameters (and, transitively,
     // over theirs): an ARROW PARAMETER may be applied inside one
@@ -625,7 +628,8 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
             match e with
             | IRApp (IRVar (fid, _), args, retTy) when fid <> func.Id ->
                 (match Map.tryFind fid callables with
-                 | Some callee when hasTypeVarsInParams callee && callee.Params.Length = args.Length ->
+                 | Some callee when (hasTypeVarsInParams callee || not (concrete retTy))
+                                    && callee.Params.Length = args.Length ->
                      let cb =
                          List.zip callee.Params args
                          |> List.fold (fun m (p, a) ->
@@ -633,6 +637,32 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                              | Some t -> unifyParamWithArg p.Type t m
                              | None -> m) Map.empty
                      let ret = substTypeInIRType cb callee.RetType
+                     // A RESULT ONLY THE CALLEE'S BODY DECIDES (D4): an arity
+                     // instance's open result (`outer_arity_1`, its rank the
+                     // instance's), or an element cast of a pack element's
+                     // variable. Learn the callee at THIS call's bindings --
+                     // what its own inner calls teach, recursively (arity
+                     // instances bottom out at the scalar base arm) --
+                     // memoized per (callee, bindings); a cycle (mutual
+                     // recursion at one instance) sees only the call's own
+                     // bindings, never loops.
+                     let ret =
+                         if concrete ret || depth >= 16 then ret
+                         else
+                             let key =
+                                 cb |> Map.toList
+                                 |> List.map (fun (k, t) -> $"{k}={canonTypeKey t}")
+                                 |> String.concat ","
+                                 |> fun s -> $"{callee.Id}|{s}"
+                             let learned =
+                                 match memo.TryGetValue key with
+                                 | true, l -> l
+                                 | _ ->
+                                     memo.[key] <- cb
+                                     let l = learnFromInnerCallsAt memo (depth + 1) callee callables cb
+                                     memo.[key] <- l
+                                     l
+                             substTypeInIRType learned callee.RetType
                      if concrete ret then
                          unifyParamWithArg retTy ret Map.empty
                          |> Map.iter (fun k v ->
@@ -665,11 +695,45 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                          | None -> IRTScalar et
                      Some (mkArrayLike { at with ElemType = elem; Identity = None; IsVirtual = false })
                  | _ -> exprTypeIfKnown e)
+            // A math intrinsic lifted over an array instance keeps the
+            // array's shape (`Int64(floor(x))` over `x: T`: the cast's
+            // operand is the floor, whose shape is x's). Only the SHAPE is
+            // read off it -- the cast above replaces the element.
+            | IRUnaryOp (IRMath _, x) ->
+                (match bodyTypeIfKnown x with
+                 | Some (ArrayElem _ as t) -> Some t
+                 | _ -> exprTypeIfKnown e)
             | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod), l, r, _) ->
                 (match bodyTypeIfKnown l, bodyTypeIfKnown r with
                  | Some ((ArrayElem at) as aty), Some (AnyPrimElem e)
                  | Some (AnyPrimElem e), Some ((ArrayElem at) as aty)
                         when (match at.ElemType with AnyPrimElem ae -> ae = e | _ -> false) -> Some aty
+                 | _ -> exprTypeIfKnown e)
+            // A COMPARISON / LOGICAL op over an operand the instance made an
+            // array is that array's shape of Bool (formalism 6.1: elementwise
+            // at every rank) -- the result variable TypeCheck typed it with
+            // (Subst.ElemBoolVar, the D1 ruling) is named here; lowering's
+            // array-binop pass builds the Bool array after monomorphization.
+            | IRBinOp (IRElementwise, (IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr), l, r, _) ->
+                (match bodyTypeIfKnown l, bodyTypeIfKnown r with
+                 | Some (ArrayElem at), _ | _, Some (ArrayElem at) ->
+                     Some (mkArrayLike { at with ElemType = IRTScalar ETBool; Identity = None; IsVirtual = false })
+                 | _ -> exprTypeIfKnown e)
+            // AN OUTER PRODUCT (D4): rank A + rank B, the left element (the
+            // arithmetic-outer convention; Bool for a comparison), axes the
+            // left's then the right's. An array beside a scalar is that
+            // array's shape (the scalar broadcasts). `head [*] outer(tail)`
+            // at an arity instance, once the smaller instance is learned.
+            | IRBinOp (IROuter, op, l, r, _) ->
+                let elemOf (at: IRArrayType) =
+                    if isCmpOrLogicalIROp op then IRTScalar ETBool else at.ElemType
+                (match bodyTypeIfKnown l, bodyTypeIfKnown r with
+                 | Some (ArrayElem la), Some (ArrayElem ra) ->
+                     Some (mkArrayLike { la with IndexTypes = la.IndexTypes @ ra.IndexTypes
+                                                 ElemType = elemOf la; Identity = None; IsVirtual = false })
+                 | Some (ArrayElem at), Some (AnyPrimElem _)
+                 | Some (AnyPrimElem _), Some (ArrayElem at) ->
+                     Some (mkArrayLike { at with ElemType = elemOf at; Identity = None; IsVirtual = false })
                  | _ -> exprTypeIfKnown e)
             | IRLet (_, _, body) -> bodyTypeIfKnown body
             | _ -> exprTypeIfKnown e
@@ -697,6 +761,10 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         let b' = pass b
         if fuel <= 0 || b'.Count = b.Count then b' else fix b' (fuel - 1)
     fix bindings 8
+
+let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
+                                (bindings: Map<int, IRType>) : Map<int, IRType> =
+    learnFromInnerCallsAt (System.Collections.Generic.Dictionary()) 0 func callables bindings
 
 /// AN ARROW PARAMETER'S APPLICATION never meets an array here. TypeCheck leaves
 /// an applied parameter generic (TypeEnv.ArrowObligation), and its application
@@ -959,6 +1027,45 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
 /// *declared type* (TypeCheck leaves it `IRTInfer N` when the call site's
 /// return was polymorphic), and (b) substitutes types throughout each spec
 /// body so it's free of `IRTInfer`.
+/// AN ARITY-DECIDED RESULT, JUDGED AT ITS CALL (D4). A pack function whose
+/// result TypeCheck left open (its rank is the instance's: `head [*]
+/// outer(tail)`) has each instance's result learned from the instance's body
+/// (learnFromInnerCalls). Two ways that can fail, both refused (BL3009) rather
+/// than handed to the back end as a value of the wrong rank:
+///   * the instance's result could not be learned (a same-arity recursion
+///     whose base arm sits behind a run-time guard) -- falling back to the
+///     declaration's type would truncate it;
+///   * the CALL was typed at another rank before the instance existed -- a
+///     subscript or intrinsic applied to the open result at type checking
+///     shapes it as the smallest array it could be.
+let internal arityResultClash (span: Blade.Ast.Span) (origFunc: IRFuncDef) (spec: IRFuncDef) (callRetTy: IRType) : unit =
+    if origFunc.Name.Contains "_arity_" then
+        let paramIds =
+            origFunc.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+        let bodyOnly = collectInferIds origFunc.RetType |> Set.exists (fun v -> not (paramIds.Contains v))
+        if bodyOnly then
+            let n = origFunc.Params.Length
+            let what = $"`{origFunc.SourceName}` at {n} pack element" + (if n = 1 then "" else "s")
+            let rankOf (t: IRType) =
+                match IR.stripUnits t with
+                | ArrayElem a -> a.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+                | _ -> 0
+            let fail (msg: string) =
+                raise (Blade.Diagnostics.BladeDiagnosticException (
+                        Blade.Diagnostics.mkError "BL3009" Blade.Diagnostics.PhTypes span msg))
+            if not (Set.isEmpty (collectInferIds spec.RetType)) then
+                fail ($"the result of {what} has a rank only its instance decides (formalism 8.2), and this "
+                      + "instance's body does not decide it -- its result reaches no arm a smaller instance or a "
+                      + "base case types. Declare the function's return type (`-> T^k`) or give the recursion a "
+                      + "literal-arity base arm")
+            elif (match IR.stripUnits callRetTy with ArrayElem _ | IRTScalar _ -> true | _ -> false)
+                 && rankOf callRetTy <> rankOf spec.RetType then
+                fail ($"the result of {what} is a rank-{rankOf spec.RetType} value (its rank is decided per "
+                      + $"instance, formalism 8.2), but this program uses it as rank {rankOf callRetTy}: a "
+                      + "subscript or intrinsic applied to the result typed it before the instance existed. "
+                      + "Annotate the binding with the instance's type (`let o: Array<...> = "
+                      + $"{origFunc.SourceName}(..)`)")
+
 let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // 1. Identify functions with type vars in signature
     // Only functions with type vars in their PARAMETERS get dropped-and-
@@ -1093,6 +1200,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                     derivedOrigins <- Map.add c.Id origFunc.Id derivedOrigins
                 changed <- true
 
+    // The declaration a call being rewritten sits in, for the span of an
+    // arity-decided result's refusal (arityResultClash).
+    let mutable clashSpan = Blade.Ast.noSpan
     // 3. Build the call-site rewriter using the now-frozen specMap.
     //    Same logic as before, but operating against a complete spec map.
     let rewriteCallSite e =
@@ -1111,8 +1221,9 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
             match Map.tryFind key specMap with
             | Some spec ->
-                IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
-                       args, spec.RetType)
+                arityResultClash clashSpan func spec (match e with IRApp (_, _, t) -> t | _ -> spec.RetType)
+                withAppParts e (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
+                                args, spec.RetType)
             | None -> e
         | _ -> e
     let specRef (id: IRId) (b: Map<int, IRType>) : IRExpr option =
@@ -1211,6 +1322,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     // repointed at their specs, residual IRTInfer substituted out of the body,
     // signature and captures.
     let rewriteFunc (f: IRFuncDef) =
+        clashSpan <- IR.declSpanOf f.SourceName
         let bindings = mergeBindings (unionBindingsFromExpr f.Body)
         let bodyWithRewrittenCalls = mapIRExpr rewriteCallSite f.Body
         let bodyWithSubstitutedTypes = substTypeInIRExpr bindings bodyWithRewrittenCalls
@@ -1227,14 +1339,74 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         modul.Functions
         |> List.filter (fun f -> not (Set.contains f.Id hmFuncIdSet))
         |> List.map rewriteFunc
+    let boundTypes = System.Collections.Generic.Dictionary<IRId, IRType>()
     let newBindings =
         modul.Bindings
         |> List.map (fun b ->
+            clashSpan <- IR.declSpanOf b.Name
             let bindings = mergeBindings (unionBindingsFromExpr b.Value)
             let newType = substTypeInIRType bindings b.Type
             let valueWithRewrittenCalls = mapIRExpr rewriteCallSite b.Value
             let valueWithSubstitutedTypes = substTypeInIRExpr bindings valueWithRewrittenCalls
-            { b with Type = newType; Value = valueWithSubstitutedTypes })
+            // A declaration variable shared by two different instances is
+            // deliberately absent from globalBindings. Dependents still read
+            // the concrete type of THEIR stored value, not that shared var.
+            let value =
+                valueWithSubstitutedTypes |> mapIRExpr (fun e ->
+                    match e with
+                    | IRVar (id, ty) when not (Set.isEmpty (collectInferIds ty)) ->
+                        match boundTypes.TryGetValue id with
+                        | true, concrete -> IRVar (id, concrete)
+                        | _ -> e
+                    | _ -> e)
+            let resultBindings =
+                match exprTypeIfKnown value with
+                | Some ty when Set.isEmpty (collectInferIds ty) -> unifyParamWithArg newType ty Map.empty
+                | _ -> Map.empty
+            let finalType = substTypeInIRType resultBindings newType
+            if Set.isEmpty (collectInferIds finalType) then boundTypes.[b.Id] <- finalType
+            { b with Type = finalType; Value = substTypeInIRExpr resultBindings value })
+    // A BINDING OF AN ARITY-DECIDED RESULT APPLIED AT TYPE CHECKING (D4):
+    // `let o = outer(x, y)` then `o(1)`. Its rank was unknown when `o(1)` was
+    // typed, so the application was recorded as a call of an open value
+    // (TypeEnv.ArrowApplication), and the instance has since made `o` an
+    // array -- a subscript nothing checked. Refused, with the annotation that
+    // types it up front (arityResultClash names the other half).
+    (let decidedSpecs =
+        specMap |> Map.toList |> List.choose (fun ((fid, _), spec) ->
+            let f = hmFuncMap.[fid]
+            let paramIds = f.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+            if f.Name.Contains "_arity_"
+               && (collectInferIds f.RetType |> Set.exists (fun v -> not (paramIds.Contains v))) then
+                Some (spec.Id, f)
+            else None)
+        |> Map.ofList
+     // An instance whose result nothing learned is refused here whether or
+     // not a call site was rewritten to it.
+     for ((fid, _), spec) in Map.toList specMap do
+        if decidedSpecs.ContainsKey spec.Id then arityResultClash (IR.declSpanOf hmFuncMap.[fid].SourceName) hmFuncMap.[fid] spec spec.RetType
+     if not decidedSpecs.IsEmpty then
+        let holders =
+            newBindings |> List.choose (fun b ->
+                match b.Value with
+                | IRApp (IRVar (sid, _), _, _) when decidedSpecs.ContainsKey sid -> Some (b.Id, (b.Name, decidedSpecs.[sid]))
+                | _ -> None)
+            |> Map.ofList
+        if not holders.IsEmpty then
+            let check (e: IRExpr) =
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRApp (IRVar (id, ArrayElem _), _, _) when holders.ContainsKey id ->
+                        let (name, f) = holders.[id]
+                        raise (Blade.Diagnostics.BladeDiagnosticException (
+                                Blade.Diagnostics.mkError "BL3009" Blade.Diagnostics.PhTypes (IR.declSpanOf name)
+                                    ($"`{name}` holds the result of `{f.SourceName}`, whose rank only its instance "
+                                     + "decides (formalism 8.2), and it is subscripted before that rank is known. "
+                                     + $"Annotate the binding with the instance's type (`let {name}: Array<...> = "
+                                     + $"{f.SourceName}(..)`)")))
+                    | _ -> ()) e
+            for b in newBindings do check b.Value
+            for f in newFunctions do check f.Body)
     // Spec function bodies need the same treatment as ordinary function
     // bodies: their inner HM calls (e.g. `id(id(x))` inside `twiceId`'s spec)
     // must be rewritten to point at the inner specs, and any residual
@@ -1452,7 +1624,7 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
         let mutable hit = false
         let scan (b: IRExpr) =
             if not hit then
-                iterIRExpr (fun e -> match e with IRZero _ -> hit <- true | _ -> ()) b
+                iterIRExpr (fun e -> match e with IRZero _ | IRUnseededSeed _ -> hit <- true | _ -> ()) b
         modul.Functions |> List.iter (fun f -> scan f.Body)
         modul.Bindings |> List.iter (fun b -> scan b.Value)
         hit
@@ -1487,6 +1659,37 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
             IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z, loc)
         | IRBinOp (mode, op, (IRZero ty as z), r, loc) when isOpen ty ->
             IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r, loc)
+        // A FOLD's seed still open (`reduce(row ^ 0, (+))` over `row: T^1`,
+        // whose mapped element the checker typed with a variable of its
+        // own): the accumulator is the specialized KERNEL's result, so the
+        // seed is that type's zero. The Float64 fallback seeded an Int64
+        // instance with 0.0 -- C++ converted it silently, the interpreter
+        // folded in doubles and printed a VFloat where an Int64 was typed.
+        | IRReduceCompute (comp, k, (IRZero ty as z)) when isOpen ty ->
+            let fromKernel =
+                match exprTypeIfKnown k with
+                | Some (FuncElem (_, ret)) -> zeroLiteralOf ret
+                | _ -> None
+            match fromKernel |> Option.orElse (partnerZero comp) with
+            | Some lit -> IRReduceCompute (comp, k, lit)
+            | None -> IRReduceCompute (comp, k, z)
+        // ...and the same open seed behind the UNSEEDED-fold mark (gap G74;
+        // Lowering.lowerUnseededSeed): the BASE becomes the instance's zero
+        // and the mark its type; the mark stays for
+        // Lowering.resolveUnseededSeedsModule, which picks the route's seed.
+        | IRReduceCompute (comp, k, IRUnseededSeed ((IRZero ty as z), uty, r)) when isOpen ty ->
+            let fromKernel =
+                match exprTypeIfKnown k with
+                | Some (FuncElem (_, ret)) -> zeroLiteralOf ret |> Option.map (fun l -> (l, ret))
+                | _ -> None
+            let fromPartner () =
+                match exprTypeIfKnown comp with
+                | Some (ArrayElem a) -> zeroLiteralOf a.ElemType |> Option.map (fun l -> (l, a.ElemType))
+                | Some t -> zeroLiteralOf t |> Option.map (fun l -> (l, t))
+                | None -> None
+            match fromKernel |> Option.orElse (fromPartner ()) with
+            | Some (lit, t) -> IRReduceCompute (comp, k, IRUnseededSeed (lit, t, r))
+            | None -> IRReduceCompute (comp, k, IRUnseededSeed (z, uty, r))
         | _ -> e
     let bareArrayZero (e: IRExpr) : IRExpr =
         match e with
@@ -1503,6 +1706,319 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
     { modul with
         Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
         Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+
+/// Post-monomorphization: a FUSED `(*)` FOLD's implicit seed, the identity
+/// `1`, at its instance's type. The checker seeds a `(*)` fold over an
+/// element still OPEN in a generic body (`reduce(method_for(v) <@> k, (*))`
+/// over `v: T^1`) with the Float64 literal `1.0` -- the one value it can
+/// spell without a type (the `(+)` twin has a typed `zero`, resolved in
+/// resolveTypedZerosModule). At an Int64 instance that seeded an integer
+/// accumulator with a double: C++ converted it silently, the interpreter
+/// folded in doubles and printed `48.0` for an Int64 `48`. The specialized
+/// KERNEL's result is the accumulator's type, so the seed is that type's one.
+/// A user-written init is never rewritten: it unifies with the element at
+/// type checking, so a Float64 init pins a Float64 kernel here.
+let adaptFoldOneSeedsModule (modul: IRModule) : IRModule =
+    let oneFor (ret: IRType) : IRExpr option =
+        match IR.stripUnits ret with
+        | IRTScalar (ETInt64 | ETInt32) -> Some (IRLit (IRLitInt 1L))
+        | IRTScalar ETFloat32 -> Some (IRLit (IRLitFloat32 1.0f))
+        | _ -> None
+    let kernelRet (k: IRExpr) =
+        match exprTypeIfKnown k with
+        | Some (FuncElem (_, ret)) -> Some ret
+        | _ -> None
+    let resolve (e: IRExpr) : IRExpr =
+        match e with
+        | IRReduceCompute (comp, k, IRLit (IRLitFloat 1.0)) ->
+            (match kernelRet k |> Option.bind oneFor with
+             | Some one -> IRReduceCompute (comp, k, one)
+             | None -> e)
+        | IRReduceCompute (comp, (IRTuple ks as kt), IRTuple seeds) when ks.Length = seeds.Length ->
+            let seeds' =
+                List.map2 (fun k s ->
+                    match s with
+                    | IRLit (IRLitFloat 1.0) -> kernelRet k |> Option.bind oneFor |> Option.defaultValue s
+                    | _ -> s) ks seeds
+            IRReduceCompute (comp, kt, IRTuple seeds')
+        | _ -> e
+    { modul with
+        Functions = modul.Functions |> List.map (fun f -> { f with Body = mapIRExpr resolve f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = mapIRExpr resolve b.Value }) }
+
+/// Post-monomorphization: a value of an INTEGER EnumIdx is a key represented
+/// as its POSITION (D2); the type checker and zonk read the key wherever such
+/// a value is computed on. A GENERIC body meets the type only here, when a
+/// specialization substitutes it (`function f(x: T) = x + 1` handed an array
+/// of keys): its arithmetic, negation or cast would compute on positions.
+/// Refused, with the type checker's sentence, before either lane runs.
+let refuseEnumKeyArithModule (programTypes: IRTypeDef list) (modul: IRModule) : unit =
+    // EVERY module's declarations (R3, Codex review): a generic declared in an
+    // imported module is specialized there, at a type the CALLER declares.
+    let allTypes = programTypes @ modul.Types
+    let intEnumTags =
+        let direct =
+            allTypes |> List.choose (fun td ->
+                match td with
+                | IRTDEnumIdx (n, _, values)
+                    when not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) -> Some n
+                | _ -> None) |> Set.ofList
+        let rec close (tags: Set<string>) =
+            let more =
+                allTypes |> List.choose (fun td ->
+                    match td with
+                    | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t)) when tags.Contains t && not (tags.Contains n) -> Some n
+                    | _ -> None)
+            if more.IsEmpty then tags else close (Set.union tags (Set.ofList more))
+        close direct
+    if not intEnumTags.IsEmpty then
+        let isKey (e: IRExpr) =
+            let elem (t: IRType) =
+                match IR.stripUnits t with
+                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumTags.Contains tag
+                | _ -> false
+            match exprTypeIfKnown e with
+            | Some (ArrayElem at) -> elem at.ElemType
+            | Some t -> elem t
+            | None -> false
+        // Located at the offending expression in the generic body (the
+        // arithmetic / cast node's own source location).
+        let refuse (loc: SrcLoc) =
+            let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+            raise (Blade.Diagnostics.BladeDiagnosticException (
+                Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints span
+                    ("a generic function is specialized at an EnumIdx type and computes on its values (arithmetic, a "
+                     + "negation or a cast): a value of an EnumIdx is a KEY, represented as its position, so the "
+                     + "specialization would compute on positions. Spell the keys at the call -- f(Int64(c)), or "
+                     + "f(method_for(xs) <@> lambda(c) -> Int64(c)) for an array.")))
+        let check (e: IRExpr) =
+            match e with
+            | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, loc) when isKey l || isKey r -> refuse loc
+            | IRUnaryOp (IRCast (_, loc), x) when isKey x -> refuse loc
+            | IRUnaryOp (IRNeg, x) when isKey x -> refuse SrcLoc.Nowhere
+            | _ -> ()
+        modul.Functions |> List.iter (fun f -> iterIRExpr check f.Body)
+        modul.Bindings |> List.iter (fun b -> iterIRExpr check b.Value)
+        // THE WHITELIST BACKSTOP (R3). A SPECIALIZED body (an HM clone, `_HM`
+        // in its name: a generic declaration, or a generic lambda, substituted
+        // at concrete types) was typed while its values' type was a variable,
+        // so no observation in it was converted to the key. The type checker
+        // hands an observing callee the KEYS (an Int64 instance:
+        // TypeCheckSupport.observeEnumKeyArrayArgs and the scalar rule beside
+        // it); whatever still reaches an instance at the EnumIdx may only
+        // TRAVEL. Every node that consumes a value of an integer EnumIdx (a
+        // scalar of it, or an array of them) in such a body must be one of:
+        //   - a binding, an argument, a return, a tuple / struct / array
+        //     member or component read, an `if` branch, a statement, an
+        //     assignment (the value moves, it is not read);
+        //   - a loop former or map operand, a compute / pure / bind, a
+        //     structural rearrangement (zip, stack, join, transpose, slice,
+        //     curry, subset, reverse), `extents` / rank, a mask / compound /
+        //     grouping / unique source (the values are selected or moved);
+        //   - a SUBSCRIPT of an array whose slot is that same EnumIdx (a
+        //     position addresses the slot directly), or of the all-literal key
+        //     table (the observation the checker already placed);
+        //   - `==` / `!=` between two values of the SAME EnumIdx, and
+        //     contains / intersect / union of two of them: equality of
+        //     positions IS equality of keys (the key table is a bijection);
+        //   - a fold whose kernel is a callable (a specialized kernel is
+        //     judged here as its own body; any other was typed at the
+        //     EnumIdx and observes through the checker's conversions).
+        // Anything else -- arithmetic, an ordering, `==` against a value of
+        // another type, a cast, a negation, an intrinsic, prodsum, a
+        // contraction, a sort by the value itself, a literal pattern, a
+        // display -- would read the positions and is refused, BL4003.
+        let tagOf (t: IRType) =
+            match IR.stripUnits t with
+            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when intEnumTags.Contains tag -> Some tag
+            | _ -> None
+        let structFields =
+            allTypes |> List.choose (function IRTDStruct (n, fs) -> Some (n, fs) | _ -> None) |> List.distinctBy fst |> Map.ofList
+        // The type a node carries, seeing through a tuple component and a
+        // struct field (exprTypeIfKnown answers neither on its own) -- a value
+        // of R inside a tuple or struct handed to a generic parameter reaches
+        // the instance's arithmetic through exactly these.
+        // (Structural first: in a body specialized at a tuple, the node's own
+        // carried type can still be the generic body's defaulted one -- the
+        // component of the SUBSTITUTED tuple type is the instance's.)
+        // The specialized callable's parameter types (the substituted
+        // signature): a reference to a parameter can still carry the generic
+        // body's type.
+        let paramTypes = System.Collections.Generic.Dictionary<IRId, IRType>()
+        let letValues = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+        let letVisiting = System.Collections.Generic.HashSet<IRId>()
+        let rec typeOf (e: IRExpr) : IRType option =
+            let structural =
+                match e with
+                | IRVar (id, _) when paramTypes.ContainsKey id -> Some paramTypes.[id]
+                // A let-bound local of the body (a match's scrutinee temp):
+                // the type of the value it is bound to, through the same rules.
+                | IRVar (id, _) when letValues.ContainsKey id && letVisiting.Add id ->
+                    let r = typeOf letValues.[id]
+                    letVisiting.Remove id |> ignore
+                    r
+                // `t[0]` over a generic `t: T` (a pack read, or an index the
+                // instance made a tuple's): the component of the instance's tuple.
+                | IRPolyIndex (x, IRLit (IRLitInt i))
+                | IRIndex (x, [ IRLit (IRLitInt i) ], _) when (match typeOf x |> Option.map IR.stripUnits with
+                                                              | Some (IRTTuple _) -> true
+                                                              | _ -> false) ->
+                    (match typeOf x |> Option.map IR.stripUnits with
+                     | Some (IRTTuple ts) -> List.tryItem (int i) ts
+                     | _ -> None)
+                | IRTupleProj (x, i, flat) ->
+                    let rec leaves (t: IRType) =
+                        match IR.stripUnits t with
+                        | IRTTuple ts -> ts |> List.collect leaves
+                        | t -> [ t ]
+                    (match typeOf x |> Option.map IR.stripUnits with
+                     | Some (IRTTuple ts) -> List.tryItem i (if flat then ts |> List.collect leaves else ts)
+                     | _ -> None)
+                | IRFieldAccess (o, fld) ->
+                    (match typeOf o |> Option.map IR.stripUnits with
+                     | Some (IRTNamed sn) ->
+                         Map.tryFind sn structFields
+                         |> Option.bind (List.tryFind (fun (n, _) -> n = fld))
+                         |> Option.map snd
+                     | _ -> None)
+                | _ -> None
+            match structural with
+            | Some t -> Some t
+            | None -> exprTypeIfKnown e
+        let keyTag (e: IRExpr) : string option =
+            match typeOf e with
+            | Some (ArrayElem at) -> tagOf at.ElemType
+            | Some t -> tagOf t
+            | None -> None
+        let refuseIn (fname: string) (span: Blade.Ast.Span) (tag: string) (what: string) =
+            raise (Blade.Diagnostics.BladeDiagnosticException (
+                Blade.Diagnostics.mkError "BL4003" Blade.Diagnostics.PhConstraints span
+                    ($"'{fname}' is specialized at the EnumIdx type '{tag}' and uses its values in a way that reads "
+                     + $"their POSITIONS ({what}): a value of an EnumIdx is a KEY, represented as its position. "
+                     + "Spell the keys at the call -- f(Int64(c)), or f(Int64(xs)) for an array -- or in the body.")))
+        let rec hasLitPattern (p: IRPattern) =
+            match p with
+            | IRPatLit _ -> true
+            | IRPatWild | IRPatVar _ | IRPatVariant (_, _, None, _) -> false
+            | IRPatTuple ps -> ps |> List.exists hasLitPattern
+            | IRPatCons (h, t) -> hasLitPattern h || hasLitPattern t
+            | IRPatVariant (_, _, Some q, _) -> hasLitPattern q
+            | IRPatStruct (_, flds) -> flds |> List.exists (snd >> hasLitPattern)
+        // An EnumIdx tag anywhere inside a type (a tuple component, a struct
+        // field, an array element) -- fuel-bounded through struct fields.
+        let rec containsKey (fuel: int) (t: IRType) : string option =
+            if fuel <= 0 then None else
+            match IR.stripUnits t with
+            | ArrayElem at -> containsKey (fuel - 1) at.ElemType
+            | IRTTuple ts -> ts |> List.tryPick (containsKey (fuel - 1))
+            | IRTNamed sn ->
+                Map.tryFind sn structFields
+                |> Option.bind (List.tryPick (fun (_, u) -> containsKey (fuel - 1) u))
+            | u -> tagOf u
+        // A LITERAL pattern at a position of an EnumIdx type inside a matched
+        // value -- `(100, _)` against a tuple whose first component is R
+        // (Codex review round 2: a tuple scrutinee hid the R component from
+        // the scalar check, and the literal compared with the position).
+        // Where the pattern's sub-type cannot be followed, any literal under
+        // a value that contains an EnumIdx counts (fail closed).
+        let rec litAtKey (p: IRPattern) (t: IRType) : string option =
+            match p, IR.stripUnits t with
+            | IRPatLit _, u -> tagOf u
+            | (IRPatWild | IRPatVar _), _ -> None
+            | IRPatTuple ps, IRTTuple ts when ps.Length = ts.Length ->
+                List.zip ps ts |> List.tryPick (fun (q, u) -> litAtKey q u)
+            | IRPatStruct (_, flds), IRTNamed sn when structFields.ContainsKey sn ->
+                let fs = structFields.[sn]
+                flds |> List.tryPick (fun (n, q) ->
+                    match fs |> List.tryFind (fun (fn, _) -> fn = n) with
+                    | Some (_, u) -> litAtKey q u
+                    | None -> if hasLitPattern q then containsKey 8 t else None)
+            | _, u -> if hasLitPattern p then containsKey 8 u else None
+        let checkSpecialized (f: IRCallable) =
+            let fname = f.SourceName
+            paramTypes.Clear()
+            f.Params |> List.iter (fun p -> paramTypes.[p.VarId] <- p.Type)
+            letValues.Clear()
+            iterIRExpr (fun e ->
+                match e with
+                | IRLet (id, v, _) -> letValues.[id] <- v
+                | _ -> ()) f.Body
+            let judge (e: IRExpr) =
+                let (ExprShape (children, _)) = e
+                (match e with
+                 | IRMatch (scr, cases) ->
+                     (match typeOf scr with
+                      | Some st ->
+                          cases |> List.iter (fun c ->
+                              match litAtKey c.Pattern st with
+                              | Some tag -> refuseIn fname Blade.Ast.noSpan tag "a literal pattern compares a position with a key"
+                              | None -> ())
+                      | None -> ())
+                 | _ -> ())
+                // A child that IS a value of R (or an array of them), or an
+                // aggregate CONTAINING one (a tuple, a struct): either may only
+                // travel (round 2: judging only the first let an aggregate's R
+                // component reach an observing node unexamined).
+                let rTagOf (c: IRExpr) =
+                    match keyTag c with
+                    | Some t -> Some t
+                    | None -> typeOf c |> Option.bind (containsKey 8)
+                match children |> List.tryPick (fun c -> rTagOf c |> Option.map (fun t -> (c, t))) with
+                | None -> ()
+                | Some (_, tag) ->
+                    let sameTag (a: IRExpr) (b: IRExpr) =
+                        match keyTag a, keyTag b with
+                        | Some x, Some y -> x = y
+                        | _ -> false
+                    match e with
+                    | IRLet _ | IRApp _ | IRTuple _ | IRStructLit _ | IRArrayLit _ | IRTupleCons _ | IRTupleProj _
+                    | IRTupleDecons _ | IRFieldAccess _ | IRIf _ | IRSequence _ | IRAssign _ | IRCompute _ | IRPure _
+                    | IRBind _ | IRMethodFor _ | IRObjectFor _ | IRApplyCombinator _ | IRZip _ | IRExtent _ | IRRank _
+                    | IRMask _ | IRGroupKeys _ | IRGroupBy _ | IRUnique _ | IRStack _ | IRJoin _
+                    | IRTranspose _ | IRSlice _ | IRCurry _ | IRSubset _ | IRReverse _ | IRPolyIndex _ | IRPolyTail _
+                    | IRFusion _ | IRParallel _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRFallback _
+                    | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> ()
+                    | IRIndex (arr, idxs, _) ->
+                        let keyTable =
+                            match arr with
+                            | IRArrayLit (elems, _) -> elems |> List.forall (function IRLit (IRLitInt _) -> true | _ -> false)
+                            | _ -> false
+                        let slots =
+                            match exprTypeIfKnown arr with
+                            | Some (ArrayElem at) -> at.IndexTypes |> List.map (fun ix -> ix.Tag)
+                            | _ -> []
+                        idxs |> List.iteri (fun k ix ->
+                            match keyTag ix with
+                            | Some t when not keyTable && List.tryItem k slots <> Some (Some t) ->
+                                refuseIn fname Blade.Ast.noSpan t "a subscript of a slot of another type"
+                            | _ -> ())
+                    | IRBinOp (_, (IREq | IRNeq), l, r, _) when sameTag l r -> ()
+                    // Two aggregates of ONE type (a tuple or struct holding values of R):
+                    // componentwise equality of positions is equality of keys.
+                    | IRBinOp (_, (IREq | IRNeq), l, r, _)
+                        when (match typeOf l, typeOf r with
+                              | Some a, Some b -> IR.stripUnits a = IR.stripUnits b && (keyTag l).IsNone
+                              | _ -> false) -> ()
+                    | IRContains (a, v) when sameTag a v -> ()
+                    | (IRIntersect (a, b) | IRUnion (a, b)) when sameTag a b -> ()
+                    | IRReduce (_, IRVar _, _) | IRReduceCompute (_, IRVar _, _) -> ()
+                    | IRSort (_, key) ->
+                        (match exprTypeIfKnown key with
+                         | Some (FuncElem (_, ret)) when (tagOf ret).IsSome ->
+                             refuseIn fname Blade.Ast.noSpan tag "a sort keyed by the value itself orders the positions"
+                         | _ -> ())
+                    | IRMatch (scr, cases) ->
+                        if (keyTag scr).IsSome && cases |> List.exists (fun c -> hasLitPattern c.Pattern) then
+                            refuseIn fname Blade.Ast.noSpan tag "a literal pattern compares a position with a key"
+                    | IRBinOp (_, op, _, _, loc) ->
+                        let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+                        refuseIn fname span tag $"the operator {op}"
+                    | IRUnaryOp (op, _) -> refuseIn fname Blade.Ast.noSpan tag $"the operation {op}"
+                    | _ ->
+                        let kind = (sprintf "%A" e).Split([| ' '; '\n'; '\r'; '(' |], System.StringSplitOptions.RemoveEmptyEntries).[0]
+                        refuseIn fname Blade.Ast.noSpan tag $"the operation {kind}"
+            iterIRExpr judge f.Body
+        modul.Functions |> List.filter (fun f -> f.Name.Contains "_HM") |> List.iter checkSpecialized
 
 /// Post-monomorphization: FLOAT LITERALS ARE WIDTH-POLYMORPHIC (formalism
 /// 2.4: `a32 * 1.0` stays Float32), and the checker adapts a literal to a
@@ -1527,33 +2043,212 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
         | Some (ArrayElem a) -> narrowElem a.ElemType
         | Some t -> narrowElem t
         | None -> false
-    let narrowLit (e: IRExpr) : IRExpr option =
+    // A LITERAL-ONLY float subtree (round 6, review core-1 S1: the checker
+    // keeps `x * (0.1 + 0.2)` beside an open `x` at the wide width) is
+    // rebuilt WHOLE at Float32 from its doubles -- not just a bare leaf -- so
+    // a Float32 instance computes the constant in Float32, as the explicit
+    // Float32 spelling does.
+    let rec intLiteralTree (e: IRExpr) =
+        match e with
+        | IRLit (IRLitInt _) -> true
+        | IRUnaryOp (IRNeg, x) -> intLiteralTree x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret), l, r, _) ->
+            intLiteralTree l && intLiteralTree r
+        | _ -> false
+    let rec narrowLit (e: IRExpr) : IRExpr option =
         match e with
         | IRLit (IRLitFloat v) -> Some (IRLit (IRLitFloat32 (float32 v)))
-        | IRUnaryOp (IRNeg, IRLit (IRLitFloat v)) -> Some (IRUnaryOp (IRNeg, IRLit (IRLitFloat32 (float32 v))))
+        | IRUnaryOp ((IRNeg | IRMath _) as u, x) -> narrowLit x |> Option.map (fun x' -> IRUnaryOp (u, x'))
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ as op), l, r, loc) ->
+            (match narrowLit l, narrowLit r with
+             | Some l', Some r' -> Some (IRBinOp (IRElementwise, op, l', r', loc))
+             | _ -> None)
+        | IRBinOp (IRElementwise, IRCaret, l, r, loc) ->
+            match narrowLit l, narrowLit r with
+            | Some l', Some r' -> Some (IRBinOp (IRElementwise, IRCaret, l', r', loc))
+            | Some l', None when intLiteralTree r -> Some (IRBinOp (IRElementwise, IRCaret, l', r, loc))
+            | _ -> None
         | _ -> None
+    // Integer trees need the same per-instance treatment. Cast EACH leaf,
+    // so Int32 overflow happens before a later division, not at the result.
+    // Existing casts are barriers: this only retypes width-flexible literals.
+    let rec narrowInt (e: IRExpr) : IRExpr option =
+        let at32 x = IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), x)
+        match e with
+        | IRLit (IRLitInt n) when n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue -> Some (at32 e)
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt 2147483648L)) -> Some (at32 (IRLit (IRLitInt -2147483648L)))
+        | IRUnaryOp (IRNeg, x) -> narrowInt x |> Option.map (fun x' -> IRUnaryOp (IRNeg, x'))
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret as op), l, r, loc) ->
+            match narrowInt l, narrowInt r with
+            | Some l', Some r' -> Some (IRBinOp (IRElementwise, op, l', r', loc))
+            | _ -> None
+        | _ -> None
+    let isInt32 ty =
+        match ty with
+        | Some (ArrayElem a) -> IR.stripUnits a.ElemType = IRTScalar ETInt32
+        | Some t -> IR.stripUnits t = IRTScalar ETInt32
+        | None -> false
+    // R19, THE INSTANCE HALF OF THE LITERAL-FIT RULE: narrowInt / narrowLit
+    // narrow a literal-only tree only when every leaf fits the narrow width;
+    // a tree of the right class with a leaf that does not fit was silently
+    // left wide here (and wrapped / overflowed at the narrow slot it meets).
+    // Every narrowing this pass would attempt instead REFUSES such a tree
+    // (BL3020, LiteralDefaults.misfitMessage): the first leaf that does not
+    // fit, a negated literal judged whole (`-2147483648` fits Int32).
+    let rec intMisfit (e: IRExpr) : string option =
+        match e with
+        | IRLit (IRLitInt n) when not (LiteralDefaults.intFits ETInt32 n) -> Some (LiteralDefaults.intText n)
+        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) ->
+            if LiteralDefaults.intFits ETInt32 (-n) then None else Some ("-" + LiteralDefaults.intText n)
+        | IRUnaryOp (IRNeg, x) -> intMisfit x
+        | IRBinOp (IRElementwise, _, l, r, _) -> intMisfit l |> Option.orElseWith (fun () -> intMisfit r)
+        | _ -> None
+    let rec floatTree (e: IRExpr) =
+        match e with
+        | IRLit (IRLitFloat _) -> true
+        | IRUnaryOp ((IRNeg | IRMath _), x) -> floatTree x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _), l, r, _) -> floatTree l && floatTree r
+        | IRBinOp (IRElementwise, IRCaret, l, r, _) -> floatTree l && (floatTree r || intLiteralTree r)
+        | _ -> false
+    let rec floatMisfit (e: IRExpr) : string option =
+        match e with
+        | IRLit (IRLitFloat v) when not (LiteralDefaults.floatFits ETFloat32 v) -> Some (LiteralDefaults.floatText v)
+        | IRUnaryOp (IRNeg, IRLit (IRLitFloat v)) when not (LiteralDefaults.floatFits ETFloat32 v) ->
+            Some ("-" + LiteralDefaults.floatText v)
+        | IRUnaryOp (_, x) -> floatMisfit x
+        | IRBinOp (IRElementwise, IRCaret, l, r, _) when not (floatTree r) -> floatMisfit l
+        | IRBinOp (IRElementwise, _, l, r, _) -> floatMisfit l |> Option.orElseWith (fun () -> floatMisfit r)
+        | _ -> None
+    let narrowElemOf (t: IRType option) =
+        let elemOf (t: IRType) =
+            match IR.stripUnits t with
+            | IRTScalar et -> Some et
+            | IRTIdxTagged (inner, _) -> (match IR.stripUnits inner with IRTScalar et -> Some et | _ -> None)
+            | _ -> None
+        match t with
+        | Some (ArrayElem a) -> elemOf a.ElemType
+        | Some t -> elemOf t
+        | None -> None
+    let mutable owner : string = ""
+    let refuseMisfit (loc: SrcLoc) (target: IRType option) (text: string) =
+        let span =
+            if not (isNull loc) && loc.Span.StartLine > 0 then loc.Span
+            else IR.declSpanOf owner
+        let et = narrowElemOf target |> Option.defaultValue ETInt32
+        raise (Blade.Diagnostics.BladeDiagnosticException (
+            Blade.Diagnostics.mkError "BL3020" Blade.Diagnostics.PhTypes span (LiteralDefaults.misfitMessage et text)))
+    // The narrowing a tree meets at a narrow position: Some misfit text when
+    // the tree is literal-only of the position's class with a leaf that does
+    // not fit (refused), None otherwise (narrowed, or not a literal tree).
+    let misfitAt (target: IRType option) (intAllowed: bool) (tree: IRExpr) : string option =
+        if isInt32 target then
+            if intAllowed && intLiteralTree tree then intMisfit tree else None
+        elif isNarrow target then
+            if floatTree tree then floatMisfit tree else None
+        else None
+    // R19 (lane a2): a float literal whose SPELLING its double cannot hold
+    // reaches the IR as Lowering's marker, an explicit Float64 cast carrying
+    // the literal's span (Ast.DegenerateFloatLiterals). Met by a narrow
+    // Float32 / Complex64 position at an instance, it is refused at the
+    // literal: never narrowed, never handed to a Float32 slot as a Float64.
+    // Refused exactly where a finite misfit at the same position is (the call
+    // or the operator, refuseMisfit), so the two spellings agree.
+    let degenerateAt (target: IRType option) (tree: IRExpr) : string option =
+        if not (isNarrow target) then None
+        else
+            let marker (e: IRExpr) =
+                match e with
+                | IRUnaryOp (IRCast (ETFloat64, loc), IRLit (IRLitFloat v))
+                    when not (isNull loc) && Blade.Ast.DegenerateFloatLiterals.isDegenerate loc.Span ->
+                    Some (LiteralDefaults.floatTextAt v loc.Span)
+                | _ -> None
+            // (G275: the marker may sit anywhere in a literal-only tree --
+            // `v * (1e-400 + 1.0)` -- and is judged by its own spelling there.)
+            let rec find (e: IRExpr) : string option =
+                match marker e with
+                | Some t -> Some t
+                | None ->
+                match e with
+                | IRUnaryOp (IRNeg, inner) -> find inner |> Option.map (fun t -> if (marker inner).IsSome then "-" + t else t)
+                | IRUnaryOp (IRMath _, inner) -> find inner
+                | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ | IRCaret), l, r, _) ->
+                    find l |> Option.orElseWith (fun () -> find r)
+                | _ -> None
+            // only inside a LITERAL-ONLY tree (a non-literal leaf is the
+            // partner of its own operator, judged there)
+            let rec literalOnly (e: IRExpr) =
+                match e with
+                | IRLit (IRLitFloat _ | IRLitInt _) -> true
+                | IRUnaryOp (IRCast (ETFloat64, _), IRLit (IRLitFloat _)) -> (marker e).IsSome
+                | IRUnaryOp ((IRNeg | IRMath _), x) -> literalOnly x
+                | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMath2 _ | IRCaret), l, r, _) ->
+                    literalOnly l && literalOnly r
+                | _ -> false
+            match marker tree with
+            | Some t -> Some t
+            | None -> if literalOnly tree then find tree else None
     let adapt (e: IRExpr) : IRExpr option =
         match e with
-        | IRBinOp (IRElementwise, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
+        | IRBinOp ((IRElementwise | IROuter) as mode, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
+            // R19 / G275 (2): a float literal tree beside a narrow partner is
+            // judged BEFORE it is narrowed -- narrowLit rounds any double, so
+            // `z * 1e100` over a Float32 `z` (a let-bound lambda's parameter
+            // the first call decided) became an infinity silently.
+            (let tl, tr = exprTypeIfKnown l, exprTypeIfKnown r
+             if isNarrow tl then
+                 degenerateAt tl r |> Option.iter (refuseMisfit loc tl)
+                 if floatTree r then floatMisfit r |> Option.iter (refuseMisfit loc tl)
+             if isNarrow tr then
+                 degenerateAt tr l |> Option.iter (refuseMisfit loc tr)
+                 if floatTree l then floatMisfit l |> Option.iter (refuseMisfit loc tr))
             (match narrowLit r, narrowLit l with
-             | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
-             | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (IRElementwise, op, l', r, loc))
-             | _ -> None)
+             | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (mode, op, l, r', loc))
+             | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (mode, op, l', r, loc))
+             | _ ->
+                 match narrowInt r, narrowInt l with
+                 | Some r', _ when op <> IRCaret && isInt32 (exprTypeIfKnown l) -> Some (IRBinOp (mode, op, l, r', loc))
+                 | _, Some l' when isInt32 (exprTypeIfKnown r) && op <> IRCaret -> Some (IRBinOp (mode, op, l', r, loc))
+                 | _ ->
+                     let tl, tr = exprTypeIfKnown l, exprTypeIfKnown r
+                     degenerateAt tl r |> Option.iter (refuseMisfit loc tl)
+                     degenerateAt tr l |> Option.iter (refuseMisfit loc tr)
+                     match misfitAt tl (op <> IRCaret) r, misfitAt tr (op <> IRCaret) l with
+                     | Some text, _ -> refuseMisfit loc tl text
+                     | _, Some text -> refuseMisfit loc tr text
+                     | _ -> None)
+        | IRApp (f, args, retTy) ->
+            match exprTypeIfKnown f |> Option.map IR.stripUnits with
+            | Some (FuncElem (slots, _)) when slots.Length = args.Length ->
+                let loc = match e with IRAppAt (_, _, _, l) -> l | _ -> SrcLoc.Nowhere
+                List.iter2 (fun slot arg ->
+                    degenerateAt (Some slot) arg |> Option.iter (refuseMisfit loc (Some slot))
+                    match misfitAt (Some slot) true arg with
+                    | Some text -> refuseMisfit loc (Some slot) text
+                    | None -> ()) slots args
+                let replacements =
+                    List.map2 (fun slot arg ->
+                        if isInt32 (Some slot) then narrowInt arg
+                        elif isNarrow (Some slot) then narrowLit arg
+                        else None) slots args
+                if replacements |> List.exists Option.isSome then
+                    Some (withAppParts e (f, List.map2 Option.defaultValue args replacements, retTy))
+                else None
+            | _ -> None
         | _ -> None
     let hit =
         let mutable hit = false
         let scan (b: IRExpr) =
             if not hit then
                 iterIRExpr (fun e -> if not hit && (adapt e).IsSome then hit <- true) b
-        modul.Functions |> List.iter (fun f -> scan f.Body)
-        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        modul.Functions |> List.iter (fun f -> owner <- f.SourceName; scan f.Body)
+        modul.Bindings |> List.iter (fun b -> owner <- b.Name; scan b.Value)
         hit
     if not hit then modul
     else
     let rewrite b = b |> mapIRExpr (fun e -> adapt e |> Option.defaultValue e)
     { modul with
-        Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
-        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+        Functions = modul.Functions |> List.map (fun f -> owner <- f.SourceName; { f with Body = rewrite f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> owner <- b.Name; { b with Value = rewrite b.Value }) }
 
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
@@ -1575,6 +2270,177 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
 /// `programFuncs` is every callable of the program: a name the scalar operand
 /// reads is a CAPTURE of the synthesized kernel unless it is a callable, and
 /// a callable may live in another module.
+/// The array identity a co-iteration/map operand carries: one per distinct
+/// operand variable, so codegen's symmetry deduction treats `A_0 + A_1` as two
+/// different arrays (and `A_0 + A_0` as the same array). A NON-variable
+/// operand (a pack element `A[0]`, a computed subexpression) has no key of its
+/// own, so it gets a FRESH literal identity per operand: two such operands are
+/// never one array (fail closed: an equal-looking expression is not proved the
+/// same storage). Before docs/plans/plan-identity-transpose-compute.md 2.7 every
+/// non-variable operand shared the constant `AIDVariable "__coi"`, so `A[0]`
+/// and `A[1]` answered the SAME identity.
+let internal coIterIdentityOf (builder: IRBuilder) (e: IRExpr) : ArrayIdentity =
+    match e with
+    | IRVar (id, _) -> AIDVariable $"__coi{id}"
+    | _ -> AIDLiteral (builder.FreshId())
+
+/// `method_for(arr) <@> kernel` over ONE array with a scalar kernel, as the
+/// bare (deferred, unforced) combinator node. `lowerArrayBinOpsModule` wraps
+/// it in `IRCompute`; Optimize's sibling-fold pass uses it bare as a join leaf.
+let internal mapOneArrayApply (builder: IRBuilder) (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
+    let ident = coIterIdentityOf builder arr
+    let sdims = la.IndexTypes.Length
+    let mfInfo : MethodForInfo =
+        { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
+          SDimsPerArray = [sdims]; TotalSDims = sdims; SharedIndexTypes = [] }
+    let applyInfo : ApplyInfo =
+        { Loop = IRMethodFor mfInfo
+          Kernel = kernel
+          Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
+          SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
+          SDimsPerArray = [sdims]; KernelInputRanks = [0]; KernelOutputRank = 0
+          KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+          OutputType = outputType; IsCoIteration = false }
+    IRApplyCombinator applyInfo
+
+/// HYGIENIC REBINDING THROUGH THE CLOSURE GRAPH (gap G93). Renaming a body's
+/// binders (`renames`: old id -> (fresh id, emitted name)) must also rename
+/// every CAPTURE of them: a lambda lifted out of that body names a captured
+/// binder in its Captures list and its own body, never in the body being
+/// renamed, so a rename of the body alone left the nested callable naming a
+/// binder that no longer exists (the interpreter: capture not resolvable;
+/// LLVM: unbound variable; C++: undeclared). ONE renaming environment is
+/// threaded through every callable reachable from the body (transitively,
+/// through the bodies of the callables it names): a callable that captures a
+/// renamed binder -- or names one that must be cloned -- is CLONED under a
+/// fresh id with its captures, parameters and lets renamed (its own binders
+/// join the environment, so a lambda nested in it that captures its
+/// parameters is cloned too), and the reference is redirected to the clone.
+/// A callable that needs no clone is shared. Returns the rewritten body and
+/// the clones, which the caller registers beside its other minted callables.
+/// `onFresh fresh original` is told every binder a CLONE freshened (its
+/// parameters and lets), so a caller can carry per-binder declarations onto
+/// the copies (IRModule.LetMutBinders: a `let mut` in a cloned lambda body is
+/// still `let mut`; deep review R12).
+let internal rebindThroughClosuresWith
+        (onFresh: IRId -> IRId -> unit)
+        (builder: IRBuilder) (resolve: IRId -> IRCallable option)
+        (renames: Map<IRId, IRId * string>) (body: IRExpr) : IRExpr * IRCallable list =
+    let env = System.Collections.Generic.Dictionary<IRId, IRId * string>()
+    for KeyValue (k, v) in renames do env.[k] <- v
+    let cloneOf = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    let clones = System.Collections.Generic.List<IRCallable>()
+    let callablesIn (e: IRExpr) = collectVarRefsIR e |> Set.toList |> List.choose resolve
+    let rec needs (visiting: Set<IRId>) (c: IRCallable) : bool =
+        cloneOf.ContainsKey c.Id
+        || c.Captures |> List.exists (fun cap -> env.ContainsKey cap.Id)
+        || (not (visiting.Contains c.Id)
+            && callablesIn c.Body |> List.exists (fun d -> d.Id <> c.Id && needs (Set.add c.Id visiting) d))
+    let rec rewrite (e: IRExpr) : IRExpr =
+        mapIRExpr (fun n ->
+            match n with
+            | IRVar (id, t) ->
+                (match env.TryGetValue id with
+                 | true, (nid, _) -> IRVar (nid, t)
+                 | _ ->
+                     match resolve id with
+                     | Some c when needs Set.empty c -> IRVar ((cloneIt c).Id, t)
+                     | _ -> n)
+            | IRLet (id, v, b) ->
+                (match env.TryGetValue id with
+                 | true, (nid, _) -> IRLet (nid, v, b)
+                 | _ -> n)
+            | _ -> n) e
+    and cloneIt (c: IRCallable) : IRCallable =
+        match cloneOf.TryGetValue c.Id with
+        | true, k -> k
+        | _ ->
+            let cid = builder.FreshId()
+            let ps =
+                c.Params |> List.map (fun p ->
+                    let nid = builder.FreshId()
+                    env.[p.VarId] <- (nid, $"__fz{nid}")
+                    onFresh nid p.VarId
+                    { p with VarId = nid; Name = $"__fz{nid}" })
+            iterIRExpr (fun x ->
+                match x with
+                | IRLet (id, _, _) when not (env.ContainsKey id) ->
+                    let nid = builder.FreshId()
+                    env.[id] <- (nid, $"__v{nid}")
+                    onFresh nid id
+                | _ -> ()) c.Body
+            let caps =
+                c.Captures |> List.map (fun cap ->
+                    match env.TryGetValue cap.Id with
+                    | true, (nid, nm) -> { cap with Id = nid; Name = nm }
+                    | _ -> cap)
+            // registered BEFORE its body is rewritten, so a self-reference
+            // (or a cycle back to it) names the clone
+            let shell = { c with Id = cid; Name = $"__lambda_{cid}"; Params = ps; Captures = caps }
+            cloneOf.[c.Id] <- shell
+            let k = { shell with Body = rewrite c.Body }
+            cloneOf.[c.Id] <- k
+            clones.Add k
+            k
+    let body' = rewrite body
+    body', List.ofSeq clones
+
+let internal rebindThroughClosures
+        (builder: IRBuilder) (resolve: IRId -> IRCallable option)
+        (renames: Map<IRId, IRId * string>) (body: IRExpr) : IRExpr * IRCallable list =
+    rebindThroughClosuresWith (fun _ _ -> ()) builder resolve renames body
+
+/// Clone a callable's parameters with fresh ids (the same callable can be
+/// spliced or inlined at more than one site; ids must stay unique), renaming
+/// them `__fz<id>` for hygiene, and rewrite its body onto the fresh ids. The
+/// body's own `let` binders are freshened too: a kernel that was itself fused
+/// binds a repeated inner value once, and splicing that kernel twice must not
+/// mint one binder twice. The renaming runs through the CLOSURE GRAPH
+/// (`rebindThroughClosures`, gap G93): a callable reachable from the body
+/// that captures a renamed binder is cloned onto the fresh ids, and the
+/// clones are returned for the caller to register beside its other mints.
+/// `resolve` names the program's callables.
+let internal freshenCallableWith (builder: IRBuilder) (resolve: IRId -> IRCallable option) (ik: IRCallable) : IRParam list * IRExpr * IRCallable list =
+    let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
+    let letBinders =
+        let acc = System.Collections.Generic.List<IRId>()
+        iterIRExpr (fun e -> match e with IRLet (id, _, _) -> acc.Add id | _ -> ()) ik.Body
+        acc |> Seq.distinct |> Seq.map (fun id -> id, builder.FreshId()) |> List.ofSeq
+    let renames =
+        Map.ofList (
+            (mapping |> List.map (fun (o, n) -> (o, (n, $"__fz{n}"))))
+            @ (letBinders |> List.map (fun (o, n) -> (o, (n, $"__v{n}")))))
+    let params' =
+        ik.Params |> List.map (fun p ->
+            let (nid, nm) = renames.[p.VarId]
+            { p with VarId = nid; Name = nm })
+    let (body', clones) = rebindThroughClosures builder resolve renames ik.Body
+    params', body', clones
+
+/// Does a callable reachable from `c`'s body (transitively) CAPTURE one of
+/// `c`'s own parameters or let binders? Such a body cannot be spliced by a
+/// rename or a substitution that stops at the body (gap G93): a pass that
+/// does not clone through `rebindThroughClosures` declines it.
+let internal nestedCapturesOwnBinder (resolve: IRId -> IRCallable option) (c: IRCallable) : bool =
+    let own = System.Collections.Generic.HashSet<IRId>()
+    for p in c.Params do own.Add p.VarId |> ignore
+    iterIRExpr (fun e -> match e with IRLet (id, _, _) -> own.Add id |> ignore | _ -> ()) c.Body
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec reach (x: IRExpr) =
+        collectVarRefsIR x |> Set.exists (fun id ->
+            match resolve id with
+            | Some d when d.Id <> c.Id && seen.Add d.Id ->
+                d.Captures |> List.exists (fun cap -> own.Contains cap.Id) || reach d.Body
+            | _ -> false)
+    reach c.Body
+/// `freshenCallableWith` with NO closure graph: the renaming stops at the
+/// body. Sound only for a callable whose body names no callable capturing
+/// one of its binders -- both remaining callers (Optimize's call elision and
+/// its kept one-level inline) refuse any capturing callable in the body
+/// before they freshen it (gap G93's class audit).
+let internal freshenCallable (builder: IRBuilder) (ik: IRCallable) : IRParam list * IRExpr =
+    let (ps, body, _) = freshenCallableWith builder (fun _ -> None) ik
+    ps, body
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
     // The function or binding being rewritten: an operator kernel minted here
@@ -1587,10 +2453,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
     // the same array -- correct commutative collapse).
-    let identityOf e =
-        match e with
-        | IRVar (id, _) -> AIDVariable $"__coi{id}"
-        | _ -> AIDVariable "__coi"
+    let identityOf e = coIterIdentityOf builder e
     // Operand type, seeing through a `|> compute` wrapper so a *nested* array
     // binop -- whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
     // (an array-typed, but not CarriedType-tagged, node) -- is still recognized
@@ -1643,13 +2506,16 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // that inner one is itself a trigger in the un-rewritten tree.
     let isArrayBinOpTrigger (e: IRExpr) : bool =
         match e with
-        | IRBinOp (IRElementwise, _, l, r, _) ->
+        | IRBinOp ((IRElementwise | IROuter), _, l, r, _) ->
             (match operandType l, operandType r with
              | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
              | _ -> false)
         // The lowering-time broadcast's `let s = <scalar> in <map>` (see the
         // `rewrite` arm that rebuilds it).
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> true
+        // A binary array op lowered before arity specialization may now
+        // have a scalar base-case operand. Its original loop shape is stale.
+        | IRApp (IRObjectFor _, [IRTuple [_; _]], _) -> true
         // A scalar unary op over an operand the clone made an array (see the
         // `rewrite` arm `liftUnary`).
         | IRUnaryOp (uop, x) when isLiftableUnary uop ->
@@ -1739,20 +2605,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // `method_for(arr) <@> kernel |> compute` over ONE array with a scalar
     // kernel: the map both broadcast rewrites below build.
     let mapOneArray (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
-        let ident = identityOf arr
-        let sdims = la.IndexTypes.Length
-        let mfInfo : MethodForInfo =
-            { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
-              SDimsPerArray = [sdims]; TotalSDims = sdims; SharedIndexTypes = [] }
-        let applyInfo : ApplyInfo =
-            { Loop = IRMethodFor mfInfo
-              Kernel = kernel
-              Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
-              SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
-              SDimsPerArray = [sdims]; KernelInputRanks = [0]; KernelOutputRank = 0
-              KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
-              OutputType = outputType; IsCoIteration = false }
-        IRCompute (IRApplyCombinator applyInfo)
+        IRCompute (mapOneArrayApply builder arr la kernel outputType)
     // Broadcast a scalar against an array (`arr op scalar` / `scalar op
     // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
     // for operands whose types only resolve post-monomorphization (a pack
@@ -1856,14 +2709,17 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // negation and conjugation take the checker's whole-array nodes; the
     // rest map a `lambda(__bx) -> op(__bx)` kernel over the one array, its
     // result element the scalar op's own type.
-    let liftUnary (uop: IRUnaryOp) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
+    let rec liftUnary (uop: IRUnaryOp) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
         match uop with
         | IRNeg -> IRArrayNegate x
         | IRConj -> IRArrayConjugate x
-        | _ ->
+        | _ -> liftUnaryKernel uop (fun v -> IRUnaryOp (uop, v)) x xt la
+    // `mkBody` builds the kernel body over the cell (one op, or the fused
+    // `Int64(floor(v))` -- see fuseRoundedCasts).
+    and liftUnaryKernel (uop: IRUnaryOp) (mkBody: IRExpr -> IRExpr) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
             let elem = arrayBinOpKernelElem la.ElemType
             let xId = builder.FreshId()
-            let kbody = IRUnaryOp (uop, IRVar (xId, IRTScalar elem))
+            let kbody = mkBody (IRVar (xId, IRTScalar elem))
             let kernelRet = typeOf kbody
             let parms : IRParam list =
                 [ { Name = "__bx"; Type = IRTScalar elem; Index = 0; VarId = xId } ]
@@ -1877,8 +2733,31 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                 | IRTArrow (slots, _, id2) -> IRTArrow (slots, kernelRet, id2)
                 | _ -> xt
             mapOneArray x la (IRVar (lam.Id, kernelFuncType)) outputType
-    let rewrite (e: IRExpr) : IRExpr =
+    let rec rewrite (e: IRExpr) : IRExpr =
         match e with
+        | IRApp (IRObjectFor o, [IRTuple [l; r]], _)
+            when o.InputRanks = [0; 0] && o.OutputRank = 0 && o.CommGroups = [[0; 1]] ->
+            // Recover only the exact cell operator synthesized by lowering.
+            // Recursive Poly calls can lose axes at arity zero; choose
+            // co-iteration or scalar broadcast from their specialized types.
+            // The ordinary binop paths below also name computed array
+            // operands before a loop reads them.
+            match o.Kernel with
+            | IRVar (kid, _) ->
+                match callableOf.TryGetValue kid with
+                | true, k when k.Captures.IsEmpty ->
+                    match k.Params, k.Body with
+                    | [a; b], IRBinOp (IRElementwise, op, IRVar (ai, _), IRVar (bi, _), loc)
+                        when ai = a.VarId && bi = b.VarId ->
+                        match operandType l, operandType r with
+                        | Some (ArrayElem _), Some (ArrayElem _)
+                        | Some (ArrayElem _), Some (AnyPrimElem _)
+                        | Some (AnyPrimElem _), Some (ArrayElem _) ->
+                            rewrite (IRBinOp (IRElementwise, op, l, r, loc))
+                        | _ -> e
+                    | _ -> e
+                | _ -> e
+            | _ -> e
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> rebuildLoweredBroadcast e
         | IRUnaryOp (uop, x) when isLiftableUnary uop ->
             (match operandType x with
@@ -1973,8 +2852,134 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
             | Some (AnyPrimElem sElem), Some ((ArrayElem ra) as rt) ->
                 broadcastScalar op r rt ra l sElem true
             | _ -> e
+        // AN OUTER PRODUCT whose operands became arrays only at an instance
+        // (D4: `head [*] outer(tail)` in a pack kernel -- TypeCheck typed it
+        // over open operands, so its own method_for re-synthesis never
+        // fired, and the raw op reached codegen as `a * b` on two Array
+        // wrappers). The checker's shape for `A [op] B`: the all-pairs
+        // `method_for(A, B) <@> lambda(__ol, __or) -> __ol op __or |>
+        // compute`, rank A + rank B (formalism 7.2). An array beside a
+        // scalar is the elementwise broadcast (the scalar has no axes).
+        | IRBinOp (IROuter, op, l, r, loc) ->
+            // THE MIXING RULE AT THE INSTANCE (formalism 2.4): TypeCheck typed
+            // this op over open operands, so an integer beside a float or a
+            // complex -- `| 0 -> 1` as the identity of a Float64 pack -- is
+            // first visible here. Refused, never promoted.
+            let mixClash (le: ElemType) (re: ElemType) =
+                let cls (e: ElemType) =
+                    match e with
+                    | ETInt32 | ETInt64 -> Some 0
+                    | ETFloat32 | ETFloat64 -> Some 1
+                    | ETComplex64 | ETComplex128 -> Some 2
+                    | _ -> None
+                match cls le, cls re with
+                | Some a, Some b when a <> b && (a = 0 || b = 0) ->
+                    let span = if isNull loc then Blade.Ast.noSpan else loc.Span
+                    let name (e: ElemType) = (sprintf "%A" e).Substring 2
+                    let inFn = match scope with Some s -> $" in `{s}`" | None -> ""
+                    raise (Blade.Diagnostics.BladeDiagnosticException (
+                            Blade.Diagnostics.mkError "BL3020" Blade.Diagnostics.PhTypes span
+                                ($"an outer product{inFn} combines {name le} and {name re} elements at one of its "
+                                 + "instances -- Blade converts nothing implicitly (formalism 2.4). In a pack "
+                                 + "function, write the identity arm in the elements' type (`| 0 -> 1.0` over "
+                                 + "Float64 slices, `| 0 -> 1` over Int64 ones)")))
+                | _ -> ()
+            match operandType l, operandType r with
+            | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
+                let elemTypeL = arrayBinOpKernelElem la.ElemType
+                let elemTypeR = arrayBinOpKernelElem ra.ElemType
+                mixClash elemTypeL elemTypeR
+                let kernelRet =
+                    if isCmpOrLogical op then IRTScalar ETBool else IRTScalar elemTypeL
+                let aId = builder.FreshId()
+                let bId = builder.FreshId()
+                let kbody =
+                    IRBinOp (IRElementwise, op,
+                             IRVar (aId, IRTScalar elemTypeL),
+                             IRVar (bId, IRTScalar elemTypeR), loc)
+                let parms : IRParam list =
+                    [ { Name = "__ol"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
+                      { Name = "__or"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId } ]
+                let lam =
+                    mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
+                    |> shownAs (operatorFunctionName op)
+                newLambdas.Add lam
+                callableOf.[lam.Id] <- lam
+                let kernelFuncType =
+                    IRTArrow ([SVal (IRTScalar elemTypeL); SVal (IRTScalar elemTypeR)], kernelRet, None)
+                // Named operands, as the co-iteration arm above binds them.
+                let mutable prelude : (IRId * IRExpr) list = []
+                let materialize (operand: IRExpr) (ty: IRType) : IRExpr =
+                    match operand with
+                    | IRVar _ -> operand
+                    | _ ->
+                        let id = builder.FreshId()
+                        prelude <- prelude @ [(id, operand)]
+                        IRVar (id, ty)
+                let lArr = materialize l lt
+                let rArr = materialize r rt
+                let identities = [identityOf lArr; identityOf rArr]
+                let arrayTypes = [la; ra]
+                let sdimsPerArray = [la.IndexTypes.Length; ra.IndexTypes.Length]
+                let mfInfo : MethodForInfo =
+                    { Arrays = [lArr; rArr]
+                      Identities = identities
+                      ArrayTypes = arrayTypes
+                      SDimsPerArray = sdimsPerArray
+                      TotalSDims = List.sum sdimsPerArray
+                      SharedIndexTypes = [] }
+                // The result's axes: the left operand's, then the right's
+                // (fresh records, so `outer(x, x)` names two axes).
+                let outAxes =
+                    la.IndexTypes @ (ra.IndexTypes |> List.map (fun ix -> { ix with Id = builder.FreshId() }))
+                let outputType =
+                    mkArrayLike { la with IndexTypes = outAxes; ElemType = kernelRet
+                                          Identity = None; IsVirtual = false }
+                let applyInfo : ApplyInfo =
+                    { Loop = IRMethodFor mfInfo
+                      Kernel = IRVar (lam.Id, kernelFuncType)
+                      Arrays = [lArr; rArr]
+                      Identities = identities
+                      ArrayTypes = arrayTypes
+                      SharedIndexTypes = []
+                      SymcomStates = [SCNeither; SCNeither]
+                      TriangularLevels = [false; false]
+                      SDimsPerArray = sdimsPerArray
+                      KernelInputRanks = [0; 0]
+                      KernelOutputRank = 0
+                      KernelTDims = []
+                      SpeedupFactor = 1L
+                      ReynoldsSpeedup = 1L
+                      HasReynolds = false
+                      OutputType = outputType
+                      IsCoIteration = false }
+                let combined = IRCompute (IRApplyCombinator applyInfo)
+                List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude combined
+            | Some ((ArrayElem la) as lt), Some (AnyPrimElem sElem) ->
+                mixClash (arrayBinOpKernelElem la.ElemType) sElem
+                broadcastScalar op l lt la r sElem false
+            | Some (AnyPrimElem sElem), Some ((ArrayElem ra) as rt) ->
+                mixClash sElem (arrayBinOpKernelElem ra.ElemType)
+                broadcastScalar op r rt ra l sElem true
+            | _ -> e
         | _ -> e
-    let rewriteExpr expr = mapIRExpr rewrite expr
+    // A ROUNDED CAST over an operand the clone made an array --
+    // `Int64(floor(x))` over `x: T` at an array instance -- is lifted as ONE
+    // kernel, `lambda(v) -> Int64(floor(v))`, exactly as the checker fuses
+    // `Int64(floor(A))` over a concrete array. Lifted op by op (the rewrite
+    // below is bottom-up), the cast's kernel would read a plain cell with no
+    // floor in sight, which the post-monomorphization cast sweep refuses as
+    // a truncation (IRValidate, BL3019). Runs before that rewrite, so the
+    // floor is still the cast's direct operand.
+    let fuseRoundedCasts (e: IRExpr) : IRExpr =
+        match e with
+        | IRUnaryOp ((IRCast _ as c), (IRUnaryOp ((IRMath ("floor" | "ceil") as r), x))) ->
+            (match operandType x with
+             | Some ((ArrayElem la) as xt) ->
+                 liftUnaryKernel c (fun v -> IRUnaryOp (c, IRUnaryOp (r, v))) x xt la
+             | _ -> e)
+        | _ -> e
+    let rewriteExpr expr = mapIRExpr rewrite (mapIRExpr fuseRoundedCasts expr)
     let newFunctions =
         modul.Functions |> List.map (fun f ->
             scope <- Some f.SourceName
@@ -2015,13 +3020,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
 // materialized-operand shape `lowerArrayBinOpsModule` produces for pack
 // elements) are deliberately out of scope for v1: fusing those needs a
 // use-count census; the direct nest is where the user-facing chains live.
-let private fusionEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_FUSION" with
-    | null -> true
-    | v ->
-        match v.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" -> false
-        | _ -> true
+let private fusionEnabled () = Blade.Toolchain.envFlag "BLADE_FUSION" true
 
 // The fusion pass's admission predicates, LIFTED so a second consumer can
 // ask the same questions without a copy: the tile planner (CodeGenTiles,
@@ -2218,23 +3217,35 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
 
     // Clone an inner kernel's parameters with fresh ids (the same callable
     // can be spliced at more than one site; ids must stay unique), renaming
-    // for hygiene, and rewrite its body onto the fresh ids.
+    // for hygiene, and rewrite its body onto the fresh ids (see freshenCallable).
+    // Gap G93: the renaming runs through the closure graph; the clones it
+    // mints (a nested callable that captured a renamed binder) are this
+    // pass's own mints, registered like the fused kernels (and swept with
+    // them when nothing references them).
+    let resolveId (id: IRId) : IRCallable option =
+        match resolver.TryGetValue id with
+        | true, c -> Some c
+        | _ -> None
+    let registerClones (clones: IRCallable list) =
+        for k in clones do
+            newLambdas.Add k
+            callables.[k.Id] <- k
+            resolver.[k.Id] <- k
     let freshen (ik: IRCallable) : IRParam list * IRExpr =
-        let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
-        let mapped = Map.ofList mapping
-        let params' =
-            ik.Params |> List.map (fun p ->
-                let nid = mapped.[p.VarId]
-                { p with VarId = nid; Name = $"__fz{nid}" })
-        let body' =
-            mapIRExpr (fun e ->
-                match e with
-                | IRVar (id, t) ->
-                    (match Map.tryFind id mapped with
-                     | Some nid -> IRVar (nid, t)
-                     | None -> e)
-                | _ -> e) ik.Body
-        params', body'
+        let (ps, body, clones) = freshenCallableWith builder resolveId ik
+        registerClones clones
+        ps, body
+    // Does a callable reachable from `e` capture `vid`? (Its id would dangle
+    // once `vid` is substituted away.)
+    let capturedThrough (vid: IRId) (e: IRExpr) : bool =
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let rec reach (x: IRExpr) =
+            collectVarRefsIR x |> Set.exists (fun id ->
+                match resolveId id with
+                | Some c when seen.Add c.Id ->
+                    c.Captures |> List.exists (fun cap -> cap.Id = vid) || reach c.Body
+                | _ -> false)
+        reach e
 
     // `Error why` is the DECLINE reason, recorded by `rewrite` when the host
     // had a fusable-looking operand (a `compute`d inner map) -- the shape a
@@ -2296,7 +3307,33 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                          keep ()
                      | Some ik ->
                          let ps', innerBody = freshen ik
-                         body <- substVar hk.Params.[i].VarId innerBody body
+                         let pid = hk.Params.[i].VarId
+                         // A host reading the parameter more than once would
+                         // evaluate the spliced body once PER OCCURRENCE
+                         // (P3-16: `method_for(exp(x) * 3.0) <@> lambda(e) ->
+                         // e * e` emitted two exp calls per cell). Bind it once
+                         // per cell instead; a bare variable or literal is
+                         // free to repeat.
+                         body <-
+                             // A callable nested in the host body that
+                             // CAPTURES the parameter (gap G93) cannot read a
+                             // substituted expression: bind the spliced value
+                             // once per cell and rebind the parameter to that
+                             // let through the closure graph (the capturing
+                             // callables are cloned onto it).
+                             if capturedThrough pid body then
+                                 let nid = builder.FreshId()
+                                 let (body', clones) =
+                                     rebindThroughClosures builder resolveId (Map.ofList [ (pid, (nid, $"__v{nid}")) ]) body
+                                 registerClones clones
+                                 IRLet (nid, innerBody, body')
+                             else
+                             match innerBody with
+                             | IRVar _ | IRLit _ -> substVar pid innerBody body
+                             | _ when occurrences pid body > 1 ->
+                                 let nid = builder.FreshId()
+                                 IRLet (nid, innerBody, substVar pid (IRVar (nid, hk.Params.[i].Type)) body)
+                             | _ -> substVar pid innerBody body
                          total <- total + inner.Arrays.Length - 1
                          fusedAny <- true
                          if sharedFromInner.IsEmpty then
@@ -2436,7 +3473,17 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                     | _ -> ()) b
             newFunctions |> List.iter (fun f -> scan f.Body)
             newBindings |> List.iter (fun b -> scan b.Value)
-            newLambdas |> Seq.filter (fun l -> referenced.Contains l.Id) |> List.ofSeq
+            // a surviving mint's body may name another mint (a closure clone,
+            // gap G93): transitively
+            let kept = System.Collections.Generic.HashSet<IRId>()
+            let mutable grew = true
+            while grew do
+                grew <- false
+                for l in newLambdas do
+                    if referenced.Contains l.Id && kept.Add l.Id then
+                        scan l.Body
+                        grew <- true
+            newLambdas |> Seq.filter (fun l -> kept.Contains l.Id) |> List.ofSeq
     { modul with
         Functions = newFunctions @ survivingLambdas
         Bindings = newBindings }
@@ -2546,6 +3593,16 @@ let findPolyParamIndices (func: IRFuncDef) : int list =
 /// Returns None for unsupported shapes (mismatched arg count, the pack itself
 /// passed on unspecialized); TypeCheck.polyCallShape refuses at the call
 /// every user-written shape this cannot read.
+/// A pack NAMED by a tuple-typed variable (`let p = (a, b); pk(p, 1)`): its
+/// elements, as the projections `p[0], p[1], ..`. Naming a pack does not
+/// change what it means (formalism 2.8), so the call is read exactly as
+/// `pk((a, b), 1)`; a variable is re-readable, so projecting it per element
+/// evaluates nothing twice.
+let internal tupleVarPackElems (a: IRExpr) : IRExpr list option =
+    match a with
+    | IRVar (_, IRTTuple ts) -> Some [ for j in 0 .. ts.Length - 1 -> IRTupleProj (a, j, false) ]
+    | _ -> None
+
 let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
     // A call passing a symbolic pack tail (`f(tail)` inside an un-specialized
@@ -2576,6 +3633,7 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
         if args.Length = func.Params.Length then
             match List.item pidx args with
             | IRTuple elems -> Some [elems.Length]
+            | IRVar (_, IRTTuple ts) -> Some [ts.Length]
             | IRVar (_, IRTPoly _) -> None
             | _ -> Some [1]
         elif args.Length > func.Params.Length then Some [args.Length - fixedCount]
@@ -2590,6 +3648,7 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
                 polyIndices |> List.map (fun pidx ->
                     match List.item pidx args with
                     | IRTuple elems -> Some elems.Length
+                    | IRVar (_, IRTTuple ts) -> Some ts.Length
                     | IRVar (_, IRTPoly _) -> None
                     | _ -> Some 1)
             if perSlot |> List.forall Option.isSome then
@@ -2616,7 +3675,10 @@ let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
                 if Set.contains i polySet then
                     match a with
                     | IRTuple elems -> elems
-                    | _ -> [a]  // shouldn't happen post-computePolyArity
+                    | _ ->
+                        match tupleVarPackElems a with
+                        | Some elems -> elems
+                        | None -> [a]  // a lone element: a one-element pack
                 else
                     [a])
             |> List.concat
@@ -2641,7 +3703,49 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
 /// Create a monomorphized copy of a poly function for a list of slot arities.
 /// `arities` carries one arity per Poly slot, in declaration order -- packs
 /// are independent, so different slots may have different sizes.
-let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder) : IRFuncDef =
+/// A PACK ELEMENT'S TYPE VARIABLES, READ OFF ITS INSTANCE (D4). TypeCheck
+/// types a cons-destructured `head` at a fresh variable that keeps the base
+/// caret's rank and generic mark (consDestructureLeaves) but NOT the base
+/// variable itself -- `head + ..` would otherwise collapse the pack's own
+/// type -- and a body op may shape it (`head - mean(head)` materializes the
+/// caret as `Array<E, ..>`). In a specialization the element IS an expanded
+/// parameter, so each use of a let bound to one names its variables in terms
+/// of that parameter's type. Only CONCRETE answers are returned (a pack whose
+/// base type was settled at type checking); an open base is the HM pass's to
+/// learn per instance (learnFromInnerCalls reads the same let).
+let packHeadLinks (spec: IRFuncDef) : Map<int, IRType> =
+    let paramTy = spec.Params |> List.map (fun p -> (p.VarId, p.Type)) |> Map.ofList
+    let headLets = System.Collections.Generic.Dictionary<IRId, IRType>()
+    iterIRExpr (fun e ->
+        match e with
+        | IRLet (id, IRVar (pid, _), _) when paramTy.ContainsKey pid -> headLets.[id] <- paramTy.[pid]
+        | _ -> ()) spec.Body
+    let mutable link : Map<int, IRType> = Map.empty
+    if headLets.Count > 0 then
+        iterIRExpr (fun e ->
+            match e with
+            | IRVar (id, useTy) when headLets.ContainsKey id ->
+                let bt = headLets.[id]
+                if useTy <> bt && Set.isEmpty (collectInferIds bt) then
+                    (match useTy with
+                     | IRTInfer h -> Map.ofList [ (h, bt) ]
+                     | _ -> unifyParamWithArg useTy bt Map.empty)
+                    |> Map.iter (fun k v ->
+                        if not (link.ContainsKey k) && Set.isEmpty (collectInferIds v) then
+                            link <- Map.add k v link)
+            | _ -> ()) spec.Body
+    link
+
+/// `clonesOut` collects the callables a pack former's unroll CLONED per
+/// element (gap G112: a nested lambda capturing the kernel's ordinal or one of
+/// its binders, `rebindThroughClosures`); the caller registers them beside
+/// the specializations. `freshOut` records every binder the unroll FRESHENED
+/// (fresh id -> original id), so the caller can carry the module's per-binder
+/// declarations onto the copies (IRModule.LetMutBinders: a `let mut` copied
+/// per element is still declared `let mut`; deep review D9).
+let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId, IRFuncDef>) (builder: IRBuilder)
+                       (clonesOut: System.Collections.Generic.List<IRFuncDef>)
+                       (freshOut: System.Collections.Generic.Dictionary<IRId, IRId>) : IRFuncDef =
     let polyIndices = findPolyParamIndices func
     if List.isEmpty polyIndices then func  // Not actually poly -- shouldn't happen
     elif List.length arities <> List.length polyIndices then func  // arity-count mismatch
@@ -2803,7 +3907,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                 [ for j in off .. aritiesArr.[slot] - 1 -> slotParamVar slot j ]
                             if calleeIsVariadic then elems else [IRTuple elems]
                         | _ -> [a])
-                IRApp (callee, expandedArgs, rty)
+                withAppParts e (callee, expandedArgs, rty)
             | _ -> e
         let newBody = mapIRExpr rewrite func.Body
 
@@ -2855,12 +3959,34 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // iteration would run.
         let rec containsBreakIf e =
             match e with
-            | IRBreakIf _ -> true
+            | IRBreakIf _ | IRReplayRow _ -> true
             | ExprShape (children, _) -> children |> List.exists containsBreakIf
+        // G95 (round 4 wave 4 lane A; G93's class): the unroll substitutes the
+        // loop variable by a literal in the BODY only. A callable reachable
+        // from the body (transitively) that CAPTURES the loop variable keeps
+        // naming it -- its call sites forward the capture by name, and no
+        // copy binds it any more (a `let rec` step in an arity-poly body with
+        // a lambda reading the step index `n` emitted `__lambda(k, n)` with
+        // `n` undeclared). Such a loop is not unrolled: it stays the ordinary
+        // loop the fixed-arity body runs. The same for a callable capturing one
+        // of the body's own `let` binders (copied unfreshened into every
+        // unrolled copy; Codex review round 1).
+        let loopVarCaptured (vid: IRId) (body: IRExpr) =
+            let own = System.Collections.Generic.HashSet<IRId>()
+            own.Add vid |> ignore
+            iterIRExpr (fun e -> match e with IRLet (id, _, _) -> own.Add id |> ignore | _ -> ()) body
+            let seen = System.Collections.Generic.HashSet<IRId>()
+            let rec reach (x: IRExpr) =
+                collectVarRefsIR x |> Set.exists (fun id ->
+                    match Map.tryFind id funcMap with
+                    | Some d when seen.Add d.Id ->
+                        d.Captures |> List.exists (fun cap -> own.Contains cap.Id) || reach d.Body
+                    | _ -> false)
+            reach body
         let rec unrollForRanges expr =
             match expr with
             | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest)
-                    when not (containsBreakIf body) ->
+                    when not (containsBreakIf body) && not (loopVarCaptured vid body) ->
                 let restUnrolled = unrollForRanges rest
                 let indices = [ int lo .. int hi - 1 ] |> List.rev
                 indices |> List.fold (fun acc k ->
@@ -2915,9 +4041,226 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                             | IRPolyIndex (IRVar (pid, _), _) when Map.containsKey pid aliasToSlot ->
                                 packSlot <- Some aliasToSlot.[pid]
                             | _ -> ()) lam.Body
+                        // G174 (round 4 wave 6): a DYNAMIC pack read hidden
+                        // in a callable the kernel reaches (a nested lambda,
+                        // a let-bound lambda it calls) did not unroll the
+                        // former, so the read stayed `args[k]` over a
+                        // specialization whose pack is scalar parameters
+                        // (g++ rejected the emission, BL9002). Found through
+                        // the closure graph and refused, as the direct
+                        // form's capturing lambda is (arity/484).
+                        // the pack's own ids: its parameter(s) and every
+                        // function-level alias the specialization knows
+                        let packIds =
+                            Set.union
+                                (aliasToSlot |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                (polyIndices |> List.map (fun pi -> func.Params.[pi].VarId) |> Set.ofList)
+                        // a LET-BOUND lambda (`let h = lambda ..` in the
+                        // function body, the kernel naming `h`) resolves
+                        // through its binding to the lifted callable
+                        let letCallables =
+                            let acc = System.Collections.Generic.Dictionary<IRId, IRId>()
+                            let note (b: IRExpr) =
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, IRVar (lid, _), _) -> acc.[id] <- lid
+                                    | _ -> ()) b
+                            note expr
+                            // and the lets inside the kernel and the
+                            // lambdas it reaches (`let h = lambda ..` in the
+                            // kernel, then `h(args)`; gap G206)
+                            note lam.Body
+                            for KeyValue (_, d) in funcMap do
+                                if d.Name.StartsWith "__lambda" then note d.Body
+                            acc
+                        // a let-bound callable resolves through its
+                        // binding, transitively (`let h2 = h`)
+                        let rec callableOfSeen (seenIds: Set<IRId>) (id: IRId) =
+                            match Map.tryFind id funcMap with
+                            | Some d -> Some d
+                            | None ->
+                                match letCallables.TryGetValue id with
+                                | true, lid when not (seenIds.Contains lid) -> callableOfSeen (seenIds.Add id) lid
+                                | _ -> None
+                        let callableOf (id: IRId) = callableOfSeen Set.empty id
+                        // the ids that name the pack in a body: the known
+                        // ones, every local alias chain of one (`let a =
+                        // args; let b = a`) and every local TUPLE holding
+                        // one (`let t = (args, x)`; gap G206)
+                        let rec holdsPack (known: Set<IRId>) (x: IRExpr) =
+                            match x with
+                            | IRVar (id, _) -> known.Contains id
+                            | IRTuple es -> es |> List.exists (holdsPack known)
+                            | _ -> false
+                        let aliasesIn (known0: Set<IRId>) (body: IRExpr) =
+                            let mutable known = known0
+                            let mutable grew = true
+                            while grew do
+                                grew <- false
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, v, _) when not (known.Contains id) && holdsPack known v ->
+                                        known <- known.Add id
+                                        grew <- true
+                                    | _ -> ()) body
+                            known
+                        // a body reads the pack DYNAMICALLY through one of
+                        // those ids -- directly, or through a projection
+                        // of a tuple holding it (`t[0][k]`, G206); a
+                        // literal index is resolved by the specialization
+                        // and is left alone
+                        let readsPack (known: Set<IRId>) (body: IRExpr) =
+                            let mutable reads = false
+                            iterIRExpr (fun e ->
+                                match e with
+                                | IRPolyIndex (_, IRLit _) -> ()
+                                | IRPolyIndex (b, _) when not (Set.isEmpty (Set.intersect (collectVarRefsIR b) known)) -> reads <- true
+                                | _ -> ()) body
+                            reads
+                        // every LAMBDA the kernel reaches (directly, through
+                        // a let binding or an alias of one, or through
+                        // another lambda that calls it) is searched, the
+                        // pack's ids carried across each closure boundary
+                        // (an alias made in the kernel and captured inside);
+                        // a NAMED function -- the enclosing one included,
+                        // recursively -- reads its OWN parameters, which its
+                        // own specialization resolves, and is not followed
+                        let seen = System.Collections.Generic.HashSet<IRId>()
+                        let rec hiddenIn (known: Set<IRId>) (x: IRExpr) =
+                            collectVarRefsIR x |> Set.exists (fun id ->
+                                match callableOf id with
+                                | Some d when d.Id <> lam.Id && d.Name.StartsWith "__lambda" && seen.Add d.Id ->
+                                    let inner = aliasesIn known d.Body
+                                    readsPack inner d.Body || hiddenIn inner d.Body
+                                | _ -> false)
+                        let hidden (x: IRExpr) = hiddenIn (aliasesIn packIds x) x
+                        // G206 (Codex review): a DYNAMIC pack subscript the
+                        // specialization cannot rewrite -- any `IRPolyIndex`
+                        // with a non-literal index, except (when the former is
+                        // unrolled) the kernel's own `args[k]` of a pack
+                        // parameter. The pack may reach it through a local
+                        // alias, a tuple projection, a match binder, a
+                        // conditional, a lambda returning it ...: no channel
+                        // is traced, every such read is refused.
+                        let dynamicRead (allowDirect: bool) (body: IRExpr) =
+                            let mutable found = false
+                            iterIRExpr (fun e ->
+                                match e with
+                                | IRPolyIndex (_, IRLit _) -> ()
+                                | IRPolyIndex (IRVar (pid, _), IRVar (ix, _))
+                                        when allowDirect && Map.containsKey pid aliasToSlot && ix = ordinalParam.VarId -> ()
+                                | IRPolyIndex _ -> found <- true
+                                | _ -> ()) body
+                            found
+                        // every lambda the kernel reaches by ANY reference (a
+                        // call, a let alias, a tuple member, a match binder,
+                        // a returned closure), transitively
+                        let letValues =
+                            let acc = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+                            let note (b: IRExpr) =
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, v, _) -> acc.[id] <- v
+                                    // a MATCH binder stands for (a part of) its
+                                    // scrutinee (`match h with | f -> f(k)`)
+                                    | IRMatch (scr, cases) ->
+                                        for c in cases do
+                                            for id in patternBoundIds c.Pattern do acc.[id] <- scr
+                                    | _ -> ()) b
+                            note expr
+                            note lam.Body
+                            for KeyValue (_, d) in funcMap do
+                                if d.Name.StartsWith "__lambda" then note d.Body
+                            acc
+                        let reachable =
+                            let acc = System.Collections.Generic.List<IRFuncDef>()
+                            let seenR = System.Collections.Generic.HashSet<IRId>()
+                            let seenV = System.Collections.Generic.HashSet<IRId>()
+                            let rec walk (x: IRExpr) =
+                                for id in collectVarRefsIR x do
+                                    match callableOf id with
+                                    | Some d when d.Id <> lam.Id && d.Name.StartsWith "__lambda" && seenR.Add d.Id ->
+                                        acc.Add d
+                                        walk d.Body
+                                    | Some _ -> ()
+                                    | None ->
+                                        // a local VALUE (a tuple, an `if`, a match
+                                        // holding a lambda): its initializer
+                                        match letValues.TryGetValue id with
+                                        | true, v when seenV.Add id -> walk v
+                                        | _ -> ()
+                            walk lam.Body
+                            List.ofSeq acc
+                        // G206: the pack (or a tuple holding it) PASSED as
+                        // an argument to a lambda the kernel reaches
+                        // (`h(args)`, `h((args, x))`): the lambda would be
+                        // handed a pack the specialization no longer has,
+                        // whatever it does with it -- refused in BOTH
+                        // forms (rolled, or unrolled because the kernel
+                        // also reads `args[k]` itself)
+                        // -- whatever callee, unless it resolves to a NAMED
+                        // function (which reads its own parameters)
+                        let passesIn (known: Set<IRId>) (x: IRExpr) =
+                            let mutable found = false
+                            iterIRExpr (fun e ->
+                                match e with
+                                | IRApp (callee, args, _) when not found && args |> List.exists (holdsPack known) ->
+                                    let named =
+                                        match callee with
+                                        | IRVar (fid, _) ->
+                                            (match callableOf fid with
+                                             | Some d -> not (d.Name.StartsWith "__lambda")
+                                             | None -> false)
+                                        | _ -> false
+                                    if not named then found <- true
+                                | _ -> ()) x
+                            found
+                        if passesIn (aliasesIn packIds lam.Body) lam.Body
+                           || (reachable |> List.exists (fun d -> passesIn (aliasesIn packIds d.Body) d.Body)) then
+                            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                $"'{func.SourceName}': a pack former's kernel passes the pack (or a tuple holding it) to a nested lambda as an argument; the specialization splits the pack into scalar parameters, so the lambda would be handed a pack it no longer has (gap G206). Compute the value inline instead of through the nested lambda.")))
+                        let refuseKernelIndirect () =
+                            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                $"'{func.SourceName}': a pack former's kernel reads a pack dynamically through a local value (an alias, a tuple projection, a binder, a returned pack: `let p = args; p[k]`); the specialization rewrites only the kernel's own `args[k]`, so the read would keep a pack subscript it no longer has (gap G206). Index the pack directly.")))
+                        let refuseNested () =
+                            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                $"'{func.SourceName}': a pack former's kernel reads the pack only through a nested lambda (a dynamic `args[k]` inside it); the former is unrolled per pack element only when the kernel itself reads the pack, so the lambda would keep a pack subscript the specialization no longer has (gap G174). Compute the value inline instead of through the nested lambda.")))
+                        if packSlot.IsNone then
+                            if hidden lam.Body || (reachable |> List.exists (fun d -> dynamicRead false d.Body)) then refuseNested ()
+                            if dynamicRead false lam.Body then refuseKernelIndirect ()
+                            // G223: a ROLLED kernel naming the pack as a value
+                            // (an argument of a named function, `pick(args,
+                            // k)`) kept a pack the specialization no longer
+                            // has (BL6001, a dangling VarId); unrolling it
+                            // would need the range proved to be THIS pack's
+                            // index, which an opaque extent cannot show
+                            // (Codex diff review round 3) -- refused
+                            if not (Set.isEmpty (Set.intersect (collectVarRefsIR lam.Body) packIds)) then
+                                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                    $"'{func.SourceName}': a pack former's kernel names the pack as a value (an argument of a named function) without reading it by the ordinal; the former is unrolled per pack element only when the kernel reads `args[k]`, so the kernel would keep a pack the specialization no longer has (gap G223). Read the element in the kernel (`args[k]`) and pass it instead.")))
                         match packSlot with
                         | Some slotIdx ->
                             let n = aritiesArr.[slotIdx]
+                            // G223 (Codex diff review round 2): the copies are
+                            // one per PACK element, so the former's range must
+                            // be the pack's own index -- zero-based, of the
+                            // pack's arity (the opaque placeholder an
+                            // `Idx<arity(args)>` range carries, or a literal
+                            // equal to it). A range of another extent or start
+                            // (`0..2` over three elements) would change the
+                            // former's shape: refused.
+                            (match info.Arrays with
+                             | [ IRRange ([ ix ], off) ] ->
+                                 let offOk = match off with None | Some (IRLit (IRLitInt 0L)) -> true | _ -> false
+                                 let extOk =
+                                     match ix.Extent with
+                                     | IRLit (IRLitInt m) -> m = int64 n
+                                     | IRParam _ | IRArity _ -> true
+                                     | _ -> false
+                                 if not (offOk && extOk) then
+                                     raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                         $"'{func.SourceName}': a pack former over a range that is not the pack index (another extent or a nonzero start) reads the pack; it is unrolled into one copy per pack element, which would change its shape (gap G223). Iterate `range<Idx<arity(args)>>`.")))
+                             | _ -> ())
                             // Element type + index-type shape from the former's
                             // deduced OutputType arrow; the extent is replaced
                             // with the (now literal) pack size.
@@ -2936,19 +4279,231 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                                   IndexTypes = [ { idxRec with Extent = IRLit (IRLitInt (int64 n)) } ]
                                   IsVirtual = false
                                   Identity = None }
+                            // G95 (round 4 wave 4 lane A; G93's class): each
+                            // element is a COPY of the kernel body, so its
+                            // `let` binders are freshened per element (the
+                            // copies used to share one id: three `auto __v4`
+                            // in one C++ scope). A callable reachable from the
+                            // body that CAPTURES the ordinal or one of those
+                            // lets would keep naming a binder no copy declares
+                            // (the substitution stops at the body); cloning it
+                            // per element is not built, so it is refused here
+                            // with a diagnostic instead of an undeclared name.
+                            // EVERY binder kind (gap G115's second half): a
+                            // `match` arm's pattern variables and a for-range
+                            // variable are copied with the body as well, so
+                            // they are freshened like the lets (they used to
+                            // keep one id across the copies: a latent
+                            // duplicate declaration).
+                            let bodyLets =
+                                let acc = System.Collections.Generic.List<IRId>()
+                                iterIRExpr (fun e ->
+                                    match e with
+                                    | IRLet (id, _, _) -> acc.Add id
+                                    | IRForRange (vid, _, _, _) -> acc.Add vid
+                                    | IRMatch (_, cases) ->
+                                        for c in cases do
+                                            for id in patternBoundIds c.Pattern do acc.Add id
+                                    | _ -> ()) lam.Body
+                                acc |> Seq.distinct |> List.ofSeq
+                            let ownBinders = Set.ofList (ordinalParam.VarId :: bodyLets)
+                            let capturedOwn =
+                                let seen = System.Collections.Generic.HashSet<IRId>()
+                                let rec reach (x: IRExpr) =
+                                    collectVarRefsIR x |> Set.exists (fun id ->
+                                        match Map.tryFind id funcMap with
+                                        | Some d when d.Id <> lam.Id && seen.Add d.Id ->
+                                            d.Captures |> List.exists (fun cap -> ownBinders.Contains cap.Id) || reach d.Body
+                                        | _ -> false)
+                                reach lam.Body
+                            // G112 (round 4 wave 5 lane c): such a lambda is
+                            // now CLONED per element through the closure graph
+                            // (`rebindThroughClosures`, G93's machinery): the
+                            // element's binders are fresh, the ordinal is a
+                            // let of the literal k that the clones capture,
+                            // and the clones are registered beside the
+                            // specializations. Only a capturing callable that
+                            // ALSO captures the pack itself is still refused:
+                            // its clone would read the pack the specialization
+                            // no longer has.
+                            let capturesPack =
+                                let seen = System.Collections.Generic.HashSet<IRId>()
+                                let rec reach (x: IRExpr) =
+                                    collectVarRefsIR x |> Set.exists (fun id ->
+                                        match Map.tryFind id funcMap with
+                                        | Some d when d.Id <> lam.Id && seen.Add d.Id ->
+                                            d.Captures |> List.exists (fun cap ->
+                                                Map.containsKey cap.Id aliasToSlot || Map.containsKey cap.Id aliasInfo
+                                                || polyIndices |> List.exists (fun pi -> func.Params.[pi].VarId = cap.Id)
+                                                || (match cap.Type with IRTPoly _ -> true | _ -> false))
+                                            || reach d.Body
+                                        | _ -> false)
+                                reach lam.Body
+                            if capturedOwn && capturesPack then
+                                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                    $"'{func.SourceName}': a pack former's kernel holds a lambda that captures both the kernel's own ordinal or one of its lets AND the pack itself; the former is unrolled into one copy of the kernel per pack element, and such a lambda cannot be copied with it (gaps G95, G112). Compute the value inline instead of through the nested lambda.")))
+                            // G206: the unrolled copies rewrite only the kernel's
+                            // own `args[k]`; any other dynamic pack subscript --
+                            // in the kernel through a local value, or in a lambda
+                            // it reaches -- would survive the specialization
+                            // G223: the kernel's own dynamic reads are judged on
+                            // the REWRITTEN per-element bodies below (after the
+                            // ordinal is a literal and a static index folded),
+                            // so a real tuple read by the ordinal (`t[k]`) and
+                            // `args[k + 0]` compile; only the reachable lambdas
+                            // are judged here
+                            if reachable |> List.exists (fun d -> dynamicRead false d.Body) then refuseNested ()
+                            let renameSites (fresh: Map<IRId, IRId>) (e: IRExpr) =
+                                match e with
+                                | IRForRange (vid, lo, hi, b) when fresh.ContainsKey vid -> IRForRange (fresh.[vid], lo, hi, b)
+                                | IRMatch (s, cases) ->
+                                    let rec renamePat (p: IRPattern) =
+                                        match p with
+                                        | IRPatVar id when fresh.ContainsKey id -> IRPatVar fresh.[id]
+                                        | IRPatTuple ps -> IRPatTuple (ps |> List.map renamePat)
+                                        | IRPatCons (h, t) -> IRPatCons (renamePat h, renamePat t)
+                                        | IRPatVariant (a, b, Some q, c) -> IRPatVariant (a, b, Some (renamePat q), c)
+                                        | IRPatStruct (sn, flds) -> IRPatStruct (sn, flds |> List.map (fun (f, q) -> (f, renamePat q)))
+                                        | _ -> p
+                                    IRMatch (s, cases |> List.map (fun c -> { c with Pattern = renamePat c.Pattern }))
+                                | _ -> e
                             let elems =
                                 [ for k in 0 .. n - 1 ->
-                                    let substituted =
-                                        mapIRExpr (fun e ->
-                                            match e with
-                                            | IRVar (vid, _) when vid = ordinalParam.VarId ->
-                                                IRLit (IRLitInt (int64 k))
-                                            | _ -> e) lam.Body
-                                    mapIRExpr rewrite substituted ]
+                                    let fresh = bodyLets |> List.map (fun id -> id, builder.FreshId()) |> Map.ofList
+                                    for KeyValue (o, nn) in fresh do freshOut.[nn] <- o
+                                    if capturedOwn then
+                                        let ordId = builder.FreshId()
+                                        let renames =
+                                            Map.ofList (
+                                                (ordinalParam.VarId, (ordId, $"__v{ordId}"))
+                                                :: (fresh |> Map.toList |> List.map (fun (o, nn) -> (o, (nn, $"__v{nn}")))))
+                                        let (body1, clones) =
+                                            // (the clones' freshened binders are
+                                            // recorded too: a `let mut` in a
+                                            // cloned lambda stays `let mut`, R12)
+                                            rebindThroughClosuresWith (fun nn o -> freshOut.[nn] <- o) builder (fun id -> Map.tryFind id funcMap) renames lam.Body
+                                        clonesOut.AddRange clones
+                                        let body2 =
+                                            mapIRExpr (fun e ->
+                                                match e with
+                                                | IRVar (vid, _) when vid = ordId -> IRLit (IRLitInt (int64 k))
+                                                | _ -> renameSites fresh e) body1
+                                        let ordCaptured =
+                                            clones |> List.exists (fun c -> c.Captures |> List.exists (fun cap -> cap.Id = ordId))
+                                        let bound =
+                                            if ordCaptured then IRLet (ordId, IRLit (IRLitInt (int64 k)), body2) else body2
+                                        mapIRExpr rewrite bound
+                                    else
+                                        let substituted =
+                                            mapIRExpr (fun e ->
+                                                match e with
+                                                | IRVar (vid, _) when vid = ordinalParam.VarId ->
+                                                    IRLit (IRLitInt (int64 k))
+                                                | IRVar (vid, t) when fresh.ContainsKey vid -> IRVar (fresh.[vid], t)
+                                                | IRLet (id, v, b) when fresh.ContainsKey id -> IRLet (fresh.[id], v, b)
+                                                | IRForRange (vid, lo, hi, b) when fresh.ContainsKey vid -> IRForRange (fresh.[vid], lo, hi, b)
+                                                | IRMatch (s, cases) ->
+                                                    let rec renamePat (p: IRPattern) =
+                                                        match p with
+                                                        | IRPatVar id when fresh.ContainsKey id -> IRPatVar fresh.[id]
+                                                        | IRPatTuple ps -> IRPatTuple (ps |> List.map renamePat)
+                                                        | IRPatCons (h, t) -> IRPatCons (renamePat h, renamePat t)
+                                                        | IRPatVariant (a, b, Some q, c) -> IRPatVariant (a, b, Some (renamePat q), c)
+                                                        | IRPatStruct (n, flds) -> IRPatStruct (n, flds |> List.map (fun (f, q) -> (f, renamePat q)))
+                                                        | _ -> p
+                                                    IRMatch (s, cases |> List.map (fun c -> { c with Pattern = renamePat c.Pattern }))
+                                                | _ -> e) lam.Body
+                                        mapIRExpr rewrite substituted ]
+                            // THE INVARIANT (G223, Codex design review): no
+                            // rewritten copy may still name the pack -- a
+                            // dynamic subscript the fold could not resolve, a
+                            // local alias or tuple holding it, a literal read
+                            // through such an alias; each would be a dangling
+                            // VarId at validation
+                            if elems |> List.exists (fun el ->
+                                   let known = aliasesIn packIds el
+                                   not (Set.isEmpty (Set.intersect (collectVarRefsIR el) packIds))
+                                   || readsPack known el) then
+                                refuseKernelIndirect ()
                             Some (IRArrayLit (elems, arrTy))
                         | None -> None
                     | _ -> None
                 | _ -> None
+            // G206 (Codex review round 2): a pure-range former that is NOT
+            // let-bound (`reduce(method_for(range<..>) <@> lambda(k) -> ..,
+            // (+))`) is never unrolled, so a kernel that touches the pack --
+            // reads it, or reaches a lambda with a dynamic pack subscript --
+            // kept a pack the specialization no longer has (g++ rejected it).
+            // Refused by name: bind the former with `let`.
+            (let letBound = System.Collections.Generic.HashSet<obj>(HashIdentity.Reference)
+             iterIRExpr (fun e ->
+                match e with
+                | IRLet (_, IRCompute (IRApplyCombinator info), _)
+                | IRLet (_, IRApplyCombinator info, _) -> letBound.Add (box info) |> ignore
+                | _ -> ()) expr
+             let packIdsAll =
+                Set.union
+                    (aliasToSlot |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                    (polyIndices |> List.map (fun pi -> func.Params.[pi].VarId) |> Set.ofList)
+             iterIRExpr (fun e ->
+                match e with
+                | IRApplyCombinator info when not (letBound.Contains (box info)) ->
+                    (match info.Arrays, info.Kernel with
+                     | [ IRRange _ ], IRVar (lamId, _) when Map.containsKey lamId funcMap ->
+                         let lam = funcMap.[lamId]
+                         // every value the kernel depends on: a lifted lambda
+                         // body, a local let initializer, a match binder's
+                         // scrutinee -- transitively (Codex review round 3)
+                         let deps = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+                         let note (b: IRExpr) =
+                             iterIRExpr (fun y ->
+                                 match y with
+                                 | IRLet (id, v, _) -> deps.[id] <- v
+                                 | IRMatch (scr, cases) ->
+                                     for c in cases do
+                                         for id in patternBoundIds c.Pattern do deps.[id] <- scr
+                                 | _ -> ()) b
+                         note expr
+                         for KeyValue (_, d) in funcMap do
+                             if d.Name.StartsWith "__lambda" then note d.Body
+                         let seen = System.Collections.Generic.HashSet<IRId>()
+                         // the pack as a VALUE (a pack id, or a tuple with
+                         // such a member): what a local value may not hold
+                         let rec isPack (v: IRExpr) =
+                             match v with
+                             | IRVar (id, _) -> packIdsAll.Contains id
+                             | IRTuple es -> es |> List.exists isPack
+                             | _ -> false
+                         // `body`: a kernel or lambda body, which may not name
+                         // the pack at all (it would keep a capture of it); a
+                         // local value initializer outside the kernel may read
+                         // the pack at a literal index (`let first = args[0]`)
+                         let rec touches (body: bool) (x: IRExpr) =
+                             let mutable dyn = false
+                             iterIRExpr (fun y ->
+                                 match y with
+                                 | IRPolyIndex (_, IRLit _) -> ()
+                                 | IRPolyIndex _ -> dyn <- true
+                                 // `arity(args)` names the pack too
+                                 | IRArity (None, _) -> dyn <- true
+                                 | _ -> ()) x
+                             dyn
+                             || (if body then not (Set.isEmpty (Set.intersect (collectVarRefsIR x) packIdsAll)) else isPack x)
+                             || collectVarRefsIR x |> Set.exists (fun id ->
+                                 if not (seen.Add id) then false
+                                 else
+                                     match Map.tryFind id funcMap with
+                                     | Some d when d.Name.StartsWith "__lambda" -> touches true d.Body
+                                     | Some _ -> false
+                                     | None ->
+                                         match deps.TryGetValue id with
+                                         | true, v -> touches false v
+                                         | _ -> false)
+                         if touches true lam.Body then
+                             raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                                 $"'{func.SourceName}': a pack former used INLINE (not bound by `let`) whose kernel reads the pack is never unrolled per pack element, so its kernel would keep a pack the specialization no longer has (gap G206). Bind the former with `let` first.")))
+                     | _ -> ())
+                | _ -> ()) expr)
             mapIRExpr (fun e ->
                 match e with
                 | IRLet (id, IRCompute (IRApplyCombinator info), rest) ->
@@ -2961,6 +4516,24 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                      | None -> e)
                 | _ -> e) expr
         let newBody = unrollPackFormers newBody
+        // G223 (round 4 wave 8 lane d): a DYNAMIC subscript of the pack whose
+        // index this specialization cannot resolve to a literal (`function
+        // pick(p: Poly<Float64>, j: Int64) = p[j]`) was left as-is over a pack
+        // parameter the specialization replaced by scalar parameters -- a
+        // dangling VarId at IR validation (BL6001), at top level and through
+        // a former alike. Refused at lowering (fail closed); a select chain
+        // over a homogeneous pack is the staged alternative (gap G223).
+        (let pids =
+            Set.union
+                (aliasInfo |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                (polyIndices |> List.map (fun pi -> func.Params.[pi].VarId) |> Set.ofList)
+         iterIRExpr (fun e ->
+            match e with
+            | IRPolyIndex (b, idx) when (match idx with IRLit _ -> false | _ -> true)
+                                       && not (Set.isEmpty (Set.intersect (collectVarRefsIR b) pids)) ->
+                raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                    $"'{func.SourceName}': a pack is subscripted by an index that is not known in this specialization (a pack read `p[j]` with a run-time `j`); a pack is specialized into scalar parameters, so only a literal or a former ordinal can select an element (gap G223). Index the pack with a literal, or iterate it with a pack former.")))
+            | _ -> ()) newBody)
 
         let declaredRetType =
             match func.RetType with
@@ -2975,11 +4548,35 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             match e with
             | IRLet (_, _, body) -> finalScalarType body
             | CarriedType (IRTScalar _ as ty) -> Some ty
+            // An explicit identity cast carries no type on its IR node.
+            // Recognize it only when its operand proves the cast scalar;
+            // an element cast of an array must keep the array's shape.
+            | IRUnaryOp (IRCast _, _) ->
+                match exprTypeIfKnown e with
+                | Some (IRTScalar _ as ty) -> Some ty
+                | _ -> None
             | _ -> None
         let newRetType =
             match finalScalarType newBody with
             | Some sTy -> sTy               // arity-collapsed scalar base (see above)
             | None -> declaredRetType
+        // AN ARITY-DECIDED RESULT (D4): an undeclared return TypeCheck left
+        // open because its rank is the instance's (`head [*] outer(tail)`:
+        // rank 1 at arity 1, rank 2 at arity 2 -- inferMatch, the outer-op
+        // rule). It is ONE variable in the generic body, shared by the
+        // function's result and its own recursive call; each instance gets
+        // its own copy, so the instance's result and the result of the
+        // smaller instance it calls are learned apart (IRMono's HM learning,
+        // learnFromInnerCalls). A variable a parameter mentions is the
+        // instance's by substitution already, and keeps its name.
+        let newBody, newRetType =
+            let paramIds =
+                expandedParams |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty
+            match IR.stripUnits newRetType with
+            | IRTInfer x when not (paramIds.Contains x) ->
+                let link = Map.ofList [ (x, builder.FreshInferType()) ]
+                substTypeInIRExpr link newBody, substTypeInIRType link newRetType
+            | _ -> newBody, newRetType
 
         // Commutativity group expansion: each original index maps to a
         // (newStart, span) in the expanded list. For a Poly slot, span =
@@ -3047,6 +4644,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           // So does the effect summary: specialization changes arity, not
           // what the body does.
           Effects = func.Effects
+          HoistFrame = func.HoistFrame
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
           Captures = func.Captures
@@ -3118,6 +4716,8 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    spec's body and enqueues what it finds until nothing new appears.
     let funcMap = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let mutable specMap : Map<IRId * int list, IRFuncDef> = Map.empty
+    let packClones = System.Collections.Generic.List<IRFuncDef>()
+    let freshOrigins = System.Collections.Generic.Dictionary<IRId, IRId>()
     let queue = System.Collections.Generic.Queue<IRId * int list>()
     for site in (callSitesFromFuncs @ callSitesFromBindings) |> List.distinct do
         queue.Enqueue site
@@ -3128,7 +4728,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         let (funcId, arity) = queue.Dequeue()
         if not (Map.containsKey (funcId, arity) specMap) then
             let origFunc = polyFuncMap.[funcId]
-            let spec = specializeFunction origFunc arity funcMap builder
+            let spec = specializeFunction origFunc arity funcMap builder packClones freshOrigins
             specMap <- Map.add (funcId, arity) spec specMap
             for site in collectPolyCallSites polyFuncMap spec.Body do
                 if not (Map.containsKey site specMap) then queue.Enqueue site
@@ -3138,19 +4738,47 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    computePolyArity (shape-aware: variadic vs tuple-as-pack), and the
     //    args are flattened at the Poly slot so they line up with the
     //    specialization's expanded param list.
-    let rewriteCallSite e =
+    //    A call OUTSIDE the specializations whose instance result is still
+    //    open (an arity-decided return, see specializeFunction) keeps the
+    //    caller's own result variable: HM monomorphization binds it per call
+    //    (specSide) once the instance's result is learned. Inside a
+    //    specialization the call names the CALLEE instance's variable, which
+    //    is what that learning reads.
+    // A generic pack's literal-only scalar base has no parameters left
+    // at arity zero, so HM cannot specialize its width from arguments.
+    // Keep that expression inside the recursive caller until its element
+    // width is known. Fixed values, casts, calls and captures are barriers.
+    let rec literalOnlyBase e =
         match e with
-        | IRApp (IRVar (funcId, fty), args, _) when polyFuncIds.Contains funcId ->
+        | IRLit (IRLitInt _ | IRLitFloat _) -> true
+        | IRUnaryOp ((IRNeg | IRMath _), x) -> literalOnlyBase x
+        | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret | IRMath2 _), l, r, _) ->
+            literalOnlyBase l && literalOnlyBase r
+        | _ -> false
+    let rewriteCallSiteWith (keepOpenCallerType: bool) e =
+        match e with
+        | IRApp (IRVar (funcId, fty), args, origRetTy) when polyFuncIds.Contains funcId ->
             let func = polyFuncMap.[funcId]
             match computePolyArity func args with
             | Some arity ->
                 match Map.tryFind (funcId, arity) specMap with
                 | Some spec ->
                     let flatArgs = flattenAtPolyPosition func args
-                    IRApp (IRVar (spec.Id, fty), flatArgs, spec.RetType)
+                    let retTy =
+                        if keepOpenCallerType && not (Set.isEmpty (collectInferIds spec.RetType)) then origRetTy
+                        else spec.RetType
+                    let genericElement =
+                        match func.RetType with
+                        | ArrayElem a -> not (Set.isEmpty (collectInferIds a.ElemType))
+                        | _ -> false
+                    if not keepOpenCallerType && genericElement && flatArgs.IsEmpty
+                       && spec.Params.IsEmpty && spec.Captures.IsEmpty && literalOnlyBase spec.Body then
+                        spec.Body
+                    else withAppParts e (IRVar (spec.Id, fty), flatArgs, retTy)
                 | None -> e
             | None -> e
         | _ -> e
+    let rewriteCallSite e = rewriteCallSiteWith true e
 
     // 5. Rewrite all expressions in module
     let newFunctions =
@@ -3164,8 +4792,11 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // applications of the ORIGINAL poly id); rewrite those to the concrete specs
     // too, or the recursion would reference a poly function that no longer exists.
     let specFuncs =
-        specializations |> List.map (fun (_, spec) ->
-            { spec with Body = mapIRExpr rewriteCallSite spec.Body })
+        (specializations |> List.map snd)
+        // G112: the per-element clones of a pack former's capturing lambdas.
+        @ List.ofSeq packClones
+        |> List.map (fun spec ->
+            { spec with Body = mapIRExpr (rewriteCallSiteWith false) spec.Body })
 
     // Prune lifted kernel lambdas that captured a poly PACK and are now dead.
     // The pack-former unroller inlines such a lambda's body into the
@@ -3174,6 +4805,81 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // longer exists as a scalar). Drop it once unreferenced. The gate is
     // narrow (synthesized "__lambda_" name, Poly-typed capture, unreferenced)
     // so no live function is ever removed.
+    // The pack elements' variables a settled base type names (packHeadLinks),
+    // over the whole module: a lifted kernel built over `head` (`head -
+    // mean(head)`'s broadcast) carries them too. Every instance of one
+    // function reads the same base type, so the answers agree; a variable
+    // two answers disagree on is left alone.
+    let headLink =
+        specializations
+        |> List.collect (fun (_, s) -> packHeadLinks s |> Map.toList)
+        |> List.groupBy fst
+        |> List.choose (fun (k, vs) ->
+            match vs |> List.map snd |> List.distinct with
+            | [ v ] -> Some (k, v)
+            | _ -> None)
+        |> Map.ofList
+    let linkFunc (f: IRFuncDef) =
+        if headLink.IsEmpty then f
+        else
+            { f with Body = substTypeInIRExpr headLink f.Body
+                     RetType = substTypeInIRType headLink f.RetType
+                     Params = f.Params |> List.map (fun p -> { p with Type = substTypeInIRType headLink p.Type })
+                     Captures = f.Captures |> List.map (fun c -> { c with Type = substTypeInIRType headLink c.Type }) }
+    let newFunctions = newFunctions |> List.map linkFunc
+    let specFuncs = specFuncs |> List.map linkFunc
+    let newBindings =
+        if headLink.IsEmpty then newBindings
+        else newBindings |> List.map (fun b -> { b with Type = substTypeInIRType headLink b.Type
+                                                        Value = substTypeInIRExpr headLink b.Value })
+    // ARITY-DECIDED RESULTS OF A SETTLED PACK (D4): an instance whose
+    // parameters are already concrete is no HM function, so nothing else
+    // learns its open result. Learn each from its body here, smallest arity
+    // first (a larger instance reads the smaller one's result), then bind the
+    // callers' own result variables per binding / function.
+    let specFuncs, newFunctions, newBindings =
+        let decided =
+            specFuncs |> List.filter (fun s ->
+                not (hasTypeVarsInParams s) && not (Set.isEmpty (collectInferIds s.RetType)))
+        if decided.IsEmpty then specFuncs, newFunctions, newBindings
+        else
+            let mutable cm = (newFunctions @ specFuncs) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+            let learnedById =
+                decided
+                |> List.sortBy (fun s -> s.Params.Length)
+                |> List.map (fun s ->
+                    let s = cm.[s.Id]
+                    let b = learnFromInnerCalls s cm Map.empty
+                    let s' = { s with Body = substTypeInIRExpr b s.Body; RetType = substTypeInIRType b s.RetType }
+                    cm <- Map.add s.Id s' cm
+                    (s.Id, s'))
+                |> Map.ofList
+            let callerBindings (e: IRExpr) =
+                let mutable acc : Map<int, IRType> = Map.empty
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRApp (IRVar (sid, fty), _, retTy) when learnedById.ContainsKey sid ->
+                        let spec = learnedById.[sid]
+                        arityResultClash Blade.Ast.noSpan (decided |> List.find (fun d -> d.Id = sid)) spec retTy
+                        // ...and the head's arrow, which still names the
+                        // declaration's result.
+                        let headRet = match fty with FuncElem (_, r) -> [ r ] | _ -> []
+                        for t in retTy :: headRet do
+                            unifyParamWithArg t spec.RetType Map.empty
+                            |> Map.iter (fun k v -> if not (acc.ContainsKey k) then acc <- Map.add k v acc)
+                    | _ -> ()) e
+                acc
+            let relink (f: IRFuncDef) =
+                let f = match Map.tryFind f.Id learnedById with Some s -> s | None -> f
+                let b = callerBindings f.Body
+                if b.IsEmpty then f
+                else { f with Body = substTypeInIRExpr b f.Body; RetType = substTypeInIRType b f.RetType }
+            (specFuncs |> List.map relink),
+            (newFunctions |> List.map relink),
+            (newBindings |> List.map (fun bd ->
+                let b = callerBindings bd.Value
+                if b.IsEmpty then bd
+                else { bd with Type = substTypeInIRType b bd.Type; Value = substTypeInIRExpr b bd.Value }))
     let allFuncs = newFunctions @ specFuncs
     let referencedIds =
         (allFuncs |> List.map _.Body)
@@ -3189,9 +4895,19 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                  && capturesPolyPack f
                  && not (Set.contains f.Id referencedIds)))
 
+    // a `let mut` binder freshened per unrolled element stays `let mut`
+    // (followed through repeated freshening: an unrolled copy of a copy)
+    let rec origin (id: IRId) (fuel: int) =
+        match freshOrigins.TryGetValue id with
+        | true, o when fuel > 0 -> origin o (fuel - 1)
+        | _ -> id
+    let letMut =
+        freshOrigins.Keys |> Seq.fold (fun (acc: Set<IRId>) nn ->
+            if modul.LetMutBinders.Contains (origin nn 64) then acc.Add nn else acc) modul.LetMutBinders
     { modul with
         Functions = prunedFuncs
-        Bindings = newBindings }
+        Bindings = newBindings
+        LetMutBinders = letMut }
 
 // Shape monomorphization (docs/plan-cpp-perf-exploitation.md)
 //
@@ -3337,7 +5053,7 @@ let internal shapeRewriteExpr (subst: Map<string, int64>) (expr: IRExpr) : IRExp
         // ever lives inside an index record, which this walk reaches through
         // the type positions instead.
         | IRParam (n, i, ty) -> IRParam (n, i, rt ty)
-        | IRApp (f, args, retTy) -> IRApp (f, args, rt retTy)
+        | IRAppAt (f, args, retTy, loc) -> IRAppAt (f, args, rt retTy, loc)
         | IRArrayLit (es, aty) -> IRArrayLit (es, rat aty)
         | IRRange (ixs, off) -> IRRange (ixs |> List.map rix, off)
         | IRVirtualReverse ix -> IRVirtualReverse (rix ix)
@@ -3863,9 +5579,9 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                     match Map.tryFind (fid, sign) specMap with
                     | Some spec ->
                         let subst = spec.Subst
-                        IRApp (IRVar (spec.SpecId, shapeRewriteType subst fty),
-                               args,
-                               shapeRewriteType subst retTy)
+                        withAppParts e (IRVar (spec.SpecId, shapeRewriteType subst fty),
+                                        args,
+                                        shapeRewriteType subst retTy)
                     | None -> e
             | _ -> e) expr
 
@@ -4154,13 +5870,26 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         reportCensus ()
         rewritten
     else
-    let referenced =
-        rewritten |> List.fold (fun acc m ->
-            let fromFuncs =
-                m.Functions |> List.map (fun f -> Set.remove f.Id (collectVarRefsIR f.Body))
-            let fromBindings = m.Bindings |> List.map (fun b -> collectVarRefsIR b.Value)
-            Set.unionMany (acc :: fromFuncs @ fromBindings)) Set.empty
-    let dead = Set.difference deadCandidates referenced
+    // To a FIXPOINT (N20): a candidate referenced only from another dead copy
+    // is dead too -- `outer(x: T^2) = rowsums(x * 2.0)` left the unshaped
+    // `rowsums_HM_..._double` called only by the unshaped `outer_HM_...`, which
+    // the first round pruned. References from a dead definition stop counting
+    // once it is known dead; the set only grows, so this terminates.
+    let refsOf =
+        rewritten |> List.collect (fun m ->
+            (m.Functions |> List.map (fun f -> (Some f.Id, Set.remove f.Id (collectVarRefsIR f.Body))))
+            @ (m.Bindings |> List.map (fun b -> (None, collectVarRefsIR b.Value))))
+    let rec grow (dead: Set<IRId>) =
+        let referenced =
+            refsOf
+            |> List.choose (fun (owner, refs) ->
+                match owner with
+                | Some id when Set.contains id dead -> None
+                | _ -> Some refs)
+            |> Set.unionMany
+        let dead' = Set.difference deadCandidates referenced
+        if dead' = dead then dead else grow dead'
+    let dead = grow Set.empty
     reportCensus ()
     if Set.isEmpty dead then rewritten
     else

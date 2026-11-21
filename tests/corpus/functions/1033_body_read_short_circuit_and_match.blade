@@ -1,0 +1,22 @@
+// TEST: A Body Read In A Short-Circuited Operand Or An Untaken Match Arm Forces Nothing
+// ============================================================================
+// Gap G239, round 4 wave 10 (lane C, C1): inside a FUNCTION body a deferred
+// module map is forced AT EACH READ POSITION, in evaluation order (formalism
+// 10.2) -- an untaken read forces nothing and the evaluation count is
+// observable. The compiled lanes forced it once per body statement, before
+// the statement; a read whose order that cannot reproduce is now a call of a
+// one-statement helper and the statement spine is put in evaluation order
+// (Lowering.splitDeferredBodyReadsModule).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [-1.0]
+let forcing = method_for(backing) <@> lambda(e) -> Int64(floor(sqrt(e)))
+function f(x: Float64) -> Bool = { let a = x > 0.0 && forcing(0) > 0; a }
+function g(x: Float64) -> Bool = { let a = x < 0.0 || forcing(0) > 0; a }
+function h(z: Int64) -> Int64 = { let a = match z with | 0 -> 1 | _ -> forcing(0); a }
+let r1 = f(-2.0)
+let r2 = g(-2.0)
+let r3 = h(0)
+// EXPECT: r1 = false
+// EXPECT: r2 = true
+// EXPECT: r3 = 1

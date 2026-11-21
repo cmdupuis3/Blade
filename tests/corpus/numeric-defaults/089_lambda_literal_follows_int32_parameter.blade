@@ -1,0 +1,9 @@
+// TEST: an integer literal beside an unannotated kernel parameter takes the operand's Int32 width
+// Gap G110 (round 4 wave 4 lane A): the integer twin of 088 -- `v * v + 3`
+// over an Int32 array is an Int32 map.
+type I = Idx<4>
+let n: Array<Int32 like I> = [1, 2, 3, 4]
+let m: Array<Int32 like I> = method_for(n) <@> lambda(v) -> v * v + 3 |> compute
+let q: Array<Int32 like I> = method_for(n) <@> lambda(v) -> 10 - v |> compute
+// EXPECT: m = [4, 7, 12, 19]
+// EXPECT: q = [9, 8, 7, 6]

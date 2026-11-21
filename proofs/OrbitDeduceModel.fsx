@@ -1,9 +1,17 @@
-// OrbitDeduceModel.fsx — AST-robustness stress tests for OrbIdx type deduction.
+// OrbitDeduceModel.fsx — the deduction-MODEL oracle for OrbIdx type deduction.
 // Companion to docs/plan-orbit-index-types.md (§7 deduction rule, §9.4) and to
-// OrbitEnum.fsx (which verifies the class calculus itself). This file verifies
-// the calculus THROUGH the AST: each case states the target deduction rule for
-// one Blade construct, names the compiler seam it must land in, and validates
-// the rule by brute-force stabilizer enumeration over generic tensors.
+// OrbitEnum.fsx (which verifies the class calculus itself). Each case states
+// the target deduction rule for one Blade construct, names the compiler seam
+// it is meant to land in, and validates the rule by brute-force stabilizer
+// enumeration over generic tensors.
+//
+// What this does NOT do: it never builds a Blade AST, runs the parser or
+// typechecker, or reads the class the compiler infers. Its cases are
+// standalone recipes, so they stay green if the compiler's rule drifts
+// (audit 2026-10-15, S04). The compiler side is pinned by the corpus
+// (the OrbIdx tests in tests/corpus/index-types and tests/corpus/symmetry),
+// not here. The seam line numbers below date from
+// 2026-08-01, before the TypeCheck* / IR* file split, and are historical.
 //
 // Constructs covered (per the 2026-08-01 combinator inventory):
 //   [*] outer product        — BinOpMode.Outer, mkOuterResult (TypeCheck.fs:5357)

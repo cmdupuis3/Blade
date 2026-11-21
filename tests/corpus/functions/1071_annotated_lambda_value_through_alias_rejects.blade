@@ -1,0 +1,9 @@
+// TEST: an annotated Float64 lambda called through an alias with a Float32 (rejects)
+// ============================================================================
+// G275 (1): the declared parameter is Float64; the call converts nothing.
+// ============================================================================
+let f32: Float32 = 1.0
+let h = lambda(v: Float64) -> v
+let saved = h
+let y = saved(f32)
+// ERROR: BL3020

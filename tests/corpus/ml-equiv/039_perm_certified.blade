@@ -49,9 +49,9 @@ let static B0 = ml.perm_bias_dim(0, 4)
 // w2 : Pow 0 (extent 1 = 4^0)              -- the readout weight
 // b  : Pow 0 (extent 1 = 4^0)              -- the invariant constant
 // result : Pow 0 (extent 1 = 4^0)          -- the S_4-invariant readout
-function readout(x: Array<Float like Idx<4>>, w1: Array<Float like Idx<W1>>,
-                 w2: Array<Float like Idx<W2>>, b: Array<Float like Idx<B0>>)
-                 where ml.perm_equiv(4) -> Array<Float like Idx<1>> = {
+function readout(x: Array<Float64 like Idx<4>>, w1: Array<Float64 like Idx<W1>>,
+                 w2: Array<Float64 like Idx<W2>>, b: Array<Float64 like Idx<B0>>)
+                 where ml.perm_equiv(4) -> Array<Float64 like Idx<1>> = {
     let h = ml.derive_perm_linear(1, 1, 4, x, w1)
     let s = h / (1.0 + h * h)
     let y = ml.derive_perm_linear(1, 0, 4, s, w2)
@@ -67,7 +67,7 @@ let out = readout([1.0, 2.0, -3.0, 4.0], [2.0, 0.0 - 1.0], [2.0], [1.0])
 // EXPECT: out = [0.47256843331392]
 
 // The uncertified twin, written out longhand: same arithmetic, no theorem.
-let xt: Array<Float like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
+let xt: Array<Float64 like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
 let st = reduce(xt, (+))
 let ht = 2.0 * xt - st
 // EXPECT: ht = [-2.0, 0.0, -10.0, 4.0]
@@ -82,7 +82,7 @@ let dtwin = out(0) - twin
 // summands in a different order.
 let perm = readout([4.0, 1.0, -3.0, 2.0], [2.0, 0.0 - 1.0], [2.0], [1.0])
 let dperm = out(0) - perm(0)
-let perm_ok = if dperm * dperm < 0.000000000000000000000001 then 1.0 else 0.0
+let perm_ok: Float64 = if dperm * dperm < 0.000000000000000000000001 then 1.0 else 0.0
 // EXPECT: perm_ok = 1.0
 
 // A second relabelling, and the bias arm exercised on its own: the constant
@@ -90,5 +90,5 @@ let perm_ok = if dperm * dperm < 0.000000000000000000000001 then 1.0 else 0.0
 // readout by exactly that amount, under every relabelling.
 let perm2 = readout([0.0 - 3.0, 4.0, 2.0, 1.0], [2.0, 0.0 - 1.0], [2.0], [4.0])
 let dshift = perm2(0) - out(0) - 3.0
-let shift_ok = if dshift * dshift < 0.000000000000000000000001 then 1.0 else 0.0
+let shift_ok: Float64 = if dshift * dshift < 0.000000000000000000000001 then 1.0 else 0.0
 // EXPECT: shift_ok = 1.0

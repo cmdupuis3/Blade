@@ -1,0 +1,17 @@
+// TEST: a join leg kernel's captured deferred map is forced before the traversal (aborts)
+// Gap G115 (round 4 wave 5 lane c; formalism 10.2): a kernel's capture of a
+// deferred map is a forcing use, made when the kernel is formed -- before the
+// join's first cell. `w`'s kernel reads `g` only at cells past 4, and `g` fails
+// at its cell 7, while leg `q` fails at cell 2: the failure is `g`'s (line 10
+// once the harness drops the TEST line), in every lane. The interpreter used to
+// force `g` at its first read and reported `q`'s.
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e: Array<Int64 like I> = [1, 2, 0, 4, 5, 6, 7, 8, 9, 10]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let q = method_for(e) <@> lambda(b) -> 200 / b
+let w = method_for(range<I>) <@> lambda(i) -> if i > 4 then g(i) else 0
+let (sw, sq) = object_for(<&!>) <@> (reduce(w, (+)), reduce(q, (+)))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:10

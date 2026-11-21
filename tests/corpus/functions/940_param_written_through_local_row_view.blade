@@ -1,0 +1,19 @@
+// TEST: a non-mut parameter written through a local row view (rejects)
+// ERROR: BL4005 @ 11:1
+// ERROR-CONTAINS: reaches the parameter `d` of `touch`, which is not `mut`
+// REJECT-AT: lower
+// R12 (deep review): a parameter is read-only unless declared `mut`, and the rule
+// is about STORAGE: a write that REACHES a non-`mut` parameter through a local
+// view, alias, tuple member, `if` / `match` value, a callee that returns its
+// argument, a `mut` argument or a capturing lambda writes the CALLER'S array, as
+// the direct `d(0, 1) = 7.0` the type checker refuses does (formalism 2.7).
+// This used to compile and change the caller's array (after = 7.0).
+type D = Array<Float64 like Idx<1>, Idx<2>>
+function touch(d: D) -> Float64 = {
+    let mut v = d(0)
+    v(1) = 7.0
+    0.0
+}
+let g: D = [[1.0, 1.0]]
+let z = touch(g)
+let after = g(0, 1)

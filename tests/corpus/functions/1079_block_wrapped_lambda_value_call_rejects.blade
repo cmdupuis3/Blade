@@ -1,0 +1,11 @@
+// TEST: a lambda returned by a block, called with a Float32 (rejects)
+// ============================================================================
+// G275 (the lead's ruling): the block's value is a use of the lambda as a
+// value, monomorphic at its binding; its open parameter defaults to Float64
+// and the call through the value decides nothing -- the Float32 argument
+// would be converted.
+// ============================================================================
+let h = { lambda(v) -> v + 1.0 }
+let a: Float32 = 1.0
+let y = h(a)
+// ERROR: BL3020

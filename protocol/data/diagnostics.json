@@ -17,8 +17,8 @@
     },
     "BL0003": {
       "title": "invalid numeric literal",
-      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
-      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
+      "explanation": "A numeric token could not be parsed as a signed 64-bit integer or a floating-point value: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
+      "fix": "Rewrite the literal in a form the target type accepts. An integer literal defaults to Int32 when it fits and Int64 otherwise; a value outside Int64 must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
       "examples": [
         "tests/corpus/diagnostics/081_number_glued_to_name_rejects.blade",
         "tests/corpus/diagnostics/086_numeric_literal_malformed_rejects.blade"
@@ -54,13 +54,14 @@
     },
     "BL1003": {
       "title": "removed loop or malformed recursive array",
-      "explanation": "Blade has no imperative loop, and this code is the steer away from one. It fires for the removed `for x in a..b { ... }` statement (at top level and inside a block alike) and for `while` / `do` written as a statement. It also guards the construct a sequential loop becomes: a `let rec` recursive array has a rigid form -- an explicit type annotation, `match <the array itself> with`, a base arm `| zero -> zero`, an optional seed arm `| zero :: n -> zero :: <slice>`, and an inductive arm `| prefix :: n -> prefix :: <slice>` -- and any departure from it is reported here. The two guards are not interchangeable: a recursive-array arm takes `while` (defined until the condition goes false, frozen after), only on the inductive arm; an ordinary match arm takes `if` (a failing guard falls through to the next arm). Each spelled on the other is this code.",
+      "explanation": "Blade has no imperative loop, and this code is the steer away from one. It fires for the removed `for x in a..b { ... }` statement (at top level and inside a block alike) and for `while` / `do` written as a statement. It also guards the construct a sequential loop becomes: a `let rec` recursive array has a rigid form -- an explicit type annotation, `match <the array itself> with`, a base arm `| zero -> zero`, an optional seed arm `| zero :: n -> zero :: <slice>`, and an inductive arm `| prefix :: n -> prefix :: <slice>` -- and any departure from it is reported here. The two guards are not interchangeable: a recursive-array arm takes `while` (defined until the condition goes false, frozen after), only on the inductive arm; an ordinary match arm takes `if` (a failing guard falls through to the next arm). Each spelled on the other is this code. It is also the steer for the removed capitalized booleans: `True` / `False` are spelled `true` / `false`.",
       "fix": "Pick the declarative construct the loop was standing in for. A recurrence, time-stepping or running state is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`); iterate-until-converged is that array's inductive arm with a `while` guard over a budget extent. A fold is `reduce(...)`, and a parallel map is array arithmetic or `method_for(range<...>) <@> lambda(...)`. If the `let rec` itself was refused, the message names the part of the form that is wrong.",
       "examples": [
         "tests/corpus/diagnostics/045_for_in_removed.blade",
         "tests/corpus/diagnostics/078_while_loop_steer.blade",
         "tests/corpus/diagnostics/079_while_on_ordinary_match_arm_rejects.blade",
-        "tests/corpus/recursive-arrays/014_while_guard_on_seed_rejects.blade"
+        "tests/corpus/recursive-arrays/014_while_guard_on_seed_rejects.blade",
+        "tests/corpus/numeric-defaults/021_capital_true_rejects.blade"
       ],
       "docs": [
         "docs/formalism.md",
@@ -69,13 +70,14 @@
     },
     "BL1004": {
       "title": "ill-formed type spelling",
-      "explanation": "The text sits where a type belongs and uses a type former, but spells no type. Two formers raise it. `Tuple<...>` is either one integer WIDTH of at least 2 (`Tuple<2>`, element types inferred) or a list of at least two component TYPES (`Tuple<Float64, Float64>`): a width of 0 or 1, a negative width, an empty `Tuple<>`, a single component type, or a width mixed with component types are all refused -- there is no 1-tuple, because `(e)` is grouping. The caret `H^r` builds a rank-r array of H elements: a concrete element type needs an integer literal rank (`Float64^1`; a variable rank belongs to a type variable, `T^r`), a builtin that is not an array element type cannot take a caret, and neither can an alias that is already an array type (that would be an array of arrays, which the caret does not build).",
+      "explanation": "The text sits where a type belongs and uses a type former, but spells no type. Two formers raise it. `Tuple<...>` is either one integer WIDTH of at least 2 (`Tuple<2>`, element types inferred) or a list of at least two component TYPES (`Tuple<Float64, Float64>`): a width of 0 or 1, a negative width, an empty `Tuple<>`, a single component type, or a width mixed with component types are all refused -- there is no 1-tuple, because `(e)` is grouping. The caret `H^r` builds a rank-r array of H elements: a concrete element type needs an integer literal rank (`Float64^1`; a variable rank belongs to a type variable, `T^r`), a builtin that is not an array element type cannot take a caret, and neither can an alias that is already an array type (that would be an array of arrays, which the caret does not build). The width-less numeric names are refused here too: only bit-sized names exist (`Int32`, `Int64`, `Float32`, `Float64`, `Complex64`, `Complex128`), so `Float`, `Int` and `Double` -- in type and in cast position -- are steered to the bit-sized spelling.",
       "fix": "For a tuple, write a literal width of 2 or more, or at least two component types, never a mixture. For a caret, give a concrete element a literal rank (`Float64^1`, `Int64^2`), use a type variable when the element or the rank is generic (`T^1`, `T^r`), and name an existing array type directly instead of raising it with `^`.",
       "examples": [
         "tests/corpus/tuples/005_tuple_width_one_rejects.blade",
         "tests/corpus/tuples/019_tuple_width_type_mixture_rejects.blade",
         "tests/corpus/functions/173_concrete_element_caret_variable_rank_rejects.blade",
-        "tests/corpus/functions/182_caret_on_array_alias_rejects.blade"
+        "tests/corpus/functions/182_caret_on_array_alias_rejects.blade",
+        "tests/corpus/numeric-defaults/023_float_type_rejects.blade"
       ],
       "docs": [
         "docs/formalism.md"
@@ -151,22 +153,30 @@
     },
     "BL2008": {
       "title": "provider cannot resolve the store",
-      "explanation": "A provider REFUSED the store named at a load or checkout site (`let repo = ic.load(path)`, `repo.checkout(ref)` -- the checkout desugars into a load of a canonical key). The store, not the library, is the problem: a missing or non-repo directory, a ref that names no branch/tag/snapshot, a bare ref that names BOTH a branch and a tag, a deleted-tag tombstone, an unsupported spec version byte, a repo whose status is Offline, or a snapshot carrying something the reader refuses by name (a virtual chunk ref, a nested group). The checker refuses at the binding site because nothing the store binds can be typed without its metadata: every `store.dims.x` and `store.vars.y` would otherwise fall back to an opaque type and die far downstream as a baffling element-type mismatch. Every provider reports through this code: the same failure from a zarr, NetCDF or CSV load is most often the plain one -- the file or directory is not there, because a relative path was resolved from a different working directory than the one it was written for. The message's detail is the provider's own refusal text, which names the condition and, where a ref is involved, lists the refs that DO exist.",
-      "fix": "Read the detail -- it names the condition precisely. A store that is \"not found\" or \"not a store\" is a path problem first: relative store paths resolve against the compiler's working directory (the source file's directory under `blade run`, the notebook's under an editor), so check where the command was run from before checking the data. A misspelled ref is answered by one of the names it lists; an ambiguous bare ref is answered by a marker (`repo.checkout(\"release\", ic.tag)` or `ic.branch`); a missing repo is a path relative to the compiler's working directory, which for a notebook cell is the notebook's own directory; an Offline repo must be brought online in the tool that manages it; a spec version other than 2 needs a different reader, by design.",
+      "explanation": "A provider REFUSED the store named at a load or checkout site (`let repo = ic.load(path)`, `repo.checkout(ref)` -- the checkout desugars into a load of a canonical key). The store, not the library, is the problem: a missing or non-repo directory, a ref that names no branch/tag/snapshot, a bare ref that names BOTH a branch and a tag, a deleted-tag tombstone, an unsupported spec version byte, a repo whose status is Offline, or a snapshot carrying something the reader refuses by name (a virtual chunk ref, a nested group). The checker refuses at the binding site because nothing the store binds can be typed without its metadata: every `store.dims.x` and `store.vars.y` would otherwise fall back to an opaque type and die far downstream as a baffling element-type mismatch. Every provider reports through this code: the same failure from a zarr, NetCDF or CSV load is most often the plain one -- the file or directory is not there, because a relative path was written relative to some other directory than the source file's own. The message's detail is the provider's own refusal text, which names the condition and, where a ref is involved, lists the refs that DO exist.",
+      "fix": "Read the detail -- it names the condition precisely. A store that is \"not found\" or \"not a store\" is a path problem first: every verb resolves a relative store path against the SOURCE FILE's directory at compile time (a notebook cell's against the notebook's directory), never against the directory the command was run from, so check the path relative to the source before checking the data. A misspelled ref is answered by one of the names it lists; an ambiguous bare ref is answered by a marker (`repo.checkout(\"release\", ic.tag)` or `ic.branch`); a missing repo is a path relative to the source file's directory (for a notebook cell, the notebook's own directory); an Offline repo must be brought online in the tool that manages it; a spec version other than 2 needs a different reader, by design.",
       "examples": [],
       "docs": [
         "docs/plans/plan-icechunk-provider.md"
       ]
     },
+    "BL2010": {
+      "title": "ambiguous imported name",
+      "explanation": "An unqualified type or variant-constructor name that two imported modules both declare, and the importing module does not. A declared type's identity is its module's (module A's `Red` is `A.Red`, B's is `B.Red`), so both may exist in one program; the name alone cannot say which one a use means. A local declaration of the name shadows the imports, and one import of it binds it bare. A constructor PATTERN over a value whose type names the constructor (`match c with | Red -> ..` where `c: A.Color`) is resolved by that type and is never ambiguous.",
+      "fix": "Qualify the use with the module -- `A.Red`, `B.Red`, `let p: A.P = ..` (or the alias of `import A as U`: `U.Red`) -- or declare the name in this module, or import just the one you want (`from A import Red`).",
+      "examples": [
+        "tests/corpus/multifile/027_same_named_constructor_rejects/03_Main.blade"
+      ],
+      "docs": []
+    },
     "BL2009": {
       "title": "duplicate declaration",
-      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Across the modules of one program a TYPE name (and a variant-constructor name) may be declared only once: type identity is still the bare name, so two modules' `struct P` would be one type to the checker and two definitions to C++, and a main-module `type Cell` would silently become the same nominal index type as an imported module's `Cell`. Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
-      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. For a type or constructor name two modules both declare, rename one of them. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
+      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Within one module a variant-constructor name belongs to one sum type. ACROSS modules nothing clashes: a declared type's identity is its module's (module A's `struct P` is `A.P`, B's is `B.P`, main's is `P`), so two modules may each declare one; an unqualified use that two imports both answer is refused at the use (BL2010). Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
+      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
       "examples": [
         "tests/corpus/functions/126_duplicate_function_rejects.blade",
         "tests/corpus/functions/152_duplicate_toplevel_let_rejects.blade",
-        "tests/corpus/structs/056_duplicate_struct_rejects.blade",
-        "tests/corpus/multifile/025_same_named_struct_rejects/03_Main.blade"
+        "tests/corpus/structs/056_duplicate_struct_rejects.blade"
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
@@ -357,13 +367,15 @@
     "BL3017": {
       "title": "group_keys result escapes its binding",
       "explanation": "A `group_keys` result is NAME-KEYED, not a value. Codegen stores the whole CSR grouping (offsets + permutation) in locals suffixed off the BINDING name -- `gk__ngroups`, `gk__offsets`, `gk__perm` -- and gives the binding itself only an opaque sentinel, so `group_by` recovers the grouping by re-deriving those symbols from the name its grouping argument resolves to. That makes exactly two positions legal: the `let` that names the call, and a `group_by` grouping slot written as that name. Aliasing it, putting it in a tuple or struct, passing it as an argument, returning it, or writing the call inline all leave the grouping behind, and used to reach g++ as undeclared `gk2__offsets`-style symbols.",
-      "fix": "Bind the keys once (`let gk = group_keys(...)`) and hand that same `gk` straight to each `group_by` -- one binding may feed any number of them, which is how grouped co-iteration is spelled. A function that needs a grouping should take the KEY ARRAY and do both halves itself; results travel freely once `group_by` has produced an ordinary array.",
+      "fix": "Bind the keys once (`let gk = group_keys(...)`) and hand that same `gk` straight to each `group_by` -- one binding may feed any number of them, which is how grouped co-iteration is spelled. A function that needs a grouping should take the KEY ARRAY and do both halves itself, and return what it computes FROM the groups (a per-group fold is an ordinary array): a GROUPED value -- a `group_by` result, a per-group map of one, or one of its rows -- carries the same name-keyed row lengths and is refused as a function's (or, whole, a lambda's) return value too.",
       "examples": [
         "tests/corpus/sql-group-by/035_groupby_gk_aliased_rejects.blade",
         "tests/corpus/sql-group-by/036_groupby_gk_tupled_rejects.blade",
         "tests/corpus/sql-group-by/037_groupby_gk_as_parameter_rejects.blade",
         "tests/corpus/sql-group-by/038_groupby_gk_inline_rejects.blade",
-        "tests/corpus/sql-group-by/039_groupby_gk_returned_rejects.blade"
+        "tests/corpus/sql-group-by/039_groupby_gk_returned_rejects.blade",
+        "tests/corpus/sql-group-by/077_groupby_result_returned_rejects.blade",
+        "tests/corpus/sql-group-by/078_groupby_row_returned_rejects.blade"
       ],
       "docs": [
         "docs/features/sql.md"
@@ -394,7 +406,7 @@
     },
     "BL3020": {
       "title": "implicit numeric conversion",
-      "explanation": "An ERROR: Blade converts nothing implicitly (formalism 2.4). `1` is an Int64 and `1.0` a Float64 -- the decimal point is the type, as in F#. An arithmetic operator (`+ - * / %`) or a comparison whose operands' elements -- scalars, or array elements, elementwise -- are an integer and a float or complex is refused at the integer operand, whether it is a literal (`x * 2` over a Float64 `x`) or a variable (`n * 0.5` over an Int64 `n`). Two widths of one class (Float32 and Float64, Int32 and Int64, Complex64 and Complex128) are refused unless one side is a literal, which adapts to its partner's width (`a32 * 1.0` is Float32). A real beside a complex is the exact embedding at the complex's component width (`w * z` over Float64 and Complex128) or as a float literal. The same rule refuses an integer -- literal or variable -- passed to a Float64 parameter or bound to a Float64-annotated name. The exponent of `^` is the one polymorphic position.",
+      "explanation": "An ERROR: Blade converts nothing implicitly (formalism 2.4). `1` defaults to Int32 and `1.0` to Float32; the decimal point selects the numeric class, and context can fix the width within that class. An arithmetic operator (`+ - * / %`) or a comparison whose operands' elements -- scalars, or array elements, elementwise -- are an integer and a float or complex is refused at the integer operand, whether it is a literal (`x * 2` over a Float64 `x`) or a variable (`n * 0.5` over an Int64 `n`). Two widths of one class (Float32 and Float64, Int32 and Int64, Complex64 and Complex128) are refused unless one side is a literal, which adapts to its partner's width (`a32 * 1.0` is Float32). A real beside a complex is the exact embedding at the complex's component width (`w * z` over Float64 and Complex128) or as a float literal. The same rule refuses an integer -- literal or variable -- passed to a Float64 parameter or bound to a Float64-annotated name. The exponent of `^` is the one polymorphic position.",
       "fix": "Write the literal in its type (`2.0`, not `2`), or convert with the type in call position -- `Float64(n)` for a scalar, `Float64(xs)` for an array (a cast converts the element only and keeps the shape) -- or convert the other operand if integer arithmetic was meant (`Int64(floor(x))`).",
       "examples": [
         "tests/corpus/casts/520_int_float_mix_rejects.blade"
@@ -435,15 +447,147 @@
         "docs/formalism.md"
       ]
     },
-    "BL3999": {
-      "title": "type error",
-      "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",
-      "fix": "Read the message and the context lines under it, which name the declaration and the expression the checker was working on.",
+    "BL3024": {
+      "title": "generic type variable bound inconsistently",
+      "explanation": "One generic type variable, or one caret rank claim (`T^k`), is bound two incompatible ways in the same call: two arguments that share `T` arrive with different element types or ranks, or a `T^k` position receives a value of another rank. A call never converts, broadcasts or reduces to make them agree.",
+      "fix": "Make the arguments agree (convert one explicitly, e.g. `Float64(x)`), give the parameters separate type variables when they may differ, or drop the caret (`T`) where the position holds an element rather than a rank-k array.",
       "examples": [
         "tests/corpus/arity/030_caret_fold_kernel_not_vacuous.blade",
-        "tests/corpus/diagnostics/028_static_struct_bound_violation.blade",
-        "tests/corpus/diagnostics/032_static_bound_forward_ref_violated.blade"
+        "tests/corpus/functions/401_shared_generic_variable_later_int_literal_rejects.blade",
+        "tests/corpus/functions/523_generic_comparison_ranks_disagree_rejects.blade"
       ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3025": {
+      "title": "invalid reduction form",
+      "explanation": "A `reduce`, `prodsum` or reduction-join (`<&!>`) form the fold rules refuse: an `axes = n` that is not a literal in 1..rank, a fused or joined fold whose kernel has no implicit identity and no explicit init, a join leg that is not a reduction or folds a different cell grid, a leading-axis fold over slices that do not share one shape, or a `prodsum` over operands that are not rank-1 fibers.",
+      "fix": "Follow the form the message names: write the init explicitly (`reduce(x, op, init)`), use an integer literal for `axes`, force a composed or partial fold with `|> compute` first, or pass `prodsum` the innermost rank-1 slices.",
+      "examples": [
+        "tests/corpus/diagnostics/066_reduce_axes_zero.blade",
+        "tests/corpus/loops/136_leading_axis_fold_axes_rejects.blade",
+        "tests/corpus/sql-reduce/014_reduce_deferred_no_init.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3026": {
+      "title": "operation not valid on compact storage",
+      "explanation": "The operation would read compact (SymIdx / AntisymIdx / HermitianIdx) storage as if it were dense: folding the stored canonical cells differs from folding the logical (mirrored, sign-tracked) cells, a partial read of a compact group has no residual class, and a transpose across a group boundary would break the group's symmetry.",
+      "fix": "Supply every coordinate of the group, or `decompact(A, d)` first to get the logical dense array; for a full fold over every logical cell, `reduce(S, (+), axes = r)` folds the packed pool with orbit weights.",
+      "examples": [
+        "tests/corpus/index-types/107_reduce_symmetric_rejects.blade",
+        "tests/corpus/index-types/257_compact_partial_read_rejected.blade",
+        "tests/corpus/math/081_gram_apply_compact_factor_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3027": {
+      "title": "operands over different index spaces",
+      "explanation": "Co-iterated or elementwise operands must walk ONE index space. These are over different named index types (provenance is part of the type, so equal extents do not make them interchangeable), mix dense and packed storage, or are grouped by different `group_keys` bindings.",
+      "fix": "Declare the operands over the same index type, or convert one with an explicit index cast; for grouped arrays bind the keys once (`let gk = group_keys(...)`) and group every operand by it. If the axes really are different, use the outer product `method_for(A, B)` instead of `zip`.",
+      "examples": [
+        "tests/corpus/diagnostics/074_zip_distinct_index_types_same_extent.blade",
+        "tests/corpus/diagnostics/098_coiter_param_index_names_direct_call_rejects.blade",
+        "tests/corpus/loops/092_binop_multi_axis_shape_mismatch_rejects.blade",
+        "tests/corpus/sql-group-by/053_groupby_zip_alias_different_keys_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3028": {
+      "title": "value must be known at compile time",
+      "explanation": "The type of this construct depends on a value -- an extent, a count, an order, a weights length -- that is only known at run time here. A range is a virtual iteration space with no runtime object, and storage sized by the type must be sized at compile time.",
+      "fix": "Write the value as a literal, a `let static`, or a static-function call, or take it from a named index type whose extent is static.",
+      "examples": [
+        "tests/corpus/index-types/240_range_unresolved_extent_rejects.blade",
+        "tests/corpus/rand/016_categorical_nonstatic_weights_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3029": {
+      "title": "invalid chunked or segmented domain",
+      "explanation": "A `Chunked<..>` index declaration, or a `segments` / `files` / `group_by` over segments / `ungroup` use of one, is ill-formed: the chunk edge is outside the axis, the inner type is not an index type or store axis, the store does not chunk the dimension uniformly, or the named alias is not a `Chunked` alias in scope.",
+      "fix": "Declare the chunked axis first (`type CI = Chunked<I, K>` with 1 <= K <= extent, or `Chunked<s.index.d, store>`), annotate the array's slots with it, and pass that alias to `segments` / `files` / `ungroup`.",
+      "examples": [
+        "tests/corpus/segments/006_chunked_edge_zero_rejects.blade",
+        "tests/corpus/segments/007_segments_of_plain_index_rejects.blade",
+        "tests/corpus/segments/015_segments_of_unannotated_value_rejects.blade"
+      ],
+      "docs": [
+        "docs/features/sql.md"
+      ]
+    },
+    "BL3030": {
+      "title": "invalid recursive array definition",
+      "explanation": "A `let rec` recursive array is ill-formed: it is used outside `let rec NAME: Array<..> = match NAME with ...`, its leading (recursion) axis has no static extent of at least 1, its element type is not a supported floating-point, integer, or complex type, its slice axes are not static, or its `while` guard is not a Bool predicate.",
+      "fix": "Annotate the binding with an Array type over a static recursion axis (`let rec x: Array<Float64 like Step> = match x with ...`) and make the `while` guard a comparison or boolean expression.",
+      "examples": [
+        "tests/corpus/recursive-arrays/015_while_guard_not_bool_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3031": {
+      "title": "invalid halo window",
+      "explanation": "A `halo<I, offsets>` window is ill-formed: the offsets are empty, not a compile-time array of integer literals, or mix flat and per-axis forms; the inner index is not rank-1; or a window read over a masked (CompoundIdx) domain uses a non-literal offset.",
+      "fix": "Write the offsets as a literal integer array (`halo<I, [-1, 0, 1]>`, or per-axis `[[..], [..]]`) and read the window with literal offsets (`w(-1)`).",
+      "examples": [
+        "tests/corpus/loops/075_halo_nonstatic_offsets_rejects.blade",
+        "tests/corpus/loops/204_halo_compound_nonliteral_offset_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3032": {
+      "title": "wildcard not valid here",
+      "explanation": "The wildcard `_` is not a value. It is meaningful only as a coordinate of a compound or sparse read (`B((a, _, c))`), where it frees one axis, and among a compound array's trailing indices only after every supplied index.",
+      "fix": "Use `_` only inside a read's coordinates; bind or return the read's RESULT, not the hole.",
+      "examples": [
+        "tests/corpus/index-types/026_wildcard_escape_in_let_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3033": {
+      "title": "construct not yet supported",
+      "explanation": "The construct is planned but not built: the compiler refuses it rather than compile it wrongly. The message names the missing piece and, where one exists, the spelling that works today.",
+      "fix": "Use the workaround the message gives (often `|> compute` first, or a separate loop object), or restructure around the construct until it lands.",
+      "examples": [
+        "tests/corpus/arity/056_nth_is_planned_rejects.blade",
+        "tests/corpus/diagnostics/050_zip_in_object_for_pack.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3034": {
+      "title": "where clause not applicable here",
+      "explanation": "A `where` clause sits on a declaration it cannot apply to: `where repro` on a lambda (it inlines into its call sites) or on a `static function` (evaluated at compile time), `comm` / `anticomm` beside a `Tuple<N>` parameter (positions are ambiguous), or a parallel clause on a sequential leading-axis fold (it would license nothing).",
+      "fix": "Move the clause to a named function declaration it can govern, or drop it where it licenses nothing.",
+      "examples": [
+        "tests/corpus/diagnostics/060_tuple_param_with_where_clause.blade",
+        "tests/corpus/loops/138_leading_axis_fold_omp_kernel_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3999": {
+      "title": "type error",
+      "explanation": "The type band's residual code. Until deep review #49 it was a catch-all carried by every checker error without a code of its own; those families now have their own codes (BL3024 - BL3034) or the existing code they belong to (BL3007, BL3016, BL4002, BL9001, ...). No checker path raises it today; it stays registered for error sources that have no family yet.",
+      "fix": "Read the message and the context lines under it, which name the declaration and the expression the checker was working on.",
+      "examples": [],
       "docs": [
         "docs/formalism.md",
         "docs/features/sql.md"
@@ -502,12 +646,13 @@
     },
     "BL4005": {
       "title": "immutable assignment",
-      "explanation": "The `mut` discipline's refusal, raised at two different places. At an ASSIGNMENT: a write hit something that cannot be written -- a `let static` binding (compile-time and immutable everywhere), a `mut` parameter that is not an array, or a whole-array assignment to a `mut` parameter. `mut` parameters are ARRAY-only, and only ELEMENT writes alias the caller; for scalars, return the new value instead. At a CALL SITE: an argument passed to a `mut` array parameter must itself carry write permission, because the callee writes back into the caller's array. Only a bare name that binds mut-passable qualifies -- a `let mut` binding, or another `mut` parameter being forwarded (`function outer(buf: mut A) = inner(buf)` is exactly the case that keeps working, and the chain is checked at every hop). Refused there: a plain `let` (module scope included, mutable in its own scope but not passable), a `let static`, a non-`mut` parameter, a computed expression such as `accum(a + b)` (a temporary has no storage the caller could observe the write through), and a partial application that leaves the `mut` position unsupplied -- `accum2(w)(g)` would fill it through a synthesized closure parameter and lose the permission at that seam, so currying a write-back parameter is refused while `accum2(w, g)` is checked normally. At a CLOSURE that could outlive its scope: a lambda capturing a binding that is reassigned (by the lambda or by its scope) shares that binding instead of copying it, so it may not be returned, stored in a tuple, array or struct, passed to a call whose result can hold a function, or assigned -- the scope, and the binding with it, ends while the closure could still run.",
-      "fix": "At an assignment: return the value rather than assigning it, or -- for arrays -- write elements through the `mut` parameter instead of rebinding the whole array. At a call site: declare the argument `let mut` (or forward a `mut` parameter that already holds permission), pass it directly by name rather than as an expression or through a partial application, or drop `mut` from the parameter if the callee does not write to it. At an escaping closure: call it, or use it as a kernel, inside the scope that defines the reassigned binding, and return the updated value (or a tuple of values) instead of a closure that updates it.",
+      "explanation": "The write-permission discipline's refusal. In a PARALLEL body (`where omp(...)` / `cuda`, and anything nested in one): a write to a binding captured from outside the body -- directly, through a callee, or through a `mut` argument -- is a data race, since the body's cells run concurrently (a serial body's write is accepted as an ordered side effect). At an ASSIGNMENT: a write hit something that cannot be written -- a `let static` binding (compile-time and immutable everywhere), a `mut` parameter that is not an array, or a whole-array assignment to a `mut` parameter. `mut` parameters are ARRAY-only, and only ELEMENT writes alias the caller; for scalars, return the new value instead. At a CALL SITE: an argument passed to a `mut` array parameter must itself carry write permission, because the callee writes back into the caller's array. Only a bare name that binds mut-passable qualifies -- a `let mut` binding, or another `mut` parameter being forwarded (`function outer(buf: mut A) = inner(buf)` is exactly the case that keeps working, and the chain is checked at every hop). Refused there: a plain `let` (module scope included, mutable in its own scope but not passable), a `let static`, a non-`mut` parameter, a computed expression such as `accum(a + b)` (a temporary has no storage the caller could observe the write through), and a partial application that leaves the `mut` position unsupplied -- `accum2(w)(g)` would fill it through a synthesized closure parameter and lose the permission at that seam, so currying a write-back parameter is refused while `accum2(w, g)` is checked normally. At a CLOSURE that could outlive its scope: a lambda capturing a binding that is reassigned (by the lambda or by its scope) shares that binding instead of copying it, so it may not be returned, stored in a tuple, array or struct, passed to a call whose result can hold a function, or assigned -- the scope, and the binding with it, ends while the closure could still run. At a JOIN (a deliberate restriction since gap G43, not a race): a leg of a `<&!>` / `<&>` tree or of a reduction join whose map kernel, fold kernel, or a named deferred computation it reads WRITES a captured binding -- the legs run side by side, one joint cell at a time, and a computation they share is evaluated once per cell (formalism 10.2), so the order and count of the writes have no single meaning (the lanes used to print three different answers).",
+      "fix": "At an assignment: return the value rather than assigning it, or -- for arrays -- write elements through the `mut` parameter instead of rebinding the whole array. At a call site: declare the argument `let mut` (or forward a `mut` parameter that already holds permission), pass it directly by name rather than as an expression or through a partial application, or drop `mut` from the parameter if the callee does not write to it. At an escaping closure: call it, or use it as a kernel, inside the scope that defines the reassigned binding, and return the updated value (or a tuple of values) instead of a closure that updates it. In a parallel body: return the value (or fold it) instead of writing a captured binding, or drop the parallel clause. At a join: force the writing map first (`|> compute`: one evaluation, stored, in order) and join over the stored cells, or fold the legs separately.",
       "examples": [
         "tests/corpus/diagnostics/007_immutable_static_assign.blade",
         "tests/corpus/functions/020_mut_scalar_param_rejected.blade",
-        "tests/corpus/functions/086_mut_param_whole_array_assign_rejects.blade",
+        "tests/corpus/mutability-errors/014_reduction_join_legs_share_writing_map_rejects.blade",
+        "tests/corpus/functions/851_mut_param_whole_array_assign_rejects.blade",
         "tests/corpus/functions/089_mut_arg_plain_let_rejects.blade",
         "tests/corpus/functions/093_mut_arg_partial_application_rejects.blade",
         "tests/corpus/functions/337_returned_closure_over_reassigned_local_rejects.blade"
@@ -568,12 +713,13 @@
     },
     "BL4010": {
       "title": "confirm-and-pin storage suggestion",
-      "explanation": "A WARNING, not an error. The deduction proved a symmetry (or another storage-changing property) that you have not declared, and proposes the pin. Storage stays DENSE and nothing changes until you write the annotation in source -- the compiler proposes, the program decides. `--strict-pins` promotes every outstanding suggestion to a build error, which is the CI spelling of forcing the decision into source.",
-      "fix": "Add the suggested `where` clause if the property is intended -- that is what licenses the triangular storage and the r! saving -- or leave it and accept dense storage. Do not silence it by restructuring the kernel.",
+      "explanation": "A WARNING, not an error. The deduction proved a symmetry (or another storage-changing property) that you have not declared, and proposes the pin. Storage stays DENSE and nothing changes until you write the annotation in source -- the compiler proposes, the program decides. `--strict-pins` promotes every outstanding suggestion to a build error, which is the CI spelling of forcing the decision into source. The same code also carries two plain ADVISORIES that `--strict-pins` leaves alone: a constrained domain that was tabled rather than enumerated in closed form, and a `comm` clause whose two slots hold the same array but are not ADJACENT (`method_for(A, B, A) <@> lambda(x, y, z) where comm(x, z)`) -- identity groups are runs of neighbouring identical operands (formalism 8.3), so the pair licenses nothing, the result is stored dense in operand order, and the warning names the adjacent spelling that would compact it.",
+      "fix": "Add the suggested `where` clause if the property is intended -- that is what licenses the triangular storage and the r! saving -- or leave it and accept dense storage. Do not silence it by restructuring the kernel. For the non-adjacent-repeat advisory: put the repeated operands side by side and move the kernel's commuting parameters with them, then read the result in that order; or keep the operand order and accept dense storage.",
       "examples": [
         "tests/corpus/arity/022_comoment_covariance_matrix.blade",
         "tests/corpus/arity/025_deferred_named_former.blade",
-        "tests/corpus/arity/026_multi_arity_dedup.blade"
+        "tests/corpus/arity/026_multi_arity_dedup.blade",
+        "tests/corpus/symmetry/077_nonadjacent_repeat_stays_dense.blade"
       ],
       "docs": [
         "docs/features.md"
@@ -607,7 +753,7 @@
     },
     "BL4013": {
       "title": "symmetry annotation contradicts body",
-      "explanation": "A declared `comm` over a provably antisymmetric pair (or `anticomm` over a provably invariant one). Split out of BL3007's generic bucket because this is not a bad builtin argument: it is an annotation the deduction can PROVE wrong.",
+      "explanation": "A declared `comm` over a provably antisymmetric pair (or `anticomm` over a provably invariant one), or a claim refuted by a concrete counterexample: the body evaluated (in formalism 2.4 arithmetic, captured scalars bound to sampled values) at a point and its swap, or -- for `anticomm` -- at a diagonal point where it is not 0, which strict-triangular storage would answer with 0. Split out of BL3007's generic bucket because this is not a bad builtin argument: it is an annotation the deduction can PROVE wrong.",
       "fix": "Remove the clause, or wrap the kernel in `reynolds(...)` -- symmetrization manufactures the commutative kernel you were claiming. Compare BL4016, where nothing is disproved and there is simply no licence to stand on.",
       "examples": [
         "tests/corpus/diagnostics/040_comm_contradicts_body.blade",
@@ -747,12 +893,12 @@
     },
     "BL5400": {
       "title": "spectra elaboration error",
-      "explanation": "The `spectra` elaborator refused a construct: an unknown op, an op used without its import, or a transform in a position it cannot occupy (an inline FFT where the pipeline needs a materialized stage, for instance).",
-      "fix": "Read the message for the op's placement rule; materializing the operand with `|> compute` resolves the inline cases.",
+      "explanation": "The `spectra` elaborator refused a construct: an unknown op, an op used without its import, or an operand it cannot specialize to -- one with no static shape (a generic parameter, a call of a function with no annotated return) or the wrong element type (an FFT of a complex spectrum, a let-bound float literal that defaults to Float32).",
+      "fix": "Read the message: it names the operand and why it has no usable static shape. Annotate the binding (`let x: Array<Float64 like Idx<n>> = ...`) or ascribe the argument; the results of other elaborated calls need no annotation.",
       "examples": [
         "tests/corpus/spectra/002_gating_selective_import.blade",
         "tests/corpus/spectra/003_unknown_op.blade",
-        "tests/corpus/spectra/017_fft_inline_rejects.blade"
+        "tests/corpus/spectra/074_fft_of_spectrum_rejects.blade"
       ],
       "docs": []
     },
@@ -762,7 +908,7 @@
       "fix": "Differentiate a function the elaborator knows, avoid overwriting values that live across the tape, and replace non-differentiable intrinsics in the differentiated path.",
       "examples": [
         "tests/corpus/ad/007_overwrite_rejected.blade",
-        "tests/corpus/ad/008_grad_of_unknown_rejected.blade",
+        "tests/corpus/ad/152_grad_of_unknown_rejected.blade",
         "tests/corpus/ad/014_digamma_not_differentiable_rejects.blade"
       ],
       "docs": [
@@ -822,8 +968,8 @@
     },
     "BL6002": {
       "title": "construct not valid in this position",
-      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw, `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
-      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in, or bind an array `zero` to an annotated `let` first.",
+      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw (an addressed `rand.<family>_at(key, stream, offset, ..)` draw is allowed anywhere, function bodies included: each sample is a pure function of its address), `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
+      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in -- or, for a random draw inside a function, use the addressed family (`rand.uniform_at(key, stream, offset, n)`), or bind an array `zero` to an annotated `let` first.",
       "examples": [
         "tests/corpus/diagnostics/090_compound_in_function_body_rejects.blade",
         "tests/corpus/diagnostics/091_rand_draw_in_function_body_rejects.blade"
@@ -859,6 +1005,15 @@
       "fix": "Follow the what-to-write-instead guidance in the message -- unlike BL7001, this is a statement about the program's shape, not a request to report a compiler gap.",
       "examples": [],
       "docs": []
+    },
+    "BL7005": {
+      "title": "experimental kept inline with an incomplete lifetime audit",
+      "explanation": "A WARNING, never an error. Under the explicit opt-in BLADE_EPILOGUE_LEGS=1, the producer-input legs (gap G69) keep a one-level inline of the call that holds their producer, and the lane that emitted the program RETAINED it (whether or not its fused form carried the legs). That inline's lifetime audit is incomplete: allocations made by the fold / map kernels the inlined callee names may survive its return. Raised once per retained inline per lane, spanned at the call. The default build declines the inline and never raises it.",
+      "fix": "Nothing is wrong with the program. Unset BLADE_EPILOGUE_LEGS (the default build keeps the legs in their joined pass and the call as written), or accept the experimental arm knowingly; the planned closure is real lifetime scopes (gap G69's scope model A).",
+      "examples": [],
+      "docs": [
+        "docs/features.md"
+      ]
     },
     "BL8001": {
       "title": "constraint violation",
@@ -927,10 +1082,11 @@
     },
     "BL8010": {
       "title": "recursion budget exhausted",
-      "explanation": "A recursive array's `while` guard was still true when the recursion reached the end of its declared leading extent (the budget). The recurrence did not converge, and freezing the last slice would silently pretend it did, so the runtime aborts naming the array and the budget.",
-      "fix": "Raise the budget (the leading `Idx<N>` extent), loosen the convergence tolerance in the guard, or fix the recurrence so it actually contracts. If running the full budget is the intended behavior, drop the `while` guard -- an unguarded `let rec` runs every step unconditionally.",
+      "explanation": "A recursive array's `while` guard was still true when the recursion reached the end of its declared leading extent (the budget). The recurrence did not converge, and freezing the last slice would silently pretend it did, so the runtime aborts naming the array and the budget. The same code reports `m.eig` (import math) running out of its Francis QR iteration budget (MAXITER, default 30 n) on a finite operand: the iteration did not converge, and its unconverged state is not returned.",
+      "fix": "Raise the budget (the leading `Idx<N>` extent), loosen the convergence tolerance in the guard, or fix the recurrence so it actually contracts. If running the full budget is the intended behavior, drop the `while` guard -- an unguarded `let rec` runs every step unconditionally. For `m.eig`, pass a larger budget, `m.eig(A, MAXITER)`; a spectrum of equal-modulus roots of unity can stall the shift strategy at any budget.",
       "examples": [
-        "tests/corpus/recursive-arrays/013_while_guard_budget_aborts.blade"
+        "tests/corpus/recursive-arrays/013_while_guard_budget_aborts.blade",
+        "tests/corpus/math/124_eig_budget_exhausted_aborts.blade"
       ],
       "docs": [
         "docs/formalism.md"
@@ -939,7 +1095,7 @@
     "BL8011": {
       "title": "co-iteration extent mismatch",
       "explanation": "Two operands walked together in one loop nest -- `a + b`, `zip(a, b)`, `method_for(zip(...))`, or gram's contracted axis -- disagree on the runtime extent of a shared axis. The nest is bounded by its first operand, so the shorter one would be read past its end. The compile-time twin is BL3016, which compares literal extents at the call site; inside a function over `T^k` parameters the extents belong to the caller, and a curried or let-bound partial application never reaches the call-site check, so this guard runs once before the nest on both the compiled and interpreted lanes.",
-      "fix": "Pass operands of equal extent on every shared axis, or declare the parameters with named index types (`Array<Float like I>`) so the disagreement is refused at the call site instead of at runtime.",
+      "fix": "Pass operands of equal extent on every shared axis, or declare the parameters with named index types (`Array<Float64 like I>`) so the disagreement is refused at the call site instead of at runtime.",
       "examples": [
         "tests/corpus/functions/128_curried_extent_mismatch_aborts.blade"
       ],
@@ -976,6 +1132,28 @@
       "docs": [
         "docs/formalism.md"
       ]
+    },
+    "BL8015": {
+      "title": "provider read holds missing values",
+      "explanation": "A missing value never crosses a provider boundary disguised as a number. The variable a read names holds cells its store marks missing, and the read is refused instead of handing them to the program as data: NaN or an infinity in any floating-point variable (NetCDF, Zarr, Icechunk, CSV -- written NaNs included, not only fill), and for NetCDF also a cell equal to the variable's `_FillValue` or a `missing_value`, a cell outside `valid_min` / `valid_max` / `valid_range`, and, for a floating variable with no `_FillValue`, the default fill a never-written cell holds. A finite Zarr / Icechunk `fill_value` is a value and reads as one; an integer NetCDF variable is refused only on an explicit attribute. The message names the variable, the store, the number of missing cells and the first one. Every read form applies the rule (`read`, `stream` -- per fiber, so the refusal can come from inside the consuming loop -- `load_compound`, which checks only the cells its mask marks present, and `read_window`), in the compiled program and the interpreter alike; a compile-time fold (`let static ... |> read`) of such a variable fails the `let static` assertion (BL3999) carrying the same sentence. A provider WRITE of a NaN or infinite cell is refused under this code too, since every reader of the store would refuse it.",
+      "fix": "Read the variable with the masked read: `let t = store.vars.x |> alias.read_present` is a compound array of the PRESENT cells only (built from the presence mask, no sentinel or NaN in it), and `let ok = store.vars.x |> alias.present` is that mask (`true` where the cell holds a value). Both must be the whole value of a module-level binding. Otherwise clean the store. Before a write, mask or replace the non-finite cells.",
+      "examples": [
+        "tests/NetcdfTests.fs",
+        "tests/ZarrTests.fs",
+        "tests/CsvTests.fs"
+      ],
+      "docs": [
+        "docs/features/sql.md"
+      ]
+    },
+    "BL8016": {
+      "title": "private intermediate resource or protocol failure",
+      "explanation": "An explicitly permitted private intermediate could not be created, stored or replayed, or failed its resource, integrity or protocol checks. No partial result is published. Provider validation still takes priority when the original input itself is invalid. The resource grant covers the admitted intermediate, not whole-process memory.",
+      "fix": "Check the explicit resource grant, scratch-directory permissions and available allowed memory/disk capacity. If an integrity, count or replay-order failure persists, report the complete diagnostic and run record as a runtime defect.",
+      "examples": [
+        "tests/PrivateSpoolTests.fs"
+      ],
+      "docs": []
     },
     "BL9001": {
       "title": "internal compiler error",

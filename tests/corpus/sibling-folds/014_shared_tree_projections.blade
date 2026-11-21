@@ -1,0 +1,31 @@
+// TEST: A shared-fold tree joins only through flat leaf projections
+// ============================================================================
+// `reduce(l1 <&!> l2 <&!> l3, (+))` is a SHARED-fold tree: one kernel and seed
+// for every leaf, typed as NESTED PAIRS ((s1, s2), s3). Destructured in full,
+// `let ((a1, a2), a3) = ...` reads each leaf by its flat index, so the
+// sibling-fold pass may extend the tree with a sibling fold and renumber the
+// leaves (nested). A partial destructure `let (ab, c) = ...` reads a SUBTREE
+// (`ab` is the pair (s1, s2)) by a structural projection, which is not a leg
+// index; v1 declines that tree (partial) and both values stay as written.
+// x = [1, 2, 3]: the leaves sum to 6, 12, 18; the sibling `reduce(x, (+),
+// 10.0)` is 16.
+// ============================================================================
+type R = Idx<3>
+
+function nested(x: Array<Float64 like R>) -> Float64 = {
+    let l = method_for(x)
+    let ((a1, a2), a3) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    a1 + 10.0 * a2 + 100.0 * a3 + reduce(x, (+), 10.0)
+}
+
+function partial(x: Array<Float64 like R>) -> Float64 = {
+    let l = method_for(x)
+    let (ab, c) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+    ab[1] + 10.0 * c + reduce(x, (+), 10.0)
+}
+
+let x: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let r_nested = nested(x)
+let r_partial = partial(x)
+// EXPECT: r_nested = 1942.0
+// EXPECT: r_partial = 208.0

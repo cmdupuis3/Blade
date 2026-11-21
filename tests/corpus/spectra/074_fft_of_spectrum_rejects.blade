@@ -1,0 +1,8 @@
+// TEST: Spectra refuses fft of a nested fft, naming the nested call (rejects)
+// #62: the message calls the operand "the result of the nested fft call",
+// never the internal name of the generated routine.
+// ERROR: BL5400
+// ERROR-CONTAINS: the result of the nested fft call must have Float64 elements
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
+let X = sp.fft(sp.fft(x))

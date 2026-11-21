@@ -4,7 +4,7 @@ type I = Idx<2>
 type Step = Idx<4>
 
 function taylor6(a: Array<Float64 like I, I>) -> Array<Float64 like I, I> = {
-    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let id = Float64([[1.0, 0.0], [0.0, 1.0]])
     let b = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> a(i, j) / 8.0 |> compute
     let b2 = gram(b, transpose(b, [0, 1]))
     let b3 = gram(b2, transpose(b, [0, 1]))

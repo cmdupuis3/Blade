@@ -1,0 +1,29 @@
+// TEST: Fold Ring Declines Mut Param Row Write
+// ============================================================================
+// PM35 decline control (Codex review round 4): the step's helper takes the lag
+// row as a `mut` parameter and writes into it, changing row n - 1 after it was
+// written. A fold moved into the sweep would read the row before that change
+// (and a ring could reuse the slot): every write other than the row's own
+// store declines the ring.
+// ============================================================================
+type T = Idx<11>
+type X = Idx<3>
+
+function step(r: mut Array<Float64 like X>) -> Array<Float64 like X> = {
+    r(0) = r(0) + 100.0
+    r + 1.0
+}
+
+function run(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    let per = reduce(traj, (+))
+    reduce(per, (+))
+}
+
+let u: Array<Float64 like X> = [1.0, 2.0, 3.0]
+let v = run(u)
+// EXPECT: v = 6731.0

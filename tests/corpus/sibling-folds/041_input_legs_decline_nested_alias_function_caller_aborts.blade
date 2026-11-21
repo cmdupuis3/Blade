@@ -1,0 +1,31 @@
+// TEST: A nested-alias callee in a failing function caller keeps its call (aborts)
+// 040's callee (an array alias inside a scalar if-arm), called from a
+// function that divides by zero after the call: the kept inline declines,
+// so the call returns and frees its own pools before driver fails BL8013 at
+// its own line (line 23 once the harness drops the TEST line), t driver, in
+// both lanes.
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let extra = if s > 0.0 then {
+        let spare = x
+        Float64(extents(spare))
+    } else 0.0
+    s + extra
+}
+function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let kk = kernel(x, y)
+    let t = reduce(x, (+)) + reduce(y, (+))
+    let z0 = Int64(floor(x((0 : Ix))))
+    let boom = 10 / z0
+    kk + t + Float64(boom)
+}
+let r = driver(inputs(7), inputs(5))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:23
+// ABORT: at driver

@@ -1,0 +1,12 @@
+// TEST: An unseeded fold whose lambda computes on R accumulators is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: Spell the key where it is computed on
+// ============================================================================
+// R3, a refusal that stays: unseeded, the accumulator starts as the first
+// cell, a value of R, which `a + b` would compute on as its type R. Seed the
+// fold (`reduce(codes, lambda(a, b) -> a + b, 0)`, index-types/634) or fold
+// the keys.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let s = reduce(codes, lambda(a, b) -> a + b)

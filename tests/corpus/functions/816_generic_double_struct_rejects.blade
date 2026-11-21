@@ -1,0 +1,16 @@
+// TEST: a generic doubling called with a struct (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14): a
+// generic body's arithmetic needs a NUMBER at every instance, judged at the
+// call (GONumericOperand) or, for an instance with no element class, after
+// monomorphization (IRValidate check 1d). On master 1e6a871a this died in g++
+// (BL9002). A struct has no element class, so the post-monomorphization
+// backstop refuses the instance.
+// ============================================================================
+struct P {
+    a: Float64
+}
+function dbl(x) = x + x
+let a = dbl(1)
+let q = dbl(P { a = 1.0 })
+// ERROR: BL3001

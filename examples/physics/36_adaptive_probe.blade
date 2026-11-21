@@ -50,9 +50,9 @@
 // a quadratic in m: l_j(m) = c0_j + c1_j m + c2_j m^2 with l_j(M_k) = [j = k],
 // exact in-language: l_j(m) = prod_{k != j}(m - M_k) / prod_{k != j}(M_j - M_k)
 // (OTHER1/OTHER2 hold, for each node j, the two nodes it is not)
-let NODE = [1.0, 1.3, 512.0]
-let OTHER1 = [1.3, 1.0, 1.0]
-let OTHER2 = [512.0, 512.0, 1.3]
+let NODE = Float64([1.0, 1.3, 512.0])
+let OTHER1 = Float64([1.3, 1.0, 1.0])
+let OTHER2 = Float64([512.0, 512.0, 1.3])
 let DEN = (NODE - OTHER1) * (NODE - OTHER2)
 let LC2 = 1.0 / DEN
 let LC1 = (0.0 - (OTHER1 + OTHER2)) / DEN
@@ -62,7 +62,7 @@ let unity_c0 = reduce(LC0, (+))
 // ---- the design surface D(p) = sum_{i<j} w_i w_j (read_i - read_j)^2 over
 //      the probe menu {1.14, 3, 8.73, 25, 72}, the read of hypothesis M under
 //      probe p being 2p/(p + M): lifted over the menu, one row per hypothesis ----
-let MENU = [1.14, 3.0, 8.73, 25.0, 72.0]
+let MENU = Float64([1.14, 3.0, 8.73, 25.0, 72.0])
 let RA = 2.0 * MENU / (MENU + 1.0)
 let RB = 2.0 * MENU / (MENU + 1.3)
 let RC = 2.0 * MENU / (MENU + 512.0)
@@ -87,7 +87,7 @@ let PDC = ppl.dist(PCa, 4)
 // (truth M = 1.3 plus that shot's noise draw), and the Gaussian likelihood
 // row -- Lagrange-encoded into the three reweight coefficients
 // shot 1: p1 = prior geometric mean (1 * 1.3 * 512)^(1/3)
-let pa1 = exp((log(1.3) + log(512.0)) / 3.0)
+let pa1: Float64 = exp((log(1.3) + log(512.0)) / 3.0)
 let A1W = 2.0 * pa1 / (pa1 + NODE)
 let a1r = A1W(1) - 0.012
 let A1L = exp(0.0 - (a1r - A1W) * (a1r - A1W) / 0.005)

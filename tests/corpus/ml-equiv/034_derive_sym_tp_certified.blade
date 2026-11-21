@@ -29,15 +29,15 @@ let static WL = ml.linear_weight_dim(TPS, SOUT)
 // EXPECT: WS = 7
 // EXPECT: WL = 4
 
-function head(x: Array<Float like IrrepsIdx<SA>>, y: Array<Float like IrrepsIdx<SA>>,
-              w1: Array<Float like Idx<WS>>, w2: Array<Float like Idx<WL>>)
-              where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> = {
+function head(x: Array<Float64 like IrrepsIdx<SA>>, y: Array<Float64 like IrrepsIdx<SA>>,
+              w1: Array<Float64 like Idx<WS>>, w2: Array<Float64 like Idx<WL>>)
+              where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SOUT>> = {
     let t = ml.derive_sym_tp(SA, x, y, w1)
     ml.linear(TPS, SOUT, w2, t)
 }
 
-let hout: Array<Float like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
+let hout: Array<Float64 like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
 // EXPECT: hout = [-0.352003175473055, -2.325, 4.359375, -5.0859375]
 
-let hself: Array<Float like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
+let hself: Array<Float64 like IrrepsIdx<SOUT>> = head([1.0, 2.0, -0.5, 0.25], [1.0, 2.0, -0.5, 0.25], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0], [0.5, -0.25, 1.5, 0.75])
 // EXPECT: hself = [2.1923672769102, 9.3, -2.325, 1.1625]

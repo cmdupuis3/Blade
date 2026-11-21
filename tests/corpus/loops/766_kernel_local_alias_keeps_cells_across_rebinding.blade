@@ -1,0 +1,14 @@
+// TEST: An Alias Of A Kernel-Local Array Keeps Its Cells Across A Rebinding
+// Gap G227 (round 4 wave 8 lane d; Codex design review): `v` is an
+// assignable alias of `b` (a copy at the bind), and rebinding `b` to a
+// literal gives `b` new cells; `v` still reads the old ones: 2.0 + 24.0 per
+// cell. (A ROW VIEW of a rank-2 kernel-local array needs a rank-2 literal in
+// a kernel, which the C++ lane refuses, BL7001: gap G245.)
+// EXPECT: total = 52.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut b: Array<Float64 like C> = [1.0, 2.0, 3.0]
+    let v = b
+    b = [7.0, 8.0, 9.0]
+    v((1 : C)) + reduce(b, (+))
+}, (+))

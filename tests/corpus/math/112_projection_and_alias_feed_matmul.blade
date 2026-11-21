@@ -1,0 +1,15 @@
+// TEST: Math eigh result through a tuple projection and an alias
+// #62: a tuple projection `e[0]` and a plain alias of it carry the result
+// shape of the elaborated call; so does the projection written directly as
+// an argument.
+import math as m
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 2.0]]
+let e = m.eigh(S)
+let Qp = e[0]
+let Qa = Qp
+let P = m.matmul(S, Qa)
+let w0 = P(0, 0) * Qa(0, 0) + P(1, 0) * Qa(1, 0) + P(2, 0) * Qa(2, 0)
+// EXPECT: w0 = 3.414213562373095
+let P2 = m.matmul(S, e[0])
+let d = P2(0, 0) - P(0, 0)
+// EXPECT: d = 0.0

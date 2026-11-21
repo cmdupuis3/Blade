@@ -1,0 +1,21 @@
+// TEST: Deferred Alias Fold Fuses
+// ----------------------------------------------------------------------------
+// Gap G60: a fold over an alias of a deferred map is the fold over the map
+// itself (formalism 10.2: the alias is the same deferred value, so
+// substitution holds). `reduce(g, (+))` fuses the map into the fold and
+// forces nothing; `reduce(g2, (+))` now does the same in every lane -- the
+// type checker resolves the alias to a fixpoint before choosing the fused
+// fold -- so NEITHER g nor g2 prints (the differential gates compare the
+// whole printed set). Before, the C++ lane printed g (forced at the alias),
+// the interpreter printed g2, the llvm lane both. An alias nothing forces
+// prints nothing either (`idle`).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let s = reduce(g2, (+))
+let s2 = reduce(g2, (+), 1.0)
+let idle = g
+// EXPECT: s = 12.0
+// EXPECT: s2 = 13.0

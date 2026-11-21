@@ -1,0 +1,25 @@
+// TEST: literals follow the width of generic arrow results and array cells
+function first(c) = c(0) + 1.0
+let xs = [1.0, 2.0, 3.0]
+let a: Float32 = first(xs)
+let b: Float32 = first([1.0, 2.0, 3.0])
+let c: Float64 = first(lambda(i) -> 10.0 * Float64(i))
+let u = lambda(c) -> c(0) + 1.0
+let ua: Float32 = u([1.0, 2.0, 3.0])
+let ub: Float64 = u(lambda(i) -> 10.0 * Float64(i))
+function half_sum(row: T^1) = reduce(row, (+)) / 2.0
+let h: Float32 = half_sum(xs)
+// EXPECT: a = 2.0
+// EXPECT: b = 2.0
+// EXPECT: c = 1.0
+// EXPECT: ua = 2.0
+// EXPECT: ub = 1.0
+// EXPECT: h = 3.0
+let hc: Complex64 = half_sum([complex(1.0, 2.0), complex(3.0, 4.0)])
+let hc_real: Float32 = real(hc)
+let hc_imag: Float32 = imag(hc)
+function half_offset(row: T^1) = (reduce(row, (+)) + 1) / 2
+let hi: Int32 = half_offset([2147483647])
+// EXPECT: hc_real = 2.0
+// EXPECT: hc_imag = 3.0
+// EXPECT: hi = -1073741824

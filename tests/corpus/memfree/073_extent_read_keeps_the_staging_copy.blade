@@ -1,0 +1,19 @@
+// TEST: A read in a later range bound keeps a staging copy a copy
+// ============================================================================
+// Round 4 wave 7 (lane c, gap G220; found by the Codex diff review of the
+// class fix, 5909d69a): the staging-alias admission (canAliasStagingLet) looked for later reads
+// of y outside type-carried expressions only, so `let mut z = y` aliased y
+// and `z(0) = 100.0` changed the range bound's read of y(0) (n 4 instead of 3).
+// The scan now reads every expression a type carries (embeddedExtentExprs).
+// ============================================================================
+type I = Idx<3>
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let mut z = y
+    z(0) = 100.0
+    let n = extents(0..{ if y(0) == 2.0 then 3 else 4 })
+    Float64(n) + z(0)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let r = f(x)
+// EXPECT: r = 103.0

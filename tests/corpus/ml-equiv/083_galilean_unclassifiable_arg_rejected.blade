@@ -30,10 +30,10 @@ import ml as ml
 // ============================================================================
 
 // An ordinary uncertified helper — the callee is not the problem.
-function widen(k: Int) -> Float = 1.0
+function widen(k: Int32) -> Float64 = 1.0
 
 // `rank(u)` is unclassifiable, not boost-variant. BL4009 with the second
 // wording, at the argument's span.
-function bad(u: Array<Float like Idx<4>>) where ml.galilean(u) -> Float = widen(rank(u))
+function bad(u: Array<Float64 like Idx<4>>) where ml.galilean(u) -> Float64 = widen(rank(u))
 
 let b = bad([1.0, 2.0, 3.0, 4.0])

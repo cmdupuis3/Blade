@@ -5,7 +5,7 @@
 // index the input by name, so its codegen forces the deferred binding in
 // place first (shared forceDeferredArrayInput helper). Values mirror
 // 034_decompact_symmetric.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let sym = L <@> reynolds(g)

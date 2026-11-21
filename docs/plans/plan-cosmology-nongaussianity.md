@@ -89,7 +89,7 @@ Meerburg et al. arXiv:2107.10802.
 | Symmetric b_{l1l2l3} storage | `SymIdx<3,N>` via `range<SymIdx>` former or `ppl.moments` | EXISTS — but **no fold**: every reduce/prodsum spelling over compact storage refuses BL3999 (~6 sites; `plan-compact-sym-folds.md` P1-P10). Only `decompact`-then-fold runs |
 | Triangle + parity support constraint | `static struct … where` (C1 counting layer, `idx_card`) | HALF-EXISTS. The corpus anchor is literally a CG m-selection rule (index-types/145); the dependent-bound refusal test (152) is literally the triangle inequality; box cap 100 000 ⇒ lmax ≤ 45. C2 (the type) unbuilt |
 | Constrained support that folds | `SparseIdx` with 3-tuple keys | EXISTS (184, 185) — the only compact class whose `reduce` works; loses canonicalization, comm licensing, and arithmetic ranking |
-| FFTs | `sp.fft/ifft/fft2/ifft2` | EXISTS. 1-D `ifft` is ALWAYS O(n²) (no radix-2 branch, `SpectraDecls.fs:116-126`); 2-D is radix-2 per axis — so heavy MC work belongs in 2-D. No `fft3`, no complex→complex fft |
+| FFTs | `sp.fft/ifft/fft2/ifft2` | EXISTS. O(n log n) at every n and per 2-D axis: radix-2 at a power of two, Bluestein (chirp-z) otherwise (2026-10, F6; the 1-D `ifft` radix-2 branch landed earlier). No `fft3`, no complex→complex fft |
 | Gaussian sims | `rand.normal(key, [r,c])`, runtime Int64 key, static shape | EXISTS; per-realization keys inside a `let rec` slice structurally admitted |
 | Fisher / covariance | `gram(A,A)` (complex → genuine SymHermitian/zherk), `math.solve/eigh` | EXISTS (math/061, index-types/067) |
 | Units through spectra ops | — | MISSING: `classifyElem` matches only zero-argument Float spellings (`SpectraElaborate.fs:109-113`), so `Float<microkelvin>` is refused with a message that never mentions units |
@@ -190,8 +190,9 @@ NB2 is the follow-through on a promise the repo already made. Cite it.
    emits one node per output cell and every notebook cell re-lowers the
    session. NB2 stays at 64×64; never put a 65536-cell polyspec above other
    cells.
-3. **1-D `ifft` is O(n²) always** — anyone "improving" the notebook by
-   raising 1-D n hits a wall with no warning. MC lives in 2-D by design.
+3. ~~**1-D `ifft` is O(n²) always**~~ — RESOLVED: `fft`/`ifft` are O(n log n)
+   at every n (radix-2, or Bluestein off powers of two; F6). MC still lives in
+   2-D by design.
 4. **Normalization conventions** (mitigated by self-calibration, above).
 5. **Full-sphere is blocked, not deferred** — no SHT, no Wigner surface,
    `ml.y_to` caps at lmax=2. Said plainly in the closing cell; see §7.

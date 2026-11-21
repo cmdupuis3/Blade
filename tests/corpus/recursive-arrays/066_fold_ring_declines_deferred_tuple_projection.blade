@@ -1,0 +1,29 @@
+// TEST: fold ring declines a fold kernel reading a projection of a wholly-deferred tuple
+// PM35 constructor-table review round 2 (round 4 wave 3 B1): `v = p[0]` is a
+// projection of the wholly-deferred tuple `p = (d1, d2)`, deferred in every
+// lane (IRLift.computeDeferredIds), so the fold kernel `fk` -- through `dsum`
+// -- forces `d1` cell by cell; moving the fold into the sweep would move that
+// evaluation, so rec-fold-ring declines. Its value pin was dropped in wave 3
+// because the C++ lane failed to compile the body's read of `v` (gap G100:
+// the kernel's deferred capture was forced only when it was bound to a map
+// directly, not through the projection's reference); restored in round 4
+// wave 4 lane A. The value is 064's.
+type I = Idx<4>
+type Step = Idx<64>
+let w: Float64 = 0.5
+let d1 = method_for(range<I>) <@> lambda(i) -> Float64(i) * w
+let d2 = method_for(range<I>) <@> lambda(i) -> Float64(i)
+let p = (d1, d2)
+let v = p[0]
+function dsum() -> Float64 = reduce(method_for(range<I>) <@> lambda(i) -> v(i), (+))
+function fk(a: Float64, b: Float64) -> Float64 = a + b + dsum()
+function run() -> Float64 = {
+    let rec x: Array<Float64 like Step> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5
+    reduce(x, fk, 0.0)
+}
+let r = run()
+// EXPECT: r = 194.0

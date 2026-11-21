@@ -30,7 +30,7 @@ function center(x: T^1) -> T^1 = x - mean(x)
 // The invariant holds a map of its own (`x * x`): it moves out whole.
 function rms_normalize(x: T^1) -> T^1 = x / sqrt(mean(x * x))
 
-let x = [1.0, 2.0, 3.0, 6.0]
+let x = Float64([1.0, 2.0, 3.0, 6.0])
 let centered = center(x)
 // EXPECT: centered = [-2.0, -1.0, 0.0, 3.0]
 let normalized = rms_normalize(x)
@@ -49,7 +49,7 @@ let n_normalized_none = extents(normalized_none)
 
 // The same for a row whose emptiness only RUN TIME knows: the guard itself
 // runs (the `none` bodies above are specialized on the literal extent 0).
-let common = intersect(x, [100.0, 200.0])
+let common = intersect(x, Float64([100.0, 200.0]))
 let n_centered_common = extents(center(common))
 // EXPECT: n_centered_common = 0
 
@@ -69,7 +69,7 @@ let scaled = x - mean(x) * 0.5
 
 // A math intrinsic alone is work too (g++ does not move a libm call out of a
 // loop): `exp` runs once.
-let decay = 0.5
+let decay: Float64 = 0.5
 let damped = x * exp(-decay)
 // EXPECT: damped = [0.606530659712633, 1.21306131942527, 1.8195919791379, 3.6391839582758]
 

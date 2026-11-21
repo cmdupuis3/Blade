@@ -1,0 +1,8 @@
+// TEST: the width-less Int type is refused (rejects)
+// ============================================================================
+// Rule 3: `Int` (old meaning Int32) is steered to Int32 / Int64, in a field
+// bound spelling as everywhere.
+// ============================================================================
+function f(n: Int) -> Int64 = Int64(n)
+// ERROR: BL1004
+// ERROR-CONTAINS: `Int` has no width: write `Int32` or `Int64`

@@ -1,0 +1,9 @@
+// TEST: an integer literal that does not fit its partner is refused (rejects)
+// ============================================================================
+// A literal takes its partner's width only when its value fits that width:
+// `i + 3000000000` over an Int32 `i` is refused, never answered by widening
+// the variable (convert `i` with Int64(i)).
+// ============================================================================
+let i: Int32 = 5
+let j = i + 3000000000
+// ERROR: BL3020

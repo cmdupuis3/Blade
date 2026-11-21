@@ -1,0 +1,22 @@
+// TEST: Antisym Tile Scaled Long Chain
+// The antisym pair with the kernel's own scalar, `(P - Q) / 4.0`, at p = 37 and
+// n = 600 (a chain longer than any sample block: the tile runs each cell's P and
+// Q whole, so no partial is stored), with the components swapped
+// (`a(1), b(0)` / `b(1), a(0)`) and the omp licence on the kernel. The scale
+// divides each FINISHED difference once (never a reciprocal multiply).
+/// Z(i, c, s) = ((3 i + 5 c + 2 s) mod 9) - 4: small integers, so the sums are exact
+/// and `/ 4.0` is exact -- association-invariant pins; the route is pinned by
+/// `blade test row-tile`, the bits by `blade test interp symmetry`.
+type P = Idx<37>
+type C = Idx<2>
+type S = Idx<600>
+let (ss, l01, l_mirror, l_edge) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 3 + c * 5 + s * 2) % 9) - 4.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b), omp(a: 1) -> (prodsum(a((1 : C)), b((0 : C))) - prodsum(b((1 : C)), a((0 : C)))) / 4.0 |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    (total, l(0, 1), l(36, 2), l(35, 36))
+}
+// EXPECT: ss = 184731637.5
+// EXPECT: l01 = -450.0
+// EXPECT: l_mirror = 452.25
+// EXPECT: l_edge = -452.25

@@ -15,7 +15,7 @@ import ml as ml
 // rendered componentwise, because componentwise zero is the acceptance test.
 let static V = [(1, 1, 1)]
 let static Q = [(2, 0, 1)]
-function quad(x: Array<Float like IrrepsIdx<V>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<Q>> =
+function quad(x: Array<Float64 like IrrepsIdx<V>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<Q>> =
   [x(0) * x(2),
    x(0) * x(1),
    0.5773502 * (x(1) * x(1) - 0.5 * x(0) * x(0) - 0.5 * x(2) * x(2)),

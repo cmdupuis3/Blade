@@ -14,7 +14,7 @@
 // SharedIndexTypes), so an antisymmetric input drives the STRICT simplex and
 // writes C(n,2) cells. The symmetric answer needs C(n+1,2) — it has a diagonal
 // this nest cannot fill. 167 shows the decompact-first spelling that works.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let out = method_for(C) <@> lambda(v) -> v * v |> compute

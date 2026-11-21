@@ -1,0 +1,10 @@
+// TEST: an immediately applied lambda given a Bool (rejects)
+// ============================================================================
+// R10 remainder: a non-numeric argument binds the open parameter of EVERY callee
+// that is one value -- an alias of a lambda, a lambda applied where it is written,
+// a block-local operator section (judged on its arguments) -- not only a let-bound
+// lambda called by its own name; the body's arithmetic is then refused. Here: a lambda applied where
+// it is written.
+// ============================================================================
+let b = (lambda(x) -> x + x)(true)
+// ERROR: BL3001 @ 8:23

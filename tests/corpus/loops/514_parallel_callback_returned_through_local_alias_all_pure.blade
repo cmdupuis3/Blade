@@ -1,0 +1,23 @@
+// TEST: Parallel Callback Returned Through Local Alias All Pure
+// Gap G47 (Codex review W2F-9 finding 29, first probe): `passthrough`
+// returns a LOCAL ALIAS of its callback parameter. The callback table follows
+// RETURN FLOW -- a call evaluates to the join of its targets' return values
+// -- so `passthrough(launch)` is launch and `(ident)` feeds ident into
+// launch's `f`; nothing escapes and the pure `where omp` kernel keeps its
+// team (omp-pragma pins the pragma). f1910060 treated the returned alias as
+// an ESCAPE, made launch's `f` unknown and refused this write-free program
+// BL4005; the writing twin is mutability-errors/042.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+function ident(v: Float64) -> Float64 = v
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function passthrough(h: H) -> H = {
+    let k = h
+    k
+}
+let a = launch(ident)
+let b = passthrough(launch)(ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]

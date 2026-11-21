@@ -1,0 +1,14 @@
+// TEST: Fold Spine Snapshot Seed Writes Through Mut Parameter
+// Gap G235 (a), round 4 wave 9: the seed writes the input x of the spine p
+// through a mut parameter (an alias of the caller array). The captured q
+// forced p before the traversal, so the fold reads the snapshot: 21.0 (every
+// lane printed 39.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+function poke(a: mut Array<Float64 like Idx<3>>) -> Float64 = { a(0) = 10.0; 0.0 }
+let q = method_for(p) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), poke(x))
+let w = p(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0
+// EXPECT: x = [10.0, 2.0, 3.0]

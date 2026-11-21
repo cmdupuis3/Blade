@@ -1,0 +1,22 @@
+// TEST: Group aggregate positional key past the last group (aborts)
+// ABORT: BL8006
+// ABORT: index out of bounds: a group_keys key outside 0 .. 2
+// 051's abort inside an aggregate-only grouping (gap G71): the one pass meets
+// the keys row by row in source order exactly as the CSR's first key pass
+// did, so the first bad key (row 2, key 4 of an Idx<3> grouping) aborts with the
+// same code, the same message, at the grouping's span -- the rows before it
+// were accumulated into private state nobody can observe, and no later
+// output was published.
+type Region = Idx<3>
+type Row = Idx<5>
+
+function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute
+    s
+}
+
+let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute
+let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]
+let s = agg(keys, vals)

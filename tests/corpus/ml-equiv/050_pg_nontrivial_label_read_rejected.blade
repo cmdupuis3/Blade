@@ -20,8 +20,8 @@ let static WB = ml.pg_hom_dim("D4", SB, SB)
 
 // The admissible read, for contrast: A1's every generator matrix is [1], so
 // offset 0 is a genuine D4 invariant.
-function good(x: Array<Float like PgIrrepsIdx<D4, SB>>, w: Array<Float like Idx<WB>>)
-              where ml.equiv(D4) -> Float = {
+function good(x: Array<Float64 like PgIrrepsIdx<D4, SB>>, w: Array<Float64 like Idx<WB>>)
+              where ml.equiv(D4) -> Float64 = {
     let y = ml.derive_pg_linear(D4, SB, SB, x, w)
     y(0)
 }
@@ -29,8 +29,8 @@ function good(x: Array<Float like PgIrrepsIdx<D4, SB>>, w: Array<Float like Idx<
 // B1 sends the mirror s to [+1] but the rotation r to [-1]: its cell changes
 // sign under a symmetry operation of the crystal, so no function that reads it
 // is D4-invariant.
-function bad(x: Array<Float like PgIrrepsIdx<D4, SB>>, w: Array<Float like Idx<WB>>)
-             where ml.equiv(D4) -> Float = {
+function bad(x: Array<Float64 like PgIrrepsIdx<D4, SB>>, w: Array<Float64 like Idx<WB>>)
+             where ml.equiv(D4) -> Float64 = {
     let y = ml.derive_pg_linear(D4, SB, SB, x, w)
     y(1)
 }

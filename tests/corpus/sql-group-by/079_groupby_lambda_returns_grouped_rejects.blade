@@ -1,0 +1,13 @@
+// TEST: GroupBy Result Returned From A Lambda Over A Top-Level Grouping (rejects)
+// ERROR: BL3017 @ 10:23
+// ERROR-CONTAINS: cannot be a GROUPED value
+// The grouping may be bound at top level and the callable a lambda: the
+// value still leaves through a return, which no grouped shape survives
+// (it used to reach the back end as a BL7004 about method_for operand forms
+// at the first consumer -- a symptom, not the rule).
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
+let gk = group_keys(region)
+let mk = lambda(t) -> group_by(t, gk)
+let h = mk(temps)
+let s = reduce(h, (+))

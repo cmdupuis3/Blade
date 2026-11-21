@@ -1,0 +1,35 @@
+// TEST: Contains Target Mutates A Dense Set
+// ============================================================================
+// THE ONE target-evaluation contract (docs/features/sql.md section 5): the
+// set operand is evaluated first -- as the set ITSELF, never a snapshot of
+// its cells -- then the target once, and only then are the cells read. A
+// target that writes the set through a `mut` parameter is therefore seen by
+// the scan, in all three lanes:
+//   * `own`: the target writes 9 into cell 0 and probes 9 -- a hit;
+//   * `gone`: the target overwrites the cell holding 3 and probes 3 -- a miss;
+//   * `kept`: the target writes another cell and probes an untouched key --
+//     a hit.
+// The probes are not in a host kernel, so membership hoisting plans nothing:
+// this is the as-written scan. The compound twin is 024.
+// ============================================================================
+type I3 = Idx<3>
+let mut D: Array<Int64 like I3> = [1, 2, 3]
+function own_hit(a: mut Array<Int64 like I3>) -> Int64 = {
+    a(0) = 9
+    9
+}
+function erase3(a: mut Array<Int64 like I3>) -> Int64 = {
+    a(2) = 70
+    3
+}
+function other_cell(a: mut Array<Int64 like I3>) -> Int64 = {
+    a(1) = 55
+    9
+}
+let own = contains(D, own_hit(D))
+let gone = contains(D, erase3(D))
+let kept = contains(D, other_cell(D))
+// EXPECT: own = true
+// EXPECT: gone = false
+// EXPECT: kept = true
+// EXPECT: D = [9, 55, 70]

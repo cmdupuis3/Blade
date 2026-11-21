@@ -1,0 +1,13 @@
+// TEST: A Zip Whose Later Compounds Are Over Different Masks Is Refused After An Untokened First Operand (rejects)
+// Gap G265 (d) (round 4 wave 10 lane d; wave-end review F3): the first operand, a range over the
+// compound index of `keep`, carries no mask token, and the provenance check judged later operands
+// only against the first; operands 2 and 3 are compounds over two different mask bindings and are
+// now compared with each other (BL3016).
+// ERROR: BL3016
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let keep = mask(x, lambda(v) -> v > 3)
+let other = mask(x, lambda(v) -> v < 4)
+let a = compound(x, keep)
+let b = compound(x, other)
+let m = method_for(zip(range<CompoundIdx<keep>>, a, b)) <@> lambda(r, p, q) -> p * q |> compute

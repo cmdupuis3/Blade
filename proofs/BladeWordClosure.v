@@ -70,7 +70,7 @@
 (* ===================================================================== *)
 
 From Blade Require Import BladePointGroup.
-Require Import List ZArith.
+From Stdlib Require Import List ZArith.
 Import ListNotations.
 Open Scope nat_scope.
 

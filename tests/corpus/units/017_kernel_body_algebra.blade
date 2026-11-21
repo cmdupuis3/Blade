@@ -8,9 +8,9 @@
 Unit meters
 Unit area = meters^2
 type SIdx = Idx<2>
-let A: Array<Float<meters> like SIdx> = [3.0, 4.0]
+let A: Array<Float64<meters> like SIdx> = [3.0, 4.0]
 let sq = method_for(A) <@> lambda(t) -> t * t |> compute
-let ar: Float<area> = 100.0
+let ar: Float64<area> = 100.0
 let total = sq((0 : SIdx)) + ar
 // EXPECT: sq = [9.0, 16.0]
 // EXPECT: total = 109.0

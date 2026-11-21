@@ -25,9 +25,9 @@ R = M^{1/2}, the oriented (−κ/2) frame, the Casimir spectrum (0, −2×6, −
 intertwiners whose singular values are the closed forms √(L(L+1)), U Uᵀ = I, and the final
 residual max |U Jₐ Uᵀ − ⊕Dₐ| = 8e-15 — all green in both lanes (the interpreter takes ~15 s
 on `007`).
-`m.expm` is a new synthesized math op (Taylor-18 scaling-and-squaring, `math/092`–`093`),
+`m.expm` is a new synthesized math op (Taylor-18 scaling-and-squaring, `math/129`–`130`),
 and a let-bound `m.matmul` inside a differentiated body is normalized to the `gram` form the
-sweeps own, so it differentiates in reverse and forward mode (`ad/043`). Two spelling rules
+sweeps own, so it differentiates in reverse and forward mode (`ad/185`). Two spelling rules
 the build added to §2.2's list: a function body cannot read a tuple-destructured module
 binding (unvec nullspace vectors at module level from `transpose(V, [0, 1])`), and index
 arithmetic lives in `Int64` helpers over ANONYMOUS-axis arrays (a named tag refuses
@@ -458,8 +458,8 @@ ordinary Blade so `ad.grad` differentiates through it and codegen is unchanged.
 
 | Item | Why | Shape |
 |---|---|---|
-| `m.expm(A)` forward — BUILT 2026-10-08 (`math/092`–`093`) | finite group elements for augmentation, Haar sampling, the finite-`t` check | Taylor-18 scaling-and-squaring (§3.6) as a synthesized `__math_N` function in the `svdDecl` style (`MathElaborate.fs`), the squarings `gram` products, `(m, s)` fixed at elaboration from a static `‖A‖₁` bound or chosen at run time by a `while`-guarded budget; oracle pins from an F# replay |
-| `m.matmul` adjoint — BUILT 2026-10-08 (`ad/043`) | was BL5500 under `ad.grad` | the AD normalizer rewrites a let-bound `__math_matmul(a, b)` to `let __mt = transpose(b, [0, 1])`, `gram(a, __mt)` before the sweeps, so the existing gram rules carry both modes; a matmul anywhere but a let initializer keeps its refusal |
+| `m.expm(A)` forward — BUILT 2026-10-08 (`math/129`–`130`) | finite group elements for augmentation, Haar sampling, the finite-`t` check | Taylor-18 scaling-and-squaring (§3.6) as a synthesized `__math_N` function in the `svdDecl` style (`MathElaborate.fs`), the squarings `gram` products, `(m, s)` fixed at elaboration from a static `‖A‖₁` bound or chosen at run time by a `while`-guarded budget; oracle pins from an F# replay |
+| `m.matmul` adjoint — BUILT 2026-10-08 (`ad/185`) | was BL5500 under `ad.grad` | the AD normalizer rewrites a let-bound `__math_matmul(a, b)` to `let __mt = transpose(b, [0, 1])`, `gram(a, __mt)` before the sweeps, so the existing gram rules carry both modes; a matmul anywhere but a let initializer keeps its refusal |
 | `m.expm` derivative (v2) | joint generator training | AD through the synthesized body if grad can inline `__math_N` bodies (§7 D7), else the explicit `L(Aᵀ, G)` rule; the block-triangular identity is the corpus check |
 | `eigh` jvp/vjp (v2) | spectral regularizers inside a loss | closed form for distinct eigenvalues; a refusal (not a NaN) below a gap tolerance |
 | reverse-over-forward (v2) | training `φ` against the Lie-derivative residual | a `grad` rule for `__jvp` calls, or the hand-assembled `2Jᵀr xᵀ` adjoint as a named-call rule |
@@ -559,14 +559,14 @@ derivative is needed; the realism term uses the U-statistic at moderate `t`, the
 let Z0   = encode(w_phi, X)                             // (Lat, Samp), whitened in-lane
 let gens = lie.discover(Z0, Fz, K, tol)                 // EXACT: Hessian + dynamics rows, eigh, ladder printed
 let G    = sample_group(gens, w_table, round)           // expm of algebra draws, CONSTANT this round
-function loss(w_phi: ..., w_psi: ..., x: ..., g: ...) -> Float = {
+function loss(w_phi: ..., w_psi: ..., x: ..., g: ...) -> Float64 = {
     let Z   = encode(w_phi, x)
     let Xr  = decode(w_psi, Z)
     let Zg  = act(g, Z)                                 // gram against a constant
     let Xg  = decode(w_psi, Zg)
     recon(Xr, x) + l1 * mmd2_gauss_u(Xg, x, sigma) + l2 * hess_ratio(Z, gens) + l3 * dyn_equiv(Z, gens)
 }
-let rec wtraj: Array<Float like Epochs, State> = ... | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
+let rec wtraj: Array<Float64 like Epochs, State> = ... | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
 ```
 
 **Mode C — unsupervised joint (research, P5).** The LaLiGAN objective without a
@@ -642,7 +642,7 @@ rows remove it.
 |---|---|---|---|
 | P0 discovery lane, Blade source — BUILT 2026-10-08 | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
 | P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map) | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
-| P2 `m.expm` — BUILT 2026-10-08 (`math/092`–`093`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
+| P2 `m.expm` — BUILT 2026-10-08 (`math/129`–`130`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
 | P3 Mode B trainer | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
 | P4 the bridge — the canonicalization half is `lie/007` (BUILT 2026-10-08); the proposal printout and cell T2 remain | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |
 | P5 research | Mode C + the geometric regularizers (N1 as the control); joint generator training (needs the `expm` derivative); training `φ` against the Lie-derivative residual (needs reverse-over-forward); the multiplicity parity search; non-roster soft equivariance (D6) | §4.1 rows 3–5 | each its own plan row when scheduled |

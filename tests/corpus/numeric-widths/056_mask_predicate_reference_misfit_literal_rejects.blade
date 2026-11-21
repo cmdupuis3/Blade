@@ -1,0 +1,13 @@
+// TEST: a mask predicate referenced by name meets the cells with a literal that does not fit them (rejects)
+// ============================================================================
+// G276 (1): a predicate passed by NAME is checked against the cells as an
+// inline lambda is -- its open parameter is decided by them (Float32), and
+// `1e100` does not fit. It used to stay Float64 and convert every cell.
+// ============================================================================
+function work(x: Array<Float32 like Idx<2>>) = {
+    let k = lambda(v) -> v > 1e100
+    mask(x, k)
+}
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let r = work(a)
+// ERROR: BL3020

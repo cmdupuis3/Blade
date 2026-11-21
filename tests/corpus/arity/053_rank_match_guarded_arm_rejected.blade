@@ -13,10 +13,10 @@
 // the intrinsic -- keeps today's behavior with the specializer's bail as the
 // backstop.
 // ============================================================================
-let flag = 1.0
+let flag: Float64 = 1.0
 function describe(x: T^r) -> Int64 = match rank(x) with
     | 0 if flag > 0.0 -> 100
     | 0 -> 101
     | 1 -> 200
     | _ -> 300
-let a = describe(4.0)
+let a = describe(Float64(4.0))

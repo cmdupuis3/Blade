@@ -1,0 +1,19 @@
+// TEST: Same-named mutual-group aliases in two modules link
+// MODULE: A
+module A
+struct Particle {
+    vel: Float64,
+    mass: Float64
+}
+type P1 = Particle
+and P2 = Particle
+where P1.vel * P1.mass + P2.vel * P2.mass == 4.0
+function make(v: Float64) -> (P1, P2) = {
+    let a = Particle { vel = v, mass = 2.0 }
+    let b = Particle { vel = 1.0, mass = 2.0 }
+    (a, b)
+}
+function total(v: Float64) -> Float64 = {
+    let (q1, q2): (P1, P2) = make(v)
+    q1.vel + q2.vel
+}

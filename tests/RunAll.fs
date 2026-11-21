@@ -348,6 +348,20 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // Skipped without it — but needs no BLAS (it includes the BLAS-free
     // blade_linalg_views.hpp). (Also `blade test linalg`.)
     let linalgProbe = Blade.Tests.LinAlgTests.runLinAlgProbeTests ()
+    // The BLAS-off syrk arm's packed-triangle tile, RAW-BIT against the serial
+    // per-cell prodsum under -ffp-contract=off and against the one-fma-per-step
+    // chain under =fast, plus a vfmadd census of each build. Needs g++,
+    // Skipped without it. (Also `blade test linalg` / `blade test syrk-tile`.)
+    let syrkTile = Blade.Tests.LinAlgTests.runSyrkTileTests ()
+    // The explicit K-lane vector fold forms (review M9 / M14): raw bits against
+    // the scalar model of the lane tree under both contraction modes, the
+    // Path B partition threaded against its serial twin, and the vfmadd census.
+    // Needs g++, Skipped without it. (Also `blade test fold-lanes`.)
+    let foldLanes = Blade.Tests.LinAlgTests.runFoldLanesTests ()
+    // The antisym-pair and rank-3 simplex tiles: routes, then raw bits against
+    // the serial per-cell forms in both contraction modes. Needs g++ for the
+    // raw-bit half. (Also `blade test linalg` / `blade test row-tile`.)
+    let rowTile = Blade.Tests.LinAlgTests.runRowContractionTileTests ()
     // The four-tier BLAS/LAPACK configuration resolution (off / explicit
     // BLADE_BLAS_LINK / OPENBLAS_DIR prefix / bare system) plus Toolchain's
     // env-over-file precedence. Pure in-process unit checks with the whole
@@ -421,6 +435,30 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // the `while` spelling's budget abort). Pure codegen string checks, no
     // toolchain. (Also `blade test optimize`.)
     let optimizeLayer = Blade.Tests.OptimizeTests.runOptimizeTests ()
+    // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms the
+    // repro-pinned differentials cannot see, by raw bits NEW vs
+    // BLADE_CELL_EPILOGUE=0, plus the LLVM lane's parity. Needs g++ (and
+    // clang for the LLVM half), Skipped without. (Also `blade test cell-epilogue`.)
+    let cellEpilogue = Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()
+    // Gap G92, the owned move: a reassigned array frees its previous pool --
+    // plan record, C++ text, values, ASan outstanding blocks vs the trip
+    // count. Needs g++ (ASan arms the memcheck toolchain), Skipped without.
+    // (Also `blade test owned-move`.)
+    let ownedMove = Blade.Tests.OwnedMoveTests.runOwnedMoveTests ()
+    // The precompiled prelude (Build.fs, BLADE_PCH): built at a block's second
+    // sighting, used after, and a compile that fails with it re-run without
+    // it. Against a private store. Needs g++, Skipped without. (Also
+    // `blade test pch`.)
+    let pchBlock = Blade.Tests.PchTests.runPchTests ()
+    // Wave 3 (E-G5): the threaded `let rec` step, threads-on vs threads-off
+    // by raw bits at fixed team sizes. Needs g++, Skipped without. (Also
+    // `blade test rec-step`.)
+    let recStep = Blade.Tests.RecStepTests.runRecStepTests ()
+    // Round-2 ordered orbit scatter: both lanes executed against walk-forced
+    // twins under REPRO + contract=off, at every scatter_g and with the knob
+    // off. Needs g++ (and clang for the LLVM half), Skipped without. (Also
+    // `blade test orbit-scatter`.)
+    let orbitScatter = Blade.Tests.OrbitScatterTests.runOrbitScatterTests ()
     // The RNG mirror's Philox4x32-10 generator against Random123's published
     // known-answer vectors, plus the `_at` address identities on the
     // generator alone (also `blade test rand-mirror`). No toolchain.
@@ -451,6 +489,10 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // on a BL8007 abort. The e2e halves skip without g++. (Also `blade test
     // run-record`.)
     let runRecord = Blade.Tests.RunRecordTests.runRunRecordTests ()
+    // The display print form (P3-26): emission facts and the three lanes'
+    // display text; the run halves skip without g++ / clang. (Also `blade
+    // test print-form`.)
+    let printForm = Blade.Tests.PrintFormTests.runPrintFormTests ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -542,7 +584,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield syrkTile; yield foldLanes; yield rowTile; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield cellEpilogue; yield ownedMove; yield pchBlock; yield recStep; yield orbitScatter; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord; yield printForm
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

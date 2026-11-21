@@ -1,0 +1,12 @@
+// TEST: An Alias Of A Stored Section Applied To Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 9:36
+// ERROR-CONTAINS: the section `(+)` is applied to a Bool value
+// ============================================================================
+// R11: functions/901 through a `let g = f` alias of the section.
+// ============================================================================
+function outer(b) = {
+    let f = (+)
+    let g = f
+    method_for(b) <@> lambda(v) -> g(v, v) |> compute
+}
+let r = outer([true, false])

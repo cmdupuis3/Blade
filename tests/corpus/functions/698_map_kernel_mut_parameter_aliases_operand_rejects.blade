@@ -1,0 +1,23 @@
+// TEST: A Map Kernel's Mut Parameter Sharing Storage With Another Operand Is Refused (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; Codex diff review round 4): a map
+// applies its kernel like a call -- each kernel parameter receives its
+// operand's slice -- so a `mut` kernel parameter fed `a` beside an operand
+// `b = identity(a)` shares storage with what the kernel reads (the
+// interpreter mutated [[2, 3], [4, 5]] into [[5, 8], [9, 14]]): BL4005 at
+// lowering in every lane.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function identity(m: M) -> M = m
+function bump(x: A, y: mut A) -> Float64 = {
+    y(0) = y(0) + x(1)
+    y(1) = y(1) + x(0)
+    y(0)
+}
+let mut a: M = [[2.0, 3.0], [4.0, 5.0]]
+let b = identity(a)
+let r = method_for(zip(b, a)) <@> bump |> compute
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

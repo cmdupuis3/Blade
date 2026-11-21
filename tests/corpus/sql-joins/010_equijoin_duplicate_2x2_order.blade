@@ -1,0 +1,22 @@
+// TEST: Equijoin Duplicate 2x2 Order
+// ----------------------------------------------------------------------------
+// The smallest duplicate stress case (Codex review B, finding 5): left keys
+// [1, 1] with amounts [1, 10], right keys [1, 1] with amounts [2, 3]. The
+// compound's lex order and a correct stable CSR give the pairs
+// (0,0) (0,1) (1,0) (1,1): values [2, 3, 20, 30], fingerprint
+// `3 * a + b` from 0 = 171. A deduplicating probe gives too few cells,
+// prepend-built buckets give [3, 2, 30, 20] (209), a right-major probe
+// [2, 20, 3, 30] (273).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<2>
+type RightRow = Idx<2>
+let left_key: Array<Int64 like LeftRow> = [1, 1]
+let left_amount: Array<Int64 like LeftRow> = [1, 10]
+let right_key: Array<Int64 like RightRow> = [1, 1]
+let right_amount: Array<Int64 like RightRow> = [2, 3]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let fp = reduce(matched, lambda(a, b) -> 3 * a + b, 0)
+// EXPECT: matched = [2, 3, 20, 30]
+// EXPECT: match_count = 4
+// EXPECT: fp = 171

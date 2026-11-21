@@ -1,0 +1,23 @@
+// TEST: C06 census full versus nested literal seeds on empty axes
+type R0 = Idx<0>
+type R = Idx<3>
+type C0 = Idx<0>
+type C = Idx<3>
+let M_zero_rows: Array<Float64 like R0, C> = []
+let M_zero_columns: Array<Float64 like R, C0> = [[], [], []]
+let full_R0 = reduce((method_for(M_zero_rows) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0, axes = 2)
+let full_C0 = reduce((method_for(M_zero_columns) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0, axes = 2)
+let nested_R0 = reduce((method_for(M_zero_rows) <@> (lambda(row: Array<Float64 like C>) ->
+    reduce((method_for(row) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0))), lambda(a: Float64, b: Float64) -> a * 2.0 + b, -3.0)
+let nested_C0 = reduce((method_for(M_zero_columns) <@> (lambda(row: Array<Float64 like C0>) ->
+    reduce((method_for(row) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, 7.0))), lambda(a: Float64, b: Float64) -> a * 2.0 + b, -3.0)
+let negative_zero = reduce((method_for(M_zero_rows) <@> (lambda(v: Float64) -> v * v + 1.0)), lambda(a: Float64, b: Float64) -> a * 2.0 + b, -0.0, axes = 2)
+// R0 executes no inner row fold; C0 executes three inner seeds7.
+// C0 outer graph:-3 ->1 ->9 ->25. Full seeds run once, no cell step.
+// EXPECT: M_zero_rows = []
+// EXPECT: M_zero_columns = [[], [], []]
+// EXPECT: full_R0 = 7.0
+// EXPECT: full_C0 = 7.0
+// EXPECT: nested_R0 = -3.0
+// EXPECT: nested_C0 = 25.0
+// EXPECT: negative_zero = -0.0

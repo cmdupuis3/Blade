@@ -1,0 +1,11 @@
+// TEST: A Method-Composition Stage Given Bool Values Is Refused (rejects)
+// ERROR: BL3001 @ 10:1
+// ERROR-CONTAINS: (an `@>>` stage, given each value of the stage before it)
+// ============================================================================
+// R11: `@>>` feeds the left map's Bool cells to `twice`, whose parameter
+// `twice(1.0)` decided. Base: BL9002 in both lanes (g++ refused the code).
+// ============================================================================
+let b = [true, false]
+let twice = lambda(x) -> x * 2.0
+let warm = twice(1.0)
+let r = ((method_for(b) <@> lambda(x) -> x) @>> (method_for([1.0, 2.0]) <@> twice)) |> compute

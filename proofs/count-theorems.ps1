@@ -94,19 +94,41 @@ foreach ($f in $counts.Keys) {
 }
 '{0,5}  TOTAL ({1} files)' -f $total, $counts.Count
 
-# A .v file that never made it into _CoqProject is not built, not checked, and
-# not counted -- and that is exactly how BladeJacobian.v went missing from the
-# README. Flag it either way.
-$orphans = Get-ChildItem -LiteralPath $proofsDir -Filter '*.v' |
-    Where-Object { $files -notcontains $_.Name } |
-    ForEach-Object { $_.Name }
+# A .v file that never made it into its manifest is not built, not checked,
+# and not counted -- and that is exactly how BladeJacobian.v went missing from
+# the README. The tower (root _CoqProject) and the two lanes outside it
+# (reals/, floats/, each with its own _CoqProject and NOT counted in the
+# tower total) are all checked. A warning without -Check; a failure with it
+# (audit 2026-10-15, I02: the warning alone let -Check pass).
+function Get-ManifestOrphans {
+    param([string]$Sub)
+    $dir = if ($Sub) { Join-Path $proofsDir $Sub } else { $proofsDir }
+    $prefix = if ($Sub) { "$Sub/" } else { '' }
+    $manifest = Join-Path $dir '_CoqProject'
+    if (-not (Test-Path -LiteralPath $manifest)) { return @() }
+    $listed = Get-Content -LiteralPath $manifest |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^-' }
+    @(Get-ChildItem -LiteralPath $dir -Filter '*.v' |
+        Where-Object { $listed -notcontains $_.Name } |
+        ForEach-Object { $prefix + $_.Name })
+}
+$orphans = @(
+    (Get-ManifestOrphans '')
+    (Get-ManifestOrphans 'reals')
+    (Get-ManifestOrphans 'floats')
+) | Where-Object { $_ }
 if ($orphans) {
-    Write-Warning ("Not in _CoqProject (unbuilt, uncounted): " + ($orphans -join ', '))
+    Write-Warning ("Not in its _CoqProject (unbuilt, uncounted): " + ($orphans -join ', '))
 }
 
 if (-not $Check) { return }
 
 $problems = New-Object System.Collections.Generic.List[string]
+
+foreach ($o in $orphans) {
+    $problems.Add("$o is not listed in its _CoqProject: it is never built, checked or counted")
+}
 
 $readmePath = Join-Path $proofsDir 'README.md'
 $readme     = Get-Content -LiteralPath $readmePath -Raw

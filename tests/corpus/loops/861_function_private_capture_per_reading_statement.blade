@@ -1,0 +1,17 @@
+// TEST: Function Private Capture Per Reading Statement
+// Gap G235 (b), round 4 wave 9 (Codex diff review round 1): inside a function
+// body a deferred module map is evaluated privately per READING STATEMENT
+// (G75; the C++ lane re-forces it per statement). The first fold captures d
+// (extents only), x is then written, and the second fold reads d(0): it must
+// read the CURRENT x (d(0) = 1), not the first statement's private pool
+// (d(0) = 10, which the LLVM lane reused after the capture force was added).
+let mut x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let a = reduce(x, lambda(a, b) -> a + b + extents(d), 0)
+    x(0) = 10
+    let b = reduce(x, lambda(a, b) -> a + b + d(0), 0)
+    a * 100 + b
+}
+let s = f()
+// EXPECT: s = 1518

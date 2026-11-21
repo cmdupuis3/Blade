@@ -1,0 +1,8 @@
+// TEST: A float range bound is refused (rejects)
+// ERROR: BL3020 @ 6:9
+// ============================================================================
+// `1.5..3` type-checked and emitted the extent `(size_t)((3L - 1.5))` and
+// the offset `(int64_t)(1.5)`: a silent float-to-int conversion the mixing
+// rule refuses everywhere else. A bound is an Int64 or an index value.
+let y = 1.5..3
+let n = extents(y)

@@ -1,0 +1,4 @@
+// TEST: static virtual range reads retain runtime index guards (aborts)
+// ABORT: index out of bounds
+function read_range(i: Int64) = (10..14)(i)
+let result = read_range(Int64(4))

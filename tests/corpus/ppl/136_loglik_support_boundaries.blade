@@ -5,7 +5,7 @@ import ppl as ppl
 // The hoisted closed forms used to ignore the support -- uniform never read
 // its data at all -- and bernoulli(1) over all-ones data was
 // log(1 - 1) * (n - n) = -inf * 0 = NaN.
-let ninf = log(0.0)
+let ninf: Float64 = log(0.0)
 let ones: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
 let zeros: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
 let bad: Array<Float64 like Idx<3>> = [0.5, 1.0, 2.0]

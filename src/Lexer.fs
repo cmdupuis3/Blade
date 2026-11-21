@@ -11,7 +11,10 @@ open System.Text
 type TokenKind =
     // Literals
     | TokInt of int64
-    | TokFloat of float
+    /// A float literal: its double, and whether its SPELLING denotes a value
+    /// the double cannot hold (R19: `1e400` parsed to an infinity, a nonzero
+    /// `1e-400` to 0.0) -- the fit judgment must see what the spelling means.
+    | TokFloat of float * degenerateSpelling: string option
     | TokString of string
     | TokChar of char
     | TokBool of bool
@@ -196,8 +199,6 @@ let keywordEntries : (string * Keyword) list =
       "reynolds", KwReynolds
       "true", KwTrue
       "false", KwFalse
-      "True", KwTrue
-      "False", KwFalse
       "in", KwIn
       "import", KwImport
       "from", KwFrom
@@ -272,7 +273,7 @@ let operatorEntries : string list =
       ">>@"; "@>>"; "|@>"; "::"; "->"; "=>"; ".."; "=="
       "!="; "<="; ">="; "&&"; "||"; ">>"
       "+="; "-="; "*="; "/="
-      "|>"; "<-"
+      "|>"
       "+"; "-"; "*"; "/"; "%"; "="; "<"; ">"; "!"; "^" ]
 
 let operators =
@@ -462,7 +463,11 @@ let scanNumber (state: LexerState) =
         let text = sb.ToString()
         if isFloat then
             match Double.TryParse(text) with
-            | true, v -> TokFloat v
+            | true, v ->
+                let mantissa = text.Split([| 'e'; 'E' |]).[0]
+                let spelledNonzero = mantissa |> Seq.exists (fun c -> c >= '1' && c <= '9')
+                let degenerate = not (Double.IsFinite v) || (v = 0.0 && spelledNonzero)
+                TokFloat (v, (if degenerate then Some text else None))
             | false, _ -> TokError $"Invalid float: {text}"
         else
             match Int64.TryParse(text) with

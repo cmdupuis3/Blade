@@ -1,0 +1,13 @@
+// TEST: A Sequence Of One Member Twice Holds Two Independent Rows
+// ============================================================================
+// Gap G240 (5), round 4 wave 10 (lane C, C3; Codex probe G, wave 9): each row
+// is its own copy, so a write to the member changes neither row.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+let mut a: A = [1.0, 2.0]
+let s = sequence(a, a) |> compute
+let w = {
+    a(1) = 7.0
+    s(0, 1) + s(1, 1)
+}
+// EXPECT: w = 4.0

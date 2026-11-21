@@ -1,0 +1,21 @@
+// TEST: Deferred Module Map Read By Two Scalar Lets Of A Body
+// ============================================================================
+// Gap G190 (b), round 4 wave 8: a DEFERRED MODULE MAP read inside a function
+// body is forced PRIVATELY (G75: re-evaluated per call, never printed). The
+// C++ lane forces it once per reading statement, before the statement, under
+// a fresh holder per re-force (bodyForceHolderName); it used to redeclare
+// `forcing` / `forcing_extents` when two statements of one body -- the forward
+// and reverse sweeps of a derivative -- each forced it, or leave it undeclared
+// when the reading statement was a scalar let, a body map whose kernel
+// captures it, or a fold seed. Fresh gradient buffers (no aliasing).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [4.0]
+let forcing = method_for(backing) <@> lambda(e) -> 8.0 / e
+function g(x: Float64) -> Float64 = {
+    let a = forcing(0) * x
+    let b = forcing(0) + a
+    b
+}
+let r = g(Float64(3.0))
+// EXPECT: r = 8.0

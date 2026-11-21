@@ -1,0 +1,9 @@
+// TEST: a literal argument takes the width of a declared parameter
+// ============================================================================
+// Rule 5: `twice(0.1)` passes the double 0.1 into the Float64 parameter, so
+// the result minus the Float64 0.2 is exactly zero.
+// ============================================================================
+function twice(x: Float64) -> Float64 = x * 2.0
+let r = twice(0.1)
+let z = r - 0.2
+// EXPECT: z = 0.0

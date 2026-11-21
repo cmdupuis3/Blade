@@ -21,7 +21,7 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>, b: Array<Float64 like I>) -> Float64 = {
     let c = a <|:> b |> compute
     c(0) + c(2)
 }

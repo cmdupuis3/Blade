@@ -7,8 +7,8 @@
 // RaggedRow whose len comes from the group_keys offsets table (the grouped
 // value itself has no lens member). Print, reduce, and element reads all
 // work on the binding.
-let region = [0, 1, 0, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let g0 = grouped(0)

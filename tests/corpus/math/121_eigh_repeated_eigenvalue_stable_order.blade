@@ -1,0 +1,12 @@
+// TEST: Math eigh: a repeated eigenvalue's eigenvectors keep their diagonal order (stable sort)
+// R26: eigh orders its eigenvalues descending by a STABLE sort -- equal
+// eigenvalues keep the order the Jacobi sweeps left them on the diagonal,
+// and their eigenvector columns with them. The old selection sort picked
+// the first maximum per pass but SWAPPED it into place, which moved the
+// displaced 1 past its equal: diag(1, 1, 2) gave eigenvalue 1's columns as
+// e2, e1. The stable order gives e1, e2.
+import math as m
+let d: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]]
+let (q, lam) = m.eigh(d)
+// EXPECT: lam = [2.0, 1.0, 1.0]
+// EXPECT: q = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]

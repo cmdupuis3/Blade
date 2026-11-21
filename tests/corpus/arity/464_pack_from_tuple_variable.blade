@@ -1,0 +1,37 @@
+// TEST: A Pack Named By A Tuple-Typed Variable Is The Group It Names
+// ============================================================================
+// Naming a pack does not change what it means (formalism 2.8): `let t = (x,
+// y); first_at(t, 1)` is `first_at((x, y), 1)`. It used to be refused BL3002
+// ("fills a Poly pack with a tuple-typed value"), and before that failed IR
+// validation (BL6001). Monomorphization now reads the variable's tuple type
+// for the pack's arity and passes its projections as the elements -- beside a
+// fixed parameter, in several packs at once, and into a recursive descent.
+// A tuple-typed value that is not a variable is still refused (arity/465).
+// ============================================================================
+function first_at(P: Poly<T^1>, k: Int64) = P[0](k)
+function blend(xs: Poly<T^0>, w: Float64, ys: Poly<T^0>) -> T^0
+= w * (xs[0] + xs[1]) + ys[0] + ys[1]
+function dotpack(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> a[0] * b[0]
+    | _ -> {
+        let ha :: ta = a
+        let hb :: tb = b
+        ha * hb + dotpack(ta, tb)
+      }
+}
+let x = Float64([1.0, 2.0, 3.0])
+let t = (x, Float64([4.0, 5.0, 6.0]))
+let r = first_at(t, Int64(1))
+let r_written = first_at((x, Float64([4.0, 5.0, 6.0])), Int64(1))
+let p = (Float64(10.0), Float64(20.0))
+let q = (Float64(1.0), Float64(3.0))
+let b = blend(p, Float64(2.0), q)
+let u = (Float64(1.0), Float64(2.0), Float64(3.0))
+let v = (Float64(4.0), Float64(5.0), Float64(6.0))
+let d = dotpack(u, v)
+// EXPECT: r = 2.0
+// EXPECT: r_written = 2.0
+// EXPECT: b = 64.0
+// EXPECT: d = 32.0
+// EXPECT: x = [1.0, 2.0, 3.0]

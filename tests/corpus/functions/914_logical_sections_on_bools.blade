@@ -1,0 +1,11 @@
+// TEST: Stored Logical Sections Applied To Bools Compute
+// EXPECT: r = false
+// EXPECT: s = true
+// ============================================================================
+// R11: a section is lifted over Float64 parameters whatever it is applied to,
+// so the argument judgment reads the operator: a logical section takes Bools.
+// ============================================================================
+let op = (&&)
+let r = op(true, false)
+let o2 = (||)
+let s = o2(false, true)

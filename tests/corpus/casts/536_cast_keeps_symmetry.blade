@@ -4,7 +4,7 @@
 // Int64 result stays packed through `Float64(...)` -- six stored cells, not
 // nine -- concretely and through a generic body.
 // ============================================================================
-let a = [1, 2, 3]
+let a = Int64([1, 2, 3])
 let S = method_for(a, a) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 // EXPECT: S = [1, 2, 3, 4, 6, 9]
 let F = Float64(S)

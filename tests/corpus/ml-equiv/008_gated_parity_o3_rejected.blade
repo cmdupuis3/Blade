@@ -8,5 +8,5 @@ import ml as ml
 // equiv(SO3) admits this same spec (see 010). BL4008.
 // ============================================================================
 let static SODD = [(0, 1, 1), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<SODD>> =
+function bad(x: Array<Float64 like IrrepsIdx<SODD>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SODD>> =
   ml.gated(SODD, x)

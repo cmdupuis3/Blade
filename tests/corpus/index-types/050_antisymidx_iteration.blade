@@ -6,7 +6,7 @@
 // wrapped kernel carries the `comm` iteration license (cf. symmetry/019).
 // g = x - y is itself antisymmetric, so the signed sum doubles it:
 // reynolds(g, Anti)(x, y) = (x - y) - (y - x) = 2*(x - y).
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> x - y
 let result = L <@> reynolds(g, Antisymmetric) |> compute

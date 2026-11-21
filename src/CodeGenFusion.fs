@@ -176,11 +176,41 @@ let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen
 /// a contiguous outer-row slab, restored by a per-leaf Allgatherv). Under
 /// mpi+omp hybrid co-fusion, hostParallel additionally puts a bare
 /// `#pragma omp parallel for` on the cell loop inside each rank's slab.
-let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+/// `simdFold`: the VECTORIZED FOLD form of a fused fold / reduction join
+/// (docs/plans/plan-fp-default-fastest.md). `Some (opStr, accs)` puts
+/// `BLADE_OMP_SIMD_REDUCTION(<opStr>:<accs>)` on the (single) loop header and
+/// spells every fold leaf's update as the builtin operator, `acc = acc op x`
+/// -- the reduction-statement form the clause needs, and what the leaf's
+/// wrapper computes (the caller only passes this when every leg's kernel IS
+/// that builtin op, `fpReassocSimdOp`). The CALLER owns the gate: one level,
+/// no streamed sources, no team, no MPI slab, a plain rectangular head.
+///
+/// `joinThread`: the THREADED REDUCTION JOIN decision (bench gap G7,
+/// `joinedFoldThreadPlan`). `Some (Ok plan)` wraps the ONE shared traversal in
+/// one Path B team (`pathBTeamOpen`/`pathBTeamClose`): the single level walks
+/// the worker's chunk [__rlo, __rhi), every fold leaf accumulates into its
+/// PRIVATE identity-seeded accumulator under one simd reduction clause over
+/// them all, share leaves stay per-iteration consts inside the worker's sweep
+/// (one evaluation per coordinate), and after the region each leg's partials
+/// combine in ascending chunk order onto its seeded accumulator. `Some (Error
+/// why)` is a declined request: a leaf map's own request reports `why`. None:
+/// no request (today's form, today's markers).
+let genFusedLoopNestStreamedJoined (simdFold: (string * string list) option) (joinThread: Result<JoinedFoldChunkPlan, string> option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
     let ind n = String.replicate n "    "
     let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let staggered = leafCgs |> List.exists (fun cg -> cg.Bindings.Length <> primary.Bindings.Length)
     let emitOuterOmp = hostParallel && primary.FoldWrapper.IsNone
+    let joined =
+        match joinThread with
+        | Some (Ok p) when primary.Bindings.Length = 1 && not staggered && mpiSlabVar.IsNone -> Some p
+        | _ -> None
+    let joinDeclined = match joinThread with Some (Error why) -> Some why | _ -> None
+    // Per fold leaf (by its accumulator name): the worker-private accumulator.
+    let privOf : Map<string, string> =
+        match joined with
+        | Some p -> p.Legs |> List.mapi (fun i l -> (l.AccName, $"__jp{i}_{p.Tag}")) |> Map.ofList
+        | None -> Map.empty
+    let ompInstrument = ompTestModeEnabled ()
     // Streamed fiber reads share per-source handles and per-argument
     // buffers -- not thread-safe under a host-parallel outer loop.
     //
@@ -207,6 +237,63 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
 
     let compoundArrays = compoundArrayNamesOf primary.Bindings
     let mutable atOuterLevel = true
+
+    // G7 prologue: ONE team around the whole shared traversal. Rank-1 real
+    // operands of the swept level are read through per-worker restrict pool
+    // aliases (the same aliases Path B's ChunkSimd form uses; inside the
+    // outlined region g++ would otherwise re-read `x.data` through the shared
+    // reference), and every fold leg gets a private accumulator seeded with the
+    // operator's identity -- never the caller's seed, which is already in the
+    // shared accumulator and enters the combine exactly once.
+    match joined with
+    | Some plan ->
+        let lvl0 = primary.Bindings.Head
+        let aliasable (e: ElementBinding) =
+            e.Virtual.IsRealArray && e.ArrayRank = 1
+            && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+            && not (Map.containsKey e.ArrayName streamed)
+        let aliases =
+            leafCgs
+            |> List.collect (fun cg -> cg.Bindings.Head.Elements |> List.filter aliasable |> List.map (fun e -> (e.ArrayName, elemTypeToCpp e.ArrayElemType)))
+            |> List.distinctBy fst
+            |> List.mapi (fun k (nm, ty) -> (nm, ty, $"__jsrc{k}_{plan.Tag}"))
+        leafCgs |> List.iteri (fun li cg ->
+            for e in cg.Bindings.Head.Elements do
+                if aliasable e then
+                    match aliases |> List.tryFind (fun (nm, _, _) -> nm = e.ArrayName) with
+                    | Some (_, _, alias) -> currentNames <- Map.add (li, e.ArrayPosition) alias currentNames
+                    | None -> ())
+        let jn = $"__jn_{plan.Tag}"
+        let jT = $"__jT_{plan.Tag}"
+        let jHad = $"__jhad_{plan.Tag}"
+        let ident = if plan.Op = "*" then "1" else "0"
+        let chunkPhrase =
+            if plan.ChunkSimd then $"one omp simd reduction({plan.Op}) over the {plan.Legs.Length} private accumulators within each chunk"
+            else "a scalar private chain per leg within each chunk (BLADE_FOLD_LANES=0/off)"
+        recordOmpConstruct plan.Tag "omp parallel num_threads(T) + fixed-order combine"
+            $"threaded reduction join (Path B joined chunks, G7): one team over the shared traversal, {chunkPhrase}; each leg's partials combined in ascending chunk order onto its own seed; requested by {plan.Provenance}"
+        (ompApiUsedCell ()).Value <- true
+        (foldLanesUsedCell ()).Value <- true
+        let coverageOpen =
+            if ompInstrument then
+                [ "// [omp-coverage] thread observation (test mode)"
+                  "int __omp_maxth = blade_omp_get_max_threads();"
+                  "bool* __omp_seen = new bool[__omp_maxth]();"
+                  "int* __omp_team = new int[__omp_maxth]();" ]
+            else []
+        lines <- lines @ [
+            ind depth + $"/* reduction join: threaded (Path B joined chunks, G7) -- one team over the shared traversal, {plan.Legs.Length} private accumulators per chunk, fixed ascending-chunk combine onto each leg's seed */" ]
+            @ pathBTeamOpen depth jn jT (genLoopBoundExpr compoundArrays lvl0)
+                ((plan.Legs |> List.mapi (fun i l -> $"{l.ElemCpp}* __jpart{i}_{plan.Tag} = new {l.ElemCpp}[{jT}];"))
+                 @ [ $"bool* {jHad} = new bool[{jT}]();" ]
+                 @ coverageOpen)
+                ((aliases |> List.map (fun (nm, ty, alias) -> $"const {ty}* BLADE_RESTRICT {alias} = {nm}.data;"))
+                 @ (plan.Legs |> List.mapi (fun i l -> $"{l.ElemCpp} __jp{i}_{plan.Tag} = {ident};"))
+                 @ (if ompInstrument
+                    then [ "{ int __tn = blade_omp_get_thread_num(); __omp_team[__tn] = __rnt; if (__rhi > __rlo) __omp_seen[__tn] = true; }" ]
+                    else []))
+        depth <- depth + 3
+    | None -> ()
 
     // Restrict row peels, per leaf. Extra cross-leaf obligation on top
     // of restrictPeelSites' own: leaves SHARE `declaredNames`, and a RealArray
@@ -259,12 +346,18 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 let reason =
                     // BUILD KNOB first -- see the same rule in genLoopNestStreamed.
                     if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
-                    elif primary.FoldWrapper.IsSome then
+                    else
+                    match joinDeclined with
+                    // a declined threaded join: the first failed condition
+                    | Some why -> why
+                    | None ->
+                    if primary.FoldWrapper.IsSome then
                         "fold accumulates into a shared scalar, which is not race-safe"
                     else "the fused nest's joined backend decision is not host-parallel"
                 ompSuppressedMarker
                     (leafCgs |> List.exists (_.OmpRequested))
-                    (pragmaPrefix <> "") reason (ind depth)
+                    // the threaded join's team spends every request
+                    (pragmaPrefix <> "" || joined.IsSome) reason (ind depth)
             else []
         atOuterLevel <- false
         // MPI co-fusion: the outer shared level iterates this rank's row slab.
@@ -272,8 +365,21 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
             match mpiSlabVar with
             | Some sv when j = 0 ->
                 $"for (size_t {pBinding.IndexName} = __blade_mpi_lo_{sv}; {pBinding.IndexName} < __blade_mpi_hi_{sv}; {pBinding.IndexName}++) {{"
+            | _ when j = 0 && joined.IsSome ->
+                // G7: the worker's chunk of the one shared level
+                $"for (size_t {pBinding.IndexName} = __rlo; {pBinding.IndexName} < __rhi; {pBinding.IndexName}++) {{"
             | _ -> genForLoopHeader compoundArrays pBinding
-        lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
+        let simdLine =
+            match joined, simdFold with
+            | Some plan, _ when j = 0 ->
+                if plan.ChunkSimd then
+                    let privs = plan.Legs |> List.mapi (fun i _ -> $"__jp{i}_{plan.Tag}")
+                    [ ind depth + $"""BLADE_OMP_SIMD_REDUCTION({plan.Op}:{(String.concat ", " privs)})""" ]
+                else []
+            | None, Some (opStr, accs) when j = 0 ->
+                [ ind depth + $"""BLADE_OMP_SIMD_REDUCTION({opStr}:{(String.concat ", " accs)})""" ]
+            | _ -> []
+        lines <- lines @ suppressedMarker @ simdLine @ [ind depth + pragmaPrefix + header]
         depth <- depth + 1
 
         // Element peels for every leaf that iterates this level, from the
@@ -345,8 +451,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 // block-local emitted as `__v<id>` must not be re-spelled to
                 // its source name here.
                 let nameMap =
-                    cg.Captures
-                    |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
+                    withCaptureNames EnclosingNamesWin cg.Captures nameMap
                 let rr = genKernelExprWithReynolds cg.KernelExpr cg.KernelParams cg.HasReynolds cg.IsAntisymmetric nameMap pfn
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
                     lines <- lines @ [ind depth + $"// Reynolds: {rr.UniqueTerms}/{rr.TotalPerms} perms unique (dedup {rr.TotalPerms / max 1 rr.UniqueTerms}x)"]
@@ -358,9 +463,14 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                     match cg.ShareDecl with
                     | Some elemCpp -> $"const {elemCpp} {cg.OutputName} = {rr.CppExpr};"
                     | None ->
-                    match cg.FoldWrapper with
-                    | Some wname -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
-                    | None ->
+                    match cg.FoldWrapper, simdFold with
+                    // G7: the worker-private accumulator, the reduction-statement shape
+                    | Some _, _ when privOf.ContainsKey cg.OutputName ->
+                        let p = privOf.[cg.OutputName]
+                        $"{p} = {p} {joined.Value.Op} ({rr.CppExpr});"
+                    | Some _, Some (opStr, _) -> $"{cg.OutputName} = {cg.OutputName} {opStr} ({rr.CppExpr});"
+                    | Some wname, None -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
+                    | None, _ ->
                         let outputIdx =
                             cg.Bindings |> List.map (fun b -> $"[{b.IndexName}]") |> String.concat ""
                         $"{cg.OutputName}{outputIdx} = {rr.CppExpr};"
@@ -371,7 +481,158 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
         depth <- depth - 1
         lines <- lines @ [ind depth + "}"]
 
+    // G7 epilogue: each worker publishes its partials (a chunk that swept
+    // nothing publishes none), the region closes, and every leg folds its
+    // partials in ASCENDING CHUNK ORDER through its own wrapper onto the
+    // accumulator that already holds its seed -- a fixed order, so a fixed
+    // team reproduces bit for bit.
+    match joined with
+    | Some plan ->
+        let jT = $"__jT_{plan.Tag}"
+        let jHad = $"__jhad_{plan.Tag}"
+        let combine =
+            plan.Legs |> List.mapi (fun i l -> $"{l.AccName} = {l.Wrapper}({l.AccName}, __jpart{i}_{plan.Tag}[__rt]);")
+            |> String.concat " "
+        let coverageClose =
+            if ompInstrument then
+                [ "{ int __omp_distinct = 0; int __omp_teamsz = 0;"
+                  "  for (int __t = 0; __t < __omp_maxth; __t++) {"
+                  "    if (__omp_seen[__t]) __omp_distinct++;"
+                  "    if (__omp_team[__t] > __omp_teamsz) __omp_teamsz = __omp_team[__t];"
+                  "  }"
+                  $"  std::cout << \"[omp-coverage] region={plan.Tag} teamsz=\" << __omp_teamsz << \" distinct=\" << __omp_distinct << \" maxth=\" << __omp_maxth << std::endl;"
+                  "  delete[] __omp_seen; delete[] __omp_team; }" ]
+            else []
+        lines <- lines @ pathBTeamClose depth
+            ((plan.Legs |> List.mapi (fun i _ -> $"__jpart{i}_{plan.Tag}[__rt] = __jp{i}_{plan.Tag};"))
+             @ [ $"{jHad}[__rt] = (__rhi > __rlo);" ])
+            ([ $"for (int __rt = 0; __rt < {jT}; __rt++) if ({jHad}[__rt]) {{ {combine} }}" ]
+             @ [ (plan.Legs |> List.mapi (fun i _ -> $"delete[] __jpart{i}_{plan.Tag};") |> String.concat " ") + $" delete[] {jHad};" ]
+             @ coverageClose)
+        depth <- depth - 3
+    | None -> ()
+
     lines
+
+/// The fused-nest emitter with no threaded-join decision (every caller but the
+/// two reduction-join entry paths).
+let genFusedLoopNestStreamedWith (simdFold: (string * string list) option) (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+    genFusedLoopNestStreamedJoined simdFold None streamed leafCgs outerNames indent hostParallel mpiSlabVar
+
+/// The fused-nest emitter in its ordinary (non-vectorized-fold) form.
+let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
+    genFusedLoopNestStreamedWith None streamed leafCgs outerNames indent hostParallel mpiSlabVar
+
+/// May a fused fold / reduction join over `allCgs` (fold legs plus any shared
+/// leaves) take the VECTORIZED FOLD form? `legs` pairs each fold leg's
+/// accumulator name with its kernel and accumulator C++ type. Ok (op, accs) is
+/// the `BLADE_OMP_SIMD_REDUCTION(op:accs)` plan; Error is the `blade plan`
+/// reason the fold stays serial.
+///
+/// The licence is the ordinary one, leg by leg (`foldReorderLicensed`, so a
+/// `where repro` leg vetoes the whole join -- one traversal has one order),
+/// spent only in a build that reorders (`fpReassocEnabled`). The FORM needs a
+/// builtin `+`/`*` body on every leg, ONE operator across them (a reduction
+/// clause names one operator per list, and one `_Pragma` carries one clause),
+/// and the same rectangular single-level sweep the one-leg simd arm requires
+/// (genReduceComputeBindingCore's `laneable`): no bound dependencies or strict
+/// offset, no compound/sparse/fused head, no halo window, no Reynolds body, no
+/// MPI slab, no streamed source.
+let fusedFoldSimdPlan (streamed: Map<string, ProviderReadSpec>) (allCgs: LoopNestCodeGen list)
+                      (legs: (string * IRCallable * string) list) : Result<string * string list, string> =
+    let headOk (cg: LoopNestCodeGen) =
+        match cg.Bindings with
+        | [ lvl ] ->
+            lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0 && lvl.FusedRank.IsNone
+            && (match lvl.Extent with IRCompoundMask _ | IRSparseKeys _ -> false | _ -> true)
+            && not cg.HasReynolds && not cg.MpiSlab
+            && (lvl.Elements |> List.forall (fun e ->
+                    match e.SlotTag with
+                    | Some t -> not (t.StartsWith "__halowin")
+                    | None -> true))
+        | _ -> false
+    if not (fpReassocEnabled ()) then Error (serialFoldForm ())
+    elif legs |> List.exists (fun (_, c, _) -> not (foldReorderLicensed c)) then
+        Error "serial (a leg has no reorder licence; one traversal has one order)"
+    elif not (Map.isEmpty streamed) then Error "serial (streamed source)"
+    elif not (allCgs |> List.forall headOk) then
+        Error "serial (multi-level or non-rectangular nest: no vectorized form for a fused fold over it yet)"
+    else
+        let ops = legs |> List.map (fun (_, c, elemStr) -> fpReassocSimdOp c elemStr)
+        if ops |> List.exists Option.isNone then
+            Error "serial (a leg's kernel is not a builtin +/* over a scalar: no reduction clause can name it, and the joined traversal has no K-lane form yet)"
+        else
+            match ops |> List.choose id |> List.distinct with
+            | [ op ] -> Ok (op, legs |> List.map (fun (acc, _, _) -> acc))
+            | _ -> Error "serial (legs fold with different operators: one reduction clause names one)"
+
+/// THE THREADED REDUCTION JOIN decision (bench gap G7; round-2 arbitration Q2),
+/// shared by both join entry shapes (`genReduceComputeBindingCore`'s fused
+/// tree and `genReduceJoinCore`'s per-leg packs). The policy, exactly:
+///   (a) an EXPLICIT request: `request` is Some provenance when `where omp`
+///       sits on the join's common fold kernel or on a leg's fold kernel, or a
+///       leaf map's `omp(...)` covers the outer level (the existing Path B
+///       rule -- it selects the traversal, it grants no leg a licence). None:
+///       no team and nothing to report (a builtin-`+` join opens no team, as a
+///       single `reduce(a, (+))` opens none) -> None;
+///   (b) EVERY leg independently admits reassociation (`foldReorderLicensed`:
+///       builtin body or declared comm, no `where repro`), checked leg by leg
+///       and never OR-ed across legs, in a build that reorders;
+///   (c) the shared traversal has the chunkable vectorized shape (`simdPlan`
+///       Ok: one plain rectangular level, no streamed source, no halo /
+///       compound / Reynolds / MPI head, ONE builtin `+`/`*` operator over
+///       scalars -- a custom kernel has no identity to seed a partial with and
+///       declines in v1), and `audit` (the caller's closed purity/totality
+///       whitelist over the map, share-producer and fold bodies) passes.
+/// Some (Error why) names the FIRST failed condition, in that order after the
+/// two build knobs. `legs`: (accumulator, fold callable, accumulator C++
+/// type, rendered original seed, wrapper name), in leg order.
+let joinedFoldThreadPlan (tag: string) (request: string option)
+                         (simdPlan: Result<string * string list, string>)
+                         (legs: (string * IRCallable * string * string * string) list)
+                         (audit: unit -> Result<unit, string>) : Result<JoinedFoldChunkPlan, string> option =
+    match request with
+    | None -> None
+    | Some provenance ->
+        let firstUnlicensed =
+            legs |> List.mapi (fun i l -> (i, l)) |> List.tryFind (fun (_, (_, c, _, _, _)) -> not (foldReorderLicensed c))
+        let decided =
+            if not (ompThreadEmissionEnabled ()) then Error (ompThreadsSuppressedReason ())
+            elif not (Blade.Toolchain.joinThreadsEnabled ()) then
+                Error "BLADE_JOIN_THREADS=0 -- the threaded reduction join is disabled (A/B knob; the join keeps its serial vectorized form)"
+            elif not (fpReassocEnabled ()) then Error (fpReproReason ())
+            else
+            match firstUnlicensed with
+            | Some (i, (_, c, _, _, _)) ->
+                if foldKernelReproVetoed c then
+                    Error $"leg {i}'s fold kernel is `where repro` (its order is the contract), so the joined traversal cannot be split across threads; the other legs' licences do not transfer"
+                else
+                    Error $"leg {i}'s fold kernel has no reorder licence (no builtin body, no comm), so the joined traversal cannot be split across threads; the other legs' licences do not transfer"
+            | None ->
+            match simdPlan with
+            | Error why -> Error $"the joined traversal has no chunked form: {why}"
+            | Ok (op, _) ->
+            match audit () with
+            | Error why -> Error why
+            | Ok () ->
+                let licenceOf (c: IRCallable) =
+                    match foldKernelBuiltinOp c with
+                    | Some _ -> $"builtin {op}"
+                    | None -> "declared comm"
+                Ok { Tag = tag
+                     Op = op
+                     Legs = legs |> List.map (fun (acc, c, elemCpp, seed, wrapper) ->
+                                { AccName = acc; ElemCpp = elemCpp; Seed = seed; Wrapper = wrapper; Licence = licenceOf c })
+                     ChunkSimd = foldLanesMode () <> FoldLanesOff
+                     Provenance = provenance }
+        Some decided
+
+/// `blade plan`'s fold form for a threaded join.
+let joinedFoldForm (plan: JoinedFoldChunkPlan) : string =
+    if plan.ChunkSimd then
+        $"threaded(Path B joined chunks, {plan.Legs.Length} builtin {plan.Op} legs, simd-reduction within each chunk)"
+    else
+        $"threaded(Path B joined chunks, {plan.Legs.Length} builtin {plan.Op} legs, serial within each chunk: BLADE_FOLD_LANES=0/off (A/B knob))"
 
 /// The ordinary (no streamed sources) fused-nest emitter.
 let genFusedLoopNest (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
@@ -521,12 +782,75 @@ let rec unrollLetChain (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
 ///
 /// Does NOT register `name` in the returned context -- that's the caller's
 /// responsibility (typically a `let`-binding handler calling `addVarName`).
+/// The STAGE KERNELS of an applied composition (`(object_for(k1) >>@
+/// object_for(k2) >>@ ..) <@> A`), in stage order, the composition resolved
+/// through deferred bindings and let-bound object leaves (gap G242, round 4
+/// wave 9): applying the composition runs every stage kernel, so each one's
+/// deferred captures must be forced before the traversal, as a canonical
+/// map's kernel captures are (genComputeBinding's capture prelude, G115).
+let composeStageKernels (ctx: CodeGenContext) (composition: IRExpr) : IRExpr list =
+    let rec resolveDeferred (seen: Set<IRId>) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some d -> resolveDeferred (seen.Add id) d
+             | None ->
+                 match Map.tryFind id ctx.ObjectLoopBindings with
+                 | Some d -> resolveDeferred (seen.Add id) d
+                 | None -> e)
+        | _ -> e
+    let rec stages (e: IRExpr) =
+        match resolveDeferred Set.empty e with
+        | IRComposeObj (l, r) -> stages l @ stages r
+        | IRObjectFor o -> [ o.Kernel ]
+        | _ -> []
+    stages composition
+
+/// The stage kernels whose deferred captures an APPLIED composition forces in
+/// its prelude, before its traversal (gap G242): the interpreter runs the
+/// stages as successive traversals, each capture forced at its own stage's
+/// start (G115), so a later stage's capture may move to the prelude only when
+/// every EARLIER stage kernel is closed-total (Blade.IRTotality: nothing the
+/// earlier stages run can fail first, Codex diff review 5f64f352 finding 3).
+/// A capture of a stage after a possibly-failing one is not forced here (the
+/// program keeps today's emission; recorded in G242).
+let composeStagesForcedAtPrelude (ctx: CodeGenContext) (composition: IRExpr) : IRExpr list =
+    let isD (id: IRId) = ctx.DeferredComputations.ContainsKey id
+    let dOf (id: IRId) = Map.tryFind id ctx.DeferredComputations
+    let total (k: IRExpr) =
+        match resolveCallable k with
+        | Some kc -> (match Blade.IRTotality.auditCallable resolveCallable dOf isD kc [] with Ok () -> true | Error _ -> false)
+        | None -> false
+    let rec pick (prefixTotal: bool) (ks: IRExpr list) =
+        match ks with
+        | [] -> []
+        | k :: rest -> (if prefixTotal then [ k ] else []) @ pick (prefixTotal && total k) rest
+    pick true (composeStageKernels ctx composition)
+
+/// The deferred bindings a stage kernel of an applied composition captures
+/// that are STILL deferred where the composition is emitted -- a later
+/// stage's capture after a possibly-failing stage (composeStagesForcedAtPrelude
+/// leaves it unforced), or a consumer with no capture prelude: the stage's
+/// lifted kernel would forward an undeclared name (BL9002), so genComposeApply
+/// refuses instead (fable review of wave 9, F4; gap G242).
+let composeUnforcedStageCaptures (ctx: CodeGenContext) (composition: IRExpr) : string list =
+    composeStageKernels ctx composition
+    |> List.collect (fun k ->
+        match resolveCallable k with
+        | Some c -> c.Captures |> List.filter (fun ci -> Map.containsKey ci.Id ctx.DeferredComputations) |> List.map (fun ci -> ci.Name)
+        | None -> [])
+    |> List.distinct
+
 let genComposeApply
     (ctx: CodeGenContext)
     (name: string)
     (info: ComposeApplyInfo)
     (outputType: IRType)
     (builder: IRBuilder)
+    // G242, round 4 wave 10: CodeGenBinding.forceDeferredBindingIds (a later
+    // file), for the PER-STAGE capture prelude of the two-sweep path; None at
+    // a consumer with no capture prelude (the refusal below stays)
+    (stageForce: (CodeGenContext -> string -> IRId list -> string list * CodeGenContext) option)
     : string list * CodeGenContext =
     let ind = indentStr ctx
     let rec resolveDeferred e =
@@ -544,6 +868,37 @@ let genComposeApply
                 | None -> e
         | _ -> e
     let resolvedComposition = resolveDeferred info.Composition
+    // G242, round 4 wave 10: the TWO-SWEEP path (two named stage kernels) runs
+    // stage 1 over every cell, then stage 2 -- the interpreter's successive
+    // traversals -- so a SECOND stage's deferred captures are forced between
+    // the sweeps, at stage 2's own start (G115), after a stage 1 that may
+    // fail. Admitted only when the first stage captures nothing deferred.
+    let stageKernelOf (o: IRExpr) = match resolveDeferred o with IRObjectFor x -> x.Kernel | r -> r
+    let deferredCapsOf (k: IRExpr) =
+        match resolveCallable k with
+        | Some c -> c.Captures |> List.filter (fun ci -> Map.containsKey ci.Id ctx.DeferredComputations)
+        | None -> []
+    let namedStage (k: IRExpr) = match k with IRVar (id, _) -> Map.containsKey id ctx.VarNames | _ -> false
+    let stage2Prelude : IRId list =
+        match stageForce, resolvedComposition, info.InputArrays with
+        | Some _, IRComposeObj (o1, o2), [ _ ] ->
+            let k1 = stageKernelOf o1
+            let k2 = stageKernelOf o2
+            if namedStage k1 && namedStage k2
+               && composeStageInputRank k1 = 0 && composeStageInputRank k2 = 0
+               && List.isEmpty (deferredCapsOf k1) then
+                deferredCapsOf k2 |> List.map (fun ci -> ci.Id)
+            else []
+        | _ -> []
+    match composeUnforcedStageCaptures ctx info.Composition with
+    | (_ :: _) as unforced when not (unforced |> List.forall (fun n -> deferredCapsOf (match resolvedComposition with IRComposeObj (_, o2) -> stageKernelOf o2 | c -> c) |> List.exists (fun ci -> ci.Name = n) && not stage2Prelude.IsEmpty)) ->
+        let names = unforced |> List.map (fun n -> $"`{n}`") |> String.concat ", "
+        (codegenError ctx ind
+            ($"a pipeline stage captures the deferred map {names}, which is not forced before the pipeline runs: \
+a stage after a stage that may fail cannot have it forced ahead of that stage's traversal, and this lane has no \
+per-stage capture prelude for it (gap G242). Force it first (`let m = <it> |> compute`) and capture `m`, \
+or make the earlier stages' kernels total"), ctx)
+    | _ ->
     match resolvedComposition with
     | IRComposeObj (obj1, obj2) ->
         let rObj1 = resolveDeferred obj1
@@ -655,16 +1010,22 @@ let genComposeApply
             // problem because it inlines the wrapper's body; the same is
             // done here for the one shape a wrapper has, a call of the named
             // function on the parameter, by calling that function directly.
-            let directName (kn: string) (k: IRExpr) : string =
+            // (the callee's CAPTURES are forwarded after the cell, as every
+            // other call of a lifted callable forwards them -- gap G242,
+            // Codex diff review 5f64f352 round 2: `__lambda_20(backing[__i0])`
+            // called a two-argument lifted kernel with one argument)
+            let directName (varNames: Map<IRId, string>) (kn: string) (k: IRExpr) : string * string list =
+                let withCaps (name: string) (callee: IRCallable) = (name, captureForwardArgs varNames callee.Captures)
                 match resolveCallable k with
                 | Some c ->
                     (match c.Params, c.Body with
-                     | [ p ], IRApp (IRVar (fid, _), [ IRVar (pid, _) ], _) when pid = p.VarId ->
-                         (match Map.tryFind fid ctx.VarNames with
-                          | Some fname -> fname
-                          | None -> kn)
-                     | _ -> kn)
-                | None -> kn
+                     | [ p ], IRApp ((IRVar (fid, _) as f), [ IRVar (pid, _) ], _) when pid = p.VarId ->
+                         (match Map.tryFind fid ctx.VarNames, resolveCallable f with
+                          | Some fname, Some callee -> withCaps fname callee
+                          | Some fname, None -> (fname, [])
+                          | None, _ -> withCaps kn c)
+                     | _ -> withCaps kn c)
+                | None -> (kn, [])
             //
             // EACH STAGE'S STORE CARRIES THAT STAGE'S RESULT TYPE, and the
             // sweep covers EVERY axis. Both used to be borrowed from the
@@ -692,7 +1053,7 @@ let genComposeApply
             /// `for` over every axis of `src`, applying `kn` cell by cell into
             /// `dst`. Axis 0 takes the shared literal-or-runtime bound; the
             /// inner axes read the source's own runtime extents.
-            let stageSweep (src: string) (dst: string) (kn: string) : string list =
+            let stageSweep (src: string) (dst: string) (kn: string, caps: string list) : string list =
                 let pad (d: int) = String.replicate d "    "
                 let subs = [ for d in 0 .. arrRank - 1 -> $"[__i{d}]" ] |> String.concat ""
                 let opens =
@@ -705,13 +1066,14 @@ let genComposeApply
                     [ for d in arrRank - 1 .. -1 .. 0 ->
                         let p = pad d
                         $"{ind}{p}}}" ]
-                opens @ [ $"{ind}{bodyPad}{dst}{subs} = {kn}({src}{subs});" ] @ closes
+                let call = String.concat ", " ($"{src}{subs}" :: caps) |> sprintf "%s(%s)" kn
+                opens @ [ $"{ind}{bodyPad}{dst}{subs} = {call};" ] @ closes
             let s1Name = $"{name}__s1"
             let s1Code =
                 [ $"{ind}const size_t* {s1Name}_extents = {arrName}.extents;"
                   arrayAlloc { Ind = ind; Elem = s1Elem; Rank = arrRank; Name = s1Name
                                Symm = "nullptr"; Strict = None; Extents = s1Name + "_extents" } ]
-                @ stageSweep arrName s1Name (directName k1 kernel1)
+                @ stageSweep arrName s1Name (directName ctx.VarNames k1 kernel1)
             // Deterministic deallocation, site 5e: the `>>@` two-stage pipeline.
             // Both stages allocate dense/nullptr under a borrowed extents pointer
             // (`s1` aliases the input's, `name` aliases `s1`'s), so neither owns
@@ -721,14 +1083,24 @@ let genComposeApply
             let singleArray = match arrays with [_] -> true | _ -> false
             if singleArray then
                 registerPoolAlloc AllocDense s1Elem arrRank "nullptr" (s1Name + "_extents") s1Name None
+            // stage 2's deferred captures, forced here: after stage 1's sweep,
+            // before stage 2's first cell (G242, the per-stage prelude)
+            // (the context the force returns goes back to the caller: the forced
+            // map is stored now, so a later read or capture reads it -- Codex
+            // diff review 03cfa2dd, finding 2)
+            let (s2Force, s2Ctx) =
+                match stageForce with
+                | Some force when not stage2Prelude.IsEmpty -> force ctx $"{name}__s2cap" stage2Prelude
+                | _ -> ([], ctx)
             let s2Code =
+                s2Force @
                 [ $"{ind}const size_t* {name}_extents = {s1Name}.extents;"
                   arrayAlloc { Ind = ind; Elem = s2Elem; Rank = arrRank; Name = name
                                Symm = "nullptr"; Strict = None; Extents = name + "_extents" } ]
-                @ stageSweep s1Name name (directName k2 kernel2)
+                @ stageSweep s1Name name (directName s2Ctx.VarNames k2 kernel2)
             if singleArray then
                 registerPoolAlloc AllocDense s2Elem arrRank "nullptr" (name + "_extents") name None
-            (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx)
+            (elemTypeErrCode @ s1Code @ [""] @ s2Code, s2Ctx)
         | _ when not (stageEmittable kernelName1 kernel1 && stageEmittable kernelName2 kernel2) ->
             // STAGED EMISSION IS TWO-STAGE (v1), and `IRComposeObj` NESTS. A
             // three-stage `o1 >>@ o2 >>@ o3` therefore arrives with a whole
@@ -809,7 +1181,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
             | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
-            | IRRange _ -> $"__range{i}"
+            | IRRange _ -> reduceRangeName i arr
             | IRVirtualReverse _ -> $"__rev{i}"
             | _ -> $"arr{i}")
     if infos |> List.exists (_.Arrays.IsEmpty) then
@@ -831,6 +1203,30 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         let leafCgs = infos |> List.mapi (fun i info ->
             // S2 routing, same rule as the single-kernel site.
             routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder))
+        // G265: EACH LEAF'S CO-ITERATION EXTENT GUARD (BL8011) -- the merged
+        // nest is bounded by the leaves' shared traversal, and a leaf's OTHER
+        // operands (`zip(a, b)` beside a leaf over `a`) were never compared.
+        // Every leaf's guard runs before the merged nest; a later leaf's guard
+        // is hoisted ahead of the earlier leaves' cells, so it is admitted only
+        // when every earlier leaf's kernel is closed-total (the interpreter
+        // runs the leaves one after another: an earlier leaf's failing cell
+        // would otherwise be overtaken). Otherwise the fusion is refused here.
+        let leafGuards =
+            List.map2 (fun (info: ApplyInfo) (cg: LoopNestCodeGen) ->
+                // a STORED operand only: a deferred operand of a leaf is not
+                // forced on this path (gap G284), and the guard must never
+                // name an array nothing declared
+                coIterationGuardLines ctx ind info cg.Bindings (fun pos ->
+                    match List.tryItem pos info.Arrays with
+                    | Some (IRVar (id, _)) -> not (Map.containsKey id ctx.DeferredComputations)
+                    | _ -> false)) infos leafCgs
+        let leafTotal (info: ApplyInfo) =
+            Blade.IRTotality.auditApply resolveCallable (fun id -> Map.tryFind id ctx.DeferredComputations)
+                (fun id -> Map.containsKey id ctx.DeferredComputations) info = Ok ()
+        let guardHoistBlocked =
+            leafGuards |> List.indexed |> List.exists (fun (k, g) ->
+                k > 0 && not g.IsEmpty && (infos |> List.take k |> List.exists (leafTotal >> not)))
+        let guardLines = List.concat leafGuards
         let backends = infos |> List.map classifyLeafBackend
         // Deterministic deallocation, site 2: `declCode` below is built EAGERLY
         // but reaches the output only through `wrap` (the host arms). The device
@@ -908,6 +1304,11 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // Loop structure (bounds/triangularity) must agree regardless of
         // backend. THEN the per-level backend must agree at each shared level:
         // shared levels are one physical header, so one backend.
+        if guardHoistBlocked then
+            Error "a later leaf co-iterates operands whose extents are known only at run time, and an earlier leaf's kernel may fail: hoisting its BL8011 extent check ahead of the earlier leaf's cells would change the failure order -- force the leaves separately with |> compute (gap G265)"
+        elif not guardLines.IsEmpty && not (backends |> List.forall isHostBackend) then
+            Error "device co-fusion of leaves whose co-iterated operands have run-time extents is not supported (no BL8011 extent check on that path) -- force the leaves separately with |> compute (gap G265)"
+        else
         checkMergeCompatible leafCgs |> Result.bind (fun _primary ->
             let backendName = function
                 | BkSerial -> "serial" | BkOmp -> "omp"
@@ -930,7 +1331,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 hostParallelR |> Result.map (fun hostParallel ->
                     let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind leafCgs
                     registerStreamBufDecls sNew
-                    wrap (sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel None))
+                    wrap (guardLines @ sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel None))
             // ---- All cuda: device co-fusion --------------------------------
             | _ when backends |> List.forall (_.IsBkCuda) ->
                 let blockSizes = backends |> List.choose (function BkCuda b -> Some b | _ -> None) |> List.distinct
@@ -945,7 +1346,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 else
                     match genCudaCoFusion leafCgs leafNames name blockSizes.Head with
                     | Some inlineLines -> Ok (wrapDevice inlineLines)
-                    | None -> Error "cuda co-fusion requires the leaves to be rectangular, non-Reynolds, boundary-safe, and share the same input arrays -- force the leaves separately with |> compute"
+                    | None -> Error "cuda co-fusion requires the leaves to be rectangular, non-Reynolds, boundary-safe, capture-free, and share the same input arrays -- force the leaves separately with |> compute"
             // ---- All mpi: domain co-fusion ---------------------------------
             // ONE outer-row slab decomposition SHARED by every leaf: each rank
             // runs the merged (possibly staggered) nest over its [lo, hi) rows,
@@ -1114,7 +1515,7 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
             let code = genApplyCombinator ctx name info builder
             (code, name, Map.empty)
         | IRComposeApply info ->
-            let (code, _) = genComposeApply ctx name info info.OutputType builder
+            let (code, _) = genComposeApply ctx name info info.OutputType builder None
             (code, name, Map.empty)
         | IRVar (id, _) ->
             let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue name
@@ -1148,7 +1549,7 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
                 | IRApplyCombinator info ->
                     genApplyCombinator ctx leafName info builder @ [""]
                 | IRComposeApply info ->
-                    let (code, _) = genComposeApply ctx leafName info info.OutputType builder
+                    let (code, _) = genComposeApply ctx leafName info info.OutputType builder None
                     code @ [""]
                 | IRVar (id, _) ->
                     let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName
@@ -1294,7 +1695,11 @@ let guardProviderWrite (ind: string) (lines: string list) : string list =
 /// `ix[k] - ix[k-1] - 1` (canon_left_justify, cpp:863). The diagonal-anchored
 /// form shifts the whole pool by one cell in both directions and runs one
 /// cell past the end of the last row.
-let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string) (varName: string) (toFlat: bool) : string list =
+/// The cell count of a packed (SymIdx/AntisymIdx leading group + dense
+/// trailing) pool -- canonical cells x the trailing block -- with exactly the
+/// refusals the linear pool copy below raises (shared by it and by the
+/// provider write's destination-passing arm, provider-sink v1).
+let packedPoolTotal (arrTy: IRArrayType) (varName: string) : int64 =
     let (lead, trailing) =
         match arrTy.IndexTypes with
         | l :: rest when l.Symmetry <> SymNone && l.Rank >= 2 -> (l, rest)
@@ -1307,15 +1712,7 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
         | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed pool copy of '{varName}' requires literal extents")))
     let n = litOf lead.Extent
     let r = lead.Rank
-    let binom (m: int64) (k: int) : int64 =
-        if k < 0 || m < int64 k then 0L
-        else
-            let mutable num = 1L
-            let mutable den = 1L
-            for i in 0 .. k - 1 do
-                num <- num * (m - int64 i)
-                den <- den * int64 (i + 1)
-            num / den
+    let binom (m: int64) (k: int) : int64 = Blade.OrbRank.binomOrZero m k
     let card =
         match lead.Symmetry with
         | SymSymmetric -> binom (n + int64 r - 1L) r
@@ -1326,13 +1723,36 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
     // Linear pool copy (canonical cells x trailing block, contiguous) -- one
     // shape for sym and antisym alike; see the header comment for why the
     // strict pool is compact.
-    let total = card * trail
+    card * trail
+
+let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string) (varName: string) (toFlat: bool) : string list =
+    let total = packedPoolTotal arrTy varName
     if toFlat then
         [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
           $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { {{flatBase}}_flat[__pc_i] = __pc_pool[__pc_i]; } }""" ]
     else
         [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
           $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { __pc_pool[__pc_i] = {{flatBase}}_flat[__pc_i]; } }""" ]
+
+/// A fold operand naming a still-deferred value-keyed WRAPPER -- `let q = A <|>
+/// B` (or `<|:>`), directly or through deferred aliases. The reduce emitters
+/// fold a deferred map inline (resolveComputation), but no fold form reads a
+/// choice / fallback cell by cell, so the operand is spelled BY NAME and must
+/// be materialized first (gap G48: `reduce(q, (+))` at top level or in a
+/// top-level block was BL9002 "'q' was not declared"). The interpreter forces
+/// the same read (Loops.force: a module binding materialized under its own
+/// name joins the print list); the LLVM lane already stores a folded named
+/// choice and prints it.
+let isDeferredWrapperOperand (ctx: CodeGenContext) (e: IRExpr) : bool =
+    let rec go (seen: Set<IRId>) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when not (Set.contains id seen) ->
+            (match Map.tryFind id ctx.DeferredComputations with
+             | Some (IRChoice _ | IRFallback _) -> true
+             | Some (IRVar _ as inner) -> go (Set.add id seen) inner
+             | _ -> false)
+        | _ -> false
+    go Set.empty e
 
 /// Collect the DISTINCT ids of deferred-computation bindings that `root` reads
 /// POSITIONALLY (base of an IRIndex/IRExtent/IRContains) or WHOLE (a
@@ -1351,6 +1771,16 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
 /// Only positional reads whose base is a deferred IRVar are collected; bare
 /// combinator/loop-object children are NOT descended (they force/absorb their
 /// own inputs), so a nested still-deferred binding is never eagerly forced.
+/// An extent read `extents(a)` at `dim` whose value the TYPE carries as a
+/// static literal: renderExtentExpr emits that literal and names nothing, so
+/// the read is no forcing use of a deferred `a` (gap G218, the user decision
+/// of 2026-11-13; formalism 10.2). A runtime extent still reads the array by
+/// name (gap G234).
+let extentIsStatic (a: IRExpr) (dim: int) : bool =
+    match inferExprType a with
+    | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length -> (tryEvalIntIR at.IndexTypes.[dim].Extent).IsSome
+    | _ -> false
+
 let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId list =
     let ordered = System.Collections.Generic.List<IRId>()
     let seen = System.Collections.Generic.HashSet<IRId>()
@@ -1362,7 +1792,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
     let rec walk (e: IRExpr) =
         match e with
         | IRIndex (a, idxs, _) -> note a; walk a; List.iter walk idxs
-        | IRExtent (a, _) -> note a; walk a
+        | IRExtent (a, dim) -> (if not (extentIsStatic a dim) then note a); walk a
         | IRContains (a, v) -> note a; walk a; walk v
         // Statement / block forms. An assignment RHS that is a whole deferred
         // array (`x = A`) renders A by name, so note it like a positional read.
@@ -1372,6 +1802,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRSequence es -> List.iter walk es
         | IRConstraintCheck (c, _, _, _) -> walk c
         | IRBreakIf c -> walk c
+        | IRReplayRow (_, r) -> walk r
         | IRReplicate (count, body) -> walk count; walk body
         | IRGuard (c, b) -> walk c; walk b
         // Scalar / compound-expression forms.
@@ -1392,6 +1823,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRJoin (es, _) -> List.iter walk es
         | IRComplex (re, im) -> walk re; walk im
         | IRFma (a, b, c) -> walk a; walk b; walk c
+        | IRRandAt (_, args, w) -> List.iter walk args; w |> Option.iter (fst >> walk)
         | IRFieldAccess (o, _) -> walk o
         | IRTupleProj (x, _, _) -> walk x
         | IRTupleCons (h, t) -> walk h; walk t
@@ -1406,7 +1838,23 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
             walk s
             cases |> List.iter (fun c -> Option.iter walk c.Guard; walk c.Body)
         // Rearrangement / reduction inputs (their array operands render by name).
-        | IRReduce (a, k, initOpt) -> walk a; walk k; Option.iter walk initOpt
+        // A fold over a named deferred WRAPPER (gap G48) renders it by name:
+        // the reduce emitters resolve a deferred MAP inline, but a choice /
+        // fallback has no fold form, so it is forced like a positional read.
+        | IRReduce (a, k, initOpt) ->
+            // a FOLD KERNEL capture of a deferred map is a forcing use too
+            // (gap G237: a fold in EXPRESSION position, `1.0 + reduce(x,
+            // lambda(a, b) -> a + b + d(1), 0.0)`, forwarded an undeclared d)
+            (match resolveKernel k with
+             | Some rk ->
+                 for cap in rk.Callable.Captures do
+                     match Map.tryFind cap.Id ctx.DeferredComputations with
+                     | Some (IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRGuard _ | IRChoice _ | IRFallback _ | IRVar _) ->
+                         if seen.Add cap.Id then ordered.Add cap.Id
+                     | _ -> ()
+             | None -> ())
+            if isDeferredWrapperOperand ctx a then note a
+            walk a; walk k; Option.iter walk initOpt
         | IRReduceCompute (comp, k, init) -> walk comp; walk k; walk init
         | _ -> ()
     walk root

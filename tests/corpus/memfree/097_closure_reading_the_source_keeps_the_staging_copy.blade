@@ -1,0 +1,24 @@
+// TEST: A closure reading the source keeps the staging copy
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, staging-copy elision; found by
+// the Codex diff review d71e628b round 4): `read` captures `boxes` before
+// `let mut alias = boxes`; the elided copy let the write `alias(0) = ..`
+// change what the closure reads (30.0 instead of 6.0). The staging reads now
+// close over the captures of every callable they name.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+struct Box {
+    a: Array<Float64 like I>
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let boxes: Array<Box like One> = [Box { a = x }]
+    let read = lambda(k: Int64) -> reduce(boxes((k : One)).a, (+))
+    let replacement = x * 5.0 |> compute
+    let mut alias = boxes
+    alias(0) = Box { a = replacement }
+    read(0)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 6.0

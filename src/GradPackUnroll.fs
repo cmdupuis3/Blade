@@ -502,8 +502,11 @@ let internal groupRegimeOf (ctx: Ctx) (fd: FunctionDecl) (letTys: Map<string, Ty
         | _ ->
             // No annotation anywhere: an int-LITERAL key table is the
             // unannotated-Int64 case, which is dynamic discovery.
-            let litInts (x: Expr) =
+            // An integer-width cast of the table (`Int64([0, 1, 0])`, the spelling the
+            // round-6 migration gives an unannotated table) is still that literal table.
+            let rec litInts (x: Expr) =
                 match x.Kind with
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar ("Int64" | "Int32") }, [ inner ]) -> litInts inner
                 | ExprKind.ExprArrayLit es ->
                     not es.IsEmpty
                     && es |> List.forall (fun el ->
@@ -676,7 +679,7 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
         // count is sum_g n_g (weighted: sum_g w_g * n_g), so each surviving
         // ROW contributes exactly its group's weight -- and no `v` at all,
         // which is why the gradient wrt the values is identically zero.
-        | PKCount, None -> fLit 1.0
+        | PKCount, None -> f64Lit 1.0
         | PKCount, Some wa -> wa
     let needsCounts = (match pk with PKMean _ -> true | _ -> false)
     // The init contribution, folded in EXACTLY rather than approximated:
@@ -687,7 +690,7 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
             (match weight with
              | None -> mul ie (fLit (float ng))
              | Some we -> mul ie (syn (ExprReduce (we, syn (ExprSection OpAdd), None, None))))
-        | _ -> fLit 0.0
+        | _ -> f64Lit 0.0
     let emitted =
         [ yield StmtLet { Mutability = BindLet; Pattern = synPat (PatVar gbName); Type = None
                           Value = syn (ExprGroupBucket (v gkName)) }

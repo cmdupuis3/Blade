@@ -206,7 +206,10 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
             // Provider reads are module-qualified (`x |> alias.read`), so they
             // take the generic pipe-application desugar below; the checker's
             // provider-read arm rewrites the application to TExprRead.
-            | _ -> loop (mkExpr (mergeSpan acc.Span right.Span) (ExprApp (right, [acc]))) remaining
+            | _ ->
+                let app = mkExpr (mergeSpan acc.Span right.Span) (ExprApp (right, [acc]))
+                (match right.Kind with ExprKind.ExprVar n -> UserCasts.recordIfCast n 1 app.Span | _ -> ())
+                loop app remaining
         | Some (TokOp "|@>") ->
             // Pipe-apply: a |@> b  desugars to  b <@> a
             advance toks' |> parseChoice >>= fun right remaining ->
@@ -454,13 +457,15 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
                 lastLineBefore t.Line rest
             | _ -> last
         lastLineBefore opener.Line tokens < opener.Line
-    let rec loop acc toks =
+    let rec loop (acc: Expr) toks =
         match peek toks with
         | Some TokLParen when not (opensOnLaterLine (List.head toks)) ->
             // Function call (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> sepBy parseExprImpl TokComma) >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
-            loop (mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprApp (acc, args))) remaining
+            let app = mkExpr (mergeSpan acc.Span (rangeSpan toks remaining)) (ExprApp (acc, args))
+            (match acc.Kind with ExprKind.ExprVar n -> UserCasts.recordIfCast n args.Length app.Span | _ -> ())
+            loop app remaining
         | Some TokLBracket when not (opensOnLaterLine (List.head toks)) ->
             // Poly-tuple indexing: args[k] (delimited: struct literals re-enabled)
             allowingStructLiterals (fun () -> advance toks |> parseExprImpl) >>= fun index afterIndex ->
@@ -474,7 +479,13 @@ and parsePostfix (tokens: Token list) : ParseResult<Expr> =
 
 and parsePrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkLitExpr tokens lit) (advance tokens)
+    | Some (TokIdent ("True" | "False" as name)) ->
+        let line, col = currentPos tokens
+        errorC "BL1003" (capitalBoolMessage name) line col
+    | Some (TokIdent name) when isWidthlessTypeName name && (match peek (advance tokens) with Some TokLParen -> true | _ -> false) ->
+        let line, col = currentPos tokens
+        errorC "BL1004" (widthlessTypeMessage name + $" -- a cast is spelled with the target's full name, `Float64(x)`") line col
 
     // Wildcard hole `_` (e.g. a free axis in a compound index B((a, _, c))):
     // a general token whose meaning comes from the consuming context;
@@ -489,6 +500,19 @@ and parsePrimary (tokens: Token list) : ParseResult<Expr> =
             // for-in range headers (see noStructLiteralCtx). Widen the span
             // to include the leading type name.
             parseStructExpr name afterName >>= fun e remaining ->
+            success { e with Span = rangeSpan tokens remaining } remaining
+        | Some TokDot when not noStructLiteralCtx.Value
+                           && (match afterName with
+                               | _ :: ({ Kind = TokIdent _ } as t) :: brace :: _ ->
+                                   brace.Kind = TokLBrace && brace.Line = t.Line
+                               | _ -> false) ->
+            // A MODULE-QUALIFIED struct construction `U.P { a = 1.0 }` (D11):
+            // the import registers the struct under its scope key `U.P`, so
+            // the name is that key. `a.b {` with the brace on b's line has no
+            // other reading (a statement ends at its line, and the lexer's
+            // newline stripping inside delimiters is why the line is compared).
+            let typeName = match afterName with _ :: { Kind = TokIdent t } :: _ -> t | _ -> ""
+            parseStructExpr (name + "." + typeName) (advance (advance afterName)) >>= fun e remaining ->
             success { e with Span = rangeSpan tokens remaining } remaining
         | _ ->
             success (mkExpr (headSpan tokens) (ExprVar name)) afterName
@@ -911,7 +935,11 @@ the axis count is the named final argument `axes = n`" line col
     // level). Span widens to cover both parens; child spans are untouched.
     | Some TokLParen ->
         allowingStructLiterals (fun () -> advance tokens |> parseParenExpr) >>= fun e remaining ->
-        success { e with Span = rangeSpan tokens remaining } remaining
+        // (a parenthesized cast keeps its user-cast mark on the widened span:
+        // `(x |> Float64)` is the cast the user wrote -- Ast.UserCasts)
+        let widened = rangeSpan tokens remaining
+        UserCasts.transfer e.Span widened
+        success { e with Span = widened } remaining
 
     | Some TokLBracket ->
         allowingStructLiterals (fun () ->
@@ -1048,6 +1076,26 @@ and parseLetAnnotation (afterPat: Token list) : ParseResult<TypeExpr option> =
 /// Shared by all three let-parse sites (`parseLet`, `parseLetStmt`,
 /// `parseTopLevelLet`) so they cannot drift.
 and parseLetPattern (tokens: Token list) : ParseResult<Pattern> =
+    parseLetPatternRaw tokens >>= fun pat remaining ->
+    // A MODULE-QUALIFIED pattern name (`U.Red`, `U.Some(x)`, `U.P { a }`,
+    // parsed since the D11 leftovers for match arms) is a constructor or
+    // struct TEST, which only a match arm performs; a `let` would bind it
+    // as a name, or destructure without checking the constructor.
+    let rec qualified (p: Pattern) : Pattern option =
+        match p.Kind with
+        | PatternKind.PatVar n | PatternKind.PatVariant (n, None) when n.Contains "." -> Some p
+        | PatternKind.PatVariant (n, Some _) | PatternKind.PatStruct (n, _) when n.Contains "." -> Some p
+        | PatternKind.PatVariant (_, Some inner) | PatternKind.PatGuarded (inner, _) | PatternKind.PatTyped (inner, _) -> qualified inner
+        | PatternKind.PatTuple ps -> ps |> List.tryPick qualified
+        | PatternKind.PatCons (a, b) -> qualified a |> Option.orElse (qualified b)
+        | PatternKind.PatStruct (_, fields) -> fields |> List.tryPick (snd >> qualified)
+        | _ -> None
+    match qualified pat with
+    | Some q ->
+        errorC "BL1001" "a module-qualified name in a `let` pattern: `<module>.<Name>` names an imported constructor or struct, and testing one is a `match` arm's job (`match v with | U.Red -> ...`); a `let` pattern binds plain names" q.Span.StartLine q.Span.StartCol
+    | None -> success pat remaining
+
+and parseLetPatternRaw (tokens: Token list) : ParseResult<Pattern> =
     parsePattern tokens >>= fun first afterFirst ->
     match peek afterFirst with
     | Some TokComma ->
@@ -1259,7 +1307,10 @@ and parseGuardMultiplicative (tokens: Token list) : ParseResult<Expr> =
 
 and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
-    | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
+    | Some (LiteralTok lit) -> success (mkLitExpr tokens lit) (advance tokens)
+    | Some (TokIdent ("True" | "False" as name)) ->
+        let line, col = currentPos tokens
+        errorC "BL1003" (capitalBoolMessage name) line col
     | Some (TokIdent name) ->
         let afterName = advance tokens
         match peek afterName with
@@ -1267,7 +1318,9 @@ and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
             advance afterName |> sepBy parseGuardExpr TokComma >>= fun args afterArgs ->
             expect TokRParen afterArgs >>= fun _ remaining ->
             let fn = mkExpr (headSpan tokens) (ExprVar name)
-            success (mkE tokens remaining (ExprApp (fn, args))) remaining
+            let app = mkE tokens remaining (ExprApp (fn, args))
+            UserCasts.recordIfCast name args.Length app.Span
+            success app remaining
         | _ -> success (mkExpr (headSpan tokens) (ExprVar name)) afterName
     | Some TokLParen ->
         advance tokens |> parseGuardExpr >>= fun expr afterExpr ->

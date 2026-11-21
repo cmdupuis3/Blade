@@ -1,0 +1,15 @@
+// TEST: a compose chain over a narrow operand hints each stage from the previous stage's result
+// Gap G172 (c) (round 4 wave 6 lane d): `(object_for(lambda(v) -> v + 1.0) >>@
+// object_for(lambda(v) -> v * 2.0)) <@> a32` was a Float64 map (the stage
+// lambdas were typed before the operand). Stage 1 now takes the operand's
+// element as its hint and each later stage the previous stage's result when
+// that is narrow: a widening cast (`Float64(v)`) stops the hint, so a literal
+// past Float32's range stays legal after it, and a narrowing cast
+// (`Float32(v)`) restarts it.
+type I = Idx<3>
+let a32: Array<Float32 like I> = [1.0, 2.0, 3.0]
+let c: Array<Float32 like I> = (object_for(lambda(v) -> v + 1.0) >>@ object_for(lambda(v) -> v * 2.0)) <@> a32 |> compute
+let w: Array<Float64 like I> = (object_for(lambda(v) -> Float64(v)) >>@ object_for(lambda(v) -> v + 1e100)) <@> a32 |> compute
+let n: Array<Float32 like I> = (object_for(lambda(v) -> Float64(v)) >>@ object_for(lambda(v) -> Float32(v)) >>@ object_for(lambda(v) -> v + 1.0)) <@> a32 |> compute
+// EXPECT: c = [4.0, 6.0, 8.0]
+// EXPECT: n = [2.0, 3.0, 4.0]

@@ -1,5 +1,5 @@
 // TEST: T^0 call mixing two array RANKS (rejects)
-// ERROR: BL3999
+// ERROR: BL3024
 // ERROR-CONTAINS: share no iteration space
 // ============================================================================
 // A scalar broadcasts; two arrays of DIFFERENT ranks do not. There is no
@@ -14,7 +14,7 @@
 // ============================================================================
 function add0(a: T^0, b: T^0) -> T^0 = a + b
 
-let A: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
-let M: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 
 let r = add0(A, M)

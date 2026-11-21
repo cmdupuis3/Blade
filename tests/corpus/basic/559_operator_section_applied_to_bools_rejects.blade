@@ -1,0 +1,8 @@
+// TEST: an operator section applied to Bools (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: the section applied
+// directly is judged on its arguments, as the operator between them would be.
+// ============================================================================
+let t = (+)(true, false)
+// ERROR: BL3001

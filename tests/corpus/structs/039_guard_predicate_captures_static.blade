@@ -5,13 +5,13 @@
 // guard, so it must be pulled into main() too — transitive main-locality
 // (computeMainLocalFuncIds in CodeGen.fs). Previously this emitted a free
 // C++ `mk` referencing the main-scoped predicate and failed to compile.
-let static CAP = 10
-static function under_cap(a: Int, b: Int) -> Bool = a + b < CAP
+let static CAP: Int64 = 10
+static function under_cap(a: Int32, b: Int32) -> Bool = a + b < CAP
 struct Pair {
-    a: Int,
-    b: Int
+    a: Int32,
+    b: Int32
 } where under_cap(a, b)
-function mk(a: Int, b: Int) -> Pair = {
+function mk(a: Int32, b: Int32) -> Pair = {
     let r = Pair { a = a, b = b }
     r
 }

@@ -1,0 +1,13 @@
+// TEST: A Kernel Lambda Capture Used Inside A Function Without Shadowing
+// Gap G224 (round 4 wave 8 lane d): the shadow-free twin of 105 -- the
+// parameter has its own name, so nothing is renamed and the kernel reads
+// the module binding.
+// EXPECT: r = [2.0, 4.0, 6.0]
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let scale: Float64 = 2.0
+let f = lambda(x) -> x * scale
+function apply(factor: Float64, a: Array<Float64 like I>) -> Array<Float64 like I> = {
+    method_for(a) <@> f |> compute
+}
+let r = apply(10.0, a64)

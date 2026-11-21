@@ -1,0 +1,19 @@
+// TEST: counting and weighting with a cast mask
+// ============================================================================
+// A Bool is not a number; it converts EXPLICITLY with a numeric cast (formalism
+// 2.4; the owner's ruling of 2026-11-14): 1 or 0 (1.0 / 0.0), element by element
+// over a Bool array, in every lane (C++, interpreter, LLVM, static evaluation).
+// The counting idiom is `reduce(Int64(m), (+))`; a mask weights an array as
+// `xs * Float64(m)`.
+// ============================================================================
+let xs: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let m = xs > 1.5
+let n = reduce(Int64(m), (+))
+// EXPECT: n = 3
+let kept = xs * Float64(m)
+// EXPECT: kept = [0.0, 2.0, 3.0, 4.0]
+let s = prodsum(xs, Float64(m))
+// EXPECT: s = 9.0
+let both = m && (xs < 3.5)
+let nb = reduce(Int64(both), (+))
+// EXPECT: nb = 2

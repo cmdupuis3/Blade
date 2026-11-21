@@ -9,10 +9,10 @@
 // Refused at CONSTRUCTION, not at the destructure: the tuple is where the gk
 // leaves its binding, so that is where the caret belongs and where the fix
 // is. Nothing downstream needs a second rule.
-let region = [0, 1, 0, 0, 1]
-let v = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let v = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
-let sums = [1.0, 2.0]
+let sums = Float64([1.0, 2.0])
 let bundle = (sums, gk)
 let (s2, gk2) = bundle
 let gv = group_by(v, gk2)

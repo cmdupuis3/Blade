@@ -1,0 +1,8 @@
+// TEST: an anonymous map operand evaluates its kernel capture (aborts)
+// Gap G199 (Codex diff review round 8): the inline map handed to prodsum is
+// evaluated there, so the deferred d its kernel captures (read only through
+// extents) is forced first and its division by zero fails, in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let z = prodsum(method_for(x) <@> lambda(v) -> v + extents(d), x)
+// ABORT: BL8013

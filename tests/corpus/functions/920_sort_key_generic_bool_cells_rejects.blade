@@ -1,0 +1,12 @@
+// TEST: A Sort Key Decided As A Float Over Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 6:1
+// ERROR-CONTAINS: (a per-element kernel)
+// ============================================================================
+// R11: as functions/919 for a sort key (accepted on base).
+// ============================================================================
+function outer(b) = {
+    let key = lambda(x) -> x * 2.0
+    let a = key(1.0)
+    sort(b, key)
+}
+let r = outer([true, false])

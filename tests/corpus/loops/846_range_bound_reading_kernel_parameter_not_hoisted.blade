@@ -1,0 +1,9 @@
+// TEST: A Fold Whose Range Bound Reads The Kernel Parameter Is Not Hoisted Out Of The Kernel
+// Gap G209 (round 4 wave 9 lane d): kernel-invariant hoisting judged `reduce(method_for(0..g(v))
+// <@> ..)` invariant (the bound g(v) is carried by the range TYPE, which its scan never read) and
+// emitted it once, outside the kernel, with v free (BL9002 at g++). It now reads type-carried
+// expressions: v * (0 + .. + v) per cell.
+// EXPECT: ys = [1, 6, 18, 40]
+function g(v: Int64) -> Int64 = v + 1
+let xs: Array<Int64 like Idx<4>> = [1, 2, 3, 4]
+let ys = method_for(xs) <@> lambda(v) -> v * reduce(method_for(0..g(v)) <@> lambda(k) -> k, (+)) |> compute

@@ -3,5 +3,5 @@
 // Defaults are TRAILING: once a parameter has a default, every later
 // parameter needs one too -- otherwise an omitted-argument call would be
 // ambiguous about which slot the supplied args fill.
-function bad(a: Float = 1.0, b: Float) -> Float = a + b
-let r = bad(2.0)
+function bad(a: Float64 = 1.0, b: Float64) -> Float64 = a + b
+let r = bad(Float64(2.0))

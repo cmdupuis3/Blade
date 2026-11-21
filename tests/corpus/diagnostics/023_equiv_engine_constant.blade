@@ -5,7 +5,7 @@
 // ERROR-CONTAINS: supported on trivial-label cells (every generator matrix the identity) and unmoved by the component group
 import ml as ml
 let static SD = [("A", 1), ("E", 1)]
-function shifted(x: Array<Float like PgIrrepsIdx<C4, SD>>)
-                 where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, SD>> =
+function shifted(x: Array<Float64 like PgIrrepsIdx<C4, SD>>)
+                 where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, SD>> =
     [x(0), x(1) + 2.0, x(2)]
 let r = shifted([1.0, 3.0, 4.0])

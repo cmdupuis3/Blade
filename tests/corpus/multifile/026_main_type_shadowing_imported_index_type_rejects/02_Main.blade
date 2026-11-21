@@ -1,13 +1,15 @@
 // TEST: Main type shadowing an imported index type (rejects)
 // MODULE: Main
-// ERROR: BL2009
-// ERROR-CONTAINS: duplicate declaration of type 'Cell': module 'Geo' already declares a type of that name
+// ERROR: BL4003
+// ERROR-CONTAINS: slot expects 'Geo.Cell' but argument has type 'Cell'
 // ============================================================================
 // Index-type provenance is nominal: `Nat<Cell>` from main's own `Cell` must
-// never index an array over Geo's `Cell`. But both were the name "Cell", so
-// main's `type Cell = Idx<5>` became the SAME index type as Geo's `Idx<3>`,
-// and `Geo.w(i)` with `i` ranging over main's five cells passed the very
-// check that exists to refuse it (reading past the end of a 3-cell array).
+// never index an array over Geo's `Cell`. Both used to be the name "Cell", so
+// main's `type Cell = Idx<5>` became the SAME index type as Geo's `Idx<3>`
+// (and the program was refused, BL2009, while type identity was the bare
+// name). Identity is now the declaring module's (D11): main's local `Cell`
+// shadows the import, and `Geo.w(i)` with `i` over main's five cells is the
+// nominal mismatch it is -- spelled qualified, the source names coinciding.
 module Main
 import Geo
 type Cell = Idx<5>

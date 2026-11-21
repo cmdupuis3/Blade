@@ -30,17 +30,17 @@ import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
 
 // Non-vacuity: scalars in, scalar out. No candidate.
-function dotscale(a: Float, b: Float, s: Float) -> Float = (a * b) * s
+function dotscale(a: Float64, b: Float64, s: Float64) -> Float64 = (a * b) * s
 
 // Non-vacuity again, with arrays that are not representation spaces: a plain
 // `Idx<n>` buffer is invariant under every group in the roster, so this is the
 // same tautology one rank up.
-function blend(u: Array<Float like Idx<3>>, v: Array<Float like Idx<3>>, t: Float)
-               -> Array<Float like Idx<3>> =
+function blend(u: Array<Float64 like Idx<3>>, v: Array<Float64 like Idx<3>>, t: Float64)
+               -> Array<Float64 like Idx<3>> =
     (u * t) + (v * t)
 
 // Failed judgment: signature-eligible, body not equivariant.
-function readout(x: Array<Float like IrrepsIdx<S>>) -> Float = x(1) + x(2)
+function readout(x: Array<Float64 like IrrepsIdx<S>>) -> Float64 = x(1) + x(2)
 
 let d = dotscale(2.0, 3.0, 0.5)
 // EXPECT: d = 3.0

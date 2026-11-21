@@ -1,0 +1,17 @@
+// TEST: Rand Indexed Families Share Uniforms At One Address By Design
+// The `_at` address is (key, stream, sample, draw) and names no family, so
+// every indexed family at one address reads the SAME uniforms: exponential_at
+// at (key, stream, offset) is exactly -log(1 - u) / rate of uniform_at's u
+// there. That coupling is intentional (independent draws take different
+// stream ids) and pinned here: per-family key separation was declined because
+// the address contract forbids moving any pinned sample (cpp/rand_runtime.hpp).
+import rand as r
+let u = r.uniform_at(5, 1, 0, 6)
+let e = r.exponential_at(5, 1, 0, 1.0, 6)
+let d = e + log(1.0 - u)
+let coupled = reduce(d * d, (+)) == 0.0
+let v = r.uniform_at(5, 2, 0, 6)
+let w = u - v
+let streamsDiffer = reduce(w * w, (+)) > 0.0
+// EXPECT: coupled = true
+// EXPECT: streamsDiffer = true

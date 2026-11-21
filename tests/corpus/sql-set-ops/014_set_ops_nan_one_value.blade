@@ -1,0 +1,31 @@
+// TEST: Set Ops NaN One Value
+// ----------------------------------------------------------------------------
+// The SET EQUALITY of unique / intersect / union (round 4 wave 5 lane c,
+// gap G126; docs/features/sql.md section 3): every NaN is ONE value and -0.0
+// and +0.0 are one value -- the same classes as sort's key order. The C++
+// lane's unordered_set used `==` (every NaN distinct) while the interpreter
+// merged them. Each class keeps its FIRST occurrence (a -0.0 before a 0.0
+// stays -0.0). `contains` stays the scalar `==` in every lane (NaN matches
+// nothing): membership is not a set operation's dedup.
+// ----------------------------------------------------------------------------
+type R = Idx<7>
+type S = Idx<3>
+let z: Float64 = 0.0
+let a: Array<Float64 like R> = [z / z, 1.0, z / z, -0.0, 0.0, 1.0, z / z]
+let b: Array<Float64 like S> = [2.0, z / z, 0.0]
+let u = unique(a)
+let n_u = extents(u)
+let i = intersect(a, b)
+let n_i = extents(i)
+let un = union(b, a)
+let n_un = extents(un)
+let has_nan = contains(a, z / z)
+let has_zero = contains(a, 0.0)
+// EXPECT: u = [nan, 1.0, -0.0]
+// EXPECT: n_u = 3
+// EXPECT: i = [nan, -0.0]
+// EXPECT: n_i = 2
+// EXPECT: un = [2.0, nan, 0.0, 1.0]
+// EXPECT: n_un = 4
+// EXPECT: has_nan = false
+// EXPECT: has_zero = true

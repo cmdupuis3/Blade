@@ -12,10 +12,10 @@
 //     (statement form), not the scalar fold's inline IIFE.
 // Hand-checked: sq(a) = [[1,4,9],[16,25,36]] with row sums [14, 77];
 // sq(b) = [[1,1,1],[4,4,4]] with row sums [3, 12]; x = [17, 89]; total 106.
-let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let m2: Array<Float like Idx<2>, Idx<3>> = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m2: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
 function sq(z: Float64) = z * z
-function tailf(a: Array<Float like Idx<2>, Idx<3>>, b: Array<Float like Idx<2>, Idx<3>>) = {
+function tailf(a: Array<Float64 like Idx<2>, Idx<3>>, b: Array<Float64 like Idx<2>, Idx<3>>) = {
     let x = (reduce(a <@> sq, (+)) |> compute) + (reduce(b <@> sq, (+)) |> compute)
     reduce(x, (+))
 }

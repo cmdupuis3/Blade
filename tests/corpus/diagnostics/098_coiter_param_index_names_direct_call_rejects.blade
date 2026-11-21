@@ -8,9 +8,9 @@
 // records are unnamed, so the call judgment had no names to compare. A
 // DayIdx fiber and an HourIdx fiber of equal extent were walked as one index
 // space and `direct` printed -0.333, where the top-level `R(0) * H(0)` is
-// refused (BL3999). The call now refuses with the same diagnostic, blamed on
+// refused (BL3027). The call now refuses with the same diagnostic, blamed on
 // the second argument.
-// ERROR: BL3999 @ 26:24
+// ERROR: BL3027 @ 26:24
 // ERROR-CONTAINS: DIFFERENT index types: arguments 1 and 2 of 'cov'
 // stats' `mean`, inlined: this runner does not resolve stdlib imports.
 function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))

@@ -1,0 +1,38 @@
+// twofir DUMP variant (methodology review M11): bench/kernels/twofir/twofir.blade at SMOKE
+// size (n = 20011), with the named outputs y1 and y2 exposed as top-level bindings so the
+// print pass echoes them cell by cell. Run in the C++ lane. Compared cell by cell against
+// numpy by validate_B.py.
+
+type I = Idx<20011>
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    let h5 = (h4 * 1103515245 + 12345) % 2147483648
+    lo + (hi - lo) * (Float64(h5) / 2147483648.0)
+}
+
+function inputs() -> Array<Float64 like I> = {
+    method_for(range<I>) <@> lambda(i) where omp -> gen(Int64(i), 10000019, 0.0, 1.0) |> compute
+}
+
+function fir1(x: Array<Float64 like I>) = {
+    method_for(halo<I, [-3, -2, -1, 0, 1, 2, 3]>) <@> lambda(w) where omp ->
+        0.0625 * x(w(-3)) + 0.125 * x(w(-2)) + 0.1875 * x(w(-1)) + 0.25 * x(w(0))
+        + 0.1875 * x(w(1)) + 0.125 * x(w(2)) + 0.0625 * x(w(3)) |> compute
+}
+
+function fir2(x: Array<Float64 like I>) = {
+    method_for(halo<I, [-8, -4, 0, 4, 8]>) <@> lambda(w) where omp ->
+        0.5 * x(w(0)) - 0.25 * x(w(-4)) - 0.25 * x(w(4)) + 0.125 * x(w(-8)) + 0.125 * x(w(8)) |> compute
+}
+
+let x = inputs()
+let y1 = fir1(x)
+let y2 = fir2(x)
+let checksum = prodsum(y1, y1) + prodsum(y2, y2)
+let input_checksum = reduce(x, (+))

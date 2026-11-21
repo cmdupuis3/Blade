@@ -7,15 +7,15 @@ import ad as ad
 
 type I = Idx<3>
 
-function s1(x: Float) -> Float = x + 1.0
-function s2(y: Float) -> Float = y * y
+function s1(x: Float64) -> Float64 = x + 1.0
+function s2(y: Float64) -> Float64 = y * y
 
-function piped(a: Array<Float like I>) -> Float = {
+function piped(a: Array<Float64 like I>) -> Float64 = {
     let m = (object_for(s1) >>@ object_for(s2)) <@> a |> compute
     reduce(m, (+))
 }
 
-function handfused(a: Array<Float like I>) -> Float = {
+function handfused(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a) <@> lambda(x) -> (x + 1.0) * (x + 1.0) |> compute
     reduce(m, (+))
 }

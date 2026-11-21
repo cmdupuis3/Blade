@@ -62,6 +62,7 @@ let private toF64v (v: Value) : float =
     | VBool b -> if b then 1.0 else 0.0
     | VChar c -> float (int c)
     | VComplex (r, _) -> r
+    | VComplex64 (r, _) -> float r
     | _ -> nan
 
 let private toI64v (v: Value) : int64 =
@@ -74,10 +75,44 @@ let private toI64v (v: Value) : int64 =
     | VChar c -> int64 (int c)
     | _ -> 0L
 
+/// A Float32 cell's value: a VFloat32 as is, anything else rounded ONCE to
+/// float from its own type (an Int64 converts directly, like C++'s
+/// static_cast<float>(int64_t), never through a double).
+let private toF32v (v: Value) : float32 =
+    match v with
+    | VFloat32 f -> f
+    | VFloat f -> float32 f
+    | VInt n -> float32 n
+    | VInt32 n -> float32 n
+    | VBool b -> if b then 1.0f else 0.0f
+    | VChar c -> float32 (int c)
+    | VComplex (r, _) -> float32 r
+    | VComplex64 (r, _) -> r
+    | _ -> nanf
+
+/// An Int32 cell's value: an Int64 wraps (two's complement), a float truncates.
+let private toI32v (v: Value) : int32 =
+    match v with
+    | VInt32 n -> n
+    | VInt n -> int32 n
+    | VFloat f -> int32 f
+    | VFloat32 f -> int32 f
+    | VBool b -> if b then 1 else 0
+    | VChar c -> int32 c
+    | _ -> 0
+
 let private toComplexv (v: Value) : float * float =
     match v with
     | VComplex (r, i) -> (r, i)
+    | VComplex64 (r, i) -> (float r, float i)
     | other -> (toF64v other, 0.0)
+
+/// A Complex64 cell's value: each part rounded once to float.
+let private toComplex64v (v: Value) : struct (float32 * float32) =
+    match v with
+    | VComplex64 (r, i) -> struct (r, i)
+    | VComplex (r, i) -> struct (float32 r, float32 i)
+    | other -> struct (toF32v other, 0.0f)
 
 let private toBoolv (v: Value) : bool =
     match v with
@@ -112,7 +147,10 @@ let private storeLen (s: Store) : int =
     match s with
     | SFloat a -> a.Length
     | SInt a -> a.Length
+    | SFloat32 a -> a.Length
+    | SInt32 a -> a.Length
     | SComplex a -> a.Length
+    | SComplex64 a -> a.Length
     | SBool a -> a.Length
     | SObj a -> a.Length
     | SNested r -> r.Length
@@ -124,7 +162,10 @@ let private sliceStore (s: Store) (start: int) (len: int) : Store =
     match s with
     | SFloat a -> SFloat (Array.sub a start len)
     | SInt a -> SInt (Array.sub a start len)
+    | SFloat32 a -> SFloat32 (Array.sub a start len)
+    | SInt32 a -> SInt32 (Array.sub a start len)
     | SComplex a -> SComplex (Array.sub a start len)
+    | SComplex64 a -> SComplex64 (Array.sub a start len)
     | SBool a -> SBool (Array.sub a start len)
     | SObj a -> SObj (Array.sub a start len)
     | SNested _ | SRagged _ -> raise (ArrayOpUnsupported "sliceStore: expected a flat store")
@@ -133,7 +174,10 @@ let rec private deepCopyStore (s: Store) : Store =
     match s with
     | SFloat a -> SFloat (Array.copy a)
     | SInt a -> SInt (Array.copy a)
+    | SFloat32 a -> SFloat32 (Array.copy a)
+    | SInt32 a -> SInt32 (Array.copy a)
     | SComplex a -> SComplex (Array.copy a)
+    | SComplex64 a -> SComplex64 (Array.copy a)
     | SBool a -> SBool (Array.copy a)
     | SObj a -> SObj (Array.copy a)
     | SNested rows -> SNested (rows |> Array.map deepCopyStore)
@@ -144,9 +188,12 @@ let rec private deepCopyStore (s: Store) : Store =
 /// placeholders (each overwritten by writeCell during materialization).
 let storeOfElemType (elemTy: IRType) (n: int) : Store =
     match elemThrough elemTy with
-    | Some (ETFloat64 | ETFloat32) -> SFloat (Array.zeroCreate n)
-    | Some (ETInt64 | ETInt32) -> SInt (Array.zeroCreate n)
-    | Some (ETComplex64 | ETComplex128) -> SComplex (Array.zeroCreate n)
+    | Some ETFloat64 -> SFloat (Array.zeroCreate n)
+    | Some ETFloat32 -> SFloat32 (Array.zeroCreate n)
+    | Some ETInt64 -> SInt (Array.zeroCreate n)
+    | Some ETInt32 -> SInt32 (Array.zeroCreate n)
+    | Some ETComplex128 -> SComplex (Array.zeroCreate n)
+    | Some ETComplex64 -> SComplex64 (Array.zeroCreate n)
     | Some ETBool -> SBool (Array.zeroCreate n)
     | Some ETString -> SObj (Array.create n (VString ""))
     | Some ETUnit -> SObj (Array.create n VUnit)
@@ -156,10 +203,13 @@ let storeOfElemType (elemTy: IRType) (n: int) : Store =
 /// given element type (mirrors storeOfElemType's widening).
 let storeOfValues (elemTy: IRType) (vs: Value[]) : Store =
     match elemThrough elemTy with
-    | Some (ETFloat64 | ETFloat32) -> SFloat (vs |> Array.map toF64v)
-    | Some (ETInt64 | ETInt32) -> SInt (vs |> Array.map toI64v)
-    | Some (ETComplex64 | ETComplex128) ->
+    | Some ETFloat64 -> SFloat (vs |> Array.map toF64v)
+    | Some ETFloat32 -> SFloat32 (vs |> Array.map toF32v)
+    | Some ETInt64 -> SInt (vs |> Array.map toI64v)
+    | Some ETInt32 -> SInt32 (vs |> Array.map toI32v)
+    | Some ETComplex128 ->
         SComplex (vs |> Array.map (fun v -> let (r, i) = toComplexv v in struct (r, i)))
+    | Some ETComplex64 -> SComplex64 (vs |> Array.map toComplex64v)
     | Some ETBool -> SBool (vs |> Array.map toBoolv)
     | _ -> SObj (Array.copy vs)
 
@@ -204,7 +254,10 @@ let readCell (arr: BladeArray) (coords: int64 list) : Value =
         match cs, store with
         | [ i ], SFloat a -> VFloat a.[int i]
         | [ i ], SInt a -> VInt a.[int i]
+        | [ i ], SFloat32 a -> VFloat32 a.[int i]
+        | [ i ], SInt32 a -> VInt32 a.[int i]
         | [ i ], SComplex a -> let struct (r, im) = a.[int i] in VComplex (r, im)
+        | [ i ], SComplex64 a -> let struct (r, im) = a.[int i] in VComplex64 (r, im)
         | [ i ], SBool a -> VBool a.[int i]
         | [ i ], SObj a -> a.[int i]
         | i :: rest, SNested rows -> go rows.[int i] rest
@@ -219,7 +272,10 @@ let writeCell (arr: BladeArray) (coords: int64 list) (v: Value) : unit =
         match cs, store with
         | [ i ], SFloat a -> a.[int i] <- toF64v v
         | [ i ], SInt a -> a.[int i] <- toI64v v
+        | [ i ], SFloat32 a -> a.[int i] <- toF32v v
+        | [ i ], SInt32 a -> a.[int i] <- toI32v v
         | [ i ], SComplex a -> let (r, im) = toComplexv v in a.[int i] <- struct (r, im)
+        | [ i ], SComplex64 a -> a.[int i] <- toComplex64v v
         | [ i ], SBool a -> a.[int i] <- toBoolv v
         | [ i ], SObj a -> a.[int i] <- v
         | i :: rest, SNested rows -> go rows.[int i] rest
@@ -383,7 +439,8 @@ let zeroOfElemTy (elemTy: IRType) : Value =
     | Some ETFloat32 -> VFloat32 0.0f
     | Some ETInt64 -> VInt 0L
     | Some ETInt32 -> VInt32 0
-    | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
+    | Some ETComplex128 -> VComplex (0.0, 0.0)
+    | Some ETComplex64 -> VComplex64 (0.0f, 0.0f)
     | Some ETBool -> VBool false
     | _ -> VFloat 0.0
 
@@ -402,9 +459,7 @@ let narrowToElem (elemTy: IRType) : Value -> Value =
             | VFloat32 _ -> v
             | _ -> VFloat32 (float32 (toF64v v)))
     | Some ETComplex64 ->
-        (fun v ->
-            let (r, im) = toComplexv v
-            VComplex (float (float32 r), float (float32 im)))
+        (fun v -> let struct (r, im) = toComplex64v v in VComplex64 (r, im))
     | _ -> id
 
 /// True iff any slot of this record list is a depth >= 2 OrbIdx class.
@@ -717,7 +772,25 @@ let arrayLitFromValues (arrType: IRArrayType) (elems: Value list) : BladeArray =
     let idxTys = arrType.IndexTypes
     let isRagged =
         Blade.CodeGen.isRaggedArrayType arrType || Blade.CodeGen.isDepIdxArrayType arrType
+    // An empty outer literal has no exemplar row from which to recover its
+    // trailing dimensions. Retain the declared rectangular shape instead of
+    // collapsing Array<T like Idx<0>, J, ...> to a runtime rank-1 array.
+    // Nonplain, dependent and unresolved axes stay on their existing routes.
+    let emptyRectangularShape =
+        if elems.IsEmpty && not isRagged && idxTys.Length >= 2 then
+            let extents =
+                idxTys |> List.choose (fun ix ->
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) when ix.IxKind = IxKPlain && ix.Rank = 1
+                                             && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty
+                                             && n >= 0L && n <= int64 System.Int32.MaxValue -> Some n
+                    | _ -> None)
+            if extents.Length = idxTys.Length && extents.Head = 0L then Some (Array.ofList extents)
+            else None
+        else None
     match elems with
+    | [] when emptyRectangularShape.IsSome ->
+        allocDense elemTy idxTys emptyRectangularShape.Value
     | (VArray _) :: _ when isRagged ->
         // Ragged / DepIdx literal (heterogeneous per-row lengths). CSR layout
         // mirroring CodeGen.genArrayLiteral's Ragged<T> emission (CodeGen.fs:
@@ -871,7 +944,8 @@ let prodSum (args: BladeArray list) : Value =
         let zero =
             match elemThrough first.ElemType with
             | Some (ETFloat64 | ETFloat32) -> VFloat 0.0
-            | Some (ETComplex64 | ETComplex128) -> VComplex (0.0, 0.0)
+            | Some ETComplex128 -> VComplex (0.0, 0.0)
+            | Some ETComplex64 -> VComplex64 (0.0f, 0.0f)
             | _ -> VInt 0L
         let mutable sum = zero
         for t in 0 .. n - 1 do
@@ -897,7 +971,7 @@ let private cmpValues (a: Value) (b: Value) : int =
     | VInt x, VInt y -> compare x y
     | VInt32 x, VInt32 y -> compare x y
     | VBool x, VBool y -> compare x y
-    | VString x, VString y -> System.String.CompareOrdinal(x, y)
+    | VString x, VString y -> N.codePointCompare x y
     | _ -> compare (toF64v a) (toF64v b)
 
 let private eqValues (a: Value) (b: Value) : bool = cmpValues a b = 0
@@ -932,8 +1006,21 @@ let maskArray (arr: BladeArray) (pred: Value -> Value) : BladeArray =
 /// source's IndexTypes (so `compound(A, m)` sees the shared index space);
 /// element type Bool. `pred` is the caller's kernel closure.
 let maskPresence (arr: BladeArray) (pred: Value -> Value) : BladeArray =
-    if arr.Extents.Length <> 1 then
-        raise (ArrayOpUnsupported "mask over a rank>1 array (rank-1 only; mirrors CodeGen's #error)")
+    if arr.Extents.Length > 1 then
+        // Rank k (materializeMaskForm's dense arm): the Bool array keeps the
+        // whole index space, cells in row-major order.
+        let ext = arr.Extents
+        let total = ext |> Array.fold (fun acc e -> acc * int e) 1
+        let coordsOf (i: int) =
+            let mutable rem = int64 i
+            let cs = Array.zeroCreate ext.Length
+            for d in ext.Length - 1 .. -1 .. 0 do
+                cs.[d] <- rem % ext.[d]
+                rem <- rem / ext.[d]
+            List.ofArray cs
+        let bools = Array.init total (fun i -> toBoolv (pred (readCell arr (coordsOf i))))
+        mkDenseArray (IRTScalar ETBool) arr.IndexTypes ext (SBool bools)
+    else
     let n = arr.Extents.[0]
     let bools = Array.init (int n) (fun i -> toBoolv (pred (readCell arr [ int64 i ])))
     { ElemType = IRTScalar ETBool
@@ -1060,9 +1147,12 @@ let rec private mapStoreLeaves (f: Value -> Value) (s: Store) : Store =
     match s with
     | SFloat a -> SFloat (a |> Array.map (fun x -> toF64v (f (VFloat x))))
     | SInt a -> SInt (a |> Array.map (fun x -> toI64v (f (VInt x))))
+    | SFloat32 a -> SFloat32 (a |> Array.map (fun x -> toF32v (f (VFloat32 x))))
+    | SInt32 a -> SInt32 (a |> Array.map (fun x -> toI32v (f (VInt32 x))))
     | SComplex a ->
         SComplex (a |> Array.map (fun (struct (r, i)) ->
             let (nr, ni) = toComplexv (f (VComplex (r, i))) in struct (nr, ni)))
+    | SComplex64 a -> SComplex64 (a |> Array.map (fun (struct (r, i)) -> toComplex64v (f (VComplex64 (r, i)))))
     | SBool a -> SBool (a |> Array.map (fun x -> toBoolv (f (VBool x))))
     | SObj a -> SObj (a |> Array.map f)
     | SNested rows -> SNested (rows |> Array.map (mapStoreLeaves f))
@@ -1534,15 +1624,20 @@ let eighArrays (operand: BladeArray) (outType: IRType) : BladeArray * BladeArray
                     let tq = qm.[i, r]
                     qm.[i, p] <- cs * tp - sn * tq
                     qm.[i, r] <- sn * tp + cs * tq
-    let lam = Array.init n (fun j -> aw.[j, j])
-    // Selection sort descending (ties keep original order) + Q column swaps.
-    for kk in 0 .. n - 1 do
-        let mutable best = kk
-        for j in kk + 1 .. n - 1 do
-            if lam.[j] > lam.[best] then best <- j
-        let tl = lam.[kk] in lam.[kk] <- lam.[best]; lam.[best] <- tl
-        for i in 0 .. n - 1 do
-            let tq = qm.[i, kk] in qm.[i, kk] <- qm.[i, best]; qm.[i, best] <- tq
+    let ld = Array.init n (fun j -> aw.[j, j])
+    // STABLE descending order (ties keep diagonal order; the oracle's and
+    // `MathDecls.stableDescPerm`'s insertion sort of an index array), then
+    // one gather each for LAM and Q's columns.
+    let perm = Array.init n id
+    for kk in 1 .. n - 1 do
+        for j in kk - 1 .. -1 .. 0 do
+            let a = perm.[j]
+            let b = perm.[j + 1]
+            if ld.[b] > ld.[a] then
+                perm.[j] <- b
+                perm.[j + 1] <- a
+    let lam = Array.init n (fun k -> ld.[perm.[k]])
+    let qm = Array2D.init n n (fun i j -> qm.[i, perm.[j]])
     // Sign fix: first row attaining max |entry| per column made positive.
     for j in 0 .. n - 1 do
         let mutable bigv = 0.0
@@ -1612,18 +1707,24 @@ let private compactCell (data: Store) (i: int) : Value =
     match data with
     | SFloat a -> VFloat a.[i]
     | SInt a -> VInt a.[i]
+    | SFloat32 a -> VFloat32 a.[i]
+    | SInt32 a -> VInt32 a.[i]
     | SComplex a -> let struct (r, im) = a.[i] in VComplex (r, im)
+    | SComplex64 a -> let struct (r, im) = a.[i] in VComplex64 (r, im)
     | SBool a -> VBool a.[i]
     | SObj a -> a.[i]
     | _ -> raise (InterpPanic ("BL8003", "compound read: unexpected backing store", None, 0))
 
 /// linearize(tuple) -> compact rank via the reverse map (compound_index_t::
-/// linearize = tuple_to_rank.at). A tuple that is not present is a program
-/// error (C++ .at() throws); the corpus only ever reads present cells.
+/// linearize: the reverse hash at rank >= 2, a binary search over the kept
+/// positions at rank 1). A tuple that is not present is the out-of-key-set
+/// read, BL8006 with the runtime header's exact text (BLADE_OUT_OF_KEY_SET,
+/// index_types.h) -- the same code and message the sparse twin raises, so a
+/// `// ABORT:` pin holds in every lane (corpus index-types/514).
 let compoundLinearize (cv: CompoundValue) (coords: int64[]) : int =
     match cv.RankOf.TryGetValue(compoundMaskOffset cv.LeadExtents coords) with
     | true, r -> r
-    | _ -> raise (InterpPanic ("BL8003", "compound read: coordinate not present in mask", None, 0))
+    | _ -> raise (InterpPanic ("BL8006", "index out of bounds: a key outside the sparse key set", None, 0))
 
 /// Build a Compound VALUE from a dense array + a bool mask array (the compound()
 /// / load_compound constructor). `arrType` is the compound view type (its
@@ -1689,6 +1790,15 @@ let compoundRow (cv: CompoundValue) (coords: int64[]) : Value =
 // feature (sparsePartial in 7b below). A CompoundPartial classification on a
 // compound head is an internal invariant break, backstopped at the read
 // sites in Loops.fs / CodeGen's compoundRead.
+
+/// Cell `i` of a compound's compact buffer, read from its LIVE store (no
+/// copy): `contains` reads its set's cells only after the target was
+/// evaluated (the one target-evaluation contract), so it reads them here,
+/// in place, rather than from a `compoundToDense` snapshot taken before.
+let compoundCompactCell (cv: CompoundValue) (i: int) : Value = compactCell cv.Data i
+
+/// A compound's compact cell count (cardinality x trailing stride).
+let compoundCompactCount (cv: CompoundValue) : int = int cv.Cardinality * int cv.TrailingStride
 
 /// The compact present values of a compound as a plain rank-1 dense array
 /// (cardinality*trailing_stride cells, buffer order) -- the operand form the
@@ -1769,11 +1879,12 @@ let buildSparse (arrType: IRArrayType) (values: BladeArray) (keys: int64[][])
       Data = storeOfValues arrType.ElemType (Array.sub valueCells 0 (int card * int trail)) }
 
 /// linearize(tuple) -> rank via the structural hash (sparse_index_t::linearize
-/// = tuple_to_rank.at). A missing key is a program error (C++ .at() throws).
+/// = a tuple_to_rank lookup). A missing key is an out-of-domain read: BL8006
+/// in both lanes, with the same message.
 let sparseLinearize (sv: SparseValue) (coords: int64[]) : int =
     match sv.RankOf.TryGetValue coords with
     | true, r -> r
-    | _ -> raise (InterpPanic ("BL8003", "sparse read: key tuple not present in key set", None, 0))
+    | _ -> raise (InterpPanic ("BL8006", "index out of bounds: a key outside the sparse key set", None, 0))
 
 let private sparseTrailingIndexTypes (sv: SparseValue) : IRIndexType list =
     match sv.IndexTypes with _ :: t -> t | [] -> []
@@ -1846,6 +1957,13 @@ let sparsePartial (sv: SparseValue) (pinned: (int * int64) list) (freePos: int l
               Cardinality = subCard
               TrailingStride = sv.TrailingStride
               Data = storeOfValues sv.ElemType compact }
+
+/// Cell `i` of a sparse array's compact buffer (key order), read in place --
+/// the twin of compoundCompactCell, for the same `contains` contract.
+let sparseCompactCell (sv: SparseValue) (i: int) : Value = compactCell sv.Data i
+
+/// A sparse array's compact cell count (cardinality x trailing stride).
+let sparseCompactCount (sv: SparseValue) : int = int sv.Cardinality * int sv.TrailingStride
 
 /// The compact values of a sparse as a plain rank-1 dense array (buffer/key
 /// order) -- the operand form the eager ops consume, mirroring compoundToDense.
@@ -2057,6 +2175,7 @@ let private formatCell (et: ElemType) (v: Value) : string =
         | VInt n -> formatFloat15 (float n)
         | VInt32 n -> formatFloat15 (float n)
         | VComplex (r, _) -> formatFloat15 r
+        | VComplex64 (r, _) -> formatFloat15 (float r)
         | _ -> formatFloat15 nan
     | ETFloat32 ->
         match v with
@@ -2084,13 +2203,15 @@ let private formatCell (et: ElemType) (v: Value) : string =
         | VInt n -> formatBool (n <> 0L)
         | _ -> formatBool false
     | ETComplex128 | ETComplex64 ->
+        let fc = if et = ETComplex64 then formatComplex64 else formatComplex
         match v with
-        | VComplex (r, im) -> formatComplex r im
-        | VFloat f -> formatComplex f 0.0
-        | VFloat32 f -> formatComplex (float f) 0.0
-        | VInt n -> formatComplex (float n) 0.0
-        | VInt32 n -> formatComplex (float n) 0.0
-        | _ -> formatComplex 0.0 0.0
+        | VComplex (r, im) -> fc r im
+        | VComplex64 (r, im) -> fc (float r) (float im)
+        | VFloat f -> fc f 0.0
+        | VFloat32 f -> fc (float f) 0.0
+        | VInt n -> fc (float n) 0.0
+        | VInt32 n -> fc (float n) 0.0
+        | _ -> fc 0.0 0.0
     | ETString ->
         match v with
         | VString s -> formatString s
@@ -2222,11 +2343,40 @@ let rec private raggedFlatValues (s: Store) : Value list =
     match s with
     | SFloat a -> a |> Array.toList |> List.map VFloat
     | SInt a -> a |> Array.toList |> List.map VInt
+    | SFloat32 a -> a |> Array.toList |> List.map VFloat32
+    | SInt32 a -> a |> Array.toList |> List.map VInt32
     | SComplex a -> a |> Array.toList |> List.map (fun (struct (r, im)) -> VComplex (r, im))
+    | SComplex64 a -> a |> Array.toList |> List.map (fun (struct (r, im)) -> VComplex64 (r, im))
     | SBool a -> a |> Array.toList |> List.map VBool
     | SObj a -> a |> Array.toList
     | SNested rows -> rows |> Array.toList |> List.collect raggedFlatValues
     | SRagged (rows, _, _) -> rows |> Array.toList |> List.collect raggedFlatValues
+
+/// Print a COMPOUND binding's present cells (G22) -- the twin of
+/// genPrintStatements' compound arm, byte-identical to it. `nested` (from
+/// CodeGen.compoundPrintShape) prints one row of `TrailingStride` cells per
+/// present compound cell; otherwise the whole compact buffer is one flat run.
+let printCompoundCells (name: string) (cv: CompoundValue) (nested: bool) (sb: StringBuilder) : unit =
+    let et =
+        match elemThrough cv.ElemType with
+        | Some et -> et
+        | None -> raise (ArrayOpUnsupported $"print: compound '{name}' of non-scalar element type")
+    let cells = raggedFlatValues cv.Data |> Array.ofList
+    let cell (k: int64) = if k < int64 cells.Length then formatCell et cells.[int k] else formatCell et (zeroOfElemTy cv.ElemType)
+    sb.Append(name).Append(" = [") |> ignore
+    if nested then
+        for r in 0L .. cv.Cardinality - 1L do
+            if r > 0L then sb.Append(", ") |> ignore
+            sb.Append("[") |> ignore
+            for t in 0L .. cv.TrailingStride - 1L do
+                if t > 0L then sb.Append(", ") |> ignore
+                sb.Append(cell (r * cv.TrailingStride + t)) |> ignore
+            sb.Append("]") |> ignore
+    else
+        for k in 0L .. cv.Cardinality * cv.TrailingStride - 1L do
+            if k > 0L then sb.Append(", ") |> ignore
+            sb.Append(cell k) |> ignore
+    sb.Append("]").Append('\n') |> ignore
 
 /// Print a top-level ARRAY binding to `sb`, byte-matching the compiled binary.
 /// Dense scalar-element arrays (flat 1-3, grid 4, placeholder) via the flat

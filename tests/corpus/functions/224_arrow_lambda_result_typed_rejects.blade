@@ -4,5 +4,5 @@
 // Vacuity probe for functions/214: the application's result is the passed
 // array's element, Int64 here, so a Bool annotation is refused.
 let u = lambda(c) -> c(0)
-let iv = [4, 5, 6]
+let iv = Int64([4, 5, 6])
 let x: Bool = u(iv)

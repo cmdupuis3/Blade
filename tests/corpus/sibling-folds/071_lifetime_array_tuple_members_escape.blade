@@ -1,0 +1,16 @@
+// TEST: Array calls in tuple members preserve their escaping pool results
+type Ix = Idx<37>
+function inputs() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(i) |> compute
+}
+function member_array(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    method_for(x) <@> lambda(v) -> v + 1.0 |> compute
+}
+let (a, b) = {
+    let x = inputs()
+    (member_array(x), member_array(x))
+}
+let sa = reduce(a, (+))
+let sb = reduce(b, (+))
+// EXPECT: sa = 703.0
+// EXPECT: sb = 703.0

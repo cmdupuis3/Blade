@@ -1,0 +1,14 @@
+// TEST: GroupBy Result Stored In A Struct Field (rejects)
+// ERROR: BL3017 @ 12:22
+// ERROR-CONTAINS: the struct field 'data' cannot be a GROUPED value
+// A field's declared type is never grouped: the aggregate initialization
+// took the row-pointer table and left the extents null, and the program
+// crashed (STATUS_ACCESS_VIOLATION) reading the field. Fold the groups
+// first and store the per-group result.
+struct Box { data: Float64^2 }
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
+let gk = group_keys(region)
+let g = group_by(temps, gk)
+let b = Box { data = g }
+let s = reduce(b.data, (+))

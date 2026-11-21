@@ -1,0 +1,22 @@
+// TEST: A Bool Stage Over A reynolds Map Is A Bool Array In Every Storage Class
+// EXPECT: dense = [[false, false], [true, true]]
+// EXPECT: packed = [[true, true, true], [true, true], [false]]
+// ============================================================================
+// R20 (review round 3): a `<$>` stage over a reynolds map applies to the
+// SYMMETRIZED value, after the permutation sum, so a Bool stage is not summed
+// and its map is a Bool array: dense over two arrays (K = 2xy - 10), packed
+// symmetric over a comm-licensed same-array map (K = -x - y, one Bool per
+// canonical cell). Round 2 refused both (BL3001: the stage ran inside each
+// summed term). Over a packed ANTISYMMETRIC map (anticomm) a Bool stage is
+// not sign-odd and is refused at the type checker (BL4015), as any map of an
+// antisymmetric array is.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 4.0]
+let g = lambda(x, y) -> x * y - 5.0
+let kc = lambda(x: Float64, y: Float64) where comm(x, y) -> x - 2.0 * y
+let positive = lambda(z: Float64) -> z > 0.0
+let above = lambda(z: Float64) -> z > -7.0
+let dense = positive <$> (method_for(a, b) <@> reynolds(g)) |> compute
+let packed = above <$> (method_for(xs, xs) <@> reynolds(kc)) |> compute

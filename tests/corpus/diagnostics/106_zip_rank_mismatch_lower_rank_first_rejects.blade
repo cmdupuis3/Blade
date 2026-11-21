@@ -1,0 +1,10 @@
+// TEST: Diag Zip Rank Mismatch Lower Rank First (rejects)
+// Gap G99 (round 4 wave 4 lane A): a zip of plain dense operands of DIFFERENT
+// ranks shares no index space. The operand order does not matter: the lower-rank operand first is refused too.
+// ERROR: BL3027
+// ERROR-CONTAINS: co-iteration operands must have the SAME rank
+type R = Idx<3>
+type C = Idx<4>
+let A: Array<Float64 like R, C> = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute
+let t: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let Z = method_for(zip(t, A)) <@> lambda(ti: Float64, row: Array<Float64 like C>) -> ti + reduce(row, (+)) |> compute

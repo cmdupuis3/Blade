@@ -1,0 +1,14 @@
+// TEST: An Int64 Cell Through An Aliased Lambda With A Float Default Is Refused (rejects)
+// ERROR: BL3020 @ 11:37
+// ERROR-CONTAINS: widening it to Float64
+// ============================================================================
+// R11: as functions/909 with `(x + 1) - x` at 2^53 (double arithmetic would
+// round it away); g++ refused it (BL9002).
+// ============================================================================
+function test() = {
+    let f = lambda(x) -> (x + 1) - x
+    let g = f
+    let xs: Array<Int64 like Idx<1>> = [9007199254740992]
+    method_for(xs) <@> lambda(v) -> g(v) |> compute
+}
+let r = test()

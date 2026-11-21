@@ -11,14 +11,14 @@ import math as m
 let Ab: Array<Float64 like Idx<2>, Idx<2>> = [[1.0e80, 1.0e80], [0.0, 1.0e80]]
 let (Ub, Sb, Vb) = m.svd(Ab)
 // EXPECT: Sb = [1.618033988749895e80, 6.180339887498948e79]
-let udot = Ub(0, 0) * Ub(0, 1) + Ub(1, 0) * Ub(1, 1)
-let u_orthogonal = if abs(udot) < 0.000000000001 then 1.0 else 0.0
+let udot = Ub(Int64(0), Int64(0)) * Ub(0, 1) + Ub(1, 0) * Ub(1, 1)
+let u_orthogonal: Float64 = if abs(udot) < 0.000000000001 then 1.0 else 0.0
 // EXPECT: u_orthogonal = 1.0
 
 // eigh of [[2,1],[1,2]] * 1e160: eigenvalues 3e160, 1e160
 let Sh: Array<Float64 like Idx<2>, Idx<2>> = [[2.0e160, 1.0e160], [1.0e160, 2.0e160]]
 let (Qh, lamh) = m.eigh(Sh)
 // EXPECT: lamh = [3.0e160, 1.0e160]
-let qdot = Qh(0, 0) * Qh(0, 1) + Qh(1, 0) * Qh(1, 1)
-let q_orthogonal = if abs(qdot) < 0.000000000001 then 1.0 else 0.0
+let qdot = Qh(Int64(0), Int64(0)) * Qh(0, 1) + Qh(1, 0) * Qh(1, 1)
+let q_orthogonal: Float64 = if abs(qdot) < 0.000000000001 then 1.0 else 0.0
 // EXPECT: q_orthogonal = 1.0

@@ -1,0 +1,16 @@
+// TEST: Ordered Tuple Copy Member Failure First (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the sixth Codex look of W4B-A, finding 1's first-failure control:
+// the tuple is member-ordered by its COPY member `g |> compute` (structural),
+// so its leaves are separate regions: g's computation fails (a checked index
+// cast, BL8006) at member 0, before member 1's if forces h -- which cannot fail.
+// Admitted (not BL6002), BL8006 first in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [2]
+let g = method_for(z) <@> lambda(v) -> z((v : Row))
+let h = method_for(z) <@> lambda(v) -> 10 / (v + 1)
+let r = (g |> compute, if h(0) > 0 then h(0) else 0)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:10

@@ -1,5 +1,5 @@
 // TEST: Leading Axis Fold Omp Kernel (rejects)
-// ERROR: BL3999
+// ERROR: BL3034
 // ERROR-CONTAINS: sequential by construction
 // The leading-axis fold is a sequential recurrence (each step consumes the
 // previous accumulator). A `where omp` clause on its kernel would license

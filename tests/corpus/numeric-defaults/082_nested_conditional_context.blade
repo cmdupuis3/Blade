@@ -1,0 +1,17 @@
+// TEST: numeric annotations reach nested conditional branches
+function species_of(a: Int64) -> Int64 =
+    if a == 6 then 1 else (if a == 8 then 2 else 3)
+function coefficient(a: Int32) -> Float64 =
+    if a == 0 then 0.1 else { if a == 1 then 0.2 else 0.1 + 0.2 }
+let carbon: Int64 = species_of(6)
+let oxygen: Int64 = species_of(8)
+let other: Int64 = species_of(1)
+let precise = coefficient(2) == Float64(0.1) + Float64(0.2)
+let first = coefficient(0) == Float64(0.1)
+let middle = coefficient(1) == Float64(0.2)
+// EXPECT: carbon = 1
+// EXPECT: oxygen = 2
+// EXPECT: other = 3
+// EXPECT: precise = true
+// EXPECT: first = true
+// EXPECT: middle = true

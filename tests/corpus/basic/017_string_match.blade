@@ -3,13 +3,13 @@
 // IRLitString lowers via litToCpp to a `scrut == std::string("...")`
 // guard, chained as nested ternaries by the match codegen.
 let s = "urban"
-let code = match s with
+let code: Int64 = match s with
   | "forest" -> 1
   | "urban" -> 2
   | "farmland" -> 3
   | _ -> 0
 let s2 = "ocean"
-let code2 = match s2 with
+let code2: Int64 = match s2 with
   | "forest" -> 1
   | "urban" -> 2
   | _ -> 99

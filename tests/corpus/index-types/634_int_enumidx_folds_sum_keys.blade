@@ -1,0 +1,19 @@
+// TEST: A fold of an arithmetic section over R values folds their keys
+// ============================================================================
+// R3: `reduce(codes, (+))` is the sum of the KEYS -- the fused fold over the
+// observed keys (nothing stored); a seed, a non-commutative section and a
+// section bound to a name likewise.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let s = reduce(codes, (+))
+// EXPECT: s = 600
+let p = reduce(codes, (*))
+// EXPECT: p = 6000000
+let s0 = reduce(codes, (+), 0)
+// EXPECT: s0 = 600
+let d = reduce(codes, (-))
+// EXPECT: d = -400
+let op = (+)
+let so = reduce(codes, op)
+// EXPECT: so = 600

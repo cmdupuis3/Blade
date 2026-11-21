@@ -1,0 +1,23 @@
+// TEST: Compaction fusion v2: two compounds over one mask keep their own gathers
+// A mask feeding SEVERAL compounds is a SHARED SELECTION (T4c, the default):
+// ONE selection index, counted in the mask pass, its kept positions (the keyed
+// reads demand them) filled by one joint pass at `y1` that gathers both, each
+// compound keeping its own compact buffer around the shared index (under the
+// opt-in `gather` that pass is the mask pass). Under `unshared` (the pre-T4c v2)
+// the mask's count serves the last compound and the first keeps its separate
+// passes. They agree cell for cell, by key and by fold; as-written values.
+type Ix = Idx<11>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 4) % 11) |> compute
+let keep = mask(x, lambda(v) -> v > 4.5)
+let y1 = compound(x, keep)
+// EXPECT: y1 = [8.0, 5.0, 9.0, 6.0, 10.0, 7.0]
+let y2 = compound(x, keep)
+// EXPECT: y2 = [8.0, 5.0, 9.0, 6.0, 10.0, 7.0]
+let s1 = reduce(y1 * y1, (+))
+// EXPECT: s1 = 355.0
+let s2 = reduce(y2 * y2, (+))
+// EXPECT: s2 = 355.0
+let k1 = y1(2)
+// EXPECT: k1 = 8.0
+let k2 = y2(10)
+// EXPECT: k2 = 7.0

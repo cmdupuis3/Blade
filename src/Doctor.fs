@@ -338,8 +338,19 @@ let private checkNetcdf (gppOk: bool) : CheckResult =
             | Ok (0, out) when out.Contains "blade-doctor-netcdf" ->
                 let ver = out.Replace("blade-doctor-netcdf", "").Trim().Split('\n').[0].Trim()
                 row StatusOk $"links and runs (libnetcdf {ver})"
-            | _ ->
-                row StatusWarn ($"""links but does not run{(runtimeDirHint "NETCDF_DIR")}""")
+            | other ->
+                // HOW it failed, not only that it did: the PATH hint alone sent
+                // CI looking at a directory that was already on PATH. A
+                // missing DLL, a missing entry point and a crash in a DLL's
+                // init are different NTSTATUS codes with different fixes.
+                let how =
+                    match other with
+                    | Ok (code, _) ->
+                        match Build.describeCrashExit code with
+                        | Some why -> $"exit {code}: {why}"
+                        | None -> $"exit {code}"
+                    | Error e -> e.Split('\n').[0].Trim()
+                row StatusWarn ($"""links but does not run ({how}){(runtimeDirHint "NETCDF_DIR")}""")
 
 let private checkMpi (gppOk: bool) : CheckResult =
     let row status detail origin =

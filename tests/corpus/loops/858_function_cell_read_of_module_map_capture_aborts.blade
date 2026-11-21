@@ -1,0 +1,13 @@
+// TEST: a function-body cell read of a module map whose kernel captures it (aborts)
+// Gap G235 (b), round 4 wave 9: the cell read q(0) of the module map q, whose kernel captures d.
+// A function body evaluates a deferred module map privately, per call (G75);
+// a kernel capture of it is a forcing use where the kernel is formed, so d
+// (a division by zero at cell 1) fails in every lane. The LLVM lane used to
+// skip the capture in a function body and complete.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let q = method_for(x) <@> lambda(v) -> v + extents(d)
+function read_q() -> Int64 = q(0)
+let s = read_q()
+// ABORT: BL8013
+// ABORT: .blade:7

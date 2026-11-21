@@ -33,7 +33,7 @@
 // The FUNCTION-body twin, which codegen handled all along, is
 // functions/059_array_intermediate_over_caret_param.
 // ============================================================================
-let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 
 let out = method_for(m) <@> lambda(r: T^1) -> {
     let w = (r * 2.0) |> compute

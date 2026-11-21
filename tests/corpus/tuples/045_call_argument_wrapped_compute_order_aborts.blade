@@ -1,0 +1,18 @@
+// TEST: Call Argument Wrapped Compute Order (aborts)
+// ----------------------------------------------------------------------------
+// Gap G57's first failure: the call's arguments are evaluated LEFT TO RIGHT
+// in every lane. The first argument's checked cast fails (BL8006) before the
+// second argument's explicit compute divides by zero (BL8013). The C++ lane
+// binds the evaluating scalar argument to a temporary at its own position
+// ahead of the compute's temporary; C++ alone leaves argument evaluation
+// order unspecified.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+function g(k: Int64, w: T^1) -> Int64 = k + reduce(w, (+))
+let r = g(a((a(0) : Row)), bad |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:14

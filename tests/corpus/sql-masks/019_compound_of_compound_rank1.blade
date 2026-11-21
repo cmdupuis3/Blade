@@ -1,0 +1,20 @@
+// TEST: Compound Of Compound Rank1
+// ----------------------------------------------------------------------------
+// A mask over a rank-1 COMPOUND (gap G128, round 4 wave 4 lane H): the bits
+// are over the compound's present cells in order (sharing its index), and a
+// compound over them selects those cells. Was a C++ compile failure (the mask
+// read `.extents` of a `Compound`) and gated in the interpreter; the LLVM lane
+// refuses a compound of a compound (recorded) and the program runs in C++.
+// ----------------------------------------------------------------------------
+type Row = Idx<9>
+let xs: Array<Int64 like Row> = [5, -1, 3, 8, -2, 7, 1, 0, 9]
+let pos = compound(xs, mask(xs, lambda(x) -> x > 0))
+let odd = mask(pos, lambda(v) -> v % 2 == 1)
+let pos_odd = compound(pos, odd)
+let n = extents(pos_odd)
+let fp = reduce(pos_odd, lambda(a, b) -> a * 10 + b)
+// EXPECT: pos = [5, 3, 8, 7, 1, 9]
+// EXPECT: odd = [true, true, false, true, true, true]
+// EXPECT: pos_odd = [5, 3, 7, 1, 9]
+// EXPECT: n = 5
+// EXPECT: fp = 53719

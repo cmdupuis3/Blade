@@ -1,0 +1,17 @@
+// TEST: A Function With A Mut Parameter Held In A Tuple Is Refused (rejects)
+// ============================================================================
+// Gap G250 (2), round 4 wave 9 (lane C, C2): a mut-parameter function held in
+// a tuple and applied through the projection (`hs[0](xs, xs)`) is an
+// unjudged head; holding it is refused (BL4005, every lane).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+let hs = (bump, 0)
+let mut xs: A = [2.0, 3.0]
+let r = hs[0](xs, xs)
+// ERROR: BL4005
+// ERROR-CONTAINS: has a mut parameter and is used here as a VALUE
+// REJECT-AT: lower

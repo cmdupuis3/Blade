@@ -1,0 +1,22 @@
+// TEST: A Mut Argument Beside A Bound Then Applied Closure Key Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3-kernel), round 4 wave 9 (lane C, C2; Codex diff review
+// 5f64f352 round 5): binding a closure taken out of an aggregate
+// (`let f = ks[0]`) runs nothing and stays inert, but the bound name in the
+// sort KEY slot runs with unknown reads: refused fail closed beside the mut
+// argument (BL4005). The store / bind exemption covers only the binding.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let ks = (factory(g), 0)
+function keyed(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    let f = ks[0]
+    let s = sort(y, f)
+    s(0)
+}
+let r = keyed(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

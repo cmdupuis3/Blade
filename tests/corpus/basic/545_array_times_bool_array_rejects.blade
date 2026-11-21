@@ -1,0 +1,12 @@
+// TEST: an array times a Bool array (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14:
+// "true is a boolean and is not compatible without type casting"): arithmetic
+// is defined on numbers only, so the type checker refuses it before either
+// lane runs. On master 1e6a871a this printed `t = [0.0, 2.0,
+// 3.0]` (the mask read as 0 / 1).
+// ============================================================================
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let m = xs > 1.5
+let t = xs * m
+// ERROR: BL3001

@@ -20,7 +20,7 @@ type I = Idx<4>
 
 let keep = [true, false, true, true]
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let c = compound(a, keep)
     c(0) + c(1)
 }

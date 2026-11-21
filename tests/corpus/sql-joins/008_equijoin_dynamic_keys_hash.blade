@@ -1,0 +1,20 @@
+// TEST: Equijoin Dynamic Keys Hash
+// ----------------------------------------------------------------------------
+// Unannotated Int64 keys whose span (from -5 to 1000000007) is far beyond
+// max(4 M, 4096) cells: the CSR's key -> bucket map is the open-addressing
+// hash (first-occurrence bucket numbering, which never reaches the output --
+// the probe order is the left keys'). A right key held by three rows (skew)
+// keeps all three, ascending. INT64-wide keys are ordinary keys.
+// Pairs: (0,1) (0,3) (0,5) (1,4) (2,0) (3,1) (3,3) (3,5).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<5>
+type RightRow = Idx<6>
+let left_key: Array<Int64 like LeftRow> = [1000000007, -5, 42, 1000000007, 8]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4, 5]
+let right_key: Array<Int64 like RightRow> = [42, 1000000007, 7, 1000000007, -5, 1000000007]
+let right_amount: Array<Int64 like RightRow> = [10, 20, 30, 40, 50, 60]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * 1000 + r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let fp = reduce(matched, lambda(a, b) -> 3 * a + b, 0)
+// EXPECT: matched = [1020, 1040, 1060, 2050, 3010, 4020, 4040, 4060]
+// EXPECT: match_count = 8

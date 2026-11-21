@@ -1,0 +1,13 @@
+// TEST: A Zip Of Compounds Over A Mask And Its Plain Alias Co-Iterates
+// Gap G265 (d) (round 4 wave 10 lane d; wave-end review F3): `k2` is a never-written plain alias of
+// the mask `keep`, so both compounds are over ONE mask value: the provenance token is the mask's ROOT
+// binder (it was the variable's own binder, and the zip was refused BL3016).
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let y: Array<Int64 like I> = [10, 20, 30, 40, 50, 60]
+let keep = mask(x, lambda(v) -> v > 3)
+let k2 = keep
+let a = compound(x, keep)
+let b = compound(y, k2)
+let m = method_for(zip(a, b)) <@> lambda(p, q) -> p * q |> compute
+// EXPECT: m = [160, 250, 360]

@@ -1,0 +1,12 @@
+// TEST: A Reynolds-wrapped fold map kernel forces its capture
+// Gap G199 (Codex diff review round 4): the fold over a map whose kernel is a
+// reynolds(..) wrapper capturing the deferred d forces d under its own name
+// before the fold (the C++ lane resolves the wrapped kernel); the LLVM lane
+// read only plain kernels, so d stayed a producer and read the later write.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(method_for(zip(x, x)) <@> reynolds(lambda(a, b) -> a + b + Float64(extents(d))), (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: w = 2.0

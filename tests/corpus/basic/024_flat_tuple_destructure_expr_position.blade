@@ -15,8 +15,8 @@
 //     a = get<0>(get<0>(y))   b = get<1>(get<0>(y))   c = get<1>(y)
 // which is what a flat projection means, and is the same leaf order
 // IR.flattenTupleLeaves hands the declaration-position path.
-let x = (1, 2)
-let y = (x, 3)
+let x = (Int64(1), Int64(2))
+let y = (x, Int64(3))
 let probe = let (a, b, c) = y
 
 // The DECLARATION-position flat destructure of the very same scrutinee, pinned
@@ -31,7 +31,7 @@ let (d, e, f) = y
 // EXPECT: e = 2
 // EXPECT: f = 3
 
-let after = 7
+let after: Int64 = 7
 // EXPECT: after = 7
 
 // WHAT THIS FILE ASSERTS, precisely:

@@ -1,0 +1,17 @@
+// TEST: Math nested elaborated calls (matmul of a matmul, svd of a matmul)
+// #62: an elaborated call is an operand of the next with no staging binding;
+// the inner call is elaborated first and its result shape is the one its
+// elaboration produces (the matmul marker's registered shape).
+// A^2 = [[17, 7, 1], [7, 11, 5], [1, 5, 5]], (A^3)(0, 0) = 75, and the
+// squared singular values of A^2 sum to its squared Frobenius norm, 585.
+// (`m.lu_solve(m.lu(A), b)` -- a factorization nested in lu_solve -- is a
+// C++ back-end gap, BL7001 "no rule for IRLu in expression position", as on
+// master; bind the factorization: `let f = m.lu(A)`.)
+import math as m
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]
+let C = m.matmul(A, m.matmul(A, A))
+let c00 = C(0, 0)
+// EXPECT: c00 = 75.0
+let (U, sv, V) = m.svd(m.matmul(A, A))
+let fro = sv(0) * sv(0) + sv(1) * sv(1) + sv(2) * sv(2)
+// EXPECT: fro = 585.0

@@ -1,0 +1,15 @@
+// TEST: a write to a callback's result that may be the captured plain let it was handed
+// ERROR: BL4005
+// ERROR-CONTAINS: a write reaches `G` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): the
+// program's value-used callable returns its parameter, so `t = h(G)` may be
+// `G` itself, and the store through `t` writes it from `f`, which only
+// captures it. The accepted twin: mutability/025 (`a * 2.0`, fresh cells).
+let G: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function f(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = {
+    let t = h(G)
+    t(0) = 9.0
+    t(0)
+}
+let r = f(lambda(a) -> a)

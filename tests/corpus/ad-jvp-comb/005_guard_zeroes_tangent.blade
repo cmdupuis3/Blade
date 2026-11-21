@@ -4,8 +4,8 @@
 // rather than an unguarded derivative. Both polarities pinned.
 import ad as ad
 
-function on(x: Float) -> Float = guard(true, x * x)
-function off(x: Float) -> Float = guard(false, x * x)
+function on(x: Float64) -> Float64 = guard(true, x * x)
+function off(x: Float64) -> Float64 = guard(false, x * x)
 
 let (von, ton) = ad.jvp(on)(3.0, 1.0)
 let (voff, toff) = ad.jvp(off)(3.0, 1.0)

@@ -1,0 +1,11 @@
+// TEST: Compound Mask Failure Valid Data (aborts)
+// ----------------------------------------------------------------------------
+// The control for 017: the dense operand is a valid in-place map, so the
+// mask's empty fold (BL8003) is the first failure.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let none = compound(a, mask(a, lambda(v) -> v > 5))
+let c = compound(method_for(a) <@> lambda(v) -> v * 2, method_for(a) <@> lambda(v) -> reduce(none, (+)) > v)
+// ABORT: BL8003
+// ABORT: empty

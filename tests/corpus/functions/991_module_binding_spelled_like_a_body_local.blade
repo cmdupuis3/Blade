@@ -1,0 +1,15 @@
+// TEST: A module binding spelled like an emitted body local is read, not the local
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 2): a function
+// body's let is emitted under the minted C++ name __v<id>; a module binding
+// SPELLED __v3, read inside the function, was shadowed by the local of id 3
+// (r = 6.0, the local twice). Minted local names now avoid every spelling the
+// program uses (CodeGenState.localVarName).
+// ============================================================================
+let __v3: Float64 = 10.0
+function f(x: Float64) -> Float64 = {
+    let y = x + 1.0
+    __v3 + y
+}
+let r = f(Float64(2.0))
+// EXPECT: r = 13.0

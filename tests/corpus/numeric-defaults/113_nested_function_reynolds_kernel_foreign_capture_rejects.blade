@@ -1,0 +1,15 @@
+// TEST: A Nested Function Applying A Reynolds-Wrapped Foreign-Capture Kernel Is Refused (rejects)
+// Gap G247 (round 4 wave 9 lane d; Codex diff review round 2): the refusal peels a reynolds(f)
+// wrapper before resolving the kernel, as resolveKernel does.
+// ERROR: BL7004
+// ERROR-CONTAINS: a binding of an enclosing function
+// REJECT-AT: lower
+type I = Idx<2>
+let a: Array<Float64 like I> = [1.0, 2.0]
+function outer() = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64, y: Float64) -> (x + y) * scale
+    function apply(scale: Float64) = method_for(a, a) <@> reynolds(f) |> compute
+    apply(10.0)
+}
+let r = outer()

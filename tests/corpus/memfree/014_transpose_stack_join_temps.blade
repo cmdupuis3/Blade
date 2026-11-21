@@ -18,12 +18,12 @@
 type C = Idx<3>
 type R = Idx<2>
 type Steps = Idx<5>
-function tvec(n: Int64) -> Array<Float like C> = {
+function tvec(n: Int64) -> Array<Float64 like C> = {
     let M = method_for(range<R, C>) <@> lambda(i, j) -> (Float64(i) + 1.0) * (Float64(j) + Float64(n)) |> compute
     let MT = transpose(M, [0, 1])
-    method_for(MT) <@> lambda(row: Array<Float like R>) -> reduce(row, (+)) |> compute
+    method_for(MT) <@> lambda(row: Array<Float64 like R>) -> reduce(row, (+)) |> compute
 }
-function mixt(n: Int64) -> Float = {
+function mixt(n: Int64) -> Float64 = {
     let rs = tvec(n)
     let st = stack(rs, rs)
     let srow = method_for(st) <@> lambda(row) -> reduce(row, (+)) |> compute
@@ -32,7 +32,7 @@ function mixt(n: Int64) -> Float = {
 }
 let toprs = tvec(1)
 let topmix = mixt(1)
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

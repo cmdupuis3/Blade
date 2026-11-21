@@ -1,0 +1,23 @@
+// TEST: Parallel Callback Third Order All Pure
+// Gap G41, Codex review W2F-8 finding 28: launch's `f` is reached through
+// three levels of indirection (relay -> bridge's q -> via's h). bridge's body
+// is met before its `q` is discovered; an undiscovered callback is BOTTOM,
+// not unknown, so nothing is tainted and the least fixpoint finds every edge
+// (804516d1 tainted launch's `f` here and refused this pure program BL4005).
+// The kernel keeps its team (omp-pragma pins the pragma); loops/513 is the
+// reversed discovery order.
+type I = Idx<2>
+type F = (Float64) -> Float64
+type R = Array<Float64 like I>
+type H = (F) -> R
+type Q = (H, F) -> R
+type D = (Q, F) -> R
+function ident(v: Float64) -> Float64 = v
+function launch(f: F) -> R = method_for(range<I>) <@> lambda(i) where omp(i: 1) -> f(Float64(i)) |> compute
+function via(h: H, f: F) -> R = h(f)
+function bridge(q: Q, f: F) -> R = q(launch, f)
+function relay(h: D, f: F) -> R = h(via, f)
+let a = launch(ident)
+let b = relay(bridge, ident)
+// EXPECT: a = [0.0, 1.0]
+// EXPECT: b = [0.0, 1.0]

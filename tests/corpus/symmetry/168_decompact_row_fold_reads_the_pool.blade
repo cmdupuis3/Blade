@@ -1,0 +1,43 @@
+// TEST: Decompact Row Fold Reads The Pool
+// ============================================================================
+// PM29 (`decompact-row-fold`, BLADE_DECOMPACT_FOLD): a row fold of a
+// decompacted rank-2 pool, `reduce(decompact(S, d), k, s)`, reads the packed
+// pool cell by cell -- the logical cell S(i, j), its sign applied for an
+// AntisymIdx pool, 0.0 on the antisymmetric diagonal -- instead of building
+// the n x n dense buffer. The pins are the hand values and the differential
+// against the stored decompaction (`D`, printed, so it keeps its buffer):
+// every row chain visits the same cells in the same order from the same
+// seed, so even the order-sensitive kernel `acc * 0.5 + v` agrees exactly.
+// ============================================================================
+type I = Idx<5>
+let x = Float64(range<I>)
+// S(i, j) = i j + 1 (SymIdx<2, 5>, 15 stored cells); A(i, j) = i - j
+// (AntisymIdx<2, 5>, 10 stored cells, the diagonal implicit).
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b + 1.0 |> compute
+let An = method_for(x, x) <@> lambda(a, b) where anticomm(a, b) -> a - b |> compute
+
+// row sums: S -> 10 i + 5, A -> 5 i - 10
+let srows = reduce(decompact(S, 0), (+), 0.0)
+// EXPECT: srows = [5.0, 15.0, 25.0, 35.0, 45.0]
+let arows = reduce(decompact(An, 0), (+), 0.0)
+// EXPECT: arows = [-10.0, -5.0, 0.0, 5.0, 10.0]
+let arows1 = reduce(decompact(An, 1), (+), 0.0)
+// EXPECT: arows1 = [-10.0, -5.0, 0.0, 5.0, 10.0]
+// unseeded: the fused fold's route seed (an exact identity on a strict route)
+let srows_u = reduce(decompact(S, 1), (+))
+// EXPECT: srows_u = [5.0, 15.0, 25.0, 35.0, 45.0]
+
+// order-sensitive kernel, against the stored decompaction
+let schain = reduce(decompact(S, 0), lambda(acc, v) -> acc * 0.5 + v, 0.0)
+let achain = reduce(decompact(An, 0), lambda(acc, v) -> acc * 0.5 + v, 0.0)
+let DS = decompact(S, 0)
+let DA = decompact(An, 0)
+let schain_ref = reduce(DS, lambda(acc, v) -> acc * 0.5 + v, 0.0)
+let achain_ref = reduce(DA, lambda(acc, v) -> acc * 0.5 + v, 0.0)
+let s_same = reduce(method_for(zip(schain, schain_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: s_same = true
+let a_same = reduce(method_for(zip(achain, achain_ref)) <@> lambda(a, b) -> a == b, lambda(p, q) -> p && q, true)
+// EXPECT: a_same = true
+// row 0 of S is [1, 1, 1, 1, 1]: 1 * 0.5 + 1 = 1.5, 1.75, 1.875, 1.9375
+let s0 = schain((0 : I))
+// EXPECT: s0 = 1.9375

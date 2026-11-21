@@ -1,0 +1,31 @@
+// TEST: A checkpointed step reads an alias whose storage the body writes after the recurrence
+// ============================================================================
+// Round 4 wave 10 (lane A, A2: the fresh class-closure round of
+// BLADE_AD_CHECKPOINT, Codex 81d2ce3b, gap G162): no gradient buffers, so the
+// replay inputs were never snapshotted -- but the statement AFTER the
+// recurrence writes backing, whose storage forcing (read by the step)
+// shares; the name check sees only forcing. The descending sweep's replay
+// read 0.25 where the first run read 0.125 (auto over 5001 rows: dx
+// 0.0180956572294235 for the full tape's 0.00267982482910156). The replay
+// inputs are now snapshotted in every build, gradient buffers or not
+// (blade test access pins the decision and compares the raw bits).
+// ============================================================================
+import ad as ad
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+let mut backing: A = [0.125]
+let forcing = identity(backing)
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: 0.5 * prefix(n - 1) * prefix(n - 1) + forcing(0)
+    backing(0) = 0.25
+    s(4)
+}
+let (value, dx) = ad.grad(f)(Float64(0.5))
+// EXPECT: backing = [0.25]
+// EXPECT: forcing = [0.25]
+// EXPECT: value = 0.134412884712219
+// EXPECT: dx = 0.00267982482910156

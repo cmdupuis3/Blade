@@ -1,0 +1,38 @@
+// TEST: prodsum over ragged and grouped rows stays built (no R13 refusal)
+// ============================================================================
+// R13 (deep review): prodsum walks each operand as a dense rank-1 buffer.
+// Over a compound selection or a sparse array -- tabulated storage, at any
+// element type and in any position -- it was a g++ rejection (BL9002) after
+// `check` said OK. It is refused in the type checker, keyed on the operand's
+// STORAGE class (prodsumUnbuiltStorage), naming the fold that is built.
+// ============================================================================
+// A row of a ragged or grouped array is a dense run of cells: prodsum over
+// one is built (a bound row view, a row parameter of a map kernel, a zip of
+// two groupings of the same keys) and is NOT in the refused storage class.
+let ra: Array<Int64 like Idx<2>, RaggedIdx<_>> = [[1], [2, 3, 4]]
+let rb: Array<Int64 like Idx<2>, RaggedIdx<_>> = [[5], [6, 7, 8]]
+let a = ra(1)
+let b = rb(1)
+let raa = prodsum(a, a)
+let rab = prodsum(a, b)
+let raba = prodsum(a, b, a)
+let rf: Array<Float32 like Idx<2>, RaggedIdx<_>> = [[1.0], [2.0, 3.0, 4.0]]
+let rk = method_for(rf) <@> lambda(r) -> prodsum(r, r) |> compute
+type K = Idx<4>
+let ks: Array<Int64 like K> = [1, 2, 2, 2]
+let gk = group_keys(ks)
+let za: Array<Complex128 like K> = [complex(1.0, 0.0), complex(2.0, 1.0), complex(3.0, 0.0), complex(4.0, -1.0)]
+let zb: Array<Complex128 like K> = [complex(5.0, 0.0), complex(6.0, 0.0), complex(7.0, 1.0), complex(8.0, 0.0)]
+let ga = group_by(za, gk)
+let gb = group_by(zb, gk)
+let g1 = method_for(ga) <@> lambda(r) -> prodsum(r, r) |> compute
+let g2 = method_for(zip(ga, gb)) <@> lambda(x, y) -> prodsum(x, y) |> compute
+let v = ga(1)
+let gv = prodsum(v, v)
+// EXPECT: raa = 29
+// EXPECT: rab = 65
+// EXPECT: raba = 215
+// EXPECT: rk = [1.0, 29.0]
+// EXPECT: g1 = [(1.0,0.0), (27.0,-4.0)]
+// EXPECT: g2 = [(5.0,0.0), (65.0,1.0)]
+// EXPECT: gv = (27.0,-4.0)

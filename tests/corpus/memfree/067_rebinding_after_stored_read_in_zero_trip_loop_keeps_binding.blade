@@ -1,0 +1,18 @@
+// TEST: A Rebinding After A Stored Read In A Zero-Trip Loop Keeps The Binding (G204)
+// Gap G204 (Codex diff review round 2): the loop guard admitted any binding
+// whose new value equalled the CURRENT value of a binding a force had
+// touched, and a plain read of stored storage (`a((0 : C))`) counted as one,
+// so `out = a` after it in a zero-trip loop changed the LLVM binding (6.0
+// instead of 0.0). Only the exact transitions of a HOISTED force are admitted
+// now; the rebinding is refused and the C++ lane runs the program.
+type C = Idx<3>
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let t1 = reduce(method_for(0..0) <@> lambda(k) -> {
+    let x = a((0 : C))
+    out = a
+    x
+}, (+), 0.0)
+let after = reduce(out, (+))
+// EXPECT: t1 = 0.0
+// EXPECT: after = 0.0

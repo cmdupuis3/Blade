@@ -1,0 +1,30 @@
+// TEST: AD A Deferred Module Map Bound Whole In A Callee
+import ad as ad
+// ============================================================================
+// Gap G190 (d) / (e), round 4 wave 8 (lane C, C2): MODULE VALUES a derivative
+// (or any function body) reads are forwarded into it: a deferred module map
+// bound whole (`let unused = delayed`), a module FUNCTION VALUE
+// (`let bomb_alias = bomb`, now the function itself: Lowering
+// inlineModuleFunctionAliases), an anonymous range RETURNED by a function.
+// Each used to be a C++ BL9002 (`forcing` / `bomb_alias` not declared) or an
+// `unsupported IR node: IRRange`; every lane now prints or fails as the
+// interpreter does. Fresh gradient buffers (a buffer may not alias what the
+// derivative reads: G190 (c), BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+function identity(a: A) -> A = a
+let mut backing: A = [2.0]
+let forcing = identity(backing)
+let delayed = method_for(forcing) <@> lambda(v) -> 1 / Int64(floor(v))
+function k(x: Float64) -> Float64 = {
+    let unused = delayed
+    x * Float64(unused(0) + 1)
+}
+function f(x: Float64, w: A) -> Float64 = {
+    let ys = method_for(range<Idx<3>>) <@> lambda(i) -> k(x) |> compute
+    reduce(ys, (+)) - 2.0 * w(0)
+}
+let w0: A = [2.0]
+let mut dw: A = [0.0]
+let r = ad.grad(f)(Float64(1.0), w0, dw)
+// EXPECT: r = (-1.0, 3.0)

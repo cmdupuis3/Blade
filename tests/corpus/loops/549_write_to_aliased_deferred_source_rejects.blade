@@ -1,0 +1,17 @@
+// TEST: Write To Aliased Deferred Source (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60 (Codex review of W4-1, finding 3): `let g2 = g; g(0) = 100.0; g2(0)`
+// -- the C++ lane and the interpreter copied the WRITTEN source when g2 was
+// read (100.0), the llvm lane recomputed the original producer (2.0). A write
+// through any member of a deferred alias class is refused at lowering in every
+// lane (BL4005), so the class stays one value.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+g(0) = 100.0
+let r = g2(0)
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

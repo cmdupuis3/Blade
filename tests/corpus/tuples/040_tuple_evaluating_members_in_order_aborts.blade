@@ -1,0 +1,16 @@
+// TEST: Tuple Evaluating Members In Order (aborts)
+// ----------------------------------------------------------------------------
+// A safe computed first member, then a failing checked cast, then a failing
+// integer division. Both failing members come AFTER the last materialized
+// one, and C++17 leaves the order of `std::make_tuple`'s arguments
+// unspecified (g++ evaluates them right to left), so the member-ordered tuple
+// path binds EVERY evaluating member at its own position: the cast (BL8006)
+// fires first, as in the interpreter.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let ok = method_for(a) <@> lambda(v) -> v + 1
+let t = (ok |> compute, a((a(0) : Row)), 1 / z(0))
+// ABORT: BL8006
+// ABORT: outside Row

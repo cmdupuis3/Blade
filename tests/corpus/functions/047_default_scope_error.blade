@@ -3,5 +3,5 @@
 // A default may reference the REQUIRED parameters only. Defaults evaluate
 // left-to-right at call entry with just the required arguments bound, so
 // another default's value is not available to reference.
-function bad2(a: Float, b: Float = 1.0, c: Float = b + 1.0) -> Float = a + b + c
-let r = bad2(2.0)
+function bad2(a: Float64, b: Float64 = 1.0, c: Float64 = b + 1.0) -> Float64 = a + b + c
+let r = bad2(Float64(2.0))

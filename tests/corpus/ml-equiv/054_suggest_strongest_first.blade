@@ -20,15 +20,15 @@ import ml as ml
 let static SODD = [(0, 1, 2), (1, 1, 1)]
 
 // SUGGEST: function 'act_loose' judges equivariant under SO3: add 'where ml.equiv(SO3)' [signature: x transforms as IrrepsIdx<[(0, 1, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 1, 2), (1, 1, 1)]>]
-function act_loose(x: Array<Float like IrrepsIdx<SODD>>) -> Array<Float like IrrepsIdx<SODD>> =
+function act_loose(x: Array<Float64 like IrrepsIdx<SODD>>) -> Array<Float64 like IrrepsIdx<SODD>> =
     ml.gated(SODD, x)
 
 // The pin the channel proposed, written out: it checks.
-function act_tight(x: Array<Float like IrrepsIdx<SODD>>) where ml.equiv(SO3)
-                   -> Array<Float like IrrepsIdx<SODD>> =
+function act_tight(x: Array<Float64 like IrrepsIdx<SODD>>) where ml.equiv(SO3)
+                   -> Array<Float64 like IrrepsIdx<SODD>> =
     ml.gated(SODD, x)
 
-let xv = [0.0, 2.0, 1.0, 1.0, 1.0]
+let xv = Float64([0.0, 2.0, 1.0, 1.0, 1.0])
 let loose = act_loose(xv)
 // EXPECT: loose = [0.0, 1.7615941559557646, 0.5, 0.5, 0.5]
 let tight = act_tight(xv)
@@ -41,11 +41,11 @@ let tight = act_tight(xv)
 let static SEVEN = [(0, 0, 2), (1, 1, 1)]
 
 // SUGGEST: function 'act_even_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 2), (1, 1, 1)]> -> IrrepsIdx<[(0, 0, 2), (1, 1, 1)]>]
-function act_even_loose(x: Array<Float like IrrepsIdx<SEVEN>>) -> Array<Float like IrrepsIdx<SEVEN>> =
+function act_even_loose(x: Array<Float64 like IrrepsIdx<SEVEN>>) -> Array<Float64 like IrrepsIdx<SEVEN>> =
     ml.gated(SEVEN, x)
 
-function act_even_tight(x: Array<Float like IrrepsIdx<SEVEN>>) where ml.equiv(O3)
-                        -> Array<Float like IrrepsIdx<SEVEN>> =
+function act_even_tight(x: Array<Float64 like IrrepsIdx<SEVEN>>) where ml.equiv(O3)
+                        -> Array<Float64 like IrrepsIdx<SEVEN>> =
     ml.gated(SEVEN, x)
 
 let even_loose = act_even_loose(xv)

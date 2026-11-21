@@ -5,7 +5,7 @@
 // Static invocation used to extend the caller's environment with g's
 // parameter, so `g(99)` folded to 99 at compile time and 10 at runtime --
 // one call, two answers. Both lanes now read the module's `a`.
-let static a = 10
+let static a: Int64 = 10
 static function f() = a
 static function g(a: Int64) = f()
 let static z = g(99)

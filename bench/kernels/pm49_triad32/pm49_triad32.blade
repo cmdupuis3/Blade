@@ -1,0 +1,46 @@
+// pm49_triad32 -- PM49 streaming-tier control (bench/RESULTS.md section 20 (round 4 wave 5, lane E))
+//
+//   z(0) = x;  z(t) = z(t-1) * 0.5 + y   (3 streams (read z(t-1), read y, write z(t)), Float32)
+//   checksum = sum z(k-1)^2 (in Float64)
+//
+// A block-body `let rec` read only at its last row: rec-window keeps a 2-row RING, and
+// slice-write fusion computes each row in place -- every row is STORED (the ring row), no
+// temporary, no copy (`blade plan`: rec-window + slice-write-fusion applied). k steps over n
+// cells repeat the pass so a cache-resident tier is timed above the process noise.
+
+type Ix = Idx<1500007>   // SIZE n
+type Step = Idx<21>   // SIZE k
+
+/// README section 5 input generator: five rounds mod 2^31 (affine, quadratic, affine,
+/// middle-square, affine), exact in Int64 (h3 * h3 < 2^62).
+function hash(k: Int64, seed: Int64) -> Int64 = {
+    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648
+    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648
+    let h3 = (h2 * 1103515245 + 12345) % 2147483648
+    let h4 = (h3 * h3 / 65536) % 2147483648
+    (h4 * 1103515245 + 12345) % 2147483648
+}
+
+function gen(k: Int64, seed: Int64, lo: Float64, hi: Float64) -> Float64 = {
+    lo + (hi - lo) * (Float64(hash(k, seed)) / 2147483648.0)
+}
+
+function inputs(seed: Int64) -> Array<Float32 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float32(gen(Int64(i), seed, 0.0, 1.0)) |> compute
+}
+
+function kernel(x: Array<Float32 like Ix>, y: Array<Float32 like Ix>) -> Float64 = {
+    let rec z: Array<Float32 like Step, Ix> =
+        match z with
+        | zero -> zero
+        | zero :: s -> zero :: x
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + y
+    let last = z(20)   // SIZE kl
+    reduce(method_for(last) <@> lambda(w) -> Float64(w) * Float64(w), (+), 0.0)
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs(10000019)
+    let y = inputs(20000038)
+    (kernel(x, y), reduce(method_for(x) <@> lambda(w) -> Float64(w), (+)) + reduce(method_for(y) <@> lambda(w) -> Float64(w), (+)))
+}

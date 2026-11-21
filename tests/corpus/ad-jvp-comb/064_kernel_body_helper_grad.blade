@@ -7,14 +7,14 @@
 // f = (x-1)^2 gated on y > 0; at x = 3: p = 4, df/dx = 2(x-1) = 4, df/dy = 0.
 import ad as ad
 
-function center(x: Float) -> Float = x - 1.0
+function center(x: Float64) -> Float64 = x - 1.0
 
-function f(x: Float, y: Float) -> Float = {
+function f(x: Float64, y: Float64) -> Float64 = {
     let a = guard(y > 0.0, center(x) * center(x))
     a
 }
 
-let (p, gx, gy) = ad.grad(f)(3.0, 1.0)
+let (p, gx, gy) = ad.grad(f)(Float64(3.0), Float64(1.0))
 // EXPECT: p = 4.0
 // EXPECT: gx = 4.0
 // EXPECT: gy = 0.0

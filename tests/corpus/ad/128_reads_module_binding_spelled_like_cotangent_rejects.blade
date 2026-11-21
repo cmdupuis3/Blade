@@ -1,0 +1,16 @@
+// TEST: AD A Function Reading A Module Binding Spelled Like A Cotangent Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3, the diff review of the synthesized-name
+// hygiene fix, Codex 5a8b7b7d). The transform's DETERMINISTIC names --
+// cotangents `__g_<x>`, tangents `__t_<x>`, `__primal`, the vjp `__seed` --
+// shadowed a MODULE binding of the same spelling the body reads: this
+// program printed r = (21.0, 0.0) for (21.0, 7.0) in every lane. The
+// reserved-name gate covered the function's own parameters and locals
+// only; it now covers every name the body reads (BL5500, rename it).
+// ============================================================================
+let __g_x = Float64(7.0)
+function f(x: Float64) -> Float64 = x * __g_x
+let r = ad.grad(f)(Float64(3.0))
+// ERROR: BL5500
+// ERROR-CONTAINS: a name spelled like a reserved AD name

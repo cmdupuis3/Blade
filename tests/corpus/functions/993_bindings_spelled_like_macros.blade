@@ -1,0 +1,19 @@
+// TEST: Bindings spelled like macros of the emitted translation unit
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): EOF, errno and INFINITY are macros
+// of the C headers every generated program includes, TIME one the emitter
+// defines itself; a binding of that spelling expanded (BL9002). The reserved
+// spellings are generated from the configured prelude
+// (tools/cpp-reserved-names/generate.sh) and such a binding is emitted under
+// another C++ name; the printed label keeps the source name.
+// ============================================================================
+let EOF: Float64 = 3.0
+let errno: Float64 = 5.0
+let INFINITY: Float64 = 7.0
+let TIME: Float64 = 11.0
+let r = EOF + errno + INFINITY + TIME
+// EXPECT: EOF = 3.0
+// EXPECT: errno = 5.0
+// EXPECT: INFINITY = 7.0
+// EXPECT: TIME = 11.0
+// EXPECT: r = 26.0

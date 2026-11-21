@@ -1,0 +1,16 @@
+// TEST: Fold Kernel Extent Capture Of Its Operand Snapshot
+// Gap G214 (round 4 wave 8, the user decision of 2026-11-13): the leaf map p
+// reads its deferred operand d AND captures it (only through extents(d)).
+// A kernel capture forces d ONCE under its own name, so the fold reads that
+// snapshot and the later write to x changes neither the read w nor the print
+// of d. The C++ lane used to evaluate d privately for the fold and drop the
+// capture force (w = 20.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + Float64(extents(d))
+let s = reduce(p, (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

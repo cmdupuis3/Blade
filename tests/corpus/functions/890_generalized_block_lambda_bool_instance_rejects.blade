@@ -1,0 +1,17 @@
+// TEST: a block lambda generalized at three types, one of them Bool (rejects)
+// ============================================================================
+// R10 remainder: a NESTED generic function's own obligations (GONumericOperand)
+// are judged at each call of it, with a span. They were recorded into the
+// enclosing declaration's list only, so a Bool instance reached the
+// post-monomorphization IRValidate backstop, which has no source span. Here the
+// lambda is used at Int32, Float32 and Bool.
+// ============================================================================
+function f() -> Int32 = {
+    let dbl = lambda(x) -> x + x
+    let a = dbl(1)
+    let b = dbl(2.0)
+    let c = dbl(true)
+    a
+}
+let r = f()
+// ERROR: BL3001 @ 12:17

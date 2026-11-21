@@ -1,0 +1,22 @@
+// TEST: A Mut Argument Read By A Sort Key The Callee Runs Is Refused (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; Codex diff review round 3): every
+// callable a callee body references may run -- a sort key included -- so the
+// key's by-name read of `view`, which shares the storage of the `mut`
+// argument `a`, is a read of it mid-call: BL4005 at lowering in every lane.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+let mut a: A = [2.0, 3.0]
+let view = identity(a)
+function key(x: Float64) -> Float64 = x * view(0)
+function f(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    let xs: A = [1.0, 2.0]
+    let s = sort(xs, key)
+    s(0)
+}
+let result = f(a)
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

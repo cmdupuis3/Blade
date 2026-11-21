@@ -1,0 +1,16 @@
+// TEST: Compaction fusion v2: a failure between the mask and the compound still comes first (aborts)
+// The opt-in T4a moves the gather from `y` up to `keep`'s pass; moved work is
+// a pure gather that cannot fail, so the as-written first failure stays: the
+// integer division by zero written BETWEEN the mask and the compound aborts
+// BL8013 at its own line in every lane, before the compound (whose stores are
+// not observable) and before the fold's own BL8003 check (line 10 once the harness drops the TEST line).
+type Ix = Idx<1003>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) |> compute
+let keep = mask(x, lambda(v) -> v > 5000.0)
+let z0 = Int64(floor(x(0)))
+let boom = 10 / z0
+let y = compound(x, keep)
+let checksum = reduce(y * y, (+)) + Float64(extents(y))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:10

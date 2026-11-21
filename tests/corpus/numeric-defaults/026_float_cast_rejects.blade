@@ -1,0 +1,9 @@
+// TEST: the width-less Float cast head is refused (rejects)
+// ============================================================================
+// Rule 3: a cast names its target in full; `Float(n)` is steered to
+// `Float32(n)` / `Float64(n)`.
+// ============================================================================
+let n: Int64 = 3
+let x = Float(n)
+// ERROR: BL1004
+// ERROR-CONTAINS: `Float` has no width

@@ -1,0 +1,14 @@
+// TEST: Tuple Later Read Before Compute (aborts)
+// ----------------------------------------------------------------------------
+// The reversed-member control for 038: the deferred producer's read comes
+// FIRST, so its checked cast (BL8006) fires before the second member's
+// integer division by zero (BL8013), in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let first = method_for(z) <@> lambda(v) -> 1 / v
+let later = method_for(a) <@> lambda(v) -> a((v : Row))
+let t = (later(0), first |> compute)
+// ABORT: BL8006
+// ABORT: outside Row

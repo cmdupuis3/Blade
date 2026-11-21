@@ -34,25 +34,23 @@ let private typeDeclNames (td: TypeDecl) : string list =
     | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> [ n ]
     | TyDeclMutualGroup (members, _) -> members |> List.map fst
 
-/// BL2009 across MODULES, for the names that are not module-qualified yet.
+/// BL2009 for a variant constructor two sum types of ONE module declare.
 ///
-/// Values and functions of a non-main module are namespaced at lowering
-/// (Lowering.qualifyModuleNames), but a TYPE's identity is still its bare
-/// name: `IRTNamed "P"`, an index type's `IRefNamed "Cell"`. So two modules
-/// each declaring `struct P` emitted two global C++ `struct P` (a g++
-/// redefinition) and the call judgment could not tell them apart -- `A.fx(q)`
-/// accepted B's `P` -- and a main-module `type Cell = Idx<5>` became the SAME
-/// nominal index type as an imported module's `Cell = Idx<3>`, so a
-/// provenance check that exists to keep them apart passed. Until type
-/// identity is keyed by (module, name), one program may declare a type name
-/// once. Variant constructors are global C++ names (enum members, ctor
-/// functions) and their tag table is keyed by bare name too, so they get the
-/// same rule -- within a module as well, since two sum types there sharing a
-/// constructor collide identically.
+/// Type identity is module-qualified (D11, Types.TypeOrigins): module A's
+/// `struct P` is `A.P`, B's is `B.P`, main's is `P`, so two modules may each
+/// declare a type or constructor of one name, and an unqualified use that two
+/// imports both answer is refused at the USE (BL2010). Within one module a
+/// constructor still names one sum type: its tag table and its C++ name
+/// (enum member, constructor function) are keyed by the module's identity.
 let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileError list =
     let errors = ResizeArray<CompileError>()
-    let seenTypes = System.Collections.Generic.Dictionary<string, string * Span>()
     let seenCtors = System.Collections.Generic.Dictionary<string, string * Span>()
+    // ...and a name that is NOT module-qualified in two modules: a
+    // `__`-prefixed (synthetic) name keeps its spelling in every module
+    // (TypeOrigins.identityOf), and the main module's names are bare, so two
+    // such declarations would be one identity -- still refused.
+    let seenUnqualified = System.Collections.Generic.Dictionary<string, string * Span>()
+    let moduleCount = program.Modules.Length
     // The error-location side channel still holds the LAST expression the
     // checker visited (in whichever module ran last); cleared per refusal so
     // each one points at its own declaration.
@@ -64,25 +62,31 @@ let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileErr
         match first.File, here.File with
         | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
         | _ -> where
-    for m in program.Modules do
+    for (mi, m) in List.indexed program.Modules do
         let modName = m.Name |> String.concat "."
+        let isMain = Blade.Types.TypeOrigins.isMainModule mi moduleCount || modName = ""
+        let unqualified (kind: string) (n: string) (span: Span) =
+            if isMain || n.StartsWith "__" then
+                match seenUnqualified.TryGetValue (kind + "\u0000" + n) with
+                | true, (firstMod, firstSpan) when firstMod <> modName ->
+                    refuse span (DuplicateDecl (kind, n, siteOf firstSpan span, Some firstMod))
+                | true, _ -> ()
+                | _ -> seenUnqualified.[kind + "\u0000" + n] <- (modName, span)
         for d in m.Decls do
             match d.Value with
             | DeclType td ->
-                for n in typeDeclNames td do
-                    match seenTypes.TryGetValue n with
-                    | true, (firstMod, firstSpan) when firstMod <> modName ->
-                        refuse d.Span (DuplicateDecl ("type", n, siteOf firstSpan d.Span, Some firstMod))
-                    | true, _ -> ()   // same module: checkModule's own BL2009
-                    | _ -> seenTypes.[n] <- (modName, d.Span)
+                for n in typeDeclNames td do unqualified "type" n d.Span
+                match td with
+                | TyDeclSum (_, _, variants) -> for v in variants do unqualified "constructor" v.Name d.Span
+                | _ -> ()
                 match td with
                 | TyDeclSum (_, _, variants) ->
                     for v in variants do
-                        match seenCtors.TryGetValue v.Name with
-                        | true, (firstMod, firstSpan) ->
-                            let crossModule = if firstMod <> modName then Some firstMod else None
-                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, crossModule))
-                        | _ -> seenCtors.[v.Name] <- (modName, d.Span)
+                        let key = modName + "\u0000" + v.Name
+                        match seenCtors.TryGetValue key with
+                        | true, (_, firstSpan) ->
+                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, None))
+                        | _ -> seenCtors.[key] <- (modName, d.Span)
                 | _ -> ()
             | _ -> ()
     List.ofSeq errors
@@ -93,12 +97,76 @@ let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileErr
 /// `range<I>` / `0..n` feeds kernel parameter k; a single multi-slot
 /// `range<Y, X>` feeds all of them. Collected BEFORE zonk because a kernel
 /// lambda can be zonked (at its own `let`) before the apply that feeds it.
-let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+let rec rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+    fst (rangeFedLambdaParamsWithBounds modul)
+
+/// The same walk, also answering each range-fed parameter's STATIC value
+/// bounds `[lo, hi)` when the range has them (`range<I>` over a static extent
+/// n: [0, n); `lo..hi` over two integer literals: [lo, hi)) -- what the guard
+/// of an ANONYMOUS slot accepts as proof (G192 (1): an anonymous slot carries
+/// no nominal tag, so the only proven positions are literals and the values
+/// of a range whose bounds lie inside the slot's static extent).
+and rangeFedLambdaParamsWithBounds (modul: TypedModule)
+        : System.Collections.Generic.HashSet<IRId> * System.Collections.Generic.Dictionary<IRId, int64 * int64> =
     let fed = System.Collections.Generic.HashSet<IRId>()
+    let bounds = System.Collections.Generic.Dictionary<IRId, int64 * int64>()
     let isRange (a: TypedExpr) =
         match a.Kind with
         | TExprRange _ | TExprDotDot _ -> true
         | _ -> false
+    let litInt (e: TypedExpr) =
+        match e.Kind with
+        | TExprLit (Blade.Ast.LitInt v) -> Some v
+        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+        | _ -> None
+    let staticBounds (a: TypedExpr) (slot: int) =
+        match a.Kind with
+        | TExprRange ixs when slot < ixs.Length ->
+            let ix = ixs.[slot]
+            match ix.Tag |> Option.bind haloAccessOfTag with
+            // A dense HALO window parameter: the positions its in-reach reads
+            // `w(o)` produce, [0, M + Shrink) over a shrunk extent M -- the
+            // window's own demand, tied to THIS parameter (Codex diff review
+            // round 2 of G192 (1): two anonymous halos may share a tag).
+            | Some h when not h.IsCompound ->
+                tryEvalIntIR ix.Extent |> Option.map (fun m -> haloDemand h (0L, m))
+            | Some _ -> None
+            | None ->
+            if ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1 then
+                tryEvalIntIR ix.Extent |> Option.map (fun n -> (0L, n))
+            else None
+        | TExprDotDot (lo, hi) ->
+            (match litInt lo, litInt hi with
+             | Some l, Some h -> Some (l, h)
+             | _ -> None)
+        | _ -> None
+    // A bound proves a parameter only when EVERY occurrence of its lambda is a
+    // kernel some range with static bounds feeds (Codex diff review of G192
+    // (1): a let-bound lambda applied over `0..3` and also called `k(5)`, or
+    // fed by data, must not inherit the range's proof). Per lambda (keyed by
+    // its first parameter): every occurrence, the kernel occurrences, and per
+    // parameter the union of its feeds (None once one feed has no bounds).
+    let lambdaOcc = System.Collections.Generic.Dictionary<IRId, int>()
+    let kernelOcc = System.Collections.Generic.Dictionary<IRId, int>()
+    let lambdaOf = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let feeds = System.Collections.Generic.Dictionary<IRId, (int64 * int64) option>()
+    let bump (d: System.Collections.Generic.Dictionary<IRId, int>) k =
+        d.[k] <- (match d.TryGetValue k with | true, n -> n + 1 | _ -> 1)
+    let noteFeed (pid: IRId) (b: (int64 * int64) option) =
+        feeds.[pid] <-
+            match feeds.TryGetValue pid, b with
+            | (true, None), _ | _, None -> None
+            | (true, Some (l0, h0)), Some (l, h) -> Some (min l0 l, max h0 h)
+            | _, Some lh -> Some lh
+    let kernelUse (li: TypedLambdaInfo) =
+        match li.Params with
+        | p0 :: _ ->
+            bump kernelOcc p0.VarId
+            for p in li.Params do lambdaOf.[p.VarId] <- p0.VarId
+        | [] -> ()
+    let feed (p: TypedParam) (a: TypedExpr) (slot: int) =
+        fed.Add p.VarId |> ignore
+        noteFeed p.VarId (staticBounds a slot)
     let rec walk (e: TypedExpr) =
         (match e.Kind with
          | TExprApply info when not info.IsComposeApply ->
@@ -109,19 +177,51 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
                      | _ -> [ a ])
              let ps =
                  match info.Kernel.Kind with
-                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> li.Params
+                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> kernelUse li; li.Params
                  | _ -> []
+             // A REYNOLDS kernel is applied to every permutation of its
+             // operands, so each parameter may receive ANY operand: its bounds
+             // are the union over all of them (Codex diff review round 3 of
+             // G192 (1): `reynolds(lambda(i, j) -> v(i))` over `0..3, 0..5`).
+             let permuted = match info.Kernel.Kind with TExprReynolds _ -> true | _ -> false
              match operands with
-             | [ { Kind = TExprRange ixs } ] when ixs.Length > 1 && ixs.Length = ps.Length ->
-                 for p in ps do fed.Add p.VarId |> ignore
+             | [ { Kind = TExprRange ixs } as r ] when ixs.Length > 1 && ixs.Length = ps.Length ->
+                 if permuted then
+                     for p in ps do ixs |> List.iteri (fun k _ -> feed p r k)
+                 else ps |> List.iteri (fun k p -> feed p r k)
              | _ when operands.Length = ps.Length ->
-                 List.iter2 (fun (p: TypedParam) a -> if isRange a then fed.Add p.VarId |> ignore) ps operands
-             | _ -> ()
+                 if permuted then
+                     for p in ps do
+                         for a in operands do
+                             if isRange a then feed p a 0 else noteFeed p.VarId None
+                 else
+                     List.iter2 (fun (p: TypedParam) a -> if isRange a then feed p a 0 else noteFeed p.VarId None) ps operands
+             | _ -> for p in ps do noteFeed p.VarId None
+         // `sort(range<I>, lambda(i) -> ..)` / `sort(lo..hi, ..)` (round 4
+         // wave 4 D1): the key sees the range's own positions, exactly as a
+         // map kernel over that range does -- a single-slot range only (a
+         // `lo..hi` from a literal 0: an offset range's values are not
+         // positions of its own axis).
+         | TExprSort (({ Kind = TExprRange [ _ ] } as r), { Kind = TExprLambda li })
+         | TExprSort (({ Kind = TExprDotDot ({ Kind = TExprLit (Blade.Ast.LitInt 0L) }, _) } as r), { Kind = TExprLambda li }) ->
+             kernelUse li
+             for p in li.Params do feed p r 0
+         | TExprLambda li ->
+             (match li.Params with
+              | p0 :: _ -> bump lambdaOcc p0.VarId
+              | [] -> ())
          | _ -> ())
         for c in typedExprChildren e do walk c
     for d in modul.Decls do
         for e in declExprs d do walk e
-    fed
+    for KeyValue (pid, b) in feeds do
+        match b, lambdaOf.TryGetValue pid with
+        | Some lh, (true, l0) ->
+            let all = match lambdaOcc.TryGetValue l0 with | true, n -> n | _ -> 0
+            let asKernel = match kernelOcc.TryGetValue l0 with | true, n -> n | _ -> 0
+            if all = asKernel then bounds.[pid] <- lh
+        | _ -> ()
+    (fed, bounds)
 
 /// LET-POLYMORPHISM FOR A LAMBDA'S ARROW PARAMETER (formalism 4.3).
 ///
@@ -151,6 +251,14 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
 ///   * no variable the lambda captures is ever assigned: a lambda captures at
 ///     its creation, a declaration reads the module binding when called.
 /// Anything else stays a lambda, exactly as before.
+/// The let-bound lambdas `instantiateLetLambdaKernels` spliced at a kernel use
+/// (gap G205), by their binding PATTERN object: such a lambda was used as a
+/// VALUE in the source, so it keeps the lambda semantics (its unit judgment
+/// defers to the use, `generalizeArrowLetLambdas` does not turn it into a
+/// generic declaration) even when the splice removed its last value use
+/// (Codex diff review round 3: `log(x / scale)` over metres, BL3006).
+let private splicedLambdaBindings = System.Runtime.CompilerServices.ConditionalWeakTable<Pattern, obj>()
+
 let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl> list =
     let mapPre = Blade.Unfold.mapExprPre
     // Every expression a declaration holds, with the names its own binders
@@ -203,7 +311,8 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
     let arr = List.toArray decls
     arr |> Array.mapi (fun i ld ->
         match ld.Value with
-        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone ->
+        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone
+                         && (let mutable o = null in not (splicedLambdaBindings.TryGetValue(b.Pattern, &o))) ->
             match b.Pattern.Kind, b.Value.Kind with
             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, None, body)
                     when not parms.IsEmpty
@@ -236,8 +345,454 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
         | _ -> ld)
     |> List.ofArray
 
+/// A LET-BOUND LAMBDA VALUE IN KERNEL POSITION IS INSTANTIATED PER USE (gap
+/// G205; G172 (b), G114). The checker resolves a kernel `inc` through its
+/// binding to the ONE typed lambda and unifies that lambda's parameters with
+/// the element (`inferApply`), so its first kernel use fixed its types for
+/// every later one: `method_for(a32) <@> inc` then `method_for(a64) <@> inc`
+/// was BL3001, and a literal partner (`x + 1.0`) never saw the operand's
+/// width (the G110 / G114 seeding reads a lambda WRITTEN at the use). A call
+/// `inc(f)` instantiates per call; a kernel use now does too: the source
+/// lambda is spliced at each KERNEL position -- the right operand of `<@>`,
+/// `object_for(..)`, a fold kernel `reduce(xs, ..)`, `reynolds(..)`, a sort
+/// key, a mask predicate -- exactly as if it were written there, so it is
+/// typed afresh per use (fresh parameter ids and type variables, the same
+/// captured bindings) and stays INLINE (no eta call, no std::function per
+/// cell). The binding itself is kept for its other uses (pipeline fusion
+/// already splices a let-bound stage the same way, Grad.fuseProgram).
+///
+/// Admission (fail closed; anything else keeps today's resolve-at-apply):
+///   * a top-level `let NAME = lambda(...) -> body` (not `mut`, no type
+///     annotation on the binding, not self-referencing), NAME never assigned;
+///   * no free name of the lambda is ever assigned anywhere in the module (a
+///     lambda captures at its creation, a spliced copy reads at its use);
+///   * HYGIENE: in the using declaration, neither NAME nor any free name of
+///     the lambda is bound by ANY binder (its parameters, lets, match / for /
+///     let-rec binders, lambda parameters) -- so every name of the spliced
+///     copy denotes what it denoted at the definition (a top-level name is
+///     unique per module, BL2009).
+/// Only uses in the SAME module are spliced. A stored former (`let o =
+/// object_for(inc)`) is one value: spliced once, still ONE instance for
+/// every application of `o` (gap G205 remainder).
+let private instantiateLetLambdaKernels (imports: ImportDecl list) (decls: Located<Decl> list) : Located<Decl> list =
+    let mapPre = Blade.Unfold.mapExprPre
+    let rootName (e: Expr) =
+        let rec go (e: Expr) =
+            match e.Kind with
+            | ExprKind.ExprVar n -> Some n
+            | ExprKind.ExprApp (f, _) -> go f
+            | ExprKind.ExprField (x, _) | ExprKind.ExprTupleIndex (x, _) | ExprKind.ExprTyped (x, _) -> go x
+            | _ -> None
+        go e
+    let scopesOf (d: Decl) : Expr list =
+        let fnScopes (f: FunctionDecl) = f.Body :: (f.Params |> List.choose (_.Default))
+        match d with
+        | DeclLet b | DeclStatic b -> [ b.Value ]
+        | DeclFunction f -> fnScopes f
+        | DeclImpl impl -> impl.Methods |> List.collect fnScopes
+        | DeclType (TyDeclStruct (_, _, _, cs, _)) | DeclType (TyDeclMutualGroup (_, cs)) -> cs
+        | DeclType _ | DeclInterface _ | DeclUnit _ | DeclImport _ -> []
+    // every name the module ASSIGNS (`x = ..`, `A(i) = ..`, `p.f = ..`)
+    let assigned =
+        let acc = System.Collections.Generic.HashSet<string>()
+        let rec stmts (ss: Stmt list) =
+            for s in ss do
+                match unwrapStmt s with
+                | StmtAssign (l, _, _) -> rootName l |> Option.iter (acc.Add >> ignore)
+                | StmtForIn (_, _, body) -> stmts body
+                | _ -> ()
+        for d in decls do
+            for e in scopesOf d.Value do
+                mapPre (fun x ->
+                    (match x.Kind with
+                     | ExprKind.ExprAssign (l, _) -> rootName l |> Option.iter (acc.Add >> ignore)
+                     | ExprKind.ExprBlock (ss, _) -> stmts ss
+                     | _ -> ())
+                    None) e |> ignore
+        acc
+    // every name any binder of declaration `d` binds (a superset is safe)
+    let bindersOf (d: Decl) : System.Collections.Generic.HashSet<string> =
+        let acc = System.Collections.Generic.HashSet<string>()
+        (match d with
+         | DeclFunction f -> for p in f.Params do acc.Add p.Name |> ignore
+         | DeclImpl impl -> for m in impl.Methods do for p in m.Params do acc.Add p.Name |> ignore
+         | _ -> ())
+        let rec stmts (ss: Stmt list) =
+            for s in ss do
+                match unwrapStmt s with
+                | StmtLet b -> for n in patternNames b.Pattern do acc.Add n |> ignore
+                | StmtForIn (v, _, body) -> acc.Add v |> ignore; stmts body
+                | _ -> ()
+        for e in scopesOf d do
+            mapPre (fun x ->
+                (match x.Kind with
+                 | ExprKind.ExprLambda (ps, _, _) -> for p in ps do acc.Add p.Name |> ignore
+                 | ExprKind.ExprLet (b, _) -> for n in patternNames b.Pattern do acc.Add n |> ignore
+                 | ExprKind.ExprMatch (_, cases) -> for c in cases do for n in patternNames c.Pattern do acc.Add n |> ignore
+                 | ExprKind.ExprBlock (ss, _) -> stmts ss
+                 | ExprKind.ExprRecArray def ->
+                     acc.Add def.Name |> ignore
+                     acc.Add def.PrefixVar |> ignore
+                     acc.Add def.StepVar |> ignore
+                     (match def.SeedArm with Some (v, _) -> acc.Add v |> ignore | None -> ())
+                 | _ -> ())
+                None) e |> ignore
+        acc
+    // the names a top-level declaration INTRODUCES (a later one shadows an
+    // earlier binding or import of the same name)
+    let introduces (d: Decl) : string list =
+        match d with
+        | DeclLet b | DeclStatic b -> patternNames b.Pattern
+        | DeclFunction f -> [ f.Name ]
+        | DeclImpl impl -> impl.Methods |> List.map (_.Name)
+        | DeclInterface i -> [ i.Name ]
+        | DeclUnit u -> [ u.Name ]
+        | DeclType (TyDeclAlias (n, _, _)) -> [ n ]
+        | DeclType (TyDeclSum (n, _, vs)) -> n :: (vs |> List.map (_.Name))
+        | DeclType (TyDeclStruct (n, _, _, _, _)) -> [ n ]
+        | DeclType (TyDeclMutualGroup (ms, _)) -> ms |> List.map fst
+        | DeclImport (qn, ImportSelective ids) -> ids @ [ String.concat "." qn ]
+        | DeclImport (qn, ImportQualified alias) ->
+            (match alias with Some a -> [ a ] | None -> []) @ [ String.concat "." qn; List.last qn ]
+    // a TYPE, unit or import declaration can change what an ANNOTATION of
+    // the lambda (`lambda(x: T)`) means; the free-name walk does not see
+    // annotations, so such a declaration ends every earlier candidate's reach
+    let typeLevel (d: Decl) =
+        match d with
+        | DeclType _ | DeclUnit _ | DeclImport _ | DeclInterface _ -> true
+        | _ -> false
+    // same-module functions with a DEFAULT argument: a call that omits it
+    // elaborates the default expression at the call site, a dependency the
+    // free-name walk does not see -- a lambda calling one is not spliced
+    // (a let-bound lambda with a default too; an IMPORTED callee's defaults
+    // are not visible here, so a lambda naming any imported name is not
+    // spliced, and a module importing names wholesale is left as it is)
+    let withDefaults =
+        decls |> List.choose (fun ld ->
+            match ld.Value with
+            | DeclFunction f when f.Params |> List.exists (fun p -> p.Default.IsSome) -> Some f.Name
+            | DeclLet b | DeclStatic b ->
+                (match b.Pattern.Kind, b.Value.Kind with
+                 | PatternKind.PatVar n, ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Default.IsSome) -> Some n
+                 | _ -> None)
+            | _ -> None)
+        |> Set.ofList
+    let importsAll =
+        imports |> List.exists (fun i ->
+            match i.Items with
+            | None -> true
+            | Some items -> items |> List.exists (function ImportHiding _ -> true | ImportName _ -> false))
+    let imported =
+        (imports |> List.collect (fun i ->
+            (match i.Alias with Some a -> [ a ] | None -> [])
+            @ (match i.Items with
+               | Some items -> items |> List.choose (function ImportName n -> Some n | ImportHiding _ -> None)
+               | None -> [])
+            @ [ String.concat "." i.Module; List.last i.Module ]))
+        @ (decls |> List.collect (fun ld ->
+            match ld.Value with
+            | DeclImport _ -> introduces ld.Value
+            | _ -> []))
+        |> Set.ofList
+    let arr = List.toArray decls
+    // CANDIDATES are processed in declaration order over the REWRITTEN
+    // declarations, so a candidate spliced into a later candidate's body is
+    // already expanded when that one is spliced (any nesting depth).
+    let cur = Array.copy arr
+    // (index, name, every name the source depends on, the source)
+    let live = System.Collections.Generic.List<int * string * Set<string> * Expr * Pattern>()
+    for j in 0 .. arr.Length - 1 do
+        // a declaration that introduces a name a live candidate depends on
+        // (or any type-level declaration) ends that candidate's reach,
+        // including at this declaration itself
+        let intro = introduces arr.[j].Value |> Set.ofList
+        live.RemoveAll(fun (_, _, names, _, _) ->
+            typeLevel arr.[j].Value || not (Set.isEmpty (Set.intersect names intro))) |> ignore
+        if live.Count > 0 then
+            let binders = bindersOf arr.[j].Value
+            let here =
+                live
+                |> Seq.filter (fun (_, _, names, _, _) -> not (names |> Set.exists binders.Contains))
+                |> Seq.map (fun (_, name, _, src, pat) -> (name, (src, pat)))
+                |> Map.ofSeq
+            if not here.IsEmpty then
+                let splice (k: Expr) : Expr option =
+                    match k.Kind with
+                    | ExprKind.ExprVar n ->
+                        Map.tryFind n here |> Option.map (fun (src, pat) ->
+                            (try splicedLambdaBindings.AddOrUpdate(pat, box true) with _ -> ())
+                            { src with Span = k.Span })
+                    | _ -> None
+                let rec rw (x: Expr) : Expr = mapPre f x
+                and f (x: Expr) : Expr option =
+                    let re k = Some (inheritSpan x k)
+                    let kern (k: Expr) = match splice k with Some s -> s | None -> rw k
+                    match x.Kind with
+                    | ExprKind.ExprBinOp (m, OpApply, l, r) when (splice r).IsSome -> re (ExprBinOp (m, OpApply, rw l, kern r))
+                    | ExprKind.ExprObjectFor k when (splice k).IsSome -> re (ExprObjectFor (kern k))
+                    | ExprKind.ExprReduce (a, k, init, ax) when (splice k).IsSome ->
+                        re (ExprReduce (rw a, kern k, Option.map rw init, ax))
+                    | ExprKind.ExprReynolds (k, anti) when (splice k).IsSome -> re (ExprReynolds (kern k, anti))
+                    | ExprKind.ExprSort (a, k) when (splice k).IsSome -> re (ExprSort (rw a, kern k))
+                    | ExprKind.ExprMask (a, p) when (splice p).IsSome -> re (ExprMask (rw a, kern p))
+                    | _ -> None
+                let rwFn (fd: FunctionDecl) =
+                    { fd with Body = rw fd.Body
+                              Params = fd.Params |> List.map (fun p -> { p with Default = Option.map rw p.Default }) }
+                let v =
+                    match cur.[j].Value with
+                    | DeclLet b -> DeclLet { b with Value = rw b.Value }
+                    | DeclStatic b -> DeclStatic { b with Value = rw b.Value }
+                    | DeclFunction fd -> DeclFunction (rwFn fd)
+                    | DeclImpl impl -> DeclImpl { impl with Methods = impl.Methods |> List.map rwFn }
+                    | other -> other
+                cur.[j] <- { cur.[j] with Value = v }
+        // this declaration as a candidate, its (rewritten) source
+        match cur.[j].Value with
+        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone ->
+            (match b.Pattern.Kind, b.Value.Kind with
+             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, _, _) when not parms.IsEmpty ->
+                 let free = collectFreeVars Set.empty b.Value
+                 if not (importsAll || free.Contains name || assigned.Contains name
+                         || (free |> Set.exists assigned.Contains)
+                         || (free |> Set.exists withDefaults.Contains)
+                         || (free |> Set.exists imported.Contains)) then
+                     live.Add((j, name, Set.add name free, b.Value, b.Pattern))
+             | _ -> ())
+        | _ -> ()
+    List.ofArray cur
+
+/// THE NEVER-WRITTEN PROOF OF STORED ALIASES, the checker's half
+/// (docs/plans/plan-identity-transpose-compute.md 2.1 second step, 2.6;
+/// TypeCheckSupport.recordStoredAliasMember is its one reader). Identity is
+/// decided at TYPECHECK -- the output type of `method_for(A, B) <@> comm-
+/// kernel` depends on it -- while a write that would refute it may come later
+/// in the source, so this is a PRE-PASS over the module's SURFACE
+/// declarations, computed before any declaration is checked: a syntactic,
+/// module-wide, fail-closed closure that mirrors the read-only alias plan's
+/// IR closure (Optimize.aliasWriteClosure) and is STRICTER than it at every
+/// point, so an alias given its root's identity is always one the plan may
+/// share storage for (Lowering cross-checks and records the plan's verdict,
+/// `[alias-identity v1]`). Names, not binder ids (nothing is resolved yet);
+/// a top-level name is unique per module (BL2009), and a local binder that
+/// shadows one is scoped out by collectFreeVars.
+///
+/// Per top-level declaration: its binders, its FREE names, whether it holds
+/// any assignment (`x = ..`, `A(i) = ..`, `p.f = ..`, `s += ..`, anywhere in
+/// it, lambdas and blocks included, to ANY target -- a write to local storage
+/// counts, as in the IR closure), and whether it names foreign code (a
+/// qualified name, or a name an import binds: another module's bodies are not
+/// judged here). A WRITING definition is one that does any of that, or names
+/// a writing definition (least fixpoint). For seeds S (the root, the alias's
+/// source, the alias; for a CALL root also every top-level name the root's
+/// declaration reaches through references, transitively -- a call's result
+/// may share storage with its arguments or with what the callee reads), the
+/// MEMBERS are S plus every top-level binder whose declaration names a member
+/// (a view, alias, tuple, map or call result derived from one may share its
+/// storage), to a fixpoint. Ok iff no other module of the program imports
+/// this one and no declaration that names a member is writing. Higher-order
+/// calls need no rule of their own: code reaches a call site only through
+/// names, so a call that could write a member's storage is in a declaration
+/// that names both the member (or a member derived from it) and the writing
+/// code (or a writing definition naming it). Builtins are assumed to write
+/// nothing (no builtin takes a `mut` argument).
+let private storedAliasWriteProof (decls: Located<Decl> list) (imports: ImportDecl list) (importedElsewhere: string option)
+                                  : string -> bool -> string list -> Result<string, string> =
+    let mapPre = Blade.Unfold.mapExprPre
+    let scopesOf (d: Decl) : (Set<string> * Expr) list =
+        let fnScopes (f: FunctionDecl) =
+            let ps = f.Params |> List.map (_.Name) |> Set.ofList
+            (ps, f.Body) :: (f.Params |> List.choose (_.Default) |> List.map (fun e -> (ps, e)))
+        match d with
+        | DeclLet b | DeclStatic b -> [ (Set.empty, b.Value) ]
+        | DeclFunction f -> fnScopes f
+        | DeclImpl impl -> impl.Methods |> List.collect fnScopes
+        | DeclType (TyDeclStruct (_, _, _, cs, _)) | DeclType (TyDeclMutualGroup (_, cs)) ->
+            cs |> List.map (fun e -> (Set.empty, e))
+        | DeclType _ | DeclInterface _ | DeclUnit _ | DeclImport _ -> []
+    let bindersOf (d: Decl) : string list =
+        match d with
+        | DeclLet b | DeclStatic b -> patternNames b.Pattern |> List.filter (fun n -> n <> "_")
+        | DeclFunction f -> [ f.Name ]
+        | DeclImpl impl -> impl.Methods |> List.map (_.Name)
+        | _ -> []
+    let importNames =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclImport (qn, ImportSelective ids) -> ids @ [ String.concat "." qn ]
+            | DeclImport (qn, ImportQualified alias) ->
+                (match alias with Some a -> [ a ] | None -> []) @ [ String.concat "." qn; List.last qn ]
+            | _ -> [])
+        |> List.append (imports |> List.collect (fun i ->
+               (match i.Alias with Some a -> [ a ] | None -> [])
+               @ (match i.Items with
+                  | Some items -> items |> List.choose (fun it -> match it with ImportName n -> Some n | ImportHiding _ -> None)
+                  | None -> [])
+               @ [ String.concat "." i.Module; List.last i.Module ]))
+        |> Set.ofList
+    // (binders, free names, assigns anything, names foreign code)
+    let facts =
+        decls |> List.map (fun d ->
+            let scopes = scopesOf d.Value
+            let free = scopes |> List.map (fun (bound, e) -> collectFreeVars bound e) |> Set.unionMany
+            let mutable assigns = false
+            let mutable qualified = false
+            let rec stmts (ss: Stmt list) =
+                for s in ss do
+                    match unwrapStmt s with
+                    | StmtAssign _ -> assigns <- true
+                    | StmtForIn (_, _, body) -> stmts body
+                    | _ -> ()
+            // mapExprPre does not descend into a lambda's parameter DEFAULTS,
+            // an align's pad expression or a halo's offsets (Codex review of
+            // this rule, finding 2: a write inside a default escaped), so
+            // the visitor scans those itself.
+            let rec scan (e: Expr) =
+                mapPre (fun x ->
+                    (match x.Kind with
+                     | ExprKind.ExprAssign _ -> assigns <- true
+                     | ExprKind.ExprBlock (ss, _) -> stmts ss
+                     | ExprKind.ExprQualified _ -> qualified <- true
+                     | ExprKind.ExprLambda (ps, _, _) -> for p in ps do Option.iter scan p.Default
+                     | ExprKind.ExprAlign (_, Some { Boundary = Ast.BoundaryMode.BndPad p }) -> scan p
+                     | ExprKind.ExprHalo (_, offsets) -> scan offsets
+                     | _ -> ())
+                    None) e |> ignore
+            for (_, e) in scopes do scan e
+            (bindersOf d.Value, free, assigns, qualified || not (Set.isEmpty (Set.intersect free importNames))))
+        |> List.toArray
+    let topNames = facts |> Array.collect (fun (bs, _, _, _) -> List.toArray bs) |> Set.ofArray
+    let refsTop = facts |> Array.map (fun (_, free, _, _) -> Set.intersect free topNames)
+    let declOf =
+        facts |> Array.mapi (fun i (bs, _, _, _) -> bs |> List.map (fun n -> (n, i))) |> List.concat |> Map.ofList
+    let writingNames =
+        let mutable w = Set.empty
+        let mutable writingDecls = Set.empty
+        for i in 0 .. facts.Length - 1 do
+            let (bs, _, assigns, foreign) = facts.[i]
+            if assigns || foreign then
+                writingDecls <- writingDecls.Add i
+                w <- Set.union w (Set.ofList bs)
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for i in 0 .. facts.Length - 1 do
+                if not (writingDecls.Contains i) && not (Set.isEmpty (Set.intersect refsTop.[i] w)) then
+                    let (bs, _, _, _) = facts.[i]
+                    writingDecls <- writingDecls.Add i
+                    w <- Set.union w (Set.ofList bs)
+                    changed <- true
+        w
+    let writingDecl (i: int) =
+        let (_, _, assigns, foreign) = facts.[i]
+        assigns || foreign || not (Set.isEmpty (Set.intersect refsTop.[i] writingNames))
+    let nameOfDecl (i: int) =
+        match facts.[i] with
+        | (b :: _, _, _, _) -> $"`{b}`"
+        | _ -> $"the declaration at line {decls.[i].Span.StartLine}"
+    let named (ns: Set<string>) = ns |> Set.toList |> List.map (fun n -> $"`{n}`") |> String.concat ", "
+    fun (root: string) (rootIsCall: bool) (seedNames: string list) ->
+        match importedElsewhere with
+        | Some why -> Error why
+        | None ->
+        // A call's result may share storage with whatever its declaration
+        // reaches (arguments, the callee's captures, transitively): those are
+        // seeds too, never written either.
+        let backward =
+            if not rootIsCall then Set.empty
+            else
+                let mutable seen = Set.empty
+                let rec visit (n: string) =
+                    if not (seen.Contains n) then
+                        seen <- seen.Add n
+                        match Map.tryFind n declOf with
+                        | Some i -> for m in refsTop.[i] do visit m
+                        | None -> ()
+                visit root
+                seen.Remove root
+        let seeds = Set.union (Set.ofList seedNames) backward
+        let mutable members = seeds
+        let mutable changed = true
+        while changed do
+            changed <- false
+            for i in 0 .. facts.Length - 1 do
+                let (bs, _, _, _) = facts.[i]
+                if not (Set.isEmpty (Set.intersect refsTop.[i] members))
+                   && bs |> List.exists (fun b -> not (members.Contains b)) then
+                    members <- Set.union members (Set.ofList bs)
+                    changed <- true
+        // A root that needs its reach is judged by its OWN declaration too, and
+        // by every declaration in the reach: what the root's value may share
+        // is decided by that code (a call into another module, `Lib.get()`,
+        // names an import and fails here).
+        let reachDecls =
+            if not rootIsCall then []
+            else (Set.add root backward) |> Set.toList |> List.choose (fun n -> Map.tryFind n declOf)
+        let offender =
+            (reachDecls |> List.tryFind writingDecl)
+            |> Option.orElse (
+                [ 0 .. facts.Length - 1 ] |> List.tryFind (fun i ->
+                    not (Set.isEmpty (Set.intersect refsTop.[i] members)) && writingDecl i))
+        match offender with
+        | Some i ->
+            let (_, _, assigns, foreign) = facts.[i]
+            let how =
+                if assigns then "holds an assignment (a write to local storage counts: the copy it relies on is the one an identity-transparent alias removes)"
+                elif foreign then "names another module's code or a qualified name (its writes are not judged here)"
+                else $"""names a definition that may write ({named (Set.intersect refsTop.[i] writingNames)})"""
+            let hit = Set.intersect refsTop.[i] members
+            if hit.IsEmpty then Error $"{nameOfDecl i} (in the reach of `{root}`, whose cells may be shared with what it names) {how}"
+            else Error $"{nameOfDecl i} names {named hit} and {how}"
+        | None ->
+            let derived = Set.difference members seeds
+            let seedTxt = named (Set.ofList seedNames)
+            let backTxt = if backward.IsEmpty then "" else $"; the call's reach ({named backward}) is never written either"
+            Ok ($"never written (module-wide, syntactic): no assignment, mutating call or writing definition names {seedTxt}"
+                + (if derived.IsEmpty then "" else $" or a value that may share their storage ({named derived})")
+                + backTxt
+                + "; no other module imports this one")
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
-    let modul = { modul with Decls = generalizeArrowLetLambdas modul.Decls }
+    let modul = { modul with Decls = generalizeArrowLetLambdas (instantiateLetLambdaKernels modul.Imports modul.Decls) }
+    // The never-written proof of top-level stored aliases (plan 2.1 second
+    // step): over the WHOLE module's surface, before any declaration is
+    // checked (TypeCheckSupport.recordStoredAliasMember reads it).
+    (let importedElsewhere =
+        match env.ProgramModules with
+        | [] -> Some "the program's other modules are not known to this check (fail closed)"
+        | mods ->
+            let me = modul.Name
+            let related (qn: string list) =
+                let n = min qn.Length me.Length
+                n > 0 && List.truncate n qn = List.truncate n me
+            let importsMe (m: ModuleDecl) =
+                m.Name <> me
+                && ((m.Imports |> List.exists (fun i -> related i.Module))
+                    || (m.Decls |> List.exists (fun d -> match d.Value with DeclImport (qn, _) -> related qn | _ -> false)))
+            match mods |> List.tryFind importsMe with
+            | Some m -> Some $"""module `{String.concat "." m.Name}` imports this module (its writes are not judged here)"""
+            | None -> None
+     env.StoredAliasNeverWritten.Value <- storedAliasWriteProof modul.Decls modul.Imports importedElsewhere)
+    // MODULE-scope ring (rec-window, P3 print replay): a module-level `let
+    // rec` read by another module is observed beyond this module's tail scan.
+    let ringImportedElsewhere =
+        match env.ProgramModules with
+        | [] -> Some "the program's other modules are not known to this check (fail closed)"
+        | mods ->
+            let me = modul.Name
+            let related (qn: string list) =
+                let n = min qn.Length me.Length
+                n > 0 && List.truncate n qn = List.truncate n me
+            let importsMe (m: ModuleDecl) =
+                m.Name <> me
+                && ((m.Imports |> List.exists (fun i -> related i.Module))
+                    || (m.Decls |> List.exists (fun d -> match d.Value with DeclImport (qn, _) -> related qn | _ -> false)))
+            match mods |> List.tryFind importsMe with
+            | Some m -> Some ("module `" + String.concat "." m.Name + "` imports this module (its reads of the trajectory are not scanned)")
+            | None -> None
+    // Binder ids restart per compile: a block-local id from an earlier module
+    // or program must not stop this module's reduce alias chase (G60).
+    Blade.TypeCheckInfer.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
     // module's first `checkDecl` (which is where the per-decl reset lives), so
@@ -249,6 +804,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // judgment reaches through a forward reference (it re-checks a
     // declaration). Installed here, at the one entry every check passes.
     arrowVariantHook.Value <- checkArrowVariant
+    // ...and of identity-sensitive declarations' SHARING INSTANCES (plan 2.2).
+    sharingVariantHook.Value <- checkSharingVariant
+    // ...and the observer of an array of EnumIdx keys at a generic call (R3).
+    enumKeyArgHook.Value <- Blade.TypeCheckInfer.enumKeyArgTyped
     // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
     // co-iteration, units -- are keyed by binder id, program-unique, and
     // shared by reference across the program's modules: a module's entries
@@ -266,24 +825,32 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // into a copy of this module's OWN static decls so resolveStatics's
     // fold assertion can see through a `let static x = M.k + 1` reference.
     let crossModuleStaticSeed = importedStaticSeed env modul.Decls
-    let env = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues crossModuleStaticSeed }
+    let env = { env with StaticValues = Map.fold (fun acc k v -> Map.add k (StaticEval.normalizeStatic v) acc) env.StaticValues crossModuleStaticSeed }
     let declsForStaticResolution = seedImportedStaticsIntoDecls crossModuleStaticSeed modul.Decls
     let env, staticAssertErrors =
         match StaticEval.resolveStatics declsForStaticResolution with
         | Ok (se, failures) ->
+            staticWidths.Clear()
+            for kv in se.Widths do staticWidths.[kv.Key] <- kv.Value
             let env' = { env with StaticValues = Map.fold (fun acc k v -> Map.add k v acc) env.StaticValues se.Values }
             let errs =
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->
+                  match f.Misfit with
+                  | Some (sp, msg) ->
+                    // R19 / R28: a literal or a static value folding would
+                    // narrow is reported where it stands (BL3020).
+                    locateError sp env' (ImplicitNumericMix msg)
+                  | None ->
                     let msg =
                         $"""`let static {(f.Names |> String.concat ", ")}` does not evaluate at compile time: {f.Reason}. `let static` asserts a compile-time value -- use plain `let` for values computed at runtime."""
-                    locateError f.Span env' (Other msg))
+                    locateError f.Span env' (StaticEvalErr msg))
             env', errs
         | Error msg ->
             let span =
                 modul.Decls
                 |> List.tryPick (fun d -> match d.Value with DeclStatic _ -> Some d.Span | _ -> None)
                 |> Option.defaultValue noSpan
-            env, [locateError span env (Other msg)]
+            env, [locateError span env (StaticEvalErr msg)]
     // Pre-pass: register static functions and static values with placeholder types
     // so forward references and mutual recursion resolve correctly.
     let preEnv =
@@ -319,7 +886,28 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable declaredTypes : Map<string, Span> = Map.empty
     let mutable declaredUnits : Map<string, Span> = Map.empty
 
-    for d in modul.Decls do
+    // A WORK LIST rather than a plain `for`: a module-level `let rec` the ring
+    // admits (TypeCheckInfer.recArrayModuleDecision) inserts its replay sweep
+    // and snapshot declarations after itself and rewrites the later fixed-row
+    // reads, before any of them is checked.
+    let pendingDecls = ResizeArray<Located<Decl>>(modul.Decls)
+    let replayDecls = System.Collections.Generic.HashSet<string>()
+    let mutable declPos = 0
+    while declPos < pendingDecls.Count do
+        let d = pendingDecls.[declPos]
+        declPos <- declPos + 1
+        (match d.Value with
+         | DeclLet b when (match b.Value.Kind with ExprKind.ExprRecArray _ -> true | _ -> false) ->
+             (match Blade.TypeCheckInfer.recArrayModuleDecision currentEnv ringImportedElsewhere b
+                        (pendingDecls |> Seq.skip declPos |> List.ofSeq) with
+              | Some rest ->
+                  (match b.Pattern.Kind with
+                   | PatternKind.PatVar n -> replayDecls.Add (Blade.IR.recReplayBindingPrefix + n) |> ignore
+                   | _ -> ())
+                  pendingDecls.RemoveRange (declPos, pendingDecls.Count - declPos)
+                  pendingDecls.AddRange rest
+              | None -> ())
+         | _ -> ())
         // BL2009 -- duplicate top-level `function` name. Without this the
         // later declaration silently rebinds the name (checkFunctionDecl's
         // bindVarSimple), and a call matching the FIRST signature dies with a
@@ -391,7 +979,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         // the decl's span.
         let mixedFindings = collectMixedEnumIdxInDecl d.Value
         for _ in mixedFindings do
-            let err = Other "Inline EnumIdx<[...]> has mixed value kinds (integer and string literals in the same list). The runtime backing must be one or the other (int64_t or std::string)."
+            let err = IndexTypeErr "Inline EnumIdx<[...]> has mixed value kinds (integer and string literals in the same list). The runtime backing must be one or the other (int64_t or std::string)."
             let ce = locateError d.Span currentEnv err
             errors <- ce :: errors
 
@@ -410,11 +998,25 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
+        // A module ring's replay sweep re-checks its recursion's step: the
+        // warnings it raises are x's own, already reported (rollback).
+        let isReplayDecl =
+            match d.Value with
+            | DeclLet { Pattern = { Kind = PatternKind.PatVar n } } ->
+                n.StartsWith Blade.IR.recReplayBindingPrefix && replayDecls.Contains n
+            | _ -> false
+        let restoreWarnings =
+            if isReplayDecl then
+                let w = Blade.TypeCheckInfer.warningChannelsRestorePoint currentEnv
+                let d0 = Blade.Effects.Decisions.mark ()
+                (fun () -> w (); Blade.Effects.Decisions.rollback d0)
+            else ignore
         // A user error the type lowering found where it has no error channel
         // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
         let declResult, raisedCode =
             try checkDecl envWithCtx d.Value, None
             with TypeErrorRaised (te, code) -> Error te, code
+        restoreWarnings ()
         match declResult with
         | Ok (td, env') ->
             decls <- td :: decls
@@ -449,7 +1051,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // g++. A refusal is located at the application; it is reported only on an
     // otherwise clean module (after an earlier error the heads may be the
     // recovery's fresh variables, and the refusal would be a cascade).
+    // R10's OPEN-ARGUMENT LINKS still pending (top-level code, or an argument
+    // decided after its declaration's end): settled now and again after the
+    // arrow applications below (one may decide a link's argument: a window
+    // read), the links still open then dropped -- all before zonk's default
+    // (TypeCheckSupport.settleOpenArgLinks).
+    let linkErrors0 = settleOpenArgLinks currentEnv false
     let arrowErrors = settleArrowApps currentEnv true
+    let linkErrors = linkErrors0 @ settleOpenArgLinks currentEnv true
+    if List.isEmpty errors then
+        for (span, err) in linkErrors do
+            resetCurrentStmtSpan ()
+            errors <- locateError span currentEnv err :: errors
     if List.isEmpty errors then
         for (span, err) in arrowErrors do
             resetCurrentStmtSpan ()
@@ -514,20 +1127,30 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // The zonk walk also retypes index POSITIONS and guards unproven
     // subscripts into named index types (Zonk.fs, SUBSCRIPT POSITIONS AND
     // GUARDS); its context carries the builder for guard bindings.
+    let enumKeyErrorSink = System.Collections.Generic.List<Span * string>()
     let zonked =
         let saved = subscriptGuardCtx.Value
+        let rangeFedSet, rangeFedBounds = rangeFedLambdaParamsWithBounds typedModule
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
                    Positions = System.Collections.Generic.HashSet<IRId>()
                    DataVars = System.Collections.Generic.HashSet<IRId>()
-                   RangeFedParams = rangeFedLambdaParams typedModule
+                   EnumKeyErrors = enumKeyErrorSink
+                   RangeFedParams = rangeFedSet
+                   RangeFedBounds = rangeFedBounds
+                   CoordVars = System.Collections.Generic.HashSet<IRId>()
                    Retargets = currentEnv.ArrowRetargets
                    Subscripts = currentEnv.ArrowSubscripts
+                   GroupOuter = fun id ->
+                       match currentEnv.GroupOuters.TryGetValue id with
+                       | true, gk -> Some gk
+                       | _ -> None
                    EnumLabels = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->
                            Some (values |> List.choose (function EVString s -> Some s | _ -> None))
                        | _ -> None
+                   EnumKeys = fun tag -> intEnumKeysOfTag currentEnv tag
                    IndexExtent = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
@@ -597,6 +1220,23 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // Misplaced provider writes: structural, inference-independent (an
     // unresolved receiver simply fails the IRTNamed match), so unlike the rank
     // sweep it runs even when the module already has errors.
+    // A literal of an integer EnumIdx that is none of its keys
+    // (collectUnknownEnumKeys): judged on the UNZONKED tree.
+    let enumKeyErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            (typedModule.Decls |> List.collect declExprs
+                               |> List.collect (collectUnknownEnumKeys currentEnv))
+            @ (enumKeyErrorSink |> Seq.map (fun (sp, msg) ->
+                   ({ Error = EnumKeyObserved msg; Span = sp; Context = []; Code = None } : CompileError))
+               |> Seq.distinctBy (fun e -> e.Span) |> List.ofSeq)
+        else []
+    // A `zero` at a sum type (collectValuelessZeros): judged on the zonked
+    // types, with the same cascade suppression as the subscript sweep.
+    let zeroErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            zonked.Decls |> List.collect declExprs
+                         |> List.collect (collectValuelessZeros currentEnv)
+        else []
     let writeErrors =
         zonked.Decls |> List.collect declWriteRoots
                      |> List.collect (fun (nested, e) -> collectMisplacedProviderWrites currentEnv.Subst nested e)
@@ -606,39 +1246,168 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let groupKeysErrors =
         zonked.Decls |> List.collect declGroupKeysRoots
                      |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
+    // Grouped values returned out of a callable (R7): structural on the
+    // zonked types, so it runs beside the group_keys sweep. Suppressed when
+    // the module already has errors (an unresolved body type proves nothing).
+    let groupedReturnErrors =
+        if List.isEmpty errors && List.isEmpty groupKeysErrors then
+            zonked.Decls |> List.collect (collectGroupedReturnEscapes currentEnv.Subst)
+        else []
     // Escaping closures that share a reassigned local (collectMutCaptureEscapes):
     // structural, so it runs even when the module already has errors.
     let mutCaptureErrors =
         zonked.Decls |> List.collect declMutCaptureRoots
                      |> List.collect (fun (pos, e) -> collectMutCaptureEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
+    // R10: a NUMBER handed to a one-value callee's open parameter without
+    // binding it (an alias, a section: TypeEnv.NumericMetOpenParams) must not
+    // see that parameter decided NON-numeric by anything later -- a Bool call,
+    // a kernel unification, an `if` merging two lambdas -- or the earlier call
+    // would convert its number. Judged once every unification is done, at the
+    // numeric argument.
+    let numericMetErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors && List.isEmpty mixErrors then
+            currentEnv.NumericMetOpenParams
+            |> Seq.choose (fun kv ->
+                let what =
+                    match currentEnv.Subst.Resolve (IRTInfer kv.Key) |> IR.stripUnits with
+                    | IRTScalar ETBool -> Some "Bool"
+                    | IRTScalar ETString -> Some "String"
+                    | IRTIdxTagged _ -> Some "index value"
+                    | IRTNamed n ->
+                        (match lookupTypeDef n currentEnv with
+                         | Some (TDIStruct _) | Some (TDIVariant _) -> Some (Blade.Types.TypeOrigins.sourceName n)
+                         | _ -> None)
+                    | _ -> None
+                what |> Option.map (fun w ->
+                    ({ Error = TypeMismatchErr (
+                                 $"this argument is a number, and the called function's parameter -- left open by its body -- "
+                                 + $"is decided a {w} by a later use of the same function: the number would be converted, and "
+                                 + "Blade converts nothing implicitly. Annotate the parameter, or use separate functions.")
+                       Span = kv.Value; Context = []; Code = None } : CompileError)))
+            |> Seq.truncate 1 |> List.ofSeq
+        else []
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ groupedReturnErrors @ mutCaptureErrors @ numericMetErrors)
+
+/// BL2009 for a C++ GLOBAL TYPE name two origins define (deep review R1, a
+/// D11 leftover). A provider load's generated types (`<b>__vars`, `<b>__dims`,
+/// `<b>_cols`, one alias per store axis -- env.ProviderEmittedTypes) keep
+/// their spelling in every module; a second definition of one passed check
+/// and died in g++. Every declared TYPE is entered under the name the back
+/// end emits: a main-module or `__` declaration bare, any other module's
+/// `<Module>__<Name>` (so module `t`'s `struct vars` is `t__vars`, as a load
+/// `t`'s vars struct is). Only a STRUCT or a variant TYPE (an `enum` /
+/// `std::variant` name) beside any other type of its name is refused: that is
+/// always a C++ conflict. Two `using` aliases are legal whenever their targets
+/// agree (two loads of one store, a dim beside `type x = Int64` or an alias
+/// chain), which syntax cannot decide, so alias-vs-alias pairs are left alone
+/// (staged, with functions / values and reserved-word sanitization, for a
+/// census of the names the emitter actually writes). Constructors and
+/// functions are not entered (a constructor function beside a struct of its
+/// name is legal C++). The refusal points at the provider load.
+let private providerTypeClashErrors (env: TypeEnv) (program: Program) : CompileError list =
+    // name -> (description, kind): kind `struct`, `type`, or `alias:<target>`
+    let seen = System.Collections.Generic.Dictionary<string, string * string>()
+    let clashes (k1: string) (k2: string) =
+        k1 = "struct" || k1 = "type" || k2 = "struct" || k2 = "type"
+    let moduleCount = program.Modules.Length
+    for (mi, m) in List.indexed program.Modules do
+        let modName = m.Name |> String.concat "."
+        let isMain = Blade.Types.TypeOrigins.isMainModule mi moduleCount || modName = ""
+        let owner = if isMain then "the main module" else $"module '{modName}'"
+        for d in m.Decls do
+            let at = $"{owner}, line {d.Span.StartLine}"
+            let declare (n: string) (kind: string) (what: string) =
+                let emitted =
+                    if isMain || n.StartsWith "__" then n
+                    else (modName + "." + n).Replace(".", "__")
+                if not (seen.ContainsKey emitted) then
+                    seen.[emitted] <- ($"the {what} '{n}' declared in {at}", kind)
+            let enumTarget (values: Expr) =
+                match values.Kind with
+                | ExprKind.ExprArrayLit es when not es.IsEmpty
+                                             && es |> List.forall (fun e -> match e.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false) ->
+                    "alias:string"
+                | ExprKind.ExprArrayLit es
+                    when es |> List.forall (fun e -> match e.Kind with ExprKind.ExprLit (LitInt _) -> true | _ -> false) ->
+                    "alias:int64"
+                | _ -> "alias:?"
+            match d.Value with
+            | DeclType (TyDeclAlias (n, _, body)) ->
+                let kind =
+                    match body with
+                    | TyIdx _ -> "alias:int64"
+                    | TyEnumIdx values -> enumTarget values
+                    | _ -> "alias:?"
+                declare n kind "type"
+            | DeclType (TyDeclStruct (n, _, _, _, _)) -> declare n "struct" "struct"
+            | DeclType (TyDeclSum (n, _, _)) -> declare n "type" "variant type"
+            | DeclType (TyDeclMutualGroup (members, _)) -> for (n, _) in members do declare n "alias:?" "mutual-group type"
+            | _ -> ()
+    let errors = ResizeArray<CompileError>()
+    for (n, kind, binding, modName, span) in env.ProviderEmittedTypes do
+        let site = if modName = "" then "in the main module" else $"in module '{modName}'"
+        let shown = if kind = "struct" then "struct" elif kind = "type" then "type" else "type alias"
+        match seen.TryGetValue n with
+        | true, (other, otherKind) when clashes kind otherKind ->
+            resetCurrentStmtSpan ()
+            errors.Add (locateError span env (ProviderTypeClash (n, shown, binding, site, other)))
+        | true, _ -> ()
+        | _ -> seen.[n] <- ($"the provider load '{binding}' {site}", kind)
+    List.ofSeq errors
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
+    resetInferSideTables ()
+    Blade.Types.StoredAliasIdentity.reset ()
     let env = emptyEnv ()
     let mutable modules = []
     let mutable allErrors = []
     let mutable moduleExports = Map.empty<string, TypeModuleExport>
-    for modul in program.Modules do
-        let envWithExports = { env with ModuleExports = moduleExports }
+    for (i, modul) in List.indexed program.Modules do
+        let moduleName = modul.Name |> String.concat "."
+        // D11: a non-main module's declarations get the identity
+        // `<module>.<name>` (Types.TypeOrigins); the main module -- the
+        // entry, which every program-assembling path puts LAST (the rule
+        // Lowering.qualifyModuleNames uses for values) -- keeps bare names.
+        let qualifier =
+            if Blade.Types.TypeOrigins.isMainModule i program.Modules.Length || moduleName = "" then None
+            else Some moduleName
+        let envWithExports = { env with ModuleExports = moduleExports; ModuleQualifier = qualifier; ProgramModules = program.Modules }
         let (tm, finalEnv, errs) = checkModule envWithExports modul
         modules <- tm :: modules
         allErrors <- allErrors @ errs
-        // Build export from this module's checked environment
-        let moduleName = modul.Name |> String.concat "."
+        // Build export from this module's checked environment. TYPES: every
+        // qualified identity the module's tables hold (its own and,
+        // transitively, the ones its API mentions) under its identity; the
+        // module's own names as TypeNames / CtorNames for the importer's
+        // scope keys; other undotted entries (provider structs) as before.
+        // Provider axes (`store.index.d`) stay out: dotted but no identity.
+        let isScopeKey (k: string) =
+            finalEnv.LocalTypeNames.ContainsKey k || finalEnv.ImportedTypeNames.ContainsKey k
+        let isCtorScopeKey (k: string) =
+            finalEnv.LocalCtorNames.ContainsKey k || finalEnv.ImportedCtorNames.ContainsKey k
         let export : TypeModuleExport = {
             Variables = finalEnv.Variables |> Map.filter (fun k _ -> not (k.Contains(".")))
-            TypeDefs = finalEnv.TypeDefs |> Map.filter (fun k _ -> not (k.Contains(".")))
-            VariantTags = finalEnv.VariantTags
+            TypeDefs =
+                finalEnv.TypeDefs |> Map.filter (fun k _ ->
+                    Blade.Types.TypeOrigins.isQualified k || (not (k.Contains(".")) && not (isScopeKey k)))
+            VariantTags =
+                finalEnv.VariantTags |> Map.filter (fun k _ ->
+                    Blade.Types.TypeOrigins.isQualified k || (not (k.Contains(".")) && not (isCtorScopeKey k)))
+            TypeNames = finalEnv.LocalTypeNames
+            CtorNames = finalEnv.LocalCtorNames
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
             StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))
         }
         moduleExports <- Map.add moduleName export moduleExports
     allErrors <- allErrors @ crossModuleDeclErrors env program
+    if List.isEmpty allErrors then allErrors <- providerTypeClashErrors env program
     // env.Warnings is shared by reference across all envWithExports updates
     // (mutable ResizeArray, not a Map), so all module-scope warnings
     // accumulate here.
     let warnings = env.Warnings |> Seq.toList
+    // G190 (c): the declared `mut` positions, for lowering's storage check
+    Blade.Types.MutParamTable.publish env.MutParamPositions
     ({ Modules = List.rev modules }, env.Builder, allErrors, warnings)
 
 // 13. Public Entry Point
@@ -812,6 +1581,13 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     // itself the earliest `resolveStatics` consumer -- and StaticEval's miss
     // would be SILENT ("not foldable"), not an error. No-op, and
     // reference-equal, for programs with no `import icechunk`.
+    // #62: every domain registers its surface ops' result shapes with the shared oracle (Blade.ElabShapes) BEFORE the
+    // first elaboration pass, so a pass that runs before a domain's own (sgs and ppl before math, math before spectra)
+    // reads the shape of that domain's call it meets. Idempotent.
+    Blade.Sgs.Elaborate.registerShapes ()
+    Blade.Ppl.Elaborate.registerShapes ()
+    Blade.Math.Elaborate.registerShapes ()
+    Blade.Spectra.Elaborate.registerShapes ()
     match Blade.ProviderDesugar.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["provider checkout desugar"]))
     | Ok program ->
@@ -856,6 +1632,9 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     // function-body `let p = o1 >>@ o2` / `f <$> c` / `c1 @>> c2` emit at
     // all. Shapes it declines fall through to the IRComposeApply path
     // unchanged. Runs BEFORE grad expansion so AD inherits fused bodies.
+    // G205: a let-bound lambda value is spliced at each KERNEL use (typed per
+    // use, inline), ahead of fusion, which reads the same surface
+    let program = { program with Modules = program.Modules |> List.map (fun m -> { m with Decls = instantiateLetLambdaKernels m.Imports m.Decls }) }
     let program = Blade.Grad.fuseProgram program
     match Blade.Grad.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["grad expansion"]))
@@ -864,7 +1643,7 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
     if not validationErrors.IsEmpty then
         let compileErrors =
             validationErrors |> List.map (fun e ->
-                { Error = Other e.Message; Span = e.Span; Context = [e.DeclName]; Code = Some "BL4003" })
+                { Error = IndexTypeErr e.Message; Span = e.Span; Context = [e.DeclName]; Code = Some "BL4003" })
         Error compileErrors
     else
         let (tp, builder, errors, warnings) = checkProgram program
@@ -893,7 +1672,7 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
             Blade.DeduceRep.RepCheckDisagreements.get ()
             |> List.map (fun (owner, detail, span) ->
                 { Error =
-                    Other $"internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '{owner}': {detail}. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)"
+                    InternalErr $"internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '{owner}': {detail}. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)"
                   Span = span
                   Context = [ "equiv certificate validation" ]
                   Code = Some "BL9004" })

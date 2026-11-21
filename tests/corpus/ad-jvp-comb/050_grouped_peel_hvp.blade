@@ -12,23 +12,23 @@ import ad as ad
 
 type R = Idx<5>
 
-let k0 = [0, 1, 0, 0, 1]
+let k0 = Int64([0, 1, 0, 0, 1])
 let mgk = group_keys(k0)
 
-function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
+function loss(v: Array<Float64 like R>, cw: Array<Float64 like Idx<2>>) -> Float64 = {
     let g = group_by(v, mgk)
-    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
     reduce(m * cw, (+))
 }
 
-let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
-let c0 = [2.0, 5.0]
-let mut gv = [0.0, 0.0, 0.0, 0.0, 0.0]
-let mut gc = [0.0, 0.0]
-let mut tgv = [0.0, 0.0, 0.0, 0.0, 0.0]
-let mut tgc = [0.0, 0.0]
+let v0 = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
+let c0 = Float64([2.0, 5.0])
+let mut gv = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let mut gc = Float64([0.0, 0.0])
+let mut tgv = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let mut tgc = Float64([0.0, 0.0])
 // seed the WEIGHT of group 0; group 0 holds rows 0, 2, 3 (n = 3)
-let (hp, ht) = ad.jvp(ad.grad(loss))(v0, c0, gv, gc, [0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0], tgv, tgc)
+let (hp, ht) = ad.jvp(ad.grad(loss))(v0, c0, gv, gc, Float64([0.0, 0.0, 0.0, 0.0, 0.0]), Float64([1.0, 0.0]), tgv, tgc)
 // the gradient legs are unchanged by the tangent seed
 // EXPECT: hp = 228.333333333333
 // EXPECT: gv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]

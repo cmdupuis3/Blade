@@ -1,0 +1,15 @@
+// TEST: Group Row Map Over A Key Grouping
+// G90 (group-rowmap v1): a per-group ROW map over a KEY grouping -- each
+// group's values centred on the group's mean -- is a grouped value over the
+// same grouping: its rows follow the grouping's (first-occurrence) group
+// order, and folds and further per-group maps read it like the group_by
+// result. Putting it back over the source axis is a scatter (v2; 076).
+type Row = Idx<6>
+let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
+let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let gk = group_keys(keys)
+let gv = group_by(vals, gk)
+let centred = method_for(gv) <@> lambda(r) -> r - reduce(r, (+)) / Float64(extents(r)) |> compute
+// EXPECT: centred = [[-23.333333333333336, -3.3333333333333357, 26.666666666666664], [-15.0, 15.0], [0.0]]
+let spread = method_for(centred) <@> lambda(r) -> prodsum(r, r) |> compute
+// EXPECT: spread = [1266.6666666666667, 450.0, 0.0]

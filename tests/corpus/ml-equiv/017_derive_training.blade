@@ -24,15 +24,15 @@ let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
 let static WD = ml.hom_dim(SIN, SOUT)
 
-let xg = [0.5, -1.2, 0.8, 0.3, -0.6]
-let tgt = [1.0, 0.5, 0.25]
+let xg = Float64([0.5, -1.2, 0.8, 0.3, -0.6])
+let tgt = Float64([1.0, 0.5, 0.25])
 
-function model(w: Array<Float like Idx<WD>>, x: Array<Float like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+function model(w: Array<Float64 like Idx<WD>>, x: Array<Float64 like IrrepsIdx<SIN>>) where ml.equiv(O3) -> Array<Float64 like Idx<3>> = {
     let h = ml.derive_linear(SIN, SOUT, w, x)
     ml.norms(SOUT, h)
 }
 
-function loss(w: Array<Float like Idx<WD>>) -> Float = {
+function loss(w: Array<Float64 like Idx<WD>>) -> Float64 = {
     let o = model(w, xg)
     reduce([(o(0) - tgt(0)) * (o(0) - tgt(0)), (o(1) - tgt(1)) * (o(1) - tgt(1)), (o(2) - tgt(2)) * (o(2) - tgt(2))], (+))
 }
@@ -40,9 +40,9 @@ function loss(w: Array<Float like Idx<WD>>) -> Float = {
 // one SGD step over the stacked [weights..., loss] state (lr 0.1)
 type Epochs = Idx<7>
 type State = Idx<5>
-function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
+function sgd_step(s: Array<Float64 like State>) -> Array<Float64 like State> = {
     let w = [s(0), s(1), s(2), s(3)]
-    let mut dw = [0.0, 0.0, 0.0, 0.0]
+    let mut dw = Float64([0.0, 0.0, 0.0, 0.0])
     let lv = ad.grad(loss)(w, dw)
     let wn = w - 0.1 * dw
     [wn(0), wn(1), wn(2), wn(3), lv]
@@ -51,10 +51,10 @@ function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
 // loss trace = the loss column of the trajectory rows 1..6 (each carries the
 // loss at the weights that entered that step); trajectory is block-local.
 let losses = {
-    let rec wtraj: Array<Float like Epochs, State> =
+    let rec wtraj: Array<Float64 like Epochs, State> =
         match wtraj with
         | zero -> zero
-        | zero :: s -> zero :: [0.4, -0.3, 0.2, 0.1, 0.0]
+        | zero :: s -> zero :: Float64([0.4, -0.3, 0.2, 0.1, 0.0])
         | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
     let r1 = wtraj(1)
     let r2 = wtraj(2)
@@ -68,10 +68,10 @@ let losses = {
 
 // final weights = the weight slots of the last trajectory row
 let wv = {
-    let rec wtraj: Array<Float like Epochs, State> =
+    let rec wtraj: Array<Float64 like Epochs, State> =
         match wtraj with
         | zero -> zero
-        | zero :: s -> zero :: [0.4, -0.3, 0.2, 0.1, 0.0]
+        | zero :: s -> zero :: Float64([0.4, -0.3, 0.2, 0.1, 0.0])
         | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
     let wf = wtraj(6)
     [wf(0), wf(1), wf(2), wf(3)]

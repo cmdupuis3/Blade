@@ -1,0 +1,12 @@
+// TEST: a Bool cast inside a kernel
+// ============================================================================
+// A Bool is not a number; it converts EXPLICITLY with a numeric cast (formalism
+// 2.4; the owner's ruling of 2026-11-14): 1 or 0 (1.0 / 0.0), element by element
+// over a Bool array, in every lane (C++, interpreter, LLVM, static evaluation).
+// ============================================================================
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let m = xs > 1.5
+let t = method_for(m) <@> lambda(c) -> Int64(c) * 10 |> compute
+// EXPECT: t = [0, 10, 10]
+let u = method_for(zip(xs, m)) <@> lambda(x, c) -> x * Float64(c) |> compute
+// EXPECT: u = [0.0, 2.0, 3.0]

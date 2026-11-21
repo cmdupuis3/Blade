@@ -8,21 +8,21 @@
 type C = Idx<4>
 type Steps = Idx<5>
 let SRC = method_for(range<C>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
-function ident(a: Array<Float like C>) -> Array<Float like C> = a
-function passthru(a: Array<Float like C>) -> Array<Float like C> = {
+function ident(a: Array<Float64 like C>) -> Array<Float64 like C> = a
+function passthru(a: Array<Float64 like C>) -> Array<Float64 like C> = {
     let z = a
     z
 }
-function stepp(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
+function stepp(u: Array<Float64 like C>, n: Int64) -> Array<Float64 like C> = {
     let t = method_for(range<C>) <@> lambda(i) -> Float64(i) + Float64(n) |> compute
     let p = passthru(SRC)
     let q = ident(p)
     u + 0.001 * t + 0.1 * q
 }
-let rec traj: Array<Float like Steps, C> =
+let rec traj: Array<Float64 like Steps, C> =
     match traj with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0])
     | prefix :: n -> prefix :: stepp(prefix(n - 1), n)
 let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))

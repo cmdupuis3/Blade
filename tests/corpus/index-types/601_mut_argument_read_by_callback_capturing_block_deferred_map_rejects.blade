@@ -1,0 +1,21 @@
+// TEST: A Mut Argument Read By A Callback Capturing A Block Deferred Map Is Refused (rejects)
+// ============================================================================
+// Gap G240 (4), round 4 wave 9 (lane C, C2): a callback capturing a deferred
+// map bound by a let of a top-level BLOCK reads, through that map's
+// evaluation, the array passed as the `mut` argument. A captured local
+// deferred map is followed through its evaluation: refused (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(y: mut A, cb: Float64 -> Float64) -> Float64 = {
+    y(0) = 9.0
+    cb(1.0)
+}
+let mut g: A = [2.0, 3.0]
+let r = {
+    let d = method_for(g) <@> lambda(e: Float64) -> e * 2.0
+    let rd = lambda(t: Float64) -> t * d(0)
+    bump(g, rd)
+}
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter
+// REJECT-AT: lower

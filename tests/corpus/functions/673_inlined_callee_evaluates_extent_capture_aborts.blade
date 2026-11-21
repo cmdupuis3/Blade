@@ -1,0 +1,11 @@
+// TEST: an inlined callee evaluates a capture read only through extents (aborts)
+// Gap G238 (round 4 wave 8, Codex review round 3): the tuple-returning h reads
+// q, whose kernel captures the failing deferred d through extents only. The
+// call evaluates the capture privately, so d fails (BL8013) at h in every
+// lane (the LLVM lane inlined h and evaluated nothing: r = (4, 0)).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let q = method_for(x) <@> lambda(v) -> v + extents(d)
+function h() -> (Int64, Int64) = (q(0), 0)
+let r = h()
+// ABORT: BL8013

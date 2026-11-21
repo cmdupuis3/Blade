@@ -18,11 +18,11 @@
 // ============================================================================
 let residual = fma(0.1, 10.0, -1.0)
 // EXPECT: residual = 5.55111512312578e-17
-let split_is_zero = 0.1 * 10.0 - 1.0 == 0.0
+let split_is_zero = Float64(0.1) * Float64(10.0) - Float64(1.0) == Float64(0.0)
 // EXPECT: split_is_zero = true
 
 // TwoProd: the product's rounding error, exactly.
-let a = 1.0 / 3.0
+let a: Float64 = 1.0 / 3.0
 let p = a * 3.0
 let e = fma(a, 3.0, 0.0 - p)
 let twoprod = [p, e]

@@ -1,0 +1,10 @@
+// TEST: an integer literal past Int32 at a generic instance made Int32 (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function f(x: T, y: T) -> T = x + y
+function h(a) = f(a, 5000000000)
+let a: Int32 = 3
+let r = h(a)
+// ERROR: BL3020 @ 6:17

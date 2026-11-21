@@ -1,5 +1,5 @@
 // TEST: Wildcard Escape In Let (rejects)
-// ERROR: BL3999
+// ERROR: BL3032
 // A wildcard `_` is a hole, not a value: it is only meaningful as a sparse-
 // index coordinate (S((a, _, c))), where the index dispatch consumes it. Bound
 // into a let as part of a tuple value, it has escaped and must be rejected at
@@ -16,7 +16,7 @@
 // value-forming-boundary guard in inferLetBindingValue; before that guard it
 // slipped to a lowering failwith, which is the wrong (unlocated, exception-
 // based) mechanism.
-let a = 1
-let c = 3
+let a: Int64 = 1
+let c: Int64 = 3
 let t = (a, _, c)
 // EXPECT: typecheck failure — a wildcard hole cannot be bound as a value.

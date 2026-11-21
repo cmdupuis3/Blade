@@ -1,0 +1,13 @@
+// TEST: An Earlier Private Operand A Later Operand Reads And Captures Is Forced Under Its Own Name
+// Gap G243 / G214 (round 4 wave 9 lane d; Codex diff review): f reads e as its input AND captures
+// it (extents(e)); the capture forces e once under its own name (a snapshot, before the d write).
+// EXPECT: e = [2, 3, 4]
+// EXPECT: s = 27
+// EXPECT: w = 2
+type I = Idx<3>
+let mut d: Array<Int64 like I> = [1, 2, 3]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + Int64(extents(e))
+let s = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a + b, (+))
+d((0 : I)) = 9
+let w = e(0)

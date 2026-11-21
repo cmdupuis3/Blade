@@ -1,0 +1,14 @@
+// TEST: a literal beside a lambda value's open parameter takes the width its call decides
+// ============================================================================
+// G275 (2): `z + 0.1` in a lambda kept as a value is typed while `z` is open;
+// the first call decides `z` (Float32), and the literal -- and the result --
+// take that width (formalism 2.4: the literal says the class, its partner the
+// width). It used to be typed Float64 whatever `z` became.
+// ============================================================================
+let h = lambda(z) -> z + 0.1
+let saved = h
+let f: Float32 = 1.0
+let w = h(f)
+let doubled = w + w
+// EXPECT: w = 1.1
+// EXPECT: doubled = 2.2

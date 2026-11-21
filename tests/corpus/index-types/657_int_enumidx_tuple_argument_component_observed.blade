@@ -1,0 +1,22 @@
+// TEST: A value of R inside a tuple argument meets a numeric component as its key
+// ============================================================================
+// R3, a defect fixed (Codex review round 2): `m`'s literal pattern types its
+// parameter `(Int32, Float64)`, and the call handed the tuple's R component
+// over as its POSITION -- the base (and the first R3 build) compared position
+// 1 with the key 100 and took the wildcard arm. A value of R meeting a
+// numeric parameter slot is observed inside a tuple argument as at the top.
+// G275 / R12 (round 4 wave 10): `m` was `m(t: T)`, whose literal pattern
+// typed it `(Int32, Float64)`, so the call wrapped the Int64 key into an
+// Int32 component -- an unproven narrowing a whole argument was already
+// refused for. `m` now declares the Int64 component the key needs.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function m(t: (Int64, Float64)) = match t with
+    | (100, _) -> 1
+    | _ -> 0
+let w = m((codes(0), Float64(1.0)))
+// EXPECT: w = 1
+function g(t: (Int64, Float64)) -> Int64 = t[0]
+let v = g((codes(2), 1.0))
+// EXPECT: v = 300

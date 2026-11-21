@@ -1,0 +1,11 @@
+// TEST: An unread block-local deferred map forces nothing
+// Gap G199 (Codex diff review round 9): a block-local deferred map whose
+// kernel captures the failing d is never read by its block, so it is never
+// evaluated and d is never forced: the block's value is 42 in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let z = {
+    let p = method_for(x) <@> lambda(v) -> v + extents(d)
+    42
+}
+// EXPECT: z = 42

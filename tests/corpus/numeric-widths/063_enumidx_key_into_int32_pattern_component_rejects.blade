@@ -1,0 +1,14 @@
+// TEST: an EnumIdx key in a tuple argument meets an Int32 component a literal pattern typed (rejects)
+// ============================================================================
+// G275 / R12: `m`'s literal pattern types its parameter `(Int32, Float64)`;
+// the key of R (an Int64) would be wrapped into the Int32 component -- an
+// unproven narrowing, refused as it is for a whole argument (index-types/657
+// declares the Int64 component instead).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function m(t: T) = match t with
+    | (100, _) -> 1
+    | _ -> 0
+let w = m((codes(0), Float64(1.0)))
+// ERROR: BL3020

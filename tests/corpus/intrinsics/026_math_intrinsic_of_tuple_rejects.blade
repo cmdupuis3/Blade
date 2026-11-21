@@ -1,0 +1,6 @@
+// TEST: a math intrinsic of a tuple (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4): a tuple is not a number either.
+// ============================================================================
+let q = sqrt((1.0, 2.0))
+// ERROR: BL3007

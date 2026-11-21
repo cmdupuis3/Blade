@@ -1,0 +1,20 @@
+// TEST: A user function named apply over a tuple argument is the user function, not std::apply
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): a tuple argument is a std::tuple in
+// the C++ lane, so argument-dependent lookup brought std::apply into the call
+// apply(add, t); it is an exact template match where the user function needs
+// a std::function conversion, so the C++ lane SILENTLY called std::apply
+// (r = 3.0). A user function whose name a named namespace of the emitted TU
+// declares, and whose arguments may carry such a namespace, is now emitted
+// under another C++ name (CodeGenState.installCppNameTable); __invoke
+// (libstdc++ internal) is the same member.
+// ============================================================================
+function apply(h: (Float64, Float64) -> Float64, t: (Float64, Float64)) -> Float64 = h(t[0], t[1]) * 10.0
+function add(a: Float64, b: Float64) -> Float64 = a + b
+function __invoke(h: ((Float64, Float64)) -> Float64, t: (Float64, Float64)) -> Float64 = h(t) * 100.0
+function addt(t: (Float64, Float64)) -> Float64 = t[0] + t[1]
+let t: (Float64, Float64) = (Float64(1.0), Float64(2.0))
+let r = apply(add, t)
+let q = __invoke(addt, t)
+// EXPECT: r = 30.0
+// EXPECT: q = 300.0

@@ -16,6 +16,65 @@ type Span = {
 
 let noSpan = { StartLine = 0; StartCol = 0; EndLine = 0; EndCol = 0; File = None }
 
+/// R19 (round 3, lane a2): FLOAT LITERALS WHOSE SPELLING THE DOUBLE CANNOT HOLD.
+/// The lexer reads a float literal into a double, so `1e400` is already an
+/// infinity and a nonzero `1e-400` already 0.0 -- indistinguishable, by value,
+/// from a spelled `0.0`. The parser marks such a literal (Lexer.TokFloat's
+/// spelling) on the literal's own SPAN OBJECT -- the record instance it builds
+/// for that ExprLit, keyed by REFERENCE (ConditionalWeakTable), never by its
+/// value. The span object travels with the node through every copy the
+/// checker, Zonk and lowering make (`{ e with Type = .. }` shares it), so every
+/// literal-fit judgment (LiteralDefaults.floatLiteralFits) reads the verdict
+/// of exactly the literal it judges. Closed by construction: an entry is
+/// visible only through the AST it was made for -- another compilation, flow
+/// or module builds its own span objects, and a structurally EQUAL span (a
+/// re-parse, a string-sourced program at the same line and column, a
+/// synthesized node) is a different object -- and it dies with that AST.
+/// A module imported into a program is parsed by the same parser, so its
+/// literals carry their marks into the program that imports it.
+module DegenerateFloatLiterals =
+    let private table = System.Runtime.CompilerServices.ConditionalWeakTable<Span, string>()
+    /// Mark the span object of a float literal the parser built whose
+    /// spelling its double does not hold.
+    let record (span: Span) (degenerateSpelling: string option) =
+        match degenerateSpelling with
+        | Some text -> table.AddOrUpdate(span, text)
+        | None -> ()
+    /// Whether `span` IS (by reference) the span of a float literal spelled as
+    /// a value its double does not hold (an overflow to an infinity, a
+    /// nonzero underflow to 0.0).
+    let isDegenerate (span: Span) : bool =
+        match table.TryGetValue span with
+        | true, _ -> true
+        | _ -> false
+    /// The spelling of a degenerate float literal (for its refusal message).
+    let spellingOf (span: Span) : string option =
+        match table.TryGetValue span with
+        | true, s -> Some s
+        | _ -> None
+
+/// G275: the numeric CASTS A USER WROTE (`Float64(x)`, `x |> Int32`), marked
+/// on the span object of the application node the PARSER builds, keyed by
+/// REFERENCE as DegenerateFloatLiterals is. An explicit cast is a fixed-width
+/// value, never a literal that adapts (Lowering.refuseArgumentConversions);
+/// a cast an elaborator or the AD pipeline synthesizes -- located at a
+/// declaration's span, or at none -- is not in the table, so it can never
+/// masquerade as one the user wrote.
+module UserCasts =
+    let private table = System.Runtime.CompilerServices.ConditionalWeakTable<Span, obj>()
+    let private heads = set [ "Int32"; "Int64"; "Float32"; "Float64"; "Complex64"; "Complex128" ]
+    /// Mark `span` (the application node's own span object) when `head` names
+    /// a numeric cast and the application has exactly one argument.
+    let recordIfCast (head: string) (argCount: int) (span: Span) =
+        if argCount = 1 && heads.Contains head then table.AddOrUpdate(span, null)
+    let isUserCast (span: Span) : bool =
+        match table.TryGetValue span with
+        | true, _ -> true
+        | _ -> false
+    /// The parser re-spans a node (parentheses widen it): the mark follows.
+    let transfer (fromSpan: Span) (toSpan: Span) =
+        if isUserCast fromSpan then table.AddOrUpdate(toSpan, null)
+
 type Located<'T> = {
     Value: 'T
     Span: Span
@@ -834,11 +893,20 @@ let inheritPatSpan (src: Pattern) (kind: PatternKind) : Pattern = { Kind = kind;
 /// Ambient span for synthesized AST: elaborators (ml/ppl/math/rand/spectra/
 /// grad) build many nodes on behalf of ONE user declaration. The expansion
 /// entry stamps that decl's span here; `syn`/`synPat` read it, so builder
-/// helpers stay span-free. Elaboration is single-threaded (typeCheck
-/// pipeline), so a plain mutable is safe.
-let mutable synthSpan : Span = noSpan
-let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan }
-let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan }
+/// helpers stay span-free. PER FLOW (gap G208 (4), the G193 class): it used
+/// to be a process-global mutable, so two syntheses running concurrently in
+/// one host (an MCP / IDE server, BLADE_TEST_FSHARP_PARALLEL) could stamp
+/// each other's spans; an AsyncLocal is the house pattern (GradCommon.FlowCell
+/// for errMode / letAnnotations, CallElideProgram). A flow that never set it
+/// reads noSpan.
+let private synthSpanStorage = System.Threading.AsyncLocal<Span option>()
+let synthSpan () : Span =
+    match synthSpanStorage.Value with
+    | Some s -> s
+    | None -> noSpan
+let setSynthSpan (s: Span) : unit = synthSpanStorage.Value <- Some s
+let syn (kind: ExprKind) : Expr = { Kind = kind; Span = synthSpan () }
+let synPat (kind: PatternKind) : Pattern = { Kind = kind; Span = synthSpan () }
 
 /// The comparison a field bound's UPPER endpoint desugars to: `<` for the
 /// half-open `in lo .. hi` spelling, `<=` for the inclusive `max=` spelling.

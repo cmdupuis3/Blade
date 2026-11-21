@@ -22,7 +22,7 @@ function polySum(args: Poly<T^0>) -> T^0 = {
     reduce(terms, (+))
 }
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let m = object_for(polySum) <@> (a, a) |> compute
     m(0, 2)
 }

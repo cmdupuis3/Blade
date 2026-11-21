@@ -24,16 +24,16 @@ let static WE = ml.pg_hom_dim("C4", EC, EC)
 // EXPECT: WE = 2
 
 // SUGGEST: function 'c4_loose' judges equivariant under C4: add 'where ml.equiv(C4)' [signature: x transforms as PgIrrepsIdx<C4, [("E", 1)]>, w invariant -> PgIrrepsIdx<C4, [("E", 1)]>]
-function c4_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                  -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function c4_loose(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                  -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     ml.derive_pg_linear(C4, EC, EC, x, w)
 
 // The proposed pin, written out.
-function c4_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>)
-                  where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> =
+function c4_tight(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>)
+                  where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> =
     ml.derive_pg_linear(C4, EC, EC, x, w)
 
-let wv = [0.0, 1.0]
+let wv = Float64([0.0, 1.0])
 // Pure J at (0, 1): (3, 4) -> (-4, 3). Integer generators, exact pins.
 let loose = c4_loose([3.0, 4.0], wv)
 // EXPECT: loose = [-4.0, 3.0]
@@ -51,16 +51,16 @@ let static SH1 = ml.sh_spec(1)
 // proposed signature is the classification the checker would make once the pin
 // is written, so the asymmetry is visible in the message itself.
 // SUGGEST: function 'mixed_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: v transforms as IrrepsIdx<[(0, 0, 1), (1, 1, 1)]>, p invariant, pw invariant -> invariant]
-function mixed_loose(v: Array<Float like IrrepsIdx<SH1>>,
-                     p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>) -> Float = {
+function mixed_loose(v: Array<Float64 like IrrepsIdx<SH1>>,
+                     p: Array<Float64 like PgIrrepsIdx<C4, EC>>, pw: Array<Float64 like Idx<WE>>) -> Float64 = {
     let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
     let n = ml.norms(SH1, v)
-    n(1) * q(0)
+    n(Int64(1)) * q(0)
 }
 
-function mixed_tight(v: Array<Float like IrrepsIdx<SH1>>,
-                     p: Array<Float like PgIrrepsIdx<C4, EC>>, pw: Array<Float like Idx<WE>>)
-                     where ml.equiv(O3) -> Float = {
+function mixed_tight(v: Array<Float64 like IrrepsIdx<SH1>>,
+                     p: Array<Float64 like PgIrrepsIdx<C4, EC>>, pw: Array<Float64 like Idx<WE>>)
+                     where ml.equiv(O3) -> Float64 = {
     let q = ml.derive_pg_linear(C4, EC, EC, p, pw)
     let n = ml.norms(SH1, v)
     n(1) * q(0)

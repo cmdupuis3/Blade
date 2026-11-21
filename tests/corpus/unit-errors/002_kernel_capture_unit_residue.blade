@@ -6,6 +6,6 @@
 // kernelBodyUnits pass still rejects the dimensioned argument.
 Unit second
 Unit day = 86400 * second
-let ws: Array<Float<1/day> like Idx<3>> = [1.0, 2.0, 3.0]
-let tz: Float<day> = 2.0
+let ws: Array<Float64<1/day> like Idx<3>> = [1.0, 2.0, 3.0]
+let tz: Float64<day> = 2.0
 let out = (ws <@> lambda(w) -> cos(w * tz * tz)) |> compute

@@ -1,0 +1,15 @@
+// TEST: Hot row publications belong to one function emission
+// The generic body uses a hot-row buffer; both fixed-shape bodies use flat
+// producers. A row-buffer publication must not leak between those emissions.
+function fmin(a: Float64, b: Float64) -> Float64 = if a < b then a else b
+function low(g: Array<Float64 like Idx<nr>, Idx<nc>>, cap: Float64) -> Float64 = {
+    let escaped = (method_for(g) <@> lambda(v) -> if v == 0.0 then cap else v) |> compute
+    let lo = reduce(reduce(escaped, fmin, 1.0e300), fmin, 1.0e300)
+    lo - 1.0
+}
+let a = Float64([[0.0, 4.0, 2.0], [3.0, 0.0, 5.0]])
+let b = Float64([[8.0, 0.0], [9.0, -2.0], [0.0, 7.0]])
+let first = low(a, 100.0)
+let second = low(b, 100.0)
+// EXPECT: first = 1.0
+// EXPECT: second = -3.0

@@ -1,0 +1,12 @@
+// TEST: an alias call typed while the lambda value is open, decided later at Float64 (rejects)
+// ============================================================================
+// G275 (1): the alias call is judged on the instance types (Lowering), once
+// the later direct call has decided the parameter.
+// ============================================================================
+let f64: Float64 = 2.0
+let f32: Float32 = 1.0
+let h = lambda(v) -> v
+let saved = h
+let y = saved(f32)
+let x = h(f64)
+// ERROR: BL3020

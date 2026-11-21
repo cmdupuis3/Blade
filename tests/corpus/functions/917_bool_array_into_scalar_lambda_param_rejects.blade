@@ -1,0 +1,14 @@
+// TEST: A Generic Bool Array Into A Lambda's Number Parameter Is Refused (rejects)
+// ERROR: BL3001 @ 11:5
+// ERROR-CONTAINS: argument 1 of this call is an array of Bool
+// ============================================================================
+// R11: `f(1.0)` decided f's parameter (a float); outer's generic parameter,
+// instantiated at an array of Bools, was handed to it and g++ refused the
+// generated call (BL9002). Refused at `f(b)`.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + 1.0
+    let a = f(1.0)
+    f(b)
+}
+let r = outer([true, false])

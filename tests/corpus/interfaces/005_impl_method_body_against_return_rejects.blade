@@ -4,10 +4,10 @@
 // An impl method's body must meet the return type it declares. The unify was
 // run and its result discarded, so `-> Float = "nope"` type-checked and died in
 // g++.
-struct P { x: Float }
-interface Show { function show(self) -> Float }
+struct P { x: Float64 }
+interface Show { function show(self) -> Float64 }
 impl Show for P {
-    function show(self) -> Float = "nope"
+    function show(self) -> Float64 = "nope"
 }
 let p = P { x = 1.0 }
 let s = p.show()

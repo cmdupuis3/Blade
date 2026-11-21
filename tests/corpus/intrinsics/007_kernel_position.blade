@@ -6,13 +6,13 @@
 // function into kernel position is the one that carries these — and the
 // shadowing rule still holds there: a user `ceil` wins over the intrinsic.
 // ============================================================================
-let A = [1.0, 0.0 - 2.0, 3.0]
-let P = [1.0, 4.0, 9.0]
+let A = Float64([1.0, 0.0 - 2.0, 3.0])
+let P = Float64([1.0, 4.0, 9.0])
 let mags = abs <@> A |> compute
 let mags2 = object_for(abs) <@> A |> compute
 let roots = method_for(P) <@> sqrt |> compute
 
-function ceil(x: Float) -> Float = x * 10.0
+function ceil(x: Float64) -> Float64 = x * 10.0
 let scaled = ceil <@> A |> compute
 // EXPECT: mags = [1.0, 2.0, 3.0]
 // EXPECT: mags2 = [1.0, 2.0, 3.0]

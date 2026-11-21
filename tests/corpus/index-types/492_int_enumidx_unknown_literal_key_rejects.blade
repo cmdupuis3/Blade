@@ -1,0 +1,7 @@
+// TEST: An integer EnumIdx literal subscript must be a key (rejects)
+// ERROR: BL4003 @ 6:11
+// ============================================================================
+// `w(250)` names no key of R. A literal key is resolved at compile time.
+type R = EnumIdx<[100, 200, 300]>
+let w: Array<Float64 like R> = [1.0, 2.0, 3.0]
+let u = w(250)

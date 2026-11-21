@@ -1,0 +1,13 @@
+// TEST: A section fold over a sparse array of R values is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a sparse array
+// ============================================================================
+// R3 (lead review): a sparse array has no key array both lanes build (the
+// interpreter does not lift a map over sparse storage), so a fold of its
+// keys is refused in the type checker instead of failing in the back end.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keys: Array<(Nat, Nat) like Idx<3>> = [(2, 1), (0, 3), (1, 0)]
+let sp = sparse(codes, keys)
+let s = reduce(sp, (+))

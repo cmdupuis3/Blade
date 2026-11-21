@@ -1,0 +1,17 @@
+// TEST: If Condition Copied Operand (rejects)
+// ----------------------------------------------------------------------------
+// Gap G77, the second Codex look of W4B-A, finding 1: the condition computes
+// a COPY of g (`g |> compute`) -- a copy evaluates g's computation but does
+// not force g or make it print -- and an arm reads g. The interpreter took
+// the else arm and never printed g; the C++ lane forced and printed g before
+// the condition. A copy is not a force: refused at lowering in every lane
+// (BL6002), whichever arm would run.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [1]
+let g = method_for(z) <@> lambda(v) -> 10 / (v + 1)
+function above(a: Array<Int64 like Row>) -> Bool = a(0) > 10
+let r = if above(g |> compute) then g(0) else 0
+// ERROR: BL6002 @ 13:1
+// ERROR-CONTAINS: whose arm forces the deferred computation `g`
+// REJECT-AT: lower

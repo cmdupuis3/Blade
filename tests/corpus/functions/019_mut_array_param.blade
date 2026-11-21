@@ -7,14 +7,14 @@
 // the C++ ABI, writes would drop silently). Element-wise assignments (no
 // imperative loop) exercise the write-back path per index.
 // ============================================================================
-function accumulate_into(x: Array<Float like Idx<3>>, out: mut Array<Float like Idx<3>>) -> Float = {
+function accumulate_into(x: Array<Float64 like Idx<3>>, out: mut Array<Float64 like Idx<3>>) -> Float64 = {
     out(0) += x(0) * 2.0
     out(1) += x(1) * 2.0
     out(2) += x(2) * 2.0
     x(0) + x(1) + x(2)
 }
-let w = [1.0, 2.0, 3.0]
-let mut g = [0.0, 0.0, 0.0]
+let w = Float64([1.0, 2.0, 3.0])
+let mut g = Float64([0.0, 0.0, 0.0])
 let s = accumulate_into(w, g)
 // EXPECT: g = [2.0, 4.0, 6.0]
 // EXPECT: s = 6.0

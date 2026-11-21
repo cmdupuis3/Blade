@@ -16,14 +16,14 @@ function pos_untyped(x) = {
     let s = tot(x)
     x > 0.0
 }
-let pu = pos_untyped([1.0, -2.0, 6.0])
+let pu = pos_untyped(Float64([1.0, -2.0, 6.0]))
 // EXPECT: pu = [true, false, true]
 
 function pos_generic(x: T) = {
     let s = tot(x)
     x > 0.0
 }
-let pg = pos_generic([1.0, -2.0, 6.0])
+let pg = pos_generic(Float64([1.0, -2.0, 6.0]))
 // EXPECT: pg = [true, false, true]
 
 function firstpos(A: Poly<T>) = {
@@ -31,5 +31,5 @@ function firstpos(A: Poly<T>) = {
     let s = tot(head)
     head > 0.0
 }
-let pp = firstpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+let pp = firstpos(Float64([1.0, -2.0, 6.0]), Float64([3.0, 4.0, -2.0]))
 // EXPECT: pp = [true, false, true]

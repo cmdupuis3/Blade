@@ -1,0 +1,16 @@
+// TEST: Fold Seed Reads Spine Tuple Member Copy
+// Gap G248 residual, round 4 wave 9 (B2): t = (p, 1.0) is a tuple VALUE, so
+// its member is a COPY of p evaluated at the construction (formalism 10.2):
+// p itself is not forced there. The seed reads the copy, the fold walks p
+// (still deferred: nothing forced it) over the unwritten x, and the later
+// read w after the write to x evaluates p over the written x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let t = (p, 1.0)
+let s = reduce(p, (+), t[0](0))
+x(0) = 10.0
+let w = p(0)
+// EXPECT: t = ([2.0, 4.0, 6.0], 1.0)
+// EXPECT: s = 14.0
+// EXPECT: w = 20.0
+// EXPECT: p = [20.0, 4.0, 6.0]

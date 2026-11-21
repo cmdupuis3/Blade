@@ -1,0 +1,24 @@
+// TEST: Transpose Pointwise Absorbed
+// ABSORPTION into a pointwise consumer (transpose-normal-form v1, rule 3b): a
+// computed map reading `transpose(M, [0, 1])` once per cell by a scalar
+// kernel becomes the range map over the OUTPUT's axes whose kernel reads
+// M(j, i): the surviving traversal is the output's row-major nest, forward
+// and contiguous over the output and over the untransposed operand `B`; M is
+// gathered. No fold, so no order question -- every build, strict included
+// (each cell is the kernel on the same values): no transpose copy, no pool.
+// `N` is written after its map, so that map keeps its copy (the snapshot).
+type R = Idx<2>
+type K = Idx<3>
+let M: Array<Float64 like R, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like K, R> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let P = transpose(M, [0, 1]) + B
+let W = method_for(zip(transpose(M, [0, 1]), B)) <@> lambda(x, y) -> x * 10.0 + y |> compute
+let D = method_for(transpose(M, [0, 1])) <@> lambda(x) -> x * 2.0 |> compute
+let N: Array<Float64 like R, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let Q = transpose(N, [0, 1]) - B
+N(1, 2) = 60.0
+// EXPECT: P = [[2.0, 6.0], [5.0, 9.0], [8.0, 12.0]]
+// EXPECT: W = [[11.0, 42.0], [23.0, 54.0], [35.0, 66.0]]
+// EXPECT: D = [[2.0, 8.0], [4.0, 10.0], [6.0, 12.0]]
+// EXPECT: Q = [[0.0, 2.0], [-1.0, 1.0], [-2.0, 0.0]]
+// EXPECT: N = [[1.0, 2.0, 3.0], [4.0, 5.0, 60.0]]

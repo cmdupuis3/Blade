@@ -7,12 +7,12 @@ Unit meters
 Unit seconds
 Unit mps = meters / seconds
 Unit speed: mps
-function twice(x: Float<speed>) -> Float<speed> = x + x
-let r = twice((4.0 : speed))
-let v: Float<speed> = 3.0
+function twice(x: Float64<speed>) -> Float64<speed> = x + x
+let r = twice((Float64(4.0) : speed))
+let v: Float64<speed> = 3.0
 let r2 = twice(v)
-let dist: Float<meters> = 8.0
-let dur: Float<seconds> = 2.0
+let dist: Float64<meters> = 8.0
+let dur: Float64<seconds> = 2.0
 let vel = ((dist / dur) : speed)
 let r3 = twice(vel)
 // EXPECT: r = 8.0

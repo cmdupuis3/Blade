@@ -1,0 +1,18 @@
+// TEST: a tuple member selected by a run-time index, holding a view of a captured plain let, written
+// ERROR: BL4005
+// ERROR-CONTAINS: a write reaches `g` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7), Codex
+// round 3: `t[k]` with a run-time `k` may be either member, so the store
+// through `v` may write `g`'s row. The walk's storage filter used to drop the
+// row view `g(0)` (its IR node is untyped), so nothing was judged -- with a
+// literal `t[0]` the same write was refused.
+let g = [[1.0, 2.0], [3.0, 4.0]]
+function f() -> Float32 = {
+    let k = 0
+    let t = (g(0), [5.0, 6.0])
+    let v = t[k]
+    v(0) = 9.0
+    v(0)
+}
+let r = f()

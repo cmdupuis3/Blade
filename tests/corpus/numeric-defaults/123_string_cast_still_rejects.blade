@@ -1,0 +1,8 @@
+// TEST: a String cast to a number (rejects)
+// ============================================================================
+// The numeric casts admit Bool (formalism 2.4) and nothing else non-numeric: a
+// String is no number and no Bool.
+// ============================================================================
+let s = "1"
+let n = Int64(s)
+// ERROR: BL3019

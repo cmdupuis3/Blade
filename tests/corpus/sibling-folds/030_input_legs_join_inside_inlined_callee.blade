@@ -1,0 +1,46 @@
+// TEST: Input legs whose join lands inside the inlined callee keep its pools alive until the call returns
+// ============================================================================
+// `kernel` folds x and y itself (a, b) between its first producer y2 and a
+// LATER map z that reads y2 again. The sibling pass joins the inner folds with
+// the caller's (one leg each over x and y), so the join lands INSIDE the
+// inlined spine, before z. The legs ride y2's producer loop; the callee's
+// pools (y2, z) are released at the call's RETURN BOUNDARY -- right behind
+// its evaluated scalar return -- never at the join (W2-4 second review NEW 1).
+// The second region places the inner folds BEFORE y2's own epilogue fold s:
+// the join precedes s, and s (fused or, if a lane declines, two-pass) still
+// reads a live y2. Values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function later(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let a = reduce(x, (+))
+    let b = reduce(y, (+))
+    let z = method_for(y2) <@> lambda(w) -> w + 1.0 |> compute
+    let q = reduce(method_for(z) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s + a + 10.0 * b + 100.0 * q
+}
+function early(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let a = reduce(x, (+))
+    let b = reduce(y, (+))
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s + a + 10.0 * b
+}
+let (r1, t1) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    (later(x, y), reduce(x, (+)) + 3.0 * reduce(y, (+)))
+}
+let (r2, t2) = {
+    let x = inputs(9)
+    let y = inputs(4)
+    (early(x, y), reduce(x, (+)) + 3.0 * reduce(y, (+)))
+}
+// EXPECT: r1 = 4257855.0
+// EXPECT: t1 = 9013.0
+// EXPECT: r2 = 137137.0
+// EXPECT: t2 = 8511.0

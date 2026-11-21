@@ -29,8 +29,8 @@ import ml as ml
 // ============================================================================
 let static SH1 = ml.sh_spec(1)
 
-function scaled_speed(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
-                      c: Array<Float like Idx<3>>) where ml.equiv(O3) -> Float = {
+function scaled_speed(v: Array<Float64 like Idx<3>>, w: Array<Float64 like Idx<3>>,
+                      c: Array<Float64 like Idx<3>>) where ml.equiv(O3) -> Float64 = {
     let d = v - w
     let sh = ml.y_to(1, d(0), d(1), d(2))
     let n = ml.norms(SH1, sh)
@@ -38,11 +38,11 @@ function scaled_speed(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
     // them was BL4008 "unclassifiable" before the arms landed.
     let total = reduce(c, (+), 0.0)
     let doubled = method_for(c) <@> lambda(t) -> t * 2.0 |> compute
-    n(1) * total + doubled(0)
+    n(Int64(1)) * total + doubled(0)
 }
 
 let a = scaled_speed([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
 let b = scaled_speed([0.0 - 5.0, 4.0, 1.0], [0.0 - 1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
 let drot = a - b
-let rot_ok = if drot * drot < 0.000000000000000000000001 then 1.0 else 0.0
+let rot_ok: Float64 = if drot * drot < 0.000000000000000000000001 then 1.0 else 0.0
 // EXPECT: rot_ok = 1.0

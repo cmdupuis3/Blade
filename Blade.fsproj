@@ -34,6 +34,11 @@
          by every gate that used to read only process env (BLAS/LAPACK tiers,
          NETCDF_DIR, MSMPI_BIN). Written by the future `blade setup`. -->
     <Compile Include="src/Toolchain.fs" />
+    <!-- The print selection (BLADE_PRINT, the print flag): one parser and the
+         conservative pre-qualification resolver every optimizer plan and
+         printer reads (gap G200). Dependency-free. -->
+    <Compile Include="src/PrintSelection.fs" />
+    <Compile Include="src/PrintForm.fs" />
     <!-- Display frames: the {mime, data} rich-output wire format
          (Blade-REPL/docs/display-frames.md). Dependency-free string work, so
          it sits at the very front and is shared by everything that has to
@@ -69,6 +74,11 @@
          decompositions diverge on purpose (see section 6, MPI row, of
          docs/plans/plan-simplex-blocked-compute.md) and agree on the
          identities, which `blade test llvm goldens` pins module vs module. -->
+    <!-- OrbRank.fs (the OrbIdx bijection layer, documented at its old slot below)
+         precedes SimplexBlocksCore: its binomOrZero is the one exact binomial
+         every pool sizer routes through (P3-15). Both are dependency-free, except that
+         binomOrZero raises a Diagnostics BL4003 past int64 (F2). -->
+    <Compile Include="src/OrbRank.fs" />
     <Compile Include="src/SimplexBlocksCore.fs" />
     <Compile Include="src/Lexer.fs" />
     <!-- The parser, five layers in dependency order. ParserCore.fs holds the
@@ -102,10 +112,10 @@
          canonicalizer, the §2 segment-peeled traversal stream, and the §3
          arithmetic rank/unrank pair. Deliberately dependency-free — FSharp.Core
          only, no Blade module is opened — so proofs/ scripts and external
-         checkers can `#load` the file standalone. Sits here because IR.fs is
-         its eventual consumer (the checked sibling of `binomI64`, IR.fs:2438),
-         and nothing it needs compiles later. -->
-    <Compile Include="src/OrbRank.fs" />
+         checkers can `#load` the file standalone. Its <Compile> entry now sits
+         ahead of SimplexBlocksCore.fs (see there): binomOrZero is the one exact
+         binomial behind SimplexBlocksCore, IRStorage.binomI64, the providers and
+         the CodeGen pool sizers. -->
     <!-- TreeIdx storage/indexing bijections (docs/plans/plan-graphs-trees.md
          P1, pure-function layer): degree-sequence validation, the derived
          preorder tables (sizes / leaf counts / leaf offsets / parent / depth /
@@ -133,9 +143,29 @@
     <Compile Include="src/IRAccess.fs" />
     <Compile Include="src/IRLift.fs" />
     <Compile Include="src/IRMono.fs" />
+    <!-- The closed purity/totality whitelist (G35 row slots, G7 threaded
+         joins), lane-neutral so the optimizer's sibling-fold pass and the C++
+         emitters apply ONE predicate. Before Optimize, after IR. -->
+    <Compile Include="src/IRTotality.fs" />
+    <!-- The static cost model v1 (plan-identity-transpose-compute P5): work /
+         traffic / peak of a dense map, fold or co-iteration, mirroring the
+         Rocq `cost` record. Pure; reads IRTotality's scalar classes. Before
+         Optimize, whose realization records and recompute selection use it. -->
+    <Compile Include="src/CostModel.fs" />
     <Compile Include="src/Optimize.fs" />
+    <!-- One final-IR private statistic-spool certificate; no provider dependency. -->
+    <Compile Include="src/OptimizePrivateSpool.fs" />
+    <Compile Include="src/OptimizeSort.fs" />
+    <Compile Include="src/OptimizeJoinAgg.fs" />
+    <Compile Include="src/OptimizeStreamGroup.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />
+    <!-- Exact ordinary scratch lifetime; consumes final planner ownership and
+         emits existing typed pool events before either backend. -->
+    <Compile Include="src/EarlyPoolRelease.fs" />
+    <!-- PM03 same-cell RETURN certificate (A04 LLVM / A06 C++): one semantic
+         proof over the original callable, read by both backends. -->
+    <Compile Include="src/SameCellReturn.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
          provider implementations that register into it. -->
@@ -299,6 +329,14 @@
          under src/ppl/compiler/; the MomentAlgebra reference project is a
          SEPARATE fsproj at oracles/ppl; core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
+    <!-- The ONE static-shape oracle of the domain elaborators (deep-review #62): every elaborator that specializes a
+         generated routine to its operands' extents (math, spectra, sgs, ppl) asks it for an operand's shape: a
+         declaration, a syntactic form, the result of an earlier elaborated call (each domain registers its surface
+         ops' result shapes, so the answer does not depend on pass order), an alias / destructuring / projection of
+         those, or an imported module binding. Also the shared rewrite walker and program expansion of the three
+         expression-level elaborators. Needs Ast, StaticEval and Diagnostics only; must precede PplElaborate, the
+         first consumer in compile order. -->
+    <Compile Include="src/ElabShapes.fs" />
     <Compile Include="src/ppl/compiler/PplElaborate.fs" />
     <!-- Linear-algebra dispatch classification (Phase 5 of
          docs/plan-cpp-perf-exploitation.md): IR node / loop-nest shape ->
@@ -390,6 +428,10 @@
          module name and must stay last. -->
     <Compile Include="src/CodeGenState.fs" />
     <Compile Include="src/CodeGenExprSupport.fs" />
+    <!-- The orbit-class fold's recogniser and plan (bench M4): shared by the
+         C++ emitter (CodeGenBinding) and the LLVM lane (EmitLlvm); needs the
+         fold-licence predicates of CodeGenExprSupport. -->
+    <Compile Include="src/OrbitFold.fs" />
     <Compile Include="src/CodeGenExpr.fs" />
     <Compile Include="src/CodeGenLoopNest.fs" />
     <Compile Include="src/CodeGenCuda.fs" />
@@ -399,6 +441,7 @@
          bindingCppName; the emission helpers it feeds live in CodeGenState. -->
     <Compile Include="src/CodeGenTiles.fs" />
     <Compile Include="src/CodeGenBinding.fs" />
+    <Compile Include="src/CodeGenPrivateSpool.fs" />
     <Compile Include="src/CodeGen.fs" />
     <!-- The direct LLVM back end (BLADE_LLVM lane): IRProgram -> textual .ll,
          whole-program refusal, no C++ in between. Placed AFTER the CodeGen
@@ -559,6 +602,7 @@
          later, and the ordinary runner is the C++ lane by construction), so it
          needs only Lowering/CodeGen/EmitLlvm/Build + the corpus loader. Skips
          cleanly without clang or g++; standalone only, never in the default suite. -->
+    <Compile Include="tests/EarlyPoolReleaseTests.fs" />
     <Compile Include="tests/LlvmTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />
@@ -579,6 +623,17 @@
          Parity pins: the anonymous range must decide as `range<I>` does. -->
     <Compile Include="tests/FlatPathTests.fs" />
     <Compile Include="tests/OptimizeTests.fs" />
+    <!-- Round-2 cell epilogues: the licensed / threaded forms by raw bits
+         (NEW vs BLADE_CELL_EPILOGUE=0), plus the LLVM lane's parity. g++. -->
+    <Compile Include="tests/CellEpilogueTests.fs" />
+    <Compile Include="tests/OwnedMoveTests.fs" />
+    <Compile Include="tests/PchTests.fs" />
+    <!-- Wave 3 (E-G5) threaded let-rec step: the threaded build vs the
+         threads-off build by raw bits at fixed team sizes. g++. -->
+    <Compile Include="tests/RecStepTests.fs" />
+    <!-- Round-2 ordered orbit scatter: both lanes executed against the
+         walk-forced twins (REPRO + contract=off), every scatter_g. g++/clang. -->
+    <Compile Include="tests/OrbitScatterTests.fs" />
     <!-- The interpreter's RNG mirror against Random123's Philox4x32-10
          known-answer vectors, plus the address identities (chunk / order /
          subrange invariance) on the generator alone. No toolchain. -->
@@ -591,12 +646,18 @@
          made in MathElaborate, which runs inside typecheck. -->
     <Compile Include="tests/LapackTests.fs" />
     <Compile Include="tests/AllocTests.fs" />
+    <!-- The provider boundary rule (BL8015) and the masked read: both-lanes runner,
+         refusal/value judges and the isMissing/missingCpp parity probe, shared by
+         the netcdf/zarr/csv/icechunk blocks below. -->
+    <Compile Include="tests/ProviderBoundaryTests.fs" />
     <Compile Include="tests/NetcdfTests.fs" />
+    <Compile Include="tests/PrivateSpoolTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
     <Compile Include="tests/CsvTests.fs" />
     <!-- Input manifests + run records: the manifest table, its emission, and
          (with g++) the record a run writes, ok and aborting. -->
     <Compile Include="tests/RunRecordTests.fs" />
+    <Compile Include="tests/PrintFormTests.fs" />
     <Compile Include="tests/IcechunkTests.fs" />
     <!-- The checkout-desugar pass's own pins (src/ProviderDesugar.fs). Pure
          in-process AST rewrite: no store, no registry, no g++, never skips. -->
@@ -664,6 +725,10 @@
     <None Include="protocol/data/diagnostics.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The reserved spellings of the emitted C++ translation unit (gap G252),
+         generated by tools/cpp-reserved-names/generate.sh; read by
+         CodeGenState.installCppNameTable. -->
+    <EmbeddedResource Include="src/CppReservedNames.txt" LogicalName="CppReservedNames.txt" />
   </ItemGroup>
 
   <!-- The Blade standard library, in Blade source. This copy is what makes
@@ -744,6 +809,14 @@
       <Link>cpp/blade_runtime.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="src/cpp/blade_private_spool.hpp">
+      <Link>cpp/blade_private_spool.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_external_sort.hpp">
+      <Link>cpp/blade_external_sort.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="src/cpp/blade_run_record.hpp">
       <Link>cpp/blade_run_record.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -754,6 +827,34 @@
     </None>
     <None Include="src/cpp/blade_packed_gemm.hpp">
       <Link>cpp/blade_packed_gemm.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_tiles.h">
+      <Link>cpp/blade_tiles.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_fold_lanes.hpp">
+      <Link>cpp/blade_fold_lanes.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/blade_orbit_scatter.hpp">
+      <Link>cpp/blade_orbit_scatter.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/fold_lanes_tests.cpp">
+      <Link>cpp/fold_lanes_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/orbit_pull_tests.cpp">
+      <Link>cpp/orbit_pull_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/syrk_tile_tests.cpp">
+      <Link>cpp/syrk_tile_tests.cpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="src/cpp/row_contraction_tile_tests.cpp">
+      <Link>cpp/row_contraction_tile_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="src/cpp/blade_linalg.hpp">
@@ -801,6 +902,34 @@
          exactly as deployRuntimeHeaders copies the C++ headers. -->
     <None Include="src/cpp/blade_llvm_shim.c">
       <Link>cpp/blade_llvm_shim.c</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The BLADE_LLVM lane's tile core (microkernel review item M6): a serial
+         C driver over blade_tiles.h, compiled by clang per policy key
+         (Build.buildLlvmTilesObject) and linked only into a .ll that calls it. -->
+    <None Include="src/cpp/blade_llvm_tiles.c">
+      <Link>cpp/blade_llvm_tiles.c</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The display print form's float spelling (P3-26): one C text, included by
+         blade_runtime.hpp and by blade_llvm_shim.c. -->
+    <None Include="src/cpp/blade_shortest.h">
+      <Link>cpp/blade_shortest.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Membership hoisting's C core (round 3, B-T1): the representation
+         chooser, build and probe of a hoisted `contains` set. Included by a
+         C++ program with a planned hoist and by blade_llvm_shim.c, so both
+         lanes run one text; deployed with the C++ headers and beside the shim. -->
+    <None Include="src/cpp/blade_member.h">
+      <Link>cpp/blade_member.h</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Its cross-lane raw-bit test: one C/C++ polyglot, built by clang as C
+         over the REAL tile object and by g++ as C++ over blade_pgemm::dsyrk_tri
+         (`blade test llvm-tiles`). -->
+    <None Include="src/cpp/llvm_tiles_rawbit.c">
+      <Link>cpp/llvm_tiles_rawbit.c</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run

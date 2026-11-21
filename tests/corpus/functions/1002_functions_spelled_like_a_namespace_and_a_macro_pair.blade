@@ -1,0 +1,12 @@
+// TEST: User functions spelled like a namespace and like a macro whose underscore twin is a macro too
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, the diff review Codex 067cb140):
+// std is a namespace of the emitted TU (double std(double) redeclared it,
+// BL9002), and BLADE_RR_STR is a function-like macro whose _ twin
+// BLADE_RR_STR_ is another one, so the first fresh spelling was reserved too.
+// A fresh spelling is now checked against the reserved names as well.
+// ============================================================================
+function std(x: Float64) -> Float64 = x + 1.0
+function BLADE_RR_STR(x: Float64) -> Float64 = x * 2.0
+let r = std(Float64(2.0)) + BLADE_RR_STR(Float64(5.0))
+// EXPECT: r = 13.0

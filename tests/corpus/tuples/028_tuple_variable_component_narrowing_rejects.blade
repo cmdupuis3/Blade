@@ -4,5 +4,5 @@
 // Literal adaptivity is for literals: a bound (Float64, Float64) value is a
 // value of that type, and passing it narrows.
 function h(p: (Float32, Float32)) -> Float32 = p[0]
-let t = (1.5, 2.0)
+let t = (Float64(1.5), Float64(2.0))
 let b = h(t)

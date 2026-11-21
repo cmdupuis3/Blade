@@ -1,0 +1,14 @@
+// TEST: A Reduction Join Over A Shared Producer Of A Run-Time Range Is Refused (rejects)
+// Gap G209 remainder (round 4 wave 10 lane d; Codex design and diff reviews): the snapshot of a
+// range shared by a joint traversal has no defined owner yet, so a join, fused tree or shared
+// producer over a range with a run-time bound is a coded backend refusal in the C++ lane (it was an
+// undeclared `__range0`, BL9002); the LLVM lane refuses run-time extents.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: is a reduction join, a fused tree or a shared producer over a range with a run-time bound
+// WARN-CODEGEN: is a reduction join, a fused tree or a shared producer over a range with a run-time bound
+function h(n: Int64) -> Int64 = {
+    let p = method_for(0..n) <@> lambda(k) -> k * 2
+    let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(p, (+), 1))
+    s + t
+}
+let r = h(4)

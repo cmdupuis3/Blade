@@ -1,0 +1,12 @@
+// TEST: A Kernel-Local Array With An Alias Keeps The Rebinding Semantics
+// Gap G245 (round 4 wave 9 lane d): an alias of the block let (a copy, G46) is not an in-place
+// use, so the block does not own the pool: the rebinding repoints the wrapper as before (G227) and
+// the copy keeps the old cells: 6.0 + 0.0 per trip.
+// EXPECT: total = 12.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    let keep = out
+    out = [1.0, 2.0, 3.0]
+    reduce(out, (+)) + reduce(keep, (+))
+}, (+))

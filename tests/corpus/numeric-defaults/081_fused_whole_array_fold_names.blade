@@ -1,0 +1,10 @@
+// TEST: A fused width-changing pipeline binds whole-array fold parameters
+from stats import mean
+let data = [[1.0, 2.0, 3.0, 4.0], [2.0, 2.0, 2.0, 2.0]]
+let rows = method_for(data)
+function demean(row: T^1) = Float64(row) - mean(row)
+function sumsq(row: T^1) -> T^0 = reduce(row * row, (+))
+// Specializing the inner partial fold to a row leaves no peel dimensions:
+// its parameter must name the materialized Float64 row, not its old IR id.
+let sums = (rows <@> demean) @>> (rows <@> sumsq) |> compute
+// EXPECT: sums = [5.0, 0.0]

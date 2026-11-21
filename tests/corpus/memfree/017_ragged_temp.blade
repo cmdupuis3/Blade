@@ -10,7 +10,7 @@
 // recursion, so the epilogue runs five times over the same shared tables.
 // ============================================================================
 type Steps = Idx<5>
-let RS = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+let RS = Float64([[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]])
 function rstep(A: Array<Float64 like Idx<3>, RaggedIdx<_>>, n: Int64) -> Float64 = {
     let d = method_for(A) <@> lambda(e) -> e * 2.0 + Float64(n) |> compute
     let e2 = method_for(d) <@> lambda(x) -> x * x |> compute
@@ -18,7 +18,7 @@ function rstep(A: Array<Float64 like Idx<3>, RaggedIdx<_>>, n: Int64) -> Float64
     let esums = method_for(e2) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
     reduce(dsums, (+)) * 0.01 + reduce(esums, (+)) * 0.0001
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

@@ -1,0 +1,17 @@
+// TEST: Deferred Alias Evaluates Nothing (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60's first failure: binding an alias of a deferred map evaluates
+// nothing (formalism 10.2), so g's integer division by zero does not fire at
+// `g2`; the program fails first at `bad`'s checked cast (BL8006). The C++
+// lane used to force g at the alias and fail there (BL8013).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let g2 = g
+let bad = a((a(0) : Row))
+let late = g2(0)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:12

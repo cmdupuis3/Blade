@@ -209,7 +209,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
     | ExprKind.ExprVar src ->
         (match Map.tryFind src idxTys with
          | None ->
-             err fname $"differentiating `sort` needs a named array operand with a declared rank-1 index type; '{src}' has none (annotate the parameter or local as `Array<Float like I>`, or sort a parameter directly)"
+             err fname $"differentiating `sort` needs a named array operand with a declared rank-1 index type; '{src}' has none (annotate the parameter or local as `Array<Float64 like I>`, or sort a parameter directly)"
          // The expansion SPELLS the index type three times (`range<I>` plus
          // the key and gather lambda annotations), and every syntactic
          // occurrence of an ANONYMOUS `Idx<n>` gets its own nominal identity
@@ -219,7 +219,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
          // the whole function. (The C2 map rule is unaffected: it spells the
          // index type ONCE.)
          | Some ity when (match ity with TyNamed (_, []) -> false | _ -> true) ->
-             err fname $"differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '{src}' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float like I>`"
+             err fname $"differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '{src}' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float64 like I>`"
          | Some ity ->
         // The key must be a lambda of one parameter reading only THAT
         // element. A key closing over ANY other binding in the differentiated
@@ -1170,17 +1170,34 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
     else
     match arrayLiteralExtents (resolveArrayTy ctx annot) with
     | None ->
-        err fname $"recursive array '{name}': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)"
+        err fname $"recursive array '{name}': a differentiable recursive array needs an `Array<Float64 like Idx<n>>` annotation with a literal extent (v1)"
     | Some (false, _) ->
         err fname $"recursive array '{name}': only Float-element recursive arrays are differentiable (v1)"
     | Some (true, [n]) ->
         let bufName = name
         let bufVar = syn (ExprVar bufName)
         let sAt (idxE: Expr) = syn (ExprApp (bufVar, [idxE]))
-        let zeros = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
+        // The buffer zero start (gap G118). Past 4096 cells it is the
+        // constant fill ConstFill (`zeroFill`), not an n-cell ARRAY LITERAL
+        // typed cell by cell (`blade check` 114 s at n = 20,001); `toStmts`
+        // emits it as the zero former. Same values: +0.0 in every cell, each
+        // overwritten before it is read. The small case keeps the literal.
+        let zeros =
+            if n > 4096 then zeroFill (iLit (int64 n))
+            else syn (ExprArrayLit (List.replicate n (f64Lit 0.0)))
         let bufLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar bufName); Type = None; Value = zeros }
         let stepVar = def.StepVar
         let prefixVar = def.PrefixVar
+        // The step ordinal is an index of the recursion's NAMED axis, as in
+        // the checker's own desugar (TypeCheckInfer.recStepVars): the loop's
+        // lower bound is ascribed with that axis. Pure construction only: a
+        // recurrence's reverse sweep (GradSweeps' CarryLoop) does arithmetic
+        // on the bounds themselves, which an index value refuses.
+        let stepLo (lo: int64) =
+            match resolveTy ctx annot with
+            | TyArray (_, (TyNamed (_, []) as slot0) :: _) when resolveTy ctx slot0 <> slot0 ->
+                syn (ExprTyped (iLit lo, slot0))
+            | _ -> iLit lo
         // `name := repl` inside a slice or a seed arm -- binding a
         // recurrence's step ordinal or its prefix name to the buffer.
         //
@@ -1249,7 +1266,7 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
                 | None -> 0L, []
             let loop =
                 StmtForIn (stepVar,
-                           syn (ExprDotDot (iLit loopStart, iLit (int64 n))),
+                           syn (ExprDotDot (stepLo loopStart, iLit (int64 n))),
                            [ StmtExpr (syn (ExprAssign (sAt (v stepVar), def.SliceExpr))) ])
             Ok (bufLet :: (seedStmts @ [loop]), n)
     | Some (true, exts) ->
@@ -1301,7 +1318,7 @@ let rec internal hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, i
         let initE =
             match initOpt with
             | Some ie -> ie
-            | None -> if secOp = OpMul then fLit 1.0 else fLit 0.0
+            | None -> if secOp = OpMul then f64Lit 1.0 else f64Lit 0.0
         let combine acc el = syn (ExprBinOp (Elementwise, secOp, acc, el))
         let accName = fresh ctx "__red"
         let accLet = StmtLet { Mutability = BindMut; Pattern = synPat (PatVar accName); Type = None; Value = initE }
@@ -1530,8 +1547,29 @@ let rec internal staticDimsOf (ctx: Ctx) (denv: Map<string, int list>) (e: Expr)
 /// Zero array literal for a dims list (rank-general).
 let rec internal zerosOfDims (dims: int list) : Expr =
     match dims with
-    | [] -> fLit 0.0
+    | [] -> f64Lit 0.0
     | n :: rest -> syn (ExprArrayLit (List.replicate n (zerosOfDims rest)))
+
+/// The ZERO FILL a combinator-built diff local's cotangent buffer starts from
+/// (C6; gap register G68): `method_for(range<Idx<d1>, ..>) <@> lambda(..) ->
+/// 0.0 |> compute` -- the zero FORMER the let-rec buffer desugar already uses
+/// past 4096 cells (TypeCheckInfer, `zerosOver`). O(rank) AST, lowered as a
+/// dense map whose cells are all `0.0`: every lane fills the allocated pool
+/// with a loop (the C++ and LLVM lanes) or a filled array (the interpreter),
+/// so the compile-time cost no longer grows with the extent. `zerosOfDims`
+/// spelled the same zeros as an n-cell nested ARRAY LITERAL, whose lowering
+/// was super-linear in n (haloadjoint: 95 s at n = 100,003). Same values:
+/// +0.0 in every cell.
+let internal zeroFillOfDims (ctx: Ctx) (dims: int list) : Expr =
+    match dims with
+    | [] -> f64Lit 0.0
+    | _ ->
+        let slots = dims |> List.map (fun d -> TyIdx (iLit (int64 d)))
+        let ps : LambdaParam list =
+            dims |> List.map (fun _ -> { Name = fresh ctx "__zf"; Type = None; Default = None; NameSpan = noSpan })
+        syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                          syn (ExprMethodFor [ syn (ExprRange slots) ]),
+                                          syn (ExprLambda (ps, None, f64Lit 0.0))))))
 
 /// Nested accumulation loops over `dims`: lhs(idx...) += rhs(idx...).
 let internal accumLoop (ctx: Ctx) (dims: int list)

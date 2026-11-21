@@ -1,0 +1,25 @@
+// TEST: Sharing-Partition Instance Through A Transitive Helper
+// docs/plans/plan-identity-transpose-compute.md section 2.2 (wave 2): an
+// identity-sensitive callee makes its caller identity-sensitive at the
+// positions it forwards. `g(x, y) = f(x, y)` called `g(A, A)` is g's
+// instance over [0,0], inside which x and y are one array, so the call
+// `f(x, y)` there is f's [0,0] instance in turn -- packed. `g(A, B)` keeps
+// both generic declarations, dense. `h(x) = f(x, x)` passes ONE parameter
+// twice, so f's [0,0] instance is chosen inside h's own generic body and h
+// itself is not identity-sensitive (one instance). Reads through the packed
+// instance's result are the logical cells (`GAA(2, 0)` is the stored (0, 2)).
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I> = [4.0, 5.0, 6.0]
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+function g(x: T^1, y: T^1) = f(x, y)
+function h(x: T^1) = f(x, x)
+let GAA = g(A, A)
+let GAB = g(A, B)
+let HA = h(A)
+let cross = GAA(2, 0) + GAA(1, 2)
+// EXPECT: GAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: GAB = [[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [12.0, 15.0, 18.0]]
+// EXPECT: HA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: cross = 9.0

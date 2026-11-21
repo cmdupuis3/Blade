@@ -1,0 +1,9 @@
+// TEST: fused cast pipelines preserve the input element width
+// The source row is Float32; its loop cells must not be frozen at Float64
+// while the outer lambda is awaiting apply-site unification.
+let data = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let L = method_for(data)
+function scale_wide(row: T^1) = Float64(extents(row)) * Float64(row)
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let totals = (L <@> scale_wide) @>> (L <@> total) |> compute
+// EXPECT: totals = [18.0, 45.0]

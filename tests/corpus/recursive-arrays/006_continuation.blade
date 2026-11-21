@@ -8,7 +8,7 @@
 // ============================================================================
 type A = Idx<4>
 type B = Idx<3>
-let rec legA: Array<Float like A> =
+let rec legA: Array<Float64 like A> =
     match legA with
     | zero -> zero
     | zero :: s -> zero :: 1.0
@@ -16,7 +16,7 @@ let rec legA: Array<Float like A> =
 // EXPECT: legA = [1.0, 2.0, 4.0, 8.0]
 let mid = legA((3 : A))
 // EXPECT: mid = 8.0
-let rec legB: Array<Float like B> =
+let rec legB: Array<Float64 like B> =
     match legB with
     | zero -> zero
     | zero :: s -> zero :: legA((3 : A)) * 2.0

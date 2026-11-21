@@ -1,0 +1,35 @@
+// TEST: AD scalar state and recurrence keep their working width
+import ad as ad
+
+function square_sum(x: Array<Float64 like Idx<3>>) -> Float64 = {
+    let rec y: Array<Float64 like Idx<3>> = match y with
+        | zero -> zero
+        | zero :: i -> zero :: x(0) * x(0)
+        | prefix :: i -> prefix :: x(i) * x(i)
+    reduce(y, (+))
+}
+let mut sg: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let sv = ad.grad(square_sum)(Float64([1.0, 2.0, 3.0]), sg)
+// EXPECT: sv = 14.0
+// EXPECT: sg = [2.0, 4.0, 6.0]
+let (sjv, sjt) = ad.jvp(square_sum)(Float64([1.0, 2.0, 3.0]), Float64([1.0, 1.0, 1.0]))
+// EXPECT: sjv = 14.0
+// EXPECT: sjt = 12.0
+
+function shifted(x: Float64) -> Float64 = {
+    let t = x
+    let u = t * t
+    let t: Float64 = 0.1
+    u + t
+}
+let (v, g) = ad.grad(shifted)(Float64(3.0))
+// EXPECT: v = 9.1
+// EXPECT: g = 6.0
+let (jv, jt) = ad.jvp(shifted)(Float64(3.0), Float64(1.0))
+// EXPECT: jv = 9.1
+// EXPECT: jt = 6.0
+
+function product(x: Array<Float64 like Idx<3>>) -> Float64 = reduce(x, (*))
+let (pv, pt) = ad.jvp(product)(Float64([1.0, 2.0, 3.0]), Float64([1.0, 1.0, 1.0]))
+// EXPECT: pv = 6.0
+// EXPECT: pt = 11.0

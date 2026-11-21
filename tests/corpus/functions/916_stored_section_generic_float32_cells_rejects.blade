@@ -1,0 +1,14 @@
+// TEST: A Stored Section Over Generic Float32 Cells Is Refused With A Span (rejects)
+// ERROR: BL3020 @ 11:36
+// ERROR-CONTAINS: the map's cells are Float32, but its kernel returns a Float64 value
+// ============================================================================
+// R11: a section bound as a value is lifted over Float64 parameters, so the
+// kernel returned a double into a Float32 map and g++ refused the narrowing
+// (BL9002). Refused at the kernel's call instead. (functions/913 is the
+// Float64 twin.)
+// ============================================================================
+function outer(b) = {
+    let f = (+)
+    method_for(b) <@> lambda(v) -> f(v, v) |> compute
+}
+let r = outer([1.5, 2.5])

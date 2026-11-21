@@ -1,0 +1,8 @@
+// TEST: an imported lambda value alias called with a Float32 (rejects)
+// MODULE: Main
+// G275 (1): an imported callable's parameter converts nothing either.
+module Main
+import Helpers as h
+let x: Float32 = 1.0
+let y = h.saved(x)
+// ERROR: BL3020

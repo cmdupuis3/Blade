@@ -1,0 +1,10 @@
+// TEST: Parallel Kernel Forwards A Pure Callback Through Recursion
+// Gap G41, Codex review W2F-6 finding 23 positive control (mutability-errors/
+// 033 is the writing twin): the callback reaches a self-recursive helper
+// that finally calls it; the only candidate is pure, so the kernel keeps its
+// team (the omp-pragma block pins the pragma).
+function scale(v: Int64) -> Float64 = Float64(v) * 2.0
+function recur(f: (Int64) -> Float64, n: Int64) -> Float64 = if n == 0 then f(0) else recur(f, n - 1)
+function launch(g: (Int64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> recur(g, 3) + Float64(i) |> compute
+let r = launch(scale)
+// EXPECT: r = [0.0, 1.0]

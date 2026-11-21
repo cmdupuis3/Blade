@@ -1,0 +1,40 @@
+// TEST: pending arrow applications give literal coordinates Int64
+function cc(c) = c(0)(1)
+function f0(j: Int64) = Float64(j)
+function f1(j: Int64) = 10.0 + Float64(j)
+function pick(i: Int64) = if i == 0 then f0 else f1
+let a = cc([[1.0, 2.0], [3.0, 4.0]])
+let b = cc(pick)
+// EXPECT: a = 2.0
+// EXPECT: b = 1.0
+
+// A function parameter still fixes the width of its literal argument.
+function apply(c) = c(0)
+function forward(c) = apply(c)
+function narrow(i: Int32) = i + 1
+let direct: Int32 = narrow(0)
+let indirect: Int32 = apply(narrow)
+let forwarded: Int32 = forward(narrow)
+// EXPECT: direct = 1
+// EXPECT: indirect = 1
+// EXPECT: forwarded = 1
+
+// A callback's width governs every operation, not just the final argument.
+function halfway(c) = c((2147483647 + 1) / 2)
+function forward_half(c) = halfway(c)
+function identity32(i: Int32) = i
+let half_direct = identity32((2147483647 + 1) / 2)
+let half_indirect = halfway(identity32)
+let half_forwarded = forward_half(identity32)
+// EXPECT: half_direct = -1073741824
+// EXPECT: half_indirect = -1073741824
+// EXPECT: half_forwarded = -1073741824
+
+function squared_half(c) = c((46341 ^ (1 + 1)) / 2)
+let power_direct = identity32((46341 ^ (1 + 1)) / 2)
+let power_indirect = squared_half(identity32)
+function half_next(x: T) = (x + 1) / 2
+let operator_half: Int32 = half_next(Int32(2147483647))
+// EXPECT: power_direct = -1073739507
+// EXPECT: power_indirect = -1073739507
+// EXPECT: operator_half = -1073741824

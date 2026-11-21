@@ -8,7 +8,7 @@ let X: Array<Float64 like Idx<3>, Idx<3>, Idx<3>> = [[[2.0, 1.0, 0.5], [1.0, 0.5
 let (G, U0, U1, U2) = m.hosvd(X)
 let d0 = G(0, 0, 0) * G(0, 0, 0) - 96.46875
 let dev = d0 * d0
-let pos = if G(0, 0, 0) > 0.0 then 1.0 else 0.0
+let pos: Float64 = if G(0, 0, 0) > 0.0 then 1.0 else 0.0
 let offd = {
     // Energy outside the (0,0,0) corner: square the core, zero the corner with
     // an elementwise selector (so the single large entry never enters the sum),

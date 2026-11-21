@@ -37,26 +37,26 @@ let static PS = [(0, 1, 1)]
 
 // 1. SO(3): no component group, so the parity declaration is not part of the
 //    claim and the plain scalar return is honest.
-function tri_so3(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
-                 w: Array<Float like IrrepsIdx<V>>)
-                 where ml.equiv(SO3) -> Float =
+function tri_so3(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>,
+                 w: Array<Float64 like IrrepsIdx<V>>)
+                 where ml.equiv(SO3) -> Float64 =
     (u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0)))
 
 // 2. O(3), declared ODD: the true theorem. Certifies.
-function tri_o3_odd(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
-                    w: Array<Float like IrrepsIdx<V>>)
-                    where ml.equiv(O3) -> Array<Float like IrrepsIdx<PS>> =
+function tri_o3_odd(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>,
+                    w: Array<Float64 like IrrepsIdx<V>>)
+                    where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<PS>> =
     [u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0))]
 
 // 3. O(3), declared EVEN: BL4008. The body commutes with every generator of
 //    so(3) — the engine says so in as many words — and still fails at −I.
-function tri_o3_even(u: Array<Float like IrrepsIdx<V>>, v: Array<Float like IrrepsIdx<V>>,
-                     w: Array<Float like IrrepsIdx<V>>)
-                     where ml.equiv(O3) -> Float =
+function tri_o3_even(u: Array<Float64 like IrrepsIdx<V>>, v: Array<Float64 like IrrepsIdx<V>>,
+                     w: Array<Float64 like IrrepsIdx<V>>)
+                     where ml.equiv(O3) -> Float64 =
     (u(0) * (v(1) * w(2) - v(2) * w(1))
      + u(1) * (v(2) * w(0) - v(0) * w(2))
      + u(2) * (v(0) * w(1) - v(1) * w(0)))

@@ -1,0 +1,13 @@
+// TEST: copying a deferred tuple evaluates its members in order (aborts)
+// Gap G199 (Codex diff review round 9): the tuple value (t, 0) copies t = (p,
+// q) member by member: p (a modulo by zero at cell 1) fails before q's
+// captured d is forced, in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> 20 % v
+let q = method_for(x) <@> lambda(v) -> v + extents(d)
+let t = (p, q)
+let z = (t, 0)
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:6

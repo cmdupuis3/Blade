@@ -1,0 +1,16 @@
+// TEST: A Functor-Map Wrapper Over Generic Bool Cells Is Refused (rejects)
+// ERROR: BL3001 @ 9:1
+// ERROR-CONTAINS: (a `<$>` wrapper, given each cell)
+// ============================================================================
+// R11: `twice(1.0)` decided the wrapper's parameter (a float); `<$>` hands
+// it each cell of a map over outer's generic array, instantiated at Bool --
+// accepted on base, the cells converted. The wrapper slot carries no source
+// location of its own: refused at the enclosing declaration.
+// ============================================================================
+function outer(b) = {
+    let twice = lambda(x) -> x * 2.0
+    let a = twice(1.0)
+    let c = method_for(b) <@> lambda(x) -> x
+    twice <$> c |> compute
+}
+let r = outer([true, false])

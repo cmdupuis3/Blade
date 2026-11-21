@@ -1,0 +1,14 @@
+// TEST: A Body Map Whose Operand Is A Deferred Module Map
+// ============================================================================
+// Gap G256 / G239, round 4 wave 9 (lane C, C1): the twin of functions/760
+// with no earlier read in the body -- the map operand is the statement's own
+// force (it used to reach the map emitter as an undeclared name, BL9002).
+// ============================================================================
+let mut x: Array<Int64 like Idx<3>> = [1, 2, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+function f() -> Int64 = {
+    let a = method_for(d) <@> lambda(v) -> v + 1
+    a(0)
+}
+let s = f()
+// EXPECT: s = 11

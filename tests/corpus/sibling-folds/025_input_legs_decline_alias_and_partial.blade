@@ -1,0 +1,32 @@
+// TEST: A leg over an alias of an operand, or a non-total leg kernel, does not ride
+// ============================================================================
+// First region: the join folds `xa` (an alias of x) and y. An input leg must
+// read EXACTLY the producer's operand (the same binding), so the
+// epilogue-legs admission declines and the join keeps its pass. Second
+// region: the leg kernels cast a float to an integer (a possible BL8014):
+// not total, so the folds are not joined at all (sibling-folds declines) and
+// nothing rides. Values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+let (s, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let xa = x
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    (s, reduce(xa, (+)) + 2.0 * reduce(y, (+)))
+}
+let (s2, t2) = {
+    let x = inputs(6)
+    let y = inputs(8)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    (s, reduce(x, lambda(a, b) -> a + Float64(Int64(floor(b)) % 4), 0.0) + reduce(y, lambda(a, b) -> a + Float64(Int64(floor(b)) % 4), 0.0))
+}
+// EXPECT: s = 31021.0
+// EXPECT: t = 7010.0
+// EXPECT: s2 = 44664.0
+// EXPECT: t2 = 2672.0

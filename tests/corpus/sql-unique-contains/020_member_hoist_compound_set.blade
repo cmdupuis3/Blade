@@ -1,0 +1,20 @@
+// TEST: Member Hoist Compound Set
+// ============================================================================
+// Membership hoisting over a rank-1 COMPOUND set (the planning sketch's
+// `compound(..., mask(..))` selection): the build reads the compound's compact
+// buffer -- its cardinality, not its dense extent -- once. Probe-side
+// duplicates (two 30s) are kept, and a dense-only value (25, filtered out of
+// the set) is not a member.
+// ============================================================================
+type Row = Idx<12>
+type Probe = Idx<9>
+let ids: Array<Int64 like Row> = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+let picked = compound(ids, mask(ids, lambda(v) -> v % 15 == 0))
+let probes: Array<Int64 like Probe> = [30, 25, 15, 61, 30, 0, 45, 60, 10]
+let hit = mask(probes, lambda(p) -> contains(picked, p))
+let found = compound(probes, hit)
+let nfound = extents(found)
+let sfound = reduce(found, (+))
+// EXPECT: hit = [true, false, true, false, true, false, true, true, false]
+// EXPECT: nfound = 5
+// EXPECT: sfound = 180

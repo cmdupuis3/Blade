@@ -9,8 +9,8 @@ import ad as ad
 // short decimals.
 // ============================================================================
 let xs = 2.0 + 0.5 * Float64(0..127)
-function h(w: Array<Float like Idx<127>>) -> Float = {
-    let rec s: Array<Float like Idx<127>> =
+function h(w: Array<Float64 like Idx<127>>) -> Float64 = {
+    let rec s: Array<Float64 like Idx<127>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: 0.0

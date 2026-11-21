@@ -1,0 +1,14 @@
+// TEST: A Join Share That Reads Another Deferred Map Is Refused In Every Lane (rejects)
+// Gap G244 (round 4 wave 9 lane d): the share f (read per cell by both legs) reads the deferred e.
+// A nested share per cell is not built in any lane (gap G244 records the design), so the C++
+// refusal (one level of sharing) is the program outcome: the LLVM lane declines the shape and
+// falls back, the interpreter does not evaluate it (they used to report two different failures).
+// REJECT-AT: codegen
+// ERROR-CONTAINS: only one level of sharing is supported
+// WARN-CODEGEN: only one level of sharing is supported
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let f = method_for(e) <@> lambda(a) -> a + 1
+let p = method_for(f) <@> lambda(a) -> 7 % (a - 51)
+let (s, t) = object_for(<&!>) <@> (reduce(p, (+)), reduce(f, (+)))

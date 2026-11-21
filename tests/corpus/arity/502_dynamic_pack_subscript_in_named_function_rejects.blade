@@ -1,0 +1,8 @@
+// TEST: a run-time subscript of a pack in a named function is refused (rejects)
+// Gap G223 (round 4 wave 8 lane d): the same read called directly at top
+// level -- no former involved -- was the same IR-validation failure (BL6001).
+// ERROR: BL7004
+// ERROR-CONTAINS: not known in this specialization
+// REJECT-AT: lower
+function pick(p: Poly<Float64>, j: Int64) -> Float64 = p[j]
+let r = pick(10.0, 20.0, 30.0, 1)

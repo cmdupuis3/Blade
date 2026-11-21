@@ -1,0 +1,10 @@
+// TEST: a private fold operand evaluates its kernel capture (aborts)
+// Gap G199 (Codex diff review round 8): the fold over q evaluates its operand
+// p privately, and p's kernel captures the deferred d (read only through
+// extents): d is forced first and fails, in every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> v + extents(d)
+let q = method_for(p) <@> lambda(v) -> v + 1
+let s = reduce(q, (+), 0)
+// ABORT: BL8013

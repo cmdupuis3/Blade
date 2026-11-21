@@ -8,6 +8,6 @@
 // projected positionally, so `tail` bound element 1 of whatever it found.
 // `s` is defined so the ONLY failure reason is the unsplittable pattern (not
 // an undefined name).
-let s = 5
+let s: Int64 = 5
 let head :: tail = s
 // EXPECT: typecheck failure — `head :: tail` requires a tuple scrutinee.

@@ -100,8 +100,8 @@ let D2: Array<Float64 like Idx<3>, Idx<5>, Idx<5>> = stack(D2x, D2y, D2z)
 function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
 function maxabs(x: T^2) -> T^0 = reduce(reduce(abs(x), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0)
 function maxabs3(x: T^3) -> T^0 = reduce(reduce(reduce(abs(x), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0), lambda(a, b) -> if a > b then a else b, 0.0)
-function count_below(s: T^1, tol: T^0) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> if v <= tol then 1 else 0 |> compute, (+))
-function count_near(s: T^1, c: T^0) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> if abs(v - c) < 1e-9 then 1 else 0 |> compute, (+))
+function count_below(s: T^1, tol: T^0) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> Int64(v <= tol) |> compute, (+))
+function count_near(s: T^1, c: T^0) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> Int64(abs(v - c) < 1e-9) |> compute, (+))
 function null_col(k: Int64, first: Int64) -> Int64 = k + first
 
 // ---- (0) Frobenius-orthonormal basis of span{J~_a}; Killing form; eigh(-kappa/2) ----
@@ -178,7 +178,7 @@ let l_antisym = maxabs3(method_for(range<G>, range<D>, range<D>) <@> lambda(a: G
 // ---- (iii) the oriented (-kappa/2)-orthonormal frame J_a = R F_a R^-1 ----
 let Jf0 = method_for(F) <@> lambda(f: T^2) -> lie.mm(lie.mm(R, f), Rinv) |> compute
 let c123 = lie.frob(Jf0(2), lie.bracket(Jf0(0), Jf0(1))) / lie.frob(Jf0(2), Jf0(2))
-let orient = if c123 < 0.0 then -1.0 else 1.0
+let orient: Float64 = if c123 < 0.0 then -1.0 else 1.0
 let J: Array<Float64 like Idx<3>, Idx<12>, Idx<12>> = Jf0 * orient
 let Jbr: Array<Float64 like Idx<3>, Idx<12>, Idx<12>> = stack(lie.bracket(J(0), J(1)), lie.bracket(J(1), J(2)), lie.bracket(J(2), J(0)))
 function j_br_at(a: Int64, i: Int64, j: Int64) -> Float64 = abs(Jbr(a, i, j) - J((a + 2) % 3, i, j))
@@ -221,11 +221,11 @@ function hom_null1(Jf: Array<Float64 like Idx<3>, Idx<12>, Idx<12>>, Dt: Array<F
     let t: Array<Float64 like K2, H1c> = method_for(range<K2>, range<H1c>) <@> lambda(k: K2, c: H1c) -> V(c, null_col(k, 34)) |> compute
     (S, t)
 }
-// 60 unknowns at the default 10 sweeps: the null vector is converged (20 sweeps move only the
-// last digits of the sqrt(12) cluster, by 1e-12)
+// 60 unknowns: the one-sided Jacobi iteration needs 11 sweeps here (the default 10 is refused as
+// unconverged, BL8008); 12 leaves one sweep of margin inside the interpreter's step budget
 function hom_null2(Jf: Array<Float64 like Idx<3>, Idx<12>, Idx<12>>, Dt: Array<Float64 like Idx<3>, Idx<5>, Idx<5>>) = {
     let A: Array<Float64 like H2r, H2c> = method_for(range<H2r>, range<H2c>) <@> lambda(r: H2r, c: H2c) -> hom_at(Jf, Dt, 5, r, c) |> compute
-    let (U, S, V) = m.svd(A)
+    let (U, S, V) = m.svd(A, 12)
     let t: Array<Float64 like Idx<60>> = method_for(range<H2c>) <@> lambda(c: H2c) -> V(c, 59) |> compute
     (S, t)
 }

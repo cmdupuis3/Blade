@@ -52,19 +52,19 @@
 // ============================================================================
 
 // ---- the tower (degree-2 cells; q = 1/sqrt2 exact) ----
-let q = sqrt(0.5)
+let q: Float64 = sqrt(0.5)
 let c_a0b0 = q
 let c_a0b1 = q
 let c_a1b0 = q
 let c_a1b1 = -q
-let c_a0a1 = 0.0
-let c_b0b1 = 0.0
+let c_a0a1: Float64 = 0.0
+let c_b0b1: Float64 = 0.0
 let chsh = c_a0b0 + c_a0b1 + c_a1b0 - c_a1b1
 
 // ---- constructive depth-2 certificate: rank-2 realization ----
 // four vectors in R^2 whose dot products (the Gram matrix) are the cells
-let A0 = [1.0, 0.0]
-let A1 = [0.0, 1.0]
+let A0 = Float64([1.0, 0.0])
+let A1 = Float64([0.0, 1.0])
 let B0 = [q, q]
 let B1 = [q, -q]
 let n_a0 = prodsum(A0, A0)
@@ -82,7 +82,7 @@ let depth2_V = if cert2 < 1.0e-12 then "DEGREE2_REALIZABLE_RANK2" else "CELLS_MI
 
 // ---- the hypercube identity: B^2 = 4 on all 16 sign assignments ----
 // grid point g's four binary digits are the signs of (a0, a1, b0, b1)
-let SGN = [-1.0, 1.0]
+let SGN = Float64([-1.0, 1.0])
 let BSQ = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> {
     let a0 = SGN(g % 2)
     let a1 = SGN((g / 2) % 2)
@@ -100,23 +100,23 @@ let var_needed = 4.0 - chsh * chsh
 let ext_V = if var_needed < 0.0 then "EXTENSION_NEEDS_NEGATIVE_VARIANCE" else "EXTENDABLE_MAYBE"
 
 // ---- both walls from one variance ----
-let var_at_1 = 4.0 - 1.0
-let var_at_2 = 4.0 - 4.0
-let var_at_24 = 4.0 - 2.4 * 2.4
+let var_at_1: Float64 = 4.0 - 1.0
+let var_at_2: Float64 = 4.0 - 4.0
+let var_at_24: Float64 = 4.0 - 2.4 * 2.4
 let wall_V = if abs(var_at_2) < 1.0e-12 then "CLASSICAL_BOUND_IS_VARIANCE_POSITIVITY" else "NO"
 // quantum rescue: B^2 = 4 + K, |K| <= 4 => |s| <= sqrt 8; at the top the
 // state is a B-eigenstate (variance exactly zero)
-let tsirelson = sqrt(8.0)
+let tsirelson: Float64 = sqrt(8.0)
 let var_q_at_max = 4.0 + 4.0 - tsirelson * tsirelson
 let rescue_V = if abs(tsirelson - chsh) < 1.0e-12 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
 
 // ---- the gap zone at s = 2.4: rank-4 realization vs no extension ----
 // a0 = e1, a1 = e2, b0 = (t, t, p, 0), b1 = (t, -t, 0, p), t = s/4,
 // p = sqrt(1 - s^2/8)
-let t = 2.4 / 4.0
-let p = sqrt(1.0 - 2.4 * 2.4 / 8.0)
-let ZA0 = [1.0, 0.0, 0.0, 0.0]
-let ZA1 = [0.0, 1.0, 0.0, 0.0]
+let t: Float64 = 2.4 / 4.0
+let p: Float64 = sqrt(1.0 - 2.4 * 2.4 / 8.0)
+let ZA0 = Float64([1.0, 0.0, 0.0, 0.0])
+let ZA1 = Float64([0.0, 1.0, 0.0, 0.0])
 let ZB0 = [t, t, p, 0.0]
 let ZB1 = [t, -t, 0.0, p]
 let z_b0 = prodsum(ZB0, ZB0)

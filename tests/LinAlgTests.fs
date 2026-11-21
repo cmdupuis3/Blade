@@ -136,6 +136,13 @@ let private emissionCases : (string * bool * string * string list * string list)
     let covKernel (whereClause: string) (body: string) =
         "lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where "
         + whereClause + " -> " + body + " |> compute\n"
+    // 20 rows x 8 samples: above the syrk-tile crossover (p >= 16, k >= 4).
+    let bigCov =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+    let bigCovKernel (whereClause: string) (body: string) =
+        "lambda(x: Array<Float64 like BT>, y: Array<Float64 like BT>) where "
+        + whereClause + " -> " + body + " |> compute\n"
     [ // gram(A, A) — the symmetric rank-k update. Blade's result is PACKED
       // upper-triangular storage, which is why the route is its own adapter
       // rather than a bare `blade_syrk` call.
@@ -269,7 +276,7 @@ let y = gram_apply(A, A, v)
       // not name the header at all — the include is collector-driven, not
       // unconditional, even though the file itself is deployed unconditionally.
       ("no_linalg_program_excludes_the_header", true,
-       "let A = [1.0, 2.0, 3.0]\nlet s = reduce(A, (+))\n",
+       "let A = Float64([1.0, 2.0, 3.0])\nlet s = reduce(A, (+))\n",
        [],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
 
@@ -344,7 +351,9 @@ let y = gram_apply(A, A, v)
        + "let y: Array<Int64 like Idx<5>> = [2, 3, 4, 5, 6]\n"
        + "let P = method_for(zip(x, y)) <@> lambda(a: Int64, b: Int64) -> a * b\n"
        + "let s = reduce(P, (+))\n",
-       [ "(x____i0 * y____i0)" ],
+       // The licensed fold's default form since 2026-10-17: the vectorized
+       // sweep over restrict aliases of x and y (plan-fp-default-fastest.md).
+       [ "(__rsrc0____i0 * __rsrc1____i0)" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ================= Phase 5b: L2 gemv =================
@@ -374,7 +383,8 @@ let y = gram_apply(A, A, v)
       ("gemv_declines_on_per_row_self_dot", true,
        matA
        + "let rowsums = method_for(A) <@> lambda(er: Array<Float64 like N>) -> prodsum(er, er) |> compute\n",
-       [ "__ps = 0" ],
+       // The native per-row self-dot: the explicit K-lane vector form (M9).
+       [ "blade_fold::sq<double, 8>(" ],
        [ "blade_linalg::"; shimInclude ])
       // ARGUMENT ORDER is not cosmetic: `IRProdSum` takes its loop bound from
       // its FIRST operand, so `prodsum(xv, row)` is bounded by the VECTOR's
@@ -441,7 +451,7 @@ let y = gram_apply(A, A, v)
        + "let m2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y)",
        [ shimInclude; "blade_linalg::blade_gram_same_d("
          "linalg dispatch: syrk C = A * A^T (packed upper, from comm nest)"
-         "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), m2.data);" ],
+         "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), m2.data, false);" ],
        // The NEST is gone: no row peel, no triangular inner bound, no scale
        // pass. (The lifted kernel lambda survives as a now-unused function
        // carrying its own prodsum IIFE — it always did — so `__ps` is not a
@@ -456,7 +466,7 @@ let y = gram_apply(A, A, v)
       ("syrk_scaled_nest_applies_the_kernel_scalar_after_the_call", true,
        covMat
        + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
-       [ "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), c2.data);"
+       [ "blade_linalg::blade_gram_same_d(3, 4, CA.data, (CA.extents[0] * CA.extents[1]), c2.data, false);"
          "for (size_t __sy_i = 0; __sy_i < 3; __sy_i++) for (size_t __sy_j = 0; __sy_j < 3 - __sy_i; __sy_j++) c2[__sy_i][__sy_j] /= (4.0);" ],
        [ "cblas_"; "CA____i0"; "__i1 < 3 - __i0" ])
       // ***PRECEDENCE, AND IT IS THE OPPOSITE OF L1/L2's.*** An `omp` request
@@ -480,7 +490,7 @@ let y = gram_apply(A, A, v)
        covMat
        + "let CB: Array<Float64 like Idx<2>, T> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]]\n"
        + "let d1 = method_for(CA, CB) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "CB____i1" ],
+       [ "blade_fold::dot<double, 8>("; "CB____i1" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // SAME ARRAY BUT NO `comm`: a full rectangular sweep into a DENSE
       // rank-2 output. syrk computes a triangle into packed storage, so the
@@ -488,7 +498,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_without_the_comm_licence", true,
        covMat
        + "let d2 = method_for(CA, CA) <@> lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0"; "for (size_t __i1 = 0; __i1 < 3;" ],
+       [ "blade_fold::dot<double, 8>("; "for (size_t __i1 = 0; __i1 < 3;" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
       // INTEGER elements: `precisionOf` answers None, so there is no routine
       // family and no letter — the same decline every other route makes.
@@ -520,7 +530,8 @@ let y = gram_apply(A, A, v)
        "type T = Idx<4>\n"
        + "let CF: Array<Float32 like Idx<3>, T> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
        + "let d6 = method_for(CF, CF) <@> lambda(x: Array<Float32 like T>, y: Array<Float32 like T>) where comm(x, y) -> prodsum(x, y) |> compute\n",
-       [ "__ps = 0" ],
+       // Float32 has its own vector lanes (8 per 32-byte accumulator).
+       [ "blade_fold::dot<float, 8>(" ],
        [ "blade_linalg::blade_gram_same_"; shimInclude ])
       // REYNOLDS reads PERMUTED coordinates, so the cell value is a SUM over
       // the orbit and not the contraction at all (`2 * prodsum` here). The
@@ -528,7 +539,7 @@ let y = gram_apply(A, A, v)
       ("syrk_declines_under_a_reynolds_wrapper", true,
        covMat
        + "let d5 = method_for(CA, CA) <@> reynolds(lambda(x: Array<Float64 like T>, y: Array<Float64 like T>) where comm(x, y) -> prodsum(x, y)) |> compute\n",
-       [ "Reynolds:"; "__ps = 0" ],
+       [ "Reynolds:"; "blade_fold::dot<double, 8>(" ],
        [ "blade_linalg::"; shimInclude; "cblas_" ])
 
       // ============ Phase 5c: the GATE-OFF side (the default build) ============
@@ -592,10 +603,12 @@ let y = gram_apply(A, A, v)
        [ "blade_pgemm::dgemm_nn((size_t)(18), (size_t)(16), (size_t)(114), (A).data, (B).data, C.data,"
          "#include \"blade_packed_gemm.hpp\"" ],
        [ shimInclude; "blade_linalg::"; "cblas_"; "__mcrow" ])
-      // dot: the fused fold nest, unchanged from before any dispatch existed.
+      // dot: the fused fold -- in its default form since M9 (2026-10-19), ONE
+      // call of the explicit K-lane vector tree over restrict aliases of x
+      // and y (blade_fold_lanes.hpp); no loop is emitted at this site.
       ("gate_off_dot_emits_the_fold_nest", false,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
-       [ "for (size_t __i0"; "(x____i0 * y____i0)" ],
+       [ "const double* BLADE_RESTRICT __rsrc0 = x.data;"; "blade_fold::dot<double, 8>(__rsrc0, __rsrc1, __rhi)" ],
        [ shimInclude; "blade_linalg::" ])
       // gemv: the per-row prodsum, emitted as the row-fold jam (all 3 rows in
       // one tile, one accumulator each) plus its scalar remainder.
@@ -612,7 +625,7 @@ let y = gram_apply(A, A, v)
       ("gate_off_syrk_emits_the_triangular_comm_nest", false,
        covMat
        + "let c2 = method_for(CA, CA) <@> " + covKernel "comm(x, y)" "prodsum(x, y) / 4.0",
-       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "__ps = 0"; "/ 4.0)" ],
+       [ "CA____i0"; "for (size_t __i1 = 0; __i1 < 3 - __i0"; "blade_fold::dot<double, 8>("; "/ 4.0)" ],
        [ shimInclude; "blade_linalg::"; "__sy_i" ])
       // ...and with the gate off the `omp` request keeps its pragma, because
       // there is no route to hand the parallelism to. The gate is the ONLY
@@ -623,6 +636,104 @@ let y = gram_apply(A, A, v)
        + "let o2 = method_for(CA, CA) <@> " + covKernel "comm(x, y), omp" "prodsum(x, y)",
        [ "#pragma omp parallel for schedule(dynamic)"; "CA____i0" ],
        [ shimInclude; "blade_linalg::" ])
+      // ...and ABOVE the syrk-tile crossover (p >= 16, k >= 4; here 20 x 8)
+      // the gate-off arm is the packed-triangle tile: ONE call into
+      // blade_packed_gemm.hpp's dsyrk_tri (6 x 8 register tile over the packed
+      // pool, per cell the serial prodsum), its include, the kernel's scalar
+      // passed to the call and applied by the last K block's store (the BLAS
+      // route keeps its post-pass; the tile has none), the default row group
+      // of 4, and no per-cell nest.
+      // `false` = no omp licence on the kernel: the call stays on one thread.
+      // ============ gram(A, A) NODE, BLAS off, above the syrk-tile crossover ============
+      // The node's triangular gram jam gives way to the SAME packed-triangle
+      // tile the comm nest uses (one rule, packedTriWorth; one knob). Rows are
+      // owned exclusively and no sum is split, so the team argument is the
+      // emission knob alone (`true` here: BLADE_OMP_THREADS is pinned unset).
+      ("gate_off_gram_same_above_crossover_emits_the_packed_tile", false,
+       bigCov + "let G = gram(CB, CB)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);"
+         "gram(A, A): packed-triangle syrk tile"
+         "#include \"blade_packed_gemm.hpp\"" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
+      // Units erase at codegen: a `Float64<meter>` operand takes the same tile.
+      ("gate_off_gram_same_with_units_takes_the_tile", false,
+       "Unit meter\ntype BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let m1: Float64<meter> = 1.0\n"
+       + "let CU = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * m1 |> compute\n"
+       + "let GU = gram(CU, CU)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CU.data, GU.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);" ],
+       [ shimInclude; "blade_linalg::"; "__gacc" ])
+      // gram(A, B) over two arrays is the DENSE m x p product: never the syrk
+      // tile, at any size (its own dense jam).
+      ("gate_off_gram_distinct_never_takes_the_syrk_tile", false,
+       bigCov
+       + "let CD: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+       + "let H = gram(CB, CD)\n",
+       [ "__gacc" ],
+       [ "dsyrk_tri"; shimInclude; "blade_linalg::" ])
+      // Float32 keeps the triangular jam (the tile is f64), as does a
+      // same-array gram below the crossover.
+      ("gate_off_gram_same_float32_keeps_the_jam", false,
+       "type BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let CF: Array<Float32 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float32(Float64(i * 8 + s)) |> compute\n"
+       + "let GF = gram(CF, CF)\n",
+       [ "__gacc0" ],
+       [ "dsyrk_tri"; shimInclude ])
+      ("gate_off_gram_same_below_crossover_keeps_the_jam", false,
+       realMat + "let G = gram(A, A)\n",
+       [ "__gacc" ],
+       [ "dsyrk_tri"; shimInclude ])
+      ("gate_off_syrk_above_crossover_emits_the_packed_tile", false,
+       bigCov
+       + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
+       // The kernel's `/ 8.0` rides the call (mode 1, the divisor) and is
+       // applied by the tile of the last K block as it stores: no post-pass
+       // over the triangle (`__sy_i` is the BLAS arm's scaling loop).
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4, 1);"
+         "packed-triangle syrk tile (blade_packed_gemm.hpp dsyrk_tri, 6x8, KC=8)"
+         "#include \"blade_packed_gemm.hpp\"" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__i1 < 20 - __i0"; "__sy_i" ])
+      // The omp licence on the kernel threads the tile (cells split across the
+      // team, sums never) -- `true`, and no per-cell pragma'd nest.
+      ("gate_off_syrk_tile_takes_the_omp_licence", false,
+       bigCov
+       + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4, 1);" ],
+       [ shimInclude; "blade_linalg::"; "CB____i0" ])
+
+      // ============ BLAS ON: the tile PREEMPTS host ?syrk where eligible ============
+      // (`syrkTilePreferredOverBlas`, bench gap G28.) Above the crossover the
+      // gate-on emission is the gate-off emission, byte for byte at the call:
+      // no shim include, no dsyrk staging. The library keeps the rest.
+      ("blas_on_syrk_above_crossover_prefers_the_tile", true,
+       bigCov
+       + "let t2 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y)" "prodsum(x, y) / 8.0",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t2.data, 0, false, (size_t)336, 1, (double)(8.0), (size_t)4, 1);" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "CB____i0"; "__sy_i" ])
+      ("blas_on_syrk_tile_takes_the_omp_licence", true,
+       bigCov
+       + "let t3 = method_for(CB, CB) <@> " + bigCovKernel "comm(x, y), omp" "prodsum(x, y)",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, t3.data, 0, true, (size_t)336, 0, (double)(0.0), (size_t)4, 1);" ],
+       [ shimInclude; "blade_linalg::"; "CB____i0" ])
+      ("blas_on_gram_same_above_crossover_prefers_the_tile", true,
+       bigCov + "let G = gram(CB, CB)\n",
+       [ "blade_pgemm::dsyrk_tri((size_t)(20), (size_t)(8), CB.data, G.data, 0, true, (size_t)336, 0, 0.0, (size_t)4, 1);"
+         "gram(A, A): packed-triangle syrk tile" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__gacc" ])
+      // The library keeps what the tile does not cover: the distinct gram
+      // (dgemm) and a Float32 same-array gram (ssyrk), at the same size.
+      ("blas_on_gram_distinct_keeps_the_library", true,
+       bigCov
+       + "let CD: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i + s) |> compute\n"
+       + "let H = gram(CB, CD)\n",
+       [ shimInclude; "blade_linalg::blade_gram_distinct_d(" ],
+       [ "dsyrk_tri" ])
+      ("blas_on_gram_same_float32_keeps_the_library", true,
+       "type BV = Idx<20>\ntype BT = Idx<8>\n"
+       + "let CF: Array<Float32 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float32(Float64(i * 8 + s)) |> compute\n"
+       + "let GF = gram(CF, CF)\n",
+       [ shimInclude; "blade_linalg::blade_gram_same_s(" ],
+       [ "dsyrk_tri" ])
 
       // ============ UNITS ARE NOT A PRECISION ============
       // A unit annotation must not cost the route. `Float64<meter>` STORES as a
@@ -663,6 +774,13 @@ let runLinAlgEmissionTests () : BlockResult =
     // delete exactly those pragmas -- turning a precedence assertion into a
     // spurious red. Pinned unset for the block; same use-guard as `pinBlas`.
     use _ompThreads = pinEnv "BLADE_OMP_THREADS" null
+    // The syrk-tile cases pin the DEFAULT (tile on); the knob case below sets
+    // it off in its own scope.
+    use _syrkTile = pinEnv "BLADE_SYRK_TILE" null
+    // The case table pins today's default side explicitly (the suite pins it
+    // too); the BLADE_BLAS_PREFER cases below set it per case.
+    use _blasPrefer = pinEnv "BLADE_BLAS_PREFER" "native"
+    use _blasFlavor = pinEnv "BLADE_BLAS_FLAVOR" null
     let mutable passed = 0
     let mutable failed = 0
     let mutable failedNames = []
@@ -684,6 +802,147 @@ let runLinAlgEmissionTests () : BlockResult =
                 passed <- passed + 1
                 resultLine Pass name (if blasOn then "routing as expected (gate on)"
                                       else "native emission as expected (gate off)")
+
+    // ---- BLADE_SYRK_TILE=0 keeps the plain per-cell nest (the A/B knob) ----
+    let knobName = "syrk_tile_knob_off_keeps_the_per_cell_nest"
+    let knobSrc =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+        + "let t4 = method_for(CB, CB) <@> lambda(x: Array<Float64 like BT>, y: Array<Float64 like BT>) where comm(x, y) -> prodsum(x, y) |> compute\n"
+    (let knobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf false knobName knobSrc
+     match knobCpp with
+     | Error e -> fail knobName e
+     | Ok cpp ->
+        if cpp.Contains "dsyrk_tri" then fail knobName "BLADE_SYRK_TILE=0 still emitted the tile"
+        elif not (cpp.Contains "CB____i0" && cpp.Contains "__i1 < 20 - __i0") then
+            fail knobName "BLADE_SYRK_TILE=0 did not emit the triangular per-cell nest"
+        else
+            passed <- passed + 1
+            resultLine Pass knobName "the per-cell nest, no tile call")
+    // ...and the gram(A, A) node keeps its triangular gram jam under the knob.
+    let gramKnobName = "syrk_tile_knob_off_keeps_the_gram_jam"
+    let gramKnobSrc =
+        "type BV = Idx<20>\ntype BT = Idx<8>\n"
+        + "let CB: Array<Float64 like BV, BT> = method_for(range<BV>, range<BT>) <@> lambda(i, s) -> Float64(i * 8 + s) * 0.125 |> compute\n"
+        + "let G = gram(CB, CB)\n"
+    (let gramKnobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf false gramKnobName gramKnobSrc
+     match gramKnobCpp with
+     | Error e -> fail gramKnobName e
+     | Ok cpp ->
+        if cpp.Contains "dsyrk_tri" then fail gramKnobName "BLADE_SYRK_TILE=0 still emitted the tile"
+        elif not (cpp.Contains "__gacc0") then fail gramKnobName "BLADE_SYRK_TILE=0 did not emit the triangular gram jam"
+        else
+            passed <- passed + 1
+            resultLine Pass gramKnobName "the triangular gram jam, no tile call")
+    // ...and with the BLAS gate ON the knob hands the eligible shapes back to
+    // the library: both the comm nest and the gram(A, A) node route to ?syrk.
+    let blasKnobName = "syrk_tile_knob_off_with_blas_on_routes_to_the_library"
+    (let blasKnobCpp =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        cppOf true blasKnobName (knobSrc + "let G = gram(CB, CB)\n")
+     match blasKnobCpp with
+     | Error e -> fail blasKnobName e
+     | Ok cpp ->
+        let calls = System.Text.RegularExpressions.Regex.Matches(cpp, @"blade_linalg::blade_gram_same_d\(").Count
+        if cpp.Contains "dsyrk_tri" then fail blasKnobName "BLADE_SYRK_TILE=0 with BLAS on still emitted the tile"
+        elif calls <> 2 then fail blasKnobName ($"expected 2 blade_gram_same_d calls (comm nest + gram node), got {calls}")
+        else
+            passed <- passed + 1
+            resultLine Pass blasKnobName "both shapes route to ?syrk, no tile call")
+
+    // ---- BLADE_BLAS_PREFER: who serves a shape BOTH the tile and ?syrk can ----
+    //
+    // `knobSrc` + a gram node: two eligible shapes (20 x 8, above the tile's
+    // crossover), so every case counts TWO calls of one kind and none of the
+    // other. Counted, not spelled: the tile's argument list is the tri-tiles
+    // ABI's business (6016b4f7), and these cases are about the route.
+    // The toolchain file is pointed at a path that does not exist (and the
+    // flavor cleared) unless a case says otherwise, so "default" really is
+    // the default whatever the machine's blade.toolchain.json holds.
+    let prefSrc = knobSrc + "let G = gram(CB, CB)\n"
+    let missingToolchain = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"blade-no-toolchain-{System.Guid.NewGuid():N}.json")
+    let countOf (cpp: string) (pat: string) = System.Text.RegularExpressions.Regex.Matches(cpp, pat).Count
+    let tiles (cpp: string) = countOf cpp @"blade_pgemm::dsyrk_tri\("
+    let shims (cpp: string) = countOf cpp @"blade_linalg::blade_gram_same_d\("
+    // Emit `prefSrc` under a preference setting (None = unset), a flavor, a
+    // toolchain file and the BLAS gate; also return the decisions recorded.
+    let emitPref (name: string) (pref: string option) (flavor: string option) (toolchainFile: string) (blasOn: bool) =
+        use _pref = pinEnv "BLADE_BLAS_PREFER" (Option.toObj pref)
+        use _flavor = pinEnv "BLADE_BLAS_FLAVOR" (Option.toObj flavor)
+        use _file = pinEnv "BLADE_TOOLCHAIN_FILE" toolchainFile
+        Blade.Toolchain.refresh ()
+        Blade.Effects.Decisions.start ()
+        let r = cppOf blasOn name prefSrc
+        let ds = Blade.Effects.Decisions.drain ()
+        Blade.Toolchain.refresh ()
+        (r, ds)
+    let expectRoute (name: string) (pref: string option) (flavor: string option) (toolchainFile: string) (blasOn: bool) (wantTiles: int) (wantShims: int) =
+        match emitPref name pref flavor toolchainFile blasOn with
+        | Error e, _ -> fail name e
+        | Ok cpp, _ ->
+            let t, s = tiles cpp, shims cpp
+            if t = wantTiles && s = wantShims then
+                passed <- passed + 1
+                resultLine Pass name ($"{t} tile call(s), {s} ?syrk call(s)")
+            else
+                fail name ($"expected {wantTiles} tile / {wantShims} ?syrk calls, got {t} / {s}")
+    // Every value, gate ON: native, auto (OpenBLAS / unidentified) and a
+    // stray spelling take the tile; library keeps ?syrk.
+    expectRoute "blas_prefer_native_blas_on_takes_the_tile" (Some "native") None missingToolchain true 2 0
+    expectRoute "blas_prefer_auto_blas_on_takes_the_tile" (Some "auto") None missingToolchain true 2 0
+    expectRoute "blas_prefer_unset_blas_on_takes_the_tile" None None missingToolchain true 2 0
+    expectRoute "blas_prefer_stray_value_reads_as_auto" (Some "fastest") None missingToolchain true 2 0
+    expectRoute "blas_prefer_library_blas_on_keeps_syrk" (Some "library") None missingToolchain true 0 2
+    expectRoute "blas_prefer_blas_spelling_keeps_syrk" (Some "BLAS") None missingToolchain true 0 2
+    // auto with the library IDENTIFIED as MKL prefers the library.
+    expectRoute "blas_prefer_auto_with_mkl_flavor_keeps_syrk" (Some "auto") (Some "mkl") missingToolchain true 0 2
+    // ...and an explicit `native` wins over that identity.
+    expectRoute "blas_prefer_native_beats_mkl_identity" (Some "native") (Some "mkl") missingToolchain true 2 0
+    // Every value, gate OFF: the preference is moot -- the tile is the only arm.
+    for v in [ "native"; "auto"; "library" ] do
+        expectRoute $"blas_prefer_{v}_blas_off_takes_the_tile" (Some v) None missingToolchain false 2 0
+    // BLADE_SYRK_TILE=0 is a separate switch: under `native` it still hands
+    // the eligible shapes to the library with the gate on.
+    let tileOffCase () =
+        use _tile = pinEnv "BLADE_SYRK_TILE" "0"
+        expectRoute "blas_prefer_native_with_tile_off_keeps_syrk" (Some "native") None missingToolchain true 0 2
+    tileOffCase ()
+
+    // The plan names the preference and its SOURCE, one case per source.
+    let planCase (name: string) (pref: string option) (toolchainFile: string) (wantRoute: string) (wantNeedle: string) (wantTileDecline: bool) =
+        match emitPref name pref None toolchainFile true with
+        | Error e, _ -> fail name e
+        | Ok _, ds ->
+            let lines = ds |> List.map Blade.Effects.Decisions.render
+            let routeLines = lines |> List.filter (fun l -> l.Contains "blas-routing" && l.Contains wantNeedle)
+            let tileDecline = lines |> List.exists (fun l -> l.Contains "microkernel" && l.Contains "packed syrk tile skipped for the library")
+            if routeLines.Length = 2 && routeLines |> List.forall (fun l -> l.Contains wantRoute) && tileDecline = wantTileDecline then
+                passed <- passed + 1
+                resultLine Pass name ($"both syrk route lines name `{wantNeedle}`")
+            else
+                let shown = lines |> List.filter (fun l -> l.Contains "blas-routing" || l.Contains "microkernel") |> String.concat " | "
+                fail name ($"wanted 2 blas-routing lines with `{wantRoute}` and `{wantNeedle}` (tile decline: {wantTileDecline}); saw: {shown}")
+    planCase "blas_prefer_plan_names_the_default" None missingToolchain
+        "declined" "BLADE_BLAS_PREFER=auto (default) -> native: the library is not identified as MKL" false
+    planCase "blas_prefer_plan_names_the_env" (Some "library") missingToolchain
+        "applied" "BLADE_BLAS_PREFER=library (env BLADE_BLAS_PREFER) -> library" true
+    // The TOOLCHAIN FILE path: no env var, the key spelled the same in
+    // blade.toolchain.json -- the per-machine setting `blade setup` persists.
+    let toolchainFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"blade-prefer-{System.Guid.NewGuid():N}.json")
+    try
+        System.IO.File.WriteAllText(toolchainFile, "{ \"BLADE_BLAS_PREFER\": \"library\" }")
+        planCase "blas_prefer_plan_names_the_toolchain_file" None toolchainFile
+            "applied" "BLADE_BLAS_PREFER=library (blade.toolchain.json) -> library" true
+        expectRoute "blas_prefer_toolchain_file_keeps_syrk" None None toolchainFile true 0 2
+        // The env var outranks the file.
+        expectRoute "blas_prefer_env_outranks_toolchain_file" (Some "native") None toolchainFile true 2 0
+    finally
+        try System.IO.File.Delete toolchainFile with _ -> ()
+        Blade.Toolchain.refresh ()
 
     // ---- a unit annotation changes NO emitted byte ----
     //
@@ -1096,7 +1355,9 @@ let runLinAlgEmissionTests () : BlockResult =
            + "let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
            + "let xv: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0]\n"
            + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
-           [ "__ps" ],
+           // Blade's own arithmetic: the row-fold jam's per-row chains plus the
+           // lifted kernel's prodsum (the explicit K-lane vector form since M9).
+           [ "blade_fold::dot<double, 8>(" ],
            [ cudaShimInclude; "blade_cuda_"; shimInclude; "blade_linalg::" ])
 
           // ---- THE FALLBACK CHAIN, which is the reason `resolveNodeRoute`
@@ -1289,6 +1550,465 @@ let runLinAlgProbeTests () : BlockResult =
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
                   FailedNames = (if failNames.IsEmpty then [$"<exit {rproc.ExitCode}>"] else failNames) }
+
+
+/// RAW-BIT tests of the packed-triangle SYRK tile (cpp/syrk_tile_tests.cpp over
+/// the SHIPPED blade_tiles.h + blade_packed_gemm.hpp): the BLAS-off arm of the
+/// same-array `comm` row contraction must reproduce the per-cell prodsum it
+/// replaces BIT FOR BIT -- no value pin can see a last-ulp drift, and the
+/// differential gates see only the shapes the corpus happens to have.
+///
+/// Two builds of ONE source, because the claim is per contraction mode:
+///   -ffp-contract=off  (the differential gates' mode): the tile vs the emitted
+///                      serial loop, bitwise by construction;
+///   -ffp-contract=fast (the user default, -DBLADE_TEST_FMA_REF): the tile vs
+///                      the one-std::fma-per-step chain -- every step fused.
+/// plus an assembly census of each build: =off must contain NO vfmadd at all,
+/// =fast must contain the tile's packed vfmadd231pd (12 per s step, per
+/// variant). Needs g++; reports Skipped without it.
+let runSyrkTileTests () : BlockResult =
+    let blockName = "Syrk Tile"
+    printHeader "Packed-Triangle SYRK Tile (raw-bit, both contraction modes)"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "syrk_tile_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ tile tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "syrk_tile_tests.cpp not found at: %s" testSrc
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["syrk_tile_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        // A private scratch directory: two concurrent suites (other worktrees
+        // share nothing, but two runs from one checkout share cppDir) must not
+        // race on one output path.
+        let work = Path.Combine(Path.GetTempPath(), "blade-syrk-tile-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable names = []
+        let fail (n: string) (detail: string) =
+            failed <- failed + 1
+            names <- names @ [ n ]
+            resultLine Fail n detail
+        let pass (n: string) (detail: string) =
+            passed <- passed + 1
+            resultLine Pass n detail
+        // -march=native and the same -fno-math-errno -fwrapv the program
+        // builds use; -fopenmp so the threaded arm is exercised too.
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_TEST_FMA_REF") ] do
+            let exe = Path.Combine(work, $"syrk_tile_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"syrk_tile_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 120000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 120000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (120s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"SYRK TILE TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        let census =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "tile vs the plain")
+                            |> Option.defaultValue ""
+                        let gramCensus =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "gram node:")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise; {census.Trim()}; {gramCensus.Trim()}")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            // The assembly census: contraction is PERMISSION, so confirm what
+            // g++ actually did in this mode.
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 120000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedFma = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (mul + add, as the serial loop)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    if packedFma >= 12 then pass "vfmadd census contract=fast" ($"{packedFma} packed vfmadd (tile s loop: 12 per step per variant)")
+                    else fail "vfmadd census contract=fast" ($"only {packedFma} packed vfmadd: the tile did not contract")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+        printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+        { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
+
+
+/// RAW-BIT tests of the explicit K-lane vector fold forms (cpp/fold_lanes_tests.cpp
+/// over the SHIPPED blade_fold_lanes.hpp; review items M9 / M14): every form
+/// (sum / dot / sq / dot3, K = 4 and 8, double and float) against the scalar
+/// model of the lane tree the header documents, at n = 0..35 / 777 / 20011,
+/// unaligned starts, same-pointer operands, and the Path B partition threaded
+/// against its serial-within-chunk twin.
+///
+/// Two builds of ONE source, -ffp-contract=off (the differential gates' mode)
+/// and =fast (the user default): the forms round every product before its add
+/// in BOTH, so both builds are bitwise the model. Plus an assembly census of
+/// each: no vfmadd in any blade_fold function (the barrier held), and packed
+/// vaddpd / vaddps present there (the forms vectorized). Needs g++; reports
+/// Skipped without it.
+let runFoldLanesTests () : BlockResult =
+    let blockName = "Fold Lanes"
+    printHeader "Explicit K-Lane Vector Folds (raw-bit vs the lane-tree model, both contraction modes)"
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "fold_lanes_tests.cpp")
+    let caps = capabilities.Value
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ fold tests)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not (File.Exists testSrc) then
+        eprintfn "fold_lanes_tests.cpp not found at: %s" testSrc
+        { Block = blockName; Passed = 0; Failed = 1; Skipped = 0
+          FailedNames = ["fold_lanes_tests.cpp missing"] }
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let work = Path.Combine(Path.GetTempPath(), "blade-fold-lanes-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let mutable passed = 0
+        let mutable failed = 0
+        let mutable names = []
+        let fail (n: string) (detail: string) =
+            failed <- failed + 1
+            names <- names @ [ n ]
+            resultLine Fail n detail
+        let pass (n: string) (detail: string) =
+            passed <- passed + 1
+            resultLine Pass n detail
+        // ---- G51 (round 3, A2): the licensed ROW-VIEW arm's emission. A
+        // `where omp` fold whose rows are `reduce(u(i), (+)[, s])` over a stored
+        // dense rank-2 array folds each row with ONE blade_fold::sum call over
+        // the row's contiguous cells inside the Path B team (no omp simd on the
+        // row loop), the seed combined once; BLADE_FOLD_LANES=4 sets K, =0 keeps
+        // the previous form, and the repro build never takes it. Pure codegen.
+        (let rowSrc (inner: string) =
+            "type Y = Idx<521>\ntype X = Idx<509>\n"
+            + "let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute\n"
+            + $"let s = reduce(method_for(range<Y>) <@> lambda(i) -> {inner}, lambda(p, q) where omp -> p + q, 0.5)\n"
+         let rowCases : (string * (string * string) list * string * string list * string list) list =
+             [ ("row_view_sum_helper_unseeded", [], rowSrc "reduce(u(i), (+))",
+                [ "const double __rv = __rrow[0] + blade_fold::sum<double, 8>((__rrow + 1), (size_t)508);"
+                  "#include \"blade_fold_lanes.hpp\"" ],
+                [ "BLADE_OMP_SIMD_REDUCTION" ])
+               ("row_view_sum_helper_seed_once", [], rowSrc "reduce(u(i), (+), 7.0)",
+                [ "const double __rv = (7.0) + blade_fold::sum<double, 8>(__rrow, (size_t)509);" ],
+                [ "BLADE_OMP_SIMD_REDUCTION" ])
+               ("row_view_sum_helper_k4", [ ("BLADE_FOLD_LANES", "4") ], rowSrc "reduce(u(i), (+))",
+                [ "blade_fold::sum<double, 4>((__rrow + 1), (size_t)508)" ], [ "blade_fold::sum<double, 8>" ])
+               ("row_view_sum_helper_knob_off", [ ("BLADE_FOLD_LANES", "0") ], rowSrc "reduce(u(i), (+))",
+                [], [ "blade_fold::sum<" ])
+               ("row_view_sum_helper_not_in_repro", [ ("BLADE_FP_REPRO", "1") ], rowSrc "reduce(u(i), (+))",
+                [ "__rslot_s[__i0] = " ], [ "blade_fold::sum<" ]) ]
+         for (name, env, src, must, mustNot) in rowCases do
+             let pins =
+                 ([ "BLADE_FP_REPRO"; "BLADE_FOLD_LANES"; "BLADE_OMP_THREADS"; "BLADE_FOLD_ROW_SLOTS"; "BLADE_TILE_TUNE" ]
+                  |> List.filter (fun k -> not (env |> List.exists (fun (p, _) -> p = k)))
+                  |> List.map (fun k -> pinEnv k null))
+                 @ (env |> List.map (fun (k, v) -> pinEnv k v))
+             let r = cppOf false name src
+             pins |> List.rev |> List.iter (fun d -> d.Dispose())
+             match r with
+             | Error e -> fail name e
+             | Ok cpp ->
+                 let missing = must |> List.filter (fun s -> not (cpp.Contains s))
+                 let present = mustNot |> List.filter (fun s -> cpp.Contains s)
+                 if not missing.IsEmpty then fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
+                 elif not present.IsEmpty then fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
+                 else pass name "emission as expected")
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", "") ] do
+            let exe = Path.Combine(work, $"fold_lanes_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"fold_lanes_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 180000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (180s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"FOLD LANES TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        let step =
+                            outText.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "vector extensions")
+                            |> Option.defaultValue ""
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} cases bitwise; {step.Trim()}")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            // The assembly census, PER FUNCTION: only the blade_fold:: bodies
+            // (mangled `10blade_fold`) are under contract -- the harness's own
+            // generator code may fuse freely under =fast.
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let labelRx = System.Text.RegularExpressions.Regex(@"^([A-Za-z_][\w.$]*):")
+                let mutable current = ""
+                let mutable fmaIn = 0
+                let mutable addPd = 0
+                let mutable addPs = 0
+                for l in lines do
+                    let m = labelRx.Match l
+                    if m.Success && not (m.Groups.[1].Value.StartsWith ".L") then current <- m.Groups.[1].Value
+                    elif current.Contains "10blade_fold" then
+                        if l.Contains "vfmadd" || l.Contains "vfmsub" || l.Contains "vfnmadd" then fmaIn <- fmaIn + 1
+                        if l.Contains "vaddpd" then addPd <- addPd + 1
+                        if l.Contains "vaddps" then addPs <- addPs + 1
+                if fmaIn <> 0 then
+                    fail $"vfmadd census contract={mode}" ($"{fmaIn} fused instruction(s) inside blade_fold functions (a product was fused into its add)")
+                elif addPd < 8 || addPs < 8 then
+                    fail $"vfmadd census contract={mode}" ($"only {addPd} vaddpd / {addPs} vaddps inside blade_fold functions: the forms did not vectorize")
+                else
+                    pass $"vfmadd census contract={mode}" ($"0 fused instructions in blade_fold functions; {addPd} vaddpd, {addPs} vaddps (rounded product, then add)")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+        printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+        { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = names }
+
+
+/// The antisym-pair tile (review item M7) and the rank-3 simplex tile (M8):
+/// ROUTING pins on the emitted text (pure codegen: the tile call, its schedule
+/// knob, the crossovers, the spellings that must decline), then the RAW-BIT
+/// gate -- cpp/row_contraction_tile_tests.cpp built twice, -ffp-contract=off
+/// (bitwise the emitted serial forms by construction) and =fast (bitwise the
+/// one-fma-per-step chains), plus the vfmadd census of each build.
+/// `blade test row-tile`; also part of `blade test linalg` and the default
+/// suite (beside `syrk-tile`).
+let runRowContractionTileTests () : BlockResult =
+    let blockName = "Row Contraction Tiles"
+    printHeader "Antisym-Pair and Simplex Tiles (routes + raw-bit, both contraction modes)"
+    use _ompThreads = pinEnv "BLADE_OMP_THREADS" null
+    use _anti = pinEnv "BLADE_ANTISYM_TILE" null
+    use _simplex = pinEnv "BLADE_SIMPLEX_TILE" null
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable names = []
+    let fail (n: string) (detail: string) =
+        failed <- failed + 1
+        names <- names @ [ n ]
+        resultLine Fail n detail
+    let pass (n: string) (detail: string) =
+        passed <- passed + 1
+        resultLine Pass n detail
+    // ---- routes ----
+    let antiSrc (p: int) (n: int) (licence: string) (body: string) =
+        $"type P = Idx<{p}>\ntype C = Idx<2>\ntype S = Idx<{n}>\n"
+        + "let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute\n"
+        + $"let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where {licence} -> {body} |> compute\n"
+    let antiBody = "prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))"
+    let sym3Src (p: int) (n: int) (licence: string) (body: string) =
+        $"type V = Idx<{p}>\ntype S = Idx<{n}>\nlet static nn: Int64 = {n}\n"
+        + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute\n"
+        + $"let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where {licence} -> {body} |> compute\n"
+    let cases : (string * (string * string) list * string * string list * string list) list =
+        [ ("antisym_tile_sequential_6x8_by_default", [],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "blade_pgemm::dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)1);"
+             "#include \"blade_packed_gemm.hpp\"" ],
+           [ "z____i0" ])
+          ("antisym_tile_paired_4x4_under_the_knob", [ ("BLADE_ANTISYM_TILE", "4x4") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "dantisym_tri((size_t)(29), (size_t)(11), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), false, 1, 0, (size_t)0, (size_t)1);" ],
+           [ "z____i0" ])
+          ("antisym_tile_knob_off_keeps_the_nest", [ ("BLADE_ANTISYM_TILE", "0") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "z____i0"; "__i1 < 29 - __i0 - 1" ], [ "dantisym_tri" ])
+          // The licence makes the driver call `threaded` (the argument is the
+          // request, unchanged). anti_g's unset default follows the TILE's
+          // regime (round 3, W2-0b): at 29 x 11 the driver's static work cap
+          // (p * p * n) >> 20 is 0, so no team can ever form and G stays 1;
+          // at 193 x 401 (cap 14) the tile is team-eligible and takes the
+          // cache budget's G = 4; anti_g=1 forces the previous order there.
+          ("antisym_tile_takes_the_omp_licence", [],
+           antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)1);"; "row groups of 1, per cell" ], [ "z____i0" ])
+          ("antisym_tile_census_under_serial_emission", [ ("BLADE_OMP_THREADS", "1") ],
+           antiSrc 29 11 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "[omp] requested but emitted serial"; "(double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_takes_the_cache_budget", [],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "blade_pgemm::dantisym_tri((size_t)(193), (size_t)(401), z.data, (size_t)0, (size_t)1, nested_array_utilities::pool_base(l.data), 0, (double)(0.0), true, 0, 0, (size_t)0, (size_t)4);"; "row groups of 4, per cell" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_serial_emission_keeps_one", [ ("BLADE_OMP_THREADS", "1") ],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "(double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_team_eligible_row_groups_forced_to_one", [ ("BLADE_TILE_TUNE", "anti_g=1") ],
+           antiSrc 193 401 "anticomm(a, b), omp(a: 1)" antiBody,
+           [ "(double)(0.0), true, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_scale_divides_the_finished_cell", [],
+           antiSrc 29 11 "anticomm(a, b)" ("(" + antiBody + ") / 4.0"),
+           [ "pool_base(l.data), 1, (double)(4.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          // BLADE_TILE_TUNE anti_kc: the sample-block cap rides the call
+          // (speed only; the bits are pinned by `blade test row-tile`).
+          ("antisym_tile_sample_blocks_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "anti_kc=100") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)100, (size_t)1);" ], [ "z____i0" ])
+          // Row-panel groups (BLADE_TILE_TUNE anti_g; unset = 1 for these
+          // serial tiles; 0 = the compile-time cache budget: n = 11 -> 4,
+          // n = 1001 -> 1) ride
+          // the call as its last argument (speed only; the bits are pinned by
+          // `blade test row-tile`).
+          ("antisym_tile_row_groups_cache_budget_policy", [ ("BLADE_TILE_TUNE", "anti_g=0") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)4);"; "row groups of 4, per cell" ], [ "z____i0" ])
+          ("antisym_tile_row_groups_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "anti_g=2") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)2);"; "row groups of 2, per cell" ], [ "z____i0" ])
+          ("antisym_tile_row_groups_fall_to_one_on_a_long_chain", [ ("BLADE_TILE_TUNE", "anti_g=0") ],
+           antiSrc 29 1001 "anticomm(a, b)" antiBody,
+           [ "pool_base(l.data), 0, (double)(0.0), false, 0, 0, (size_t)0, (size_t)1);" ], [ "z____i0" ])
+          ("antisym_tile_paired_row_groups", [ ("BLADE_ANTISYM_TILE", "4x4"); ("BLADE_TILE_TUNE", "anti_g=8") ],
+           antiSrc 29 11 "anticomm(a, b)" antiBody,
+           [ "false, 1, 0, (size_t)0, (size_t)8);" ], [ "z____i0" ])
+          ("antisym_below_crossover_keeps_the_nest", [],
+           antiSrc 23 11 "anticomm(a, b)" antiBody, [ "z____i0" ], [ "dantisym_tri" ])
+          ("antisym_reversed_q_operands_decline", [],
+           antiSrc 29 11 "anticomm(a, b)" "prodsum(a((0 : C)), b((1 : C))) - prodsum(a((1 : C)), b((0 : C)))",
+           [ "z____i0" ], [ "dantisym_tri" ])
+          ("antisym_p_plus_negated_q_declines", [],
+           antiSrc 29 11 "anticomm(a, b)" "prodsum(a((0 : C)), b((1 : C))) + (-prodsum(b((0 : C)), a((1 : C))))",
+           [ "z____i0" ], [ "dantisym_tri" ])
+          ("simplex_tile_with_the_cast_divisor", [],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c) / Float64(nn)",
+           [ "blade_pgemm::dsym3_tri((size_t)(29), (size_t)(67), x.data, nested_array_utilities::pool_base(t.data), 1, (double)("
+             "false, (size_t)336, 1);"; "#include \"blade_packed_gemm.hpp\"" ],
+           [ "x____i0" ])
+          ("simplex_tile_takes_the_omp_licence", [],
+           sym3Src 61 11 "comm(a, b, c), omp(a: 1)" "prodsum(a, b, c)",
+           [ "dsym3_tri((size_t)(61), (size_t)(11), x.data, nested_array_utilities::pool_base(t.data), 0, (double)(0.0), true, (size_t)336, 1);" ],
+           [ "x____i0" ])
+          // The edge tiles' kloop (BLADE_TILE_TUNE tri_edge: 1 = live
+          // accumulators, the default; 0 = the full 6 x 8) rides the call.
+          ("simplex_tile_full_kloop_edges_under_the_tune_knob", [ ("BLADE_TILE_TUNE", "tri_edge=0") ],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c)",
+           [ "false, (size_t)336, 0);" ], [ "x____i0" ])
+          ("simplex_tile_knob_off_keeps_the_nest", [ ("BLADE_SIMPLEX_TILE", "0") ],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(a, b, c)", [ "x____i0" ], [ "dsym3_tri" ])
+          ("simplex_below_crossover_keeps_the_nest", [],
+           sym3Src 13 201 "comm(a, b, c)" "prodsum(a, b, c)", [ "x____i0" ], [ "dsym3_tri" ])
+          ("simplex_inner_level_first_declines", [],
+           sym3Src 29 67 "comm(a, b, c)" "prodsum(c, a, b)", [ "x____i0" ], [ "dsym3_tri" ]) ]
+    for (name, env, src, must, mustNot) in cases do
+        let pins = env |> List.map (fun (k, v) -> pinEnv k v)
+        let r = cppOf false name src
+        pins |> List.rev |> List.iter (fun d -> d.Dispose())
+        match r with
+        | Error e -> fail name e
+        | Ok cpp ->
+            let missing = must |> List.filter (fun s -> not (cpp.Contains s))
+            let present = mustNot |> List.filter (fun s -> cpp.Contains s)
+            if not missing.IsEmpty then fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
+            elif not present.IsEmpty then fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
+            else pass name "emission as expected"
+    // ---- raw bits ----
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "row_contraction_tile_tests.cpp")
+    let caps = capabilities.Value
+    let mutable skipped = 0
+    if not caps.HasGpp then
+        printfn "Skipped: g++ not found (cannot compile the C++ tile tests)."
+        skipped <- 1
+    elif not (File.Exists testSrc) then
+        fail "row_contraction_tile_tests.cpp missing" testSrc
+    else
+        let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
+        let work = Path.Combine(Path.GetTempPath(), "blade-row-tile-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(work) |> ignore
+        let runProc (exe: string) (args: string) (timeoutMs: int) =
+            let psi = ProcessStartInfo(exe, args)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            psi.WorkingDirectory <- cppDir
+            use p = Process.Start(psi)
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit(timeoutMs) then (Some p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill(true) with _ -> ())
+                (None, o.Result, e.Result)
+        let baseFlags = "-std=c++17 -O3 -march=native -fno-math-errno -fwrapv -fopenmp"
+        for (mode, extra) in [ ("off", ""); ("fast", " -DBLADE_TEST_FMA_REF") ] do
+            let exe = Path.Combine(work, $"row_tile_{mode}{exeExt}")
+            let asm = Path.Combine(work, $"row_tile_{mode}.s")
+            let flags = $"{baseFlags} -ffp-contract={mode}{extra}"
+            match runProc "g++" $"{flags} -o \"{exe}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                match runProc exe "" 300000 with
+                | None, _, _ -> fail $"raw-bit contract={mode}" "test binary TIMED OUT (300s)"
+                | Some code, out, err ->
+                    let outText = out.Replace("\r\n", "\n")
+                    let m = System.Text.RegularExpressions.Regex.Match(outText, @"ROW TILE TESTS:\s*(\d+)/(\d+)\s*passed")
+                    let firstFails =
+                        outText.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 5
+                        |> String.concat " | "
+                    if m.Success && code = 0 && m.Groups.[1].Value = m.Groups.[2].Value then
+                        pass $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} shapes bitwise (antisym 6x8 + 4x4, simplex)")
+                    elif m.Success then
+                        fail $"raw-bit contract={mode}" ($"{m.Groups.[1].Value}/{m.Groups.[2].Value} passed: {firstFails} {err.Trim()}")
+                    else
+                        fail $"raw-bit contract={mode}" ($"no summary line (exit {code}): {err.Trim()}")
+            | _, o, e -> fail $"raw-bit contract={mode}" ($"compile failed: {(o + e).Trim()}")
+            match runProc "g++" $"{flags} -S -o \"{asm}\" \"{testSrc}\"" 180000 with
+            | Some 0, _, _ ->
+                let lines = File.ReadAllLines asm
+                let count (pat: string) = lines |> Array.filter (fun l -> l.Contains pat) |> Array.length
+                let anyFma = count "vfmadd" + count "vfmsub" + count "vfnmadd"
+                let packedFma = count "vfmadd231pd" + count "vfmadd132pd" + count "vfmadd213pd"
+                if mode = "off" then
+                    if anyFma = 0 then pass "vfmadd census contract=off" "0 fused instructions in the TU (mul + add, as the serial loops)"
+                    else fail "vfmadd census contract=off" ($"{anyFma} fused instruction(s) under -ffp-contract=off")
+                else
+                    // 12 per step per 6x8 kloop (P, Q, simplex) + 8 per paired 4x4 step
+                    if packedFma >= 20 then pass "vfmadd census contract=fast" ($"{packedFma} packed vfmadd (6x8 kloops: 12 per step; paired 4x4: 8)")
+                    else fail "vfmadd census contract=fast" ($"only {packedFma} packed vfmadd: the tiles did not contract")
+            | _, o, e -> fail $"vfmadd census contract={mode}" ($"-S failed: {(o + e).Trim()}")
+        (try Directory.Delete(work, true) with _ -> ())
+    printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+    { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }
 
 
 /// The four-tier BLAS/LAPACK resolution (docs/plans/plan-toolchain-packaging.md):

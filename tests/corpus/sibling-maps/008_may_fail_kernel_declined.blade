@@ -1,0 +1,14 @@
+// TEST: Sibling Maps Decline A Kernel That May Fail (aborts)
+// ============================================================================
+// y1's kernel divides integers by a captured zero: it may fail, so
+// interleaving the two maps would move its first failing cell behind y2's
+// cells. The kernel is not closed-total, so the maps keep their own loops
+// and the abort is y1's, at y1.
+type I = Idx<5>
+function two(x: Array<Int64 like I>, z: Int64) -> Int64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a / z |> compute
+    let y2 = method_for(x) <@> lambda(a) -> a + 1 |> compute
+    reduce(y1, (+), 0) + reduce(y2, (+), 0)
+}
+let r = two([1, 2, 3, 4, 5], 0)
+// ABORT: BL8013

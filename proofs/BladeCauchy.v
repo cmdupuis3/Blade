@@ -36,11 +36,11 @@
 (* Naming: the _lat / _lon suffixes mean the first / second index of     *)
 (* each slot.                                                            *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeArrow.  Coq 8.18, stdlib only.                *)
+(* Imports BladeDMWF, BladeArrow.  Rocq 9.0, stdlib only.                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeArrow.
-Require Import List Arith Lia ZArith Psatz.
+From Stdlib Require Import List Arith Lia ZArith Psatz.
 Import ListNotations.
 
 Section CauchySplit.

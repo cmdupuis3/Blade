@@ -1,0 +1,8 @@
+// TEST: a named Float64 sort key over Float32 cells (rejects)
+// ============================================================================
+// G276 (1): each cell would be converted into the key's parameter.
+// ============================================================================
+function k64(v: Float64) -> Float64 = v
+let a: Array<Float32 like Idx<2>> = [2.0, 1.0]
+let r = sort(a, k64)
+// ERROR: BL3020

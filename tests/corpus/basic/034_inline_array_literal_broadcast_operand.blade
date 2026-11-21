@@ -6,9 +6,9 @@
 // and the nest peeled `double arr1____i0 = arr1[__i0];` from an identifier
 // that was never declared. The lift pass now hoists it to its own let-RHS.
 // Let-binding the literal by hand always worked; only the inline form failed.
-let yr = [10.0, -4.0]
-let dr = yr - [2.0, -14.0]
-function shift(v: Array<Float like Idx<2>>) -> Array<Float like Idx<2>> = v - [2.0, -14.0]
-let dr2 = shift([10.0, -4.0])
+let yr = Float64([10.0, -4.0])
+let dr = yr - Float64([2.0, -14.0])
+function shift(v: Array<Float64 like Idx<2>>) -> Array<Float64 like Idx<2>> = v - Float64([2.0, -14.0])
+let dr2 = shift(Float64([10.0, -4.0]))
 // EXPECT: dr = [8.0, 10.0]
 // EXPECT: dr2 = [8.0, 10.0]

@@ -1,0 +1,24 @@
+// TEST: A callee storing a scalar in a struct field does not keep the caller local
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221, the twin of memfree/080): `note` writes a
+// SCALAR folded from its argument into a module struct's field -- a scalar
+// store retains nothing, so f still frees y.
+// ============================================================================
+type I = Idx<3>
+struct Tally {
+    n: Float64
+}
+let mut tally = Tally { n = 0.0 }
+function note(a: Array<Float64 like I>) -> Int64 = {
+    tally.n = reduce(a, (+))
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let k = note(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + tally.n + Float64(k)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 33.0

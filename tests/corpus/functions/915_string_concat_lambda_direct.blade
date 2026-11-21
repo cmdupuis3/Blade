@@ -1,0 +1,8 @@
+// TEST: String Concatenation In A Lambda Applied To A String Computes
+// EXPECT: r = "a!"
+// ============================================================================
+// R11 accepted twin of functions/907: called directly with a String, the
+// open parameter is decided by its argument.
+// ============================================================================
+let f = lambda(x) -> x + "!"
+let r = f("a")

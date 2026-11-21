@@ -6,5 +6,5 @@
 // Nested guard: guard(p, guard(q, c)) = guard(p && q, c)
 let p = true
 let q = true
-let result = guard(p, guard(q, 99))
+let result = guard(p, guard(q, Int64(99)))
 // EXPECT: result = 99

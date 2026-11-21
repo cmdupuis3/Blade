@@ -124,7 +124,7 @@ function gap_ratio(e: Array<Float64 like Idx<64>>) -> Float64 = {
 }
 // out-of-order steps in an ascending spectrum (0 for a sorted one)
 function descents(e: Array<Float64 like Idx<64>>) -> Float64 =
-    reduce(method_for(range<Idx<63>>) <@> lambda(k: Int64) -> if e(k + 1) < e(k) then 1.0 else 0.0, (+))
+    reduce(method_for(range<Idx<63>>) <@> lambda(k: Int64) -> if e(k + 1) < e(k) then Float64(1.0) else Float64(0.0), (+))
 
 // ---- the estimator: ex 29's crossing channel at time t, infinite
 //      temperature. In the eigenbasis A(t) = X + iY with X_ij =
@@ -259,8 +259,8 @@ let ringV = if varM > 0.01 then "INTEGRABLE_STILL_RINGING" else "NO"
 // kappa4 sign census across the deformed states (the ex-29 flip test):
 // at infinite temperature kappa4 = qhat - 1 (unit normalizer)
 let KAPW = [kapt2, kapt4, kapt6, kapl2, kapl4, kapl6]
-let nnegK = reduce(method_for(QK) <@> lambda(q) -> if q < 1.0 then 1.0 else 0.0, (+))
-let nnegW = reduce(method_for(KAPW) <@> lambda(k) -> if k < 0.0 then 1.0 else 0.0, (+))
+let nnegK = reduce(method_for(QK) <@> lambda(q) -> if q < 1.0 then Float64(1.0) else Float64(0.0), (+))
+let nnegW = reduce(method_for(KAPW) <@> lambda(k) -> if k < 0.0 then Float64(1.0) else Float64(0.0), (+))
 let robustV = if nnegK > 5.5 && nnegW > 5.5 then "K4_SIGN_ROBUST" else "PARTIAL_FLIP"
 let verdictV = if nnegW > 5.5 then (if varK < 0.01 then "DYNAMICAL_NOT_INHERITED" else "NO") else "INHERITED"
 

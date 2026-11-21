@@ -1,0 +1,29 @@
+// TEST: Llvm Row Tiles Near Misses Keep The Nest
+// Spellings ONE step off the tiles' shapes, above both crossovers, keep the
+// per-cell nest in both lanes, because `(|RowContraction|_|)` matches ordered
+// arithmetic and nothing else: the antisym pair with Q's operands REVERSED
+// (`prodsum(a(1), b(0))` reads Z(i, 1) Z(j, 0), not Q's X(j) Y(i) -- a
+// different tensor), and the simplex with the INNER level first
+// (`prodsum(c, a, b)`: its first product would read the k level, so no W panel
+// exists). The A/B knobs (BLADE_ANTISYM_TILE=0, BLADE_SIMPLEX_TILE=0) restore
+// the same nest on the tile shapes -- an environment the corpus cannot set;
+// `blade test llvm facts` and `blade test row-tile` pin those routes.
+/// Small-integer data: exact sums, association-invariant pins.
+type P = Idx<29>
+type C = Idx<2>
+type S = Idx<11>
+type V = Idx<29>
+type N = Idx<67>
+let (lss, l01, tss, t012) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) % 7) - 3.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> prodsum(a((0 : C)), b((1 : C))) - prodsum(a((1 : C)), b((0 : C))) |> compute
+    let x = method_for(range<V>, range<N>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> prodsum(c, a, b) |> compute
+    let la = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let ta = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (la, l(0, 1), ta, t(0, 1, 2))
+}
+// EXPECT: lss = 449568.0
+// EXPECT: l01 = 31.0
+// EXPECT: tss = 132593040.0
+// EXPECT: t012 = 0.0

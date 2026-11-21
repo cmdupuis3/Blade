@@ -1,0 +1,24 @@
+// TEST: A Mut Argument Refusal Is Spanned At The Refused Call (rejects)
+// ============================================================================
+// Gap G240 (1), round 4 wave 10 (lane C, C3): the BL4005 of the mut-argument
+// rule (Lowering.refuseAliasedMutArgumentsWith) is spanned at the CALL it
+// refuses -- every lowered call carries its surface span -- not at the
+// enclosing declaration: of the two calls below only the second is refused
+// (both members of `twice(g)` are g, so x may share the read argument).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+function twice(a: A) -> (A, A) = (a, a)
+let mut g: A = [1.0, 2.0]
+let mut h: A = [3.0, 4.0]
+let r = {
+    let pair = twice(g)
+    let mut x = pair[1]
+    let ok = bump(h, x)
+    bump(pair[0], x)
+}
+// ERROR: BL4005 @ 20:5
+// REJECT-AT: lower

@@ -1,0 +1,17 @@
+// TEST: a top-level kernel reading a projection of a wholly-deferred tuple forces it as an alias of the member
+// Gap G111 (round 4 wave 5 lane c; formalism 10.2, the alias rule): `v = p[0]`
+// over the wholly-deferred tuple `p = (d1, d2)` is `d1` by substitution -- a
+// deferred alias, one alias class with `d1`. The fold's kernel captures `v`
+// (a forcing use at module level), so the class prints under both names, `d1`
+// and `v`, with the same cells; `d2` is never forced and does not print. The
+// C++ lane used to leave `v` undeclared (BL9002).
+type I = Idx<4>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let d1 = method_for(a) <@> lambda(x) -> x * 2.0
+let d2 = method_for(a) <@> lambda(x) -> x + 10.0
+let p = (d1, d2)
+let v = p[0]
+let s = reduce(method_for(range<I>) <@> lambda(i) -> v(i), (+))
+// EXPECT: d1 = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: v = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: s = 20.0

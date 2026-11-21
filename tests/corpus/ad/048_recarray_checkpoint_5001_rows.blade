@@ -1,0 +1,28 @@
+// TEST: AD Recursive Array, A 5001-Step Recurrence Reverses From Checkpoints
+import ad as ad
+// ============================================================================
+// PM40 (rule `ad-checkpoint v1`, BLADE_AD_CHECKPOINT): a differentiated
+// recurrence whose tape exceeds 4096 cells keeps checkpoints every
+// K = ceil(sqrt(5000)) = 71 steps instead of its 5001-cell trajectory and
+// 5001-cell cotangent; the descending sweep replays each segment from its
+// checkpoint. The loss reads the seed row, a checkpoint row (71), two
+// interior rows (1234, 4999: snapshotted in the forward pass) and the last
+// row. s(n) = a s(n-1) + 0.002 from s(0) = x. Pins: the same recurrence
+// evaluated in float64 with forward-mode duals (independent of Blade);
+// `blade test access` compares the checkpointed and full-tape gradients bit
+// for bit under the reproducible build.
+// ============================================================================
+function f(x: Float64, a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: a * prefix(n - 1) + 0.002
+    s(5000) + 3.0 * s(71) + s(1234) * s(1234) + s(0) * s(4999)
+}
+let (gv, gx, ga) = ad.grad(f)(Float64(0.5), Float64(0.999))
+// EXPECT: gv = 7.2382281272065
+// EXPECT: gx = 5.7041150796277
+// EXPECT: ga = 5766.5210963142
+let (fa, ta) = ad.jvp(f)(Float64(0.5), Float64(0.999), Float64(0.0), Float64(1.0))
+// EXPECT: ta = 5766.5210963142

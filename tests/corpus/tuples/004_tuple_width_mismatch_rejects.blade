@@ -11,7 +11,7 @@
 // were tolerated here, pack widths would be inference-dependent and the
 // matcher would have nothing to slice on.
 
-let b = 1.0
-let c = 2.0
+let b: Float64 = 1.0
+let c: Float64 = 2.0
 let t: Tuple<3> = b, c
 // EXPECT: typecheck failure -- a 2-wide value cannot fill a Tuple<3> slot

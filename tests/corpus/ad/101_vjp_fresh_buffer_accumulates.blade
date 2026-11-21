@@ -1,0 +1,26 @@
+// TEST: AD A Fresh VJP Buffer Accumulates
+import ad as ad
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; lead decision): a `mut` ARGUMENT
+// -- an ad.grad / ad.vjp gradient buffer and an ordinary `mut` parameter
+// alike -- may NOT share storage with anything the callee READS: another
+// array argument, or a module binding the callee reads by name (a module
+// alias such as `let forcing = identity(g)`, a deferred map over it), judged
+// by storage provenance and refused at lowering with BL4005 in every lane.
+// The callee's writes through the parameter would be visible through its own
+// reads mid-call; the lanes disagreed (c9: a silently wrong gradient, 20 for
+// 8, in both compiled lanes). No run-time check, one rule for AD buffers and
+// ordinary mut parameters.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+function f(x: A) -> A = {
+    let y: A = [x(0) * x(1), x(0) + x(1)]
+    y
+}
+let x0: A = [2.0, 3.0]
+let w: A = [1.0, 10.0]
+let mut dx: A = [1.0, 10.0]
+let yv = ad.vjp(f)(x0, w, dx)
+// EXPECT: yv = [6.0, 5.0]
+// EXPECT: dx = [14.0, 22.0]

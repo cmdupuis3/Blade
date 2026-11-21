@@ -136,8 +136,80 @@ let private groupKeysTypeInScope (id: IRId) (scope: IRExpr list) : IRType option
 /// deterministic-deallocation frame can be pushed and popped around it inside a
 /// `try ... finally` WITHOUT adding a closure layer over the mutable `currentNames`
 /// the fold threads (see setAllocOwner's note on that hazard).
-let private genFuncBodyScoped
+/// PM03 same-cell RETURN, the C++ realization (round 4 A06). The semantic
+/// proof is Blade.SameCellReturn's certificate over the ORIGINAL callable
+/// (shared with the LLVM lane's A04); `Decided` says the return arm recorded
+/// this function's `same-cell-return-cpp` outcome.
+type internal SameCellCandidate =
+    { Proof: Blade.SameCellReturn.Certificate
+      Subject: string
+      Decided: bool ref }
+
+let internal recordSameCellCpp (subject: string) (fid: IRId) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
+    Blade.Effects.Decisions.record
+        { Blade.Effects.Rule = "same-cell-return-cpp"; Version = 1; Span = declSpanOf subject; Subject = subject
+          Outcome = outcome; Evidence = ($"function v{fid}; the shared same-cell certificate (Blade.SameCellReturn, A04's admission), no generic return donor" :: evidence) }
+
+/// The ACTUAL allocation-frame check, immediately before the tail is emitted:
+/// the body the frame renders is exactly the certified original spine, the
+/// live frame is the function's own depth-one SFunc holding exactly ONE
+/// registration -- the donor's dense pool, owned by the donor let, its free
+/// the dense `deallocate` mirror, no owned dynamic extents, not escaping, not
+/// suppressed -- whose declaration is the one plain dense allocation over a
+/// static constexpr extents table of the certified extent, and every scalar
+/// snapshot the kernel reads is an emitted name. Read-only: nothing is
+/// emitted, forced or freed here. Ok = the donor's C++ name, the loop's four
+/// temporaries (pool pointer, cell count, index, old cell) -- each chosen so
+/// it is no emitted binding name and no identifier already in the body (a
+/// Blade name may itself be `__sc_old`; review A06-1) -- and the rendered
+/// cell expression over the old-cell temporary.
+let private sameCellRealization (proof: Blade.SameCellReturn.Certificate) (lets: (IRId * IRExpr) list)
+                                (info: ApplyInfo) (names: Map<IRId, string>) (stmts: string list)
+                                : Result<string * (string * string * string * string) * string, string> =
+    let rec spineIds e = match e with IRLet (id, _, b) -> id :: spineIds b | _ -> []
+    if lets |> List.map fst <> spineIds proof.Body then Error "the emitted body's let spine is not the certified original spine"
+    elif info <> proof.Tail then Error "the emitted return is not the certified tail"
+    else
+    match Map.tryFind proof.Donor names with
+    | None -> Error "the donor has no emitted name"
+    | Some dn ->
+    let frameOk =
+        allocScopeDepth () = 1 &&
+        (match currentAllocScope () with
+         | Some frame when frame.Kind = SFunc ->
+             (match frame.Allocs with
+              | [ PoolAlloc (n, "deallocate", "typename promote<double, 1>::type, nullptr", None, Some owner) ] ->
+                  n = dn && owner = proof.Donor && not (frame.Escapes.Contains proof.Donor) && not (frame.SuppressNames.Contains dn)
+              | _ -> false)
+         | _ -> false)
+    if not frameOk then Error "the donor is not the frame's sole tracked dense allocation (owner, routine, extents, escape or suppression differ)"
+    else
+    let decl = $"Array<double, 1> {dn} = {{ allocate<typename promote<double, 1>::type, nullptr>({dn}_extents), {dn}_extents }};"
+    let ext = $"static constexpr const size_t {dn}_extents[1] = {{ {proof.Extent} }};"
+    let count (needle: string) = stmts |> List.filter (fun l -> l.Trim() = needle) |> List.length
+    if count decl <> 1 || count ext <> 1 then Error "the donor's declaration is not the one plain dense allocation over its static extents table"
+    elif proof.Snapshots |> Set.exists (fun id -> not (Map.containsKey id names)) then Error "a scalar snapshot is not an emitted binding"
+    else
+    match resolveCallable info.Kernel with
+    | Some k when k.Params.Length = 1 ->
+        let leaf = k.Params.Head.VarId
+        let taken = names |> Map.toSeq |> Seq.map snd |> Set.ofSeq
+        let body = String.concat "\n" stmts
+        let used = System.Collections.Generic.HashSet<string>()
+        let free (stem: string) =
+            let rec pick i =
+                let cand = if i = 0 then stem else $"{stem}{i}"
+                if taken.Contains cand || used.Contains cand || containsIdentToken body cand then pick (i + 1)
+                else (used.Add cand |> ignore; cand)
+            pick 0
+        let temps = (free "__sc_pool", free "__sc_cells", free "__sc_k", free "__sc_old")
+        let (_, _, _, oldName) = temps
+        Ok (dn, temps, exprToCpp (Map.add leaf oldName names) k.Body)
+    | _ -> Error "the return kernel does not resolve to its certified one-parameter callable"
+
+let rec private genFuncBodyScoped
         (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+        (sameCell: SameCellCandidate option)
         (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : string list =
     let mutable currentNames = names
     // Grouped-array registrations made by THIS body's lets (group_by ->
@@ -155,10 +227,16 @@ let private genFuncBodyScoped
     // without being one); the join's emitter resolves the operand through this
     // map to inline it as a shared per-iteration local.
     let mutable currentDeferred = ctx.DeferredComputations
+    // the deferred-alias records that go with currentDeferred (a projection
+    // of a deferred tuple: G190 (b))
+    let mutable currentAliasOf = ctx.DeferredAliasOf
     // Ids S2 deliberately left unforced: bound to a bare combinator and read
     // ONLY as a join operand. Computed over the whole body at once, because
     // the accounting that makes the exemption safe is global.
     let joinDeferredIds = Blade.Lowering.joinDeferrableIdsMany ((lets |> List.map snd) @ [retExpr])
+    // S2's other exemption: a closed-form domain map the fold that consumed it
+    // spliced (and streams itself), now read by nothing.
+    let unreadDomainIds = Blade.Lowering.unreadDomainMapIdsOfLets lets retExpr
     // Flat-tuple child names registered by THIS body's lets, threaded for the
     // same reason as currentGrouped above. EVERY tuple this file emits is FLAT
     // (`std::make_tuple(x_0, x_1, x_2)` -- tryGenMergedCompute, genParallelTree
@@ -208,11 +286,11 @@ let private genFuncBodyScoped
             | IRVar (rid, _) when deferredLets |> List.exists (fun (i, _) -> i = rid) ->
                 Set.add rid read
             | _ -> read
-    let stmts = lets |> List.collect (fun (id, value) ->
+    let emitBodyLetCore (ctx: CodeGenContext) (stmtDeferred: Map<IRId, IRExpr>) (id: IRId, value: IRExpr) : string list =
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
-        let varName = $"__v{id}"
+        let varName = (localVarName id)
         // Collapse stacked IRCompute wrappers before dispatching. `compute` is
         // idempotent at inference, but IR construction can stack the user's
         // `|> compute` on a node that already carries its own wrap (measured:
@@ -227,6 +305,13 @@ let private genFuncBodyScoped
                 | e -> e
             collapse value
         match value with
+        | IRBeginPoolScope call ->
+            currentNames <- Map.add id varName currentNames
+            [ $"{indent}// A01: begin inline pool scope: {call}" ]
+        | IRReleasePools (_, pools, call) ->
+            let lines = releaseInlinePools indent currentNames pools call
+            currentNames <- Map.add id varName currentNames
+            lines
         | IRForRange (vid, lo, hi, forBody) ->
             // Route through genForRangeBinding -- the recursive binding-level
             // renderer -- so nested for-in loops (and any statement form its
@@ -255,14 +340,21 @@ let private genFuncBodyScoped
             | None ->
             let targetStr =
                 match target with
-                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ($"__v{tid}")
+                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ((localVarName tid))
                 | _ -> exprToCpp currentNames target
             // Copy-in-place (see exprToCppCore's IRAssign arm): sole-owner mut keeps
             // ONE pool; the RHS temp stays iteration-owned and its scope frees it.
             match copyInPlaceAssign target v with
             | Some (_, rid, n) ->
-                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ($"__v{rid}")
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ((localVarName rid))
                 [$"{indent}std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data));"]
+            | None ->
+            // Owned move (gap G92): free T's previous pool, then take R's.
+            match ownedMoveAssign target v with
+            | Some (_, rid) ->
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue (localVarName rid)
+                let staticShape = ownedMoveStaticShape target
+                [$"{indent}{(renderOwnedMove targetStr rhsStr staticShape)};"]
             | None ->
                 [$"{indent}{targetStr} = {(exprToCpp currentNames v)};"]
         | IRConstraintCheck (cond, blCode, message, span) ->
@@ -278,6 +370,23 @@ let private genFuncBodyScoped
             // Loop objects are compile-time only -- they're resolved when <@> is processed
             currentNames <- Map.add id varName currentNames
             []
+        | IRTuple elems when IRLift.isWhollyDeferredTupleOf
+                                { IsDeferred = (fun i -> Map.containsKey i currentDeferred)
+                                  ValueOf = (fun i -> Map.tryFind i currentDeferred)
+                                  TypeOfExpr = inferExprType } elems ->
+            // A WHOLLY DEFERRED TUPLE bound in a function body (gap G58): every
+            // member is a deferred computation -- a module map the body has not
+            // forced, an inline map, or another deferred tuple of this body --
+            // so the tuple is itself deferred, exactly as at module level
+            // (genScalarExprBinding's arm; IRLift.isWhollyDeferredTupleOf is the
+            // shared judgment, the lowering pass's and the interpreter's twin).
+            // Binding it evaluates nothing; a projection reads one member
+            // (resolved through currentDeferred). It used to fall to the default
+            // arm's `std::make_tuple(g, g)`, naming a module map this body never
+            // declared (BL9002 at g++).
+            currentNames <- Map.add id varName currentNames
+            currentDeferred <- Map.add id value currentDeferred
+            [$"{indent}// {varName} = <deferred computation tuple>"]
         | IRApplyCombinator info when Set.contains id forcedDeferredIds ->
             // Still-deferred combinator that a LATER statement reads BY NAME.
             // Materialize it here, through the same statement-form path the
@@ -287,6 +396,11 @@ let private genFuncBodyScoped
             let code = genApplyCombinator bodyCtx varName info builder
             currentNames <- Map.add id varName currentNames
             code
+        | IRApplyCombinator _ when Set.contains id unreadDomainIds ->
+            // A closed-form domain map no statement reads: the fold that
+            // consumed it streams the affine nest itself (docs/plans/
+            // structural/06), so there is nothing to build here.
+            [$"{indent}// {varName} = <closed-form domain map, streamed by its fold>"]
         | IRApplyCombinator _ when Set.contains id joinDeferredIds ->
             // REDUCTION-JOIN OPERAND: the one body-level let that legitimately
             // stays deferred. A later join in this same body inlines it as a
@@ -332,8 +446,35 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // accumulation form anyway. Routing through genApplyCombinator here
             // mirrors what genBinding does at the module level.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
-            let code = genApplyCombinator bodyCtx varName info builder
+            // Hot-row fold scheduling: hand the plan to the apply emitter by
+            // the output's NAME (it never sees the let id), for the duration
+            // of this one emission.
+            (match Blade.Optimize.HotRowTable.tryProducer id with
+             | Some plan -> plan.EmittedCpp.Value <- None; (hotRowPendingCell ()).[varName] <- plan
+             | None -> ())
+            (match Blade.Optimize.CompactRowTable.tryProducer id with
+             | Some plan -> plan.EmittedCpp.Value <- None; plan.DeclinedCpp.Value <- false; (compactRowPendingCell ()).[varName] <- plan
+             | None -> ())
+            let code =
+                // Aggregate-only grouping (Blade.Optimize.planGroupAggregate):
+                // a planned peel reads its state from the grouping's one pass.
+                match genGroupAggPeelCpp bodyCtx id varName with
+                | Some lines -> lines
+                | None ->
+                try genApplyCombinator bodyCtx varName info builder
+                finally
+                    (hotRowPendingCell ()).Remove varName |> ignore
+                    (compactRowPendingCell ()).Remove varName |> ignore
             currentNames <- Map.add id varName currentNames
+            // G90: a per-group row map emitted as a grouped value reads its
+            // row lengths through its operand's grouping (see genBindingDispatch).
+            (match tryGroupRowMap varName with
+             | Some gkName when (match info.OutputType with
+                                 | ArrayElem a -> a.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+                                 | _ -> false) ->
+                 noteGroupedBinding id varName gkName
+                 currentGrouped <- Map.add varName gkName currentGrouped
+             | _ -> ())
             code
         | IRCompute (IRComposeApply _) ->
             // The IRComposeApply half of the arm above. `(o1 >>@ o2) <@> A` as a
@@ -365,7 +506,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // on its nested type.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
                                      GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred
+                                     DeferredComputations = stmtDeferred
                                      TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
@@ -452,6 +593,20 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
+        | IRVar (srcId, _) when (flatTupleIdsCell ()).Value.Contains srcId ->
+            // Gap G42: an alias of a FLAT join tuple (`let u = t`). Route
+            // through genBinding (genVarAliasBinding: `auto&` plus the source's
+            // TupleChildren) so the alias is registered flat too and an inline
+            // `u[0][1]` reads the flat leaf, as `t[0][1]` does.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = true; IsMutable = false
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
         | IRVar _ when Set.contains id ctx.MutableArrayLets ->
             // Function-body `let mut a = Z` over an array: route through
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh
@@ -470,7 +625,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // MutableArrayLets independently of IsMutable, so both must go.
             let aliasStaging =
                 match value with
-                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId
+                | IRVar (srcId, _) -> canAliasStagingLet lets (Some id) srcId [retExpr]
                 | _ -> false
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let bodyCtx =
@@ -487,7 +642,23 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             code
         | (IRReduce _ | IRCompute (IRReduce _)) when
             (let inner = (match value with IRCompute e -> e | e -> e)
-             match inferExprType inner with ArrayElem _ -> true | _ -> false) ->
+             match inferExprType inner with
+             | ArrayElem _ -> true
+             // G55: a SCALAR fold let whose kernel asks for a team
+             // (`let s = reduce(x, lambda(p, q) where omp -> p + q, 0.0)`)
+             // IS its own let: route it through the statement fold path
+             // (genReduceBinding: the team, the census line, the K-lane /
+             // Path B forms) exactly as at module level, instead of the
+             // inline IIFE's expression-position decline. A scalar fold with
+             // no request keeps the IIFE (the same K-lane form either way).
+             | IRTScalar _ ->
+                 (match inner with
+                  | IRReduce (_, k, _) ->
+                      (match resolveCallable k with
+                       | Some c -> c.Params.Length = 2 && c.IsOmpParallel
+                       | None -> false)
+                  | _ -> false)
+             | _ -> false) ->
             // An ARRAY-VALUED reduce (axis fold: rank-2 -> rank-1, lswosa's
             // per-frequency segment fold `reduce(ls_e <@> mag2, (+)) |> compute`)
             // as a function-body let, with or without the user's IRCompute
@@ -503,7 +674,52 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 Type = inferExprType (match value with IRCompute e -> e | e -> e)
                 Value = value; IsConst = false; IsMutable = true
             }
-            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            // G55's plan subject: a SCALAR fold let's decisions -- the applied
+            // `[omp]` record (subjected by the emitted `__v<id>`) and every
+            // decline (subjected by the function) -- are ONE subject,
+            // `<function>.<let name>`. The let's name is its fold kernel's
+            // scope: Lowering names an anonymous lambda in a let's value
+            // `lambda in <let>` (lowerBoundValue). A NAMED kernel (a function,
+            // a separately bound local lambda) carries no let name -- IRLet has
+            // none and Lowering records none (gap G55) -- so the subject is
+            // `<function>.<fold k>`, the k-th scalar fold let of this body in
+            // source order: distinct per fold, the same in every outcome, and a
+            // spelling no let name can take (`<` / space are no identifier
+            // characters), so it never collides with a real `<function>.<let>`.
+            let subjectCell = localDecisionSubjectCell ()
+            let priorSubject = subjectCell.Value
+            (match tempBinding.Type with
+             | IRTScalar _ ->
+                 let owner = (currentDeclCell ()).Value
+                 let fnShown = shownDeclName owner
+                 let letName =
+                     match (match value with IRCompute e -> e | e -> e) with
+                     | IRReduce (_, k, _) ->
+                         (match resolveCallable k with
+                          | Some c ->
+                              let sn = c.SourceName
+                              let at = sn.LastIndexOf " in "
+                              if at > 0 && sn.StartsWith "lambda in " then
+                                  let scope = sn.Substring(at + 4)
+                                  if scope <> fnShown && scope <> "" then Some scope else None
+                              else None
+                          | None -> None)
+                     | _ -> None
+                 let isScalarFoldLet (v: IRExpr) =
+                     match v with
+                     | IRReduce _ | IRCompute (IRReduce _) ->
+                         (match inferExprType (match v with IRCompute e -> e | e -> e) with
+                          | IRTScalar _ -> true
+                          | _ -> false)
+                     | _ -> false
+                 let ordinal =
+                     1 + (lets |> List.takeWhile (fun (i, _) -> i <> id) |> List.filter (snd >> isScalarFoldLet) |> List.length)
+                 let shown = match letName with Some n -> fnShown + "." + n | None -> $"{fnShown}.<fold {ordinal}>"
+                 subjectCell.Value <- Some (varName, owner, shown)
+             | _ -> ())
+            let (code, ctxAfter) =
+                try genBinding bodyCtx tempBinding builder
+                finally subjectCell.Value <- priorSubject
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
@@ -595,8 +811,10 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // three or more did not compile. genTupleProjBinding keeps the
             // std::get form as its own fallback for tuples with no registered
             // children (a callee's returned tuple), so nothing that worked
-            // before is rerouted.
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            // before is rerouted. `currentDeferred` so a projection of a
+            // deferred tuple this body bound (gap G58) resolves to its member.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped
+                                     DeferredComputations = stmtDeferred; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = id; Name = varName; Type = inferExprType value
                 Value = value; IsConst = true; IsMutable = false
@@ -604,6 +822,16 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
+            // G190 (b): a projection of a DEFERRED tuple binds a deferred
+            // member (genTupleProjBinding records it, emitting a comment); keep
+            // that record, or a later statement reading the member names an
+            // undeclared `__v<id>` (`let member = pair[0]; member(0)` over a
+            // module `let pair = (delayed, delayed)`, Codex design review).
+            (match Map.tryFind id ctxAfter.DeferredComputations with
+             | Some v ->
+                 currentDeferred <- Map.add id v currentDeferred
+                 currentAliasOf <- ctxAfter.DeferredAliasOf
+             | None -> ())
             code
         | IRMask _ | IRIntersect _ | IRUnion _ | IRSort _ | IRUnique _ | IRTranspose _ | IRDecompact _ | IRArrayNegate _ | IRArrayConjugate _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _
         | IRStack _ | IRJoin _ ->
@@ -653,7 +881,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // that can force, since its caller receives a VALUE.
             let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent
                                      GroupedArrays = currentGrouped
-                                     DeferredComputations = currentDeferred
+                                     DeferredComputations = stmtDeferred
                                      TupleChildren = currentTupleChildren }
             let forced = forceDeferringForm v
             let tempBinding = {
@@ -718,7 +946,159 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
-            [$"{indent}auto {varName} = {valStr};"])
+            [$"{indent}auto {varName} = {valStr};"]
+    // Sibling maps (Optimize.planSiblingMaps): each let renders inside the
+    // group protocol -- the first member preflights the group, the last
+    // flushes any stash its apply never reached (CodeGenLoopNest).
+    // G190 (b): THE STATEMENT PRE-PASS OF A BODY'S PRIVATE FORCES. A module
+    // deferred map (still in the function-entry ctx.DeferredComputations) that
+    // a body statement names BY NAME -- a positional read anywhere in it
+    // (collectDeferredPositionalReads: a scalar let `forcing(0) * x`, a loop
+    // step, a fold seed), or a CAPTURE of a callable the statement references
+    // (a map kernel `lambda(i) -> x * forcing(0)`, whose lifted body takes the
+    // capture by reference) -- is forced HERE, at the body's scope, before the
+    // statement, and the statement renders with it stored (dropped from its
+    // deferred maps, its holder in VarNames). Re-forced per reading statement:
+    // a function-body force is private and re-evaluated (G75, the
+    // interpreter's FunctionCallDepth arm), so a later statement never reads
+    // a holder an earlier one filled (two statements of one call may see
+    // different inputs); the holder of each re-force is fresh
+    // (bodyForceHolderName). The arms that force by themselves (the loop and
+    // return pre-passes, genComputeBinding's capture prelude) used to do so
+    // only for SOME statements, each under the module name, and their ctx was
+    // dropped: a scalar let or a body map left `forcing` undeclared, and the
+    // forward and reverse sweeps of a derivative declared it twice. The order
+    // is the existing pre-pass order (the force runs before the statement,
+    // not at the read inside it): the C++ / interpreter divergence inside
+    // callable bodies stays OPEN under G60 / G77 (formalism 10.2).
+    let moduleDeferredReadsOf (value: IRExpr) : IRId list =
+        if Map.isEmpty currentDeferred then [] else
+        let probe = { ctx with VarNames = currentNames; DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+        let positional = collectDeferredPositionalReads probe value
+        let captured = System.Collections.Generic.List<IRId>()
+        let operands = System.Collections.Generic.List<IRId>()
+        let seenCallables = System.Collections.Generic.HashSet<IRId>()
+        // only a callable the statement APPLIES (a map / fold kernel, a
+        // called function, a callable handed to a call): binding a lambda or
+        // building an unapplied loop object evaluates none of its captures
+        // (Codex design review round 2: `let unused = object_for(lambda ..)`
+        // must not force the deferred map its kernel captures)
+        let note (k: IRExpr) =
+            match resolveKernel k with
+            | Some rk when seenCallables.Add rk.Callable.Id ->
+                for cap in rk.Callable.Captures do
+                    if Map.containsKey cap.Id currentDeferred && not (captured.Contains cap.Id) then
+                        captured.Add cap.Id
+            | _ -> ()
+        // every callable REFERENCE the statement evaluates may run (a call
+        // head, a map / fold kernel, a sort key, a callable argument: Codex
+        // diff review round 2), except the value of a `let` that only binds a
+        // callable and an unapplied loop object
+        let rec walk (e: IRExpr) =
+            match e with
+            | IRObjectFor _ | IRMethodFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ -> ()
+            | IRLet (_, IRVar _, b) -> walk b
+            | IRVar _ -> note e
+            | IRApplyCombinator info ->
+                // its Loop child may be an applied object_for: its kernel runs
+                note info.Kernel
+                (match info.Loop with IRObjectFor oi -> note oi.Kernel | _ -> ())
+                childrenOf e |> List.iter walk
+            // an APPLIED composition runs every stage kernel (gap G242)
+            | IRComposeApply info ->
+                composeStagesForcedAtPrelude probe info.Composition |> List.iter note
+                info.InputArrays |> List.iter walk
+            | _ -> childrenOf e |> List.iter walk
+        // a statement that only BINDS a callable (`let unused = lambda ..`,
+        // flattened into a bare reference here) evaluates none of its
+        // captures (Codex diff review round 3)
+        (match value with
+         | IRVar _ -> ()
+         | _ -> walk value)
+        // A deferred map that is an OPERAND of a MATERIALIZED map -- the
+        // statement's whole value, `method_for(d) <@> k |> compute` (or an
+        // applied composition over d) -- is read by name by the body's map
+        // emitter: forced for THIS statement, before the kernel captures (the
+        // map's own order: inputs, then captures). Gap G256 / G239 member: the
+        // statement used to read the holder an EARLIER statement had filled (a
+        // stale snapshot after a write of its input) or, with no earlier force,
+        // an undeclared name. A fold or a join over a map of d is NOT this
+        // consumer: fold / join consumers keep their existing prelude
+        // behaviour; the remaining operand / capture order divergence there is
+        // tracked under G239 (Codex diff review 5f64f352 rounds 3-4).
+        let rec stripC (e: IRExpr) = match e with IRCompute x -> stripC x | e -> e
+        (match stripC value with
+         | IRApplyCombinator info ->
+             for a in info.Arrays do
+                 match a with
+                 | IRVar (aid, _) when Map.containsKey aid currentDeferred && not (operands.Contains aid) -> operands.Add aid
+                 | _ -> ()
+         | IRComposeApply info ->
+             for a in info.InputArrays do
+                 match a with
+                 | IRVar (aid, _) when Map.containsKey aid currentDeferred && not (operands.Contains aid) -> operands.Add aid
+                 | _ -> ()
+         | _ -> ())
+        // G246: the STRUCTURAL SOURCE of a range index the statement builds --
+        // the keys of a `range<SparseIdx<keys>>`, the mask of a
+        // `range<CompoundIdx<m>>` -- that is a module deferred map is read BY
+        // NAME by the range driver's index build: forced with the captures and
+        // after them (genComputeBinding's G225 order at module level)
+        // ... only of a range that is EVALUATED: an unapplied loop object
+        // (`let unused = method_for(range<SparseIdx<keys>>)`) builds no index
+        // (the walk's boundaries above; Codex diff review)
+        let structural =
+            let acc = System.Collections.Generic.List<IRId>()
+            let noteRange (ixs: IRIndexType list) =
+                for ix in ixs do
+                    match ix.Extent with
+                    | IRSparseKeys (SkRuntime (IRVar (kid, _))) when Map.containsKey kid currentDeferred && not (acc.Contains kid) -> acc.Add kid
+                    | IRCompoundMask (IRVar (mid, _)) when Map.containsKey mid currentDeferred && not (acc.Contains mid) -> acc.Add mid
+                    | _ -> ()
+            let rec scan (e: IRExpr) =
+                match e with
+                | IRObjectFor _ | IRMethodFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ -> ()
+                | IRApplyCombinator info ->
+                    for a in info.Arrays do
+                        match a with
+                        | IRRange (ixs, _) -> noteRange ixs
+                        | _ -> scan a
+                | IRRange (ixs, _) -> noteRange ixs
+                | _ -> childrenOf e |> List.iter scan
+            (match value with
+             | IRVar _ -> ()
+             | _ -> scan value)
+            List.ofSeq acc
+        (List.ofSeq operands @ positional @ List.ofSeq captured @ structural) |> List.distinct
+    let emitBodyLet (id: IRId, value: IRExpr) : string list =
+        let ids = moduleDeferredReadsOf value
+        if List.isEmpty ids then emitBodyLetCore ctx currentDeferred (id, value) else
+        setAllocOwner (Some id)
+        let forceCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                                  DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+        let (preCode, ctxF) = forceDeferredBindingIds forceCtx builder $"__v{id}__def" ids
+        let forcedNow =
+            currentDeferred |> Map.toList |> List.map fst
+            |> List.filter (fun i -> not (Map.containsKey i ctxF.DeferredComputations))
+        let saved = forcedNow |> List.map (fun i -> (i, Map.tryFind i currentNames))
+        for i in forcedNow do
+            match Map.tryFind i ctxF.VarNames with
+            | Some n -> currentNames <- Map.add i n currentNames
+            | None -> ()
+        let stmtCtx = { ctx with DeferredComputations = forcedNow |> List.fold (fun d i -> Map.remove i d) ctx.DeferredComputations
+                                 DeferredAliasOf = ctxF.DeferredAliasOf }
+        let stmtDeferred = ctxF.DeferredComputations
+        let lines = emitBodyLetCore stmtCtx stmtDeferred (id, value)
+        // the holder is this statement's: a later statement re-forces
+        for (i, old) in saved do
+            match old with
+            | Some n -> currentNames <- Map.add i n currentNames
+            | None -> currentNames <- Map.remove i currentNames
+        preCode @ lines
+    let stmts = lets |> List.collect (fun (id, value) ->
+        siblingArmBegin id (localVarName id) siblingPreflight
+        let lines = emitBodyLet (id, value)
+        lines @ siblingArmEnd id (localVarName id))
     // Scratch reuse: a let the plan gave a donor takes the donor's pool -- its
     // `allocate<>` declaration is rewritten into an alias of the donor's data
     // (its own extents table stays), and its scope free is spared; the donor's
@@ -731,10 +1111,32 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             | Some d ->
                 (match Map.tryFind d currentNames with
                  | Some dn ->
-                     let name = $"__v{id}"
+                     let name = (localVarName id)
                      let (acc', matched) = rewritePoolAlias acc name dn
-                     if matched then suppressAllocName name
-                     acc'
+                     // the backing goes with the donor; an owned run-time extents
+                     // table (PM60) is still the reuser's to free
+                     if matched then spareReusedBacking name
+                     // PM60: a RUN-TIME-shaped pair (the reuser's extents are not
+                     // a static table) is proved equal by the planner; the
+                     // emitted belt checks it before the first store and fails
+                     // loudly (an internal error) rather than overrun the pool
+                     let staticExt = acc' |> List.exists (fun l -> l.TrimStart().StartsWith $"static constexpr const size_t {name}_extents[")
+                     if matched && not staticExt then
+                         let tag = $"/* pool reuse: {name} takes {dn}'s dead pool */"
+                         let rank =
+                             acc' |> List.tryPick (fun l ->
+                                 let m = System.Text.RegularExpressions.Regex.Match(l, @"Array<.+?, (\d+)> " + System.Text.RegularExpressions.Regex.Escape name + " = ")
+                                 if m.Success && l.Contains tag then Some (int m.Groups.[1].Value) else None)
+                         match rank with
+                         | Some r ->
+                             let cond = [ 0 .. r - 1 ] |> List.map (fun d -> $"{name}_extents[{d}] == {dn}.extents[{d}]") |> String.concat " && "
+                             acc' |> List.collect (fun l ->
+                                 if l.Contains tag then
+                                     let ind = l.Substring(0, l.Length - l.TrimStart().Length)
+                                     [ l; $"{ind}if (!({cond})) {{ blade_rt::panic(\"BL9002\", \"internal: run-time scratch reuse over unequal extents ({name} <- {dn})\", nullptr, 0); }}" ]
+                                 else [ l ])
+                         | None -> acc'
+                     else acc'
                  | None -> acc)
             | None -> acc) stmts
     // Return-arm emissions carry NO owner: a __retN temporary must not be matched
@@ -762,10 +1164,59 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // the inline-expression sentinel (UNEVALUATED_COMPUTATION_USED_AS_
         // VALUE) even though the statement-form emitter handles it exactly
         // as it handles the computed spelling.
+        // PM03 same-cell return (A06): the certified tail fills the donor's
+        // own pool -- old cell to a scalar, then the same-index store -- and
+        // returns it; any realization failure takes the fresh return below,
+        // once, nothing emitted or evaluated before it.
+        let sameCellArm =
+            match retExpr, sameCell with
+            | IRCompute (IRApplyCombinator info), Some cand when not cand.Decided.Value ->
+                cand.Decided.Value <- true
+                match sameCellRealization cand.Proof lets info currentNames stmts with
+                | Error why ->
+                    recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined why) []
+                    None
+                | Ok (dn, (pool, cells, k, old), cell) ->
+                    let i2 = indent + "    "
+                    let i3 = i2 + "    "
+                    let code =
+                        [ $"{indent}// same-cell return (A06, PM03): function v{cand.Proof.Function} donor v{cand.Proof.Donor} -- filled in {dn}'s own pool, each old cell loaded before its same-index store; no result pool"
+                          $"{indent}{{"
+                          $"{i2}double* {pool} = nested_array_utilities::pool_base({dn}.data);"
+                          $"{i2}const size_t {cells} = {cand.Proof.Extent}UL;"
+                          $"{i2}BLADE_IVDEP"
+                          $"{i2}for (size_t {k} = 0; {k} < {cells}; {k}++) {{"
+                          $"{i3}const double {old} = {pool}[{k}];"
+                          $"{i3}{pool}[{k}] = {cell};"
+                          $"{i2}}}"
+                          $"{indent}}}" ]
+                    // The donor's pool leaves with the value (its static
+                    // constexpr extents survive the frame); nothing else owns it.
+                    suppressAllocName dn
+                    recordSameCellCpp cand.Subject cand.Proof.Function Blade.Effects.Applied
+                        [ $"donor v{cand.Proof.Donor} (`{dn}`), the frame's sole tracked dense pool, returned; one pool, no result allocation, no in-callee free"
+                          "old cell loaded into a scalar before the same-index store; the kernel, its operand order and every scalar snapshot unchanged"
+                          "serial; no restricted second access path" ]
+                    Some (stmts @ code @ popAllocScopeFrees indent @ [$"{indent}return {dn};"])
+            | _ -> None
+        match sameCellArm with
+        | Some lines -> lines
+        | None ->
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
             let retVarName = $"__ret{builder.FreshId()}"
-            let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            // G190 (b): the statement pre-pass for a RETURNED map (Codex diff
+            // review: its kernel's capture of a deferred module map was never
+            // forced -- `'delayed' was not declared`)
+            let (retForce, ctxF) =
+                forceDeferredBindingIds
+                    { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                               DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+                    builder "__retdef" (moduleDeferredReadsOf retExpr)
+            let stmts = stmts @ retForce
+            let bodyCtx = { ctx with VarNames = ctxF.VarNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                                     DeferredComputations = ctx.DeferredComputations |> Map.filter (fun k _ -> Map.containsKey k ctxF.DeferredComputations)
+                                     DeferredAliasOf = ctxF.DeferredAliasOf }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // Scratch reuse at the RETURN position: the returned value takes
             // its donor's pool, which leaves with it, so the donor's scope
@@ -781,7 +1232,8 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
             stmts @ combCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
-        | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr ->
+        | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr
+                                    && not (retExpr.IsIRIf && (match inferExprType retExpr with IRTScalar _ -> true | _ -> false)) ->
             // A BRANCHING return whose arms each materialize an array
             // (`if flag then xs <@> k1 else xs <@> k2`). S4's return force
             // reaches these leaves, but the emitter cannot: every materializing
@@ -905,6 +1357,25 @@ or return a scalar and materialize at the call site"
             let (retCode, _) = genBinding bodyCtx tempBinding builder
             suppressAllocsSince allocMark
             stmts @ retCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
+        | IRIf (cond, thenE, elseE)
+            when (match inferExprType retExpr with IRTScalar _ -> true | _ -> false)
+                 && not (kernelBodyIsExpressionShaped thenE && kernelBodyIsExpressionShaped elseE) ->
+            // A SCALAR branching return whose arm holds a statement-shaped node
+            // -- `if k > 0 then sqrt(reduce(d * d, (+))) else 0.0`, whose fused
+            // reduce the lift pass bound to a let INSIDE the arm (hoisting it
+            // past the branch would run reads the condition guards). A ternary
+            // has no room for that let, so each arm is emitted as a body of its
+            // own (the same generator, its own allocation scope) inside an
+            // immediately-invoked lambda, and the ternary picks one. A scalar
+            // needs no shared destination, which is what keeps array-valued
+            // arms refused above.
+            let retTy = irTypeToCpp (inferExprType retExpr)
+            let armIife (arm: IRExpr) =
+                let lines = genFuncBody { ctx with VarNames = currentNames; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren } builder currentNames "" arm
+                $"""[&]() -> {retTy} {{ {String.concat " " (lines |> List.map (fun l -> l.Trim()))} }}()"""
+            let retStr = $"(({exprToCpp currentNames cond}) ? {armIife thenE} : {armIife elseE})"
+            let retVarName = $"__ret{builder.FreshId()}"
+            stmts @ [$"{indent}{retTy} {retVarName} = {retStr};"] @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a
             // loop-materialized array CAN now be returned. The former guard
@@ -919,6 +1390,28 @@ or return a scalar and materialize at the call site"
             // across the call boundary. No caller-side change is needed: the
             // caller already binds the returned wrapper and reads shape off
             // it (`c.extents[0]`), never off a companion `c_extents`.
+            //
+            // A MODULE-LEVEL deferred map the returned expression reads by
+            // name (`function f(n) = lazy(1) + n`, gap G75) is forced HERE,
+            // inside the body, at the body's indent -- block-scoped and
+            // unprinted, re-evaluated per call, exactly as a body-local map
+            // kernel's capture of it is (formalism 10.2). It used to reach
+            // the return as an undeclared `lazy` (BL9002).
+            // G190 (b): the capture half of the statement pre-pass too.
+            let (retForce, retCtx) =
+                forceDeferredBindingIds
+                    { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                               DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+                    builder "__retdef"
+                    // a returned deferred member of this body (a projection
+                    // of a deferred module tuple) is forced too: the return
+                    // hands the caller a value (Codex diff review)
+                    ((moduleDeferredReadsOf retExpr)
+                     @ (match retExpr with
+                        | IRVar (rid, _) when Map.containsKey rid currentDeferred && not (Map.containsKey rid ctx.DeferredComputations) -> [ rid ]
+                        | _ -> []))
+            let stmts = stmts @ retForce
+            let currentNames = retCtx.VarNames
             let retStr = exprToCpp currentNames retExpr
             // `return t` where a body let bound `t` to a JOINED reduce: the
             // local is the emitters' flat tuple, the signature says nested.
@@ -1034,7 +1527,13 @@ or return a scalar and materialize at the call site"
 /// deterministic-deallocation FUNCTION scope: every allocation the body emits
 /// registers into that frame and is freed immediately before the single exit,
 /// unless the escape analysis (or a return-name suppression) spares it.
-let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+    genFuncBodyWith ctx builder names indent None body
+
+/// genFuncBody with the ordinary function return's same-cell candidate (A06):
+/// only genFuncDefCore passes one; every other body renderer passes None.
+and internal genFuncBodyWith (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
+                             (sameCell: SameCellCandidate option) (body: IRExpr) : string list =
     // Deep unroll: flatten all nested IRLet chains into a flat list
     let rec deepUnroll (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match expr with
@@ -1048,6 +1547,34 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             | _ -> (innerLets @ [(id, innerFinal)] @ restLets, restFinal)
         | _ -> ([], expr)
     let (lets0, retExpr0) = deepUnroll body
+    // ORDERED CALL ARGUMENTS (gap G79; Codex review of W4B-A, finding 4): a
+    // body let's value, or the returned value, that is a call two or more of
+    // whose arguments may fail has those arguments bound to lets of their own,
+    // in source order, BEFORE any hoisting below -- the loop-app and fresh-pool
+    // hoists lift array-valued arguments ahead of the others, so a later
+    // argument would otherwise run first (C++ also leaves argument order
+    // unspecified). Each argument let then takes its ordinary arm (a fresh-pool
+    // call result is registered with the frame there); the call names them.
+    // A bare map argument is bound under `|> compute` (a body let must be
+    // forced; the call would materialize it anyway).
+    let splitOrderedArgs (v: IRExpr) : (IRId * IRExpr) list * IRExpr =
+        match v with
+        | IRApp (f, args, ty) when callNeedsArgumentOrder ctx args ->
+            let (pre, args') =
+                args |> List.fold (fun (pre, acc) a ->
+                    if memberMayFail ctx a then
+                        let tmp = builder.FreshId()
+                        let bound =
+                            match a with
+                            | IRApplyCombinator _ | IRComposeApply _ -> IRCompute a
+                            | a -> a
+                        (pre @ [ (tmp, bound) ], acc @ [ IRVar (tmp, inferExprType a) ])
+                    else (pre, acc @ [ a ])) ([], [])
+            (pre, IRApp (f, args', ty))
+        | v -> ([], v)
+    let lets0 = lets0 |> List.collect (fun (id, v) -> let (pre, v') = splitOrderedArgs v in pre @ [ (id, v') ])
+    let (retPre, retExpr0) = splitOrderedArgs retExpr0
+    let lets0 = lets0 @ retPre
     // Expression-position loop materialization. Synthesized
     // elementwise/broadcast loops (IRApp over IRObjectFor) are statement-
     // shaped: at module level genBinding materializes them, but inside a
@@ -1105,12 +1632,34 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
             hv @ [(id, v')])
     let (retHoist, retExpr) = hoistFreshPoolCallArgs builder retExpr
     let lets = lets @ retHoist
+    // G190 (e): a body RETURNING a bare range (`function make(n: Int64) =
+    // 0..n`) had no rendering (BL7001, "no rule for IRRange in expression
+    // position"); a let of one is statement-shaped and handled (the IRRange
+    // arm of genFuncBodyScoped), so the range is bound to a let and that is
+    // returned -- the same cells, a fresh pool that leaves with the value.
+    let (lets, retExpr) =
+        match retExpr with
+        | IRRange (ixs, _) | IRCompute (IRRange (ixs, _)) ->
+            let tmp = builder.FreshId()
+            // the materialized cells' ARRAY type (a range's own expression
+            // type reads as its element), so the return takes the array arm
+            // and the escape analysis lets the pool leave with the value
+            let arrTy = mkArrayArrow ixs (IRTScalar ETInt64) None
+            (lets @ [ (tmp, retExpr) ], IRVar (tmp, arrTy))
+        | _ -> (lets, retExpr)
     let escapes =
         computeScopeEscapes ctx (FuncScope (if isUnitExpr retExpr then None else Some retExpr)) lets
     let allocDepth = allocScopeDepth ()
     pushAllocScope SFunc escapes
-    try genFuncBodyScoped ctx builder names indent lets retExpr
-    finally truncateAllocScopeStack allocDepth
+    // G190 (b): this body's private forces of module deferred maps declare
+    // their holders in ONE C++ scope; track the names so a re-force renames.
+    let forceNames = bodyForceNamesCell ()
+    let forceNamesBefore = forceNames.Value
+    forceNames.Value <- System.Collections.Generic.HashSet<string>() :: forceNamesBefore
+    try genFuncBodyScoped ctx builder names indent sameCell lets retExpr
+    finally
+        forceNames.Value <- forceNamesBefore
+        truncateAllocScopeStack allocDepth
 
 // Shadow-stack frames: emission markers and panic-reachability resolution
 //
@@ -1180,6 +1729,14 @@ let private callShapedRe =
         @"(?<qual>(?:[A-Za-z_][A-Za-z0-9_]*::)+)?(?<id>[A-Za-z_][A-Za-z0-9_]*)\s*\(|(?<ind>(?:[>)]|(?<!\[&)\])\s*\()",
         System.Text.RegularExpressions.RegexOptions.Compiled)
 
+/// The C++ named casts, through the `(` of their operand. The template
+/// argument may itself be a template (`static_cast<std::complex<double>>(`):
+/// the lazy run stops at the first `>` that a `(` follows.
+let private namedCastRe =
+    System.Text.RegularExpressions.Regex(
+        @"\b(?:static_cast|reinterpret_cast|const_cast)\s*<[^;(){}]*?>\s*\(",
+        System.Text.RegularExpressions.RegexOptions.Compiled)
+
 /// What one emitted body does that bears on whether its frame is observable.
 type private FrameFacts = {
     /// The body itself panics, or the signature admits an indirect call.
@@ -1198,6 +1755,14 @@ type private FrameFacts = {
 /// (`kern(x, y)`, where `kern` is a `std::function` argument) looks exactly
 /// like one and CAN reach a panic in whatever it was bound to.
 let private scanBodyCalls (peers: Set<string>) (body: string) : bool * Set<string> =
+    // A named cast (`static_cast<double>(e)`) ends in the `>(` the functor
+    // alternative reads as a call through a value, which made every body that
+    // converts a number UNKNOWN and kept its frame: phi(i, j) =
+    // `static_cast<double>(i - j) / ...` kept a BLADE_FRAME whose stack store,
+    // inlined into a domain fold's cell loop, was one of the things stopping
+    // g++ from vectorizing it (bench gap G30). A cast calls nothing; its
+    // operand stays in the text and is scanned like any other.
+    let body = namedCastRe.Replace(body, "(")
     let ms = callShapedRe.Matches body
     let mutable unknown = false
     let mutable callees = Set.empty
@@ -1227,9 +1792,17 @@ let private shadowFrameOpen (funcDef: IRFuncDef) (bodyInd: string) : string list
     // it against call sites); the FRAME says the name the program wrote --
     // a specialization or an array instance prints as its declaration
     // (IRCallable.SourceName), exactly as the interpreter's frame does.
-    [ sprintf "%s%s %s %d BLADE_FRAME(\"%s\", nullptr, 0);"
+    // A kernel-invariant hoist helper whose kernel this lane INLINES per cell
+    // (IRCallable.HoistFrame = Some false) is inline code moved out of the
+    // nest, so it never pushes a frame (flag `N`: the body is still scanned,
+    // the statement always dropped; gap G151).
+    let flag =
+        if funcDef.HoistFrame = Some false then "N"
+        elif forced then "1"
+        else "0"
+    [ sprintf "%s%s %s %s BLADE_FRAME(\"%s\", nullptr, 0);"
         bodyInd frameMarkBegin (sanitizeCppName funcDef.Name)
-        (if forced then 1 else 0) (cppStrEscape funcDef.SourceName) ]
+        flag (cppStrEscape funcDef.SourceName) ]
 
 /// Close a marked body. Delimiting the body explicitly keeps the scan exact:
 /// without it a body would run to the next marker and pick up the following
@@ -1305,7 +1878,7 @@ let private resolveShadowFrames (buckets: string list list) : string list list =
             let t = line.TrimStart()
             if t.StartsWith frameMarkBegin then
                 let parts = t.Split([|' '|], 4)
-                if parts.Length = 4 && needs.Contains parts.[1] then
+                if parts.Length = 4 && parts.[2] <> "N" && needs.Contains parts.[1] then
                     Some (line.Substring(0, line.Length - t.Length) + parts.[3])
                 else None
             elif t.StartsWith frameMarkEnd then None
@@ -1339,7 +1912,49 @@ let private captureParamDecls (caps: CaptureInfo list) : (string * string) list 
         | _ -> ($"{(irTypeToCpp cap.Type)}&", cap.Name)
     (caps |> List.map one) @ gkSidecarParams caps
 
-let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+/// The C++ names of a function's PARAMETERS (gap G224). A parameter is
+/// spelled by its source name unless that name is also the C++ name of a
+/// DIFFERENT binding the body reads -- directly, or as a capture of a
+/// callable it names (a resolve-at-apply kernel lambda `lambda(x) -> x *
+/// scale` inlined into `function apply(scale: Float64, ..)`, or a default
+/// argument such a lambda elaborates): the inlined kernel spells its capture
+/// by NAME, so the parameter shadowed the module binding and the C++ lane
+/// read the parameter where the LLVM lane and the interpreter read the
+/// binding visible at the lambda's definition. Such a parameter is renamed
+/// `<name>__p<id>`, so every reference resolves by binding identity.
+let private paramCppNames (ctx: CodeGenContext) (funcDef: IRFuncDef) : Map<IRId, string> =
+    let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+    let pnames = funcDef.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let clashing = ctx.VarNames |> Map.filter (fun id n -> pnames.Contains n && not (paramIds.Contains id))
+    let plain = funcDef.Params |> List.map (fun p -> (p.VarId, p.Name)) |> Map.ofList
+    if clashing.IsEmpty then plain else
+    let refs = System.Collections.Generic.HashSet<IRId>()
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec walk (e: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRVar (id, _) ->
+                refs.Add id |> ignore
+                (match resolveCallable n with
+                 | Some cl when seen.Add cl.Id ->
+                     for cap in cl.Captures do refs.Add cap.Id |> ignore
+                     walk cl.Body
+                 | _ -> ())
+            | _ -> ()) e
+    walk funcDef.Body
+    funcDef.Params
+    |> List.map (fun p ->
+        let shadows = clashing |> Map.exists (fun id n -> n = p.Name && refs.Contains id)
+        (p.VarId, (if shadows then avoidUserSpelled $"{p.Name}__p{p.VarId}" else p.Name)))
+    |> Map.ofList
+
+let rec genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+    // A body the closed-form domain cell loops reach renders `Float64(x)` of
+    // an Int64 as the vectorizable split; every other body the plain cast
+    // (CodeGenExprSupport, "WHERE `Float64(x)` of an Int64 takes the split").
+    withI64SplitScope (i64SplitReaches funcDef.Id) (fun () -> genFuncDefCore ctx builder funcDef)
+
+and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
     let bodyInd = ind + "    "
 
@@ -1350,7 +1965,8 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         match ty with
         | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {name}"
         | _ -> $"{(irTypeToCpp ty)} {name}"
-    let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
+    let pnames = paramCppNames ctx funcDef
+    let regularParams = funcDef.Params |> List.map (fun p -> paramStr pnames.[p.VarId] p.Type)
     // Captures are appended after the regular params (captureParamDecls).
     let captureParams = captureParamDecls funcDef.Captures |> List.map (fun (t, n) -> $"{t} {n}")
     let paramList = (regularParams @ captureParams) |> String.concat ", "
@@ -1367,10 +1983,9 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     // C++ name the signature declared.
     let bodyNames =
         funcDef.Params
-        |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+        |> List.fold (fun m p -> Map.add p.VarId pnames.[p.VarId] m) ctx.VarNames
     let bodyNames =
-        funcDef.Captures
-        |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
+        withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
 
     // Generate proper C++ function
     let safeName = sanitizeCppName funcDef.Name
@@ -1394,8 +2009,16 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
                 { c with GroupedArrays = Map.add cap.Name $"__gk{gkId}" c.GroupedArrays }
             | None -> c)
             // The body's parameters, for the co-iteration extent guard
-            // (CodeGenContext.ParamIds).
-            { ctx with ParamIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList }
+            // (CodeGenContext.ParamIds). A CAPTURE arrives as a parameter the
+            // caller materialized (every call site forces a deferred capture
+            // before forwarding it by name), so inside the body it is a stored
+            // array, not the module's deferred computation: a fold in the body
+            // must read it, never re-force it into a temporary of the body's
+            // own (which would spell the producer's module-level inputs).
+            { ctx with
+                ParamIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+                DeferredComputations =
+                    funcDef.Captures |> List.fold (fun d cap -> Map.remove cap.Id d) ctx.DeferredComputations }
     // A captured GROUPING (`group_keys` / `segments` / `tiles` ...) is refused
     // rather than emitted into g++'s "was not declared in this scope". The
     // binding is an opaque `void*` sentinel whose state lives in locals named
@@ -1450,6 +2073,24 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     // Scratch reuse: the plan's donor for THIS body's return position, read
     // by genFuncBody's return arm; cleared after so no other body sees it.
     Blade.Types.PoolReuseTable.setCurrentReturnDonor (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id)
+    // PM03 same-cell return (A06): the shared certificate over THIS original
+    // callable, read only by this ordinary function return (every other body
+    // renderer passes None). An array return with a generic return donor is
+    // the generic path's; any other array return records why it declines.
+    let sameCell =
+        match funcDef.RetType with
+        | ArrayElem _ when (Blade.Types.PoolReuseTable.tryReturnDonor funcDef.Id).IsNone && unforwardableCaptureRefusal.IsNone ->
+            let callables = (IR.currentAnalysisCtx ()).Callables
+            match Blade.SameCellReturn.certify callables (Blade.SameCellReturn.reachesSelf callables) funcDef with
+            | Error why ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined why) []
+                None
+            | Ok proof when proof.Function = funcDef.Id && proof.Body = funcDef.Body ->
+                Some { Proof = proof; Subject = funcDef.SourceName; Decided = ref false }
+            | Ok _ ->
+                recordSameCellCpp funcDef.SourceName funcDef.Id (Blade.Effects.Declined "the certificate belongs to a different function/body") []
+                None
+        | _ -> None
     let bodyStmts =
         try
             match unforwardableCaptureRefusal with
@@ -1458,12 +2099,18 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
             if funcDef.IsRepro then
                 (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value + 1
-                try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+                try genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
                 finally
                     (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
                         (Blade.LinAlgPatterns.reproScopeDepth ()).Value - 1
-            else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+            else genFuncBodyWith bodyCtx builder bodyNames bodyInd sameCell funcDef.Body
         finally Blade.Types.PoolReuseTable.setCurrentReturnDonor None
+    // a certified body whose return arm was never reached (an emitted spine
+    // the frame did not render as certified) records its decline here
+    (match sameCell with
+     | Some cand when not cand.Decided.Value ->
+         recordSameCellCpp cand.Subject cand.Proof.Function (Blade.Effects.Declined "the certified return arm was not reached by the emitted body") []
+     | _ -> ())
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
@@ -1488,16 +2135,21 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     (code, ctx')
 
 /// Generate a function as a C++ lambda (for functions that capture module-level bindings)
-let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+let rec genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
+    // Same split scope as genFuncDef.
+    withI64SplitScope (i64SplitReaches funcDef.Id) (fun () -> genFuncDefAsLambdaCore ctx builder funcDef)
+
+and private genFuncDefAsLambdaCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
 
     // Array params are wrappers; same approach as genFuncDef.
+    let pnames = paramCppNames ctx funcDef
     let paramList =
         funcDef.Params
         |> List.map (fun p ->
             match p.Type with
-            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
-            | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
+            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {pnames.[p.VarId]}"
+            | _ -> $"{(irTypeToCpp p.Type)} {pnames.[p.VarId]}")
         |> String.concat ", "
 
     let retType =
@@ -1521,10 +2173,10 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
         else
             (if paramList = "" then [] else [ paramList ]) @ (captureDecls |> List.map (fun (t, n) -> $"{t} {n}"))
             |> String.concat ", "
-    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
+    let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId pnames.[p.VarId] m) ctx.VarNames
     // Parity with genFuncDef (which folds captures in alongside params): the
     // body's IRVar references to captures resolve to the declared names.
-    let bodyNames = funcDef.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
+    let bodyNames = withCaptureNames CapturesAreParameters funcDef.Captures bodyNames
     let safeName = sanitizeCppName funcDef.Name
     // std::function type: one param type per Blade param, then the captures'.
     let paramTypeList =
@@ -1684,7 +2336,10 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         let paramIds = funcDef.Params |> List.map (_.VarId) |> Set.ofList
         let captureIds = funcDef.Captures |> List.map (_.Id) |> Set.ofList
         let bound = Set.unionMany [paramIds; captureIds; funcIds]
-        let spelled = Set.difference (collectVarRefsIR funcDef.Body) bound
+        // G246: a name a TYPE in the body carries (the keys of a
+        // range<SparseIdx<keys>>, a CompoundIdx mask) is read there too
+        let bodyRefs = Set.union (collectVarRefsIR funcDef.Body) (Blade.Optimize.embeddedExtentExprs funcDef.Body |> List.map collectVarRefsIR |> Set.unionMany)
+        let spelled = Set.difference bodyRefs bound
         // Subtract `bound` AFTER the fold, never inside it: a self-recursive
         // lifted callable names itself, and a callee whose captures are all
         // params of THIS function is already satisfied here. Both would
@@ -1818,10 +2473,18 @@ let private computeModuleCaptureHoistIds
             Set.union
                 (f.Params |> List.map (_.VarId) |> Set.ofList)
                 (f.Captures |> List.map (_.Id) |> Set.ofList)
-        collectVarRefsIR f.Body
+        // G246: names carried by the body's types (range keys / masks) too
+        Set.union (collectVarRefsIR f.Body) (Blade.Optimize.embeddedExtentExprs f.Body |> List.map collectVarRefsIR |> Set.unionMany)
         |> Set.toList
         |> List.collect (fun rid ->
             if rid = f.Id then []
+            // The body's OWN read of a module binding. A function that reads
+            // one is normally main-local, but not when it is reachable from a
+            // kernel that captures an enclosing function's parameter
+            // (`cannotBeMainLocal` in computeMainLocalFuncIds): then it is a
+            // namespace-scope function spelling a main() local --
+            // `sq(w, n)` reading `xs` from the kernel inside `loss(w)`.
+            elif Set.contains rid moduleBindingIds && not (Set.contains rid nameable) then [ rid ]
             else
                 match Map.tryFind rid byId with
                 | Some c ->
@@ -1831,6 +2494,37 @@ let private computeModuleCaptureHoistIds
                         Set.contains cid moduleBindingIds && not (Set.contains cid nameable))
                 | None -> []))
     |> Set.ofList
+    // G190 (b), (d): a demanded DEFERRED module map is forced privately INSIDE
+    // the namespace-scope body that reads it (genFuncBodyScoped's statement
+    // pre-pass), so its producer runs there and spells ITS inputs -- the
+    // module bindings its value and its kernels' captures name -- which must
+    // be nameable at namespace scope too, transitively (a deferred map over
+    // another deferred map). `let delayed = method_for(forcing) <@> ..` read
+    // by such a body left `forcing` a main() local (BL9002 at g++).
+    |> fun demanded ->
+        let byBinding = modul.Bindings |> List.map (fun b -> (b.Id, b)) |> Map.ofList
+        let isDeferredForm (v: IRExpr) =
+            match v with
+            | IRApplyCombinator _ | IRComposeApply _ | IRFunctorMap _ | IRChoice _ | IRFallback _
+            | IRParallel _ | IRFusion _ | IRBind _ | IRZip _ | IRVar _ | IRTuple _ -> true
+            | _ -> false
+        let inputsOf (b: IRBinding) =
+            let refs = collectVarRefsIR b.Value
+            let kernelCaps =
+                refs |> Set.toList |> List.collect (fun r ->
+                    match Map.tryFind r byId with
+                    | Some c -> c.Captures |> List.map (_.Id)
+                    | None -> [])
+            Set.union refs (Set.ofList kernelCaps) |> Set.intersect moduleBindingIds
+        let rec grow (acc: Set<IRId>) (frontier: Set<IRId>) =
+            let next =
+                frontier |> Set.fold (fun s id ->
+                    match Map.tryFind id byBinding with
+                    | Some b when isDeferredForm b.Value -> Set.union s (inputsOf b)
+                    | _ -> s) Set.empty
+            let fresh = Set.difference next acc
+            if Set.isEmpty fresh then acc else grow (Set.union acc fresh) fresh
+        grow demanded demanded
 
 /// Emit one module-level binding, promoting its DECLARATION to namespace scope
 /// when `hoistIds` demands it and the emitted shape allows the split (see
@@ -1840,7 +2534,33 @@ let private computeModuleCaptureHoistIds
 let private genModuleBinding
         (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder)
         (hoistIds: Set<IRId>) : string list * CodeGenContext =
-    let (code, ctx') = genBinding ctx binding builder
+    let atBinding =
+        { ctx with TopLevelProviderRead = if ctx.ProviderReads.ContainsKey binding.Id then Some binding.Id else None }
+    // Sibling maps (Optimize.planSiblingMaps): the group protocol around
+    // every module binding (CodeGenLoopNest.siblingArmBegin / siblingArmEnd)
+    siblingArmBegin binding.Id (bindingCppName binding) siblingPreflight
+    let (code, emittedCtx) =
+        match ctx.PrivateSpoolRegion with
+        | Some region when obj.ReferenceEquals(binding, region.Plan.Producer) && not region.Committed ->
+            match Blade.CodeGenPrivateSpool.tryGenerate atBinding region.Plan with
+            | Ok lines ->
+                Blade.CodeGenPrivateSpool.record binding.Name Blade.Effects.Applied
+                    ([ "private-statistic-spool-v1: exact stored F64 bits, serial/repro and contraction off"
+                       "retained normal-window decode/input capacity; append faults drain original source windows"
+                       "tracked workspace and serialized disk only; terminal publication follows replay/EOF/cleanup"
+                       "route: spool (the resident intermediate exceeds the resident allowance)" ]
+                     @ Blade.CodeGenPrivateSpool.selectionEvidence region.Plan (int64 region.Plan.Policy.BlockCells)
+                     @ [ "run record: private_spool member (cells, blocks, payload bytes written / read, logical disk high water, planned reservation, grant)" ])
+                lines, { atBinding with PrivateSpoolRegion = Some { region with Committed = true } }
+            | Error why ->
+                Blade.CodeGenPrivateSpool.record binding.Name (Blade.Effects.Declined why) []
+                genBinding { atBinding with PrivateSpoolRegion = None } binding builder
+        | Some region when region.Committed
+                           && ([region.Plan.Statistic;region.Plan.Barrier;region.Plan.Terminal]
+                               |> List.exists (fun b -> obj.ReferenceEquals(b,binding))) -> [], atBinding
+        | _ -> genBinding atBinding binding builder
+    let code = code @ siblingArmEnd binding.Id (bindingCppName binding)
+    let ctx' = { emittedCtx with TopLevelProviderRead = ctx.TopLevelProviderRead }
     if not (Set.contains binding.Id hoistIds) then (code, ctx')
     else
         let name = bindingCppName binding
@@ -1857,6 +2577,67 @@ let private genModuleBinding
             (code @ [ sprintf "%s// (module binding '%s' is demanded at namespace scope but its emitted \
 shape has no single `TYPE %s = ...;` definition line to split -- see tryHoistModuleBindingDecl)"
                               (indentStr ctx) name name ], ctx')
+
+/// MEMBERSHIP HOISTING's placement around one module binding
+/// (Optimize.planMembershipHoist): for each plan whose host is `binding`, the
+/// build of its file-scope structure over the stored set -- emitted
+/// immediately before the host's own code, the set's cells read once -- and
+/// its free immediately after (the structure is BLADE_MEMBER_NONE again, so a
+/// probe outside the host's window takes the as-written scan). Empty for any
+/// other binding.
+let private memberHoistBracket (ctx: CodeGenContext) (modul: IRModule) (binding: IRBinding) : string list * string list =
+    let ind = indentStr ctx
+    let pieces =
+        Blade.Optimize.MemberHoistTable.plansOf binding.Id
+        |> List.map (fun p ->
+            // FAIL CLOSED (Codex diff review of W2-1, finding 2): the build
+            // reads the set's STORED cells here, before the host's first
+            // statement, so it is emitted only when this emission holds them:
+            // the set is bound, not a deferred computation, not streamed, and
+            // a rank-1 array. (A deferred map captured by the host is forced
+            // in the host's own prelude, AFTER this point. An alias of one is
+            // usually not deferred: an ordinary `let B = lazy` is assignable,
+            // so genVarAliasBinding forces `lazy` and deep-copies B at B's own
+            // site; only a NON-assignable alias propagates the deferral --
+            // either way the map's entry tells.) Otherwise nothing is built
+            // (the probes test `kind` and scan as written) and the plan says so.
+            let unavailable =
+                match modul.Bindings |> List.tryFind (fun b -> b.Id = p.SetId) with
+                | None -> Some "it is not a binding of this module"
+                | Some sb ->
+                    if not (Map.containsKey sb.Id ctx.VarNames) then Some "it is not bound at the build point"
+                    elif Map.containsKey sb.Id ctx.DeferredComputations then Some "it is a deferred computation at the build point (no stored cells)"
+                    elif (streamedBindingName sb.Id).IsSome then Some "it is a streamed provider read (no stored cells)"
+                    else
+                        match sb.Type with
+                        | ArrayElem at when at.IsVirtual -> Some "it is a virtual array (no stored cells)"
+                        | ArrayElem at when at.IndexTypes.Length = 1 -> None
+                        | _ -> Some "it is not a rank-1 array"
+            match unavailable, modul.Bindings |> List.tryFind (fun b -> b.Id = p.SetId) with
+            | None, Some sb ->
+                let name = exprToCppCtx ctx (IRVar (sb.Id, sb.Type))
+                let g = memberHoistGlobalName p.HostId p.SetId
+                let compound =
+                    match sb.Type with
+                    | ArrayElem at -> isCompoundArrayType at
+                    | _ -> false
+                let (cells, m) =
+                    if compound then ($"{name}.data", $"(int64_t)({name}.idx->cardinality)")
+                    else ($"nested_array_utilities::pool_base({name}.data)", $"(int64_t)({literalOrRuntimeExtent sb.Type name 0})")
+                let how =
+                    if p.Forced = 0 then "the preferred representation chosen from (M, min, max)"
+                    else $"BLADE_MEMBER_HOIST={Blade.Optimize.memberRepName p.Forced}"
+                ([ $"{ind}// member-hoist v1: `{p.HostName}`'s probes of `{p.SetName}` read ONE search structure built here ({how}; blade_member.h; the build reports the actual representation)"
+                   $"{ind}blade_member_build_i64(&{g}, {cells}, {m}, {p.Forced});"
+                   $"{ind}blade_member_note_i64(&{g}, {escapeStringLit p.HostName}, {escapeStringLit p.SetName});" ],
+                 [ $"{ind}blade_member_free_i64(&{g});" ])
+            | why, _ ->
+                let why = defaultArg why "it is not available"
+                recordCodegenDecision "member-hoist" p.HostName
+                    (Blade.Effects.Declined $"C++ emission: the planned build over `{p.SetName}` is not emitted -- {why}; the probes scan as written")
+                    [ "fail closed: no structure without the set's stored cells at the build point" ]
+                ([ $"{ind}// member-hoist v1: no structure over `{p.SetName}` for `{p.HostName}` -- {why}; the probes scan as written" ], []))
+    (pieces |> List.collect fst, pieces |> List.collect snd)
 
 /// The bindings-and-functions emission order, as ONE definition shared by
 /// `genModule` and `genModuleSplit` so the two can never drift.
@@ -1964,7 +2745,7 @@ let private emissionOrderedItems (modul: IRModule) (mainLocalFuncIds: Set<IRId>)
         | _ -> (k, 1, 0)
     bindingItems @ funcItems |> List.sortBy sortKey
 
-let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
+let private genModuleCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Companion-array gap: populate the codegen-side struct fields
     // cache so inferExprType can resolve IRFieldAccess result types.
     setCodegenStructFieldsCache modul.Types
@@ -1977,6 +2758,8 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // arm can walk them with parameter substitution.
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
+    // The bodies that take the Int64 -> Float64 split (needs the table above).
+    setI64SplitReach (i64SplitReachOf modul)
 
     // Deterministic deallocation: the fresh-return fixpoint resolves callees
     // through the table installed above, so it must run AFTER it. The stack reset
@@ -1984,17 +2767,29 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // mid-emission must not leave a frame active for this one's bindings.
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell programLetValuesStorage (computeProgramLetValues modul)
+    freshCell programCallbackArgsStorage (computeProgramCallbackArgs modul)
+    freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
+    freshCell functionParamIdsStorage (computeFunctionParamIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
+    // G92 owned moves: after the write facts (callableMayWrite) and the
+    // fresh-return facts it reads.
+
+    freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
+    ownedMoveRenderer <- renderOwnedMove
+    // PRINT REPLAY admission (after the write facts and callables table).
+    planRecPrintReplays modul
 
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
 
     // First pass: register ALL names (both bindings and functions) in context
     let ctx0 =
@@ -2016,6 +2811,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Main-locality first: the emission order reads it (emissionOrderedItems).
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
 
     // Generate in ID order (approximates source order).
     // First, collect file-scope functions to generate forward declarations.
@@ -2065,12 +2863,17 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
             match item with
             | Choice1Of2 binding ->
                 setCurrentCodegenDecl binding.Name binding.Name
+                (currentDeclIdCell ()).Value <- binding.Id
+                let (memberBuild, memberFree) = memberHoistBracket c modul binding
                 let (code, c') = genModuleBinding c binding builder hoistIds
+                bindLines.AddRange memberBuild
                 bindLines.AddRange code
+                bindLines.AddRange memberFree
                 bindLines.Add ""
                 c'
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name funcDef.SourceName
+                (currentDeclIdCell ()).Value <- funcDef.Id
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
                     bindLines.AddRange code
@@ -2082,12 +2885,15 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
                     funcLines.Add ""
                     c'
         ) ctx0
+    (currentDeclIdCell ()).Value <- -1
     let funcCode = List.ofSeq funcLines
     let bindCode = List.ofSeq bindLines
 
     // Merge context warnings into module-level collector
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
+    // main()'s flat tuples, for the print pass (moduleTupleChildrenCell).
+    (moduleTupleChildrenCell ()).Value <- finalCtx.TupleChildren
 
     // Settle every shadow-frame marker before the code leaves this function:
     // both buckets are analyzed together (a file-scope function and a
@@ -2096,6 +2902,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     | [fc; bc] -> (fc, bc)
     | _ -> (funcCode, bindCode)
 
+/// Low-level callers supply one module without whole-program demand evidence.
+let genModule modul builder = genModuleCore false None modul builder
+
 /// Split-timing variant of genModule: identical context-threaded emission, but
 /// binding output is routed into TWO buckets -- `setupCode` (data-setup
 /// bindings) and `computeCode` (forced computations) -- so the caller can place
@@ -2103,25 +2912,39 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
 /// still threaded through ALL items in ID order (later bindings reference
 /// earlier ones), so only the OUTPUT is partitioned, never the evaluation
 /// order. Returns (funcCode, setupCode, computeCode).
-let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
+let private genModuleSplitCore (wholeProgram: bool) (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
     setCodegenStructFieldsCache modul.Types
     let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
+    // The bodies that take the Int64 -> Float64 split (needs the table above).
+    setI64SplitReach (i64SplitReachOf modul)
     // Same install as genModule -- split-timing mode goes through this entry point
     // instead, and a missing install here would silently demote every callee to
     // NotFresh (leaks only, but a divergence between the two modes).
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell programLetValuesStorage (computeProgramLetValues modul)
+    freshCell programCallbackArgsStorage (computeProgramCallbackArgs modul)
+    freshCell programMutableArrayLetsStorage modul.MutableArrayLets
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     freshCell reboundVarIdsStorage (computeReboundVarIds modul)
+    freshCell functionParamIdsStorage (computeFunctionParamIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
+    // G92 owned moves: after the write facts (callableMayWrite) and the
+    // fresh-return facts it reads.
+
+    freshCell ownedMoveAssignsStorage (computeOwnedMoveAssigns modul)
+    ownedMoveRenderer <- renderOwnedMove
+    // PRINT REPLAY admission (after the write facts and callables table).
+    planRecPrintReplays modul
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
     // Revision reuse (docs/plans/structural/04): empty unless BLADE_TILE_CACHE is set.
     let (tilePlans, tileReads) = Blade.CodeGenTiles.planTiles modul
-    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads }
+    let ctx0 = { ctx0 with TilePlans = tilePlans; TileReads = tileReads; StreamTerminalModule = if wholeProgram then Some modul else None }
+    let ctx0 = { ctx0 with PrivateSpoolRegion = if wholeProgram then spool |> Option.map (fun p -> {Plan=p;Committed=false}) else None }
     let ctx0 =
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
@@ -2131,6 +2954,9 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
     // Same emission order as genModule, from the same definition.
     let allItems = emissionOrderedItems modul mainLocalFuncIds
+    let ctx0 =
+        Blade.CodeGenPrivateSpool.checkEmissionOrder ctx0
+            (allItems |> List.choose (fun (_,item) -> match item with Choice1Of2 b -> Some b | _ -> None))
     let fileScopeFuncs =
         allItems |> List.choose (fun (_, item) ->
             match item with
@@ -2170,7 +2996,10 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
                 setCurrentCodegenDecl binding.Name binding.Name
+                (currentDeclIdCell ()).Value <- binding.Id
+                let (memberBuild, memberFree) = memberHoistBracket c modul binding
                 let (code, c') = genModuleBinding c binding builder hoistIds
+                let code = memberBuild @ code @ memberFree
                 if nowCompute then
                     computeLines.AddRange code
                     computeLines.Add ""
@@ -2181,6 +3010,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     (false, c')
             | Choice2Of2 funcDef ->
                 setCurrentCodegenDecl funcDef.Name funcDef.SourceName
+                (currentDeclIdCell ()).Value <- funcDef.Id
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     // Lambda-as-binding (closure definition): follows the
                     // current phase -- setup if before the first compute, else
@@ -2202,18 +3032,23 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     funcLines.Add ""
                     (seen, c')
         ) (false, ctx0)
+    (currentDeclIdCell ()).Value <- -1
     let funcCode = List.ofSeq funcLines
     let setupCode = List.ofSeq setupLines
     let computeCode = List.ofSeq computeLines
     let cell = exprWarningsCell ()
     cell.Value <- cell.Value @ finalCtx.Warnings.Value
+    (moduleTupleChildrenCell ()).Value <- finalCtx.TupleChildren
     // See genModule: markers are resolved across all three buckets at once.
     match resolveShadowFrames [funcCode; setupCode; computeCode] with
     | [fc; sc; cc] -> (fc, sc, cc)
     | _ -> (funcCode, setupCode, computeCode)
 
+let genModuleSplit modul builder = genModuleSplitCore false None modul builder
+
 /// Generate a complete C++ program with main() from an IR module
 let genStructDef (name: string) (fields: (string * IRType) list) : string list =
+    let name = Blade.Types.TypeOrigins.cppName name
     let fieldLines = fields |> List.map (fun (fname, fty) ->
         // Array-typed fields render as Array<T,N> / Ragged<T> wrappers so
         // the field carries its shape with it. Other types use the
@@ -2233,6 +3068,11 @@ let genTypeDefs (modul: IRModule) : string list =
     modul.Types |> List.collect (function
         | IRTDStruct (name, fields) -> genStructDef name fields
         | IRTDVariant (name, variants) ->
+            // The type and every constructor through the one sanitizer (D11):
+            // module A's `Red` is the global C++ name `A__Red` (plain enum
+            // members and constructor functions are unscoped).
+            let name = Blade.Types.TypeOrigins.cppName name
+            let variants = variants |> List.map (fun (v, d) -> (Blade.Types.TypeOrigins.cppName v, d))
             let hasData = variants |> List.exists (fun (_, d) -> d.IsSome)
             if hasData then
                 // Tagged union using std::variant. Wrapper structs use a _T
@@ -2260,7 +3100,7 @@ let genTypeDefs (modul: IRModule) : string list =
                 [$"""enum {name} {{ {(variants |> List.map fst |> String.concat ", ")} }};"""
                  ""]
         | IRTDAlias (name, ty) ->
-            [$"using {name} = {(irTypeToCpp ty)};"; ""]
+            [$"using {(Blade.Types.TypeOrigins.cppName name)} = {(irTypeToCpp ty)};"; ""]
         | IRTDIndexType (name, _) ->
             // Emit a typedef for the index type so foreign-key element types
             // (IRTIdxTagged (_, IRefNamed name)) can render as the alias
@@ -2289,12 +3129,12 @@ let genTypeDefs (modul: IRModule) : string list =
 // expressions and temporaries go through `sanitizeCppName`, which is the
 // spelling `bindingCppName` declared the binding under. The two differ only
 // for a binding whose name is a C++ reserved word (`let final = ...`) or one
-// spelled as another binding's name plus a generated suffix
-// (`installUserNameRenames`: `a_extents` beside an array `a`).
+// the program's name table moved (`installCppNameTable`: `a_extents` beside
+// an array `a`, a user `Lib__a` beside an imported `Lib.a`, `let EOF = ..`).
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
-    [$"    cout << \"{name} = \" << {(sanitizeCppName name)} << endl;"]
+    [$"    cout << \"{name} = \" << blade_rt::pv({(sanitizeCppName name)}) << endl;"]
 
 /// The print blocks' loop variables. HYGIENIC: a print block sits in the
 /// scope of every top-level binding, so a loop var spelled like a user name
@@ -2325,7 +3165,7 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
       $$"""        for (size_t {{j}} = 0; {{j}} < {{innerBound}}; {{j}}++) {"""
       $"            if (!{firstVar}) cout << \", \";"
       $"            {firstVar} = false;"
-      $"            cout << {v}[{i}][{j}];"
+      $"            cout << blade_rt::pv({v}[{i}][{j}]);"
       "        }"
       "        cout << \"]\";"
       "    }"
@@ -2365,7 +3205,7 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
             let idx = [ for d in 0 .. rank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
             [ $"{ind}if (!{firstVar}) cout << \", \";"
               $"{ind}{firstVar} = false;"
-              $"{ind}cout << {v}{idx};" ]
+              $"{ind}cout << blade_rt::pv({v}{idx});" ]
         let closes =
             [ for d in rank - 1 .. -1 .. 0 ->
                 $"""    {(String.replicate d "    ")}}}""" ]
@@ -2414,7 +3254,7 @@ let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
           $"{ind}        cout << \"[\";"
           $$"""{{ind}}        for (size_t __f1 = 0; __f1 < {{expr}}.extents[1]; __f1++) {"""
           $"{ind}            if (__f1) cout << \", \";"
-          $"{ind}            cout << {expr}[__f0][__f1];"
+          $"{ind}            cout << blade_rt::pv({expr}[__f0][__f1]);"
           $"{ind}        }}"
           $"{ind}        cout << \"]\";"
           $"{ind}    }}"
@@ -2432,10 +3272,258 @@ let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
         @ loops
         @ [ $"{inner}if (!__ffirst) cout << \", \";"
             $"{inner}__ffirst = false;"
-            $"{inner}cout << {expr}{idx};" ]
+            $"{inner}cout << blade_rt::pv({expr}{idx});" ]
         @ [ for d in rank - 1 .. -1 .. 0 -> $"""{ind}    {(String.replicate d "    ")}}}""" ]
         @ [ $"{ind}    cout << \"]\";"
             $"{ind}}}" ]
+
+/// The keys of the INTEGER EnumIdx a tag names (through aliases), in
+/// position order: a value of it is a KEY represented as its POSITION (D2).
+let intEnumKeysOfModule (types: IRTypeDef list) (tag: string) : int64 list option =
+    let rec go (fuel: int) (t: string) =
+        if fuel <= 0 then None else
+        types |> List.tryPick (fun td ->
+            match td with
+            | IRTDEnumIdx (n, _, values) when n = t
+                    && not values.IsEmpty && values |> List.forall (function EVInt _ -> true | _ -> false) ->
+                Some (Some (values |> List.choose (function EVInt k -> Some k | _ -> None)))
+            | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t2)) when n = t && t2 <> t -> Some (go (fuel - 1) t2)
+            | _ -> None)
+        |> Option.flatten
+    go 16 tag
+
+/// THE DISPLAY FORM's unit (P3-26): the unit a value of type `t` prints after
+/// it -- a quantity's own name (`speed`, declared `Unit speed: mps`), else the
+/// unit checker's rendering of the dims (ppUnitSig: `meters / seconds`, also
+/// for a plain alias such as `Unit mps = meters / seconds`, which carries no
+/// quantity name); nothing for a dimensionless value.
+/// An array's unit is its element's.
+let rec displayUnitOf (t: IRType) : string option =
+    match t with
+    | IRTUnitAnnotated (inner, u) ->
+        let n = Blade.Types.unitNormalize u
+        if u.Nominal.IsSome then Some (Blade.Types.ppUnitSig u)
+        elif Map.isEmpty n.Dims && Blade.Types.scaleIsOne n.Scale then displayUnitOf inner
+        else Some (Blade.Types.ppUnitSig u)
+    | IRTIdxTagged (inner, _) -> displayUnitOf inner
+    | ArrayElem at -> displayUnitOf at.ElemType
+    | _ -> None
+
+/// How a top-level TUPLE or STRUCT value prints: spelled like its literal,
+/// `t = (1, 2.0)`, `p = P { a = 1.0, b = 2.0 }`, nesting as the literal nests.
+/// Shared by both lanes (Interp/Print.fs walks the same classification), so
+/// the two cannot disagree about which aggregates print or how.
+type AggregatePrint =
+    /// `cout << x`: any printable scalar (an index-tagged or Nat value prints
+    /// as its integer, a string verbatim, exactly like a scalar binding).
+    | APScalar
+    /// A value of an INTEGER EnumIdx: a key represented as its position (D2),
+    /// printed as its key through the type's key table.
+    | APKeyed of keys: int64 list
+    /// A dense array of integer EnumIdx values: its KEYS, in the dense format.
+    | APKeyedArray of rank: int * keys: int64 list
+    /// A dense array of printable scalars: its values in the top-level array
+    /// format (genPrintFieldArray -- rank 2 nested, every other rank flat).
+    | APDenseArray of rank: int
+    /// Any other array: the struct-field placeholder (`<rank-2 array>`).
+    | APOpaque of text: string
+    | APTuple of AggregatePrint list
+    | APStruct of name: string * fields: (string * AggregatePrint) list
+    /// A SUM-TYPE value (the DISPLAY print form only, P3-26): its constructor,
+    /// with its payload when it has one -- `Circle(1.5)`, `Empty`. `hasData`:
+    /// the C++ lane holds the type as a std::variant of payload structs (else a
+    /// plain enum, genTypeDefs).
+    | APVariant of name: string * ctors: (string * AggregatePrint option) list * hasData: bool
+    /// A unit-carrying component (the DISPLAY form only, P3-26): its print, then
+    /// `suffix` (` meters`) -- the binding-level rule applied to each leaf.
+    | APUnits of AggregatePrint * suffix: string
+
+/// The print form of a tuple- or struct-typed value, or None when it has none
+/// (a component that is a function, a loop object, a variant, unit, ...). A
+/// struct prints through its DECLARED field list (`types` = IRModule.Types);
+/// a recursive struct reference has no finite literal and is None.
+let aggregatePrintOfIn (variants: bool) (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    // (`variants`: the DISPLAY form -- sum types print, and a unit-carrying
+    // leaf carries its unit, APUnits)
+    let rec go (seen: Set<string>) (t: IRType) : AggregatePrint option =
+        let core = goCore seen t
+        match IR.stripUnits t with
+        | IRTTuple _ | IRTNamed _ -> core
+        | _ when variants ->
+            (match displayUnitOf t with
+             | Some u -> core |> Option.map (fun p -> APUnits (p, " " + u))
+             | None -> core)
+        | _ -> core
+    and goCore (seen: Set<string>) (t: IRType) : AggregatePrint option =
+        let all (xs: AggregatePrint option list) =
+            if xs |> List.forall Option.isSome then Some (List.map Option.get xs) else None
+        match IR.stripUnits t with
+        | IRTScalar ETUnit -> None
+        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when (intEnumKeysOfModule types tag).IsSome ->
+            Some (APKeyed (intEnumKeysOfModule types tag).Value)
+        | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> Some APScalar
+        | ArrayElem _ as at ->
+            let keyedElem =
+                match at with
+                | ArrayElem a ->
+                    (match IR.stripUnits a.ElemType with
+                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumKeysOfModule types tag
+                     | _ -> None)
+                | _ -> None
+            (match structFieldPrint at, keyedElem with
+             | FieldDenseArray rank, Some keys -> Some (APKeyedArray (rank, keys))
+             | FieldDenseArray rank, None -> Some (APDenseArray rank)
+             | FieldOpaqueArray text, _ -> Some (APOpaque text)
+             | FieldScalar, _ -> None)
+        | IRTTuple ts when not ts.IsEmpty -> ts |> List.map (go seen) |> all |> Option.map APTuple
+        | IRTNamed n when not (seen.Contains n) ->
+            let fields =
+                types |> List.tryPick (function
+                    | IRTDStruct (m, fs) when m = n -> Some fs
+                    | _ -> None)
+            (match fields with
+             | Some fs when not fs.IsEmpty ->
+                 let seen' = seen.Add n
+                 fs |> List.map (fun (_, ft) -> go seen' ft) |> all
+                 |> Option.map (fun ps -> APStruct (n, List.zip (List.map fst fs) ps))
+             | Some _ -> None
+             | None when variants ->
+                 // A sum type (the display form only): every payload must
+                 // have a print form of its own.
+                 let ctors =
+                     types |> List.tryPick (function
+                         | IRTDVariant (m, vs) when m = n -> Some vs
+                         | _ -> None)
+                 (match ctors with
+                  | Some vs when not vs.IsEmpty ->
+                      let seen' = seen.Add n
+                      let parts =
+                          vs |> List.map (fun (c, d) ->
+                              match d with
+                              | None -> Some (c, None)
+                              // (a payload holding an ARRAY is stored as a raw pointer in
+                              // the std::variant (genTypeDefs' irTypeToCpp): no shape to
+                              // print it by, so the type keeps no print form -- Codex
+                              // review of P3-26)
+                              | Some dt when (IR.flattenTupleLeaves dt |> List.exists (fun lt -> match IR.stripUnits lt with ArrayElem _ -> true | _ -> false)) -> None
+                              | Some dt -> go seen' dt |> Option.map (fun p -> (c, Some p)))
+                      if parts |> List.forall Option.isSome then
+                          Some (APVariant (n, List.map Option.get parts, vs |> List.exists (fun (_, d) -> d.IsSome)))
+                      else None
+                  | _ -> None)
+             | None -> None)
+        | _ -> None
+    match IR.stripUnits t with
+    | IRTTuple _ | IRTNamed _ -> go Set.empty t
+    | _ -> None
+
+/// The TEST form's classification (a sum type has no print form there).
+let aggregatePrintOf (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    aggregatePrintOfIn false types t
+
+/// The classification of the CURRENT print form (Blade.PrintForm): a sum type,
+/// and an aggregate holding one, print in the display form only.
+let aggregatePrintOfForm (types: IRTypeDef list) (t: IRType) : AggregatePrint option =
+    aggregatePrintOfIn (Blade.PrintForm.current () = Blade.PrintForm.Display) types t
+
+/// The display spelling of a constructor name: its last dotted segment (a
+/// module's constructor is written unqualified, like its literal).
+let variantCtorDisplayName (c: string) : string =
+    let s = Blade.Types.TypeOrigins.sourceName c
+    match s.LastIndexOf '.' with
+    | -1 -> s
+    | i -> s.Substring(i + 1)
+
+/// A bare top-level expression's carrier (`__expr<N>`, the last dotted
+/// segment): the display form prints its value with no label.
+let isExprCarrierName (name: string) : bool =
+    let seg = match name.LastIndexOf '.' with -1 -> name | i -> name.Substring(i + 1)
+    System.Text.RegularExpressions.Regex.IsMatch(seg, @"^__expr\d+$")
+
+/// The label a binding's print opens with under the CURRENT form: `name = `,
+/// or nothing for a bare expression in the display form.
+let printLabelOf (name: string) : string =
+    if Blade.PrintForm.current () = Blade.PrintForm.Display && isExprCarrierName name then ""
+    else name + " = "
+
+/// The text a binding's print closes with under the CURRENT form (before the
+/// newline): ` <unit>` for a unit-carrying value in the display form.
+let printUnitSuffixOf (t: IRType) : string =
+    if Blade.PrintForm.current () = Blade.PrintForm.Display then
+        match displayUnitOf t with
+        | Some u -> " " + u
+        | None -> ""
+    else ""
+
+/// The statements printing the aggregate `expr` (a C++ expression of the
+/// value's type) in its literal spelling, no name and no newline.
+let rec genPrintAggregate (ap: AggregatePrint) (expr: string) (ind: string) : string list =
+    match ap with
+    | APScalar -> [ $"{ind}cout << blade_rt::pv({expr});" ]
+    | APKeyed keys ->
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        [ $"{ind}cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[{expr}];" ]
+    | APDenseArray rank -> genPrintFieldArray expr rank ind
+    | APKeyedArray (rank, keys) ->
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        let e = System.Text.RegularExpressions.Regex.Escape expr
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({e}(\[[^\]]+\])+)\);")
+        genPrintFieldArray expr rank ind
+        |> List.map (fun l -> cellRe.Replace(l, $"cout << std::array<int64_t, {keys.Length}>{{{{{table}}}}}[$1];"))
+    | APOpaque text -> [ $"{ind}cout << \"{text}\";" ]
+    | APTuple parts ->
+        [ $"{ind}cout << \"(\";" ]
+        @ (parts |> List.mapi (fun i p ->
+            (if i > 0 then [ $"{ind}cout << \", \";" ] else [])
+            @ genPrintAggregate p $"std::get<{i}>({expr})" ind) |> List.concat)
+        @ [ $"{ind}cout << \")\";" ]
+    | APStruct (name, fields) ->
+        // The SOURCE name (D11: module A's `P` prints `P { .. }`, as the
+        // literal is written), in both lanes.
+        let name = Blade.Types.TypeOrigins.sourceName name
+        [ $"{ind}cout << \"{name} {{ \";" ]
+        @ (fields |> List.mapi (fun i (f, p) ->
+            let sep = if i > 0 then ", " else ""
+            [ $"{ind}cout << \"{sep}{f} = \";" ]
+            @ genPrintAggregate p $"{expr}.{f}" ind) |> List.concat)
+        @ [ $"{ind}cout << \" }}\";" ]
+    | APUnits (p, suffix) -> genPrintAggregate p expr ind @ [ $"{ind}cout << \"{suffix}\";" ]
+    | APVariant (_, ctors, false) ->
+        // A plain enum (no constructor carries data): its name by position.
+        let table = ctors |> List.map (fun (c, _) -> $"\"{variantCtorDisplayName c}\"") |> String.concat ", "
+        [ $"{ind}cout << std::array<const char*, {ctors.Length}>{{{{{table}}}}}[(int)({expr})];" ]
+    | APVariant (_, ctors, true) ->
+        // A std::variant of `<Ctor>_T` payload structs (genTypeDefs): the
+        // alternative's name, and its payload in parentheses.
+        [ $"{ind}switch (({expr}).index()) {{" ]
+        @ (ctors |> List.mapi (fun k (c, payload) ->
+            let nm = variantCtorDisplayName c
+            match payload with
+            | None -> [ $"{ind}case {k}: cout << \"{nm}\"; break;" ]
+            | Some p ->
+                [ $"{ind}case {k}: {{"
+                  $"{ind}    cout << \"{nm}(\";" ]
+                @ genPrintAggregate p $"std::get<{k}>({expr}).value" (ind + "    ")
+                @ [ $"{ind}    cout << \")\";"
+                    $"{ind}    break; }}" ]) |> List.concat)
+        @ [ $"{ind}default: break;"
+            $"{ind}}}" ]
+
+/// The statements printing a tuple held FLAT (`std::make_tuple(t_0, t_1,
+/// t_2)` under a left-nested type, moduleTupleChildrenCell): the parentheses
+/// follow the classification's nesting, the components are `std::get<k>` of
+/// the flat tuple, k counting leaves left to right (IR.flattenTupleLeaves'
+/// order -- the order the emitters register the leaves in).
+let rec private genPrintAggregateFlatLeaves (ap: AggregatePrint) (flat: string) (ind: string) (k: int) : string list * int =
+    match ap with
+    | APTuple parts ->
+        let (lines, k') =
+            parts |> List.indexed |> List.fold (fun (acc, k) (i, p) ->
+                let sep = if i > 0 then [ $"{ind}cout << \", \";" ] else []
+                let (ls, k') = genPrintAggregateFlatLeaves p flat ind k
+                (acc @ sep @ ls, k')) ([], k)
+        ([ $"{ind}cout << \"(\";" ] @ lines @ [ $"{ind}cout << \")\";" ], k')
+    | leaf -> (genPrintAggregate leaf $"std::get<{k}>({flat})" ind, k + 1)
 
 /// Generate print loop for arrays with per-dimension symmetry awareness.
 /// Expands IRIndexType list into per-dimension loop structure:
@@ -2512,7 +3600,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         let inner = [
             $"{innerIndent}if (!{firstVar}) cout << \", \";"
             $"{innerIndent}{firstVar} = false;"
-            $"{innerIndent}cout << {v}{idx};" ]
+            $"{innerIndent}cout << blade_rt::pv({v}{idx});" ]
         let closes =
             [for d in rank - 1 .. -1 .. 0 ->
                 $"""    {(String.replicate d "    ")}}}"""]
@@ -2542,52 +3630,14 @@ let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int6
       $"    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<{levelArgs}>({extent}); __ok++) {{"
       $"        if (!{firstVar}) cout << \", \";"
       $"        {firstVar} = false;"
-      $"        cout << {v}[__ok];"
+      $"        cout << blade_rt::pv({v}[__ok]);"
       "    }"
       "    cout << \"]\" << endl;" ]
 
-/// Compute which binding IDs are deferred (no C++ code generated).
-/// A binding is deferred if it's a computation that hasn't been materialized via |> compute.
-let computeDeferredIds (bindings: IRBinding list) : Set<int> =
-    let isDeferred (ids: Set<int>) (e: IRExpr) =
-        match e with
-        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
-        | IRVar (id, _) -> Set.contains id ids
-        | _ -> false
-    bindings |> List.fold (fun ids b ->
-        // A combinator whose RESULT TYPE is an array is a deferred computation
-        // regardless of whether its operands are already deferred -- it materializes
-        // only at |> compute, exactly like `<@>` (which always defers). Without this,
-        // `<$>` / sequence / `<|>` / guard / `>>=` / `>>@` applied to CONCRETE arrays
-        // fell through to `| _ -> false` and were eagerly materialized (and printed)
-        // with no |> compute. Scalar `<|>` / guard stay eager ternaries (result type
-        // is IRTScalar, so resultIsArray is false).
-        let resultIsArray = match IR.stripUnits b.Type with ArrayElem _ -> true | _ -> false
-        let shouldDefer =
-            match b.Value with
-            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
-            | IRZip _ -> true
-            | IRComposeObj _ -> true
-            | IRBind (comp, _) -> resultIsArray || isDeferred ids comp
-            | IRComposeMeth (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            | IRFunctorMap (_, inner) -> resultIsArray || isDeferred ids inner
-            | IRChoice (left, right) -> resultIsArray || isDeferred ids left || isDeferred ids right
-            // <|:> operands are arrays, so the binding ALWAYS defers
-            // (genFallbackBinding) -- materialization happens at |> compute.
-            | IRFallback _ -> true
-            | IRGuard (_, body) ->
-                let rec leafIsDeferred e =
-                    match e with
-                    | IRGuard (_, inner) -> leafIsDeferred inner
-                    | _ -> isDeferred ids e
-                resultIsArray || leafIsDeferred body
-            | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferred ids))
-            | IRTuple elems -> elems |> List.forall (isDeferred ids)
-            | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
-            | IRVar (srcId, _) -> Set.contains srcId ids
-            | _ -> false
-        if shouldDefer then Set.add b.Id ids else ids
-    ) Set.empty
+/// Compute which binding IDs are deferred (no C++ code generated). The ONE
+/// classification lives in IRLift (shared with the lowering refusals, the
+/// interpreter and the llvm lane).
+let computeDeferredIds (bindings: IRBinding list) : Set<int> = IRLift.computeDeferredIds bindings
 
 /// Top-level bindings that hold a FUNCTION -- a binding of function type
 /// (`let g = sq`), plus the generic-function aliases monomorphization removed
@@ -2608,6 +3658,110 @@ let functionPrintRefusal (names: string list) : string =
     let what = if names.Length = 1 then $"{ns} is a function" else $"{ns} are functions"
     $"--print: {what}, not a value, so there is nothing to print -- select a binding that applies it (e.g. `let y = {names.Head}(...)`)"
 
+/// A destructuring carrier (`let (a, b) = e` binds `_(a, b)`, emitted as
+/// `__tup_<id>`): the compiler's own binding, never printed -- its components
+/// print under their own names.
+let isDestructureCarrier (b: IRBinding) : bool = b.Name.StartsWith "_("
+
+/// A binding an ELABORATOR introduced (`__ppl_cen_A`, `__dist_dx_k1`, ...): a
+/// leading `__` marks an internal, non-API name. It is not echoed by default
+/// -- a ppl program used to print a screenful of these around the user's own
+/// bindings -- but prints when selected by name (`--print`). A bare top-level
+/// expression's carrier `__expr<n>` is the user's value and always prints.
+/// An IMPORTED module's bindings are qualified (`A.__sfj18`), so the test
+/// reads the name's last dotted segment (round 4 wave 6, the class-closure
+/// round of the top-level sibling folds: an imported module's join carriers
+/// printed as `A.__sfj18`).
+let isInternalBindingName (name: string) : bool = Blade.PrintSelection.isInternal name
+
+/// The printed form of a COMPOUND array (G22: its extent is a run-time
+/// cardinality, `Idx<?>`): Some false = one flat run of the present cells in
+/// storage order (the compound record alone, or with two or more trailing
+/// dims), Some true = nested rows (exactly one trailing dim: one row of
+/// `trailing_stride` cells per present compound cell), None = no printed form
+/// (a non-scalar element). The print rank regime with the compound axis
+/// counted as one axis; both lanes read it (Interp/ArrayOps.printCompoundCells).
+let compoundPrintShape (arrType: IRArrayType) : bool option =
+    let scalarElem =
+        match IR.stripUnits arrType.ElemType with
+        | IRTScalar et -> et <> ETUnit
+        | IRTIdxTagged (IRTScalar et, _) -> et <> ETUnit
+        | _ -> false
+    match arrType.IndexTypes with
+    | head :: trailing when head.IxKind = IxKCompound && scalarElem
+                            && trailing |> List.forall (fun ix -> ix.IxKind <> IxKCompound && ix.IxKind <> IxKSparse) ->
+        Some (List.length trailing = 1)
+    | _ -> None
+
+/// Whether a binding that passes the printability gate (not deferred, not a
+/// streamed read, not an unmaterialized loop value) still has NO printed form:
+/// genPrintStatements' arms that emit only a C++ comment, decided from the
+/// TYPE. Both lanes' `--print` refusals read it (Interp/Print.fs), so a
+/// selected binding that would print nothing is refused by name instead of
+/// leaving the run silent. The value-dependent comment arms (a ragged or
+/// compound-row SUB-VIEW) are not covered: they hinge on codegen state the
+/// interpreter does not share.
+let hasNoPrintedForm (modul: IRModule) (b: IRBinding) : bool =
+    match IR.stripUnits b.Type with
+    | IRTScalar ETUnit | IRTUnit -> true
+    | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> false
+    | IRTTuple _ | IRTNamed _ -> (aggregatePrintOfForm modul.Types b.Type).IsNone
+    | ArrayElem arrType ->
+        let wreathUnprintable =
+            arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = SymWreath)
+            && (match arrType.IndexTypes with
+                | [ ix ] -> (match orbitBaseExtent ix with IRLit (IRLitInt _) -> false | _ -> true)
+                | _ -> true)
+        let elemUnprintable =
+            match arrType.ElemType with
+            | FuncElem _ | IRTTuple _ -> true
+            | IRTNamed _ ->
+                not (arrayRank arrType = 1 && (aggregatePrintOfForm modul.Types arrType.ElemType).IsSome)
+            | _ -> false
+        wreathUnprintable
+        || (isCompoundArrayType arrType && (compoundPrintShape arrType).IsNone)
+        || isSparseArrayType arrType || elemUnprintable
+    | _ -> true
+
+/// The `--print` refusal for selected bindings with no printed form, one text
+/// for both lanes.
+let formlessPrintRefusal (modul: IRModule) (names: string list) : string =
+    let typeOfName n =
+        modul.Bindings |> List.tryFind (fun b -> b.Name = n)
+        |> Option.map (fun b -> Blade.IRPrint.ppIRType b.Type) |> Option.defaultValue "?"
+    let described = names |> List.map (fun n -> $"{n} : {typeOfName n}") |> String.concat ", "
+    let verb = if names.Length = 1 then "has no printed form" else "have no printed form"
+    $"--print: {described} {verb}, so there is nothing to print -- select a binding derived from it"
+/// The integer EnumIdx a binding's value (a scalar, or an array's element) is
+/// of, with its keys.
+let intEnumKeysOfBindingType (modul: IRModule) (ty: IRType) : int64 list option =
+    let elemTag (t: IRType) =
+        match IR.stripUnits t with
+        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> Some tag
+        | _ -> None
+    match IR.stripUnits ty with
+    | ArrayElem at -> elemTag at.ElemType
+    | t -> elemTag t
+    |> Option.bind (intEnumKeysOfModule modul.Types)
+
+/// A binding of an integer EnumIdx type prints its KEYS: every streamed
+/// value `v` of the printer becomes `__ek[v]` over a local key table.
+let private intEnumKeyedPrint (modul: IRModule) (b: IRBinding) (lines: string list) : string list =
+    match intEnumKeysOfBindingType modul b.Type with
+    | Some keys when not lines.IsEmpty ->
+        let v = System.Text.RegularExpressions.Regex.Escape (sanitizeCppName b.Name)
+        let scalarRe = System.Text.RegularExpressions.Regex($@"<< blade_rt::pv\(({v})\) << endl;")
+        // (`<v>.data[i]`: a COMPOUND array's compact buffer, its present cells
+        // -- R3: it printed the positions.)
+        let cellRe = System.Text.RegularExpressions.Regex($@"cout << blade_rt::pv\(({v}(\.data)?(\[[^\]]+\])+)\);")
+        let table = keys |> List.map (fun k -> $"{k}LL") |> String.concat ", "
+        let body =
+            lines |> List.map (fun l ->
+                let l = cellRe.Replace(l, "cout << __ek[$1];")
+                scalarRe.Replace(l, "<< __ek[$1] << endl;"))
+        [ $"    {{ static const int64_t __ek[] = {{{table}}};" ] @ body @ [ "    }" ]
+    | _ -> lines
+
 let genPrintStatements (modul: IRModule) : string list =
     let deferredIds = computeDeferredIds modul.Bindings
     // `--print <names>` (BLADE_PRINT, CodeGenState.printSelection): print only
@@ -2627,7 +3781,26 @@ let genPrintStatements (modul: IRModule) : string list =
     // stayed deferred through the whole program prints nothing. The cell is
     // populated during genModule, so callers must assemble print code AFTER
     // body generation.
-    let forcedIds = (forcedDeferredIdsCell ()).Value
+    let forcedOwn = (forcedDeferredIdsCell ()).Value
+    // ALIAS CLASSES (gap G60, formalism 10.2): a deferred map and its
+    // top-level aliases are ONE value, so the class prints under every name
+    // as soon as any member was forced at main's top level. A member never
+    // materialized under its own name there is declared as a reference to a
+    // forced member just before the prints (the cells are the same: a write
+    // through any member is refused at lowering). Shared with the interpreter
+    // and the llvm lane (IRLift.deferredAliasClasses).
+    let aliasClasses = IRLift.deferredAliasClasses modul.Bindings deferredIds
+    let forcedIds =
+        aliasClasses |> Map.fold (fun acc m cls ->
+            if cls |> List.exists (fun x -> Set.contains x forcedOwn) then Set.add m acc else acc) forcedOwn
+    let aliasDecls =
+        modul.Bindings |> List.choose (fun b ->
+            match Map.tryFind b.Id aliasClasses with
+            | Some cls when Set.contains b.Id forcedIds && not (Set.contains b.Id forcedOwn) ->
+                cls |> List.tryFind (fun x -> Set.contains x forcedOwn)
+                |> Option.bind (fun rep -> modul.Bindings |> List.tryFind (fun r -> r.Id = rep))
+                |> Option.map (fun r -> $"    auto& {sanitizeCppName b.Name} = {sanitizeCppName r.Name};")
+            | _ -> None)
     // |> compute of a DEFERRED combinator is a forced materialization and
     // always prints; |> compute of anything ELSE prints exactly when the
     // wrapped value itself would (an eager reduce/scalar is unchanged by
@@ -2653,8 +3826,16 @@ let genPrintStatements (modul: IRModule) : string list =
             let sep = ", "
             // An eliminated generic-function alias is still a binding the
             // source has; it is refused below as a function, not as a typo.
+            // The masked read's hidden raw half (ProviderReadSpec.AllowMissing)
+            // is NOT a selectable binding: printing it would expose exactly the
+            // missing cells the boundary rule keeps out of the program.
             let declared =
-                modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+                modul.Bindings
+                |> List.filter (fun b ->
+                    match Map.tryFind b.Id modul.ProviderReads with
+                    | Some spec -> not spec.AllowMissing
+                    | None -> true)
+                |> List.map (fun b -> b.Name) |> Set.ofList
                 |> Set.union modul.FunctionAliasNames
             let unknown = Set.difference names declared |> Set.toList
             // A SELECTED binding holding a FUNCTION has no printed form in
@@ -2669,7 +3850,16 @@ let genPrintStatements (modul: IRModule) : string list =
                 modul.Bindings
                 |> List.filter (fun b -> Set.contains b.Name names && not (isPrintableBinding b))
                 |> List.map (fun b -> b.Name) |> List.distinct
-            if unknown.IsEmpty && functions.IsEmpty && silent.IsEmpty then []
+            // A SELECTED binding of a kind with no printed form (a variant, a
+            // compound array, a tuple holding a function, ...) prints nothing
+            // either -- same refusal, third cause.
+            let formless =
+                modul.Bindings
+                |> List.filter (fun b ->
+                    Set.contains b.Name names && isPrintableBinding b && hasNoPrintedForm modul b)
+                |> List.map (fun b -> b.Name) |> List.distinct
+                |> List.filter (fun n -> not (List.contains n functions))
+            if unknown.IsEmpty && functions.IsEmpty && silent.IsEmpty && formless.IsEmpty then []
             elif not unknown.IsEmpty then
                 let known = declared |> Set.toList |> List.filter (fun n -> not (n.StartsWith "__")) |> String.concat sep
                 let missing = String.concat sep unknown
@@ -2680,10 +3870,17 @@ let genPrintStatements (modul: IRModule) : string list =
             else
                 let names = String.concat sep silent
                 let verb = if silent.Length = 1 then "is a deferred loop value (or streamed read) that is never materialized" else "are deferred loop values (or streamed reads) that are never materialized"
-                [ refusalErrorLine "    " $"--print: {names} {verb}, so there is nothing to print -- materialize it with `|> compute` to print it" ]
+                if not silent.IsEmpty then
+                    [ refusalErrorLine "    " $"--print: {names} {verb}, so there is nothing to print -- materialize it with `|> compute` to print it" ]
+                else
+                    [ refusalErrorLine "    " (formlessPrintRefusal modul formless) ]
         | None -> []
-    selectionRefusal @
-    (modul.Bindings |> List.collect (fun b ->
+    // The display form switches the float spelling here, AFTER the timing
+    // line, so `completed in` reads the same in both forms (blade_runtime.hpp
+    // print_display_flag).
+    (if Blade.PrintForm.current () = Blade.PrintForm.Display then [ "    blade_rt::print_display_flag() = true;" ] else [])
+    @ aliasDecls @ selectionRefusal @
+    (let printLinesOf (b: IRBinding) : string list =
         let isPrintable = isPrintableBinding b
         
         let hasSymmetry =
@@ -2698,9 +3895,17 @@ let genPrintStatements (modul: IRModule) : string list =
         let wanted =
             match selection with
             | Some names -> Set.contains b.Name names
-            | None -> true
+            | None -> not (isInternalBindingName b.Name)
 
-        if isPrintable && wanted then
+        let replayPlan = (recReplayPlansCell ()).Value |> List.tryFind (fun p -> p.TargetId = b.Id)
+        if isPrintable && wanted && replayPlan.IsSome then
+            // PRINT REPLAY (rec-print-replay v1): the trajectory was never
+            // stored; its sweep runs again, printing each row in the regime
+            // below (rank 2 nested, every other rank flat).
+            [ $"    cout << \"{b.Name} = [\";"
+              $"    blade_rt::replay_sweep({replayPlan.Value.Sweep}, true);"
+              "    cout << \"]\" << endl;" ]
+        elif isPrintable && wanted then
             match IR.stripUnits b.Type with
             | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool | ETComplex64 | ETComplex128 | ETString) ->
                 genPrintScalar b.Name
@@ -2726,12 +3931,40 @@ let genPrintStatements (modul: IRModule) : string list =
                  | _ ->
                      [$"    // (OrbIdx array '{b.Name}' not auto-printed: a wreath group combined with other index groups has no pool layout)"])
             | ArrayElem arrType when isCompoundArrayType arrType ->
-                // Compound (load_compound) values wrap a compact buffer plus a
-                // compound_index_t pointer; there is no operator<< for
-                // Compound<T,RANK>. Skip auto-print with a diagnostic so the
-                // generated program still compiles -- scalar value-checks via
-                // element access (e.g. data(lead, t)) remain available.
-                [$"    // (compound array '{b.Name}' not auto-printed; Compound<T,RANK> has no operator<<)"]
+                // A compound value (`compound(x, mask)`, a map over one, a
+                // load_compound read) wraps a compact buffer plus a
+                // compound_index_t pointer, and its extent is known only at run
+                // time (`Idx<?>`, G22). It prints its PRESENT cells in storage
+                // (lex rank) order, by the print rank regime with the compound
+                // axis counted as ONE axis: alone (or with two or more trailing
+                // dims) one flat run, with exactly one trailing dim nested rows.
+                // The interpreter's twin is Interp/ArrayOps.printCompoundCells.
+                // A non-scalar element keeps the skip comment (no printed form).
+                match compoundPrintShape arrType with
+                | Some nested ->
+                    let v = sanitizeCppName b.Name
+                    let i, j = printLoopVar 0, printLoopVar 1
+                    if nested then
+                        [ $"    cout << \"{b.Name} = [\";"
+                          $$"""    for (size_t {{i}} = 0; {{i}} < {{v}}.idx->cardinality; {{i}}++) {"""
+                          $"        if ({i}) cout << \", \";"
+                          "        cout << \"[\";"
+                          $$"""        for (size_t {{j}} = 0; {{j}} < {{v}}.trailing_stride; {{j}}++) {"""
+                          $"            if ({j}) cout << \", \";"
+                          $"            cout << blade_rt::pv({v}.data[{i} * {v}.trailing_stride + {j}]);"
+                          "        }"
+                          "        cout << \"]\";"
+                          "    }"
+                          "    cout << \"]\" << endl;" ]
+                    else
+                        [ $"    cout << \"{b.Name} = [\";"
+                          $$"""    for (size_t {{i}} = 0; {{i}} < {{v}}.size(); {{i}}++) {"""
+                          $"        if ({i}) cout << \", \";"
+                          $"        cout << blade_rt::pv({v}.data[{i}]);"
+                          "    }"
+                          "    cout << \"]\" << endl;" ]
+                | None ->
+                    [$"    // (compound array '{b.Name}' not auto-printed; its element type has no printed form)"]
             | ArrayElem arrType when isSparseArrayType arrType ->
                 // Same rationale as the compound arm: Sparse<T,RANK> has no
                 // operator<<; value-checks read cells via full-key access.
@@ -2756,51 +3989,33 @@ let genPrintStatements (modul: IRModule) : string list =
                     // (e.g. `let r = funcs(1)(5.0)`) still runs.
                     [$"    // (array '{b.Name}' of function values not auto-printed; std::function isn't streamable)"]
                 | IRTNamed structName ->
+                    // A rank-1 array of structs prints each ELEMENT spelled like
+                    // its literal, through the one aggregate formatter a struct
+                    // value uses (formalism 3.9: printing agrees with the
+                    // literal): `pts = [P { x = 1.0, y = 2.0 }, P { x = 3.0, y = 4.0 }]`.
+                    // It used to print `[{x: 1.0, y: 2.0}, ...]`, a spelling no
+                    // literal has. An element with no print form (a variant
+                    // field, a function field), or rank > 1, prints nothing.
                     let rank = arrayRank arrType
-                    let structFields =
-                        modul.Types |> List.tryPick (fun td ->
-                            match td with
-                            | IRTDStruct (n, fs) when n = structName -> Some fs
-                            | _ -> None)
-                    match structFields, rank with
-                    | Some fields, 1 when not (List.isEmpty fields) ->
+                    match aggregatePrintOfForm modul.Types arrType.ElemType, rank with
+                    | Some ap, 1 ->
                         let bv = sanitizeCppName b.Name
                         let firstVar = $"{bv}__first"
-                        let fieldPrints =
-                            fields |> List.collect (fun (fname, ftype) ->
-                                let i = fields |> List.findIndex (fun (n, _) -> n = fname)
-                                let prefix = if i = 0 then "" else ", "
-                                let label = $"        cout << \"{prefix}{fname}: \";"
-                                match structFieldPrint ftype with
-                                | FieldDenseArray rank ->
-                                    // An ARRAY-typed field used to stream as
-                                    // `cout << row.field`, i.e. the wrapper's
-                                    // data POINTER (`samples: 0x1fe4df26e90`),
-                                    // which both differential normalizers then
-                                    // masked. Printed as its values instead, in
-                                    // the top-level array format.
-                                    label :: genPrintFieldArray $"{bv}[{printLoopVar 0}].{fname}" rank "        "
-                                | FieldOpaqueArray text ->
-                                    [ $"        cout << \"{prefix}{fname}: {text}\";" ]
-                                | FieldScalar ->
-                                    [ $"        cout << \"{prefix}{fname}: \" << {bv}[{printLoopVar 0}].{fname};" ])
                         [
                             $"    cout << \"{b.Name} = [\";"
                             $"    bool {firstVar} = true;"
                             $$"""    for (size_t {{printLoopVar 0}} = 0; {{printLoopVar 0}} < {{bv}}.extents[0]; {{printLoopVar 0}}++) {"""
                             $"        if (!{firstVar}) cout << \", \";"
                             $"        {firstVar} = false;"
-                            "        cout << \"{\";"
                         ]
-                        @ fieldPrints
+                        @ genPrintAggregate ap $"{bv}[{printLoopVar 0}]" "        "
                         @ [
-                            "        cout << \"}\";"
                             "    }"
                             "    cout << \"]\" << endl;"
                         ]
                     | _ ->
-                        // Struct not found in module Types, or rank > 1, or
-                        // no fields -- emit diagnostic comment and skip.
+                        // No element print form, or rank > 1 -- emit a
+                        // diagnostic comment and skip.
                         [$"    // (array '{b.Name}' of struct '{structName}' not auto-printed; access individual fields via {b.Name}[i].field)"]
                 | IRTTuple _ ->
                     // std::tuple has no operator<<; value-checks read
@@ -2880,7 +4095,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""        for (size_t __rj = 0, __rn = {{gk}}__offsets[__ri + 1] - {{gk}}__offsets[__ri]; __rj < __rn; __rj++) {"""
                         $"            if (!{firstVar}) cout << \", \";"
                         $"            {firstVar} = false;"
-                        $"            cout << {gv}[__ri][__rj];"
+                        $"            cout << blade_rt::pv({gv}[__ri][__rj]);"
                         "        }"
                         "        cout << \"]\";"
                         "    }"
@@ -2897,7 +4112,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""    for (size_t __rk = 0; __rk < {{bv}}.len; __rk++) {"""
                         $"        if (!{firstVar}) cout << \", \";"
                         $"        {firstVar} = false;"
-                        $"        cout << {bv}[__rk];"
+                        $"        cout << blade_rt::pv({bv}[__rk]);"
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -2921,7 +4136,7 @@ let genPrintStatements (modul: IRModule) : string list =
                         $$"""        for (size_t __rj = 0; __rj < {{bv}}.lens[__ri]; __rj++) {"""
                         $"            if (!{firstVar}) cout << \", \";"
                         $"            {firstVar} = false;"
-                        $"            cout << {bv}[__ri][__rj];"
+                        $"            cout << blade_rt::pv({bv}[__ri][__rj]);"
                         "        }"
                         "        cout << \"]\";"
                         "    }"
@@ -2944,11 +4159,49 @@ let genPrintStatements (modul: IRModule) : string list =
                     genPrintArraySymAware b.Name arrType.IndexTypes
                 else
                     genPrintArrayFlat b.Name rank
+            // A TUPLE or STRUCT prints spelled like its literal (`t = (1, 2.0)`,
+            // `p = P { a = 1.0, b = 2.0 }`); one with no print form (a
+            // variant, a component that is a function, ...) prints nothing,
+            // and `--print` refuses it above (hasNoPrintedForm).
+            | IRTTuple _ | IRTNamed _ when not (isDestructureCarrier b) ->
+                (match aggregatePrintOfForm modul.Types b.Type with
+                 | Some ap ->
+                     let v = sanitizeCppName b.Name
+                     let body =
+                         match Map.tryFind v (moduleTupleChildrenCell ()).Value with
+                         | Some leaves when leaves.Length = (IR.flattenTupleLeaves b.Type).Length ->
+                             fst (genPrintAggregateFlatLeaves ap v "    " 0)
+                         | _ -> genPrintAggregate ap v "    "
+                     [ $"    cout << \"{b.Name} = \";" ] @ body @ [ "    cout << endl;" ]
+                 | None -> [])
             | IRTTuple _ -> []
             | IRTNamed _ -> []
             | IRTUnit -> []
             | _ -> []
-        else [])
+        else []
+     // THE DISPLAY FORM's framing (P3-26; Blade.PrintForm): a bare
+     // expression's line drops its `__exprN = ` label, and a unit-carrying
+     // value closes with its unit (an array's after its closing bracket). The
+     // test form's lines are untouched.
+     let displayFraming (b: IRBinding) (lines: string list) : string list =
+         if Blade.PrintForm.current () <> Blade.PrintForm.Display then lines
+         else
+             let lines =
+                 if isExprCarrierName b.Name then
+                     lines |> List.map (fun (l: string) -> l.Replace("\"" + b.Name + " = ", "\""))
+                 else lines
+             match printUnitSuffixOf b.Type with
+             | "" -> lines
+             | suffix ->
+                 match lines |> List.tryFindIndexBack (fun (l: string) -> l.Contains "<< endl;") with
+                 | Some i ->
+                     lines |> List.mapi (fun k (l: string) ->
+                         if k <> i then l
+                         else
+                             let j = l.LastIndexOf "<< endl;"
+                             l.Substring(0, j) + $"<< \"{suffix}\" " + l.Substring(j))
+                 | None -> lines
+     modul.Bindings |> List.collect (fun b -> displayFraming b (intEnumKeyedPrint modul b (printLinesOf b)))
     )
 
 /// Assemble the main() function wrapper around binding code and print statements.
@@ -3097,29 +4350,29 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
                   "    MPI_Init(&argc, &argv);")
               "    MPI_Comm_rank(MPI_COMM_WORLD, &__blade_mpi_rank);"
               "    MPI_Comm_size(MPI_COMM_WORLD, &__blade_mpi_size);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
         else
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
               "    blade_rt::typed_float_print(cout);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
     let timing =
         if mpi then
             [ ""
-              "    auto end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
-              $"    if (__blade_mpi_rank == 0) {{ cout << \"{testName} completed in \" << elapsed << \"s\" << endl; }}"
+              "    auto __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
+              $"    if (__blade_mpi_rank == 0) {{ cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl; }}"
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
         else
             [ ""
-              "    auto end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
-              $"    cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
+              "    auto __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
+              $"    cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl;"
               ""
               "    // Print results for verification" ]
     let finalizeLines = if netcdf then netcdfFinalizeLines else []
@@ -3140,12 +4393,13 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
                 "    return 0;"
                 "}" ]
     // Wrap the whole body in try/catch so C++ exceptions (bad_alloc, etc.)
-    // route to blade_rt::panic (BL8005) instead of std::terminate. MPI
+    // route to blade_rt::panic_exception (BL8005, or the "[BLnnnn] " code a
+    // runtime header put at the front of what()) instead of std::terminate. MPI
     // init/finalize straddle the try; a panic exits without MPI_Finalize,
     // acceptable on a failure path. Success-path output is byte-identical.
     let tryLine = [ "    try {" ]
     let catchClose =
-        [ "    } catch (const std::exception& e) { blade_rt::panic(\"BL8005\", e.what(), nullptr, 0); }"
+        [ "    } catch (const std::exception& e) { blade_rt::panic_exception(e); }"
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
@@ -3171,37 +4425,37 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
                   "    MPI_Init(&argc, &argv);")
               "    MPI_Comm_rank(MPI_COMM_WORLD, &__blade_mpi_rank);"
               "    MPI_Comm_size(MPI_COMM_WORLD, &__blade_mpi_size);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
         else
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
               "    blade_rt::typed_float_print(cout);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
     let setupTiming =
-        let line = $"cout << \"{testName} input allocation took \" << setup_elapsed << \"s\" << endl;"
+        let line = $"cout << \"{testName} input allocation took \" << __blade_setup_elapsed << \"s\" << endl;"
         [ ""
-          "    auto end = TIME;"
-          "    double setup_elapsed = 1e-9 * TIME_DIFF;"
+          "    auto __blade_t1 = TIME;"
+          "    double __blade_setup_elapsed = 1e-9 * TIME_DIFF;"
           (if mpi then $$"""    if (__blade_mpi_rank == 0) { {{line}} }""" else "    " + line)
           ""
-          "    start = TIME;" ]
+          "    __blade_t0 = TIME;" ]
     let computeTiming =
-        let line = $"cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
+        let line = $"cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl;"
         if mpi then
             [ ""
-              "    end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
+              "    __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
               $$"""    if (__blade_mpi_rank == 0) { {{line}} }"""
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
         else
             [ ""
-              "    end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
+              "    __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
               "    " + line
               ""
               "    // Print results for verification" ]
@@ -3225,7 +4479,7 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
     // See genMainWrapper: wrap the body in try/catch -> blade_rt::panic (BL8005).
     let tryLine = [ "    try {" ]
     let catchClose =
-        [ "    } catch (const std::exception& e) { blade_rt::panic(\"BL8005\", e.what(), nullptr, 0); }"
+        [ "    } catch (const std::exception& e) { blade_rt::panic_exception(e); }"
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
@@ -3250,6 +4504,14 @@ let getCudaFileContent () : string option =
               "#include <cstddef>"
               "#include <cstdint>" ]
             @ (if usesComplex then ["#include <complex>"; "#include <thrust/complex.h>"] else [])
+            // Device integer `^` (renderContractBinOp's device arm): exact
+            // square-and-multiply in UNSIGNED arithmetic, so it wraps like the
+            // host's blade_arith::ipow_nn (formalism section 2.4) rather than
+            // going through a double `pow`. Emitted only when a kernel names it.
+            @ (if defs |> List.exists (fun (l: string) -> l.Contains "blade_dev_ipow") then
+                   [ "__host__ __device__ inline int64_t blade_dev_ipow64(int64_t b, int64_t e) { uint64_t r = 1, x = (uint64_t)b; while (e > 0) { if (e & 1) r *= x; x *= x; e >>= 1; } return (int64_t)r; }"
+                     "__host__ __device__ inline int32_t blade_dev_ipow32(int32_t b, int32_t e) { uint32_t r = 1, x = (uint32_t)b; while (e > 0) { if (e & 1) r *= x; x *= x; e >>= 1; } return (int32_t)r; }" ]
+               else [])
             // Failure exit: the wrappers' CUDA statuses are checked
             // (checkCudaStatuses) and fail through the panic the host binds
             // in through this binder (dllPanicBindLines binds it whenever this
@@ -3325,16 +4587,18 @@ let providerIncludes (modul: IRModule) : string list =
 /// ids read by genPrintStatements, the include flags read below) start empty,
 /// and the deterministic-deallocation facts are reinstalled by genModule /
 /// genModuleSplit (they need the callables table first).
-let private genSelfContainedProgram (modul: IRModule) (testName: string) : string =
+let private genSelfContainedProgram (spool: Blade.OptimizePrivateSpool.Plan option) (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
     // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
     // must not collide with typecheck/lowering ids arriving in the module --
     // a reused id re-registers the original variable's name in VarNames.
     // 2^30 is far above any real program's id count.
     builder.EnsureAtLeast(0x40000000)
-    // User bindings whose names extend another binding's by `_...` step
-    // aside from the generated `<name>_suffix` namespace (CodeGenState).
-    installUserNameRenames (modul.Bindings |> List.map (fun b -> b.Name))
+    // The program's C++ name table (gap G252, CodeGenState.installCppNameTable):
+    // colliding / reserved spellings move -- callables at IR level (so `modul`
+    // is rebound), bindings through the raw-keyed rename table -- and the
+    // emitter's minted names avoid the program's own spellings.
+    let modul = installCppNameTable modul
 
     let includes =
         // Provider reads/writes emit provider-specific runtime calls (nc_*,
@@ -3342,6 +4606,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
         // the module actually has provider I/O, so non-provider programs gain
         // no extra dependency (registry-dispatched per provider).
         genIncludesExternal () @ providerIncludes modul
+        @ (if spool.IsSome then ["#include \"blade_private_spool.hpp\"";"#include <memory>"] else [])
     // MPI scaffolding: only when the emit gate is on AND the module has an
     // mpi kernel (a PURE predicate -- includes are computed before genModule
     // runs, so an emission-time cell would not work here). Adds
@@ -3366,13 +4631,13 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     // the forced-deferred collector genModule* populates.
     let mainFunc =
         if splitTimingModeEnabled () then
-            let (funcDefs, setupCode, computeCode) = genModuleSplit modul builder
+            let (funcDefs, setupCode, computeCode) = genModuleSplitCore true spool modul builder
             let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName setupIndented computeIndented printCode)
         else
-            let (funcDefs, bindCode) = genModule modul builder
+            let (funcDefs, bindCode) = genModuleCore true spool modul builder
             let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
             (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode)
@@ -3388,6 +4653,27 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
     // blade_packed_gemm.hpp only when the native matmul arm called it.
     let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
+    // blade_fold_lanes.hpp only when a fold took the explicit K-lane vector
+    // form or the Path B partition called blade_fold::chunk_lo.
+    let includes = if (foldLanesUsedCell ()).Value then includes @ ["#include \"blade_fold_lanes.hpp\""] else includes
+    // blade_orbit_scatter.hpp only when a fold took the ordered orbit scatter.
+    let includes = if (orbitScatterUsedCell ()).Value then includes @ ["#include \"blade_orbit_scatter.hpp\""] else includes
+    // blade_member.h and one zero-initialized file-scope structure per
+    // membership-hoist plan (Optimize.planMembershipHoist): declared for EVERY
+    // plan of the program, built or not -- a probe tests `kind` first, so an
+    // unbuilt structure is the as-written scan, never a dangling read.
+    let memberPlans = Blade.Optimize.MemberHoistTable.all ()
+    if not memberPlans.IsEmpty then (memberUsedCell ()).Value <- true
+    let includes = if (memberUsedCell ()).Value then includes @ ["#include \"blade_member.h\""] else includes
+    // blade_external_sort.hpp (and through it the private spool protocol) only
+    // when a sort site emitted the grant-bound external form (ST14).
+    let includes =
+        if (externalSortUsedCell ()).Value then
+            includes @ ["#include \"blade_external_sort.hpp\""]
+        else includes
+    let memberDecls =
+        memberPlans |> List.map (fun p ->
+            $"static blade_member_i64 {memberHoistGlobalName p.HostId p.SetId}; // member-hoist v1: the search structure over `{p.SetName}` for `{p.HostName}` (all-zero = BLADE_MEMBER_NONE, not built)")
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and
@@ -3428,7 +4714,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
     let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainBody)
-    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ dllBinds @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ memberDecls @ [""] @ cudaProtos @ dllBinds @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
 /// Every per-program emission cell, reset for a new assembly: warnings and
 /// refusal channels (back-end holes from a previous assembly must not be
@@ -3440,19 +4726,74 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
 /// flow and every sibling pipeline (CodeGenState.freshCell).
 let beginProgramAssembly () : unit =
     resetProgramStateCells ()
+    Blade.Diagnostics.EmitterWarnings.reset ()
     resetExprSupportCells ()
     resetLoopNestCells ()
     Blade.LinAlgPatterns.resetReproScope ()
 
 /// Generate a self-contained C++ program from an IR program: THE program
 /// assembler (CLI, REPL, notebook and every test lane go through here).
-let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+let genSelfContainedProgramFromIRWithOptions (options: ProgramEmissionOptions) (program: IRProgram) (testName: string) : string * string list =
     beginProgramAssembly ()
+    // The external stable sort's grant (round 4 wave 4 D1, ST14, rule
+    // `external-sort v1`): the SAME explicit BLADE_PRIVATE_SPOOL policy, its
+    // own site admission (CodeGenBinding.genSortBinding). A sort is exact in
+    // every build, so no FP requirement; split timing and --mpi decline as for
+    // the statistic spool (N ranks would share one grant).
+    (match options.PrivateSpool with
+     | Some policy when not (splitTimingModeEnabled ()) && not (mpiEmitModeEnabled ()) ->
+         Blade.CodeGenPrivateSpool.validatePolicy policy
+         (externalSortGrantCell ()).Value <- Some policy
+     | _ -> ())
+    let spool =
+        match options.PrivateSpool with
+        | None -> None
+        | Some policy ->
+            Blade.CodeGenPrivateSpool.validatePolicy policy
+            if splitTimingModeEnabled () then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "split timing placement is not admitted") []
+                None
+            elif mpiEmitModeEnabled () then
+                // `--mpi N` launches N copies of a non-MPI program: N spools
+                // under one root with N times the grant. Not admitted.
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "MPI emit mode (--mpi) is not admitted: every rank would spool under the one grant") []
+                None
+            elif not (Blade.CodeGenPrivateSpool.fpSupported ()) then
+                Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined "requires reproducible serial folds and explicit BLADE_FP_CONTRACT=off") []
+                None
+            else
+                match Blade.OptimizePrivateSpool.tryPlan policy (printSelection ()) program with
+                | Error why ->
+                    Blade.CodeGenPrivateSpool.record testName (Blade.Effects.Declined why) []
+                    None
+                | Ok plan ->
+                // THE SELECTION (round 4 wave 3, E2): the certificate holds;
+                // resolve the block (0 = the source chunk edge), then retain
+                // when the resident intermediate fits the resident allowance,
+                // else spool. Replay is a recorded candidate, never proved.
+                match Blade.ZarrProvider.CppZarr.rank1TerminalChunk plan.SourceSpec with
+                | Error why ->
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name (Blade.Effects.Declined why) []
+                    None
+                | Ok (chunk, _) when chunk <= 0L || chunk > 1048576L ->
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name
+                        (Blade.Effects.Declined $"the source chunk edge {chunk} is outside the spool block range 1..1048576") []
+                    None
+                | Ok (chunk, _) ->
+                let plan =
+                    if policy.BlockCells = 0UL then { plan with Policy = { policy with BlockCells = uint64 chunk } }
+                    else plan
+                let evidence = Blade.CodeGenPrivateSpool.selectionEvidence plan chunk
+                if plan.Policy.ResidentBytes > 0UL && 8UL * uint64 plan.Cells <= plan.Policy.ResidentBytes then
+                    Blade.CodeGenPrivateSpool.record plan.Producer.Name
+                        (Blade.Effects.Declined $"retain: the resident intermediate p ({8UL * uint64 plan.Cells} bytes) is within the resident allowance ({plan.Policy.ResidentBytes} bytes); the resident two-pass route runs") evidence
+                    None
+                else Some plan
     let cell = exprWarningsCell ()
     let code =
         match program.Modules with
         | [] -> "// Empty program\nint main() { return 0; }\n"
-        | [modul] -> genSelfContainedProgram modul testName
+        | [modul] -> genSelfContainedProgram spool modul testName
         | modules ->
             // Multi-module: merge all modules into one for code generation
             // Functions and bindings from earlier modules come first
@@ -3470,12 +4811,13 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
                 SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
                 MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+                LetMutBinders = modules |> List.fold (fun acc m -> Set.union acc m.LetMutBinders) Set.empty
                 // Ids are module-global (one builder), so the
                 // union preserves every copy's origin key.
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
                 FunctionAliasNames = modules |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty
             }
-            genSelfContainedProgram merged testName
+            genSelfContainedProgram None merged testName
     // Expression-position refusals become real `#error` directives. They are
     // appended to the END of the translation unit rather than spliced at the
     // refusal site because the refusal site is an EXPRESSION and a preprocessor
@@ -3496,4 +4838,23 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 sentinels
                 |> List.map (fun m -> sprintf "#error \"Blade codegen: %s\"" (m.Replace("\"", "'")))
             code + "\n" + (directives |> String.concat "\n") + "\n"
+    // Wave 3 (E-G5): a threaded-step entry no time-loop emitter DECIDED (the
+    // recursion reached an emitter without the hook -- an expression-position
+    // loop, a cloned owner): its `where omp` request was inlined away with
+    // the step's map, so the census is printed here, never nowhere.
+    let code =
+        match Blade.Optimize.RecStepTable.undecided () with
+        | [] -> code
+        | lost ->
+            let lines =
+                lost |> List.map (fun e ->
+                    let why = $"rec-step-parallel: the planned time loop of `{e.Subject}` never reached the C++ time-loop emitter (the `where omp` request of `{e.KernelName}` was fused into the step and the recursion's steps run serially)"
+                    "// " + Blade.CodeGenState.ompSuppressedPhrase why)
+            code + "\n" + (lines |> String.concat "\n") + "\n"
     (code, cell.Value)
+
+/// Existing callers never acquire disk authority. The explicit options entry
+/// deliberately binds its validated policy to the generated artifact; optional
+/// resident fallback does not implement an enforced global workspace limit.
+let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
+    genSelfContainedProgramFromIRWithOptions defaultProgramEmissionOptions program testName

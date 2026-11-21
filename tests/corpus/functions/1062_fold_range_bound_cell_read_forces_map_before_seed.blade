@@ -1,0 +1,11 @@
+// TEST: A Fold Range Bound Reading A Deferred Map Forces It Before The Seed
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 3): the range bound p(0) is evaluated at
+// the fold's operand stage, before the seed, so it forces p under its own name there (the holder read
+// p before its declaration, BL9002); the seed p(0) then reads the same snapshot:
+// (0 + 1 + 2 + 3) + 4.
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let result = reduce(method_for(0..p(0)) <@> lambda(k) -> k, (+), p(0))
+// EXPECT: result = 10
+// EXPECT: p = [4, 6]

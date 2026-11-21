@@ -1,0 +1,14 @@
+// TEST: a join share spelled through an alias fails ahead of leg 0 (aborts)
+// Gap G101 (round 4 wave 4 lane A; Codex review round 2): `a` aliases the
+// deferred map `q`, and the join spells `a` twice, so every lane evaluates it
+// as a SHARE at the top of each cell. Both p and q fail at cell 1; the
+// failure is q (its kernel, line 8 once the harness drops the TEST line).
+type I = Idx<3>
+let xs: Array<Int64 like I> = [1, 0, 3]
+let p = method_for(xs) <@> lambda(v) -> 100 / v
+let q = method_for(xs) <@> lambda(v) -> 200 / v
+let a = q
+let (s1, s2, s3) = object_for(<&!>) <@> (reduce(p, (+)), reduce(a, (+)), reduce(a, (+)))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:8

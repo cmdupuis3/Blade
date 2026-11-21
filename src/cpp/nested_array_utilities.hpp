@@ -14,6 +14,381 @@
 // header, through one include list or the other, before any emitted loop nest
 // -- and so do the standalone cpp/*_tests.cpp harnesses.
 #include "blade_portability.hpp"
+#include <cstdio>
+#include <new>
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+#include "blade_pool_capacity.hpp"
+#endif
+
+// ---------------------------------------------------------------------------
+// blade_pool -- the retained-block cache behind every scalar pool allocate<>
+// makes (bench/notes/microkernel-sketches-review.md M1; plan S7 / 4.5a).
+//
+// WHY. The UCRT/NT heap hands a freed block of a few hundred KB back to the
+// OS, so the next allocation of the same size demand-faults every page again.
+// A time-stepping recursive array allocates and frees the same handful of
+// row-sized temporaries on every step (bench recur: 8 x 160 KB per step, ~29.5
+// faults per allocation, ~91k faults, most of the 117-134 ms), and an isolated
+// probe with the buffers kept was 6x faster. Keeping a few freed pools
+// COMMITTED and handing one back to the next allocation of the SAME element
+// type and cell count removes those faults without changing what any program
+// computes.
+//
+// CONTRACT (what keeps it exact-arithmetic and ownership-neutral):
+//   * exact-size reuse only: a pool is handed back to a request for the same
+//     element type and the same cell count it was released with. The released
+//     count is the one allocate<> passed (`total > 0 ? total : 1`), recomputed
+//     by deallocate<> from the same extents, so a hit is never smaller than
+//     the request;
+//   * contents are NOT cleared, exactly as `new T[n]` leaves them
+//     uninitialized for an arithmetic T: every cell the language promises a
+//     value for is an explicit store in the emitted code (the same contract
+//     the LLVM lane's blade_alloc_cells lives by);
+//   * new[] / delete[] pairing is kept per type: a cached block is a live
+//     `new T[cells]` array, handed out again as that T, and finally released
+//     with that T's delete[] (a typed deleter rides each slot);
+//   * arithmetic element types and std::complex of a floating type only
+//     (`cacheable<T>` below). `new std::complex<F>[n]` runs complex's
+//     default constructor, which zeroes every cell, so a REUSED complex block
+//     is zero-filled before it is handed back -- the same contents a fresh
+//     new[] gives (an arithmetic block is handed back as is, like new T[]);
+//     other class types are never cached. Complex pools are cached because
+//     leaving them to the heap is what made examples/09_qg_atmosphere SLOWER
+//     with the cache: its 64 KB complex temporaries went to the UCRT heap
+//     (~10 us per new/free above 16 KB, 40% of the run without any cache),
+//     and the real blocks the cache pinned between them fragmented that heap
+//     (60% of the run) -- 6.6 s uncached, 9.8 s caching reals only, 3.6 s
+//     caching both;
+//   * blocks of 16 KB .. 32 MB; at most 16 slots and 64 MB per THREAD, one
+//     budget across all element types (oldest slot evicted first). Both
+//     numbers are measured policy (review section 4.4), not semantics -- the
+//     DEFAULT; the opt-in BLADE_POOL_RETAIN arm raises both (see kMaxBlock);
+//   * per-thread (thread_local): no locking, and a block freed on another
+//     thread simply lands in that thread's cache (any thread may delete[] a
+//     new[] block). A thread's cache is freed at thread exit; after that the
+//     thread's releases go straight to delete[];
+//   * OFF under BLADE_POOL_CACHE_OFF (Build.fs passes it to every memcheck
+//     compile: a cached free is invisible to the leak counter) and under any
+//     AddressSanitizer build (a cached free would hide a use-after-free).
+//
+// BLADE_POOL_CACHE_STATS=1 (test builds only) counts fresh / reused / retained
+// blocks process-wide and prints one `[blade-pool] ...` line on stderr at exit.
+// ---------------------------------------------------------------------------
+#if defined(__SANITIZE_ADDRESS__)
+#  ifndef BLADE_POOL_CACHE_OFF
+#    define BLADE_POOL_CACHE_OFF 1
+#  endif
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    ifndef BLADE_POOL_CACHE_OFF
+#      define BLADE_POOL_CACHE_OFF 1
+#    endif
+#  endif
+#endif
+#if defined(BLADE_POOL_CACHE_STATS) && BLADE_POOL_CACHE_STATS
+#include <atomic>
+#endif
+
+// THE PER-WORKER WORKSPACE CENSUS (round 4 wave 3 A4, plan PM06), compiled
+// in only when the program defines BLADE_WS_CENSUS (the compiler writes it
+// under BLADE_WORKSPACE_CENSUS=1; the default build has no counter and no
+// cost). While a threaded site is OPEN (blade_rr::ws_site_begin/_end, around
+// the team), every pool this allocator hands out or takes back is counted
+// against the calling OpenMP thread: allocations, bytes, live bytes and the
+// thread's live high-water mark -- the scratch a worker holds at once. The
+// run record (blade_run_record.hpp, `workspace`) reports it per site.
+#if defined(BLADE_WS_CENSUS) && BLADE_WS_CENSUS
+#include <atomic>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+namespace blade_ws {
+    constexpr int kMaxWorkers = 256;
+    struct alignas(64) Worker { long long allocs; long long bytes; long long live; long long peak; };
+    inline Worker workers[kMaxWorkers] = {};
+    inline std::atomic<bool> open{false};
+    inline int worker_id() {
+#if defined(_OPENMP)
+        return omp_get_thread_num();
+#else
+        return 0;
+#endif
+    }
+    inline void on_alloc(size_t b) {
+        if (!open.load(std::memory_order_relaxed)) return;
+        const int w = worker_id();
+        if (w < 0 || w >= kMaxWorkers) return;
+        Worker& k = workers[w];
+        k.allocs++; k.bytes += (long long)b; k.live += (long long)b;
+        if (k.live > k.peak) k.peak = k.live;
+    }
+    inline void on_release(size_t b) {
+        if (!open.load(std::memory_order_relaxed)) return;
+        const int w = worker_id();
+        if (w < 0 || w >= kMaxWorkers) return;
+        workers[w].live -= (long long)b;
+    }
+}
+#define BLADE_WS_ALLOC(b) ::blade_ws::on_alloc(b)
+#define BLADE_WS_RELEASE(b) ::blade_ws::on_release(b)
+#else
+#define BLADE_WS_ALLOC(b) ((void)0)
+#define BLADE_WS_RELEASE(b) ((void)0)
+#endif
+namespace blade_pool {
+
+    // Element types the cache may hold (see the CONTRACT above): arithmetic
+    // types, and std::complex of a floating type.
+    template<class T> struct cacheable : std::is_arithmetic<T> {};
+    template<class F> struct cacheable<std::complex<F>> : std::is_floating_point<F> {};
+
+#if defined(BLADE_POOL_CACHE_STATS) && BLADE_POOL_CACHE_STATS
+    // Process-wide counters (atomics: OpenMP workers allocate too).
+    //   fresh    -- eligible-size allocations served by new[] (a miss)
+    //   reused   -- eligible-size allocations served from the cache (a hit)
+    //   retained -- releases kept in the cache instead of delete[]
+    //   evicted  -- cached blocks delete[]d to make room or at thread exit
+    struct Stats {
+        std::atomic<long long> fresh{0}, reused{0}, retained{0}, evicted{0};
+        ~Stats() {
+            std::fprintf(stderr, "[blade-pool] cache=%s fresh=%lld reused=%lld retained=%lld evicted=%lld\n",
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+                         "off",
+#else
+                         "on",
+#endif
+                         fresh.load(), reused.load(), retained.load(), evicted.load());
+        }
+    };
+    inline Stats g_stats;
+#  define BLADE_POOL_COUNT(field) (::blade_pool::g_stats.field.fetch_add(1, std::memory_order_relaxed))
+#else
+#  define BLADE_POOL_COUNT(field) ((void)0)
+#endif
+
+    // Policy constants (bytes). kMaxBlock <= kBudget, so a block that passes
+    // the size test always fits once the oldest slots are evicted.
+    //
+    // BLADE_POOL_RETAIN (round-3 A4, bench gap G52; default raised in round 4
+    // wave 6, G185 (a)): the compiler writes `#define BLADE_POOL_MAX_BLOCK
+    // <bytes>` / `BLADE_POOL_BUDGET <bytes>` at the top of the generated program
+    // when it is set to anything but the default (1 / on = 64 MB / 96 MB, 0 / off
+    // = the pre-wave-6 4 MB / 8 MB, or an explicit <maxMB>:<budgetMB> pair).
+    // Without them the policy below (32 MB / 64 MB) is the default. Under the arm a released
+    // pool up to the larger cap (recur's 48 MB trajectory, stencil's 24 MB
+    // `lap`) stays committed until reuse, eviction or THREAD EXIT, so its
+    // release leaves the timed region -- it is not less work, the budget is per
+    // thread (T threads may retain T x kBudget), and the peak working set can
+    // rise. BLADE_POOL_CACHE_OFF (memcheck / ASan) disables the cache under
+    // either policy.
+    constexpr size_t kMinBytes = size_t(16) << 10;   // below this the heap's front end keeps pages warm anyway
+#if defined(BLADE_POOL_MAX_BLOCK) || defined(BLADE_POOL_BUDGET)
+#  if !defined(BLADE_POOL_MAX_BLOCK) || !defined(BLADE_POOL_BUDGET)
+#    error "BLADE_POOL_RETAIN: BLADE_POOL_MAX_BLOCK and BLADE_POOL_BUDGET are defined together"
+#  endif
+    constexpr size_t kMaxBlock = size_t(BLADE_POOL_MAX_BLOCK);
+    constexpr size_t kBudget   = size_t(BLADE_POOL_BUDGET);
+    constexpr bool kRetainArm  = true;
+#else
+    // default since round 4 wave 6 (G185 (a), the user's decision of
+    // 2026-11-08, measured: bench pm08_churn, a 24 MB per-call temporary,
+    // 0.199 -> 0.10 s; stencil mt8 peak WS 51.4 -> 51.6 MiB): a 32 MB block
+    // is retained, 64 MB per thread; BLADE_POOL_RETAIN=0 restates the
+    // pre-wave-6 4 MB / 8 MB as defines
+    constexpr size_t kMaxBlock = size_t(32) << 20;   // a whole trajectory (48 MB) is still never retained
+    constexpr size_t kBudget   = size_t(64) << 20;   // per thread, ALL element types together
+    constexpr bool kRetainArm  = false;
+#endif
+    static_assert(kMaxBlock <= kBudget, "blade_pool: the largest retained block must fit the budget");
+    constexpr size_t kSlots    = 16;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+    constexpr bool kCapacityPolicySupported = true;
+#else
+    constexpr bool kCapacityPolicySupported = kBudget <= (std::numeric_limits<size_t>::max)() - kMaxBlock;
+#endif
+#endif
+
+    // Is a pool of `cells` T's in the retained size band? (Overflow-safe: a
+    // product that would overflow is far above kMaxBlock.)
+    template<class T>
+    constexpr bool eligible(size_t cells) {
+        return cells >= kMinBytes / sizeof(T) && cells <= kMaxBlock / sizeof(T);
+    }
+
+#if defined(BLADE_POOL_CACHE_OFF) && BLADE_POOL_CACHE_OFF
+    template<class T> inline T* alloc(size_t cells) {
+        BLADE_WS_ALLOC(cells * sizeof(T));
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
+#endif
+        if constexpr (cacheable<T>::value) { if (eligible<T>(cells)) BLADE_POOL_COUNT(fresh); }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        T* result = capacity_detail::native_new<T>(cells);
+        operation.success();
+        return result;
+#else
+        return new T[cells];
+#endif
+    }
+    template<class T> inline void release(T* p, size_t cells) {
+        if (p) BLADE_WS_RELEASE(cells * sizeof(T));
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::release);
+        capacity_detail::native_delete(p, cells);
+#else
+        (void)cells;
+        delete[] p;
+#endif
+    }
+    inline void flush() {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::flush);
+#endif
+    }
+#else
+    // One type tag per element type: the address of a per-type variable.
+    template<class T> struct TypeTag { static inline const char id = 0; };
+    template<class T> inline void delete_block(void* p) { delete[] static_cast<T*>(p); }
+
+    struct Slot { void* p; size_t cells; size_t bytes; const char* type; void (*del)(void*); };
+    // Trivially destructible and constant-initialized, so it is usable at any
+    // point of the thread's life -- including after the Reaper below ran
+    // (`dead` then routes every release to delete[]).
+    struct Cache { Slot s[kSlots]; size_t n; size_t bytes; bool dead; };
+    inline thread_local Cache tl_cache{};
+
+    inline void evict_oldest(Cache& c) {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        const size_t bytes = c.s[0].bytes;
+        capacity_detail::begin_delete();
+        try { c.s[0].del(c.s[0].p); }
+        catch (...) { capacity_detail::invalidate(capacity_detail::Invalid::native_delete_exception); throw; }
+        capacity_detail::Guard guard;
+#else
+        c.s[0].del(c.s[0].p);
+#endif
+        c.bytes -= c.s[0].bytes;
+        for (size_t m = 1; m < c.n; m++) c.s[m - 1] = c.s[m];
+        c.n--;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::evict_locked(bytes);
+#endif
+        BLADE_POOL_COUNT(evicted);
+    }
+    // Free every block this thread retains (out-of-memory retry; thread exit).
+    inline void flush() {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::flush);
+#endif
+        Cache& c = tl_cache;
+        while (c.n > 0) evict_oldest(c);
+    }
+    // Registered on the first retain of each thread: frees the thread's cache
+    // when the thread ends (the main thread's runs at exit, before statics).
+    struct Reaper { ~Reaper() { flush(); tl_cache.dead = true; } };
+
+    template<class T> inline T* alloc(size_t cells) {
+        BLADE_WS_ALLOC(cells * sizeof(T));
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::allocate, kCapacityPolicySupported);
+#endif
+        if constexpr (cacheable<T>::value) {
+            if (eligible<T>(cells)) {
+                Cache& c = tl_cache;
+                const char* type = &TypeTag<T>::id;
+                for (size_t k = c.n; k-- > 0; ) {            // newest first: the hottest pages
+                    if (c.s[k].type == type && c.s[k].cells == cells) {
+                        T* r = static_cast<T*>(c.s[k].p);
+                        // a fresh new std::complex<F>[] is all zeros; so is a reused one
+                        if constexpr (!std::is_arithmetic<T>::value) std::fill(r, r + cells, T());
+                        {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        const size_t bytes = c.s[k].bytes;
+                        capacity_detail::Guard guard;
+#endif
+                        c.bytes -= c.s[k].bytes;
+                        for (size_t m = k + 1; m < c.n; m++) c.s[m - 1] = c.s[m];
+                        c.n--;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        capacity_detail::reuse_locked(bytes);
+#endif
+                        }
+                        BLADE_POOL_COUNT(reused);
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        operation.success();
+#endif
+                        return r;
+                    }
+                }
+                BLADE_POOL_COUNT(fresh);
+                if (c.n > 0) {
+                    // Out of memory with blocks still retained: give them back
+                    // and try once more before letting bad_alloc propagate.
+                    try {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        T* result = capacity_detail::native_new<T>(cells);
+                        operation.success();
+                        return result;
+#else
+                        return new T[cells];
+#endif
+                    }
+                    catch (const std::bad_alloc&) {
+                        flush();
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                        capacity_detail::retry();
+#endif
+                    }
+                }
+            }
+        }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        T* result = capacity_detail::native_new<T>(cells);
+        operation.success();
+        return result;
+#else
+        return new T[cells];
+#endif
+    }
+
+    template<class T> inline void release(T* p, size_t cells) {
+        if (p) BLADE_WS_RELEASE(cells * sizeof(T));
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::Operation operation(capacity_detail::OperationKind::release);
+#endif
+        if constexpr (cacheable<T>::value) {
+            if (p && eligible<T>(cells)) {
+                Cache& c = tl_cache;
+                if (!c.dead) {
+                    static thread_local Reaper reaper;   // constructed (and its destructor registered) once per thread
+                    (void)reaper;
+                    const size_t b = cells * sizeof(T);
+                    while (c.n > 0 && (c.n == kSlots || c.bytes + b > kBudget)) evict_oldest(c);
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                    capacity_detail::Guard guard;
+#endif
+                    c.s[c.n++] = Slot{ p, cells, b, &TypeTag<T>::id, &delete_block<T> };
+                    c.bytes += b;
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                    capacity_detail::retain_locked(b);
+#endif
+                    BLADE_POOL_COUNT(retained);
+                    return;
+                }
+            }
+        }
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+        capacity_detail::native_delete(p, cells);
+#else
+        delete[] p;
+#endif
+    }
+#endif
+} // namespace blade_pool
+// The run record (blade_run_record.hpp) reports blade_pool's policy when the
+// program includes this header first, as every generated program does.
+#define BLADE_POOL_POLICY_DECLARED 1
 
 namespace nested_array_utilities {
 
@@ -236,7 +611,8 @@ namespace nested_array_utilities {
         using SCALAR = typename strip_ptr<TYPE>::type;
         size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
         // Degenerate total==0 (e.g. strict storage with rank > n): allocate a 1-element pool so a later deref is never on a zero-length buffer.
-        SCALAR* pool = new SCALAR[total > 0 ? total : 1];                 // alloc #1
+        // Through the retained-block cache (blade_pool, above); deallocate<> recomputes this same count.
+        SCALAR* pool = blade_pool::alloc<SCALAR>(total > 0 ? total : 1);   // alloc #1
         size_t offset = 0;
         return build_skeleton<TYPE, SYMM, DIAGONALS, 0>(extents, pool, offset, 0);   // alloc #2
     }
@@ -330,7 +706,7 @@ namespace nested_array_utilities {
     TYPE allocate_strict(const size_t extents[]) {
         using SCALAR = typename strip_ptr<TYPE>::type;
         size_t total = count_leaves_strict<TYPE, SYMM, STRICT, 0>(extents, 0);
-        SCALAR* pool = new SCALAR[total > 0 ? total : 1];
+        SCALAR* pool = blade_pool::alloc<SCALAR>(total > 0 ? total : 1);
         size_t offset = 0;
         return build_skeleton_strict<TYPE, SYMM, STRICT, 0>(extents, pool, offset, 0);
     }
@@ -395,8 +771,15 @@ namespace nested_array_utilities {
         using SCALAR = typename strip_ptr<TYPE>::type;
 
         if constexpr (!std::is_pointer<DTYPE>::value) {
-            // Rank 1: there is no skeleton -- build_skeleton returned `pool + 0`, so `data` IS the pool base. One delete[] and we are done (also covers the degenerate extent-0 case).
-            delete[] data;
+            // Rank 1: there is no skeleton -- build_skeleton returned `pool + 0`, so `data` IS the pool base. One release
+            // and we are done (also covers the degenerate extent-0 case); the count is allocate's `total > 0 ? total : 1`.
+            if (extents) blade_pool::release(data, extents[0] > 0 ? extents[0] : size_t(1));
+            else {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                if (data) blade_pool::capacity_detail::unknown_release();
+#endif
+                delete[] data;
+            }
         } else {
             size_t total = count_leaves<TYPE, SYMM, DIAGONALS, 0>(extents, 0);
             // Recover the pool BEFORE the skeleton is torn down: pool_base walks the [0] spine, which requires the rows
@@ -404,7 +787,7 @@ namespace nested_array_utilities {
             // level, so total > 0 guarantees it is walkable and its leaf sits at pool + 0.
             SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;
             destroy_skeleton<TYPE, SYMM, DIAGONALS, 0>(data, extents, 0);
-            delete[] pool;   // delete[] nullptr is a no-op
+            if (pool) blade_pool::release(pool, total);   // the count allocate<> passed (total > 0 here)
             // BOUNDED LEAK, total == 0 (e.g. strict storage with rank > extent): allocate still made a 1-element
             // sentinel pool so a stray deref is never on a zero-length buffer, but with no leaves there is no [0]
             // spine to walk (skeleton[0] would be out of bounds) and the sentinel's address is unrecoverable from the
@@ -450,12 +833,19 @@ namespace nested_array_utilities {
         using SCALAR = typename strip_ptr<TYPE>::type;
 
         if constexpr (!std::is_pointer<DTYPE>::value) {
-            delete[] data;                  // rank 1: data IS the pool
+            // rank 1: data IS the pool
+            if (extents) blade_pool::release(data, extents[0] > 0 ? extents[0] : size_t(1));
+            else {
+#if defined(BLADE_POOL_CAPACITY_DIAGNOSTICS) && BLADE_POOL_CAPACITY_DIAGNOSTICS
+                if (data) blade_pool::capacity_detail::unknown_release();
+#endif
+                delete[] data;
+            }
         } else {
             size_t total = count_leaves_strict<TYPE, SYMM, STRICT, 0>(extents, 0);
             SCALAR* pool = (total > 0) ? pool_base(data) : nullptr;
             destroy_skeleton_strict<TYPE, SYMM, STRICT, 0>(data, extents, 0);
-            delete[] pool;
+            if (pool) blade_pool::release(pool, total);
         }
     }
 
@@ -702,21 +1092,92 @@ namespace nested_array_utilities {
     // Transform policies. Selected by the caller from the index type's ReadTransformBehavior; share one fold/fetch path.
     enum class ReadTransform { Identity, NegateOnSwap, ConjugateOnSwap };
 
+    // Compare-exchange: order (a, b) ascending, return 1 iff it swapped. An exchange of an out-of-order ADJACENT pair
+    // removes exactly one inversion, so the XOR of a sorting network's swap flags is the permutation's inversion
+    // parity -- the parity the generic fold below counts -- and ties never swap, as that fold never counts them.
+    inline int canon_cswap(size_t& a, size_t& b) {
+        const int sw = a > b;
+        const size_t lo = sw ? b : a, hi = sw ? a : b;   // selects, no branch
+        a = lo; b = hi;
+        return sw;
+    }
+
     // Fold an R-tuple in place: sort ascending, return swap parity (0 even, 1 odd). For strict groups, set `zero` if any two entries are equal.
+    //
+    // Ranks 2 and 3 (every compact read the corpus and the bench make) run a fixed compare-exchange network -- one
+    // exchange at r = 2, (0,1)(1,2)(0,1) at r = 3, the network the LLVM lane's canonRead emits -- so the read is
+    // straight-line integer code with no out-of-line std::sort (bench G3b: the C++ checksum read was 4.9x the LLVM
+    // lane's). Same sorted tuple, same parity, same zero flag as the generic path, which higher ranks keep.
     template<size_t R>
     inline int canon_fold(std::array<size_t, R>& idx, bool strict, bool& zero) {
-        zero = false;
-        if (strict) {
+        if constexpr (R == 2) {
+            const int p = canon_cswap(idx[0], idx[1]);
+            zero = strict && idx[0] == idx[1];
+            return zero ? 0 : p;
+        } else if constexpr (R == 3) {
+            int p = canon_cswap(idx[0], idx[1]);
+            p ^= canon_cswap(idx[1], idx[2]);
+            p ^= canon_cswap(idx[0], idx[1]);
+            zero = strict && (idx[0] == idx[1] || idx[1] == idx[2]);   // sorted: a repeat is adjacent
+            return zero ? 0 : p;
+        } else {
+            zero = false;
+            if (strict) {
+                for (size_t a = 0; a < R; a++)
+                    for (size_t b = a + 1; b < R; b++)
+                        if (idx[a] == idx[b]) { zero = true; return 0; }
+            }
+            int inv = 0;
             for (size_t a = 0; a < R; a++)
                 for (size_t b = a + 1; b < R; b++)
-                    if (idx[a] == idx[b]) { zero = true; return 0; }
+                    if (idx[a] > idx[b]) inv++;
+            std::sort(idx.begin(), idx.end());
+            return inv & 1;
         }
-        int inv = 0;
-        for (size_t a = 0; a < R; a++)
-            for (size_t b = a + 1; b < R; b++)
-                if (idx[a] > idx[b]) inv++;
-        std::sort(idx.begin(), idx.end());
-        return inv & 1;
+    }
+
+    // FLAT canonical offsets into one packed pool (allocate<>'s DFS order; pool_base gives the base): the position
+    // build_skeleton gives each canonical cell, checked exhaustively by cpp/alloc_layout_tests.cpp
+    // ("canon_flat_offsets"). NOT the emitted random-access read: the lazy compact read keeps the nested walk
+    // `t[c0][c1][c2]` after the network fold above, because the flat form measured SLOWER on the bench shapes
+    // (review M2; CodeGenExpr.lazyCompactRead has the numbers) -- two L1-resident row-pointer loads are cheaper than
+    // the binomial arithmetic per cell. Kept for code that walks a pool by offset (the planned packed tile drivers,
+    // review M5/M8). Preconditions: the coordinates are sorted, and (n + 2)^3 fits a size_t, so no binomial
+    // numerator below can overflow (n <= 2,000,000 on 64 bits).
+    //
+    //   inclusive rank 2, a <= b < n:      a(2n - a + 1)/2 + (b - a)
+    //   strict    rank 2, a <  b < n:      a(2n - a - 1)/2 + (b - a - 1)
+    //   inclusive rank 3, a <= b <= c < n: T3(n) - T3(n - a) + T2(n - a) - T2(n - b) + (c - b),
+    //                                      T2(m) = m(m+1)/2, T3(m) = m(m+1)(m+2)/6
+    //   strict    rank 3, a < b < c < n:   the inclusive rank-3 offset of (a, b-1, c-2) at extent n-2 -- the strict
+    //                                      simplex IS the inclusive one two smaller (each level's seed is one higher)
+    inline size_t canon_t2(size_t m) { return m * (m + 1) / 2; }
+    inline size_t canon_t3(size_t m) { return m * (m + 1) * (m + 2) / 6; }
+    template<bool STRICT>
+    inline size_t canon_off2(size_t a, size_t b, size_t n) {
+        if constexpr (STRICT) return a * (2 * n - a - 1) / 2 + (b - a - 1);
+        else                  return a * (2 * n - a + 1) / 2 + (b - a);
+    }
+    inline size_t canon_off3_incl(size_t a, size_t b, size_t c, size_t n) {
+        return canon_t3(n) - canon_t3(n - a) + canon_t2(n - a) - canon_t2(n - b) + (c - b);
+    }
+    template<bool STRICT>
+    inline size_t canon_off3(size_t a, size_t b, size_t c, size_t n) {
+        if constexpr (STRICT) return canon_off3_incl(a, b - 1, c - 2, n - 2);
+        else                  return canon_off3_incl(a, b, c, n);
+    }
+
+    // canon_count(m, r, strict): canonical r-tuples over m values -- C(m, r) strict, C(m + r - 1, r) inclusive -- the
+    // size of a packed pool, and (as total - canon_count(n - i, ...)) the pool offset where the canonical tuples with
+    // leading coordinate i begin, which is how the threaded orbit-class fold (src/OrbitFold.fs, bench G32) hands each
+    // thread its rows without walking the rows before them. Step k leaves c = C(top - r + k, k) exactly (so C(top, r)
+    // at k = r), and the intermediate product is at most r times the final count.
+    inline size_t canon_count(size_t m, size_t r, bool strict) {
+        const size_t top = strict ? m : m + r - 1;
+        if (top < r) return 0;
+        size_t c = 1;
+        for (size_t k = 1; k <= r; k++) c = c * (top - r + k) / k;
+        return c;
     }
 
     // Left-justify a sorted R-tuple to storage coords. strict -> extra -k.

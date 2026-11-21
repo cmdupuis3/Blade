@@ -1,7 +1,7 @@
 // TEST: HermitianIdx Rectangular
 // HermitianIdx iterates as full rectangular (no triangular optimization)
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let L = method_for(A, B)
 let f = lambda(x, y) -> x * y
 let result = L <@> f |> compute

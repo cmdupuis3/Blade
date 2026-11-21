@@ -7,5 +7,5 @@ import ml as ml
 // the Clebsch-Gordan-typed ml.tensor_product. BL4008.
 // ============================================================================
 let static S = [(0, 0, 1), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>, y: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bad(x: Array<Float64 like IrrepsIdx<S>>, y: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
   x * y

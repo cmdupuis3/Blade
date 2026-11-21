@@ -59,11 +59,15 @@ namespace blade_dll {
 
 #ifdef __CUDACC__
     // A CUDA runtime call that did not succeed: BL8005, naming the call and
-    // the runtime's own error string. One static buffer: the failure exit is
-    // taken once, by the first failing thread (the host panic's once-flag).
+    // the runtime's own error string. The buffer is THREAD-LOCAL: the
+    // message is formatted BEFORE the host panic's once-flag decides which
+    // failing thread exits, so with one shared buffer two host threads
+    // failing together could garble the winner's line and run-record
+    // message. The winner's buffer outlives the call (it is its own
+    // thread's, and that thread runs the failure-exit hooks).
     static inline void ck(cudaError_t e, const char* api) {
         if (e == cudaSuccess) return;
-        static char buf[512];
+        static thread_local char buf[512];
         std::snprintf(buf, sizeof buf, "CUDA runtime call %s failed (status %d: %s)",
                       api, (int)e, cudaGetErrorString(e));
         fail("BL8005", buf);

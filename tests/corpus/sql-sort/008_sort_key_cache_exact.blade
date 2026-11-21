@@ -1,0 +1,15 @@
+// TEST: Sort Key Cache Exact
+// Rule `sort-form v1` caches a total, write-free key ONCE per element, in the
+// key's OWN type: an Int64 key above 2^53 stays exact (as a double the two
+// keys below would tie and keep input order). The key over a range operand
+// reads `big(i)` with i a level of R, so its subscript is proven and the key
+// is total (cached); the same key over a materialized index array reads a
+// value (a run-time checked subscript) and keeps the per-comparison form.
+// Same permutation either way.
+type R = Idx<4>
+let big: Array<Int64 like R> = [9007199254740993, 9007199254740992, 5, 9007199254740993]
+let p = sort(range<R>, lambda(i) -> big(i))
+let ids = method_for(range<R>) <@> lambda(i) -> i |> compute
+let q = sort(ids, lambda(i) -> big(i))
+// EXPECT: p = [2, 1, 0, 3]
+// EXPECT: q = [2, 1, 0, 3]

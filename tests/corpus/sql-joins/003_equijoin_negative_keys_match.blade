@@ -1,0 +1,20 @@
+// TEST: Equijoin Negative Keys Match
+// ----------------------------------------------------------------------------
+// Equality has no negative-key drop (unlike `group_keys`, which drops a row
+// whose key is negative): -3 pairs with -3 and 0 with 0, exactly as `l == r`
+// on every pair. The CSR's counting sort runs over the keys' measured span
+// [-3, 2], bucket = key - lo, with no sentinel key value.
+// Pairs: (0,0) (0,3) (1,2) (2,0) (2,3).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<4>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [-3, 0, -3, 5]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4]
+let right_key: Array<Int64 like RightRow> = [-3, 2, 0, -3]
+let right_amount: Array<Int64 like RightRow> = [10, 20, 30, 40]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l + r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let fp = reduce(matched, lambda(a, b) -> 3 * a + b, 0)
+// EXPECT: matched = [11, 41, 32, 13, 43]
+// EXPECT: match_count = 5
+// EXPECT: fp = 2368

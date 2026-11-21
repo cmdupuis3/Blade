@@ -1,0 +1,20 @@
+// TEST: Sibling Folds Keep A Leg Reading A Deferred Module Map Extent Apart
+// ============================================================================
+// Gap G219, round 4 wave 9 (lane C, C5): the sibling-fold pass inlines a
+// pure-total helper one level under FRESH ids; its leg totality judge read
+// the module-wide fail-closed deferred classifier, built before the inline,
+// so the inlined `let y = .. |> compute` looked like an imported (unseen)
+// binder and the seed `Float64(extents(y))` declined the join (two
+// traversals, the same value). The region's inlined lets now join the
+// classifier's census: the legs join (blade test optimize pins the record).
+// ============================================================================
+// The control: the leg's seed reads the extent of a DEFERRED MODULE map,
+// which stays declined (the classifier still answers deferred for it).
+type I = Idx<5>
+type A = Array<Float64 like I>
+let x: A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let d = method_for(x) <@> lambda(v: Float64) -> v * 2.0
+function helper(a: A) -> Float64 = reduce(a, (+), Float64(extents(d)))
+function f(a: A) -> (Float64, Float64) = (prodsum(a, a), helper(a))
+let r = f(x)
+// EXPECT: r = (55.0, 20.0)

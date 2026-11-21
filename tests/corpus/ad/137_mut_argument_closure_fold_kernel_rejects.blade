@@ -1,0 +1,20 @@
+// TEST: A Mut Argument Beside A Closure Fold Kernel Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3-kernel) / G250 (5), round 4 wave 9 (lane C, C2): a closure held
+// by a module let used as a REDUCTION kernel (`reduce(y, kf2, 0.0)`) runs
+// inside the callee with unknown reads: refused fail closed beside the `mut`
+// argument (BL4005). It used to be accepted (and then failed in the C++
+// back end, BL9002, a separate gap).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory2(a: A) -> ((Float64, Float64) -> Float64) = lambda(s: Float64, t: Float64) -> s + t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf2 = factory2(g)
+function bump(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    reduce(y, kf2, 0.0)
+}
+let r = bump(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

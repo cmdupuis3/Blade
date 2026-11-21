@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "pairaction",
+  "group": "A",
+  "title": "One-channel row actions of a stored symmetric Matern-5/2 matrix (z, 3 RHS u_r, y_r = u_r / z)",
+  "sizes": {
+    "smoke": {
+      "n": 53
+    },
+    "full": {
+      "n": 2503
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "mt8-licensed-native",
+    "serial-repro-native",
+    "mt8-repro-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "WIN ~2x (half the transcendentals: the producer dominates)",
+    "expert": "parity on the producer; the actions' share small (4 passes over the 25 MB pool vs the expert's one fused sweep)"
+  },
+  "notes": "Round 3, D-P2 / gap G73 (bench/notes/gap-register.md). Every named output (pts, v_r, W, z, u_r, y_r) is a stored array; checksum reads every stored element of W, z, u_r and y_r. Blade v1 is SINGLE-CHANNEL: each of z, u_0, u_1, u_2 is its own row action, one pass over W each (serial regimes, BLADE_OMP_THREADS=1). mt8 is a LANE SPLIT: blade-cpp (threads enabled, the map's request present) declines the action and the old emitter runs the row walk on the team (each row's chain on one thread, output-owned); blade-llvm has no thread runtime and runs the SERIAL action whenever its own admission succeeds, otherwise its own fallback. Raw-bit identity with the walk is tested for Float64 under REPRO + contract off; the C++ lane admits Float64 / Float32 / Int64 / Int32, the LLVM lane Float64 / Int64. Multi-channel is NOT RECOGNIZED (a tuple kernel or seed returns ActionNotAction, no refusal record). The expert serial twin FUSES all four channels into one packed-by-columns sweep (dspmv-style, strict: every chain receives its terms in ascending partner order, see spec.md); the expert mt8 twin is OUTPUT-OWNED (each thread owns rows of z / u_r and gathers its row's canonical cells in ascending j) -- a shared-update canonical loop with atomics or private merges would NOT be strict and is not a fair repro twin. The natural twin is the dense full-matrix transcription (every cell evaluated, n^2 sqrt+exp).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "source_of_truth": "bench/kernels/pairaction/spec.md (round 3, wave 3, W3-4)"
+}

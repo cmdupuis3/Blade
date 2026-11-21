@@ -12,7 +12,7 @@
 // index KIND: irreps block indices and `group_by` outer slots are dense walks
 // that legitimately co-iterate with a plain `Idx<n>` (ml-equiv, ml-ops and the
 // grouped-peel AD corpora all do it), and only packing changes the addressing.
-// ERROR: BL3999
+// ERROR: BL3027
 // ERROR-CONTAINS: operand 1 is over SymIdx<2, 4> and operand 2 is over D
 type S = SymIdx<2, 4>
 type D = Idx<4>

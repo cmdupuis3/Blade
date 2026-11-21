@@ -1,0 +1,15 @@
+// TEST: A literal returned through a leading opaque RaggedIdx annotation is refused (rejects)
+// ============================================================================
+// Gap G190 (a), Codex diff review of A4: the let-annotation refusal of
+// index-types/579 missed a literal that gets the type through a function
+// RETURN annotation -- the interpreter read it as a plain array, and the C++
+// lane returned a ragged view over the callee's automatic storage. The
+// refusal now sits where every literal has its final type (zonk): returns,
+// blocks and tuple components alike (index-types/581).
+// ============================================================================
+function f() -> Array<Float64 like RaggedIdx<_>, Idx<1>> = [[1.0], [2.0]]
+let a = f()
+let x = a(0, 0)
+// ERROR: BL4003
+// ERROR-CONTAINS: has no outer axis for its row lengths to vary over
+// REJECT-AT: lower

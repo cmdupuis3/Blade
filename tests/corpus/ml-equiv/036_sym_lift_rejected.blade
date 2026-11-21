@@ -18,7 +18,7 @@ import ml as ml
 // ============================================================================
 let static SA = [(0, 0, 1), (1, 1, 1)]
 
-function bad(x: Array<Float like IrrepsIdx<SA>>) where ml.equiv(O3) -> Array<Float like Idx<10>> =
+function bad(x: Array<Float64 like IrrepsIdx<SA>>) where ml.equiv(O3) -> Array<Float64 like Idx<10>> =
   ml.sym_lift(SA, 2, x)
 
-let out: Array<Float like Idx<10>> = bad([1.0, 2.0, -0.5, 0.25])
+let out: Array<Float64 like Idx<10>> = bad([1.0, 2.0, -0.5, 0.25])

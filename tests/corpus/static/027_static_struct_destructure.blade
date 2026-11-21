@@ -18,7 +18,7 @@
 // genPrintStatements), and static leaves are pinned through plain lets by
 // convention (013, 024), so each leaf is re-bound before being observed.
 struct Sample {
-    count: Int,
+    count: Int32,
     scale: Float64
 }
 let static Sample { count, scale } = Sample { count = 6, scale = 2.5 }

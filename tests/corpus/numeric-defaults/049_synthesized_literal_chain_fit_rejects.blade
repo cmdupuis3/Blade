@@ -1,0 +1,5 @@
+// TEST: synthesized literal chains retain oversized leaf constraints (rejects)
+let __a = 0.0
+let __b = __a + 1e300
+let result = __b + Float32(1.0)
+// ERROR: BL3020

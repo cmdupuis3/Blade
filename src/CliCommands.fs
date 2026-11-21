@@ -14,14 +14,14 @@ let compilerVersion = Blade.RunRecord.bladeVersion
 /// and a sample of the corpus-category keys (one per tests/corpus/<dir>;
 /// multiword ones also accept the unhyphenated spelling). Listed for `--help`.
 let internal usageTestBlockKeys =
-    [ "access"; "alloc"; "attrs"; "cli"; "closure-capture"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
+    [ "access"; "alloc"; "attrs"; "cell-epilogue"; "cli"; "closure-capture"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
-      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
-      "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"
-      "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "run-record"
-      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"
+      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"; "print-form"
+      "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"; "rec-step"
+      "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
+      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
       "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
       "validate-arrow"; "validation-codes"; "zarr" ]
 
@@ -117,6 +117,11 @@ let printUsage () =
     printfn "  --print <a,b>  Print only the named top-level bindings (every one by default; a name"
     printfn "                 that is not a binding is refused). Any verb; the compiled program and"
     printfn "                 the interpreter both honour it (equivalently BLADE_PRINT)."
+    printfn "  --print-form test|display"
+    printfn "                 Which spelling the program's prints use. run / compile / emit / plan default"
+    printfn "                 to DISPLAY (shortest round-trip floats, units, bare expressions unlabelled,"
+    printfn "                 sum types); TEST is the spelling // EXPECT: pins are written in (equivalently"
+    printfn "                 BLADE_PRINT_FORM; blade test always uses the test form)."
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
     printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
@@ -299,13 +304,24 @@ let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> 
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok ir -> Ok (ir, sm)
 
+/// Print (and drain) the coded warnings the lane that produced the artifact
+/// raised while emitting it -- BL7005 today -- on stderr.
+let private printEmitterWarnings (useColor: bool) (sm: Blade.Diagnostics.SourceMap) : unit =
+    match Blade.Diagnostics.EmitterWarnings.drain () with
+    | [] -> ()
+    | ds -> eprintfn "%s" (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+
 /// The C++ back half: IRProgram -> translation unit, plus the two
 /// refusal channels codegen reports through.
-let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
+let private cppBackendOfIR (options: Blade.CodeGenState.ProgramEmissionOptions)
+                           (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
                            (verbose: bool) (timing: bool) (swAll: System.Diagnostics.Stopwatch)
                            (mark: string -> unit) : Result<string * string list, string> =
     let useColor = not Console.IsErrorRedirected
-    let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+    // `options` carries the BLADE_PRIVATE_SPOOL grant ONLY from the verb
+    // dispatch (Cli.fs: run / compile / emit / plan); the REPL, notebook, IDE
+    // render lane and every test helper pass the default (no grant).
+    let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIRWithOptions options ir testName
     mark "codegen"
     // A shape that reached codegen with no arm for it. Refuse HERE,
     // as a coded Blade diagnostic spanned at the declaration --
@@ -346,6 +362,9 @@ let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blad
         // and outside cuda emit mode this list is empty.
         for w in warnings do
             if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
+    // Coded emitter warnings (BL7005, G69's opt-in kept inline): unprompted,
+    // on stderr, rendered like every diagnostic.
+    printEmitterWarnings useColor sm
     Ok (cppCode, warnings)
 
 /// Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
@@ -373,7 +392,7 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
         let (timing, swAll, mark) = phaseTimers ()
         match frontEndToIR filePath strictPins mark with
         | Error e -> Error e
-        | Ok (ir, sm) -> cppBackendOfIR ir testName sm verbose timing swAll mark
+        | Ok (ir, sm) -> cppBackendOfIR Blade.CodeGenState.defaultProgramEmissionOptions ir testName sm verbose timing swAll mark
 
 /// What a back end produced for one program: a C++ translation unit (with its
 /// codegen warnings) or the LLVM lane's textual `.ll`.
@@ -390,7 +409,7 @@ type BackendArtifact =
 /// program to the C++ lane unchanged. The lane can therefore only be
 /// all-correct or absent, which is what lets it grow against a byte-pinned
 /// corpus without ever half-compiling anything.
-let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
+let compileArtifactWith (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
     if not (File.Exists filePath) then
         Error $"File not found: {filePath}"
     else
@@ -400,7 +419,7 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
         | Error e -> Error e
         | Ok (ir, sm) ->
             let toCpp () =
-                cppBackendOfIR ir testName sm verbose timing swAll mark
+                cppBackendOfIR options ir testName sm verbose timing swAll mark
                 |> Result.map CppArtifact
             let fallback (reason: string) =
                 eprintfn "[blade] llvm lane refused: %s; falling back to C++" reason
@@ -414,7 +433,20 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                     | Error reason -> fallback reason
                     | Ok ll ->
                         mark "emit-llvm"
+                        printEmitterWarnings (not Console.IsErrorRedirected) sm
+                        // The omp census (G11): the lane has no thread runtime,
+                        // so every `where omp` licence compiled serial. Printed
+                        // unprompted, like the refusal notice above -- "you
+                        // asked and did not get it" is never a --verbose detail.
+                        match EmitLlvm.ompRequestedKernels ir with
+                        | [] -> ()
+                        | ks ->
+                            eprintfn "[blade] llvm lane: %s (%s)" (EmitLlvm.ompCensusPhrase ()) (String.concat ", " ks)
                         Ok (LlvmArtifact ll)
+
+/// The default-options spelling: no private-spool grant.
+let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
+    compileArtifactWith Blade.CodeGenState.defaultProgramEmissionOptions filePath verbose strictPins
 
 // ---------------------------------------------------------------------------
 // Where a compile happens.
@@ -514,12 +546,12 @@ let internal reportBackendRejection (firstError: string) (rawLog: string) (srcFi
 /// Returns the executable's path in `buildDir`, or the failure text (a
 /// BL9002 diagnostic when the back end rejected generated code, see
 /// backendRejection). Nothing outside `buildDir` is written or deleted.
-let private compileInto (filePath: string) (buildDir: string) (verbose: bool) (strictPins: bool) : Result<string, string> =
+let private compileInto (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (buildDir: string) (verbose: bool) (strictPins: bool) : Result<string, string> =
     // The generated source keeps the SOURCE's base name: it is spliced into
     // the emitted text (program name, timing lines), so a build directory
     // must not change what is emitted.
     let baseName = Path.GetFileNameWithoutExtension(filePath)
-    match compileArtifact filePath verbose strictPins with
+    match compileArtifactWith options filePath verbose strictPins with
     | Error e -> Error e
     | Ok (LlvmArtifact ll) ->
         // The LLVM lane's whole back half: write the .ll where the .cpp would
@@ -585,12 +617,12 @@ let private isBackendRejection (failure: string) = failure.Contains "BL9002"
 /// directory is removed afterwards unless `verbose` (kept for inspection, and
 /// named) or the back end rejected the generated code (BL9002 names files in
 /// it).
-let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+let compileToExeWith (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
     if not (File.Exists filePath) then Error $"File not found: {filePath}"
     else
     let buildDir = freshBuildDir filePath
     let result =
-        match compileInto filePath buildDir verbose strictPins with
+        match compileInto options filePath buildDir verbose strictPins with
         | Error e -> Error e
         | Ok exePath ->
             let dest =
@@ -620,6 +652,11 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         else removeBuildDir buildDir
     result
 
+/// The default-options spelling (no private-spool grant): the REPL, the
+/// notebook / IDE render lanes and the test helpers come through here.
+let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+    compileToExeWith Blade.CodeGenState.defaultProgramEmissionOptions filePath outputPath verbose strictPins
+
 /// One stderr line naming an OS-level crash of the compiled program
 /// (Build.describeCrashExit); the exit code itself is passed through unchanged.
 let private reportCrash (exitCode: int) : unit =
@@ -635,7 +672,7 @@ let private reportCrash (exitCode: int) : unit =
 /// (compileInto) and nothing is written beside the source; the program's
 /// working directory is the SOURCE's directory, so relative data paths
 /// resolve exactly as they did when the executable was written there.
-let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
+let runFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
     if not (File.Exists filePath) then reportFailure $"File not found: {filePath}"
     else
     let srcDir = Path.GetDirectoryName(Path.GetFullPath filePath)
@@ -643,7 +680,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
     let mutable keep = verbose
     try
         let runIt () =
-            match compileInto filePath buildDir verbose strictPins with
+            match compileInto options filePath buildDir verbose strictPins with
             | Error e ->
                 if isBackendRejection e then keep <- true
                 reportFailure e
@@ -942,7 +979,212 @@ let replLoop () : int =
 /// had one, applied or declined with the first reason, and the evidence
 /// the pass discharged. Diagnostic data only -- nothing here is a licence
 /// to branch on an optimizer outcome from Blade source.
-let planFile (filePath: string) (json: bool) : int =
+/// One emission decision, re-read for the LLVM lane (bench gap G23).
+///
+/// `blade plan` records its emission decisions by generating the C++ (the
+/// only back end that records them). When BLADE_LLVM is on and the LLVM lane
+/// takes the program, several of those are C++-ONLY routes the executable will
+/// not contain -- the plan used to print `[blas-routing v1] applied` for a
+/// program whose LLVM executable links no OpenBLAS. Each such record is
+/// re-stated for the lane that will emit: declined with the lane's reason, the
+/// C++ lane's own verdict kept as evidence. Decisions both lanes share (the
+/// optimizer's, storage and iteration shape) pass through unchanged.
+let internal llvmLaneDecision (d: Blade.Effects.Decision) : Blade.Effects.Decision =
+    let cppVerdict =
+        match d.Outcome with
+        | Blade.Effects.Applied -> "C++ lane: applied"
+        | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+    let declined (why: string) (extra: string list) =
+        { d with Outcome = Blade.Effects.Declined why; Evidence = extra @ (cppVerdict :: d.Evidence) }
+    match d.Rule with
+    | "blas-routing" ->
+        declined "the LLVM lane has no BLAS/LAPACK route (its executable links no OpenBLAS or cuBLAS): Blade's own loops run" []
+    | "omp" ->
+        // The census phrase tag, as every C++ decline record carries it.
+        declined (EmitLlvm.ompCensusReason ()) [ "[omp] requested but emitted serial" ]
+    | "fold-form" ->
+        // The C++ fold forms (simd reduction, K lanes, thread team, row jam,
+        // BLAS dot) are that lane's. The LLVM lane folds with ONE accumulator
+        // chain whose adds carry `reassoc nsz` when the fold is licensed
+        // (`foldFmfLicensed`): exactly the folds the C++ lane did not leave
+        // serial for want of a licence or under the repro build.
+        let cppForm = d.Evidence |> List.tryHead |> Option.defaultValue ""
+        // The orbit-class fold (Blade.OrbitFold) is BOTH lanes' form: the
+        // LLVM lane runs the same recogniser and the same class nest, so the
+        // record (taken or declined) holds for it as written -- except the
+        // C++ lane's thread team (G32), which this lane has no runtime for:
+        // its pass is the serial one.
+        if cppForm.StartsWith "fold form: orbit-class fold" && cppForm.Contains Blade.OrbitFold.threadedSuffix then
+            { d with Evidence = cppForm.Replace(Blade.OrbitFold.threadedSuffix, "; one serial pass (LLVM lane: no thread runtime)") :: List.tail d.Evidence }
+        elif cppForm.StartsWith "fold form: orbit-class fold" then d
+        // The ORDERED ORBIT SCATTER: the LLVM lane's version of every scatter
+        // record is its EMITTER's own (EmitLlvm.tryOrbitScatter, merged in by
+        // mergeLlvmScatterRecords before this function sees the rest); such a
+        // record, and a shared-plan decline the merge passed through, holds
+        // as written.
+        elif d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag then d
+        elif (match d.Outcome with
+              | Blade.Effects.Declined why -> why.Contains Blade.OrbitFold.scatterG35Precedence
+              | _ -> false) then
+            declined "the LLVM lane's emitter recorded no ordered-scatter decision for this walk (the C++ lane yielded it to its thread team)" []
+        elif cppForm.StartsWith "fold form: ordered orbit scatter not taken" then d
+        // The row-owned pull (round 3, D-P3) is the C++ lane's thread team
+        // over the rank-3 scatter's leaf chains: this lane has none, so its
+        // decline (and its reason) is the C++ lane's; the lane's own scatter
+        // record for the walk says which form it runs.
+        elif cppForm.StartsWith Blade.OrbitFold.pullDeclinedForm then
+            declined "the LLVM lane has no thread runtime (no row-owned pull form); this lane's scatter record for the walk says which form it runs" []
+        // A C++ orbit-action record (round 3, D-P2) the LLVM emitter recorded
+        // nothing about: never claimed for this lane (its own record, when it
+        // has one, was merged in above and carries the tag).
+        elif Blade.OrbitFold.isActionRecord d then
+            declined "the LLVM lane's emitter recorded no orbit-action decision for this site" []
+        // A C++ scatter record the LLVM emitter recorded nothing about (it was
+        // merged as unpartnered): never claimed for this lane.
+        elif Blade.OrbitFold.isScatterRecord d then
+            declined "the LLVM lane's emitter recorded no ordered-scatter decision for this walk" []
+        // The C++ lane's threaded complete-row form (G35) is that lane's
+        // thread team; this lane has no thread runtime and runs the same rows
+        // serially, in the same association. When the strict scatter admitted
+        // the walk in the C++ plan, whether this lane SCATTERS is its emitter's
+        // own record (the scatter line for the same walk), not this marker.
+        elif cppForm.StartsWith "fold form: threaded complete rows (repro)"
+             && d.Evidence |> List.exists (fun e -> e.Contains Blade.OrbitFold.scatterServesSerialMarker) then
+            declined "the LLVM lane has no thread runtime: it runs this walk serially in the same association -- the ordered orbit scatter where its own record for this walk says applied, else the serial walk" []
+        elif cppForm.StartsWith "fold form: threaded complete rows (repro)" then
+            declined "the LLVM lane has no thread runtime: it runs the serial walk (each row's fold, then the outer chain ascending from its seed -- the same association as the C++ lane's row slots)" []
+        // A row-slot decline whose walk the C++ plan scatters -- declined by
+        // its own admission, or admitted and yielded to the scatter (round 3).
+        elif cppForm.StartsWith Blade.OrbitFold.rowSlotsScatterFormPrefix then
+            declined "the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs" []
+        elif cppForm.StartsWith "fold form: serial (no reorder licence"
+           || cppForm.StartsWith "fold form: serial (repro" then
+            declined "the fold keeps its serial association in the LLVM lane too" []
+        // A7c (gap G69): the join's legs rode the producer's sweep -- in this
+        // lane its one fused cell-epilogue loop, each leg with its OWN fold
+        // flags (none when strict, `reassoc nsz` on its own licence).
+        elif cppForm.StartsWith "fold form: producer-input legs" then
+            { d with Evidence = "fold form: producer-input legs carried by the producer's one fused loop (LLVM lane: each leg its own chain and its own fold flags -- none when strict, `reassoc nsz` only on the leg's own licence)" :: d.Evidence }
+        else
+            { d with
+                Outcome = Blade.Effects.Applied
+                Evidence = [ "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes)"
+                             $"C++ lane {cppForm}" ] @ List.tail (if d.Evidence.IsEmpty then [ "" ] else d.Evidence) }
+    | "microkernel" | "tile-cache" when d.Outcome = Blade.Effects.Applied ->
+        declined $"C++-lane {d.Rule}: the LLVM lane emits its own loop nest" []
+    // The compound REPRESENTATION (rule `compound`, bench gap G9) holds for
+    // both lanes as recorded: the LLVM lane emits exactly the compounds the
+    // C++ lane compacts (a rank-1 mask over one dense axis, no trailing dims
+    // -- the count, the kept-position fill and the gather by position in IR,
+    // keyed reads by binary search) and refuses every other one, so a plan
+    // this lane prints never carries a `compound` record it did not build.
+    | "compound" -> d
+    // A7c (gap G69): the planner's admission holds for both lanes; an
+    // emitter record ("C++ lane: ...") is that lane's. The LLVM lane carries
+    // the legs in its own fused cell-epilogue loop wherever that loop takes
+    // the producer (EmitLlvm.tryBindFlatEpilogueProducer: a literal fold seed
+    // and a builtin combine), and the C++ lane's lane-state / block forms are
+    // not this lane's.
+    | "epilogue-legs" when (d.Evidence |> List.exists (fun e -> e.StartsWith "C++ lane:"))
+                           || (match d.Outcome with Blade.Effects.Declined why -> why.StartsWith "C++ lane:" | _ -> false) ->
+        { d with Evidence = "LLVM lane: the legs ride this lane's one fused cell-epilogue loop wherever that loop takes the producer (a literal fold seed and a builtin combine); the forms below are the C++ lane's" :: d.Evidence }
+    | _ -> d
+
+/// The LLVM lane's ordered-scatter records are its EMITTER's own
+/// (EmitLlvm.tryOrbitScatter, tagged OrbitFold.llvmScatterRecordTag): each C++
+/// scatter record (taken, yielded to G35, or declined) is replaced by the
+/// emitter's record for the same declaration span, in emission order (both
+/// lanes walk the folds of a declaration in the same order), keeping the C++
+/// verdict as trailing evidence and the C++ subject. A C++ record with no
+/// partner stays (llvmLaneDecision re-states it: a shared-plan decline holds;
+/// a taken / yielded scatter becomes "no LLVM decision recorded"); an emitter
+/// record with no C++ partner is appended.
+let internal mergeLlvmScatterRecords (ds: Blade.Effects.Decision list) (own: Blade.Effects.Decision list) : Blade.Effects.Decision list =
+    let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
+    let merged =
+        ds |> List.map (fun d ->
+            if not (Blade.OrbitFold.isScatterRecord d || Blade.OrbitFold.isActionRecord d) then d
+            else
+                // an orbit-action record (round 3, D-P2) pairs only with the
+                // emitter's own action record, a scatter record with a scatter's
+                let kind (x: Blade.Effects.Decision) = Blade.OrbitFold.isActionRecord x
+                match pending |> Seq.tryFindIndex (fun o -> o.Span = d.Span && kind o = kind d) with
+                | Some ix ->
+                    let o = pending.[ix]
+                    pending.RemoveAt ix
+                    let cppVerdict =
+                        match d.Outcome with
+                        | Blade.Effects.Applied -> "C++ lane: applied"
+                        | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+                    { o with Subject = d.Subject; Evidence = o.Evidence @ [ cppVerdict ] }
+                | None -> d)
+    merged @ List.ofSeq pending
+
+/// A record the LLVM emitter made ITSELF: the tile cores' (syrk M6, antisym
+/// pair M7, rank-3 simplex M8), tagged `(shared C core)` in its evidence.
+let internal isLlvmTileRecord (d: Blade.Effects.Decision) : bool =
+    (d.Rule = "microkernel" || d.Rule = "fold-form")
+    && d.Evidence |> List.exists (fun e -> e.Contains "(shared C core")
+
+/// The tile a record is about, from its evidence: "syrk tile", "antisym
+/// tile" or "simplex tile" (both lanes' records name it), else None.
+let private tileKindOf (d: Blade.Effects.Decision) : string option =
+    [ "syrk tile"; "antisym tile"; "simplex tile" ]
+    |> List.tryFind (fun k -> d.Evidence |> List.exists (fun e -> e.Contains k))
+
+/// The LLVM lane's plan: every C++ record `ds` re-stated by
+/// `llvmLaneDecision`, EXCEPT that the lane's own tile-core records `own`
+/// (M6 / M7 / M8) take the place of the C++ records for the SAME contraction
+/// -- same rule, evidence naming the same tile, and the same declaration
+/// span; failing a span match (a contraction inside a block, where the C++
+/// lane names the block-local binding and this lane the enclosing
+/// declaration), the next unclaimed record of that rule and tile in emission
+/// order, which both lanes walk identically. The C++ verdict is kept as
+/// trailing evidence and its subject (the C++ name the rest of the plan
+/// uses) is adopted. A tile record with no C++ counterpart -- the C++ lane
+/// routed the contraction to BLAS, which records no fold form -- is appended
+/// under the BLAS record's subject.
+let internal mergeLlvmTileRecords (ds: Blade.Effects.Decision list) (own: Blade.Effects.Decision list) : Blade.Effects.Decision list =
+    let pending = System.Collections.Generic.List<Blade.Effects.Decision>(own)
+    let claim (d: Blade.Effects.Decision) =
+        match tileKindOf d with
+        | None -> None
+        | Some kind ->
+            let sameTile (o: Blade.Effects.Decision) = o.Rule = d.Rule && tileKindOf o = Some kind
+            match pending |> Seq.tryFindIndex (fun o -> sameTile o && o.Span = d.Span) with
+            | Some ix -> Some ix
+            | None ->
+                // Only an own record no C++ record claims by span.
+                let spanPartnered (o: Blade.Effects.Decision) =
+                    ds |> List.exists (fun d2 -> d2.Rule = o.Rule && tileKindOf d2 = Some kind && d2.Span = o.Span)
+                pending |> Seq.tryFindIndex (fun o -> sameTile o && not (spanPartnered o))
+    let merged =
+        ds |> List.map (fun d ->
+            match claim d with
+            | Some ix ->
+                let o = pending.[ix]
+                pending.RemoveAt ix
+                let cppVerdict =
+                    match d.Outcome with
+                    | Blade.Effects.Applied -> $"""C++ lane: applied ({(d.Evidence |> List.tryHead |> Option.defaultValue "")})"""
+                    | Blade.Effects.Declined why -> $"C++ lane: declined -- {why}"
+                { o with Subject = d.Subject; Evidence = o.Evidence @ [ cppVerdict ] }
+            // Not this lane's tile, or a C++ syrk record for a contraction
+            // this lane recorded nothing about: the ordinary re-statement.
+            | None -> llvmLaneDecision d)
+    // Unmatched (the C++ lane took the BLAS route): adopt the subject of that
+    // route's record for the same declaration, so both lines name one value.
+    let adopted =
+        pending |> Seq.map (fun o ->
+            match ds |> List.tryFind (fun d ->
+                    d.Rule = "blas-routing" && d.Span = o.Span
+                    && d.Evidence |> List.exists (fun e -> e.Contains "Syrk")) with
+            | Some d -> { o with Subject = d.Subject }
+            | None -> o)
+        |> List.ofSeq
+    merged @ adopted
+
+let planFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (json: bool) : int =
     if not (File.Exists filePath) then
         reportFailure $"File not found: {filePath}"
     else
@@ -968,21 +1210,83 @@ let planFile (filePath: string) (json: bool) : int =
             // BLADE_OMP_THREADS, BLADE_TILE_CACHE, ...).
             // A plan without its emission half says so (stderr), rather than
             // passing for a program that simply made no emission decisions.
-            (match Blade.IRValidate.validateIR program with
-             | Ok ir ->
-                 (try
-                     CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
-                     CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
-                  with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
-             | Error errs ->
-                 eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs))
+            let validated =
+                match Blade.IRValidate.validateIR program with
+                | Ok ir ->
+                    (try
+                        CodeGen.genSelfContainedProgramFromIRWithOptions options ir (Path.GetFileNameWithoutExtension filePath) |> ignore
+                        CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                     with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
+                    Some ir
+                | Error errs ->
+                    eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs)
+                    None
             let ds = Blade.Effects.Decisions.drain ()
+            // LANE-CORRECT PLAN (bench gap G23). With BLADE_LLVM on, the plan
+            // asks the same question `compileArtifact` asks -- does the LLVM
+            // lane take this program? -- and, when it does, re-states the C++-
+            // only routes for the lane that will actually emit. A refusal (or
+            // no clang) means the C++ lane builds it, and the plan says so.
+            // BLADE_LLVM unset: not consulted, the plan text is unchanged.
+            let lane, ds =
+                if not (Build.llvmEnabled ()) then None, ds
+                else
+                    let verdict =
+                        match Build.resolveClang (), validated with
+                        | None, _ -> Error "no clang found (set BLADE_LLVM_CLANG)"
+                        | _, None -> Error "IR validation failed"
+                        | Some _, Some ir ->
+                            (try EmitLlvm.tryEmitProgramNamed (Path.GetFileNameWithoutExtension filePath) ir
+                             with ex -> Error ex.Message)
+                    // The LLVM emitter's OWN records: only its tile-core
+                    // decisions (M6) are plan material; anything a shared
+                    // layer recorded while it ran is a duplicate of the C++
+                    // pass above and is dropped.
+                    let drained = Blade.Effects.Decisions.drain ()
+                    let llvmOwn = drained |> List.filter isLlvmTileRecord
+                    // ...and its own ordered-scatter decisions (taken or refused).
+                    let llvmScatter = drained |> List.filter (fun d -> d.Evidence |> List.contains Blade.OrbitFold.llvmScatterRecordTag)
+                    match verdict with
+                    | Ok _ -> Some ("llvm", "LLVM (BLADE_LLVM=1): C++-only routes below are reported for this lane"), mergeLlvmTileRecords (mergeLlvmScatterRecords ds llvmScatter) llvmOwn
+                    | Error reason -> Some ("cpp", $"C++ (BLADE_LLVM=1, but the LLVM lane refused: {reason})"), ds
+            // The build line: the runtime allocator's pool-retention policy
+            // (BLADE_POOL_RETAIN, round-3 A4 / gap G52) -- a runtime arm, not
+            // an optimization decision, so it is not counted among them.
+            let retention = Blade.Toolchain.poolRetention ()
+            // The runtime that holds the pools is the lane that BUILDS it: the
+            // LLVM shim (one process budget) only when that lane took the
+            // program; C++ (per-thread) otherwise, a refusal / fallback included.
+            let poolLane =
+                match lane with
+                | Some ("llvm", _) -> Blade.Toolchain.PoolLaneLlvm
+                | _ -> Blade.Toolchain.PoolLaneCpp
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
+                let laneJs =
+                    match lane with
+                    | Some (key, _) -> $",\"lane\":\"{key}\""
+                    | None -> ""
+                let buildJs =
+                    let malformed =
+                        match retention.Malformed with
+                        | Some v -> Blade.Effects.Decisions.jsonString v
+                        | None -> "null"
+                    let poolRuntime =
+                        match poolLane with
+                        | Blade.Toolchain.PoolLaneLlvm -> "llvm-shim"
+                        | Blade.Toolchain.PoolLaneCpp -> "cpp-blade_pool"
+                    $",\"build\":{{\"pool_retain\":{{\"arm\":\"{retention.Arm}\",\"setting\":{Blade.Effects.Decisions.jsonString retention.Setting},\"source\":{Blade.Effects.Decisions.jsonString retention.Source},\"max_block\":{retention.MaxBlockBytes},\"budget\":{retention.BudgetBytes},\"budget_scope\":\"{Blade.Toolchain.poolBudgetScope poolLane}\",\"runtime\":\"{poolRuntime}\",\"malformed\":{malformed}}},\"print_form\":{Blade.Effects.Decisions.jsonString (Blade.PrintForm.describe ())}}}"
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
-                printfn "%s" (js.Substring(0, js.Length - 1) + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
+                printfn "%s" (js.Substring(0, js.Length - 1) + laneJs + buildJs + ",\"inputs\":" + Blade.RunRecord.renderJson inputs + "}")
             else
                 printfn "plan: %s -- %d optimization decision(s)" filePath ds.Length
+                match lane with
+                | Some (_, text) -> printfn "lane: %s" text
+                | None -> ()
+                printfn "build: %s" (Blade.Toolchain.describePoolRetention poolLane retention)
+                // The print form the program's prints use (P3-26, Blade.PrintForm),
+                // with where it came from; a second `build:` line, after the pool's.
+                printfn "build: print form: %s" (Blade.PrintForm.describe ())
                 for d in ds do
                     printfn "  %s" (Blade.Effects.Decisions.render d)
                 printfn "inputs: %d (identity policy: `content` = folded at compile time, hashed; `version` = read at run time, size + mtime observed -- BLADE_RUN_RECORD=<path> writes the run record)" inputs.Length
@@ -1071,8 +1375,8 @@ let checkFile (filePath: string) (strictPins: bool) : int =
 
 /// Emit back-end source to file or stdout: C++ normally, textual LLVM IR when
 /// the BLADE_LLVM lane took the program.
-let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
-    match compileArtifact filePath verbose strictPins with
+let emitFile (options: Blade.CodeGenState.ProgramEmissionOptions) (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
+    match compileArtifactWith options filePath verbose strictPins with
     | Error e -> reportFailure e
     | Ok artifact ->
         let text = match artifact with CppArtifact (src, _) -> src | LlvmArtifact ll -> ll

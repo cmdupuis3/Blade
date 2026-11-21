@@ -1,0 +1,10 @@
+// TEST: named Float32 stages, fused, stay Float32
+// ============================================================================
+// G276 (2): the passing twin of functions/1083 (the result was typed Float64).
+// ============================================================================
+function f(x: Float32) -> Float32 = x * 2.0
+function g(x: Float32) -> Float32 = x + 0.1
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let p = object_for(f) >>@ object_for(g)
+let y = (p <@> a) |> compute
+// EXPECT: y = [2.1, 4.1]

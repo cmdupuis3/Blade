@@ -1,0 +1,19 @@
+// TEST: Block Alias After Input Write
+// ----------------------------------------------------------------------------
+// Gap G60 (c), the write BEFORE the alias (577 is the write after it): the
+// alias `b` forces g AT its own binding, so it reads the written input:
+// b = [2, 5], r = 7, and g -- stored there, at module level -- prints the
+// same cells. The llvm lane's first fix hoisted the force to the start of the
+// whole top-level statement, ahead of the block's write (r = 15 there).
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let r = {
+    x(0) = 5
+    let b = g
+    b(0) + b(1)
+}
+// EXPECT: x = [5, 2]
+// EXPECT: g = [2, 5]
+// EXPECT: r = 7

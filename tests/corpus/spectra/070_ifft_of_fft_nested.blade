@@ -1,0 +1,9 @@
+// TEST: Spectra ifft(fft(x)) nested, no staging binding (#62 repro)
+// The inner fft is elaborated first and its generated routine's signature
+// (Array<Complex128 like Idx<8>>) is the shape the outer ifft reads; the
+// round trip reproduces the signal to machine precision.
+import spectra as sp
+let x: Array<Float64 like Idx<8>> = [0.5, -1.25, 2.0, 0.75, -0.5, 1.5, -2.25, 3.0]
+let y = sp.ifft(sp.fft(x))
+let resid = reduce(method_for(range<Idx<8>>) <@> lambda(i) -> (y(i) - x(i)) * (y(i) - x(i)), (+), 0.0)
+// EXPECT: resid = 0.0

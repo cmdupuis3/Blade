@@ -2,10 +2,10 @@
 // Reynolds version of test159. reynolds(xy)(x,y) = xy + yx = 2xy
 // (g is mathematically commutative; without `where comm` the iteration
 // is rectangular but Reynolds still applies the permutation sum).
-let above2 = unique([3.0, 4.0, 5.0, 3.0])
-let below5 = unique([1.0, 2.0, 3.0, 4.0, 1.0])
+let above2 = unique(Float64([3.0, 4.0, 5.0, 3.0]))
+let below5 = unique(Float64([1.0, 2.0, 3.0, 4.0, 1.0]))
 let both = intersect(above2, below5)
-let B = [10.0, 20.0]
+let B = Float64([10.0, 20.0])
 let g = lambda(x, y) -> x * y
 let result = method_for(both, B) <@> reynolds(g) |> compute
 // both = [3, 4]; 2x2 rectangular; each entry = 2xy.

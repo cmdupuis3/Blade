@@ -1,0 +1,12 @@
+// TEST: a fold kernel's element parameter takes the operand's narrow width for its literal partners
+// Gap G114 (round 4 wave 5 lane c): `reduce(a, lambda(x, y) -> x + y * 2.0)` over
+// a Float32 operand typed `y * 2.0` at Float64 and was refused BL3020 at the
+// `+`; the ELEMENT parameter (the second; the accumulator follows the seed) is
+// now hinted by the operand's element. Left fold: ((1 + 2*2) + 3*2) + 4*2 = 19.
+type I = Idx<4>
+let a: Array<Float32 like I> = [1.0, 2.0, 3.0, 4.0]
+let s: Float32 = reduce(a, lambda(x, y) -> x + y * 2.0)
+let n: Array<Int32 like I> = [1, 2, 3, 4]
+let t: Int32 = reduce(n, lambda(x, y) -> x + y * 2, 0)
+// EXPECT: s = 19.0
+// EXPECT: t = 20

@@ -1,0 +1,6 @@
+// TEST: A main-module struct shadowing an imported one of the same name
+// MODULE: A
+module A
+struct P { x: Float64 }
+function mk(v: Float64) -> P = P { x = v }
+function fx(p: P) -> Float64 = p.x

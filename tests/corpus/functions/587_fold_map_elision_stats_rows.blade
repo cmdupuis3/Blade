@@ -1,0 +1,13 @@
+// TEST: Fold-Map Elision In The Stats Variance Per Row
+// ============================================================================
+// `(row - mean(row)) / stddev(row)` per row of a rank-2 array: the stdlib
+// `stats.variance` body centers the row (`centered = Float64(row) - m`) and
+// folds `centered * centered`; the fold-of-map consumer elides the centered
+// row (no per-row pool for it). Row 1 is constant: zero variance, so its
+// normalized cells are 0/0 = nan, exactly as with the centered row stored.
+from stats import mean, stddev
+type R = Idx<3>
+type C = Idx<5>
+let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 2.0, 2.0, 2.0, 2.0], [-1.0, 0.5, 4.0, 9.0, -3.0]]
+let Z = method_for(A) <@> lambda(row) -> (row - mean(row)) / stddev(row) |> compute
+// EXPECT: Z = [[-1.41421356237309, -0.707106781186547, 0.0, 0.707106781186547, 1.41421356237309], [nan, nan, nan, nan, nan], [-0.686594899525049, -0.331459606667265, 0.497189410000897, 1.68097371952684, -1.16010862333543]]

@@ -1,0 +1,36 @@
+// TEST: A write between two folds keeps them apart
+// ============================================================================
+// Two sums of one array with an element write between them (directly, and
+// through a call writing a `mut` parameter): hoisting the second fold to the
+// first would read the array before the write. The sibling-fold pass declines
+// both regions (the first assigns; in the second, a call that may write sits
+// between the folds), so the second fold sees the write.
+// ============================================================================
+type R = Idx<4>
+
+function direct(x: Array<Float64 like R>) -> Float64 = {
+    let mut v = x * 1.0
+    let a = reduce(v, (+))
+    v((2 : R)) = 7.0
+    let b = reduce(v, (+), 0.0)
+    100.0 * a + b
+}
+
+function bump(a: mut Array<Float64 like R>) -> Float64 = {
+    a((0 : R)) = 50.0
+    0.0
+}
+
+function through_call(x: Array<Float64 like R>) -> Float64 = {
+    let mut v = x * 2.0
+    let a = reduce(v, (+))
+    let z = bump(v)
+    let b = reduce(v, (+), 0.0)
+    100.0 * a + b + z
+}
+
+let x: Array<Float64 like R> = [1.0, 2.0, 3.0, 4.0]
+let d = direct(x)
+let c = through_call(x)
+// EXPECT: d = 1014.0
+// EXPECT: c = 2068.0

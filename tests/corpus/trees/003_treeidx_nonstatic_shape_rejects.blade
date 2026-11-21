@@ -2,7 +2,7 @@
 // A tree carries its whole shape in its type, so the shape must fold at
 // compile time. A plain `let` does not. The refusal steers to DynTreeIdx.
 // REJECT-AT: lower
-let runtime_shape = [2, 0, 0]
+let runtime_shape = Int64([2, 0, 0])
 type BadIdx = TreeIdx<runtime_shape>
 function f(x: Float64) -> Array<Float64 like BadIdx> = { x }
 // ERROR: BL4021

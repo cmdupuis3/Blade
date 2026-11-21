@@ -1,0 +1,20 @@
+// TEST: A stored producer read only by one join's legs becomes the join's shared leaf
+// ============================================================================
+// Round 4 wave 4, E2 / streaming plan ST04 (rule `join-producer`,
+// BLADE_JOIN_PRODUCER): `p` is a `|> compute` map whose ONLY readers are the
+// three fold legs the sibling-fold pass joins. The region needs one cell of
+// `p` per step, so `p` is rebound to the bare map and the join evaluates the
+// producer ONCE per coordinate and feeds every leg -- no pool, no separate
+// fill. Integer-valued halves: the pins are association-invariant.
+// ============================================================================
+type I = Idx<11>
+function stats(a: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(a) <@> lambda(v) -> v * 0.5 + 1.0 |> compute
+    let s1 = reduce(p, (+))
+    let s2 = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))
+    let s3 = reduce(method_for(p) <@> lambda(v) -> v * v, (+))
+    s1 + s2 + s3
+}
+let x = Float64(range<Idx<11>>) |> compute
+let r = stats(x)
+// EXPECT: r = 316.25

@@ -1,0 +1,29 @@
+// TEST: A fold over a runtime-extent range evaluates the range before the seed and treats a negative extent as empty
+// ============================================================================
+// Gap G201 (Codex design review): a function-body fold over `0..n` read an
+// undeclared `__range0` in the C++ lane. Its holder evaluates the extent
+// ONCE as a signed value, so a negative extent is an empty range (the seed),
+// never a huge unsigned bound. ORDER (gap G209, round 4 wave 10 lane d, the
+// lead ruling; the G207 rule): a range operand is an OPERAND, the fold's
+// first stage, and reduce(A, k, s) evaluates its arguments left to right --
+// the range bound (`mark` records 2) before the seed (1): m = 21. The old pin
+// (m = 12, the seed first) encoded the interpreter's pre-G207 order.
+// ============================================================================
+function mark(a: mut Array<Int64 like Idx<1>>, digit: Int64) -> Int64 = {
+    a(0) = a(0) * 10 + digit
+    3
+}
+function probe(a: mut Array<Int64 like Idx<1>>) -> Int64 = reduce(method_for(0..mark(a, 2)) <@> lambda(k) -> k, (+), mark(a, 1))
+let mut m: Array<Int64 like Idx<1>> = [0]
+let p = probe(m)
+let after = m(0)
+function g(n: Int64) -> Int64 = reduce(method_for(0..n) <@> lambda(k) -> k * 2, (+), 0)
+let g3 = g(3)
+let gneg = g(-1)
+let gzero = g(0)
+// EXPECT: m = [21]
+// EXPECT: p = 6
+// EXPECT: after = 21
+// EXPECT: g3 = 6
+// EXPECT: gneg = 0
+// EXPECT: gzero = 0

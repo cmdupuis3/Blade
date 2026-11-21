@@ -1,0 +1,11 @@
+// TEST: Fused Tree Seed Reads Operand Before Its Write
+// Gap G214 (round 4 wave 8, Codex diff review round 2): the fused-tree twin of
+// loops/723: the operand d the seed reads is forced under its own name before
+// the seed writes x, so every leg folds the snapshot and w reads it.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let s = reduce(p <&!> p, (+), { x(0) = 10.0; d(1) })
+let w = d(0)
+// EXPECT: s = (19.0, 19.0)
+// EXPECT: w = 2.0

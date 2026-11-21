@@ -1,0 +1,17 @@
+// TEST: a pack former reaching a pack-reading lambda through a match binder is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 3): `match h with
+// | f -> .. f(k) ..` hid the lambda behind a pattern binder, so its dynamic
+// `args[j]` survived the unrolled former and reached g++. A match binder now
+// stands for its scrutinee in the closure search.
+// ERROR: BL7004
+// ERROR-CONTAINS: only through a nested lambda
+// REJECT-AT: lower
+function polySum(args: Poly<Float64>) -> Float64 = {
+    let h = lambda(j: Int64) -> args[j]
+    match h with
+    | f -> {
+        let terms = method_for(range<Idx<3>>) <@> lambda(k) -> f(k) + args[k] |> compute
+        reduce(terms, (+))
+    }
+}
+let result = polySum(10.0, 20.0, 30.0)

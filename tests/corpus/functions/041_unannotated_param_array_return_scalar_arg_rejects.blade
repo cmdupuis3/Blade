@@ -11,6 +11,6 @@
 // from a SCALAR body is still a feature -- when the parameter says it is a
 // scalar (`x: Float`), which is the spelling for that program.
 // ============================================================================
-function f(x, s: Float) -> Array<Float like Idx<4>> =
+function f(x, s: Float64) -> Array<Float64 like Idx<4>> =
     x * s
 let r = f(3.0, 2.0)

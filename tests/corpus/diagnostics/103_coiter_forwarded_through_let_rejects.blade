@@ -5,7 +5,7 @@
 // must trace the operand back to the parameter (a let-bound or forwarded
 // elementwise map keeps its operand's leading axis), or the refusal is one
 // level deep.
-// ERROR: BL3999
+// ERROR: BL3027
 // ERROR-CONTAINS: arguments 1 and 2 of 'fwd_cov'
 // stats' `mean`, inlined: this runner does not resolve stdlib imports.
 function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))

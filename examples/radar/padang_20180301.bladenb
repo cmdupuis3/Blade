@@ -67,7 +67,7 @@ let ts_total = reduce(ts, (+))          // cross-check: 534.70 (f32 accumulation
 
 let p_series = plot.line(t_min, ts,
     "Rain rate at (0.306S, 98.513E), 2018-03-01": title,
-    "minutes since 00Z": xlabel, "mm/h": ylabel, 1: backend)
+    "minutes since 00Z": xlabel, "mm/h": ylabel, Int64(1): backend)
 
 // %% [markdown]
 // ## The peak scan: full disk, then filled contours of the storm
@@ -99,9 +99,9 @@ let frame_mean = reduce(Float64(frame), (+), axes = 2) / 500.0^2   // sanity rea
 // Float32 is the wrong way to do it anyway. Converting the ARRAY says the
 // accumulation happens in Float64 and says it once, at the operand.
 
-let p_disk = plot.heatmap(lon, lat, frame, 0.0: zmin, 50.0: zmax,
+let p_disk = plot.heatmap(lon, lat, frame, Float64(0.0): zmin, Float64(50.0): zmax,
     "Rain rate (mm/h), 2018-03-01 06:08Z": title,
-    "longitude": xlabel, "latitude": ylabel, 1: backend)
+    "longitude": xlabel, "latitude": ylabel, Int64(1): backend)
 
 // %%
 type Yz = store.index.yz                // the cutout's own 128-point axes
@@ -112,9 +112,9 @@ let lon_z: Array<Float64 like Xz> = store.vars.lon_zoom |> z.read
 
 let storm = Rz((36 : Scan))
 
-let p_storm = plot.contourf(lon_z, lat_z, storm, 20: levels, 0.0: zmin, 50.0: zmax,
+let p_storm = plot.contourf(lon_z, lat_z, storm, Int64(20): levels, Float64(0.0): zmin, Float64(50.0): zmax,
     "Storm cell off Padang (mm/h), 06:08Z": title,
-    "longitude": xlabel, "latitude": ylabel, 1: backend)
+    "longitude": xlabel, "latitude": ylabel, Int64(1): backend)
 
 // %% [markdown]
 // ## The whole day as video

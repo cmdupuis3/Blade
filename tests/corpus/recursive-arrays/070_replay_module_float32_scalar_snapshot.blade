@@ -1,0 +1,18 @@
+// TEST: Replay Module Float32 Scalar Snapshot
+// ============================================================================
+// PRINT REPLAY of a Float32 rank-1 recursion (a row is a scalar) with a
+// snapshot of its last row read by a later binding: the snapshot is a bare
+// Float32 filled by the sweep's first run, the print is the second run.
+// f_n = 0.5 f_{n-1} + 2, f_0 = 0.
+// ============================================================================
+type K = Idx<7>
+
+let rec f: Array<Float32 like K> =
+    match f with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 2.0
+
+let tail = f(6) * 2.0
+// EXPECT: f = [0.0, 2.0, 3.0, 3.5, 3.75, 3.875, 3.9375]
+// EXPECT: tail = 7.875

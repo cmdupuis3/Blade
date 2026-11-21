@@ -5,6 +5,6 @@
 // The named-function kernel's eta wrapper calls `r` with an argument that is
 // still open at the call judgment; the post-zonk sweep judges the instance.
 function r(x: T^0) -> T^0 = sqrt(x)
-let ok = r(9.0)
-let v = [4, 9]
+let ok = r(Float64(9.0))
+let v = Int64([4, 9])
 let w = method_for(v) <@> r |> compute

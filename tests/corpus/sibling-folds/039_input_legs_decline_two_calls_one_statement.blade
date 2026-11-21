@@ -1,0 +1,37 @@
+// TEST: Two inlinable calls in one statement keep their calls (one return boundary per statement)
+// ============================================================================
+// ka (an Ix producer and its epilogue) and kb (a Jx one) are called in ONE
+// statement beside both extents' input sums. Inlined, both spines would land
+// before the statement and share one delayed boundary -- ka's pool live
+// through kb's body (W2-4 fourth review NEW 3). v1 fails closed: epilogue-legs
+// declines `the statement holding ka(x, y) holds another inlinable call`, both
+// calls stay and free their own pools at their own returns. Values are the
+// as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+type Jx = Idx<1009>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function inputs_j(m: Int64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function ka(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a + b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s
+}
+function kb(u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let w2 = method_for(zip(u, v)) <@> lambda(a, b) -> a - b |> compute
+    let q = reduce(method_for(w2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    q
+}
+let (r, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let u = inputs_j(11)
+    let v = inputs_j(3)
+    (ka(x, y) + 10.0 * kb(u, v), reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+// EXPECT: r = 299031.0
+// EXPECT: t = 1516307.0

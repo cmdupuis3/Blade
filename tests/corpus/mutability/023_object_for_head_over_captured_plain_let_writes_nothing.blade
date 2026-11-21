@@ -1,0 +1,22 @@
+// TEST: an intrinsic map over a captured plain let in a kernel writes nothing
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a kernel
+// may READ a captured plain `let` freely. `sqrt <@> (w * xs)` lowers to an
+// application of `object_for(sqrt)`, a head the write analysis cannot resolve
+// to a callable; it used to count as an unknown function value that may write
+// every array it is handed, so the read of `xs` was refused as a write. An
+// intrinsic writes nothing (loops/120, loops/126, units/065 have this shape).
+let xs: Array<Float64 like Idx<3>> = [1.0, 4.0, 9.0]
+let ws: Array<Float64 like Idx<2>> = [1.0, 4.0]
+let out = ws <@> lambda(w) -> {
+    let e = sqrt <@> (w * xs)
+    reduce(e, (+))
+} |> compute
+function f(vs: Array<Float64 like Idx<m>>) = {
+    vs <@> lambda(w) -> {
+        let e = sqrt <@> (xs * w)
+        reduce(e, (+))
+    }
+}
+let r = f(ws)
+// EXPECT: out = [6.0, 12.0]
+// EXPECT: r = [6.0, 12.0]

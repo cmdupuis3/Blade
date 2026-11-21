@@ -56,7 +56,7 @@
 
 import math as m
 
-let MVAL = [0.92, 1.0, 1.08]
+let MVAL = Float64([0.92, 1.0, 1.08])
 type Chan = Array<Float64 like Idx<12>, Idx<12>>
 
 // ---- the kick: example 34's block channel (orders 1..4), powered to U^4 ----
@@ -94,24 +94,24 @@ function grid_front(r: Int64, h: Int64) -> Float64 =
     2.0 / (1.0 + MVAL(r % 3)) * rho(r % 3, (r / 3) % 3) * rho((r / 3) % 3, (r / 9) % 3) * rho((r / 9) % 3, r / 27) * rho(r / 27, h)
 let GRID = method_for(range<Idx<3>, Idx<81>>) <@> lambda(h: Int64, r: Int64) -> grid_front(r, h) |> compute
 let GMU = reduce(GRID, (+)) / 81.0
-let gmu0 = GMU(0)
+let gmu0 = GMU(Int64(0))
 let gmu2 = GMU(2)
 let chan_gap = abs(mu0 - gmu0) + abs(mu2 - gmu2)
 let chan_V = if chan_gap < 1.0e-12 then "CHANNEL_MATCHES_GRID" else "NO"
 
 // ---- the observations (two shots, fresh medium; sigma = 0.03, so
 //      2 s^2 = 0.0018; the hidden truth behind these reads is 1.08) ----
-let vh1 = 0.951
-let vh2 = 0.964
+let vh1: Float64 = 0.951
+let vh2: Float64 = 0.964
 
 // exact likelihoods from the grids (the oracle side): the instrument kernel
 // averaged over each hypothesis's 81 medium paths, all three rows at once
 let L1G = reduce(exp(0.0 - (vh1 - GRID) * (vh1 - GRID) / 0.0018), (+)) / 81.0
 let L2G = reduce(exp(0.0 - (vh2 - GRID) * (vh2 - GRID) / 0.0018), (+)) / 81.0
-let La1 = L1G(0)
+let La1 = L1G(Int64(0))
 let Lb1 = L1G(1)
 let Lc1 = L1G(2)
-let La2 = L2G(0)
+let La2 = L2G(Int64(0))
 let Lb2 = L2G(1)
 let Lc2 = L2G(2)
 

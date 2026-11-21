@@ -1,0 +1,18 @@
+// TEST: Two Reads Of One Statement Straddling A Callee Write Force Twice
+// ============================================================================
+// Gap G239, round 4 wave 10 (lane C, C1): inside a FUNCTION body a deferred
+// module map is forced AT EACH READ POSITION, in evaluation order (formalism
+// 10.2) -- an untaken read forces nothing and the evaluation count is
+// observable. The compiled lanes forced it once per body statement, before
+// the statement; a read whose order that cannot reproduce is now a call of a
+// one-statement helper and the statement spine is put in evaluation order
+// (Lowering.splitDeferredBodyReadsModule).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [1.0]
+let forcing = method_for(backing) <@> lambda(e) -> e * 2.0
+function bump(x: Float64) -> Float64 = { backing(0) = x; 0.0 }
+function f(x: Float64) -> Float64 = { let a = forcing(0) + bump(x) + forcing(0); a }
+let r = f(5.0)
+// EXPECT: r = 12.0
+// EXPECT: backing = [5.0]

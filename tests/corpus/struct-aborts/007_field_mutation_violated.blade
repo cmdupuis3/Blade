@@ -2,11 +2,11 @@
 // Mutating one field out from under the invariant fires the guard.
 // ABORT: Constraint violation in Balanced
 struct Balanced {
-    a: Int,
-    b: Int,
-    total: Int
+    a: Int32,
+    b: Int32,
+    total: Int32
 } where a + b == total
-function go() -> Int = {
+function go() -> Int32 = {
     let mut x = Balanced { a = 1, b = 2, total = 3 }
     x.a = 5
     x.total

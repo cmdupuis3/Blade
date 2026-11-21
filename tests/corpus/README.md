@@ -20,7 +20,12 @@ them as assets: edit deliberately, never regenerate mechanically.
   guard-combinators/007 header for a cautionary tale about duplicate names.
 - `// EXPECT: <var> = <value>` lines are parsed by tests/Expect.fs and checked
   against the program's printed output. Scalars, 1-D arrays, 2-D `[[..]]`
-  arrays, complex pairs `(re, im)`, and quoted strings are all checked.
+  arrays, complex pairs `(re, im)`, and quoted strings are all checked. A
+  TUPLE or STRUCT binding prints spelled like its literal, and its pin is
+  compared as exact text: `// EXPECT: t = (1, 2.0, true)`,
+  `// EXPECT: p = P { a = 1.0, b = 2 }`, and an array of structs prints each
+  element the same way, `// EXPECT: ps = [P { a = 1.0 }, P { a = 2.0 }]` (a two-number tuple reads as a
+  complex pair, which checks the same values and spellings).
 - **Numbers are spelled as their type prints** (docs/formalism.md 3.9): a
   float with a decimal point or exponent (`2.0`, `[1.0, 0.5]`, `(1.0, -2.0)`,
   `1e+20`, `nan`), an integer bare (`2`, `[1, 2]`). A numeric pin token matches
@@ -96,6 +101,11 @@ Notes:
 - `(rejects)` probes are held to the same rule. The checker's warning channels
   survive its error path, so a program refused at typecheck has still earned
   whatever it emitted before the refusal.
+- `// WARN:` also reads the coded EMITTER warnings of the lane that generated
+  the program (`Diagnostics.EmitterWarnings`, single-file runner) -- today only
+  BL7005, the opt-in kept inline of gap G69 (`BLADE_EPILOGUE_LEGS=1`). The default
+  suite never raises it (the default build declines that inline), so no corpus
+  file pins it; the harness tests that build under the explicit arm assert it.
 - Multi-file tests take the **union** of the pins across their member sources
   (EXPECT and ERROR pins as well as WARN pins): a cross-module program is
   typechecked as one program, so its warnings cannot be attributed to a single

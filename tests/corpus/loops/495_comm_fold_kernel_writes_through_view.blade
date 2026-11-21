@@ -1,0 +1,22 @@
+// TEST: Comm Fold Kernel Writes Through A View
+// Gap G41, the storage-provenance case (Codex review of W2-F, blocker 1). The
+// fold kernel's store goes through `t`, a ROW VIEW of the captured rank-2 `G`
+// (`let t = G(0)` -- dense partial indexing yields a view, not a copy). A
+// detector that judged locality by the initializer's syntax called `t` a
+// local and licensed the fold: the map's `omp(i: 1)` threaded it and the
+// licensed build's K lanes read G(0, 0) ahead of the kernel's writes. A write
+// through a view is a write to its base: the fold keeps the serial chain.
+//   row i = sum over j of (G(0, 0) + i) with G(0, 0) = i  ->  521 * 2i
+//   total = 1042 * (0 + 1 + ... + 520) = 141149320
+type I = Idx<521>
+type K = Idx<2>
+let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute
+let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)),
+                   lambda(a, b) where comm(a, b) -> {
+                       let t = G((0 : K))
+                       t((0 : K)) = t((0 : K)) + 1.0
+                       a + b
+                   }, 0.0)
+let g00 = G((0 : K), (0 : K))
+// EXPECT: total = 141149320.0
+// EXPECT: g00 = 521.0

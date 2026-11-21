@@ -1,0 +1,15 @@
+// TEST: a pack former's kernel holding a lambda that captures a kernel let clones the lambda per element
+// Gap G112 (round 4 wave 5 lane c): the nested lambda `scale` captures the
+// kernel's own let `y`, freshened per unrolled element, so the lambda is cloned
+// per element onto that element's `y`. It was refused BL7004 (gap G95).
+//   y = 2 * args[k]; scale(1.5) = 1.5 * y: [30, 60, 90]; sum 180.
+function polyScaled(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let y = args[k] * 2.0
+        let scale = lambda(s: Float64) -> s * y
+        scale(1.5)
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polyScaled(10.0, 20.0, 30.0)
+// EXPECT: result = 180.0

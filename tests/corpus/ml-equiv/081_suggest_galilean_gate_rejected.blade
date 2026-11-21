@@ -23,10 +23,10 @@ import ml as ml
 // ============================================================================
 
 // The failing certificate: scaling a velocity scales its U0-coefficient.
-function bad_step(u: Float, dt: Float) where ml.galilean(u) -> Float = u * dt
+function bad_step(u: Float64, dt: Float64) where ml.galilean(u) -> Float64 = u * dt
 
 // Deducible in isolation — and silent here, because the gate above is shut.
-function honest_shear(a: Float, b: Float) -> Float = a - b
+function honest_shear(a: Float64, b: Float64) -> Float64 = a - b
 
 let x = bad_step(2.0, 3.0)
 let y = honest_shear(5.0, 2.0)

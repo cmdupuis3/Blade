@@ -1,0 +1,10 @@
+// TEST: Parameters spelled like a C++ keyword, a macro and cout
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252): parameters were emitted with their
+// raw spelling, so auto reached g++ as a keyword, EOF as a macro and
+// cout hid the print stream (BL9002). They now take the same reserved-name
+// rule as bindings.
+// ============================================================================
+function g(auto: Float64, EOF: Float64, cout: Float64) -> Float64 = auto * 100.0 + EOF * 10.0 + cout
+let r = g(Float64(1.0), Float64(2.0), Float64(3.0))
+// EXPECT: r = 123.0

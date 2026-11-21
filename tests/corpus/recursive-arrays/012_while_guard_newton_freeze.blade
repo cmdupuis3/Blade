@@ -8,7 +8,7 @@
 // bitwise. Downstream reads and folds see the frozen trajectory.
 // ============================================================================
 type It = Idx<8>
-let rec x: Array<Float like It> =
+let rec x: Array<Float64 like It> =
     match x with
     | zero -> zero
     | zero :: s -> zero :: 1.0

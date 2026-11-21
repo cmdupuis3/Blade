@@ -1,0 +1,24 @@
+// TEST: Producer-input legs with seeded non-commutative kernels keep their strict order
+// ============================================================================
+// Two legs `reduce(x, lambda(a, b) -> a - b, 100.0)` and the same over y: no
+// reorder licence, so each rides the producer's loop as its OWN ascending
+// chain from its OWN seed (a left fold: `((100 - x0) - x1) - ..`), exactly
+// the joined pass's chain -- only interleaved with y2's stores. The pins read
+// the order: any other association would change them.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u - 2.0 * v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w, lambda(p, q) -> p + q, 0.0)
+    s
+}
+let (s, d) = {
+    let x = inputs(11)
+    let y = inputs(3)
+    (kernel(x, y), reduce(x, lambda(a, b) -> a - b, 100.0) - 3.0 * reduce(y, lambda(a, b) -> a - b, 0.5))
+}
+// EXPECT: s = 3002.0
+// EXPECT: d = -1901.5

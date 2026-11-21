@@ -10,6 +10,6 @@
 // reference quantity when no dimensionless complex would have helped either.
 // Classifying on the stripped base names the real problem first.
 Unit volts
-let v: Float<volts> = 3.0
-let z = complex(1.0, 2.0) * v
+let v: Float64<volts> = 3.0
+let z = Complex128(complex(1.0, 2.0)) * v
 let bad = floor(z)

@@ -35,25 +35,25 @@ Unit seconds
 Unit area = meters * meters
 Unit mps = meters / seconds
 
-let xs: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
-let offset: Float<meters> = 1.0
+let xs: Array<Float64<meters> like Idx<4>> = [1.0, 2.0, 3.0, 6.0]
+let offset: Float64<meters> = 1.0
 
 // Preserved: mean of a meters row is meters, and adds to a meters scalar.
-let m: Float<meters> = mean(xs)
+let m: Float64<meters> = mean(xs)
 let shifted = m + offset
 
 // Squared: variance is meters^2, and only `area` accepts it.
-let v: Float<area> = variance(xs)
+let v: Float64<area> = variance(xs)
 
 // Halved back: sqrt of meters^2 is meters.
-let sd: Float<meters> = stddev(xs)
+let sd: Float64<meters> = stddev(xs)
 
 // A locally declared generic, to show this is not a module-boundary effect.
 function total(row: T^1) -> T^0 = reduce(row, (+))
-let t: Float<meters> = total(xs)
+let t: Float64<meters> = total(xs)
 
 // The nominal quantity rides through a pure pass-through unchanged.
-type Speed = Float<mps>
+type Speed = Float64<mps>
 let vs: Array<Speed like Idx<3>> = [2.0, 4.0, 6.0]
 let vbar: Speed = mean(vs)
 

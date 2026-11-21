@@ -1,0 +1,15 @@
+// TEST: a captured rank-2 spine folded with axes = 2 reads its snapshot
+// Gap G233, round 4 wave 10: `reduce(p, k, seed, axes = 2)` over a NAMED
+// deferred map is no longer desugared into an accumulator block (which read p
+// by position: the compiled lanes forced p at the block's pre-pass, the
+// interpreter at the first read, after the seed -- s = 102.0, w = 11.0 there).
+// The fused terminal's prelude forces the fold kernel's capture p before the
+// seed (G214, G207), and the rank-2 kept spine folds that snapshot.
+let mut m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let p = method_for(m) <@> lambda(v) -> v + 1.0
+let s = reduce(p, lambda(a, b) -> a + b + p(0, 0), { m(0, 0) = 10.0; Float64(0) }, axes = 2)
+let w = p(0, 0)
+// EXPECT: m = [[10.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: p = [[2.0, 3.0, 4.0], [5.0, 6.0, 7.0]]
+// EXPECT: s = 39.0
+// EXPECT: w = 2.0

@@ -1,0 +1,23 @@
+// TEST: Two modules each declaring struct P and constructor Red link
+// MODULE: Main
+// ============================================================================
+// D11: a declared type's identity is its module's -- A's `P` is `A.P`
+// (emitted `A__P`), B's is `B.P` -- so two modules may each declare `struct
+// P` and a constructor `Red` (they used to be refused, BL2009, because the
+// two were one name to the checker and one global C++ name). Values print
+// under their SOURCE names, and `A.Red` names A's constructor.
+module Main
+import A
+import B
+let a = A.mk(2.5)
+// EXPECT: a = P { x = 2.5 }
+let b = B.mk()
+// EXPECT: b = P { y = 7 }
+let ax = A.fx(a)
+// EXPECT: ax = 2.5
+let by = B.fy(b)
+// EXPECT: by = 7
+let r1 = A.isRed(A.Red)
+// EXPECT: r1 = true
+let r2 = B.isRed(B.Amber)
+// EXPECT: r2 = false

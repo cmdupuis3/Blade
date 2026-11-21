@@ -1,0 +1,19 @@
+// TEST: prodsum over a compound captured by a map kernel is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a compound selection
+// ============================================================================
+// R13 (deep review): prodsum walks each operand as a dense rank-1 buffer.
+// Over a compound selection or a sparse array -- tabulated storage, at any
+// element type and in any position -- it was a g++ rejection (BL9002) after
+// `check` said OK. It is refused in the type checker, keyed on the operand's
+// STORAGE class (prodsumUnbuiltStorage), naming the fold that is built.
+// ============================================================================
+// The storage class decides, not the spelling: a capture inside a kernel,
+// Complex128 cells.
+type K = Idx<4>
+let codes: Array<Int64 like K> = [100, 200, 300, 400]
+let keep = mask(codes, lambda(c) -> c > 150)
+let da: Array<Complex128 like K> = [complex(1.0, 0.0), complex(2.0, 1.0), complex(3.0, 0.0), complex(4.0, -1.0)]
+let a = compound(da, keep)
+let ws: Array<Int64 like Idx<2>> = [1, 2]
+let r1 = method_for(ws) <@> lambda(w) -> prodsum(a, a) |> compute

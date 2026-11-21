@@ -148,6 +148,21 @@ let binOpToCpp = function
 /// (TypeCheck rejects complex ones), so no complex coercion is needed. In the
 /// CUDA device dialect the names go UNQUALIFIED, matching renderUnaryOpTyped's
 /// real-operand rule -- CUDA's device overloads live in the global namespace.
+/// ONE ADDRESSED SAMPLE (IRRandAt, D13): `blade_rand::<kind>_one(key,
+/// stream, index[, weights pool, k], pars..)` -- the fill's own transform at
+/// one address (rand_runtime.hpp). `args` are rendered: key, stream, index,
+/// then the Float64 parameters.
+let renderRandAt (kind: string) (args: string list) (weights: (string * int) option) : string =
+    match args with
+    | key :: stream :: index :: pars ->
+        let w =
+            match weights with
+            | Some (wStr, k) -> $", nested_array_utilities::pool_base(({wStr}).data), (size_t){k}LL"
+            | None -> ""
+        let ps = pars |> List.map (fun p -> $", (double)({p})") |> String.concat ""
+        $"blade_rand::{kind}_one((int64_t)({key}), (int64_t)({stream}), (int64_t)({index}){w}{ps})"
+    | _ -> "/* malformed IRRandAt */ 0"
+
 let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
     // Host: blade_libm:: -- the run-time libm, never a compile-time fold, and
     // its overloads round a Float32 pair once to float (the arithmetic
@@ -228,6 +243,85 @@ let complexLibmRuntimeNames : Set<string> =
 let private isComplexElem (et: ElemType) =
     match et with ETComplex64 | ETComplex128 -> true | _ -> false
 
+// ---------------------------------------------------------------------------
+// WHERE `Float64(x)` of an Int64 takes the split conversion (both lanes)
+//
+// Two spellings of ONE value: the plain conversion (`static_cast<double>` /
+// `sitofp i64`) and the exact split (blade_arith::i64_to_f64 / EmitLlvm's
+// emitI64ToF64: high word through the packed int32 convert, low word through
+// the 2^52 magic exponent, the exact sum rounded once). Each is the double
+// nearest the integer, ties to even, bit for bit -- so choosing between them
+// moves no value and no pin, in any lane or build. They differ only in COST:
+// AVX2 has no packed int64 -> double, so a loop holding the plain form does
+// not vectorize (g++ refuses it; LLVM scalarizes it per lane, bench gaps
+// G30/G33), while in SCALAR code the split is ~6 instructions where the plain
+// form is one -- +27% on the bench's serial input generators, a scalar
+// recurrence of integer ops around one `Float64(h)` per cell (bench
+// loose-ends item 1).
+//
+// So the split is taken only in the code the cell loops of a CLOSED-FORM
+// DOMAIN run: the domain map kernel itself (rendered inline in the nest) and
+// every callable it reaches (band's `phi`, inlined into the run by the back
+// end). Everywhere else the plain conversion stands. The set is a property of
+// the whole module, computed once per emission (`i64SplitReachOf`) and read
+// at each function's emission; the inline kernel sets the scope itself.
+// ---------------------------------------------------------------------------
+
+/// The map kernels of every `method_for(range<R>) <@> k` over a closed-form
+/// domain in `e`, as callables.
+let private domainMapKernelsIn (e: IRExpr) : IRCallable list =
+    let acc = ResizeArray<IRCallable>()
+    let rec walk (x: IRExpr) =
+        (match x with
+         | IRApplyCombinator info
+             when info.Arrays |> List.exists (function
+                      | IRRange ([ ix ], _) -> (match ix.Extent with IRSparseKeys (SkDomain _) -> true | _ -> false)
+                      | _ -> false) ->
+             (match resolveCallable info.Kernel with Some cl -> acc.Add cl | None -> ())
+         | _ -> ())
+        childrenOf x |> List.iter walk
+    walk e
+    List.ofSeq acc
+
+/// The ids of every domain map kernel in the module and of every callable it
+/// reaches through calls -- the bodies that take the split.
+let i64SplitReachOf (modul: IRModule) : Set<IRId> =
+    let roots =
+        (modul.Bindings |> List.collect (fun b -> domainMapKernelsIn b.Value))
+        @ (modul.Functions |> List.collect (fun f -> domainMapKernelsIn f.Body))
+    let seen = System.Collections.Generic.HashSet<IRId>()
+    let rec visit (cl: IRCallable) =
+        if seen.Add cl.Id then
+            let rec calls (x: IRExpr) =
+                (match x with
+                 | IRApp (f, _, _) -> (match resolveCallable f with Some callee -> visit callee | None -> ())
+                 | _ -> ())
+                childrenOf x |> List.iter calls
+            calls cl.Body
+    roots |> List.iter visit
+    Set.ofSeq seen
+
+let private i64SplitReachStorage = System.Threading.AsyncLocal<Set<IRId>>()
+let private i64SplitScopeStorage = System.Threading.AsyncLocal<bool>()
+
+/// Install the module's split set (i64SplitReachOf); emission entry points
+/// call it once, before any body is rendered.
+let setI64SplitReach (ids: Set<IRId>) : unit = i64SplitReachStorage.Value <- ids
+
+/// Does this callable's body take the split?
+let i64SplitReaches (id: IRId) : bool =
+    let s = i64SplitReachStorage.Value
+    not (isNull (box s)) && Set.contains id s
+
+/// Is the code being rendered right now in split scope?
+let i64SplitInScope () : bool = i64SplitScopeStorage.Value
+
+/// Render `f` with the split scope set to `on`, restoring it after.
+let withI64SplitScope (on: bool) (f: unit -> 'a) : 'a =
+    let saved = i64SplitScopeStorage.Value
+    i64SplitScopeStorage.Value <- on
+    try f () finally i64SplitScopeStorage.Value <- saved
+
 /// Render a function-call unary op, choosing the spelling by operand type and
 /// active dialect. Host rendering is unaryOpToCpp verbatim. In the CUDA device
 /// dialect: complex operands use thrust:: (thrust has no free real()/imag(), so
@@ -257,6 +351,12 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
             // The cast's source position rides into the panic's `--> file:line`.
             let at = panicSpanArgs loc.Span
             (if et = ETInt64 then $"blade_rt::f2i64({inner}, {at})" else $"blade_rt::f2i32({inner}, {at})")
+        // Int64 -> Float64 in a closed-form domain's cell code: the exact
+        // split (blade_arith::i64_to_f64), which vectorizes on AVX2 (bench gap
+        // G30). Elsewhere the plain static_cast below -- the same double (see
+        // "WHERE `Float64(x)` of an Int64 takes the split" above).
+        | IRCast (ETFloat64, _), Some ETInt64 when i64SplitInScope () ->
+            $"blade_arith::i64_to_f64({inner})"
         // A transcendental on a REAL operand: blade_libm::, the run-time
         // platform libm (never folded at compile time), whose overloads
         // evaluate a Float32 operand in double and round once to float and
@@ -273,6 +373,15 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
         // double and rounds each component once).
         | IRMath name, Some et when isComplexElem et && complexLibmRuntimeNames.Contains name ->
             $"blade_libm::{name}({inner})"
+        // A Complex64's magnitude and phase follow the same rule: evaluated
+        // over the Complex128 widening (the interpreter's complexAbs / atan2
+        // in double), the magnitude rounded once to its Float32 node type --
+        // never libstdc++'s float cabsf/cargf, which the interpreter has no
+        // twin of.
+        | IRMath "abs", Some ETComplex64 ->
+            $"static_cast<float>(std::abs(std::complex<double>({inner})))"
+        | IRArg, Some ETComplex64 ->
+            $"std::arg(std::complex<double>({inner}))"
         | _ -> $"{(unaryOpToCpp op)}({inner})"
 
 /// Coerce a rendered scalar operand to match std::complex's SAME-TYPE-ONLY
@@ -307,7 +416,18 @@ let emitBinOpWithComplexCoercion
         | Some ((ETComplex64 | ETComplex128) as resElem) ->
             let lC = coerceComplexOperand resElem le lStr
             let rC = coerceComplexOperand resElem re rStr
-            $"({lC} {(binToCpp op)} {rC})"
+            // Complex64 x Complex64 `*` / `/`: Blade's own float algorithms
+            // (blade_arith::c64_mul / c64_div), the interpreter's twins --
+            // not libgcc's __mulsc3 / __divsc3 (round 6, Complex64 fidelity).
+            // A real divided by a Complex64 is the full complex division
+            // too (libstdc++'s operator/(T, complex) divides complex(s) by z).
+            match resElem, op with
+            | ETComplex64, (IRMul | IRDiv) when isComplexElem le && isComplexElem re && not (inCudaDeviceDialect ()) ->
+                let fn = if op = IRMul then "c64_mul" else "c64_div"
+                $"blade_arith::{fn}({lC}, {rC})"
+            | ETComplex64, IRDiv when isComplexElem re && not (inCudaDeviceDialect ()) ->
+                $"blade_arith::c64_div(std::complex<float>({lC}), {rC})"
+            | _ -> $"({lC} {(binToCpp op)} {rC})"
         | _ -> $"({lStr} {(binToCpp op)} {rStr})"
     | _ -> $"({lStr} {(binToCpp op)} {rStr})"
 
@@ -344,18 +464,60 @@ let private intLiteralOf (e: IRExpr) : int64 option =
 /// None = the caller's ordinary rendering. The CUDA device dialect keeps the
 /// old `pow(l, r)` / infix spelling: device bodies cannot reach blade_rt or
 /// blade_libm (host-only).
+/// Which operand of a binop is a bare integer literal that ADAPTS to an Int32
+/// partner (IR.typeOf's literal rule, formalism 2.4: "`i32 + 1` is Int32"):
+/// (left adapts, right adapts). Such a literal renders as a plain `int`
+/// (int32LiteralToCpp) and the operation takes the 32-bit helpers, so the
+/// C++ lane wraps and compares at 32 bits on every data model (an `L`
+/// literal is 64-bit on LP64 and would widen `x + 1L > x`).
+let int32AdaptedLiterals (inferTy: IRExpr -> IRType) (l: IRExpr) (r: IRExpr) : bool * bool =
+    let isI32 (e: IRExpr) = scalarElemOf (inferTy e) = Some ETInt32
+    match l, r with
+    | IRLit (IRLitInt n), _ when fitsInt32 n && isI32 r -> (true, false)
+    | _, IRLit (IRLitInt n) when fitsInt32 n && isI32 l -> (false, true)
+    | _ -> (false, false)
+
+/// An Int32-adapted integer literal as a C++ `int` token (INT32_MIN has no
+/// literal spelling of its own).
+let int32LiteralToCpp (n: int64) : string =
+    if n = int64 System.Int32.MinValue then "(-2147483647 - 1)" else string n
+
+/// An Int64 literal as a C++ token: `LL` (long long, 64 bits on EVERY data
+/// model). `L` is a `long`, 32 bits on Windows (LLP64), so two `L` literals
+/// folded in 32 bits -- `1000000L * 3000L` was -1294967296 where Blade's
+/// Int64 product is 3000000000. INT64_MIN has no literal spelling of its own.
+/// The one Int64-literal renderer every emission site uses.
+let int64LiteralToCpp (n: int64) : string =
+    if n = System.Int64.MinValue then "(-9223372036854775807LL - 1)" else $"{n}LL"
+
 let renderContractBinOp
         (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
         (inferTy: IRExpr -> IRType) (loc: SrcLoc) : string option =
     let isInt et = match et with ETInt32 | ETInt64 -> true | _ -> false
+    // An Int32-adapted literal counts as Int32 for the helper's width.
+    let (lAdapt, rAdapt) = int32AdaptedLiterals inferTy l r
+    let wOf (le: ElemType) (re: ElemType) =
+        if (le = ETInt64 && not lAdapt) || (re = ETInt64 && not rAdapt) then "64" else "32"
     // The fault's source position, for the panic's `--> file:line`: constants
     // the guard reads only on its cold path (blade_runtime.hpp idiv/imod/ipow).
     let at = panicSpanArgs loc.Span
     match op with
+    // Device integer `^`: EXACT and wrapping like the host's (section 2.4),
+    // never the double `pow` it used to become. Only a literal nonnegative
+    // exponent reaches here -- the negative-exponent panic cannot be raised
+    // on the device, so a variable exponent is refused before rendering
+    // (CodeGenCuda.cudaScalarNodeOk). The helper is emitted into the .cu
+    // (getCudaFileContent) whenever a kernel names it.
+    | IRCaret when inCudaDeviceDialect () ->
+        match scalarElemOf (inferTy l), scalarElemOf (inferTy r), intLiteralOf r with
+        | Some le, Some re, Some n when isInt le && isInt re && n >= 0L ->
+            let w = wOf le re
+            Some $"blade_dev_ipow{w}({lStr}, {rStr})"
+        | _ -> None
     | IRDiv | IRMod | IRCaret when not (inCudaDeviceDialect ()) ->
         match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
         | Some le, Some re when isInt le && isInt re ->
-            let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
+            let w = wOf le re
             match op, intLiteralOf r with
             | (IRDiv | IRMod), Some n when n <> 0L && n <> -1L -> None
             | IRDiv, _ -> Some $"blade_rt::idiv{w}({lStr}, {rStr}, {at})"
@@ -443,17 +605,18 @@ let escapeStringLit (s: string) : string =
 /// Used for kernel bodies in inline generation
 let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
-    | IRLit (IRLitInt n) -> $"{n}L"
+    | IRLit (IRLitInt n) -> int64LiteralToCpp n
     | IRLit (IRLitFloat f) -> floatToCppLiteral f
     | IRLit (IRLitFloat32 f) -> float32ToCppLiteral f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit (IRLitString s) -> $"std::string({(escapeStringLit s)})"
     | IRLit IRLitUnit -> "((void)0)"
-    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
-    | IRParam (name, _, _) -> name
+    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ((localVarName id))
+    | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRBinOp (_, op, l, r, loc) ->
-        let lStr = exprToCppSimple names l
-        let rStr = exprToCppSimple names r
+        let (la, ra) = int32AdaptedLiterals inferExprType l r
+        let lStr = match l with IRLit (IRLitInt n) when la -> int32LiteralToCpp n | _ -> exprToCppSimple names l
+        let rStr = match r with IRLit (IRLitInt n) when ra -> int32LiteralToCpp n | _ -> exprToCppSimple names r
         match renderContractBinOp op l r lStr rStr inferExprType loc, op with
         | Some s, _ -> s
         | None, IRCaret -> $"pow({lStr}, {rStr})"
@@ -461,19 +624,23 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
         | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRFma (a, b, c) ->
         $"std::fma({(exprToCppSimple names a)}, {(exprToCppSimple names b)}, {(exprToCppSimple names c)})"
+    | IRRandAt (kind, args, weights) ->
+        renderRandAt kind (args |> List.map (exprToCppSimple names))
+                     (weights |> Option.map (fun (w, n) -> (exprToCppSimple names w, n)))
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
         if isComplexType (inferExprType e) then $"""{(complexFnName "conj")}({inner})"""
         else inner
     | IRUnaryOp (op, e) -> renderUnaryOpTyped op (inferExprType e) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
-        $"({(exprToCppSimple names cond)} ? {(exprToCppSimple names body)} : 0.0)"
+        let zero = if scalarElemOf (inferExprType body) = Some ETFloat32 then "0.0f" else "0.0"
+        $"({(exprToCppSimple names cond)} ? {(exprToCppSimple names body)} : {zero})"
     | other -> $"BLADE_UNSUPPORTED_EXPR_{(other.GetType().Name.ToUpper())}"
 
 /// Convert IRLit to C++ literal string
 let litToCpp (lit: IRLit) : string =
     match lit with
-    | IRLitInt n -> $"{n}L"
+    | IRLitInt n -> int64LiteralToCpp n
     | IRLitFloat f -> floatToCppLiteral f
     | IRLitFloat32 f -> float32ToCppLiteral f
     | IRLitBool b -> if b then "true" else "false"
@@ -526,6 +693,63 @@ let copyInPlaceAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId * int) opt
         | None -> None
     | _ -> None
 
+// Owned-move whole-array reassignment (gap G92; analysis in CodeGenLoopNest,
+// `computeOwnedMoveAssigns`, where the freshness helpers live).
+
+/// BLADE_OWNED_MOVE: unset/`1`/`on` = a whole-array reassignment `T = R` of
+/// an OWNED array binding frees T's previous pool before T takes R's (the
+/// analysis below); `0`/`off` = the plain wrapper move, which drops T's
+/// previous pool on the floor (the pre-G92 emission, for A/B). Read per call.
+let ownedMoveEnabled () : bool = Blade.Toolchain.envFlag "BLADE_OWNED_MOVE" true
+
+let internal ownedMoveAssignsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRId> ref>()
+
+/// The admitted owned moves, `R -> T`: the assignment `T = R` (R a single-use
+/// fresh pool, T an owned dense pool no other name can hold) frees T's
+/// previous pool and hands T R's. Filled by `computeOwnedMoveAssigns`; read
+/// by computeScopeEscapes (R is spared from its scope's frees, T is not
+/// pinned) and by the two statement-position IRAssign emitters.
+let ownedMoveAssignsCell () : Map<IRId, IRId> ref =
+    let v = ownedMoveAssignsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        ownedMoveAssignsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The single decision point for an owned move: Some (T, R) when THIS
+/// assign is an admitted one. A copy-into-place assign never is (that
+/// transform keeps T's one pool and takes precedence).
+let ownedMoveAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId) option =
+    match target, value with
+    | LVVar tid, IRVar (rid, _) when (copyInPlaceAssign target value).IsNone ->
+        match Map.tryFind rid (ownedMoveAssignsCell ()).Value with
+        | Some t when t = tid -> Some (tid, rid)
+        | _ -> None
+    | _ -> None
+
+/// The statement text of an admitted owned move, `T = R` -> `deallocate(T);
+/// T = R` (no trailing `;`), given T's and R's emitted names. Installed per
+/// program by CodeGen (it reads the allocation frames, which live in
+/// CodeGenLoopNest, compiled after this file): `CodeGenLoopNest.renderOwnedMove`.
+let mutable ownedMoveRenderer : string -> string -> bool -> string = fun t r _ -> $"{t} = {r}"
+
+/// Is an owned-move target's type (as THIS emission sees it: a shape clone's
+/// own) of LITERAL extents only? Then every extents table of its pools is a
+/// `static constexpr` (or another static pool's), so the move needs no table
+/// ownership at all; a run-time-shaped target moves only a value whose
+/// registration OWNS its table (fable review: a borrowed `<input>.extents`
+/// would die at its lender's free).
+let ownedMoveStaticShape (target: IRExpr) : bool =
+    match inferExprType target with
+    | ArrayElem at ->
+        not at.IndexTypes.IsEmpty
+        && at.IndexTypes |> List.forall (fun ix ->
+            ix.Rank = 1 && List.isEmpty ix.Dependencies
+            && (match ix.Extent with IRLit (IRLitInt n) -> n > 0L | _ -> false))
+    | _ -> false
+
 // cppArrayTypeStr is defined ABOVE, inside the irTypeToCpp/elemTypeToCpp
 // recursion group, so that arrowSlotTypeForFuncSig (which renders
 // std::function<> slots and lives in that group) reaches the SAME wrapper
@@ -555,12 +779,41 @@ let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : 
     let extentsInit = String.concat ", " extentTerms
     let gridExpr = String.concat " * " extentTerms
     let lines =
-        [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
-          $"size_t {idxName}_grid = {gridExpr};"
-          $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
-          $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
-          $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
+        if rank = 1 then
+            // RANK-1 COMPACTION (bench gap G9): the specialization
+            // compound_index_t<1> builds its kept-position table straight
+            // from the flat bool pool -- a count pass and one branchless fill,
+            // no std::vector<bool> copy and no hash node per present cell.
+            // Same locals (`_grid`, `_pool`) as the general arm so the
+            // consumers that read them (the CUDA range driver) see one shape.
+            [ $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"compound_index_t<1>* {idxName} = new compound_index_t<1>(\"{idxName}\", {idxName}_grid, {idxName}_pool); // rank-1 compaction: kept positions, no hash" ]
+        else
+            [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
+              $"size_t {idxName}_grid = {gridExpr};"
+              $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+              $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
+              $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
     (lines, idxName)
+
+/// `blade plan`'s line for how a `compound(dense, mask)` binding is
+/// REPRESENTED (rule `compound`): a rank-1 mask takes the compaction
+/// representation (`applied`); a rank-k mask keeps the hashed index
+/// (`declined`, with the reason). Both lanes build the same representation
+/// for everything the LLVM lane accepts (it refuses every compound that is
+/// not a rank-1, trailing-free compaction), so the record holds for either.
+let recordCompoundRepresentation (subject: string) (leadRank: int) (trailingDims: int) : unit =
+    let trail = if trailingDims = 0 then "no trailing dims" else $"{trailingDims} trailing dim(s) per kept cell"
+    if leadRank = 1 then
+        recordCodegenDecision "compound" subject Blade.Effects.Applied
+            [ "representation: rank-1 compaction (count pass + branchless kept-position fill, gather by position; no hash table; keyed reads by binary search over the kept positions)"
+              $"rank-1 mask over one dense axis; {trail}" ]
+    else
+        recordCodegenDecision "compound" subject
+            (Blade.Effects.Declined $"hashed SparseIdx: a rank-{leadRank} mask has no closed-form rank, so compound_index_t<{leadRank}> keeps one tuple->rank hash entry per present cell")
+            [ $"representation: hashed SparseIdx (compound_index_t<{leadRank}>, lex-sorted tuple table + reverse hash)"
+              $"rank-{leadRank} mask; {trail}" ]
 
 /// Emit the construction of a standalone `sparse_index_t<RANK>` -- the sparse
 /// twin of genCompoundIndexFromMask, keyed on the SparseKeysSource branch:
@@ -625,6 +878,32 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
               $"sparse_index_t<{rank}>* {idxName} = new sparse_index_t<{rank}>(\"{idxName}\", std::move({idxName}_keys));" ]
         | None ->
             [ refusalErrorLine "" "SparseIdx: runtime keys variable not found in scope at codegen" ]
+
+/// Where a callable's captured bindings get their C++ names when its body is
+/// rendered (F8: one helper for what were sixteen hand folds in two variants).
+/// The two policies are two different LEXICAL situations, not two styles:
+type CaptureNamePolicy =
+    /// The body is rendered as its OWN C++ function (a lifted callable, its
+    /// std::function closure, a CUDA __global__ kernel): every capture is a
+    /// PARAMETER of that function, declared under the capture's own name, so
+    /// that name must replace whatever the enclosing scope called the
+    /// binding.
+    | CapturesAreParameters
+    /// The body is rendered INLINE in the enclosing scope (a loop nest, a
+    /// peel, a fused kernel, a row map): the binding is read where it lives,
+    /// under the name that scope EMITTED for it -- a block-local `let k` is
+    /// `__v<id>` there, not `k` -- so an id the map already knows keeps its
+    /// name and the capture's source name only fills a gap. Overwriting here
+    /// re-spells the binding to its source name: an undeclared identifier,
+    /// or worse, a different binding of the same name (a module-level `k`).
+    | EnclosingNamesWin
+
+/// Extend `names` with `captures` under `policy` (see CaptureNamePolicy).
+let withCaptureNames (policy: CaptureNamePolicy) (captures: CaptureInfo list) (names: Map<IRId, string>) : Map<IRId, string> =
+    captures |> List.fold (fun (m: Map<IRId, string>) (c: CaptureInfo) ->
+        match policy with
+        | CapturesAreParameters -> Map.add c.Id c.Name m
+        | EnclosingNamesWin -> if Map.containsKey c.Id m then m else Map.add c.Id c.Name m) names
 
 /// Resolve a capture to the C++ identifier naming it in the SCOPE where the
 /// forwarding closure is emitted. A capture's `Name` is its SOURCE name,
@@ -746,6 +1025,39 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
         walkBody bind.Value
     for f in modul.Functions do
         walkBody f.Body
+    // G90: a per-group map over a grouped value (its result keeps the member
+    // axis) is a grouped value over the SAME grouping, so a callable capturing
+    // it needs that grouping's sidecar too. Transitive (a map of a map).
+    // A COPY of a grouped value (`let h2 = h`, the grouped-copy arm) carries
+    // its grouping too. Iterated to convergence (a chain of maps and copies).
+    let changed = ref true
+    let rec spineTail (e: IRExpr) = match e with IRLet (_, _, rest) -> spineTail rest | t -> t
+    let derived (id: IRId) (v: IRExpr) =
+        if not (acc.ContainsKey id) then
+            // a BLOCK whose value is a grouped let (`let h = { let t = <map>; t }`)
+            // carries that grouping too
+            match strip (spineTail v) with
+            | IRApplyCombinator info ->
+                (match info.Arrays, info.OutputType with
+                 | [ IRVar (src, _) ], ArrayElem oa
+                     when acc.ContainsKey src
+                          && oa.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember) ->
+                     acc.[id] <- acc.[src]
+                     changed.Value <- true
+                 | _ -> ())
+            | IRVar (src, ArrayElem at)
+                when acc.ContainsKey src
+                     && at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKGroupMember) ->
+                acc.[id] <- acc.[src]
+                changed.Value <- true
+            | _ -> ()
+    while changed.Value do
+        changed.Value <- false
+        for bind in modul.Bindings do
+            derived bind.Id bind.Value
+            iterIRExpr (fun e -> match e with IRLet (id, v, _) -> derived id v | _ -> ()) bind.Value
+        for f in modul.Functions do
+            iterIRExpr (fun e -> match e with IRLet (id, v, _) -> derived id v | _ -> ()) f.Body
     acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
 
 /// EXTENTS-ONLY GROUP_BY: which group_by bindings never have their VALUES read.
@@ -877,6 +1189,36 @@ let noteGroupedBinding (id: IRId) (cppName: string) (gkName: string) : unit =
     let cell = groupedBindingsCell ()
     cell.Value <- Map.add id (cppName, gkName) cell.Value
 
+/// G90 (group-rowmap v1): the per-group ROW MAPS the ragged peel emitted as a
+/// grouped value (C++ name -> the grouping's C++ name). tryRaggedPeel returns
+/// code only, so the binding sites that own the codegen context read this to
+/// register the result in ctx.GroupedArrays (and noteGroupedBinding) exactly as
+/// a group_by binding registers itself: a peel, a print, an ungroup of the map
+/// then resolve its row lengths through the SAME grouping. Reset per assembly.
+let internal groupRowMapsStorage =
+    System.Threading.AsyncLocal<Map<string, string> ref>()
+
+let groupRowMapsCell () : Map<string, string> ref =
+    let v = groupRowMapsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupRowMapsStorage.Value <- fresh
+        fresh
+    else v
+
+let noteGroupRowMap (cppName: string) (gkName: string) : unit =
+    let cell = groupRowMapsCell ()
+    cell.Value <- Map.add cppName gkName cell.Value
+
+/// The grouping a just-emitted row map named `cppName` reads its lengths from,
+/// CONSUMED (a later binding of the same C++ name in another scope must not
+/// inherit it).
+let tryGroupRowMap (cppName: string) : string option =
+    let cell = groupRowMapsCell ()
+    match Map.tryFind cppName cell.Value with
+    | Some gk -> cell.Value <- Map.remove cppName cell.Value; Some gk
+    | None -> None
+
 // CLOSURE VALUES CAPTURE BY VALUE.
 //
 // A lifted callable takes its captures as trailing `T&` parameters, and a
@@ -921,6 +1263,30 @@ let reboundVarIdsCell () : Set<IRId> ref =
         reboundVarIdsStorage.Value <- fresh
         fresh
     else v
+
+/// The PARAMETER ids of the program's source functions (lifted kernel lambdas
+/// excluded: their parameters are cells of the operands they peel). Shape
+/// monomorphization copies one argument's literal extent onto another
+/// parameter, so a parameter's literal extent is not a statement about the
+/// runtime array (the co-iteration guards compare such operands at run time;
+/// prodsum's guard reads this set -- the wave-end review of G249). Installed
+/// by CodeGen's program entries beside reboundVarIds.
+let internal functionParamIdsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+let functionParamIdsCell () : Set<IRId> ref =
+    let v = functionParamIdsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        functionParamIdsStorage.Value <- fresh
+        fresh
+    else v
+
+let computeFunctionParamIds (modul: IRModule) : Set<IRId> =
+    modul.Functions
+    |> List.filter (fun f -> not (f.Name.StartsWith "__lambda"))
+    |> List.collect (fun f -> f.Params |> List.map (fun p -> p.VarId))
+    |> Set.ofList
 
 /// Every binding id some assignment REBINDS: the root of an assignment
 /// target, unless the target lies inside an element of an array (a store into
@@ -1044,6 +1410,7 @@ let resetExprSupportCells () : unit =
     freshCell groupedCaptureFactsStorage Map.empty
     freshCell extentsOnlyGroupBysStorage Set.empty
     freshCell groupedBindingsStorage Map.empty
+    freshCell groupRowMapsStorage Map.empty
     freshCell freshReturnFactsStorage Map.empty
 
 /// The fresh-return fact for whatever callable an expression in callee position
@@ -1083,21 +1450,16 @@ let freshReturnOf (calleeExpr: IRExpr) : FreshReturn =
 // work inline today.
 
 /// True iff `e` is a node `exprToCppCore` refuses outright in expression
-/// position. Deliberately narrow -- see the conservatism note above.
-let internal isNonExpressionNode (e: IRExpr) : bool =
-    match e with
-    | IRApplyCombinator _ | IRComposeApply _ -> true     // exprToCppCore: "unevaluated computation used as value"
-    | IRMethodFor _ | IRObjectFor _ -> true              // exprToCppCore: "loop object used as value"
-    | IRReduceCompute _ -> true                          // exprToCppCore: "reduce over a deferred computation ..."
-    | IRCompute (IRApplyCombinator _) -> true            // genApplyCombinatorExpr: unconditional refusal
-    | _ -> false
+/// position. Deliberately narrow -- see the conservatism note above. Defined
+/// in IRLift (the optimizer's kernel-invariant hoist asks the same question,
+/// gap G151); restated here under its old name.
+let internal isNonExpressionNode (e: IRExpr) : bool = Blade.IRLift.isNonExpressionNode e
 
 /// Does the kernel body render as a single C++ expression? False when a
 /// materializing node appears anywhere in it (including as an `IRLet` RHS, which
 /// is the shape stage S2's Lowering half now produces for a kernel-local array).
-let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
-    if isNonExpressionNode body then false
-    else childrenOf body |> List.forall kernelBodyIsExpressionShaped
+/// Defined in IRLift beside `isNonExpressionNode`.
+let kernelBodyIsExpressionShaped (body: IRExpr) : bool = Blade.IRLift.kernelBodyIsExpressionShaped body
 
 /// True iff a RETURN expression branches (`if`/`match`) and at least one of the
 /// leaves it can return is a materializing form. Follows only the return spine
@@ -1359,6 +1721,18 @@ let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
          :: (dims |> List.mapi (fun d (e, _) -> $"{ind}{extentsName}[{d}] = {e};")),
          Some extentsName)
 
+/// A `group_by` result's extents table (G1): `[ngroups, 0, offsets[0 ..
+/// ngroups]]` -- slot 1 is ragged, and the grouping's offsets ride along, so
+/// a read of group i's rows is checked against its own length (`extents[2 +
+/// i + 1] - extents[2 + i]`, renderExtentExpr) wherever the grouped value
+/// goes, a kernel it is captured into included.
+let emitGroupedExtentsTable (ind: string) (extentsName: string) (gkName: string) : string list * string option =
+    ([ $"{ind}size_t* {extentsName} = new size_t[3 + {gkName}__ngroups];"
+       $"{ind}{extentsName}[0] = {gkName}__ngroups;"
+       $"{ind}{extentsName}[1] = 0; /* inner extent is ragged */"
+       $"{ind}for (size_t __g = 0; __g <= {gkName}__ngroups; __g++) {extentsName}[2 + __g] = {gkName}__offsets[__g];" ],
+     Some extentsName)
+
 /// The word a dispatch marker comment leads with, for a route resolved by
 /// `LinAlgPatterns.resolveNodeRoute`. Names the BACKEND because that's the only
 /// place the choice is observable (host cblas / device cuBLAS / Blade's own
@@ -1401,10 +1775,10 @@ let isAssociativeOp (op: IRBinOp) : bool =
 // the serial loop with a visible marker rather than parallelizing on a licence
 // nobody granted.
 //
-// The SAME predicate answers "may BLADE_FP_REASSOC turn this serial chain into
-// lanes?" -- the knob supplies the reproducibility opt-in that `omp` supplies
-// on the parallel paths, never the licence itself. An unlicensed user kernel
-// stays serial with the knob on.
+// The SAME predicate answers "may this serial chain become lanes / an `omp simd
+// reduction`?" -- spent by DEFAULT since 2026-10-17 (`fpReassocEnabled`), and
+// withheld only by the repro build (BLADE_FP_REPRO=1), which is a polarity, never
+// the licence itself. An unlicensed user kernel stays serial in every build.
 
 /// The builtin binary op a 2-parameter fold callable's body IS, when the body is
 /// exactly `p0 <op> p1` (either argument order) and `op` is both commutative and
@@ -1433,6 +1807,176 @@ let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
          | _ -> None)
     | _ -> None
 
+/// Gap G42: a projection chain (`t[1]`, `t[0][1]`, flat or structural steps)
+/// rooted at a binding the C++ lane holds as a FLAT tuple (flatTupleIdsCell)
+/// -> (root, the flat position of the selected part's first leaf, the selected
+/// part's IR type). None when the root is not such a binding, or a step does
+/// not fit the type (the ordinary render then reports it).
+let flatTupleProjection (e: IRExpr) : (IRExpr * int * IRType) option =
+    let rec peel (x: IRExpr) (steps: (int * bool) list) =
+        match x with
+        | IRTupleProj (inner, i, fl) -> peel inner ((i, fl) :: steps)
+        | root -> (root, steps)
+    match peel e [] with
+    | (IRVar (id, rootTy) as root), steps when not steps.IsEmpty && (flatTupleIdsCell ()).Value.Contains id ->
+        let step (state: (IRType * int) option) (i: int, isFlat: bool) =
+            match state with
+            | None -> None
+            | Some (ty, off) ->
+                match stripUnits ty with
+                | IRTTuple ts when not isFlat && i >= 0 && i < ts.Length ->
+                    let before = ts |> List.take i |> List.sumBy (fun t -> (IR.flattenTupleLeaves t).Length)
+                    Some (ts.[i], off + before)
+                | IRTTuple _ as tt when isFlat ->
+                    let leaves = IR.flattenTupleLeaves tt
+                    if i >= 0 && i < leaves.Length then Some (leaves.[i], off + i) else None
+                | _ -> None
+        steps |> List.fold step (Some (rootTy, 0))
+        |> Option.map (fun (ty, off) -> (root, off, ty))
+    | _ -> None
+
+/// Does evaluating this callable WRITE something another evaluation could
+/// observe -- transitively, through every callable its body names (calls,
+/// kernels of inner folds and maps, lifted lambdas)? An assignment is LOCAL
+/// (not a write) when its target's root is a `let` bound inside the walked
+/// body itself -- a local accumulator, a local scratch array, a let-rec
+/// buffer -- the typechecker's own notion of "a binding outside the body"
+/// (formalism §5.2), except that a local bound directly to another NAME
+/// (`let t = G`) may alias it and counts. Every other assignment counts, and
+/// so does a call through a head that does not resolve to a callable (a
+/// function-typed value: may do anything). Conservative: a "may".
+///
+/// Read by `foldReorderLicensed`: formalism §5.2 accepts a serial body's
+/// write to a captured `let mut` as an ORDERED side effect, and a `comm`
+/// clause says the kernel's VALUE is symmetric -- not that its applications
+/// may be reordered, chunked across threads, or interleaved with the
+/// element evaluations they used to follow (gap G41).
+/// The walk itself is Blade.Optimize.exprMayWriteWith, shared with
+/// Lowering's join-leg refusal (gap G43); here it resolves callees through
+/// the codegen callable table.
+let internal programLetValuesStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRExpr> ref>()
+
+/// Every let-bound value of the module being emitted (module bindings and the
+/// lets inside every function body; ids are unique per program), installed by
+/// each emitter's program entry (CodeGen.genModule*, EmitLlvm) so the write
+/// analysis can follow a NAMED deferred computation that a kernel or a fold
+/// operand reads to the kernels that run when it is read (gaps G41 / G43).
+/// Stored values (`|> compute`, calls) are never followed: only deferred forms.
+let programLetValuesCell () : Map<IRId, IRExpr> ref =
+    let v = programLetValuesStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        programLetValuesStorage.Value <- fresh
+        fresh
+    else v
+
+let computeProgramLetValues (modul: IRModule) : Map<IRId, IRExpr> =
+    let acc = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    let note (e: IRExpr) = iterIRExpr (fun n -> match n with IRLet (id, v, _) -> acc.[id] <- v | _ -> ()) e
+    for b in modul.Bindings do
+        acc.[b.Id] <- b.Value
+        note b.Value
+    for f in modul.Functions do note f.Body
+    acc |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> Map.ofSeq
+
+let internal programCallbackArgsStorage =
+    System.Threading.AsyncLocal<Map<IRId, IRExpr list> ref>()
+
+/// Every argument a call site of the module passes for a FUNCTION-VALUED
+/// parameter, keyed by that parameter's id (gap G41, Codex finding 20): a
+/// kernel that calls a callback is judged through what the callback can be.
+/// Installed beside programLetValuesCell (after the callables table).
+let programCallbackArgsCell () : Map<IRId, IRExpr list> ref =
+    let v = programCallbackArgsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        programCallbackArgsStorage.Value <- fresh
+        fresh
+    else v
+
+let internal programMutableArrayLetsStorage =
+    System.Threading.AsyncLocal<Set<IRId> ref>()
+
+/// The module's ASSIGNABLE array lets (IRModule.MutableArrayLets: every block
+/// array `let`, since a plain block let is assignable in its scope, and every
+/// `let mut`), installed beside programLetValuesCell by each emitter's program
+/// entry. A dense one initialized from an existing array DEEP-COPIES it in
+/// every lane (gap G46): genVarAliasBinding for a binding-level let, the
+/// expression emitter's kernel-body copy (CodeGenExpr.kernelLetCopy) for a let
+/// inside an IIFE kernel body -- the interpreter's IRLet arm copies both.
+let programMutableArrayLetsCell () : Set<IRId> ref =
+    let v = programMutableArrayLetsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Set.empty
+        programMutableArrayLetsStorage.Value <- fresh
+        fresh
+    else v
+
+/// The dense, plain-index array shapes whose assignable let deep-copies its
+/// initializer (the shapes genVarAliasBinding / the interpreter copy; a
+/// compound / ragged / dependent-index store keeps the historical alias).
+let isDenseCopyLetType (t: IRType) : bool =
+    match t with
+    | ArrayElem at -> at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+    | _ -> false
+
+/// `let x = Z` (Z an existing dense array) whose x is assignable: x holds a
+/// private copy, so a write through x writes nothing Z's other names see.
+/// The same rule Lowering's write facts use (its `copied`).
+let isCopiedArrayLet (id: IRId) : bool =
+    Set.contains id (programMutableArrayLetsCell ()).Value
+    && (match Map.tryFind id (programLetValuesCell ()).Value with
+        | Some (IRVar (_, ty)) -> isDenseCopyLetType (stripUnits ty)
+        | _ -> false)
+
+let computeProgramCallbackArgs (modul: IRModule) : Map<IRId, IRExpr list> =
+    // the SAME collector Lowering uses (Optimize.callbackTable)
+    Blade.Optimize.callbackTable resolveCallable modul.Functions (modul.Bindings |> List.map (fun b -> (b.Id, b.Value)))
+
+let private codegenWriteFacts (deferred: Map<IRId, IRExpr>) : Blade.Optimize.WriteFacts =
+    { Resolve = resolveCallable
+      OuterLet = (fun id ->
+          match Map.tryFind id deferred with
+          | Some v -> Some v
+          | None -> Map.tryFind id (programLetValuesCell ()).Value)
+      // an assignable dense `let x = Z` deep-copies Z in every lane (gap G46:
+      // the C++ kernel-body let copies too now), so a write through x is local
+      CopiedLet = isCopiedArrayLet
+      UnknownIsWrite = true
+      // a callback joins EVERY argument its call sites pass (Codex finding 22)
+      Callbacks = (fun id ->
+          match Map.tryFind id (programCallbackArgsCell ()).Value with
+          | Some args when not args.IsEmpty -> Some args
+          | _ -> None) }
+let callableMayWrite (callable: IRCallable) : bool =
+    Blade.Optimize.callableMayWriteWith (codegenWriteFacts Map.empty) callable
+
+/// `callableMayWrite`'s rule over a bare kernel BODY (a loop nest's
+/// `KernelExpr`), every callable it names judged transitively; `deferred`
+/// (ctx.DeferredComputations) lets it follow a named unforced computation the
+/// body reads to the kernels that run when it is read.
+let exprMayWriteIn (deferred: Map<IRId, IRExpr>) (body: IRExpr) : bool =
+    Blade.Optimize.exprMayWriteWith (codegenWriteFacts deferred) body
+
+let exprMayWrite (body: IRExpr) : bool = exprMayWriteIn Map.empty body
+
+/// THE RETENTION FACTS (gap G221; Blade.Optimize.retentionAnalyzer): may a call
+/// of this callable leave a reference to storage it was handed in storage that
+/// outlives the call? Same write facts as callableMayWrite.
+let callableMayRetain (callable: IRCallable) : bool =
+    Blade.Optimize.callableMayRetainWith (codegenWriteFacts Map.empty) callable
+
+/// One checker (one summary table) for a scope's statements: `locals` are the
+/// scope's own lets (a whole rebinding of one is local), `privates` the lets
+/// whose cells a direct store fills privately.
+let retentionChecker () : Set<IRId> -> Set<IRId> -> IRExpr -> bool =
+    Blade.Optimize.retentionCheckerWith (codegenWriteFacts Map.empty)
+
+/// May evaluating this expression (a consumer an emitter frees a temporary
+/// after) retain a reference to storage it reads? Fail closed.
+let exprMayRetain (e: IRExpr) : bool = retentionChecker () Set.empty Set.empty e
+
 /// Does this fold kernel demand REPRODUCIBLE evaluation? True when the
 /// callable itself is a `where repro` function, or when it is the
 /// eta-expanded wrapper around one (`lambda(a, b) -> f(a, b)` -- the shape a
@@ -1453,13 +1997,37 @@ let foldKernelReproVetoed (callable: IRCallable) : bool =
 /// Answers only the LICENCE question -- whether omp was requested is separate
 /// (callable.IsOmpParallel), so the two can be reported independently.
 /// `where repro` vetoes unconditionally: this one predicate gates the OpenMP
-/// fold paths, every BLADE_FP_REASSOC lane, and the LLVM lane's fast-math
-/// flags, so the veto lands on all of them at once.
+/// fold paths, every K-lane / `omp simd reduction` fold form, and the LLVM
+/// lane's fast-math flags, so the veto lands on all of them at once. (The
+/// BUILD-wide twin, BLADE_FP_REPRO=1, is `fpReassocEnabled` -- checked beside
+/// this predicate at each site, because the predicate is also read as a FACT
+/// about the kernel, e.g. by the Path B chunk plan, whose route selection must
+/// not depend on a build knob.)
+///
+/// A kernel that WRITES (`callableMayWrite`) is never licensed, whatever its
+/// clauses: its applications are ordered side effects (formalism §5.2), so
+/// every reordered form -- a Path B team reached through the MAP's
+/// `omp(i: 1)`, K lanes that evaluate eight elements before combining them,
+/// the LLVM fast-math flags -- would change what the program does, not just
+/// its rounding (gap G41). The front end's BL4005 ban covers only a PARALLEL
+/// body, and a `comm` fold kernel is not one.
 let foldReorderLicensed (callable: IRCallable) : bool =
     not (foldKernelReproVetoed callable)
+    && not (callableMayWrite callable)
     && (callable.IsCommutative
         || not (List.isEmpty callable.CommGroups)
         || (foldKernelBuiltinOp callable).IsSome)
+
+/// The `blade plan` fold-form text of a fold `foldReorderLicensed` refuses,
+/// naming the write when that is the reason.
+let unlicensedFoldForm (callable: IRCallable) : string =
+    if callableMayWrite callable then
+        "serial (the fold kernel writes a captured binding: its applications are ordered side effects; no licence -- comm, omp on the fold or the map -- reorders or threads them)"
+    elif foldKernelReproVetoed callable then
+        // the kernel's own `where repro`, or the ENCLOSING repro function's
+        // demand its lifted kernel inherits (Lowering's InRepro; gap G74)
+        "serial (no reorder licence: a `where repro` demand -- the kernel's own or its enclosing function's -- keeps the ordered chain)"
+    else "serial (no reorder licence)"
 
 /// An operand's extent along `dim`, as a C++ expression: the LITERAL when the
 /// operand's own index record carries one, else the runtime `.extents[dim]`
@@ -1672,6 +2240,74 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
 
+/// Is a domain fold's MAP kernel free of side effects, so that its cells may
+/// be evaluated in another order (the diagonal walk) or on a thread team? The
+/// fold's licence covers only the COMBINE; nothing has vetted the map body the
+/// way BL4005 vets an omp body: a map kernel may assign a captured `let mut`
+/// or print in serial code, and then the cell order (or a team) is observable.
+/// Conservative: no assignment anywhere in the body, and every callee either a
+/// function whose effect summary rules out mutation and output or a lambda
+/// whose body passes the same test.
+let domainMapKernelPure (body: IRExpr) : bool =
+    let visited = System.Collections.Generic.HashSet<IRId>()
+    let rec ok (e: IRExpr) : bool =
+        match e with
+        | IRAssign _ -> false
+        | IRApp (f, _, _) ->
+            let calleeOk =
+                match f with
+                | IRVar _ ->
+                    (match resolveCallable f with
+                     | Some cl when not cl.Effects.Unknown -> not cl.Effects.Mutates && not cl.Effects.EmitsOutput
+                     | Some cl -> (not (visited.Add cl.Id)) || ok cl.Body
+                     | None -> false)
+                | _ -> ok f
+            calleeOk && (childrenOf e |> List.forall ok)
+        | _ -> childrenOf e |> List.forall ok
+    ok body
+
+/// The order a FOLD over a closed-form domain walks its cells.
+type DomainFoldOrder =
+    /// k = i - j outermost, a contiguous run of i inside (Types.domainDiagonal).
+    | DomainDiagonalOrder of Blade.Types.DomainDiagonal
+    /// The plan's lexicographic affine nest, and why the diagonal was declined.
+    | DomainLexOrder of reason: string
+
+/// THE one decision, shared by `blade plan`'s `[domain-enum v1]` line, the C++
+/// domain fold arm (CodeGenBinding) and the LLVM lane's domain folds, so the
+/// lanes walk the same order and the plan says which and why (docs/formalism.md,
+/// "Diagonal order of a licensed band fold"). The diagonal is taken only under
+/// the REORDER LICENCE on a builtin `+`/`*` fold -- a `BLADE_FP_REPRO=1` build,
+/// a `where repro` fold kernel and any other kernel keep the lex order and its
+/// bits -- over a band (two fields, a difference bounded on both sides with
+/// unit slope) whose map kernel subscripts no matrix (a diagonal strides a
+/// matrix by a row). `mapKernelBody` None = unknown, which keeps the lex order.
+let domainFoldOrder (foldCallable: IRCallable option) (mapKernelBody: IRExpr option) (plan: DomainPlan) : DomainFoldOrder =
+    match Blade.Types.domainDiagonal plan with
+    | None -> DomainLexOrder "not a band: no two-field conjunct bounds the difference of the fields from both sides with unit slope"
+    | Some dg ->
+    match foldCallable with
+    | None -> DomainLexOrder "the fold kernel does not resolve to a callable"
+    | Some cl when (foldKernelBuiltinOp cl).IsNone ->
+        DomainLexOrder "the fold kernel is not the builtin + or *: only a builtin reduction may walk the band by diagonal"
+    | Some cl when foldKernelReproVetoed cl -> DomainLexOrder "the fold kernel is `where repro`: the lexicographic order is the contract"
+    | Some _ when not (Blade.CodeGenState.fpReassocEnabled ()) ->
+        DomainLexOrder "BLADE_FP_REPRO=1: a repro fold keeps the lexicographic order"
+    | Some _ when not (Blade.CodeGenState.domainDiagonalEnabled ()) -> DomainLexOrder "BLADE_DOMAIN_DIAGONAL=0"
+    | Some _ when (match mapKernelBody with Some b -> Blade.IR.kernelSubscriptsRank2 b | None -> true) ->
+        DomainLexOrder "the map kernel subscripts a matrix, which a diagonal walk would stride by a row"
+    | Some _ when (match mapKernelBody with Some b -> not (domainMapKernelPure b) | None -> true) ->
+        DomainLexOrder "the map kernel may assign a capture or emit output: its cells' side effects keep the lexicographic order"
+    | Some _ -> DomainDiagonalOrder dg
+
+/// `blade plan`'s rendering of a domain fold's order.
+let domainFoldOrderText (plan: DomainPlan) (order: DomainFoldOrder) : string =
+    match order, plan.Levels with
+    | DomainDiagonalOrder dg, [ l0; l1 ] ->
+        $"order: diagonal (k = {l0.Field} - {l1.Field} outer, k in [{dg.KLo}, {dg.KHi}]; {l0.Field} inner and contiguous) -- a licensed fold over a difference-bounded band: same cells, same per-cell arithmetic, and a term depending only on {l0.Field} - {l1.Field} is invariant in the inner run"
+    | DomainDiagonalOrder _, _ -> "order: diagonal"
+    | DomainLexOrder why, _ -> $"order: lexicographic ({why})"
+
 
 /// Is the packed native matmul kernel (blade_packed_gemm.hpp's dgemm_nn)
 /// worth it for an M x K times K x N product? THE one statement of the rule:
@@ -1682,6 +2318,469 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
 /// not amortize. Small N is fine (the loop is at its worst there).
 let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
     m >= 18L && k >= 16L && m * n * k >= 32768L
+
+
+/// Is the packed-triangle SYRK tile (blade_packed_gemm.hpp's dsyrk_tri over
+/// blade_tiles.h's 6 x 8 core) worth it for a p x p same-array row contraction
+/// over k samples? THE one statement of the rule, decided at compile time on
+/// the literal extents (the header carries no copy). Measured against the
+/// per-cell dot it replaces (default build, Zen 3, single thread, scratch
+/// sweep 2026-10-18): the tile wins from p = 16 at every k >= 4 (24 x 8 1.3x,
+/// 61 x 31 2.5x, 61 x 257 2.7x, 97 x 513 3.1x, 1601 x 1001 5.9x) and loses
+/// below (13 x 31 0.78x, 9 x 1001 0.56x) -- a 6 x 8 tile is mostly padding on a
+/// 13-row triangle. The serial call makes NO OpenMP runtime call, which is
+/// what moved the crossover down from the plan's first guess (an `if(false)`
+/// parallel region cost ~17 us per K block).
+let packedTriWorth (p: int64) (k: int64) : bool =
+    p >= 16L && k >= 4L
+
+/// The tile's sample-block cap, passed to dsyrk_tri as its `kcMax` so the
+/// plan line and the header cannot disagree: k samples run in
+/// nkb = ceil(k / cap) BALANCED blocks of ceil(k / nkb) (k = 1001: 3 x 334).
+/// 336 keeps the 6 x KC A micro-panel (16 KB) resident in Zen 3's 32 KB L1d
+/// beside the streaming B lines; 256 / 336 / 400 measured within 2% at
+/// 1601 x 1001, 192 ~5% slower (more output reload passes).
+let syrkTileKcMax = 336L
+
+/// The balanced sample block the header derives from `syrkTileKcMax` (stated
+/// here only for the `blade plan` line).
+let syrkTileKc (k: int64) : int64 =
+    if k <= 0L then 0L
+    else
+        let nkb = (k + syrkTileKcMax - 1L) / syrkTileKcMax
+        (k + nkb - 1L) / nkb
+
+/// BLADE_TILE_TUNE: the packed-tile drivers' SPEED-ONLY parameters, for A/B
+/// sweeps -- `key=value` pairs separated by commas or spaces, unknown keys
+/// ignored, a malformed value = the default. No bit depends on any of them
+/// (every cell is one owner's chain in one order whatever the visiting order
+/// or block size), so they need no licence and apply under BLADE_FP_REPRO=1.
+/// Read per call; they change the EMISSION (the driver's arguments), so the
+/// exe cache keys on them for free.
+///   syrk_g   row panels per GROUP in dsyrk_tri / blade_dsyrk_tri_f64 (1..8):
+///            G A micro-panels are packed together and each column panel is
+///            read once from L3 and reused G times from L1 (default 4;
+///            1 = the previous order, every column panel from L3 per row panel)
+///   anti_kc  sample-block cap INSIDE an antisym tile visit (P and Q partials
+///            spilled and reloaded exactly between balanced blocks; 0 = the
+///            whole chain in one block, the default)
+///   anti_g   row panels per GROUP in dantisym_tri / blade_dantisym_tri_f64:
+///            unset = per regime (`antisymRowGroup`: 1, the previous order,
+///            for a serial tile; the cache budget for a TEAM-ELIGIBLE one --
+///            licence, thread emission, static work cap >= 2), 0 = the
+///            compile-time cache budget, 1..8 = forced
+///   tri_edge the syrk / simplex EDGE tiles' kloop (blade_tiles.h
+///            blade_tri_tile_edge): 1 = only the accumulators with a real lane
+///            (the default), 0 = the full 6 x 8 kloop
+///   epi_blk  the cell epilogue's producer block between lane-state feeds
+///            (`cellEpiBlock`: default 256, a multiple of the lane block)
+///   epi_blk_r  the cell-chain mini-block (`cellEpiBlockR`: default 0 = one
+///            fused loop)
+///   sel_cap  the compaction's single-pass selectivity cap in KiB (read by
+///            the optimizer, Optimize.compactionSelCapBytes: default 262144
+///            = 256 MiB of n + 1 private cells across the compound's buffers)
+/// The parser itself is Blade.Toolchain.tileTune (the optimizer reads it too).
+let tileTune (key: string) (dflt: int64) : int64 = Blade.Toolchain.tileTune key dflt
+
+/// dsyrk_tri's row panels per group (BLADE_TILE_TUNE syrk_g), clamped to the
+/// drivers' TRI_G_MAX = 8.
+let syrkRowGroup () : int64 = max 1L (min 8L (tileTune "syrk_g" 4L))
+
+/// The antisym tile's sample-block cap (BLADE_TILE_TUNE anti_kc); 0 = whole.
+let antisymKcMax () : int64 = max 0L (tileTune "anti_kc" 0L)
+
+/// The L2 budget the antisym row-panel groups are sized against: half of Zen
+/// 3's 512 KiB per-core L2, the rest left to the output lines, the P / Q
+/// spills, the packing stream and the other data the visit touches.
+let antisymRowGroupBudgetBytes = 256L * 1024L
+
+/// The antisym driver's STATIC work cap on its team (blade_packed_gemm.hpp
+/// `dantisym_tri`: T = max(1, min(omp_get_max_threads(), (p * p * n) >> 20)),
+/// a team only when T > 1 and not inside an enclosing parallel region),
+/// computed here without overflow. A cap below 2 means the driver runs
+/// serially whatever the thread count.
+let antisymTeamWorkCap (p: int64) (n: int64) : bigint =
+    (bigint (max 0L p) * bigint (max 0L p) * bigint (max 0L n)) / bigint (1L <<< 20)
+
+/// The plan phrases of anti_g's per-regime default (`antisymRowGroup`).
+/// Why a tile is in the SERIAL regime, by cause.
+let antisymNoTeamRequested =
+    "no thread team is requested for this tile (no omp licence on the kernel, thread emission off, or the LLVM lane)"
+let antisymNoTeamByWorkCap (cap: bigint) =
+    $"the driver's static work cap (p * p * n) >> 20 = {cap} admits no team of two, so the tile runs serially at any thread count"
+let antisymSerialDefaultNote (why: string) =
+    $"row groups of 1 (the serial-tile default: {why}; G = 1 measured faster than the cache-budget groups serially, round 3; BLADE_TILE_TUNE anti_g=0 selects the cache-budget groups)"
+/// The suffix of the TEAM-ELIGIBLE regime's cache-budget phrase.
+let antisymTeamEligibleNote (cap: bigint) =
+    $"; the team-eligible-tile default: the omp licence, thread emission and the driver's static work cap (p * p * n) >> 20 = {cap} >= 2 make this tile ELIGIBLE for the driver's thread team -- the runtime team is min(OMP_NUM_THREADS, cap), none at one thread or inside an enclosing parallel region -- and the cache-budget groups measured faster than G = 1 under mt8, round 3; BLADE_TILE_TUNE anti_g=1 keeps the previous order"
+
+/// dantisym_tri's row panels per group and the plan phrase that states why
+/// (BLADE_TILE_TUNE anti_g; the C++ driver's and the LLVM core's rowGroup).
+/// A GROUP packs G row panels' X(i) / Y(i) pairs (G x 2 x RM x n doubles per
+/// thread) and visits each column panel's X(j) / Y(j) pair (2 x RN x n
+/// doubles) with every member in turn: each member rereads the pair; the
+/// modeled lower-cache traffic assumes one fetch per group and residency
+/// across its visits (a model, not a measured fetch count).
+/// DEFAULT (anti_g unset) PER REGIME (round 3, W2-0b; the wave-1 harness
+/// A/B, bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc), three interleaved sessions per mirror,
+/// pooled n = 63): a SERIAL tile takes G = 1, the previous order (the cache
+/// budget measured 1.0-2.0% SLOWER serially: 1.010 llvm, 1.020 cpp); a
+/// TEAM-ELIGIBLE tile takes the cache-budget policy (measured 4.8% FASTER
+/// under mt8: 0.952 [0.929, 0.987] cpp). Team-eligible = the driver is asked
+/// for a team (`teamRequested`: the kernel's omp licence AND thread emission
+/// on -- the driver's own `threaded` argument, unchanged) AND its STATIC work
+/// cap (`antisymTeamWorkCap`, (p * p * n) >> 20) is at least 2: below that the
+/// driver never forms a team (29 x 11: cap 0; 61 x 401: cap 1; 193 x 401: 14;
+/// the bench's 1201 x 401: 551). Everything else is serial: thread emission
+/// off (BLADE_OMP_THREADS=1/0/off), no licence, a cap below 2, or the LLVM
+/// lane (no thread runtime). ELIGIBILITY, not a guaranteed team: at run time
+/// OMP_NUM_THREADS=1 or an enclosing parallel region still runs the call
+/// serially (with the cache-budget G, which no bit depends on). The regime
+/// is the tile's own, not the build's: an unlicensed tile in a threaded build
+/// runs serially, which is the serial measurement's situation. anti_g = 0:
+/// the cache-budget policy in either regime, the largest fitting G in
+/// {4, 2}, otherwise 1, with
+///     G * 2 * RM * n * 8 + 2 * RN * n * 8 <= 256 KiB,
+/// decided at COMPILE time on the literal n (the header carries no copy of
+/// the rule). The budget covers the ACTIVE B pair -- the one column panel the
+/// group is visiting -- not the whole packed B (n = 401: 4 groups' A pairs
+/// 150.4 KiB + the B pair 50.1 KiB = 200.5 KiB, G = 4; n = 1001: G = 2 needs
+/// 312.8 KiB, G = 1). The fallback G = 1 need not fit either (6x8 at n = 1201
+/// needs 269,024 B): it is simply the previous order. 1..8 forces G (in
+/// either regime). No bit depends on G: the group visits the same (i0, j0)
+/// tile calls with the same arguments, in another order.
+/// `paired` = the 4 x 4 schedule (RM = RN = 4), else the sequential 6 x 8.
+/// `teamRequested` = the C++ lane's `threaded` driver argument (licence AND
+/// thread emission); always false in the LLVM lane.
+let antisymRowGroup (p: int64) (n: int64) (paired: bool) (teamRequested: bool) : int64 * string =
+    let rm, rn = if paired then 4L, 4L else 6L, 8L
+    let cap = antisymTeamWorkCap p n
+    let teamEligible = teamRequested && cap >= 2I
+    let bytes (g: int64) = g * 2L * rm * n * 8L + 2L * rn * n * 8L
+    let budgetPolicy (why: string) =
+        let budget = antisymRowGroupBudgetBytes
+        match [ 4L; 2L ] |> List.tryFind (fun g -> bytes g <= budget) with
+        | Some g -> g, $"row groups of {g} (cache budget {bytes g / 1024L} KiB of {budget / 1024L} KiB{why})"
+        | None ->
+            let over = (bytes 2L + 1023L) / 1024L
+            1L, $"row groups of 1 -- cache budget: B pair + 2 row panels = {over} KiB > {budget / 1024L} KiB{why}"
+    match tileTune "anti_g" -1L with
+    | v when v >= 1L ->
+        let g = min 8L v
+        g, $"row groups of {g} (BLADE_TILE_TUNE anti_g={g})"
+    | v when v < 0L && not teamRequested ->
+        1L, antisymSerialDefaultNote antisymNoTeamRequested
+    | v when v < 0L && not teamEligible ->
+        1L, antisymSerialDefaultNote (antisymNoTeamByWorkCap cap)
+    | v when v < 0L ->
+        budgetPolicy (antisymTeamEligibleNote cap)
+    | _ -> budgetPolicy ""
+
+/// The syrk / simplex edge tiles' kloop (BLADE_TILE_TUNE tri_edge): 1 = the
+/// live-accumulator variants (default), 0 = the full 6 x 8 kloop. Speed only.
+let triTileEdge () : int64 = if tileTune "tri_edge" 1L = 0L then 0L else 1L
+
+/// The fold-form phrase for `triTileEdge` (both lanes' plan lines).
+let triEdgeNote (edge: int64) : string =
+    if edge <> 0L then ", live-accumulator edges" else ", full-kloop edges (BLADE_TILE_TUNE tri_edge=0)"
+
+/// The row-slot form's STATIC WORK GATE (BLADE_TILE_TUNE rowslots_min,
+/// bench gap G35): the total number of inner fold steps (outer rows x each
+/// row's fold cells) below which a threaded complete-row fold is declined
+/// and the serial walk kept -- a team plus a slot array is not free, and a
+/// row of a handful of adds does not pay for it. Default 2^18 = 262144 is
+/// PROVISIONAL: chosen on operation counts alone (it declines the bench's
+/// input-checksum rows and admits its logical-walk checksums), with no
+/// timing behind it yet. Speed-only: no bit depends on it.
+let rowSlotsMin () : int64 = max 0L (tileTune "rowslots_min" 262144L)
+
+/// BLADE_FOLD_ROW_SLOTS, a POLICY knob (round 3, W2-0a):
+///   unset / `1` / `on` / `true` = under BLADE_FP_REPRO=1 (or BLADE_FP_REASSOC=0) a
+///             `where omp` fold whose outer level's value is one complete
+///             scalar fold per index runs those row folds on the thread team
+///             into indexed slots, then the outer chain serially (G35) --
+///             EXCEPT where the ordered orbit scatter admits the same walk:
+///             there the scatter takes precedence (measured faster under mt8
+///             repro, round 3: pairkernel 0.841, comoment3 0.843 of the row
+///             slots' time, bench/results/stats.csv, labels r3old / r3new (the former bench/notes/round3/w1-ab.md, in git history at cf2028cc));
+///   `prefer` = the row slots win wherever both admit (the round-2 order);
+///   `0` / `off` / `false` = no row slots at all (the serial walk, or the
+///             scatter where it admits the walk).
+/// Any other spelling reads as the default. Emission-only (C++ lane; the
+/// LLVM lane has no thread runtime). FUNCTIONS, read per call.
+type RowSlotsPolicy =
+    | RowSlotsOff
+    | RowSlotsAdmit
+    | RowSlotsPrefer
+
+let foldRowSlotsPolicy () : RowSlotsPolicy =
+    match Blade.Toolchain.envSwitch "BLADE_FOLD_ROW_SLOTS" with
+    | Blade.Toolchain.SwitchOff -> RowSlotsOff
+    | Blade.Toolchain.SwitchOther t when t.ToLowerInvariant() = "prefer" -> RowSlotsPrefer
+    | _ -> RowSlotsAdmit
+
+let foldRowSlotsEnabled () : bool = foldRowSlotsPolicy () <> RowSlotsOff
+
+/// `BLADE_FOLD_ROW_SLOTS=prefer`: a taken row-slot form wins over an
+/// admitted ordered orbit scatter (the round-2 precedence).
+let foldRowSlotsPreferred () : bool = foldRowSlotsPolicy () = RowSlotsPrefer
+
+/// B1's producer block between lane-state feeds (BLADE_TILE_TUNE epi_blk,
+/// round-2 cell epilogues): cells per block, default 256 (2 KB of double).
+/// It MUST be a positive multiple of the lane block B = K * 32 / sizeof(T)
+/// (a feed consumes whole blocks only); any other value is ignored and the
+/// default is used (256 is a multiple of every B: 16 / 32 / 64). Speed only:
+/// the lane tree is fixed by B, not by the block, so no bit depends on it.
+let cellEpiBlock (laneBlock: int64) : int64 =
+    let v = tileTune "epi_blk" 256L
+    if v > 0L && laneBlock > 0L && v % laneBlock = 0L then v else 256L
+
+/// B1-repro / B2r's cell-loop mini-block (BLADE_TILE_TUNE epi_blk_r): 0 (the
+/// default: a chosen simple competitive value -- the round-2 drop sweep over
+/// 8-64 showed no consistent winner, without paired uncertainty) =
+/// one fused loop; n > 0 strip-mines the cell loop into n-cell blocks. Speed
+/// only: the chain visits the same cells in the same order either way.
+let cellEpiBlockR () : int64 = max 0L (tileTune "epi_blk_r" 0L)
+
+/// The ordered orbit scatter's row GROUP (BLADE_TILE_TUNE scatter_g; default
+/// 4, clamped to 1..8): canonical rows fed together, so the group's row chains
+/// take one column per step and each column chain takes G terms in row order.
+/// Speed only: every chain receives its source sequence for any G (the group
+/// order proof in OrbitFold.planStrict's header), so no bit depends on it.
+let scatterRowGroup () : int = int (max 1L (min 8L (tileTune "scatter_g" 4L)))
+
+/// The ordered orbit scatter's column BLOCK (BLADE_TILE_TUNE scatter_b;
+/// default 64, clamped to 8..1024): columns whose G terms are formed into the
+/// term buffer before the column and row chains consume them. Speed only.
+let scatterColBlock () : int = int (max 8L (min 1024L (tileTune "scatter_b" 64L)))
+
+/// The LLVM lane's scatter row chains for a builtin `+` on double at G % 4 = 0
+/// (BLADE_TILE_TUNE scatter_vrow): default 1 = explicit `<4 x double>` adds (one
+/// vertical add per column per 4 chains, the C++ lane's v4d), 0 = scalar chains.
+/// Speed only (each lane is one chain either way); measured within noise.
+let scatterVectorRows () : bool = tileTune "scatter_vrow" 1L <> 0L
+
+/// BLADE_SYRK_TILE: unset / `1` / `on` = the packed-triangle SYRK tile is the
+/// BLAS-off arm of the same-array `comm` row contraction (default); `0` / `off`
+/// keeps the plain per-cell nest, for A/B. A FUNCTION, read per call, so a
+/// harness can pin it mid-process. It changes the emission, so the exe cache
+/// keys on it for free.
+let syrkTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SYRK_TILE" true
+
+/// BLAS-ON PRECEDENCE (bench gap G28, 2026-10-19): with the BLAS gate on, a
+/// real f64 same-array `comm` row contraction or `gram(A, A)` node that the
+/// tile would take ANYWAY (literal extents above `packedTriWorth`, knob on)
+/// goes to the tile, not to host `?syrk`. Measured at the bench's gram shape
+/// (p = 1601, k = 1001, Zen 3): the tile 57.96 ms serial / 15.58 ms at 8
+/// threads against an explicit `dsyrk` caller's 62.5-65.4 / 19.3-20.0 ms --
+/// and the BLAS route additionally stages a dense p x p buffer and repacks
+/// it (blade_linalg.hpp). The library keeps everything the tile does not
+/// cover: complex (herk), float32, runtime extents, small shapes -- and an
+/// explicit device route (BLADE_CUBLAS) is never preempted. BLADE_SYRK_TILE=0
+/// hands the eligible shapes back to `?syrk`. The values move from the
+/// library's blocked association to the serial chain per cell (ulps; the
+/// bench pins hold at their tolerance -- re-validated with `run.py check
+/// gram` in the blas regime).
+///
+/// WHICH SIDE wins at an eligible shape is `LinAlgPatterns.blasPreference`
+/// (BLADE_BLAS_PREFER, env or blade.toolchain.json): `native` (and `auto`
+/// unless the library is identified as MKL) takes the tile; `library` keeps
+/// `?syrk`. `syrkTileEligibleShape` is the shape half alone, so a site can
+/// say in the plan that it skipped an eligible tile for the library.
+let syrkTileEligibleShape (p: string) (k: string) : bool =
+    let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+    syrkTileEnabled ()
+    && (match lit p, lit k with
+        | Some p, Some k -> packedTriWorth p k
+        | _ -> false)
+
+let syrkTilePreferredOverBlas (p: string) (k: string) : bool =
+    syrkTileEligibleShape p k
+    && (Blade.LinAlgPatterns.blasPreference ()).Prefer = Blade.LinAlgPatterns.PreferNative
+
+/// The antisym pair's tile schedule (`LinAlgPatterns.AntiPair`, driver
+/// blade_pgemm::dantisym_tri), read from BLADE_ANTISYM_TILE per call:
+/// unset / `1` / `on` / `6x8` = the SEQUENTIAL 6 x 8 tile (P pass, spill, Q
+/// pass: 12 accumulators, 0.67 loads per FMA -- the reviewed default);
+/// `4x4` / `paired` = the PAIRED 4 x 4 tile (P and Q in one pass: 8
+/// accumulators, 1.25 loads per FMA, no spill -- the measured alternative,
+/// bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) S2); `0` / `off` = the plain
+/// per-cell nest. Anything else is the default. Same bits in every schedule
+/// (each cell's two chains and one subtraction are unchanged).
+type AntisymTileSchedule =
+    | AntiSeq6x8
+    | AntiPaired4x4
+    | AntiOff
+
+let antisymTileSchedule () : AntisymTileSchedule =
+    match System.Environment.GetEnvironmentVariable "BLADE_ANTISYM_TILE" with
+    | null -> AntiSeq6x8
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" | "no" -> AntiOff
+        | "4x4" | "paired" -> AntiPaired4x4
+        | _ -> AntiSeq6x8
+
+/// BLADE_SIMPLEX_TILE: unset / `1` / `on` = the rank-3 simplex tile with the
+/// hoisted W = X(i) * X(j) panel (`LinAlgPatterns.Sym3`, driver
+/// blade_pgemm::dsym3_tri) is the emission of the same-array 3-way `comm`
+/// prodsum nest (default); `0` / `off` keeps the plain per-cell nest, for A/B.
+let simplexTileEnabled () : bool = Blade.Toolchain.envFlag "BLADE_SIMPLEX_TILE" true
+
+// ---- The explicit K-lane vector fold form (BLADE_FOLD_LANES; review M9/M14) --
+
+/// BLADE_FOLD_LANES, read per call:
+///   unset / `1` / `on` / `auto` -> the explicit K-lane vector form
+///                                  (blade_fold_lanes.hpp) for every licensed
+///                                  DOT-CLASS fold, K by `foldVecLanes`; and
+///                                  the simd form inside Path B chunks
+///   `4` / `8`                   -> the same, with that K everywhere (A/B)
+///   `0` / `off`                 -> the forms before M9/M14: ONE `omp simd
+///                                  reduction` accumulator, and a serial chain
+///                                  inside each Path B chunk
+/// It changes the emission, so the exe cache keys on it for free. Inert under
+/// BLADE_FP_REPRO=1, which never reaches a reassociated form.
+type FoldLanesMode =
+    | FoldLanesOff
+    | FoldLanesAuto
+    | FoldLanesFixed of int
+
+let foldLanesMode () : FoldLanesMode =
+    match System.Environment.GetEnvironmentVariable "BLADE_FOLD_LANES" with
+    | null -> FoldLanesAuto
+    | _ when Blade.Optimize.foldLanesSwitchedOff () -> FoldLanesOff
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "4" -> FoldLanesFixed 4
+        | "8" -> FoldLanesFixed 8
+        | _ -> FoldLanesAuto
+
+/// The vector forms blade_fold_lanes.hpp spells, by the kernel's factor list
+/// (source order; a repeated array is a self-dot): `sum` (one stream),
+/// `dot` (two), `sq` (one stream read once, squared), `dot3` (three, the
+/// product left-nested `(a * b) * c`).
+type FoldVecKind =
+    | VecSum
+    | VecDot
+    | VecSq
+    | VecDot3
+
+/// The form for a factor list of 1..3 array names, with the DISTINCT operand
+/// names in the call's order; None for anything else.
+let foldVecKind (factors: string list) : (FoldVecKind * string list) option =
+    match factors with
+    | [ a ] -> Some (VecSum, [ a ])
+    | [ a; b ] when a = b -> Some (VecSq, [ a ])
+    | [ a; b ] -> Some (VecDot, [ a; b ])
+    | [ a; b; c ] -> Some (VecDot3, [ a; b; c ])
+    | _ -> None
+
+let foldVecKindName (k: FoldVecKind) : string =
+    match k with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "sq" | VecDot3 -> "dot3"
+
+/// The number of distinct memory streams a form reads per element.
+let foldVecStreams (k: FoldVecKind) : int =
+    match k with VecSum -> 1 | VecDot -> 2 | VecSq -> 1 | VecDot3 -> 3
+
+/// K, the number of independent 32-byte vector accumulators. The rule is by
+/// the form's load/FMA ratio on Zen 3 (2 loads + 2 FMAs per cycle, FMA latency
+/// 4): a two-stream dot is load-bound at one vector FMA per cycle, which 4
+/// chains cover; a self-dot or a plain sum issues one load per FMA and can
+/// run both FMA units, which needs 8 chains. 8 is never worse than 4 at any
+/// shape measured (bench/notes/gap-register.md, G26 entry), so 8 is the
+/// default everywhere; `BLADE_FOLD_LANES=4|8` forces either for A/B.
+let foldVecLanes (k: FoldVecKind) : int =
+    match foldLanesMode () with
+    | FoldLanesFixed n -> n
+    | _ -> 8
+
+/// Is `elemStr` an element type blade_fold's vector forms are defined for?
+let foldVecElem (elemStr: string) : bool =
+    elemStr = "double" || elemStr = "float"
+
+/// The C++ call: `blade_fold::<kind><T, K>(p0, p1, .., n)` over raw element
+/// pointers (`.data` of a rank-1 Array, `+ lo` for a chunk) and an element
+/// count. Sets nothing: the caller marks `foldLanesUsedCell` (the include).
+let foldVecCall (elemStr: string) (k: int) (kind: FoldVecKind) (ptrs: string list) (nExpr: string) : string =
+    let args = String.concat ", " (ptrs @ [ nExpr ])
+    $"blade_fold::{(foldVecKindName kind)}<{elemStr}, {k}>({args})"
+
+/// The census / `blade plan` spelling of the form: `simd K-lanes(8) dot`.
+let foldVecLabel (kind: FoldVecKind) (k: int) : string =
+    let word =
+        match kind with VecSum -> "sum" | VecDot -> "dot" | VecSq -> "self-dot" | VecDot3 -> "dot3"
+    $"simd K-lanes({k}) {word}"
+
+/// Is `lvl` a plain rectangular sweep a fold may take a lane / simd / vector
+/// form over -- no bound dependencies, no strict offset, not a fused joint
+/// level, not a tabulated (compound / sparse) axis, no Reynolds body, no MPI
+/// slab, no halo-window slot? ONE predicate for the one-level licensed arm of
+/// `genReduceComputeBinding` and for the Path B chunk plan (M14), so the
+/// serial and the threaded forms admit exactly the same levels.
+let laneableFoldLevel (cg: LoopNestCodeGen) (lvl: LoopIndexBinding) : bool =
+    lvl.BoundDependencies.IsEmpty && lvl.StrictOffset = 0
+    && lvl.FusedRank.IsNone
+    && (match lvl.Extent with
+        | IRCompoundMask _ | IRSparseKeys _ -> false
+        | _ -> true)
+    && not cg.HasReynolds && not cg.MpiSlab
+    && (lvl.Elements
+        |> List.forall (fun e ->
+            match e.SlotTag with
+            | Some t -> not (t.StartsWith "__halowin")
+            | None -> true))
+
+/// The factor list of a DOT-CLASS kernel body over `lvl`'s peels: the body is
+/// a left-nested elementwise product of 1..3 kernel parameters, each bound at
+/// this level to a REAL rank-1 array (not a range / reverse / halo slot) whose
+/// element type `elemOk` accepts, so the body at index i is `A[i] * B[i]
+/// (* C[i])` and the whole fold is one of blade_fold's forms. Returns the
+/// arrays in source factor order (a repeated array appears twice: `x * x`);
+/// None for any other body -- a composed chain, a call, a cast, a scalar
+/// capture in the product -- which keeps the simd form.
+let dotClassFactors (elemOk: IRType -> bool) (body: IRExpr) (kernelParams: IRParam list) (lvl: LoopIndexBinding) : string list option =
+    // A slot's tag is its index type's NAME for a named index (`Ix`); only the
+    // halo-window payload marks a slot that is not a plain element read.
+    let plainSlot (e: ElementBinding) =
+        match e.SlotTag with
+        | Some t -> not (t.StartsWith "__halowin")
+        | None -> true
+    let arrayOfParam (vid: IRId) =
+        lvl.Elements
+        |> List.tryPick (fun e ->
+            if e.ParamVarId = vid && e.Virtual.IsRealArray && e.ArrayRank = 1
+               && plainSlot e && elemOk e.ArrayElemType
+            then Some e.ArrayName else None)
+    let leaf (e: IRExpr) =
+        match e with
+        | IRVar (id, _) -> arrayOfParam id
+        | IRParam (_, idx, _) ->
+            kernelParams |> List.tryFind (fun p -> p.Index = idx) |> Option.bind (fun p -> arrayOfParam p.VarId)
+        | _ -> None
+    match body with
+    | IRBinOp (IRElementwise, IRMul, IRBinOp (IRElementwise, IRMul, a, b, _), c, _) ->
+        (match leaf a, leaf b, leaf c with
+         | Some x, Some y, Some z -> Some [ x; y; z ]
+         | _ -> None)
+    | IRBinOp (IRElementwise, IRMul, a, b, _) ->
+        (match leaf a, leaf b with
+         | Some x, Some y -> Some [ x; y ]
+         | _ -> None)
+    | e -> leaf e |> Option.map (fun x -> [ x ])
+
+/// Is the antisym pair's tile worth it over the per-cell double dot? The
+/// review's routes: tile at p = 61 x n = 401 / 600, decline at 23 x 11 (a
+/// strict 23-row triangle is a handful of 6 x 8 tiles, mostly padding). One
+/// statement of the rule, decided on the literal extents.
+let packedAntiWorth (p: int64) (n: int64) : bool =
+    p >= 24L && n >= 8L
+
+/// Is the rank-3 simplex tile worth it over the per-cell triple dot? The
+/// review's routes: tile at (29, 67) (29, 201) (61, 11) (61, 201), decline at
+/// (13, 11) (13, 201) -- a 13-wide simplex leaves most of every 6 x 8 tile
+/// below its k >= j edge.
+let packedSym3Worth (p: int64) (n: int64) : bool =
+    p >= 24L && n >= 4L
 
 
 /// Can `A(i1, ..., ik)` -- `consumed` positional subscripts, fewer than A's
@@ -1707,8 +2806,16 @@ let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
 /// would the stored group. A partially-read group, or a group completed with
 /// slots after it, is refused at typecheck (TypeCheckSupport.compactCoordWalk);
 /// ragged/dep-idx/compound/sparse/wreath residuals keep their own read paths.
+///
+/// An IRREPS residual (IrrepsIdx / point-group irreps, rank 1) counts as plain:
+/// those spaces are dense by design (IR.placementClass), one flat axis of the
+/// spec's total dimension, so a row of `Array<T like I, IrrepsIdx<S>>` is the
+/// same `{ A.data[i], A.extents + 1 }` view a plain row is. It used to fall to
+/// the bare `A[i]` (a `T*`), which g++ refused to pass as an `Array<T, 1>`.
 let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
-    let plainAxis (ix: IRIndexType) = ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+    let plainAxis (ix: IRIndexType) =
+        (ix.IxKind = IxKPlain || ix.IxKind = IxKIrreps || ix.IxKind = IxKPgIrreps)
+        && ix.Symmetry = SymNone && ix.Rank = 1
     let compactGroup (ix: IRIndexType) =
         ix.IxKind = IxKPlain && ix.Rank >= 2
         && (match ix.Symmetry with
@@ -1722,3 +2829,123 @@ let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
                 (ix.IxKind = IxKPlain || ix.IxKind = IxKGroupOuter)
                 && ix.Symmetry = SymNone && ix.Rank = 1
             else plainAxis ix || compactGroup ix)
+
+/// THE COMPACTION PASS LOOP (Blade.Optimize.planCompactionFusion): the loop
+/// over the source axis that both compaction-fusion passes run -- B4's
+/// fill+gather pass at the compound and T4a's predicate+gather pass at the
+/// mask -- in 256-cell BLOCKS: `block body lo hi` gives the lines of one
+/// block [lo, hi) at indentation `body` (the block advances `cursor`, the
+/// count of kept cells written so far).
+///
+/// With `feeds` (accumulator, kernel wrapper) -- the serial chains of the
+/// planned `reduce(y * y, (+))` folds (B4c) -- after each block every chain
+/// advances over the compact cells that block COMPLETED (index < cursor; the
+/// slack cell the branchless store lands on is never read): the first kept
+/// square peeled as the chain's start, then `acc = k(acc, v * v)` in kept
+/// order, each product rounded before its add (BLADE_FOLD_ROUND), as a
+/// stored product is. The same terms in the same order wherever the pass
+/// runs, and whatever a block does inside.
+///
+/// `pre` names the loop's own scratch (`<pre>_b`, `<pre>_e`, `<pre>_f`).
+let rec compactionBlockLoop (ind: string) (pre: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (block: string -> string -> string -> string list) : string list =
+    compactionBlockLoopMulti ind pre bound elemCpp cursor (feeds |> List.map (fun (acc, wname) -> (acc, wname, compact))) block
+
+/// `compactionBlockLoop` whose chains may each read a DIFFERENT compact
+/// buffer (the shared selection, T4c: every companion's buffer advances on
+/// the one cursor `q`, so one completed-cell counter serves every chain).
+/// `feeds` = (accumulator, kernel wrapper, the buffer it folds).
+and compactionBlockLoopMulti (ind: string) (pre: string) (bound: string) (elemCpp: string) (cursor: string) (feeds: (string * string * string) list) (block: string -> string -> string -> string list) : string list =
+    let i1 = ind + "    "
+    let i2 = i1 + "    "
+    let peel =
+        feeds |> List.map (fun (acc, _, compact) ->
+            $"{i2}    {{ {elemCpp} __t = {compact}[0] * {compact}[0]; BLADE_FOLD_ROUND(__t); {acc} = __t; }}")
+    let step =
+        feeds |> List.map (fun (acc, wname, compact) ->
+            $"{i2}    {{ {elemCpp} __t = {compact}[{pre}_f] * {compact}[{pre}_f]; BLADE_FOLD_ROUND(__t); {acc} = {wname}({acc}, __t); }}")
+    let chain =
+        if feeds.IsEmpty then []
+        else
+            [ $"{i1}// the chain over the cells this block completed (index < q; the slack cell is never read)"
+              $"{i1}if ({pre}_f < {cursor}) {{"
+              $"{i2}if ({pre}_f == 0) {{" ]
+            @ peel
+            @ [ $"{i2}    {pre}_f = 1;"
+                $"{i2}}}"
+                $"{i2}for (; {pre}_f < {cursor}; {pre}_f++) {{" ]
+            @ step
+            @ [ $"{i2}}}"
+                $"{i1}}}" ]
+    (if feeds.IsEmpty then [] else [ $"{ind}size_t {pre}_f = 0;" ])
+    @ [ $"{ind}for (size_t {pre}_b = 0; {pre}_b < {bound}; {pre}_b += 256) {{"
+        $"{i1}const size_t {pre}_e = ({bound} - {pre}_b < 256) ? {bound} : {pre}_b + 256;" ]
+    @ block i1 $"{pre}_b" $"{pre}_e"
+    @ chain
+    @ [ $"{ind}}}" ]
+
+/// The per-CELL form of the pass (B4's compound-site fill+gather pass): one
+/// unblocked loop when no chain is fed, else the block loop above with one
+/// inner cell loop per block. `cell body` gives one source cell's lines.
+let compactionPassLoop (ind: string) (pre: string) (iv: string) (bound: string) (elemCpp: string) (compact: string) (cursor: string) (feeds: (string * string) list) (cell: string -> string list) : string list =
+    if feeds.IsEmpty then
+        [ $"{ind}for (size_t {iv} = 0; {iv} < {bound}; {iv}++) {{" ]
+        @ cell (ind + "    ")
+        @ [ $"{ind}}}" ]
+    else
+        compactionBlockLoop ind pre bound elemCpp compact cursor feeds (fun body lo hi ->
+            [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
+            @ cell (body + "    ")
+            @ [ $"{body}}}" ])
+
+/// The per-cell pass over several companion buffers (T4c's joint pass).
+let compactionPassLoopMulti (ind: string) (pre: string) (iv: string) (bound: string) (cursor: string) (feeds: (string * string * string) list) (cell: string -> string list) : string list =
+    if feeds.IsEmpty then
+        [ $"{ind}for (size_t {iv} = 0; {iv} < {bound}; {iv}++) {{" ]
+        @ cell (ind + "    ")
+        @ [ $"{ind}}}" ]
+    else
+        compactionBlockLoopMulti ind pre bound "double" cursor feeds (fun body lo hi ->
+            [ $"{body}for (size_t {iv} = {lo}; {iv} < {hi}; {iv}++) {{" ]
+            @ cell (body + "    ")
+            @ [ $"{body}}}" ])
+
+/// G209 (round 4 wave 10 lane d; the lead ruling): A RANGE IS A VALUE whose
+/// bounds are evaluated ONCE where the range expression is evaluated, before
+/// any cell. `lo..hi` lowers to `IRRange([extent = hi - lo], Some lo)` -- lo
+/// spelled twice, and C++ leaves the order of hi and lo in `hi - lo`
+/// unspecified -- so every emitter that evaluates a run-time bound (the map
+/// holder, the fold holder, the bare materializer) renders it through this:
+/// lo ONCE, then hi ONCE (source order), the extent their wrapping Int64
+/// difference, a negative one an EMPTY range; any other shape evaluates the
+/// start first, then each extent. Returns the statements (prefixed names), the
+/// per-slot extent text (`size_t`) and the start text (`int64_t`). Mirrored by
+/// the interpreter's `Loops.evalRangeBounds`.
+let rangeBoundLines (render: IRExpr -> string) (prefix: string) (ixs: IRIndexType list) (offset: IRExpr option)
+        : string list * string list * string =
+    let clampDecl (name: string) (diff: string) =
+        $"const size_t {name} = [&]() {{ const int64_t __d = {diff}; return __d < 0 ? (size_t)0 : (size_t)__d; }}();"
+    match ixs, offset with
+    | [ ix ], Some lo when (tryEvalIntIR ix.Extent).IsNone
+                           && (match ix.Extent with IRBinOp (_, IRSub, _, lo2, _) -> lo2 = lo | _ -> false) ->
+        let hi = match ix.Extent with IRBinOp (_, IRSub, h, _, _) -> h | _ -> ix.Extent
+        let loName = $"{prefix}_lo"
+        let hiName = $"{prefix}_hi"
+        let nName = $"{prefix}_n0"
+        ([ $"const int64_t {loName} = (int64_t)({render lo});"
+           $"const int64_t {hiName} = (int64_t)({render hi});"
+           clampDecl nName $"(int64_t)((uint64_t){hiName} - (uint64_t){loName})" ],
+         [ nName ], loName)
+    | _ ->
+        let (offDecls, offText) =
+            match offset with
+            | None -> ([], "0")
+            | Some o ->
+                match tryEvalIntIR o with
+                | Some n -> ([], string n)
+                | None -> ([ $"const int64_t {prefix}_lo = (int64_t)({render o});" ], $"{prefix}_lo")
+        let extParts =
+            ixs |> List.mapi (fun k ix ->
+                match tryEvalIntIR ix.Extent with
+                | Some n -> ([], $"(size_t){n}")
+                | None -> ([ clampDecl $"{prefix}_n{k}" $"(int64_t)({render ix.Extent})" ], $"{prefix}_n{k}"))
+        (offDecls @ (extParts |> List.collect fst), extParts |> List.map snd, offText)

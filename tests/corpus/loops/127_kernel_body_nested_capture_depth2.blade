@@ -26,12 +26,12 @@
 // e[t] = t * w * sc * two = 6*w*t, so prodsum(e, e) = 36 * w^2 * (1+4+9+16)
 //      = 1080 * w^2:  w=0.5 -> 270, w=1.5 -> 2430, w=2.5 -> 6750.
 // ============================================================================
-let two = 2.0
-let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
-let b: Array<Float like Idx<3>> = [0.5, 1.5, 2.5]
+let two: Float64 = 2.0
+let a: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let b: Array<Float64 like Idx<3>> = [0.5, 1.5, 2.5]
 
-function outer(aa: Array<Float like Idx<4>>, bb: Array<Float like Idx<3>>) = {
-    let sc = 3.0
+function outer(aa: Array<Float64 like Idx<4>>, bb: Array<Float64 like Idx<3>>) = {
+    let sc: Float64 = 3.0
     bb <@> lambda(w) -> {
         let e = (aa <@> lambda(t) -> t * w * sc * two) |> compute
         prodsum(e, e)

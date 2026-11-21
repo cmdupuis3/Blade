@@ -1,0 +1,19 @@
+// TEST: Equijoin Residual Not Total Declines
+// ----------------------------------------------------------------------------
+// A residual conjunct that is NOT a pure total scalar of the keys (integer
+// division, `10 / l > 1`) is a DECLINE (round 4 wave 4 D3): the as-written
+// mask pass evaluates it on pairs the probe would skip, and integer `/` can
+// panic (BL8013) on one of them -- so the six as-written passes run. Here no
+// key is zero, so both routes print the same relation; the decline is pinned
+// by `blade test optimize`.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 5]
+let left_amount: Array<Int64 like LeftRow> = [1, 1, 1]
+let right_key: Array<Int64 like RightRow> = [1, 2, 5, 5]
+let right_amount: Array<Int64 like RightRow> = [1, 2, 3, 4]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r && 10 / l > 1, lambda(e) -> e))
+let match_count = extents(matched)
+// EXPECT: matched = [1, 2, 3, 4]
+// EXPECT: match_count = 4

@@ -1,0 +1,15 @@
+// TEST: a local view rebound on one arm only, then written (rejects)
+// ERROR: BL4005 @ 8:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review, defect 4; formalism 2.7): the arms of an `if` join, so
+// after a rebinding on ONE arm `v` may still be the view of the captured plain
+// `g` (948 is the accepted twin, rebound on both arms).
+let g: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+function f(c: Bool) -> Float64 = {
+    let v = g(0)
+    if c then { v = [5.0, 6.0] } else { }
+    v(0) = 9.0
+    v(0)
+}
+let r = f(true)

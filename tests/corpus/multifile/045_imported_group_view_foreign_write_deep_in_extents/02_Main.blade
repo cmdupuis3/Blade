@@ -1,0 +1,13 @@
+// TEST: An imported structural group keeps its snapshot across a foreign write deep in extents
+// MODULE: Main
+// bump writes Lib.a(0) = 100 through its `mut` parameter, called twenty
+// extents deep in m's range bound: Main's only reference to Lib.a.
+module Main
+import Lib
+function bump(v: mut Array<Int64 like Idx<6>>) -> Int64 = {
+    v(0) = 100
+    3
+}
+let m = method_for(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..bump(Lib.a)))))))))))))))))))))) <@> lambda(v) -> v + 1 |> compute
+// EXPECT: m = [1, 2, 3]
+// EXPECT: Lib.a = [100, 2, 3, 4, 5, 6]

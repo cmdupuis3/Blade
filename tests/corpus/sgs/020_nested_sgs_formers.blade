@@ -1,0 +1,13 @@
+// TEST: SGS formers nested and let-bound with no annotation
+// #62: the result of one sgs former is the field of the next -- nested, and
+// through an un-annotated let -- and both agree bitwise with the annotated
+// twin the elaborator needed before.
+import sgs as sgs
+let U: Array<Float64 like Idx<3>, Idx<4>, Idx<4>, Idx<4>> = method_for(range<Idx<3>, Idx<4>, Idx<4>, Idx<4>>) <@> lambda(c, i, j, k) -> 0.5 * Float64(c) + Float64(i) * Float64(j) - 0.25 * Float64(k) * Float64(c) |> compute
+let S1 = sgs.stress(sgs.box_filter(U, 2), 2)
+let F2 = sgs.box_filter(U, 2)
+let S2 = sgs.stress(F2, 2)
+let Ft: Array<Float64 like Idx<3>, Idx<2>, Idx<2>, Idx<2>> = sgs.box_filter(U, 2)
+let S3 = sgs.stress(Ft, 2)
+let d = (S1(0, 0, 0, 0) - S3(0, 0, 0, 0)) + (S2(3, 0, 0, 0) - S3(3, 0, 0, 0))
+// EXPECT: d = 0.0

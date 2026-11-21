@@ -1,0 +1,11 @@
+// TEST: A Private Operand Read By A Later Private Operand Stays Private
+// Gap G243 (round 4 wave 9 lane d): e and f are private operands of the fold (evaluated for it, in
+// operand order); materializing f reads e PRIVATE value, so nothing forces e under its own name:
+// neither e nor f prints, in every lane (the interpreter and the LLVM lane printed e).
+// EXPECT: d = [1, 2, 3, 4, 5]
+// EXPECT: s = 50
+type I = Idx<5>
+let mut d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let e = method_for(d) <@> lambda(a) -> a + 1
+let f = method_for(e) <@> lambda(a) -> a + 2
+let s = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a + b, (+))

@@ -4,5 +4,5 @@
 // `2.0 ^ n` is typed as its base -- the exponent of `^` never decides the
 // power's type (docs/formalism.md section 2.4) -- so an array exponent has no
 // shape to land in: refused at the call (it reached g++ as BL9002).
-function tw(n) = 2.0 ^ n
+function tw(n) = Float64(2.0) ^ n
 let r = tw([1, 2])

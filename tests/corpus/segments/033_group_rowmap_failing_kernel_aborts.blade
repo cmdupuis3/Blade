@@ -1,0 +1,15 @@
+// TEST: Group Row Map Failing Kernel Fails At Its Group (aborts)
+// ABORT: BL8013
+// G90: groups run ascending, each group's cells in order; group 1 holds the
+// zero, so the element kernel's integer division panics there -- before
+// group 2 and before anything of h or b is observable. (An element kernel:
+// a failing row-invariant such as `r * (6 / reduce(r, (+)))` reports an extra
+// `(*)` frame under BLADE_HOIST, a pre-existing frame-text divergence of the
+// dense row map too, reported separately.)
+type I = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Int64 like I> = [1, 2, 3, -1, 0, 1, 5]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(e) -> 6 / e |> compute
+let b = ungroup(h, CI)

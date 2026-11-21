@@ -20,13 +20,13 @@ function data_ll(theta: Float64) -> Float64 = ppl.loglik(gaussian(theta, 2.0), d
 // the lgamma path in a body
 function gamma_lp(t: Float64) -> Float64 = ppl.logpdf(gamma(2.0, 1.0), t)
 
-let a = prior_lp(0.0)
+let a = prior_lp(Float64(0.0))
 // EXPECT: a = -0.91893853320467267
-let b = two_terms(1.0)
+let b = two_terms(Float64(1.0))
 // EXPECT: b = -2.4189385332046727
-let c = data_ll(1.0)
+let c = data_ll(Float64(1.0))
 // EXPECT: c = -7.4750606174232268
-let d = gamma_lp(1.0)
+let d = gamma_lp(Float64(1.0))
 // EXPECT: d = -1.0
 let lp_decl = ppl.logpdf(gaussian(0.0, 1.0), 0.0)
 let same_as_decl = abs(a - lp_decl) < 1.0e-300

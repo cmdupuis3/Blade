@@ -1,0 +1,15 @@
+// TEST: a call through a function-valued parameter that an identity callback reaches (rejects)
+// ERROR: BL4005 @ 8:1
+// ERROR-CONTAINS: a captured binding may be written only when it was declared `let mut`
+// REJECT-AT: lower
+// R12 (deep review, defect 2; formalism 2.7): `g2` forwards its own parameter
+// to `f`, and `g2` is handed `lambda(a) -> a`, so `t` may be `G` itself: the
+// store writes the captured plain `G` (952 is the accepted twin).
+let G: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function f(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = {
+    let t = h(G)
+    t(0) = 9.0
+    t(0)
+}
+function g2(h: (Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>>) -> Float64 = f(h)
+let r = g2(lambda(a) -> a)

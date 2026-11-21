@@ -30,7 +30,7 @@ let square = lambda(x) -> x * x
 let k_abs = lambda(x) -> abs(x)
 let deadband = lambda(x) -> if abs(x) < 0.1 then 0.0 else x
 let k_id = lambda(x) -> x
-let k_one = lambda(x) -> 1.0
+let k_one = lambda(x) -> Float64(1.0)
 
 // ============================================================================
 // (a) Deferred stage composition. The conditioning pipeline is built ONCE as
@@ -176,7 +176,7 @@ let reference = replicate(2, L0 <@> calibrate) |> compute
 // direction, a differently-united source, would be a compile error).
 // ============================================================================
 Unit seconds
-let t_axis: Array<Float<seconds> like Idx<8>> = 0.25 * Float64(0..8)
+let t_axis: Array<Float64<seconds> like Idx<8>> = 0.25 * Float64(0..8)
 let countdown = Float64(reverse<Idx<8>>)
 // EXPECT: t_axis = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
 // EXPECT: countdown = [7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]

@@ -5,7 +5,7 @@
 // topological order could fold `a` before `z` and fail with "undefined
 // static variable 'z'" against a program whose `z` is declared first.
 // Callee bodies are walked transitively (with a visited set) when ordering.
-let static z = 10
+let static z: Int64 = 10
 static function f() = z
 static function g() = f() + 1
 let static a = f()

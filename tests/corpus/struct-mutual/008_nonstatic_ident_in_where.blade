@@ -1,8 +1,8 @@
 // TEST: Mutual Nonstatic Ident In Where (rejects)
 // ERROR: BL4006
 // Free identifiers in a mutual constraint must be statically evaluable.
-let runtime_val = 1.0
-type V1 = Float
-and V2 = Float
+let runtime_val: Float64 = 1.0
+type V1 = Float64
+and V2 = Float64
 where V1 + V2 == runtime_val
 let (u, w): (V1, V2) = (0.5, 0.5)

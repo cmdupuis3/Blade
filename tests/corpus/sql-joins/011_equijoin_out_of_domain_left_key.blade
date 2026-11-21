@@ -1,0 +1,22 @@
+// TEST: Equijoin Out Of Domain Left Key
+// ----------------------------------------------------------------------------
+// The right keys are POSITIONAL (KIdx = Idx<4>, the counting sort); the left
+// keys are plain Int64, and 9 and -1 lie outside [0, 4). They are simply "no
+// match", exactly as `l == r` is false on every pair they make -- never a
+// BL8006 out-of-domain read: equality has no domain check, and the probe's
+// bucket lookup answers -1 for a key outside the measured span.
+// Pairs: (0,0) (0,2) (3,1).
+// ----------------------------------------------------------------------------
+type KIdx = Idx<4>
+type LeftRow = Idx<4>
+type RightRow = Idx<3>
+let left_key: Array<Int64 like LeftRow> = [1, 9, -1, 3]
+let left_amount: Array<Int64 like LeftRow> = [1, 10, 100, 1000]
+let right_key: Array<KIdx like RightRow> = [1, 3, 1]
+let right_amount: Array<Int64 like RightRow> = [2, 3, 5]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [2, 5, 3000]
+// EXPECT: match_count = 3
+// EXPECT: total = 3007

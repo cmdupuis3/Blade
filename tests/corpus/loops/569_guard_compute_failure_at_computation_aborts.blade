@@ -1,0 +1,15 @@
+// TEST: Guard Compute Failure At Computation (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60(a)'s fresh guard result, first failure: `guard(true, gb) |> compute`
+// is its own fresh pool (writing it is accepted, tuples/068), and computing it
+// evaluates gb's kernel, so gb's division by zero (BL8013, at the kernel's
+// line) fires AT the computation, before the write -- C++ and the interpreter
+// (the llvm lane has no array guard and falls back to C++).
+// ----------------------------------------------------------------------------
+type I = Idx<1>
+let x: Array<Int64 like I> = [0]
+let gb = method_for(x) <@> lambda(v) -> 1 / v
+let out = guard(true, gb) |> compute
+out(0) = 9
+// ABORT: BL8013
+// ABORT: .blade:10

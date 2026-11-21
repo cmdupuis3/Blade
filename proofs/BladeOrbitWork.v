@@ -65,12 +65,12 @@
 (* general formula W = sum omega(G_v, X_v) over an arbitrary schema is   *)
 (* prose; this file proves the term form and one instance.               *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeBinomial, BladeOptimal.  Coq 8.18, stdlib     *)
+(* Imports BladeDMWF, BladeBinomial, BladeOptimal.  Rocq 9.0, stdlib     *)
 (* only.                                                                 *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeBinomial BladeOptimal.
-Require Import List Arith Lia Cantor.
+From Stdlib Require Import List Arith Lia Cantor.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -555,7 +555,7 @@ Section OrbitWork.
       <= length (trace P kfree).
   Proof.
     intros targets P Hcor.
-    rewrite <- (map_length cq (trace P kfree)).
+    rewrite <- (length_map cq (trace P kfree)).
     apply NoDup_incl_length; [apply NoDup_nodup |].
     intros c Hc. apply nodup_In in Hc.
     destruct (in_dec qry_dec c (map cq (trace P kfree))) as [Hi | Hni];
@@ -722,7 +722,7 @@ Section OrbitWork.
       + apply nodes_NoDup.
       + intros q Hq. apply nodup_In. apply nodes_are_the_classes. exact Hq.
     - unfold hnode, gnode.
-      rewrite app_length, !map_length, seq_length, storage_cardinality.
+      rewrite length_app, !length_map, length_seq, storage_cardinality.
       replace (n + 2 - 1) with (n + 1) by lia. reflexivity.
   Qed.
 
@@ -734,8 +734,8 @@ Section OrbitWork.
     assert (H : forall l : list (nat * nat),
               length (flat_map (classes kfree) (map cell l)) = 3 * length l).
     { induction l as [|[i j] l IH]; [reflexivity |].
-      cbn [map flat_map]. rewrite app_length, IH, classes_cell. simpl. lia. }
-    rewrite H, prod_length, seq_length. reflexivity.
+      cbn [map flat_map]. rewrite length_app, IH, classes_cell. simpl. lia. }
+    rewrite H, length_prod, length_seq. reflexivity.
   Qed.
 
   (* the two together, for any correct program *)

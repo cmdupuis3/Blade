@@ -1,0 +1,19 @@
+// TEST: a let mut of a pack former's kernel stays writable from its nested lambda
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a nested
+// lambda may write a binding it captures when that binding was declared
+// `let mut`. The pack former's kernel is unrolled per element and its lets are
+// FRESHENED per copy (gap G95); the copies' binders are still declared
+// `let mut` (IRMono carries IRModule.LetMutBinders onto them). They used to be
+// unknown, so the write was refused as one to a plain `let`.
+//   per element: scale(1.5) = 1.5, y(0) = 3.0, + args[k]: 14.5, 24.5, 34.5
+function polyScaled(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let mut y: Array<Float64 like Idx<1>> = [0.0]
+        let scale = lambda(s: Float64) -> { y(0) = s * 2.0; s }
+        let s = scale(1.5)
+        s + y(0) + args[k]
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polyScaled(10.0, 20.0, 30.0)
+// EXPECT: result = 73.5

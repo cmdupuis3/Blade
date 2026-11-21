@@ -1,0 +1,25 @@
+// TEST: Syrk Tile Ragged Triangle Three K Blocks
+// The same-array comm row contraction at p = 61 (61 = 10*6 + 1 rows, 7*8 + 5
+// columns: ragged last row panel AND column panel) over k = 701 samples (three
+// balanced K blocks of 234, so every cell's chain is stored and reloaded twice).
+// With the BLAS gate off this is the packed-triangle syrk tile
+// (blade_pgemm::dsyrk_tri) in the C++ lane.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and every
+/// partial sum is an exact integer and ANY association gives the same G -- the pins
+/// below are association-invariant (CLAUDE.md fold policy), while the route is pinned
+/// by `blade plan` (tests/OptimizeTests.fs plan_syrk_tile_*) and the arithmetic
+/// bitwise by `blade test syrk-tile` and `blade test interp symmetry`.
+type V = Idx<61>
+type S = Idx<701>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(60, 3), g(59, 60), trace)
+}
+// EXPECT: ss = 2195730576.0
+// EXPECT: g00 = 1404.0
+// EXPECT: g_mirror = 2.0
+// EXPECT: g_edge = -702.0
+// EXPECT: tr = 85524.0

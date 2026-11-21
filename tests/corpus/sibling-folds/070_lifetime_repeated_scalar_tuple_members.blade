@@ -1,0 +1,16 @@
+// TEST: Repeated scalar calls in tuple members keep outlined pool cleanup
+type Ix = Idx<37>
+function inputs() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(i) |> compute
+}
+function member_scalar(x: Array<Float64 like Ix>) -> Float64 = {
+    let y = method_for(x) <@> lambda(v) -> v + 1.0 |> compute
+    let s = reduce(method_for(y) <@> lambda(v) -> v * v, lambda(a, b) -> a + b, 0.0)
+    s
+}
+let (left, right) = {
+    let x = inputs()
+    (member_scalar(x), member_scalar(x))
+}
+// EXPECT: left = 17575.0
+// EXPECT: right = 17575.0

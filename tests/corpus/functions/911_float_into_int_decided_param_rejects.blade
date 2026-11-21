@@ -1,0 +1,12 @@
+// TEST: A Generic Float Into A Lambda Parameter Decided As Int32 Is Refused (rejects)
+// ERROR: BL3020 @ 9:5
+// ERROR-CONTAINS: losing precision
+// ============================================================================
+// R11: `f(1)` decided f's parameter (Int32); `outer(2.5)` handed it a float.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + x
+    let a = f(1)
+    f(b)
+}
+let r = outer(2.5)

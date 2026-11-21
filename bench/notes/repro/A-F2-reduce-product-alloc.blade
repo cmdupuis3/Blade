@@ -1,0 +1,19 @@
+// REPRO A-F2 (blade-A, 2026-10-17, compiler 0.20.0): PER-CELL HEAP ALLOCATION (C++ lane).
+// A comm row kernel spelled `reduce(x * y, (+))` is emitted as a call to a lambda that
+// `new`s an extents array, allocates a length-n Array<double,1>, fills x[t] * y[t], folds
+// it and frees both -- once per OUTPUT CELL (p(p+1)/2 allocations here). The same holds for
+// `reduce(x * y * z, (+))` in a rank-3 comm kernel (design-decisions O4).
+// Lanes affected: C++ only (performance, not values). The LLVM lane fuses it into one loop.
+// `prodsum(x, y)` (the kernels' spelling) emits an inline `__ps += x[t] * y[t]` loop.
+// Run: BLADE_BLAS=0 BLADE_PRINT=checksum blade emit A-F2-reduce-product-alloc.blade
+// Expected: the triangular nest computes each cell with an inline loop, no allocation.
+// Observed: the nest calls `__lambda_N(row_i, row_j)`, whose body contains
+//   `size_t* ..._extents = new size_t[1];` and `allocate<promote<double, 1>::type>(...)`.
+// Both lanes print checksum = 0.14875 (= 0.0625 * 238 / 100, right).
+type Var = Idx<5>
+type Obs = Idx<7>
+let checksum = {
+    let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> 0.25 * Float64(i * 7 + s) |> compute
+    let g = method_for(x, x) <@> lambda(a: T^1, b: T^1) where comm(a, b) -> reduce(a * b, (+)) |> compute
+    g((0 : Var), (1 : Var)) / 100.0
+}

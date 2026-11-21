@@ -1,0 +1,12 @@
+// TEST: An anonymous index cast of a computed integer is checked (aborts)
+// ============================================================================
+// Gap G208 (3), round 4 wave 8 (lane C, C5): an ANONYMOUS index ascription
+// `(e : Idx<3>)` is the same cast into an index space as a named one: a
+// literal is range-checked at compile time (BL4003) and a computed integer
+// gets the checked conversion (BL8006 at run time, every lane). It used to
+// make `(5 : Idx<3>)` an unchecked position (an anonymous tag is never proof;
+// only reads THROUGH it were checked).
+// ============================================================================
+function g(k: Int64) -> Int64 = Int64((k : Idx<3>))
+let r = g(Int64(7))
+// ABORT: BL8006

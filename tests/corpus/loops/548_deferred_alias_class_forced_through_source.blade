@@ -1,0 +1,26 @@
+// TEST: Deferred Alias Class Forced Through Source
+// ----------------------------------------------------------------------------
+// Gap G60, the other directions (Codex review of W4-1, finding 3): forcing the
+// SOURCE prints every alias of its class -- siblings `g2`, `g4` that nothing
+// reads print with g -- and an alias bound AFTER its source was forced (`h2`)
+// is the same value and prints too. Before, forcing `g` alone left its aliases
+// unprinted in the C++ lane and the interpreter.
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let g4 = g
+let s = g(1)
+let h = method_for(x) <@> lambda(v) -> v + 10.0
+let t = h(0)
+let h2 = h
+let u = h2(2)
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: g2 = [2.0, 4.0, 6.0]
+// EXPECT: g4 = [2.0, 4.0, 6.0]
+// EXPECT: s = 4.0
+// EXPECT: h = [11.0, 12.0, 13.0]
+// EXPECT: t = 11.0
+// EXPECT: h2 = [11.0, 12.0, 13.0]
+// EXPECT: u = 13.0

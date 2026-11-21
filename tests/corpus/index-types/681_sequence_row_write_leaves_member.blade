@@ -1,0 +1,16 @@
+// TEST: A Write Through A Sequence Row Leaves Its Member Unchanged
+// ============================================================================
+// Gap G240 (5), round 4 wave 10 (lane C, C3; Codex 03cfa2dd): a row of a
+// sequence is its own copy in both directions -- a write through the
+// sequence does not reach the member it was built from.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+let a: A = [1.0, 2.0]
+let b: A = [3.0, 4.0]
+let mut s = sequence(a, b) |> compute
+let w = {
+    s(1, 0) = 8.0
+    s(1, 0) + b(0)
+}
+// EXPECT: w = 11.0
+// EXPECT: b = [3.0, 4.0]

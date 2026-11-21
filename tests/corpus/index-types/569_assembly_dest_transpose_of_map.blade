@@ -1,0 +1,24 @@
+// TEST: Assembly Destination Fill Of A Transposed Map
+// assembly-dest v1 (BLADE_ASSEMBLY_DEST, PM26): `transpose(A * 2.0, [0, 1])`
+// lowers to a private temporary for `A * 2.0` and a copy into the transposed
+// pool. The temporary's kernel is total and writes nothing, and the transpose
+// is its only observer, so it is never stored: each cell is computed where the
+// copy read it and written once into the transposed destination, in 32 x 32
+// tiles of the swapped axes. A co-iteration operand (`zip(A, B)`) the same
+// way. Odd extents (37 x 41 crosses the tile edge in both axes).
+type I = Idx<37>
+type J = Idx<41>
+let A: Array<Float64 like I, J> = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i) * 100.0 + Float64(j) |> compute
+let B: Array<Float64 like I, J> = method_for(range<I, J>) <@> lambda(i, j) -> Float64(i + j) |> compute
+let T1 = transpose(A * 2.0, [0, 1])
+let T2 = transpose(method_for(zip(A, B)) <@> lambda(x, y) -> x - y |> compute, [0, 1])
+let c1 = T1(40, 36)
+// EXPECT: c1 = 7280.0
+let c2 = T1(3, 1)
+// EXPECT: c2 = 206.0
+let c3 = T2(40, 36)
+// EXPECT: c3 = 3564.0
+let s1 = reduce(T1, (+), axes = 2)
+// EXPECT: s1 = 5521880.0
+let s2 = reduce(T2, (+), axes = 2)
+// EXPECT: s2 = 2703294.0

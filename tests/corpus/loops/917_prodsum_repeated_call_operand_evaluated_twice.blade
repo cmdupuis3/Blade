@@ -1,0 +1,13 @@
+// TEST: A prodsum Evaluates Each Operand Occurrence Once
+// Gap G265 (a) (round 4 wave 10 lane d; Codex design review): two equal operand SPELLINGS are two
+// evaluations. The C++ lane took `tick(state)` twice as a self-dot and evaluated it once
+// (state = [1.0], s = 1.0); every occurrence is now bound once, in operand order, as the
+// interpreter and the LLVM lane evaluate it (both calls return the same storage: 2.0 * 2.0).
+function tick(v: mut Array<Float64 like Idx<1>>) -> Array<Float64 like Idx<1>> = {
+    v(0) += 1.0
+    v
+}
+let mut state: Array<Float64 like Idx<1>> = [0.0]
+let s = prodsum(tick(state), tick(state))
+// EXPECT: state = [2.0]
+// EXPECT: s = 4.0

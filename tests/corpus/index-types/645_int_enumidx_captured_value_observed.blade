@@ -1,0 +1,11 @@
+// TEST: A captured value of R is observed as its key in a kernel
+// ============================================================================
+// R3: both the range value and the captured cell are keys.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let c0 = codes(2)
+let a = method_for(range<R>) <@> lambda(r) -> r + c0 |> compute
+// EXPECT: a = [600, 400, 500]
+let b = method_for(range<R>) <@> lambda(r) -> r < c0 |> compute
+// EXPECT: b = [false, true, true]

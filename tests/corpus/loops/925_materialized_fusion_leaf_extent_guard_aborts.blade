@@ -1,0 +1,15 @@
+// TEST: A Materialized Fusion Checks Each Leaf's Co-Iteration Extents (aborts)
+// Gap G265 (round 4 wave 10 lane d; Codex design review): the merged nest of p <&!> q is bounded by
+// the leaves' shared traversal (a, 5 cells), and the zip(a, b) leaf's other operand b (3 cells) was
+// never compared (s = [0.0, 1.0, 4.0, <garbage>, 0.0]); each leaf's guard now runs before the
+// merged nest (BL8011), q being closed-total.
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let p = method_for(zip(a, b)) <@> lambda(u, v) -> u * v
+let q = method_for(a) <@> lambda(u) -> u + 1.0
+let (s, t) = p <&!> q |> compute

@@ -1,0 +1,10 @@
+// TEST: A May-Fail Row Kernel Behind A Threaded Producer Keeps Row 0's Failure First (aborts)
+// Gap G265 (round 4 wave 10 lane d; Codex diff review): the hot-row schedule ran a row kernel that
+// may fail inside the producer's thread team, so another row's failure (BL8014) could arrive
+// before row 0's (BL8013), which the serial consumer reaches first. A may-fail row kernel is not
+// scheduled behind a threaded producer: row 0's integer modulo by zero is the outcome.
+// ABORT: BL8013
+let P = method_for(0..1001, 0..1003) <@> lambda(i, j) where omp(i: 1) -> i + j |> compute
+let s = reduce(method_for(P) <@> lambda(row: T^1) ->
+    if row(0) == 0 then 7 % row(0)
+    else Int64(floor(Float64(row(0)) / 0.0)), (+), 0)

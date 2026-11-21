@@ -1,0 +1,19 @@
+// TEST: Call Elision Pointwise Consumer
+// ============================================================================
+// BLADE_CALL_ELIDE's second consumer: a call that is one operand of a
+// pointwise map or co-iteration whose kernel reads its cell once. The
+// callee's map becomes that operand in place and elementwise fusion splices
+// it, so `y`, `z` and `zz` are each ONE nest over A with no pool for prep's
+// result (the consumer's own pool, the printed value, stays). In a function
+// body the consumer is the returned value.
+function prep(a: T^1) -> T^1 = { method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute }
+function shifted(b: T^1) -> T^1 = { method_for(prep(b)) <@> lambda(v) -> v - 1.0 |> compute }
+let A = 0.5 * Float64(0..7)
+let y = method_for(prep(A)) <@> lambda(v) -> v * 10.0 |> compute
+let z = prep(A) + A
+let zz = method_for(zip(A, prep(A))) <@> lambda(u, w) -> u * w |> compute
+let sh = shifted(A)
+// EXPECT: y = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+// EXPECT: z = [1.0, 2.5, 4.0, 5.5, 7.0, 8.5, 10.0]
+// EXPECT: zz = [0.0, 1.0, 3.0, 6.0, 10.0, 15.0, 21.0]
+// EXPECT: sh = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]

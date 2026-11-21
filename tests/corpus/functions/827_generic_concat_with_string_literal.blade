@@ -1,0 +1,13 @@
+// TEST: generic and kernel concatenation beside a String literal
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14), a
+// member Codex's class-closure review found: a String beside a still-open
+// operand may be concatenation, so it is judged where the operand is decided
+// (accepted on master; the first cut refused it).
+// ============================================================================
+function bang(x) = x + "!"
+let r = bang("a")
+// EXPECT: r = "a!"
+let ws = ["a", "b"]
+let qs = method_for(ws) <@> lambda(w) -> w + "?" |> compute
+// EXPECT: qs = ["a?", "b?"]

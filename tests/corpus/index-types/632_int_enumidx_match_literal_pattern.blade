@@ -1,0 +1,18 @@
+// TEST: A literal pattern matched against a value of R names a key
+// ============================================================================
+// R3, a defect fixed: the base compared the POSITION with the literal, so
+// `match codes(0) with | 100 -> 1` took the wildcard arm. A literal pattern
+// names one of R's keys, as a literal typed R does, and is folded to that
+// key's position before either lane runs.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let m = match codes(0) with
+    | 100 -> 1
+    | _ -> 0
+// EXPECT: m = 1
+let m2 = match codes(2) with
+    | 100 -> 1
+    | 300 -> 3
+    | _ -> 0
+// EXPECT: m2 = 3

@@ -26,7 +26,7 @@
 // ============================================================================
 type X = Idx<3>
 
-function g(a: Array<Float like X>) -> Float = {
+function g(a: Array<Float64 like X>) -> Float64 = {
     let e = exp <@> a
     prodsum(a, e)
 }

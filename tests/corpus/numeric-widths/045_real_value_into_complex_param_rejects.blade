@@ -1,0 +1,9 @@
+// TEST: a real value into a complex parameter (rejects)
+// ============================================================================
+// G275 (formalism 2.4): real into complex needs an explicit conversion at a
+// call (`complex(r, 0.0)`); the operator embedding `w * z` is not a call.
+// ============================================================================
+function g(z: Complex128) -> Complex128 = z * z
+let r: Float64 = 1.5
+let y = g(r)
+// ERROR: BL3020

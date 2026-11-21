@@ -30,8 +30,8 @@ import ml as ml
 let static W = ml.perm_weight_dim(1, 1, 2)
 let static B1 = ml.perm_bias_dim(1, 2)
 
-function bad(x: Array<Float like Idx<2>>, b: Array<Float like Idx<B1>>)
-             where ml.perm_equiv(2) -> Array<Float like Idx<2>> = {
+function bad(x: Array<Float64 like Idx<2>>, b: Array<Float64 like Idx<B1>>)
+             where ml.perm_equiv(2) -> Array<Float64 like Idx<2>> = {
     let w = method_for(ml.derive_perm_bias(1, 2, b)) <@> lambda(v) -> v * 2.0 |> compute
     ml.derive_perm_linear(1, 1, 2, x, w)
 }

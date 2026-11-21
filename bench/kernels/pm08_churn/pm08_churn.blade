@@ -1,0 +1,25 @@
+// pm08_churn -- PM08 allocation-churn control (bench/RESULTS.md section 20 (round 4 wave 5, lane E))
+//
+//   per repetition t < k: a fresh m-cell array big(w) and a fresh 513-cell array small(w)
+//   (w = 1 + 0.001 t), each folded and released:  checksum = sum_t (sum big + sum small)
+// Call elision does not reach a top-level kernel lambda: every call allocates and frees its pool
+// in every arm (allocate<> / deallocate<> around each fold in the emitted C++). `retain` =
+// BLADE_POOL_RETAIN=1 (64 MB blocks, 96 MB budget) against the default 4 MB / 8 MB.
+
+type Big = Idx<131071>   // SIZE m
+type Small = Idx<513>
+type Rep = Idx<763>   // SIZE k
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+function small(w: Float64) -> Array<Float64 like Small> = {
+    method_for(range<Small>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+
+let checksum = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let w = 1.0 + 0.001 * Float64(t)
+    reduce(big(w), (+)) + reduce(small(w), (+))
+}, (+))
+let input_checksum = Float64(0.0)

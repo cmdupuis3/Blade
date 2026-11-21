@@ -1,0 +1,10 @@
+// TEST: Unread parallel and fused tuples force nothing
+// Gap G199 (Codex diff review round 10): a `<&>` / `<&!>` pair of maps whose
+// first kernel captures the failing d is a deferred value; never read, it is
+// never evaluated and d is never forced (no failure, no d line), every lane.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let t = (method_for(x) <@> lambda(v) -> v + extents(d)) <&> (method_for(x) <@> lambda(v) -> v)
+let u = (method_for(x) <@> lambda(v) -> v + extents(d)) <&!> (method_for(x) <@> lambda(v) -> v)
+let z = 42
+// EXPECT: z = 42

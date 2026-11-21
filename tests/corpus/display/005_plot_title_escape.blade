@@ -14,7 +14,7 @@
 // (blade_display::jsonstr) escape identically.
 // ============================================================================
 import plot
-let x = [0.0, 1.0, 2.0]
-let y = [0.0, 0.5, 1.5]
+let x = Float64([0.0, 1.0, 2.0])
+let y = Float64([0.0, 0.5, 1.5])
 let ok = plot.line(x, y, "he said \"hi\"\tand\\left": title, "a \"quoted\" axis": xlabel)
 // EXPECT: ok = true

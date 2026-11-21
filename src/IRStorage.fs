@@ -97,6 +97,222 @@ type FoldChunkPlan = {
     ElemCpp: string
     /// Uniquifying suffix for the generated locals (the fold binding's name).
     Tag: string
+    /// How the fold runs INSIDE each thread's chunk (review item M14, gap
+    /// G25): decided by the producer, where the kernel is known, and read by
+    /// the nest emitter and the `blade plan` census alike so the two cannot
+    /// disagree.
+    ChunkForm: ChunkFoldForm
+}
+
+/// The fold's form within one Path B chunk.
+and ChunkFoldForm =
+    /// The serial chain seeded from the chunk's first value -- the form every
+    /// chunk had before M14 -- with the reason the fast form was declined.
+    | ChunkSerial of string
+    /// `omp simd reduction(<op>:acc)` over the chunk's one-level sweep: the
+    /// accumulator seeded with the operator's identity, the body written
+    /// straight into the vectorized loop (the serial licensed form's shape,
+    /// per thread). `op` is `+` or `*`.
+    | ChunkSimd of string
+    /// THREADED COMPLETE ROWS (bench gap G35), the REPRO build's only chunk
+    /// form: each outer index's value is ONE complete scalar fold (its own
+    /// seed, its own serial chain), evaluated whole by the thread that owns
+    /// the index under the same `blade_fold::chunk_lo` partition and stored
+    /// into its slot `__rslot[i]`; after the region the OUTER chain runs
+    /// serially, ascending from the caller's seed, through the fold wrapper.
+    /// No chain is split and nothing is reassociated (no partial combine), so
+    /// the value is the serial walk's, bitwise under BLADE_FP_CONTRACT=off.
+    /// Chosen by the producer only when the build is repro, threads are
+    /// emitted, the row body passed the totality/purity whitelist and the
+    /// static work gate (`rows` outer indices, `cells` inner fold steps in all).
+    | ChunkRowSlots of rows: int64 * cells: int64
+
+/// THREADED REDUCTION JOIN (bench gap G7): the generalized Path B form of a
+/// `<&!>` join / fused fold -- ONE team over the join's ONE shared traversal,
+/// never one team per leg. Built by `CodeGenFusion.joinedFoldThreadPlan` (the
+/// decision: an explicit `where omp` request on the join's fold kernel, on a
+/// leg's fold kernel, or a leaf map request covering the outer level; EVERY
+/// leg's own reorder licence, never OR-ed across legs; the shared-traversal
+/// purity/shape checks), consumed by `genFusedLoopNestStreamedWith`.
+///
+/// The schedule is the builtin `+`/`*` specialization of the FoldChunkPlan
+/// contract (ChunkSimd): the caller has already declared every leg's
+/// accumulator and seeded it with the leg's ORIGINAL seed (evaluated once,
+/// before the team); the extent is hoisted, the requested team bounded by it
+/// and the range partitioned with the ACTUAL team size through
+/// `blade_fold::chunk_lo`; each worker seeds one private accumulator per leg
+/// with the operator's identity (a nonzero caller seed never enters a
+/// partial), runs the shared sweep (shared leaves evaluated once per
+/// coordinate, one load per operand) under ONE
+/// `BLADE_OMP_SIMD_REDUCTION(op: p1, .., pk)`, and publishes its partials when
+/// its chunk was non-empty; after the region every leg combines its partials
+/// in ascending chunk order onto its seeded accumulator.
+type JoinedFoldChunkPlan = {
+    /// Uniquifying suffix for the generated locals (the join binding's name).
+    Tag: string
+    /// The ONE builtin operator every leg folds with (`+` or `*`).
+    Op: string
+    /// One descriptor per fold leg, in leg order.
+    Legs: JoinedFoldLeg list
+    /// true: one `BLADE_OMP_SIMD_REDUCTION` over the private accumulators
+    /// inside each chunk; false (`BLADE_FOLD_LANES=off`): a scalar private
+    /// chain per leg per chunk (the team is kept).
+    ChunkSimd: bool
+    /// Where the thread request came from, for the applied `omp` record.
+    Provenance: string
+}
+
+/// One leg of a threaded reduction join.
+and JoinedFoldLeg = {
+    /// The caller-declared accumulator (seeded with the leg's original seed).
+    AccName: string
+    /// Its C++ type.
+    ElemCpp: string
+    /// The leg's ORIGINAL seed as rendered C++ (documentation: it enters the
+    /// fold once, as the accumulator's initializer, never a partial).
+    Seed: string
+    /// The leg's fold-kernel wrapper (the serial form's combine).
+    Wrapper: string
+    /// The leg's own licence fact, for the record (`builtin +`, ...).
+    Licence: string
+}
+
+/// Hot-row fold scheduling (Blade.Optimize.planHotRowFolds, bench review
+/// item M13): what the producer's nest places around and inside its
+/// OUTERMOST loop so the consumer's per-row fold runs behind each produced
+/// row. Built by the apply emitter from the plan, consumed by
+/// `genLoopNestStreamed`; every other nest form ignores it.
+type RowEpilogue = {
+    /// Declarations before the nest, unindented: the row-sum array's extents
+    /// table and allocation.
+    Prelude: string list
+    /// The C++ name the epilogue's body reads the just-produced slice through
+    /// (the nest declares it as an `Array<T, r-1>` view of the output's row).
+    RowViewName: string
+    /// Statements after the outermost level's inner nest has closed, still
+    /// inside the outermost loop, unindented: the row's fold stored into the
+    /// row-sum array. A FUNCTION, rendered only when the nest places the
+    /// epilogue: kernel rendering is not free of side effects (a refusal
+    /// leaves the expression sentinel behind), so a declined site must not
+    /// render it.
+    Body: unit -> string list
+    /// The row-sum array's name, published to the consumer once emitted.
+    RowSumName: string
+    /// Called exactly when the nest emitted the prelude and the body: it
+    /// registers the row-sum pool for the scope's frees and publishes the
+    /// name to the plan.
+    OnEmitted: unit -> unit
+    /// B2r (round-2 cell epilogues): the row's fold advanced PER CELL inside
+    /// the inner level instead of on the finished row. `Some step` makes the
+    /// nest declare `<ChainElem> <ChainName> = 0;` at the top of each outer
+    /// iteration, bind each produced cell to a local `c` that it stores and
+    /// then hands to `step c` (the chain's `+=`), and store the chain into
+    /// the row-sum array (`ChainBody`) instead of rendering `Body`. None =
+    /// the row-kernel call on the finished row (`Body`).
+    CellStep: (string -> string) option
+    /// The chain's accumulator name and element type (meaningful with CellStep).
+    ChainName: string
+    ChainElem: string
+    /// The epilogue statements under CellStep: the chain stored as the row's value.
+    ChainBody: unit -> string list
+    /// The cell loop's mini-block (BLADE_TILE_TUNE epi_blk_r): 0 = one fused
+    /// loop; n > 0 strip-mines it into n-cell blocks (same cells, same order).
+    ChainBlock: int64
+    /// Called (with the reason) when the nest emitted the row epilogue but
+    /// could not take the CellStep form: the decision is recorded and the
+    /// ordinary `Body` is rendered (the fallback is atomic with the consumer).
+    OnCellStepDeclined: string -> unit
+    /// The consumer's name (the `cell-epilogue` decision's subject).
+    Subject: string
+}
+
+/// B1 (round-2 cell epilogues): the form a rank-1 flat producer's epilogue
+/// takes in THIS build (decided by the apply emitter from the plan).
+type FlatEpilogueForm =
+    /// P1: the blade_fold lane state fed behind each epi_blk-cell block of the
+    /// whole sweep (serial licensed); the partial is `PartName`.
+    | FlatLanesSerial
+    /// P1 per Path B chunk: the producer sweep runs in the fold's team,
+    /// thread t producing [chunk_lo(n, t, T), chunk_lo(n, t + 1, T)) and
+    /// feeding its own lane state; partials in `PartName[t]` / `HadName[t]`,
+    /// team size in `TeamName` (mt8 licensed).
+    | FlatLanesChunks
+    /// P2: the fold's ordered chain advanced per cell right behind its store
+    /// (register-consume), serial; the accumulator is `PartName`.
+    | FlatChain
+
+/// A7c (round 3, gap G69): one producer-INPUT leg the flat sweep carries
+/// beside B1's fold -- a sibling fold of one of the producer's operands,
+/// fed by the operand value the sweep already loads.
+type FlatLeg = {
+    /// The producer operand the leg reads (its position in the nest's
+    /// operand list, hence its pool pointer).
+    OperandPos: int
+    /// Declarations before the producer's block, unindented: the strict
+    /// chain's wrapper and accumulator (seeded), or the licensed leg's
+    /// partial.
+    Prelude: string list
+    /// Strict: the chain statement for one operand cell (`acc = w(acc, v);`).
+    ChainStep: string -> string
+    /// Licensed: Some K (the leg's own blade_fold lane state, `feed_sum` /
+    /// `finish_sum`, the SAME tree as `blade_fold::sum<T, K>`); None = the
+    /// strict ascending chain.
+    LaneK: int option
+    /// The lane block B = K * 32 / sizeof(T) of a licensed leg (1 otherwise).
+    LaneBlock: int64
+    /// The licensed leg's lane state (inside the block) and partial (before
+    /// it) names.
+    StateName: string
+    PartName: string
+    ElemCpp: string
+}
+
+/// What the flat elementwise emitter fuses into its sweep (B1).
+type FlatEpilogue = {
+    Form: FlatEpilogueForm
+    /// The cell / accumulator C++ element type.
+    ElemCpp: string
+    /// K lanes and the lane block B = K * 32 / sizeof(T) (P1 forms).
+    K: int
+    LaneBlock: int64
+    /// `feed_sq` / `finish_sq` (c * c) vs `feed_sum` / `finish_sum` (c).
+    Square: bool
+    /// P1: the producer block (BLADE_TILE_TUNE epi_blk, a multiple of
+    /// LaneBlock); P2: the mini-block (epi_blk_r, 0 = one fused loop).
+    Block: int64
+    PartName: string
+    HadName: string
+    TeamName: string
+    /// P2: declarations before the producer (the fold wrapper, the
+    /// accumulator from the seed), unindented.
+    ChainPrelude: string list
+    /// P2: the chain's statement for a cell named by the argument.
+    ChainStep: string -> string
+    /// Called when the flat emitter placed the form (publishes to the plan).
+    OnEmitted: unit -> unit
+    /// A7c: the producer-input legs riding the same sweep (empty = none).
+    /// Only the serial forms (FlatChain, FlatLanesSerial) carry them; when
+    /// the form is placed the legs are placed with it (OnEmitted publishes
+    /// both).
+    Legs: FlatLeg list
+}
+
+/// Compact row-class scheduling (Blade.Optimize.planCompactRowClasses, round
+/// 2 item B3): what a COMPACT rank-2 producer's plain nest places inside its
+/// outermost loop, after the packed row is stored -- the orbit fold's per-row
+/// class partials. Built by the apply emitter, consumed by
+/// `genLoopNestStreamed` only for the compact flat-write form.
+type CompactRowEpilogue = {
+    /// Declarations before the nest, unindented: the class arrays.
+    Prelude: string list
+    /// Statements inside the outermost loop after its inner nest closed,
+    /// unindented, given (packed row pointer, outer index name). Rendered only
+    /// when the nest places the epilogue.
+    Body: string -> string -> string list
+    /// Called exactly when the nest emitted the prelude and the body.
+    OnEmitted: unit -> unit
+    /// Called when the nest's form declined the epilogue (it records why).
+    OnDeclined: unit -> unit
 }
 
 type LoopNestCodeGen = {
@@ -152,6 +368,24 @@ type LoopNestCodeGen = {
     /// materialized into an array). Meaningful only inside a merged nest, and
     /// only for leaves ordered BEFORE their consumers; None everywhere else.
     ShareDecl: string option
+    /// Hot-row fold scheduling: the consumer's per-row fold to run behind
+    /// each produced row (see RowEpilogue). None everywhere but a planned
+    /// producer's statement-form materialization.
+    RowEpilogue: RowEpilogue option
+    /// B1 (round-2 cell epilogues): the consumer fold fed behind a rank-1
+    /// flat producer's stores. None everywhere but a planned ChunkFold
+    /// producer's statement-form materialization; only the flat
+    /// elementwise emitter honours it.
+    FlatEpilogue: FlatEpilogue option
+    /// Compact row-class scheduling: the orbit fold's class partials behind
+    /// each packed row (see CompactRowEpilogue). None everywhere but a
+    /// planned compact producer's statement-form materialization.
+    CompactRowEpilogue: CompactRowEpilogue option
+    /// Why a fold over this nest has no thread-level form, when that is more
+    /// specific than the generic shared-scalar reason the nest's suppressed
+    /// marker gives (today: the fold kernel WRITES, gap G41). Meaningful only
+    /// together with FoldWrapper; None everywhere else.
+    FoldOmpDecline: string option
 }
 
 /// One dimension GROUP of a device buffer. Mirrors a single IRIndexType:
@@ -218,19 +452,11 @@ let isCudaBoundarySafeElem (ty: IRType) : bool =
     | AnyPrimElem ETComplex64 | AnyPrimElem ETComplex128 -> true
     | _ -> false
 
-/// Binomial C(n, k) as int64. Incremental multiplicative form; each partial
-/// C(n, i+1) = C(n, i)*(n-i)/(i+1) is itself an integer, so the mid-loop
-/// division is EXACT (not lossy).
+/// Binomial C(n, k) as int64, 0 when k < 0 or k > n (OrbRank.binomOrZero: the
+/// incremental form here wrapped transiently in `result * (n - i)`).
 let binomI64 (n: int64) (k: int64) : int64 =
     if k < 0L || k > n then 0L
-    else
-        let k = if k > n - k then n - k else k
-        let mutable result = 1L
-        let mutable i = 0L
-        while i < k do
-            result <- result * (n - i) / (i + 1L)
-            i <- i + 1L
-        result
+    else Blade.OrbRank.binomOrZero n (int k)
 
 /// Per-group scalar count as an IRExpr. Literal extents fold to a literal:
 ///   rectangular (Rank=1)      => extent
@@ -1176,4 +1402,66 @@ let buildLoopNestCodeGen
         OmpRequested = kernelRequestedOmp
         FoldChunk = None
         ShareDecl = None
+        RowEpilogue = None
+        FlatEpilogue = None
+        CompactRowEpilogue = None
+        FoldOmpDecline = None
     }
+
+/// THE STORED-LEAF TRAVERSAL (gap G233, round 4 wave 10). A fused terminal
+/// (`IRReduceCompute`) whose tree keeps a leaf's NAME (`IRVar p`: the checker's
+/// kept spine / kept leaf, a join leg written `reduce(p, op)`) folds the
+/// SNAPSHOT of that leaf when its own prelude -- a kernel capture, a seed cell
+/// read -- stored it under its own name (formalism 10.2, G214). Every lane
+/// builds the prelude from the AS-WRITTEN leaves (each leaf kernel's captures
+/// at its leaf position) and only then replaces a leaf naming a STORED array
+/// by the identity map over it, `method_for(p) <@> lambda(v) -> v`: the same
+/// cells in the same row-major order, so every nest form, join share and
+/// BL8011 guard downstream is the ordinary one. Answers None for a leaf that
+/// is not a plain dense unsymmetric scalar-element array variable (the caller
+/// keeps its own refusal). The identity kernel is a synthetic callable of the
+/// active analysis context (IR.registerSyntheticCallable).
+let storedLeafTraversal (builder: IRBuilder) (leaf: IRExpr) : IRExpr option =
+    match leaf with
+    | IRVar (_, ty) ->
+        (match ty with
+         | ArrayElem at when not at.IsVirtual
+                             && not at.IndexTypes.IsEmpty
+                             && at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                             && (match stripUnits at.ElemType with IRTScalar _ -> true | _ -> false) ->
+            let sd = at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let pid = builder.FreshId ()
+            let p : IRParam = { Name = $"__sl_{pid}"; VarId = pid; Index = 0; Type = at.ElemType }
+            let k = mkCallable builder defaultLambdaOptions [ p ] (IRVar (pid, at.ElemType)) at.ElemType [] false [] [] false false 256 false
+            let kref = registerSyntheticCallable { k with Name = $"__stored_leaf_{k.Id}" }
+            let identity = AIDLiteral (builder.FreshId ())
+            Some (IRApplyCombinator
+                    { Loop = IRMethodFor { Arrays = [ leaf ]; Identities = [ identity ]; ArrayTypes = [ at ]
+                                           SDimsPerArray = [ sd ]; TotalSDims = sd; SharedIndexTypes = [] }
+                      Kernel = kref
+                      Arrays = [ leaf ]; Identities = [ identity ]; ArrayTypes = [ at ]; SharedIndexTypes = []
+                      SymcomStates = List.replicate sd SCNeither; TriangularLevels = List.replicate sd false
+                      SDimsPerArray = [ sd ]; KernelInputRanks = [ 0 ]; KernelOutputRank = 0; KernelTDims = []
+                      SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+                      OutputType = ty; IsCoIteration = false })
+         | _ -> None)
+    | _ -> None
+
+/// Rewrite every leaf of a fused-terminal tree that is an `IRVar` naming a
+/// STORED array (`isStored`) into its stored-leaf traversal (G233); `None`
+/// when some such leaf has no traversal form (the caller keeps its refusal),
+/// else the rebuilt tree and whether anything changed. A leaf still deferred
+/// stays its name (every lane resolves and fuses it).
+let rewriteStoredLeaves (builder: IRBuilder) (isStored: IRId -> bool) (tree: IRExpr) : (IRExpr * bool) option =
+    let mutable ok = true
+    let mutable changed = false
+    let rec go (e: IRExpr) =
+        match e with
+        | IRFusion (l, r) -> IRFusion (go l, go r)
+        | IRVar (id, _) when isStored id ->
+            (match storedLeafTraversal builder e with
+             | Some t -> changed <- true; t
+             | None -> ok <- false; e)
+        | _ -> e
+    let t = go tree
+    if ok then Some (t, changed) else None

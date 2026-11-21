@@ -1,0 +1,16 @@
+// TEST: Compute Copy Does Not Print Source
+// ----------------------------------------------------------------------------
+// Formalism 10.2: `g |> compute` evaluates a COPY of the deferred map g; it is
+// not a forcing use of g under its own name, so g prints nothing even after
+// the copy `v` is read by position (the stored copy prints). The llvm lane
+// used to mark g printable when v was forced, printing `g = [2.0, 4.0, 6.0]`
+// there only (the absence is pinned by the differential gates, which compare
+// the whole printed set).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let v = g |> compute
+let w = v(0) + v(1)
+// EXPECT: v = [2.0, 4.0, 6.0]
+// EXPECT: w = 6.0

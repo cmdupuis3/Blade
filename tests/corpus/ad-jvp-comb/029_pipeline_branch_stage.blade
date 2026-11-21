@@ -19,7 +19,7 @@ let deadband = lambda(x) -> if x * x < 0.01 then 0.0 else x
 let o_cal = object_for(calibrate)
 let o_dead = object_for(deadband)
 
-function f(r: Array<Float like I>) -> Float = {
+function f(r: Array<Float64 like I>) -> Float64 = {
     let m = (o_cal >>@ o_dead) <@> r |> compute
     reduce(m, (+))
 }

@@ -19,21 +19,21 @@
 // statics, static callables and known builtins, so a members-only rule would
 // be a regression against shipped behavior rather than a new check.
 // ============================================================================
-let static LMAX = 4
+let static LMAX: Int64 = 4
 
-static function triangle(a: Int, b: Int, c: Int) -> Bool =
+static function triangle(a: Int32, b: Int32, c: Int32) -> Bool =
     c >= abs(a - b) && c <= a + b
 
-static function parity_ok(p1: Int, p2: Int, po: Int) -> Bool =
+static function parity_ok(p1: Int32, p2: Int32, po: Int32) -> Bool =
     po == (p1 + p2) % 2
 
 struct CGPath {
-    l1: Int,
-    p1: Int,
-    l2: Int,
-    p2: Int,
-    l_out: Int,
-    p_out: Int
+    l1: Int32,
+    p1: Int32,
+    l2: Int32,
+    p2: Int32,
+    l_out: Int32,
+    p_out: Int32
 } where triangle(l1, l2, l_out), parity_ok(p1, p2, p_out), l_out <= LMAX
 
 let path = CGPath { l1 = 1, p1 = 1, l2 = 2, p2 = 1, l_out = 3, p_out = 0 }

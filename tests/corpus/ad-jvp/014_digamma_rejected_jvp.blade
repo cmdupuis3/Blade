@@ -7,7 +7,7 @@
 // ERROR-CONTAINS: has no derivative rule
 import ad as ad
 
-function f(x: Float) -> Float = digamma(x) * x
+function f(x: Float64) -> Float64 = digamma(x) * x
 
 let (fv, dfv) = ad.jvp(f)(2.0, 1.0)
 fv

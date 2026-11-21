@@ -24,15 +24,15 @@ import ad as ad
 type I = Idx<3>
 type J = Idx<2>
 
-function kern(a: Float, b: Float) -> Float = a * a + b
+function kern(a: Float64, b: Float64) -> Float64 = a * a + b
 
-function loss_obj(x: Array<Float like I>, y: Array<Float like J>) -> Float = {
+function loss_obj(x: Array<Float64 like I>, y: Array<Float64 like J>) -> Float64 = {
     let m = object_for(kern) <@> (x, y) |> compute
     m(0, 0) + 3.0 * m(2, 1)
 }
 
-function loss_meth(x: Array<Float like I>, y: Array<Float like J>) -> Float = {
-    let m = method_for(x, y) <@> lambda(a: Float, b: Float) -> a * a + b |> compute
+function loss_meth(x: Array<Float64 like I>, y: Array<Float64 like J>) -> Float64 = {
+    let m = method_for(x, y) <@> lambda(a: Float64, b: Float64) -> a * a + b |> compute
     m(0, 0) + 3.0 * m(2, 1)
 }
 
@@ -43,46 +43,46 @@ function loss_meth(x: Array<Float like I>, y: Array<Float like J>) -> Float = {
 // applies unchanged; there is nothing else to say about `<*>`, which is why
 // C1 rates it FREE. (Forward mode still refuses it -- `tangentOfMap`
 // decomposes `method_for`/`object_for` loop sides only -- so no jvp leg.)
-function loss_prod(x: Array<Float like I>, y: Array<Float like J>) -> Float = {
+function loss_prod(x: Array<Float64 like I>, y: Array<Float64 like J>) -> Float64 = {
     let P = method_for(x) <*> method_for(y)
-    let m = P <@> lambda(a: Float, b: Float) -> a * a + b |> compute
+    let m = P <@> lambda(a: Float64, b: Float64) -> a * a + b |> compute
     m(0, 0) + 3.0 * m(2, 1)
 }
 
-let x0 = [1.0, 2.0, 3.0]
-let y0 = [10.0, 20.0]
-let mut dx = [0.0, 0.0, 0.0]
-let mut dy = [0.0, 0.0]
+let x0 = Float64([1.0, 2.0, 3.0])
+let y0 = Float64([10.0, 20.0])
+let mut dx = Float64([0.0, 0.0, 0.0])
+let mut dy = Float64([0.0, 0.0])
 let lv = ad.grad(loss_obj)(x0, y0, dx, dy)
 // EXPECT: lv = 98.0
 // EXPECT: dx = [2.0, 0.0, 18.0]
 // EXPECT: dy = [1.0, 3.0]
 
 // The two spellings must agree to the digit, gradients included.
-let mut ex = [0.0, 0.0, 0.0]
-let mut ey = [0.0, 0.0]
+let mut ex = Float64([0.0, 0.0, 0.0])
+let mut ey = Float64([0.0, 0.0])
 let mv = ad.grad(loss_meth)(x0, y0, ex, ey)
 let vresid = mv - lv
 let gresid = reduce(abs(ex - dx), (+)) + reduce(abs(ey - dy), (+))
 // EXPECT: vresid = 0.0
 // EXPECT: gresid = 0.0
 
-let mut px = [0.0, 0.0, 0.0]
-let mut py = [0.0, 0.0]
+let mut px = Float64([0.0, 0.0, 0.0])
+let mut py = Float64([0.0, 0.0])
 let pv = ad.grad(loss_prod)(x0, y0, px, py)
 let pvresid = pv - lv
 let pgresid = reduce(abs(px - dx), (+)) + reduce(abs(py - dy), (+))
 // EXPECT: pvresid = 0.0
 // EXPECT: pgresid = 0.0
 
-let sx = [1.0, 0.5, -2.0]
-let sy = [0.25, 4.0]
+let sx = Float64([1.0, 0.5, -2.0])
+let sy = Float64([0.25, 4.0])
 let (jp, jt) = ad.jvp(loss_meth)(x0, y0, sx, sy)
 let resid = jt - (reduce(dx * sx, (+)) + reduce(dy * sy, (+)))
 // EXPECT: jp = 98.0
 // EXPECT: resid = 0.0
 
-let h = 0.000001
+let h: Float64 = 0.000001
 let fdx = (loss_obj([1.0, 2.0, 3.0 + h], y0) - loss_obj([1.0, 2.0, 3.0 - h], y0)) / (2.0 * h)
 let fd_ok = abs(fdx - dx(2)) < 0.000001 * (abs(dx(2)) + 1.0)
 // EXPECT: fd_ok = true

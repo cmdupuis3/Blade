@@ -1,0 +1,8 @@
+// TEST: a float literal past FLT_MAX as the seed of a Float32 fold (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let xs: Array<Float32 like Idx<3>> = [1.0, 2.0, 3.0]
+let s = reduce(xs, (+), 1e40)
+// ERROR: BL3020 @ 6:25

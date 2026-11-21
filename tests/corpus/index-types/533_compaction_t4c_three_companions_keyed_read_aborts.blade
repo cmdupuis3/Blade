@@ -1,0 +1,19 @@
+// TEST: Compaction fusion T4c: three companions, a keyed read through the shared index aborts at its site (aborts)
+// Three compounds over one mask share ONE selection index; a keyed read of
+// the last one demands the kept positions, so the shared index holds them
+// (one fill, in the joint pass at `y1`). `y3(4)` is a kept position; `y3(5)`
+// is not, and it is BL8006 at its own declaration in every lane -- after
+// every companion and the folds before it ran, exactly as written.
+type Ix = Idx<13>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute
+let c2 = method_for(range<Ix>) <@> lambda(i) -> Int64(i) + 100 |> compute
+let c3 = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i)) * 0.5 |> compute
+let keep = mask(x, lambda(v) -> v > 5.5)
+let y1 = compound(x, keep)
+let y2 = compound(c2, keep)
+let y3 = compound(c3, keep)
+let s = reduce(y1 * y1, (+)) + Float64(reduce(y2, (+))) + reduce(y3 * y3, (+))
+let ok = y3(4)
+let bad = y3(5)
+// ABORT: BL8006
+// ABORT: a key outside the sparse key set

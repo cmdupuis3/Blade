@@ -1,0 +1,34 @@
+// TEST: An A7c ownership decline leaves independent sibling-fold inlining unchanged
+// ============================================================================
+// 038's first kernel (an unused Jx join that the caller's Jx folds absorb)
+// plus 036's array rename. epilogue-legs declines the Ix plan (callee let ..
+// is not an owned allocation form; the call is not retained for A7c) -- and
+// the sibling pass's own join-driven inlining still keeps the call inlined
+// for its Jx join (W2-4 fifth review NEW 3: the decline record no longer
+// promises the call survives). Since the round-4 merge that join-driven
+// inline carries its own A01 lifetime region (one release, no BL7005).
+// ============================================================================
+type Ix = Idx<1003>
+type Jx = Idx<1009>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function inputs_j(m: Int64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let unused = reduce((method_for(u) <@> lambda(a) -> a) <&!> (method_for(v) <@> lambda(a) -> a), (+))
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a + b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let spare = x
+    s + Float64(extents(spare))
+}
+let (r, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let u = inputs_j(11)
+    let v = inputs_j(3)
+    (kernel(x, y, u, v), reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+// EXPECT: r = 32024.0
+// EXPECT: t = 1516307.0

@@ -1,0 +1,13 @@
+// TEST: C06 census flat versus nested floating point parenthesization
+// Runner fixes REPRO1 and CONTRACToff. No source reorder licence is added.
+type R = Idx<3>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[10000000000000000.0, 1.0, 0.0], [-10000000000000000.0, 1.0, 0.0], [0.0, 0.0, 0.0]]
+let flat = reduce((method_for(M) <@> (lambda(v: Float64) -> v)), lambda(a: Float64, b: Float64) -> a + b, 0.0, axes = 2)
+let nested = reduce((method_for(M) <@> (lambda(row: Array<Float64 like C>) ->
+    reduce((method_for(row) <@> (lambda(v: Float64) -> v)), lambda(a: Float64, b: Float64) -> a + b, 0.0))), lambda(a: Float64, b: Float64) -> a + b, 0.0)
+// Flat:1e16+1 rounds to1e16, then -1e16 cancels, final1 survives.
+// Nested rows:[1e16,-1e16,0]; outer left fold is0. These trees differ.
+// EXPECT: M = [[10000000000000000.0, 1.0, 0.0], [-10000000000000000.0, 1.0, 0.0], [0.0, 0.0, 0.0]]
+// EXPECT: flat = 1.0
+// EXPECT: nested = 0.0

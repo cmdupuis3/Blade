@@ -6,4 +6,4 @@
 // explicit (docs/formalism.md section 2.4), so the call is refused at the BASE
 // -- the caller writes `pw(2.0, 0.5)` or `pw(Float64(k), 0.5)` (functions/500).
 function pw(x, n) = x ^ n
-let r = pw(2, 0.5)
+let r = pw(Int64(2), Float64(0.5))

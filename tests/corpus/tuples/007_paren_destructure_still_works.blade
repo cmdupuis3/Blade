@@ -7,8 +7,8 @@
 // This is the compatibility pin for the construction change: the RHS grammar
 // moved, the pattern grammar did not, and the two still meet.
 
-let b = 1.0
-let c = 2.0
+let b: Float64 = 1.0
+let c: Float64 = 2.0
 
 // Bare-comma construction, parenthesized destructure.
 let t = b, c
@@ -24,15 +24,15 @@ let (p, q) = (c, b)
 // Blade tuple patterns flatten across nesting (basic/024 pins the rule); a
 // bare-comma tuple of a tuple is no different, since the comma builds exactly
 // the node the parenthesized literal builds.
-let inner = 1.0, 2.0
-let outer = inner, 3.0
+let inner = Float64(1.0), Float64(2.0)
+let outer = inner, Float64(3.0)
 let (d, e, f) = outer
 // EXPECT: d = 1.0
 // EXPECT: e = 2.0
 // EXPECT: f = 3.0
 
 // Width 3 destructure of a width-3 bare-comma tuple.
-let three = 7.0, 8.0, 9.0
+let three = Float64(7.0), Float64(8.0), Float64(9.0)
 let (g, h, i) = three
 // EXPECT: g = 7.0
 // EXPECT: h = 8.0

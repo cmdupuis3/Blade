@@ -332,9 +332,10 @@ let private normalizeLl (s: string) = s.Replace("\r\n", "\n")
 /// afterwards (including back to UNSET, which `null` does).
 ///
 /// Needed by two blocks for two different reasons: the emission pins are
-/// against the DEFAULT numeric policy, so a developer whose shell happens to
-/// carry `BLADE_FP_REASSOC=1` must not see three phantom failures; and the
-/// fact block asserts each knob's effect, which means setting it.
+/// against the DEFAULT numeric policy (the fast regime since 2026-10-17), so a
+/// developer whose shell happens to carry `BLADE_FP_REPRO=1` must not see
+/// three phantom failures; and the fact block asserts each knob's effect,
+/// which means setting it.
 let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : 'a =
     let saved = pins |> List.map (fun (k, _) -> k, Environment.GetEnvironmentVariable k)
     for (k, v) in pins do
@@ -345,7 +346,7 @@ let private withEnv (pins: (string * string option) list) (body: unit -> 'a) : '
 /// The knobs that change emitted text. Pinned OFF around any assertion about
 /// default emission; listed once so a knob added later is added in one place.
 let private numericKnobs =
-    [ "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS" ]
+    [ "BLADE_FP_REASSOC"; "BLADE_FP_REPRO"; "BLADE_FP_CONTRACT"; "BLADE_LLVM_FACTS"; "BLADE_LLVM_BRICKS"; "BLADE_SYRK_TILE"; "BLADE_POOL_EARLY_RELEASE" ]
 
 let private defaultEmissionEnv = numericKnobs |> List.map (fun k -> k, None)
 
@@ -385,7 +386,7 @@ let runLlvmGoldenTests () : BlockResult =
                         // match what `blade emit` produces for the same file.
                         // The pins record DEFAULT emission, so the numeric
                         // knobs are forced off for the call itself -- an
-                        // inherited BLADE_FP_REASSOC would otherwise fail all
+                        // inherited BLADE_FP_REPRO would otherwise fail all
                         // three pins for a reason that is not a drift.
                         match withEnv defaultEmissionEnv (fun () -> EmitLlvm.tryEmitProgramNamed name ir) with
                         | Error reason ->
@@ -468,17 +469,17 @@ let private emitUnder (pins: (string * string option) list) (name: string) (sour
 /// program, which is what makes "exactly the accumulator chain" checkable.
 let private licensedFoldSource = """
 type Ix = Idx<8>
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
 let scaled = xs * 0.5
 let total = reduce(scaled, (+))
 """
 
 /// An UNLICENSED fold: the kernel is neither a recognized builtin body nor
-/// `comm`-declared, so the knob must not reach it.
+/// `comm`-declared, so no build reassociates it.
 let private unlicensedFoldSource = """
 type Ix = Idx<8>
 function skew(a: Float64, b: Float64) -> Float64 = { a * 0.75 + b }
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
 let total = reduce(xs, skew)
 """
 
@@ -489,7 +490,7 @@ let private readonlyAndRecursionSource = """
 type Ix = Idx<6>
 function total(row: T^1) -> T^0 = reduce(row, (+))
 function fact(n: Int64) -> Int64 = { if n <= 1 then 1 else n * fact(n - 1) }
-let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let s = total(xs)
 let f = fact(5)
 """
@@ -500,24 +501,129 @@ let f = fact(5)
 /// a NAMED index type would want a tagged subscript and this block's output
 /// would carry three BL4003 warnings that have nothing to do with the facts.
 let private elementWriteSource = """
-function accumulate_into(x: Array<Float like Idx<3>>, out: mut Array<Float like Idx<3>>) -> Float = {
+function accumulate_into(x: Array<Float64 like Idx<3>>, out: mut Array<Float64 like Idx<3>>) -> Float64 = {
     out(0) = x(0)
     x(0)
 }
-let src = [1.0, 2.0, 3.0]
-let mut dst = [0.0, 0.0, 0.0]
+let src = Float64([1.0, 2.0, 3.0])
+let mut dst = Float64([0.0, 0.0, 0.0])
 let r = accumulate_into(src, dst)
 """
 
 /// `^` at each exponent kind (formalism 2.4): Float ^ Int, Float ^ Float,
 /// Int ^ Int, all with run-time operands so no literal shortcut applies.
 let private powKindsSource = """
-let x = 1.1
-let n = 7
+let x: Float64 = 1.1
+let n: Int64 = 7
 let a = x ^ n
 let b = x ^ 2.5
 let i = n ^ n
 """
+
+/// A band over a static struct (structural/06): the fold streams the nest.
+let private domainBandFoldSource = """
+let static n: Int64 = 23
+let static w: Int64 = 3
+static struct Band {
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
+} where abs(i - j) <= w
+let total = reduce(method_for(range<Band>) <@> lambda(i, j) -> Float64(i * j) * 0.5, (+))
+"""
+
+/// The same band materialized and read by key.
+let private domainBandKeyedSource = """
+let static n: Int64 = 23
+let static w: Int64 = 3
+static struct Band {
+    i: Int32<min=0, max=n-1>,
+    j: Int32<min=0, max=n-1>
+} where abs(i - j) <= w
+let R = method_for(range<Band>) <@> lambda(i, j) -> i * 100 + j |> compute
+let k: Int64 = 7
+let v = R((k, k + 2))
+"""
+
+/// One row of membership hoisting's ROUTE TABLE (`memberHoistRoutes`).
+type MemberHoistRoute =
+    { /// The literal corpus directory.
+      Category: string
+      /// The file's `// TEST:` name.
+      Test: string
+      /// The planned hosts, in the order they are bound: each one structure,
+      /// built before the host, probed inside it, freed after it. Empty = no
+      /// plan: no member call at all, the as-written scan.
+      Hosts: string list
+      /// How many of those builds are over a COMPOUND set (the C++ build reads
+      /// its cardinality and compact buffer).
+      CompoundBuilds: int
+      /// None: the LLVM lane emits the program. Some reason: the lane refuses
+      /// it with exactly this reason (the program runs in the C++ lane) -- an
+      /// unrelated refusal, a lowering or a validation error FAILS the row.
+      LlvmRefusal: string option }
+
+/// MEMBERSHIP HOISTING'S ROUTE TABLE (round 3 B-T1; Codex diff reviews of
+/// W2-1, finding 4 and the second look's NEW 1-2), shared by this block (the
+/// LLVM route) and `blade test optimize` (the C++ route): one row per corpus
+/// file that calls `contains` -- the corpus/table name sets are asserted
+/// EQUAL (`memberHoistRouteCoverage`), so a new unlisted file fails too.
+let memberHoistRoutes : MemberHoistRoute list =
+    let row cat test hosts compound refusal = { Category = cat; Test = test; Hosts = hosts; CompoundBuilds = compound; LlvmRefusal = refusal }
+    let compoundParam = Some "parameter 'a' of 'own_hit' has type Array<Int64 like Idx<?>> -- the llvm lane handles Int64/Int32/Float64/Float32/Bool/String scalars only"
+    // G185 (b), round 4 wave 6: a LITERAL set of at most 16 keys keeps the
+    // as-written scan (no build): the rows whose sets are that small list no host
+    [ row "sql-unique-contains" "Contains Present" [] 0 None
+      row "sql-unique-contains" "Contains Absent" [] 0 None
+      row "sql-unique-contains" "Contains Empty After Mask" [] 0 None
+      row "sql-unique-contains" "Contains In Mask Predicate" [] 0 None
+      row "sql-unique-contains" "Unique Of Rank-1 Compound" [] 0 (Some "group_keys over a key array that is not a dense rank-1 axis")
+      row "sql-unique-contains" "Member Hoist Small Set Linear" [] 0 None
+      row "sql-unique-contains" "Member Hoist Literal Set Bitmap" [ "hit"; "next_hit" ] 0 None
+      row "sql-unique-contains" "Member Hoist Extreme Keys Hash" [ "hit" ] 0 None
+      row "sql-unique-contains" "Member Hoist Empty Compound Set" [ "hit"; "cnt" ] 2 None
+      row "sql-unique-contains" "Contains Target Evaluated Once Per Probe" [] 0 None
+      row "sql-unique-contains" "Contains Failing Target Over Empty Set (aborts)" [] 0 None
+      row "sql-unique-contains" "Member Hoist Failing Target (aborts)" [ "keep" ] 0 None
+      row "sql-unique-contains" "Member Hoist Fold Kernel Short Circuit" [ "guarded"; "weighted" ] 0 None
+      row "sql-unique-contains" "Member Hoist OMP Map Hash" [ "flags" ] 0 None
+      row "sql-unique-contains" "Member Hoist Compound Set" [ "hit" ] 1 None
+      row "sql-unique-contains" "Member Hoist Declines Keep Values" [] 0 None
+      row "sql-unique-contains" "Member Hoist Semiagg Probe" [ "keep"; "keep2" ] 0 None
+      row "sql-unique-contains" "Contains Target Mutates A Dense Set" [] 0 None
+      row "sql-unique-contains" "Contains Target Mutates A Compound Set" [] 0 compoundParam
+      row "sql-unique-contains" "Member Hoist Fold Kernel Probe" [ "picked" ] 0 None
+      row "sql-unique-contains" "Member Hoist Stored Alias Chain" [] 0 None
+      row "sql-semijoins" "Semijoin Preserves Multiplicity" [] 0 None
+      row "sql-semijoins" "Antijoin Basic" [] 0 None
+      row "sql-semijoins" "Antijoin Preserves Multiplicity" [] 0 None
+      row "sql-semijoins" "Pattern Does Not Fire On Conjunction" [] 0 None
+      row "sql-semijoins" "Semijoin Float64" [] 0 None
+      row "sql-semijoins" "Unique Of Semijoin" [] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
+      row "sql-semijoins" "Semijoin Then Mask" [] 0 None
+      // G126 (round 4 wave 5 lane c): two bare top-level probes, no host; `unique` has no LLVM arm
+      row "sql-set-ops" "Set Ops NaN One Value" [] 0 (Some "the IR node IRUnique in array position -- no arm in the llvm lane")
+      // compaction fusion T4c's membership-probe certificate (round 3 W2-2)
+      row "index-types" "Compaction fusion T4c: a membership-probe predicate certified by member-hoist's admission" [ "keep" ] 0 None
+      row "index-types" "Compaction fusion T4c: a probe membership hoisting declines is not certified" [] 0 None
+      row "index-types" "Compaction fusion T4c: the antijoin `!contains` certified, two companions" [ "drop" ] 0 None
+      row "memfree" "Memfree Inline Sparse Gather In Every Scalar Position" [] 0 (Some "a sparse-index initializer")
+      row "reynolds" "Reynolds Dedup Sees Contains" [] 0 None
+      row "reynolds" "Reynolds Antisym Dedup Sees Contains" [] 0 None ]
+
+/// The table covers EXACTLY the corpus's contains programs: every non-reject
+/// file of every single-file corpus directory whose source calls `contains(`
+/// has a row, and every row names an existing such file. Returns (missing
+/// rows, stale rows) as "category / test" names.
+let memberHoistRouteCoverage () : string list * string list =
+    let onDisk =
+        Blade.Tests.Corpus.singleFileCategories ()
+        |> List.collect (fun cat ->
+            (try Blade.Tests.Corpus.category cat with _ -> [])
+            |> List.filter (fun (n, src) -> not (n.EndsWith "(rejects)") && src.Contains "contains(")
+            |> List.map (fun (n, _) -> $"{cat} / {n}"))
+        |> Set.ofList
+    let inTable = memberHoistRoutes |> List.map (fun r -> $"{r.Category} / {r.Test}") |> Set.ofList
+    (Set.difference onDisk inTable |> Set.toList, Set.difference inTable onDisk |> Set.toList)
 
 /// Drop `;` comment lines before asserting on emitted text. The module banner
 /// NAMES the knobs it documents ("per-instruction `contract`"), so a bare
@@ -528,6 +634,303 @@ let private instructionsOnly (ll: string) =
     ll.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l -> not (l.TrimStart().StartsWith ";"))
     |> String.concat "\n"
+
+// THE ACCUMULATOR, identified structurally (Codex re-re-review): an
+// `fadd` whose result is stored back into a slot the function also LOADS
+// (`%acc` = load ptr %s ... %n = fadd ... ; store %n, ptr %s). A counter
+// bump stores through a freshly computed element pointer, never a loaded
+// slot, so it is not mistaken for the fold's chain.
+let private accumulatorFadds (ll: string) : string list =
+    let lines = (instructionsOnly ll).Split('\n') |> Array.map (fun s -> s.Trim())
+    let loadedSlots =
+        lines |> Array.choose (fun s ->
+            let m = System.Text.RegularExpressions.Regex.Match(s, @"= load double, ptr (%[\w.]+)")
+            if m.Success then Some m.Groups.[1].Value else None) |> Set.ofArray
+    let stores =
+        lines |> Array.choose (fun s ->
+            let m = System.Text.RegularExpressions.Regex.Match(s, @"^store double (%[\w.]+), ptr (%[\w.]+)")
+            if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value) else None)
+    lines |> Array.choose (fun s ->
+        let m = System.Text.RegularExpressions.Regex.Match(s, @"^(%[\w.]+) = fadd ")
+        if m.Success && (stores |> Array.exists (fun (v, slot) -> v = m.Groups.[1].Value && loadedSlots.Contains slot))
+        then Some s else None)
+    |> List.ofArray
+let private flagsOf (fadd: string) =
+    let m = System.Text.RegularExpressions.Regex.Match(fadd, @"= fadd ((?:[a-z]+ )*)double")
+    if m.Success then m.Groups.[1].Value.Trim() else "?"
+
+/// A01 allocation-specific cleanup proof on raw LLVM. Each pool allocated
+/// between an inline begin and return event is stored into a tracking slot;
+/// that slot is loaded/freed exactly once after the event, and no subsequent
+/// instruction can name the backing register. This detects both omitted
+/// cleanup and a second free at the enclosing function's return.
+let inlineLifetimeCleanupProof (ll: string) : Result<int, string> =
+    let funcs = System.Text.RegularExpressions.Regex.Matches(ll.Replace("\r\n", "\n"), @"(?ms)^define .*?^\}")
+    let mutable count = 0
+    let mutable problem : string option = None
+    for fm in funcs do
+        let body = fm.Value
+        let begins = System.Text.RegularExpressions.Regex.Matches(body, @"; A01: begin inline pool scope:[^\n]*")
+        for bm in begins do
+            let ending = body.IndexOf("; A01: inline return cleanup:", bm.Index + bm.Length)
+            if ending < 0 then problem <- Some "inline begin without return cleanup"
+            else
+                let region = body.Substring(bm.Index, ending - bm.Index)
+                let pools = System.Text.RegularExpressions.Regex.Matches(region, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                if pools.Count = 0 then problem <- Some "retained inline allocates no tracked pool"
+                for pm in pools do
+                    count <- count + 1
+                    let p = pm.Groups.[1].Value
+                    let tracked = System.Text.RegularExpressions.Regex.Match(region, @"store ptr " + p + @", ptr (%r\d+)")
+                    if not tracked.Success then problem <- Some ($"pool {p} has no tracking slot")
+                    else
+                        let slot = tracked.Groups.[1].Value
+                        let tail = body.Substring ending
+                        let loads = System.Text.RegularExpressions.Regex.Matches(tail, @"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                        if loads.Count <> 1 then problem <- Some ($"pool {p} tracking slot is loaded {loads.Count} times after return")
+                        else
+                            let loaded = loads.[0].Groups.[1].Value
+                            let free = System.Text.RegularExpressions.Regex.Matches(tail, @"call void @blade_free\(ptr " + loaded + @"\)")
+                            let liveRead = System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + p + @"(?![A-Za-z0-9_])")
+                            if free.Count <> 1 || liveRead then problem <- Some ($"pool {p}: frees={free.Count}, later backing reference={liveRead}")
+    match problem with Some p -> Error p | None -> Ok count
+
+/// Find the specific ordinary call ABI body, rather than accepting an unrelated
+/// free elsewhere in the module. LLVM register names are local to this body.
+let private outlinedLifetimeBody (stem: string) (ll: string) : (string * string) option =
+    let symbol = @"@bl_" + System.Text.RegularExpressions.Regex.Escape(stem) + @"_\d+"
+    let pattern = @"(?ms)^define internal [^\n]* (?<sym>" + symbol + @")\([^\n]*\)[^\n]*\{\n.*?^\}"
+    let m = System.Text.RegularExpressions.Regex.Match(ll.Replace("\r\n", "\n"), pattern)
+    if m.Success then Some (m.Groups.["sym"].Value, m.Value) else None
+
+let private outlinedLifetimeCallCount (symbol: string) (ll: string) =
+    System.Text.RegularExpressions.Regex.Matches(ll, @"call (?:double|ptr) " + System.Text.RegularExpressions.Regex.Escape(symbol) + @"\(").Count
+
+/// Every backing allocated in the named scalar callee must reach its own
+/// tracking-slot load and exactly one free before ret. No overwritten slot,
+/// escaped backing or later direct/GEP-alias reference can masquerade as cleanup.
+let private outlinedLifetimeCleanupProof (stem: string) (ll: string) : Result<int, string> =
+    match outlinedLifetimeBody stem ll with
+    | None -> Error ($"no outlined {stem} definition")
+    | Some (symbol, body) ->
+        let matches pattern = System.Text.RegularExpressions.Regex.Matches(body, pattern)
+        let pools = matches @"(%r\d+) = call ptr @blade_alloc_cells\("
+        let mutable problem : string option = None
+        if pools.Count = 0 then problem <- Some ($"{symbol} has no owned allocation")
+        if outlinedLifetimeCallCount symbol ll = 0 then problem <- Some ($"{symbol} is never called")
+        if not (System.Text.RegularExpressions.Regex.IsMatch(body, @"(?m)^  ret double ")) then
+            problem <- Some ($"{symbol} does not return a scalar through the ordinary ABI")
+        for pm in pools do
+            let p = pm.Groups.[1].Value
+            let tracked = matches (@"store ptr " + p + @", ptr (%r\d+)(?![0-9])")
+            if tracked.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {tracked.Count} tracking stores")
+            else
+                let slot = tracked.[0].Groups.[1].Value
+                let loads = matches (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                if loads.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {loads.Count} cleanup loads")
+                else
+                    let loaded = loads.[0].Groups.[1].Value
+                    let frees = matches (@"call void @blade_free\(ptr " + loaded + @"\)")
+                    if frees.Count <> 1 then problem <- Some ($"{symbol}: pool {p} has {frees.Count} frees")
+                    else
+                        let free = frees.[0]
+                        let afterTracking = tracked.[0].Index + tracked.[0].Length
+                        let overwritten =
+                            loads.[0].Index <= afterTracking ||
+                            System.Text.RegularExpressions.Regex.IsMatch(
+                                body.Substring(afterTracking, max 0 (loads.[0].Index - afterTracking)),
+                                @"store ptr [^\n]+, ptr " + slot + @"(?![0-9])")
+                        let aliases = HashSet<string>([p; loaded])
+                        for gep in matches @"(%r\d+) = getelementptr [^\n]*, ptr (%r\d+)," do
+                            if aliases.Contains gep.Groups.[2].Value then aliases.Add gep.Groups.[1].Value |> ignore
+                        let tail = body.Substring(free.Index + free.Length)
+                        let laterReference =
+                            aliases |> Seq.exists (fun alias ->
+                                System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + alias + @"(?![A-Za-z0-9_])"))
+                        if pm.Index >= tracked.[0].Index || overwritten || loads.[0].Index >= free.Index ||
+                           not (tail.Contains "ret double ") || laterReference then
+                            problem <- Some ($"{symbol}: pool {p} cleanup order/ownership failed; overwritten={overwritten}, later reference={laterReference}")
+        match problem with Some p -> Error p | None -> Ok pools.Count
+
+/// Trace every ordinary array-return allocation to its own tracking slot.
+/// The A03 marker identifies the selected root; allocation/store/load/free
+/// dataflow, rather than the marker alone, establishes actual realization.
+let private returnPoolReuseProof (reuse: bool) (ll: string) : Result<string, string> =
+    match outlinedLifetimeBody "returned_pool" ll with
+    | None -> Error "missing ordinary returned_pool outline"
+    | Some (_, body) ->
+        let matches pattern = System.Text.RegularExpressions.Regex.Matches(body, pattern)
+        let pools = matches @"(%r\d+) = call ptr @blade_alloc_cells\(i64 7, i64 8\)"
+        let ret = System.Text.RegularExpressions.Regex.Match(body, @"ret ptr (%r\d+)")
+        let marks = matches @"; A03: return pool reuse: function v\d+ donor v\d+ backing (%r\d+) slot (%r\d+)"
+        let mutable problem : string option = None
+        let wanted = if reuse then 2 else 3
+        if pools.Count <> wanted || (matches @" = call ptr @blade_alloc_cells\(").Count <> wanted || not ret.Success then
+            problem <- Some ($"allocations={pools.Count}, wanted={wanted}; return={ret.Success}")
+        if (matches @"call void @blade_free\(").Count <> wanted - 1 then problem <- Some "unexpected free count"
+        if marks.Count <> (if reuse then 1 else 0) then problem <- Some ($"reuse markers={marks.Count}")
+        let returned = if ret.Success then ret.Groups.[1].Value else "?"
+        for pm in pools do
+            let backing = pm.Groups.[1].Value
+            let stores = matches (@"store ptr " + backing + @", ptr (%r\d+)(?![0-9])")
+            if stores.Count <> 1 then problem <- Some ($"{backing}: tracking stores={stores.Count}")
+            else
+                let slot = stores.[0].Groups.[1].Value
+                let loads = matches (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])")
+                let afterTracking = stores.[0].Index + stores.[0].Length
+                if System.Text.RegularExpressions.Regex.IsMatch(body.Substring(afterTracking), @"store ptr [^\n]+, ptr " + slot + @"(?![0-9])") then
+                    problem <- Some ($"{backing}: tracking slot overwritten after allocation")
+                if backing = returned then
+                    if loads.Count <> 0 || body.Contains("call void @blade_free(ptr " + backing + ")") then
+                        problem <- Some ($"returned backing {backing} was freed")
+                    if reuse && marks.Count = 1 &&
+                       (marks.[0].Groups.[1].Value <> backing || marks.[0].Groups.[2].Value <> slot || pm.Index >= marks.[0].Index) then
+                        problem <- Some "selected donor does not match the earlier owned allocation and slot"
+                elif loads.Count <> 1 then problem <- Some ($"{backing}: cleanup loads={loads.Count}")
+                else
+                    let freed = loads.[0].Groups.[1].Value
+                    let frees = matches (@"call void @blade_free\(ptr " + freed + @"\)")
+                    if frees.Count <> 1 || loads.[0].Index >= frees.[0].Index || frees.[0].Index >= ret.Index then
+                        problem <- Some ($"{backing}: wrong free count/order")
+                    else
+                        let tail = body.Substring(frees.[0].Index + frees.[0].Length)
+                        if System.Text.RegularExpressions.Regex.IsMatch(tail, @"(?<![A-Za-z0-9_])" + backing + @"(?![A-Za-z0-9_])") then
+                            problem <- Some ($"{backing}: read after cleanup")
+        if not (pools |> Seq.exists (fun p -> p.Groups.[1].Value = returned)) then problem <- Some "returned pointer is not an owned allocation root"
+        if reuse && marks.Count = 1 then
+            let after = body.Substring(marks.[0].Index)
+            let dest = System.Text.RegularExpressions.Regex.Match(after, @"(%r\d+) = getelementptr inbounds double, ptr " + returned + @", i64 ")
+            let source = pools |> Seq.tryFind (fun p -> p.Groups.[1].Value <> returned)
+            match source with
+            | None -> problem <- Some "no independent completed input allocation"
+            | Some input ->
+                let inputPtr = input.Groups.[1].Value
+                let inputRead = System.Text.RegularExpressions.Regex.Match(after, @"(%r\d+) = getelementptr inbounds double, ptr " + inputPtr + @", i64 ")
+                let stores = if dest.Success then System.Text.RegularExpressions.Regex.IsMatch(after, @"store double [^\n]+, ptr " + dest.Groups.[1].Value + @"(?![0-9])") else false
+                let reads = if inputRead.Success then after.Contains("load double, ptr " + inputRead.Groups.[1].Value + "\n") else false
+                let before = body.Substring(0, marks.[0].Index)
+                let filled = System.Text.RegularExpressions.Regex.Match(before, @"(%r\d+) = getelementptr inbounds double, ptr " + inputPtr + @", i64 ")
+                let filledBefore = filled.Success && System.Text.RegularExpressions.Regex.IsMatch(before, @"store double [^\n]+, ptr " + filled.Groups.[1].Value + @"(?![0-9])")
+                if input.Index >= marks.[0].Index || not (stores && reads && filledBefore) then
+                    problem <- Some "final donor stores do not follow the independent input's completed fill"
+        match problem with
+        | Some why -> Error why
+        | None ->
+            // Compare the arithmetic instruction/flag sequence. Operand/SSA
+            // graph identity is checked in root's raw IR/emission review.
+            let arithmetic = matches @" = (?:fadd|fsub|fmul|fdiv) (?:[a-z]+ )*double " |> Seq.map (fun m -> m.Value) |> String.concat "|"
+            Ok arithmetic
+
+/// A04: prove the actual root/slot/return and the final same-index old-load
+/// BEFORE store. The returned graph normalizes scalar spill/reload temporaries,
+/// retaining arithmetic operands/flags and the completed snapshot as an input.
+let private sameCellReturnProof (reuse: bool) (ll: string) : Result<string, string> =
+    let rx pattern text = System.Text.RegularExpressions.Regex.Match(text, pattern)
+    let all pattern text = System.Text.RegularExpressions.Regex.Matches(text, pattern) |> Seq.toList
+    match outlinedLifetimeBody "same_cell" ll with
+    | None -> Error "missing ordinary same_cell outline"
+    | Some (symbol, body) ->
+        let pools = all @"(%r\d+) = call ptr @blade_alloc_cells\(i64 7, i64 8\)" body
+        let ret = rx @"ret ptr (%r\d+)" body
+        let marks = all @"; A04: same-cell return: function v\d+ donor v\d+ backing (%r\d+) slot (%r\d+)" body
+        let wanted = if reuse then 1 else 2
+        let mutable problem : string option = None
+        let require ok why = if not ok && problem.IsNone then problem <- Some why
+        require (pools.Length = wanted && (all @" = call ptr @blade_alloc_cells\(" body).Length = wanted && ret.Success)
+                "wrong actual allocation count or return"
+        require (marks.Length = (if reuse then 1 else 0)) "wrong same-cell marker count"
+        require ((all @"call void @blade_free\(" body).Length = wanted - 1) "wrong owned free count"
+        if pools.Length = wanted && ret.Success then
+            let donor = pools.Head.Groups.[1].Value
+            let returned = ret.Groups.[1].Value
+            require (returned = (if reuse then donor else pools.[1].Groups.[1].Value)) "wrong returned allocation root"
+            for pool in pools do
+                let ptr = pool.Groups.[1].Value
+                let tracking = all (@"store ptr " + ptr + @", ptr (%r\d+)(?![0-9])") body
+                require (tracking.Length = 1) "allocation does not have one tracking entry"
+                if tracking.Length = 1 then
+                    let slot = tracking.Head.Groups.[1].Value
+                    let writes = all (@"store ptr [^\n]+, ptr " + slot + @"(?![0-9])") body
+                    let loads = all (@"(%r\d+) = load ptr, ptr " + slot + @"(?![0-9])") body
+                    let expectedWrites = if ptr = returned then 1 else 2 // initial cleanup reset + allocation
+                    require (writes.Length = expectedWrites) "ownership slot overwritten or duplicated"
+                    if ptr = returned then
+                        require (loads.IsEmpty && not (body.Contains("@blade_free(ptr " + ptr + ")"))) "returned root freed"
+                        if reuse && marks.Length = 1 then
+                            require (marks.Head.Groups.[1].Value = ptr && marks.Head.Groups.[2].Value = slot && pool.Index < marks.Head.Index)
+                                    "marker not tied to the original allocation/tracking entry"
+                    else
+                        require (loads.Length = 1 && (all (@"@blade_free\(ptr " + loads.Head.Groups.[1].Value + @"\)") body).Length = 1)
+                                "old donor not freed exactly once on fresh-output path"
+            let stores = all @"store double ([^,\n]+), ptr (%r\d+)" body
+            if stores.IsEmpty then
+                require false "no payload store"
+                Error (defaultArg problem "no payload store")
+            else
+                let store = stores |> List.last
+                let definitions = all @"(?m)^  (%r\d+) = ([^\n]+)" body |> List.map (fun m -> m.Groups.[1].Value, m) |> Map.ofList
+                let address = Map.tryFind store.Groups.[2].Value definitions
+                let dest = address |> Option.map (fun d -> rx (@"getelementptr inbounds double, ptr " + returned + @", i64 (%r\d+)$") d.Groups.[2].Value)
+                match dest with
+                | Some dest when dest.Success ->
+                    let index = dest.Groups.[1].Value
+                    let tailStart = if reuse && marks.Length = 1 then marks.Head.Index else pools.[wanted - 1].Index
+                    // Donation has TWO same-root GEPs (read and destination).
+                    // Count actual old payload loads, including OTHER indices,
+                    // rather than treating an unloaded destination as a read.
+                    let source =
+                        all (@"(%r\d+) = getelementptr inbounds double, ptr " + donor + @", i64 ([^\n]+)") body
+                    let reads = source |> List.collect (fun gep ->
+                        all (@"(%r\d+) = load double, ptr " + gep.Groups.[1].Value + @"(?![0-9])") body
+                        |> List.filter (fun load -> load.Index > tailStart)
+                        |> List.map (fun load -> gep, load))
+                    let loads = reads |> List.map snd
+                    let destAt = address |> Option.map (fun d -> d.Index) |> Option.defaultValue -1
+                    let direct = all (@"load double, ptr " + donor + @"(?![0-9])") body |> List.filter (fun load -> load.Index > tailStart)
+                    let oneOldRead =
+                        match reads with
+                        | [(gep, load)] -> gep.Groups.[2].Value = index && gep.Index < load.Index && load.Index < destAt && destAt < store.Index
+                        | _ -> false
+                    require (direct.IsEmpty && oneOldRead)
+                            "no single old-cell read before same-index destination/store, or extra/cross-index old read"
+                    let rec graph depth (value: string) =
+                        if depth > 30 then "?cycle"
+                        elif not (value.StartsWith "%") then value
+                        else
+                            match Map.tryFind value definitions with
+                            | None -> "?undefined"
+                            | Some d ->
+                                let expression = d.Groups.[2].Value
+                                let arithmetic = rx @"^(fadd|fsub|fmul) ((?:[a-z]+ )*)double ([^,]+), (.+)$" expression
+                                let load = rx @"^load double, ptr (%r\d+)$" expression
+                                if arithmetic.Success then
+                                    arithmetic.Groups.[1].Value + ":" + arithmetic.Groups.[2].Value + "(" +
+                                    graph (depth + 1) arithmetic.Groups.[3].Value + "," + graph (depth + 1) arithmetic.Groups.[4].Value + ")"
+                                elif load.Success then
+                                    let ptr = load.Groups.[1].Value
+                                    if loads |> List.exists (fun m -> m.Groups.[1].Value = value) then "old-cell"
+                                    else
+                                        match stores |> List.filter (fun s -> s.Groups.[2].Value = ptr && s.Index < d.Index) |> List.tryLast with
+                                        | Some s when s.Index < tailStart -> "completed-snapshot"
+                                        | Some s -> graph (depth + 1) s.Groups.[1].Value
+                                        | None -> "?uninitialized"
+                                else "?unsupported"
+                    let cellGraph = graph 0 store.Groups.[1].Value
+                    require (cellGraph = "fadd:(fmul:(old-cell,0x3FE0000000000000),completed-snapshot)")
+                            ("unexpected final-cell arithmetic operands/flags: " + cellGraph)
+                    require (not (body.Contains "!alias.scope") && not (body.Contains "!noalias") && not (body.Contains "!llvm.access.group"))
+                            "same-cell accesses carry disjointness metadata"
+                    let main = ll.Substring(ll.IndexOf "define i32 @main()")
+                    let calls = all (@"(%r\d+) = call ptr " + System.Text.RegularExpressions.Regex.Escape(symbol) + @"\(ptr (%r\d+)\)") main
+                    require (calls.Length = 2) "two independent calls were not retained"
+                    if calls.Length = 2 then
+                        let afterSecond = main.Substring(calls.[1].Index + calls.[1].Length)
+                        for root in [calls.[0].Groups.[1].Value; calls.[1].Groups.[1].Value; calls.[0].Groups.[2].Value; calls.[1].Groups.[2].Value] do
+                            require ((rx (@"getelementptr inbounds double, ptr " + root + @", i64 ") afterSecond).Success)
+                                    "a required caller input/result is not accessed after the second call"
+                    match problem with Some why -> Error why | None -> Ok cellGraph
+                | _ -> Error "last payload store does not address the returned root at a scalar loop index"
+        else Error (defaultArg problem "no allocation proof")
 
 let runLlvmFactTests () : BlockResult =
     printHeader "LLVM Fact Layer"
@@ -541,6 +944,10 @@ let runLlvmFactTests () : BlockResult =
         failed <- failed + 1
         failedNames <- failedNames @ [ name ]
         resultLine Fail name detail
+    for name, result in EarlyPoolReleaseTests.llvmCases () do
+        match result with
+        | Ok detail -> pass name detail
+        | Error why -> fail name why
     /// `name`: what is asserted. `want`/`deny`: substrings that must appear /
     /// must not. Both lists are checked, so one case states a fact and its
     /// boundary together.
@@ -589,6 +996,63 @@ let runLlvmFactTests () : BlockResult =
     switchCase "an unrecognized token disables nothing" (Some "banana")
         [ "fnattrs", true; "paramattrs", true; "fmf", true ]
 
+    printSubHeader "closed-form enumerable domains (structural/06, bench G4)"
+    // A fold over a `range<R>` of a static struct with linear conjuncts is the
+    // affine nest itself -- bounds by compare + select on the outer field, an
+    // accumulator, no pool and no table. The differential sweep cannot say
+    // this: a refusal there is a quiet SKIP, so the lane's acceptance of the
+    // shape is asserted here by name.
+    check "a band fold streams the affine nest (no pool, no table)" [] domainBandFoldSource
+        [ "icmp sgt i64"; "select i1"; "fadd reassoc nsz contract double" ]
+        [ "@.blade.roff"; "@blade_alloc_cells" ]
+    // A KEYED read of a materialized domain array addresses it by lex rank
+    // through a prefix table of the OUTER field only (one entry per row,
+    // never per cell), behind the C++ key index's BL8006 membership abort.
+    check "a keyed read ranks through a per-row prefix table" [] domainBandKeyedSource
+        [ "@.blade.roff"; "index out of bounds: a key outside the sparse key set" ] []
+
+    printSubHeader "reduction join shared leaves (PM13)"
+    // A NAMED deferred producer the join spells twice -- folded as a leg's
+    // whole leaf AND read as an operand of another leg's apply, or read by
+    // two legs' applies -- is evaluated ONCE per iteration, as the C++
+    // lane's per-iteration `const` share. The lane used to evaluate it once
+    // per spelling (two `exp` per cell for the pairwise normalization, four
+    // `cos` and two `sin` for loops/141). Counted on the instructions.
+    let countIn (ll: string) (needle: string) =
+        (instructionsOnly ll).Split('\n') |> Array.filter (fun l -> l.Contains needle) |> Array.length
+    let shareCount name source (needle: string) (want: int) =
+        match emitUnder [] "facts" source with
+        | Error e -> fail name e
+        | Ok ll ->
+            let n = countIn ll needle
+            if n = want then pass name ($"{n} x {needle}")
+            else fail name ($"expected {want} x {needle}, found {n}")
+    let pairwiseSource = """
+type I = Idx<5>
+type J = Idx<7>
+let x = 0.25 * Float64(range<I>) - 2.0
+let xs = 0.17 * Float64(range<J>) - 3.0
+let ys = 0.5 * Float64(range<J>) + 1.0
+let h: Float64 = 0.6
+let smoothed = (method_for(range<I>) <@> lambda(i) -> {
+    let xi = x(i)
+    let w = method_for(xs) <@> lambda(b) -> exp(-(xi - b) * (xi - b) / (2.0 * h * h))
+    let z, u = object_for(<&!>) <@> (reduce(w, (+)), prodsum(w, ys))
+    u / z
+}) |> compute
+"""
+    shareCount "a per-row join evaluates its named producer once per cell" pairwiseSource "call double @exp(" 1
+    let slotShareSource = """
+type I = Idx<6>
+let ph: Array<Float64 like I> = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+let s: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let ct = cos <@> ph
+let st = sin <@> ph
+let a, b, c, d = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, st), prodsum(ct, ct), prodsum(ct, st))
+"""
+    shareCount "operand-slot shares: one cos per iteration" slotShareSource "call double @cos(" 1
+    shareCount "operand-slot shares: one sin per iteration" slotShareSource "call double @sin(" 1
+
     printSubHeader "function and parameter attributes"
     check "a non-recursive module claims termination" [] licensedFoldSource
         [ "define i32 @main() #0"
@@ -615,18 +1079,35 @@ let runLlvmFactTests () : BlockResult =
         [ "define i32 @main() {" ] [ "attributes #" ]
 
     printSubHeader "fast-math flags"
-    check "default emission is flag-free" [] licensedFoldSource
-        [ "fadd double"; "fmul double" ] [ "reassoc"; "nsz"; "contract" ]
+    // THE DEFAULT IS THE FAST REGIME (2026-10-17, plan-fp-default-fastest.md):
+    // `reassoc nsz` on the licensed accumulator and `contract` on every
+    // fadd/fmul -- the g++ lane's `-ffp-contract=fast` plus the licensed fold
+    // forms. Byte identity with the interpreter is the opt-in in both lanes,
+    // BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off.
+    check "default emission: licensed accumulator reassociates, everything contracts" [] licensedFoldSource
+        [ "fadd reassoc nsz contract double"; "fmul contract double" ] [ "fmul reassoc" ]
     check "the license reaches exactly the accumulator chain"
-        [ "BLADE_FP_REASSOC", Some "1" ] licensedFoldSource
+        [ "BLADE_FP_REASSOC", Some "1"; "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
         // The fold's add is tagged; the map's multiply -- same program, same
         // element type, no license -- is not.
         [ "fadd reassoc nsz double"; "fmul double" ] [ "fmul reassoc" ]
-    check "an unlicensed kernel stays ordered with the knob on"
-        [ "BLADE_FP_REASSOC", Some "1" ] unlicensedFoldSource
+    check "an unlicensed kernel stays ordered in the default build"
+        [ "BLADE_FP_CONTRACT", Some "off" ] unlicensedFoldSource
         [ "fadd double" ] [ "reassoc" ]
-    check "contract is per-instruction and opt-in"
-        [ "BLADE_FP_CONTRACT", Some "fast" ] licensedFoldSource
+    check "BLADE_FP_REPRO=1 strips reassoc and nothing else"
+        [ "BLADE_FP_REPRO", Some "1" ] licensedFoldSource
+        [ "fadd contract double"; "fmul contract double" ] [ "reassoc"; "nsz" ]
+    check "BLADE_FP_REASSOC=0 is the repro spelling"
+        [ "BLADE_FP_REASSOC", Some "0" ] licensedFoldSource
+        [ "fadd contract double" ] [ "reassoc"; "nsz" ]
+    check "BLADE_FP_REPRO=1 outranks BLADE_FP_REASSOC=1"
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_REASSOC", Some "1" ] licensedFoldSource
+        [ "fadd contract double" ] [ "reassoc" ]
+    check "the byte-identity build is flag-free"
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
+        [ "fadd double"; "fmul double" ] [ "reassoc"; "nsz"; "contract" ]
+    check "contract is per-instruction"
+        [ "BLADE_FP_CONTRACT", Some "fast"; "BLADE_FP_REPRO", Some "1" ] licensedFoldSource
         [ "fmul contract double"; "fadd contract double" ] [ "reassoc" ]
     check "contract=off is off" [ "BLADE_FP_CONTRACT", Some "off" ] licensedFoldSource
         [ "fmul double" ] [ "contract" ]
@@ -651,6 +1132,85 @@ let runLlvmFactTests () : BlockResult =
         [ "call double @blade_fpowi("; "call double @blade_fpow("; "call i64 @blade_ipow(" ]
         [ "llvm.powi"; "@pow(" ]
 
+    printSubHeader "shadow frames: kept where a panic is reachable, dropped elsewhere"
+    // The twin of the C++ lane's BLADE_FRAME elision (EmitLlvm.resolveFrames):
+    // a panic prints `  at <name>` per live frame, so a frame that can see a
+    // panic must be stored, and one that cannot is dead weight in a hot loop.
+    // Corpus functions/280 and 420-425 pin the printed traces.
+    let frameStore = "ptr @blade_frame_depth"
+    check "an Int64 division kernel keeps its frame, named as its binding" []
+        "let xs = Int64([4, 2, 1])\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        [ frameStore; "@blade_frame_stack"; "c\"lambda in r\\00\"" ] [ "__BLADE_FRAME" ]
+    check "a Float64 division kernel reaches no panic and has no frame" []
+        "let xs = Float64([4.0, 2.0, 1.0])\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        [ "fdiv " ] [ frameStore; "lambda in r"; "__BLADE_FRAME" ]
+    check "a caller keeps its frame through a callee that panics" []
+        "function divide(x: Int64, y: Int64) -> Int64 = x / y\nfunction twice(x: Int64, y: Int64) -> Int64 = divide(x, y) * 2\nlet z: Int64 = 1\nlet b = twice(4, z)\n"
+        [ frameStore; "c\"divide\\00\""; "c\"twice\\00\"" ] [ "__BLADE_FRAME" ]
+    check "a literal nonzero divisor cannot fault, so no frame" []
+        "function half(x: Int64) -> Int64 = x / 2\nlet z: Int64 = 5\nlet b = half(z)\n"
+        [ "sdiv i64" ] [ frameStore; "c\"half\\00\""; "__BLADE_FRAME" ]
+    // Elision is only sound while EmitLlvm.shimPanicSymbols names every shim
+    // export that can reach blade_panic: a call to an unlisted one would look
+    // panic-free and lose its frames, silently dropping trace lines. The
+    // allocators are the one deliberate exception -- their out-of-memory exit
+    // goes untraced, as `new` does in the C++ lane.
+    (let name = "every shim export that can panic is in shimPanicSymbols"
+     let allocators = set [ "blade_alloc_cells"; "blade_alloc_f64"; "blade_alloc_i64" ]
+     let defRe =
+         System.Text.RegularExpressions.Regex(
+             @"^(?:BLADE_NORETURN\s+)?(static\s+)?[A-Za-z_][A-Za-z0-9_ \*]*?\b(blade_[a-z0-9_]+)\s*\([^;{]*\)\s*\{")
+     let lines = EmitLlvm.shimSourceText().Replace("\r\n", "\n").Split('\n')
+     // (name, exported, body text up to the next definition)
+     let defs = ResizeArray<string * bool * System.Text.StringBuilder>()
+     for l in lines do
+         let m = defRe.Match l
+         if m.Success then defs.Add((m.Groups.[2].Value, not m.Groups.[1].Success, System.Text.StringBuilder(l)))
+         elif defs.Count > 0 then
+             let (_, _, sb) = defs.[defs.Count - 1]
+             sb.Append('\n').Append(l) |> ignore
+     let panics = HashSet<string>([ "blade_panic" ])
+     let mutable changed = true
+     while changed do
+         changed <- false
+         for (n, _, sb) in defs do
+             let body = sb.ToString()
+             if not (panics.Contains n)
+                && (body.Contains "blade_panic" || panics |> Seq.exists (fun p -> body.Contains(p + "("))) then
+                 panics.Add n |> ignore
+                 changed <- true
+     let exportedPanickers =
+         defs |> Seq.filter (fun (n, exported, _) -> exported && panics.Contains n)
+         |> Seq.map (fun (n, _, _) -> n) |> Set.ofSeq
+     let unlisted = Set.difference (Set.difference exportedPanickers allocators) EmitLlvm.shimPanicSymbols
+     let stale = Set.difference EmitLlvm.shimPanicSymbols exportedPanickers
+     if defs.Count < 10 then fail name ($"the shim scan found only {defs.Count} definitions -- the pattern no longer matches")
+     elif not unlisted.IsEmpty then
+         fail name ($"""can panic but is not in shimPanicSymbols (its callers would lose their frames): {(String.concat ", " unlisted)}""")
+     elif not stale.IsEmpty then
+         fail name ($"""in shimPanicSymbols but the shim never panics there: {(String.concat ", " stale)}""")
+     else pass name ($"{exportedPanickers.Count} panicking exports, {defs.Count} definitions scanned"))
+
+    printSubHeader "the --print selection (G12)"
+    // The print pass honours BLADE_PRINT exactly as genPrintStatements does:
+    // only the selected bindings print. It used to ignore the selection and
+    // echo every binding (bench llvm-acceptance-B F1). A selected name the
+    // lane would not print -- here a typo -- refuses, so the program reaches
+    // the C++ lane, which owns the BL7004 text. The differential cannot see
+    // either half: it never sets the selection.
+    let printSource = "let x = Float64([1.0, 2.0, 3.0])\nlet y: Float64 = 4.0\nlet s = reduce(x, (+))\n"
+    check "a selection prints only the selected binding" [ "BLADE_PRINT", Some "s" ] printSource
+        [ "c\"s\\00\""; "call void @blade_print_f64(" ]
+        // An array prints through its own `x = [` label.
+        [ "c\"x = [\\00\""; "c\"y\\00\"" ]
+    check "no selection prints every binding" [] printSource
+        [ "c\"s\\00\""; "c\"x = [\\00\""; "c\"y\\00\"" ] []
+    (let name = "a selected name that is no binding refuses to the C++ lane"
+     match emitUnder [ "BLADE_PRINT", Some "nope" ] "facts" printSource with
+     | Error e when e.Contains "the --print selection names 'nope'" -> pass name "refused"
+     | Error e -> fail name ($"refused for another reason: {e}")
+     | Ok _ -> fail name "emitted a module that prints nothing for the selected typo")
+
     printSubHeader "the whole switch"
     // FACTS=off must return the lane to the shape that passed its differential
     // before this layer existed -- the property that makes the switch a usable
@@ -669,10 +1229,1623 @@ let runLlvmFactTests () : BlockResult =
          if bad.IsEmpty then pass name "no fact text survives"
          else fail name ($"""fact text survived the kill switch: {(String.concat " | " bad)}"""))
 
+    // ---- the omp census (bench gap G11) -------------------------------------
+    // The lane has no thread runtime, so a `where omp` licence compiles serial
+    // here; the dropped threading half must not be silent. The census phrase is
+    // the C++ lane's, as a module comment naming the kernel; the reordering half
+    // is spent as `reassoc nsz` (absent in the REPRO build, whose census says
+    // so). Negative control: a program with no omp request carries no line.
+    (let src = """
+type Ix = Idx<9>
+let xs: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let total = reduce(xs, lambda(a, b) where omp -> a + b, 0.0)
+"""
+     let census = "; [omp] requested but emitted serial: the LLVM lane has no thread-level form"
+     let name = "omp census: a `where omp` fold names its dropped team"
+     match emitUnder [] "facts" src, emitUnder [ ("BLADE_FP_REPRO", Some "1") ] "facts" src,
+           emitUnder [] "facts" licensedFoldSource with
+     | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+     | Ok ll, Ok repro, Ok noOmp ->
+         if not (ll.Contains (census + "; a licensed fold is reassociated instead (one whose kernel or deferred map writes keeps its serial chain) (lambda in total)")) then
+             fail name "default build: no census comment for the dropped thread team"
+         elif not ((instructionsOnly ll).Contains "reassoc nsz") then
+             fail name "default build: the licence's reordering half was not spent (no `reassoc nsz`)"
+         elif not (repro.Contains (census + ", and BLADE_FP_REPRO=1 keeps every fold serial")) then
+             fail name "repro build: the census does not say the fold stays serial"
+         elif noOmp.Contains "[omp]" then
+             fail name "a program with no omp request carries a census line"
+         else pass name "census comment in both builds, none without a request")
+
+    // ---- gap G41: a fold over a WRITING deferred map keeps its serial chain --
+    // The map kernel writes a captured counter, so the accumulator's `fadd`
+    // carries no fold fast-math (the C++ lane's `licensedFold` declines the
+    // same fold to its serial chain); the pure twin keeps `reassoc nsz`.
+    (let writing = """
+type Ix = Idx<9>
+let mut G = Float64([0.0])
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> {
+    G(0) = G(0) + 1.0
+    G(0) * 1.5
+}, (+))
+"""
+     let pureSrc = """
+type Ix = Idx<9>
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 1.5, (+))
+"""
+     let name = "G41: a writing deferred map's fold carries no fold FMF; the pure twin does"
+     match emitUnder [] "g41w" writing, emitUnder [] "g41p" pureSrc with
+     | Error e, _ | _, Error e -> fail name e
+     | Ok w, Ok p ->
+         if (instructionsOnly w).Contains "reassoc" then fail name "writing map: the fold accumulator still carries `reassoc`"
+         elif not ((instructionsOnly p).Contains "reassoc nsz") then fail name "pure twin: no `reassoc nsz` (the control is vacuous)"
+         else pass name "no `reassoc` over the writing map; `reassoc nsz` over the pure one")
+
+    // ---- G41 (Codex re-review, finding 11): EVERY fold entry, not only the
+    // fused terminal. An ordinary `reduce` over a CHOICE whose left map writes
+    // (lowered as IRReduce; the choice stays a virtual producer), and a fold
+    // KERNEL whose inner `reduce` reads a named writing map: neither
+    // accumulator may carry fold fast-math; the pure twins keep it. The
+    // accumulator's instruction is pinned exactly.
+    (let choice (body: string) = $"""
+type Ix = Idx<9>
+let mut G = Float64([0.0])
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64(i) * 0.5 |> compute
+let total = reduce((method_for(x) <@> lambda(v) -> {body}) <|> (method_for(x) <@> lambda(v) -> v), (+))
+"""
+     let kernel (body: string) = $"""
+type Ix = Idx<3>
+let mut G = Float64([0.0])
+let m = method_for(range<Ix>) <@> lambda(i) -> {body}
+let k = lambda(a: Float64, b: Float64) where comm(a, b) -> {{
+    let z = reduce(m, (+))
+    a + b + z
+}}
+let total = reduce(method_for(range<Ix>) <@> lambda(i) -> Float64(i), k, 0.0)
+"""
+     let writing = "{\n    G(0) = G(0) + 1.0\n    v * 1.5\n}"
+     let writingI = "{\n    G(0) = G(0) + 1.0\n    G(0) * 1.5\n}"
+     // Gap G45: a NAMED writing map is evaluated once at its definition, so a
+     // fold kernel's inner reduce over it reads STORED cells and may
+     // reassociate like any stored array (the counter is pinned by
+     // corpus loops/497 and 518); the guard below stays covered by the
+     // INLINE writing choice -- not a `let`, so neither G45 nor G50 (which
+     // stores a NAMED writing choice) forces it.
+     (let name = "G45: a fold kernel's inner reduce over a named writing map reads its stored cells"
+      match emitUnder [] "g45k" (kernel writingI) with
+      | Error e -> fail name e
+      | Ok wl ->
+          if not (accumulatorFadds wl |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then
+              fail name "the inner fold over the stored map has no `reassoc nsz contract` accumulator (was the map left virtual?)"
+          else pass name "the named writing map is stored at its let; its fold reassociates")
+     for (name, w, p) in [ ("G41: ordinary reduce over a writing choice keeps the serial chain", choice writing, choice "v * 1.5") ] do
+         match emitUnder [] "g41c" w, emitUnder [] "g41cp" p with
+         | Error e, _ | _, Error e -> fail name e
+         | Ok wl, Ok pl ->
+             let wAcc = accumulatorFadds wl
+             let pAcc = accumulatorFadds pl
+             if wAcc.IsEmpty then fail name "writing producer: no accumulator `fadd` identified"
+             elif wAcc |> List.exists (fun f -> flagsOf f <> "contract") then
+                 fail name ($"""writing producer: an accumulator carries flags other than `contract`: {(String.concat " | " wAcc)}""")
+             elif not (pAcc |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then
+                 fail name "pure twin: no `reassoc nsz contract` accumulator (the control is vacuous)"
+             else pass name "the accumulator is `fadd contract` over the writing producer; `fadd reassoc nsz contract` over the pure twin")
+
+    // ---- G41 (Codex re-re-review, finding 12): a NAMED PARTIAL VIEW of a
+    // writing deferred value (`let row = m(0)`) was virtual too: folding it ran
+    // the writer, so the accumulator had to keep the serial chain. Since gap
+    // G45 a named writing MAP, and since gap G50 a named writing CHOICE, is
+    // stored at its definition, so a view of either is stored data, like the
+    // `|> compute` control, and may reassociate: no NAMED writing value is
+    // virtual any more, and the deferred chase through views stays a backstop.
+    // The virtual-writer guard is the inline writing choice above ("G41:
+    // ordinary reduce over a writing choice keeps the serial chain").
+    (let mapRhs (body: string) = $"method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}"
+     let view (rhs: string) = $"""
+type I = Idx<2>
+type J = Idx<3>
+let mut G = Float64([0.0])
+let m = {rhs}
+let row = m((0 : I))
+let total = reduce(row, (+), 0.0)
+"""
+     let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
+     let zeroRhs = mapRhs "Float64(0.0)"
+     let choiceRhs = "(" + mapRhs writer + ") <|> (" + zeroRhs + ")"
+     let name = "G41-12 / G45 / G50: a fold over a named partial view of a writing value reads stored cells"
+     match emitUnder [] "g4112w" (view choiceRhs), emitUnder [] "g4112p" (view (mapRhs "Float64(i + j) * 0.5")),
+           emitUnder [] "g4112m" (view (mapRhs writer + " |> compute")), emitUnder [] "g4112n" (view (mapRhs writer)) with
+     | Error e, _, _, _ | _, Error e, _, _ | _, _, Error e, _ | _, _, _, Error e -> fail name e
+     | Ok w, Ok p, Ok m, Ok n ->
+         if not (accumulatorFadds w |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing choice (G50: stored at its let): no reassoc accumulator"
+         elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure view control: no reassoc accumulator"
+         elif not (accumulatorFadds m |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "materialized writing control: no reassoc accumulator (a stored view may reassociate)"
+         elif not (accumulatorFadds n |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing map (G45: stored at its let): no reassoc accumulator"
+         else pass name "views of the named writing choice (G50) and map (G45), the materialized writer and the pure control: `fadd reassoc nsz contract`")
+
+    // ---- G41 (Codex review W2F-4, finding 19): a view held INSIDE a named
+    // tuple (`let pair = (m(0), 0.0); let row = pair[0]`) is still a view of
+    // the value behind it. The writer is a named CHOICE, which gap G50 stores
+    // at its definition (G45 stores a named writing map), so the tuple-held
+    // view is stored data and may reassociate, like the pure control.
+    (let tupleView (rhs: string) = $"""
+type I = Idx<2>
+type J = Idx<3>
+let mut G = Float64([0.0])
+let m = {rhs}
+let pair = (m((0 : I)), Float64(0.0))
+let row = pair[0]
+let total = reduce(row, (+), 0.0)
+"""
+     let mapRhs (body: string) = $"method_for(range<I>, range<J>) <@> lambda(i, j) -> {body}"
+     let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
+     let choiceRhs = "(" + mapRhs writer + ") <|> (" + mapRhs "Float64(0.0)" + ")"
+     let name = "G41-19 / G50: a fold over a tuple-held view of a named writing choice reads stored cells"
+     match emitUnder [] "g4119w" (tupleView choiceRhs), emitUnder [] "g4119p" (tupleView (mapRhs "Float64(i + j) * 0.5")) with
+     | Error e, _ | _, Error e -> fail name e
+     | Ok w, Ok p ->
+         if not (accumulatorFadds w |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "named writing choice (G50: stored at its let): no reassoc accumulator"
+         elif not (accumulatorFadds p |> List.exists (fun f -> flagsOf f = "reassoc nsz contract")) then fail name "pure control: no reassoc accumulator"
+         else pass name "tuple-held views of the stored writing choice (G50) and of the pure control: `fadd reassoc nsz contract`")
+
+    // ---- G41 (Codex re-re-review, finding 13): the orbit-class fold
+    // evaluates each canonical cell once and weights it, so it must never run
+    // over a source whose evaluation writes (it would drop evaluations: the
+    // logical walk prints total 10 / counter 4, the orbit arm printed 8 / 3).
+    // The writing virtual source takes the logical walk; a pure virtual source
+    // keeps the orbit form; a MATERIALIZED writing source is stored data.
+    (let orbit (body: string) (forced: string) = $"""
+type I = Idx<2>
+let x = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
+let g0 = method_for(x, x) <@> lambda(a: Float64, b: Float64) where comm(a, b) -> a + b |> compute
+let mut G = [0.0]
+let g = method_for(g0) <@> lambda(v: Float64) -> {body}{forced}
+let total = reduce(method_for(range<I>) <@> lambda(i) -> reduce(method_for(range<I>) <@> lambda(j) -> g(i, j), (+), 0.0), (+), 0.0)
+let seen = G(0)
+"""
+     // Gap G45: the NAMED writing source is now evaluated once at its
+     // definition -- the same as its `|> compute` twin, counter 3, logical sum
+     // 8 in every lane (corpus loops/524) -- so through a name the orbit fold
+     // never meets a writing VIRTUAL source; `tryOrbitFold`'s decline stays a
+     // backstop (a writing choice never takes the orbit form at all). The
+     // named writer and the materialized one must emit the same fold.
+     let writer = "{\n    G(0) = G(0) + 1.0\n    G(0)\n}"
+     let orbitLine = "the logical sum over the pool of"
+     let name = "G41-13 / G45: a named writing orbit source is stored at its let; the pure virtual source keeps the orbit fold"
+     match emitUnder [] "g4113w" (orbit writer ""), emitUnder [] "g4113p" (orbit "v * 2.0" ""),
+           emitUnder [] "g4113m" (orbit writer " |> compute") with
+     | Error e, _, _ | _, Error e, _ | _, _, Error e -> fail name e
+     | Ok w, Ok p, Ok m ->
+         if not (p.Contains orbitLine) then fail name "pure virtual control: no orbit-class fold (the control is vacuous)"
+         elif String.IsNullOrWhiteSpace m then fail name "materialized writing control: no module emitted"
+         elif w.Contains orbitLine <> m.Contains orbitLine then
+             fail name "the named writing source and its `|> compute` twin took different fold forms (is the named one still virtual?)"
+         else pass name "named writer folds like its materialized twin; pure virtual source: orbit-class fold")
+
+    // ---- gap G42: the three-leaf join projections run NATIVELY here ---------
+    // corpus tuples/032's shape must be emitted by this lane, not handed back
+    // to C++ (its `blade test llvm tuples` pass would otherwise compare the C++
+    // lane against itself).
+    (let src = """
+let x = Float64([1.0, 2.0, 3.0])
+let l = method_for(x)
+let t = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> 2.0 * v) <&!> (l <@> lambda(v) -> 3.0 * v), (+))
+let q1 = t[1]
+let q01 = t[0][1]
+let ((n0, n1), n2) = t
+let (m0, m1, m2) = t
+"""
+     let name = "G42: tuples/032's three-leaf projections emit natively"
+     match emitUnder [] "g42" src with
+     | Error e -> fail name ($"the lane refused it: {e}")
+     | Ok ll -> if ll.Contains "define" then pass name "native module emitted" else fail name "no function emitted")    // ---- the syrk tile core (microkernel review item M6) --------------------
+    // A same-array comm row contraction at or above the crossover (p >= 16,
+    // k >= 4) materializes through ONE call to blade_llvm_tiles.c, with the
+    // emitter's argument recipe: p, k, the operand pool, ldx = k, the output
+    // pool, strict 0, the kc cap, the scale mode + value, the scratch pool and
+    // its capacity (EmitLlvm.syrkTileScratchCells). The declaration carries the
+    // core's honest attributes. Below the crossover, under BLADE_SYRK_TILE=0,
+    // or for a contraction of two DIFFERENT arrays, the nest stays.
+    printSubHeader "the syrk tile core (M6)"
+    let gramSrc (p: int) (k: int) (tail: string) (ys: string) = $"""
+type V = Idx<{p}>
+type S = Idx<{k}>
+let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) %% 5) - 2.5 |> compute
+let y = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 5 + s) %% 7) |> compute
+let g = method_for(x, {ys}) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b){tail} |> compute
+let t = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+"""
+    let tileSym = "@" + EmitLlvm.tilesSymbol
+    let rowG = Blade.CodeGenExprSupport.syrkRowGroup ()
+    let triEdge = Blade.CodeGenExprSupport.triTileEdge ()
+    let scratch6131 = EmitLlvm.syrkTileScratchCells 61L (Blade.CodeGenExprSupport.syrkTileKc 31L) rowG
+    check "syrk tile: gram's shape (61 x 31) calls the core with the emitter's recipe"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "x")
+        [ $"call void {tileSym}(i64 61, i64 31, ptr "
+          ", i64 31, ptr "
+          $", i64 0, i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 {rowG}, i64 {triEdge}, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {scratch6131})"
+          $"declare void {tileSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef, ptr noundef captures(none),"
+          "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
+        [ "readnone" ]
+    check "syrk tile: the `/ d` tail rides the call as mode 1 and the divisor"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 97 257 " / 4.0" "x")
+        [ $"call void {tileSym}(i64 97, i64 257, ptr "; ", i64 1, double 0x4010000000000000, ptr " ]
+        []
+    check "syrk tile: the `* s` tail rides the call as mode 2"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 24 8 " * 0.5" "x")
+        [ $"call void {tileSym}(i64 24, i64 8, ptr "; ", i64 2, double 0x3FE0000000000000, ptr " ]
+        []
+    check "syrk tile: below the crossover (13 x 31) keeps the nest"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 13 31 "" "x") [] [ tileSym ]
+    check "syrk tile: k below the crossover (61 x 3) keeps the nest"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 3 "" "x") [] [ tileSym ]
+    check "syrk tile: BLADE_SYRK_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_SYRK_TILE", Some "0" ] (gramSrc 61 31 "" "x") [] [ tileSym ]
+    check "syrk tile: two DIFFERENT arrays are not a same-array contraction"
+        [ "BLADE_SYRK_TILE", None ] (gramSrc 61 31 "" "y") [] [ tileSym ]
+    check "syrk tile: the fact kill switch strips the declaration's attributes"
+        [ "BLADE_SYRK_TILE", None; "BLADE_LLVM_FACTS", Some "off" ] (gramSrc 61 31 "" "x")
+        [ $"declare void {tileSym}(i64, i64, ptr, i64, ptr, i64, i64, i64, i64, i64, double, ptr, i64)" ]
+        [ "captures(none)"; "memory(argmem" ]
+
+    // ---- the antisym pair and rank-3 simplex tile cores (M7 / M8) ---------
+    // The C++ lane's `(|RowContraction|_|)` shapes at or above their
+    // crossovers (antisym p >= 24, n >= 8; simplex p >= 24, n >= 4)
+    // materialize through ONE call each, with the emitter's recipe: extents,
+    // the operand pool and its leading dims, the output pool, the schedule /
+    // kc cap, the scale mode + value, the scratch and its capacity. ON under
+    // BLADE_FP_REPRO=1 (no reorder licence used); off by knob, below the
+    // crossover, and in a module with a `where repro` function.
+    printSubHeader "the antisym and simplex tile cores (M7 / M8)"
+    let antiSrc (p: int) (n: int) (tail: string) (extra: string) = $"""
+type P = Idx<{p}>
+type C = Idx<2>
+type S = Idx<{n}>
+{extra}
+let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 5 + c * 3 + s) %% 7) - 3.0 |> compute
+let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((0 : C)), b((1 : C))) - prodsum(b((0 : C)), a((1 : C)))){tail} |> compute
+let t = reduce(method_for(range<P>) <@> lambda(j) -> l(0, j), (+))
+"""
+    let sym3Src (p: int) (n: int) (tail: string) = $"""
+type V = Idx<{p}>
+type S = Idx<{n}>
+let static nn: Int64 = {n}
+let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) %% 5) - 2.0 |> compute
+let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c){tail} |> compute
+let u = reduce(method_for(range<V>) <@> lambda(k) -> t(0, 0, k), (+))
+"""
+    let antiSym = "@" + EmitLlvm.antisymTileSymbol
+    let sym3Sym = "@" + EmitLlvm.simplexTileSymbol
+    let antiOff = [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None ]
+    let sym3Off = [ "BLADE_SIMPLEX_TILE", None; "BLADE_FP_REPRO", None ]
+    // The row group rides the call and sizes the scratch (unset: the SERIAL
+    // regime's default G = 1 -- this lane has no thread runtime; anti_g=0: the
+    // cache budget's G = 4 at n = 401 for both schedules); BLADE_TILE_TUNE
+    // anti_g=1..8 forces it.
+    let antiG6 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L false false)
+    let antiG4 = fst (Blade.CodeGenExprSupport.antisymRowGroup 61L 401L true false)
+    check "antisym tile: 61 x 401 calls the core with the emitter's recipe"
+        antiOff (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr "
+          ", i64 802, i64 401, i64 0, i64 1, ptr "
+          $", i64 0, i64 0, i64 {Blade.CodeGenExprSupport.antisymKcMax ()}, i64 {antiG6}, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false antiG6})"
+          $"declare void {antiSym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef,"
+          "mustprogress nofree nosync nounwind willreturn memory(argmem: readwrite)" ]
+        []
+    check "antisym tile: BLADE_ANTISYM_TILE=4x4 passes the paired schedule"
+        [ "BLADE_ANTISYM_TILE", Some "4x4"; "BLADE_FP_REPRO", None ] (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr "; $", i64 1, i64 0, i64 {Blade.CodeGenExprSupport.antisymKcMax ()}, i64 {antiG4}, i64 0, double "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L true antiG4})" ]
+        []
+    check "antisym tile: the default is row groups of 1 with the G = 1 scratch"
+        [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None; "BLADE_TILE_TUNE", None ] (antiSrc 61 401 "" "")
+        [ ", i64 1, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false 1L})" ]
+        []
+    check "antisym tile: anti_g=0's cache budget picks row groups of 4 at n = 401, the scratch sized for them"
+        [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None; "BLADE_TILE_TUNE", Some "anti_g=0" ] (antiSrc 61 401 "" "")
+        [ ", i64 4, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false 4L})" ]
+        []
+    check "antisym tile: BLADE_TILE_TUNE anti_g=1 passes G = 1 and the G = 1 scratch"
+        [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", None; "BLADE_TILE_TUNE", Some "anti_g=1" ] (antiSrc 61 401 "" "")
+        [ ", i64 1, i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false 1L})" ]
+        [ $", i64 {EmitLlvm.antisymTileScratchCells 61L 401L false 4L})" ]
+    check "antisym tile: the `/ d` tail rides the call as mode 1 and the divisor"
+        antiOff (antiSrc 29 11 " / 4.0" "")
+        [ $"call void {antiSym}(i64 29, i64 11, ptr "; ", i64 1, double 0x4010000000000000, ptr " ]
+        []
+    check "antisym tile: ON under BLADE_FP_REPRO=1 (no reorder licence used)"
+        [ "BLADE_ANTISYM_TILE", None; "BLADE_FP_REPRO", Some "1" ] (antiSrc 61 401 "" "")
+        [ $"call void {antiSym}(i64 61, i64 401, ptr " ] []
+    check "antisym tile: below the crossover (23 x 11) keeps the nest"
+        antiOff (antiSrc 23 11 "" "") [] [ antiSym ]
+    check "antisym tile: BLADE_ANTISYM_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_ANTISYM_TILE", Some "0"; "BLADE_FP_REPRO", None ] (antiSrc 61 401 "" "") [] [ antiSym ]
+    check "antisym tile: a `where repro` function in the module keeps the nest"
+        antiOff (antiSrc 61 401 "" "function axpy1(a: Float64, b: Float64) where repro = 1.0 + a * b\nlet w = axpy1(1.0, 2.0)\n") [] [ antiSym ]
+    check "simplex tile: 29 x 67 / Float64(n) calls the core with the emitter's recipe"
+        sym3Off (sym3Src 29 67 " / Float64(nn)")
+        [ $"call void {sym3Sym}(i64 29, i64 67, ptr "
+          $", i64 67, ptr "
+          $", i64 {Blade.CodeGenExprSupport.syrkTileKcMax}, i64 {triEdge}, i64 1, double "
+          $", i64 {EmitLlvm.sym3TileScratchCells 29L 67L 67L})"
+          $"declare void {sym3Sym}(i64 noundef, i64 noundef, ptr noundef readonly captures(none), i64 noundef, ptr noundef captures(none)," ]
+        []
+    check "simplex tile: three K blocks (29 x 700) size the scratch at KC = 234"
+        sym3Off (sym3Src 29 700 "")
+        [ $"call void {sym3Sym}(i64 29, i64 700, ptr "; ", i64 0, double 0x3FF0000000000000, ptr "
+          $", i64 {EmitLlvm.sym3TileScratchCells 29L 700L 234L})" ]
+        []
+    check "simplex tile: ON under BLADE_FP_REPRO=1 (no reorder licence used)"
+        [ "BLADE_SIMPLEX_TILE", None; "BLADE_FP_REPRO", Some "1" ] (sym3Src 29 67 "")
+        [ $"call void {sym3Sym}(i64 29, i64 67, ptr " ] []
+    check "simplex tile: below the crossover (13 x 201) keeps the nest"
+        sym3Off (sym3Src 13 201 "") [] [ sym3Sym ]
+    check "simplex tile: BLADE_SIMPLEX_TILE=0 keeps the nest (the A/B knob)"
+        [ "BLADE_SIMPLEX_TILE", Some "0"; "BLADE_FP_REPRO", None ] (sym3Src 29 67 "") [] [ sym3Sym ]
+    check "simplex tile: the inner level first (`prodsum(c, a, b)`) declines"
+        sym3Off ((sym3Src 29 67 "").Replace("prodsum(a, b, c)", "prodsum(c, a, b)")) [] [ sym3Sym ]
+
+    // ---- A01: actual alloc/free relationships at retained-inline returns --
+    let lifetimeCases =
+        [ "Producer-input legs ride the producer's loop across the call that holds it", 1
+          "Two input-leg plans in ONE inlined call release its pools once", 2
+          "Inline lifetime event survives deletion of an unused final join", 1
+          "CSE cannot merge a caller map into a released inline pool", 1
+          // 0: since the round-4 merge the kept inline's fail-closed ownership
+          // scope (master's W2-4 rounds 5-7) declines this callee (it calls the
+          // user function helper), so the call stays outlined and frees its own pool
+          "Inline cleanup survives CSE of a duplicate scalar return", 0
+          "Function caller releases an inline pool after a non-atom return", 1
+          "Inline pool is released before the caller first failure (aborts)", 1
+          "Scratch reuse excludes retained inline lifetime regions", 2 ]
+    for (test, expected) in lifetimeCases do
+        let name = "inline lifetime cleanup (llvm): " + test
+        match Blade.Tests.Corpus.category "sibling-folds" |> List.tryFind (fun (n, _) -> n = test) with
+        | None -> fail name "missing corpus witness"
+        | Some (_, src) ->
+            // the kept one-level inline is OPT-IN since the round-4 merge (master's
+            // W2-4 round 8, the user's decision): the retained-inline arm needs the
+            // explicit BLADE_EPILOGUE_LEGS=1; the default build keeps the call
+            let pins = [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "1"; "BLADE_EPILOGUE_LEGS", Some "1" ]
+            match emitUnder pins "facts" src,
+                  emitUnder (pins |> List.map (fun (k, v) -> if k = "BLADE_EPILOGUE_LEGS" then (k, Some "0") else (k, v))) "facts" src with
+            | Ok on, Ok off when expected = 0 ->
+                // a DECLINED kept inline: no region in either build; the outlined
+                // kernel frees its own pool in both
+                match outlinedLifetimeCleanupProof "kernel" on, outlinedLifetimeCleanupProof "kernel" off with
+                | Ok a, Ok b when a > 0 && b > 0 && not (on.Contains "; A01: inline return cleanup:") ->
+                    pass name ($"declined kept inline: no inline region; the outlined kernel frees its {a} owned allocation(s) in both builds")
+                | a, b -> fail name (sprintf "declined kept inline: on proof=%A off proof=%A region=%b" a b (on.Contains "; A01: inline return cleanup:"))
+            | Ok on, Ok off ->
+                match inlineLifetimeCleanupProof on with
+                | Ok n when n = expected && on.Contains "; A01: inline return cleanup:" ->
+                    let cleanup = on.IndexOf "; A01: inline return cleanup:"
+                    let free = if cleanup < 0 then -1 else on.IndexOf("call void @blade_free(ptr", cleanup)
+                    let fault = on.IndexOf "call i64 @blade_idiv(i64 7"
+                    let failureOrder = not (test.Contains "caller first failure") || (cleanup >= 0 && free > cleanup && fault > free)
+                    // 032 also qualifies for the older explicit-join inline
+                    // route with EPILOGUE_LEGS=0. Only that named witness may
+                    // use an event proof instead of an outlined kernel proof.
+                    let offProof =
+                        match outlinedLifetimeBody "kernel" off with
+                        | Some _ -> outlinedLifetimeCleanupProof "kernel" off
+                        | None when test = "Inline lifetime event survives deletion of an unused final join" ->
+                            match inlineLifetimeCleanupProof off with
+                            | Ok count when count = expected -> Ok count
+                            | proof -> Error (sprintf "older explicit-join route wanted %d releases; proof %A" expected proof)
+                        | None -> Error "gate-off lost the outlined kernel definition"
+                    match offProof with
+                    | Ok offCount when offCount > 0 && failureOrder &&
+                                       (test <> "Producer-input legs ride the producer's loop across the call that holds it" || offCount = 1) ->
+                        pass name ($"{n} inline allocation-specific releases; {offCount} gate-off allocations traced to their own frees")
+                    | proof -> fail name (sprintf "gate-off ownership proof=%A; caller failure order=%b" proof failureOrder)
+                | rr -> fail name (sprintf "wanted %d releases; proof %A" expected rr)
+            | Error e, _ | _, Error e -> fail name e
+
+    // A scalar/array IRApp nested in a tuple must use its ordinary ABI;
+    // only actual tuple results need emitTupleParts' inline tuple ABI.
+    let memberPins =
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_OMP_THREADS", Some "1"; "BLADE_BLAS", Some "off"
+          "BLADE_EPILOGUE_LEGS", Some "0"; "BLADE_SIBLING_FOLDS", Some "0"; "BLADE_CSE", Some "0" ]
+    let memberCases =
+        [ "Repeated scalar calls in tuple members keep outlined pool cleanup", "member_scalar"
+          "Array calls in tuple members preserve their escaping pool results", "member_array"
+          "Genuine tuple returning calls retain the LLVM inline tuple ABI", "member_pair" ]
+    for (test, stem) in memberCases do
+        let name = "tuple member call ABI (llvm): " + test
+        match Blade.Tests.Corpus.category "sibling-folds" |> List.tryFind (fun (n, _) -> n = test) with
+        | None -> fail name "missing corpus witness"
+        | Some (_, src) ->
+            // Inspect the same validated IR that emission receives: absence
+            // of an outline alone cannot prove the tuple ABI was exercised.
+            let emission =
+                withEnv (defaultEmissionEnv @ memberPins) (fun () ->
+                    match Lowering.lower src with
+                    | Error e -> Error ("lowering refused: " + e)
+                    | Ok ir ->
+                        match IRValidate.validateIR ir with
+                        | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+                        | Ok ir ->
+                            let tupleIds =
+                                ir.Modules |> List.collect (_.Functions)
+                                |> List.choose (fun f ->
+                                    match Blade.IR.stripUnits f.RetType with
+                                    | Blade.Types.IRTTuple [_; _] when f.SourceName = stem && f.Captures.IsEmpty -> Some f.Id
+                                    | _ -> None)
+                                |> Set.ofList
+                            let rec hasTupleCall e =
+                                match e with
+                                | Blade.IR.IRApp (Blade.IR.IRVar (fid, _), _, retType) when Set.contains fid tupleIds ->
+                                    match Blade.IR.stripUnits retType with Blade.Types.IRTTuple [_; _] -> true | _ -> false
+                                | _ -> Blade.IR.childrenOf e |> List.exists hasTupleCall
+                            let tupleCall =
+                                ir.Modules |> List.exists (fun m -> m.Bindings |> List.exists (fun b -> hasTupleCall b.Value))
+                            match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                            | Error r -> Error ("the llvm lane refused: " + r)
+                            | Ok ll -> Ok (tupleCall, ll))
+            match emission with
+            | Error e -> fail name e
+            | Ok (tupleCall, ll) ->
+                match stem, outlinedLifetimeBody stem ll with
+                | "member_scalar", Some (symbol, _) ->
+                    match outlinedLifetimeCleanupProof stem ll with
+                    | Ok 1 when outlinedLifetimeCallCount symbol ll = 2 ->
+                        pass name "two ordinary scalar calls, each invocation frees its single owned pool"
+                    | proof -> fail name (sprintf "scalar ownership=%A; calls=%d" proof (outlinedLifetimeCallCount symbol ll))
+                | "member_array", Some (symbol, body) ->
+                    let pools = System.Text.RegularExpressions.Regex.Matches(body, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                    let returnsOwnPool =
+                        pools.Count = 1 && body.Contains("ret ptr " + pools.[0].Groups.[1].Value + "\n")
+                    if outlinedLifetimeCallCount symbol ll = 2 && returnsOwnPool && not (body.Contains "call void @blade_free(") then
+                        pass name "two ordinary array calls return their own live allocations to later caller folds"
+                    else fail name "array result was inlined, lost its backing, freed before escape, or called other than twice"
+                | "member_pair", None ->
+                    let main = System.Text.RegularExpressions.Regex.Match(ll.Replace("\r\n", "\n"), @"(?ms)^define i32 @main\(\)[^\n]*\{\n.*?^\}")
+                    let inlineBody =
+                        main.Success &&
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @" = fadd (?:[a-z]+ )*double ").Count = 2 &&
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @" = fmul (?:[a-z]+ )*double ").Count = 1
+                    let scalarOutputs =
+                        System.Text.RegularExpressions.Regex.Matches(main.Value, @"call void @blade_print_f64\(").Count = 2 &&
+                        ll.Contains "c\"s\\00\"" && ll.Contains "c\"q\\00\""
+                    // resolveFrames intentionally elides this nonfailing
+                    // body's frame/string. Corpus pins check s=666/q=16206.
+                    if tupleCall && inlineBody && scalarOutputs && not (ll.Contains "@bl_member_pair_") then
+                        pass name "real two-result IR call emits both reductions inline and prints both scalar results"
+                    else fail name ($"tuple IR call={tupleCall}; inline reductions={inlineBody}; scalar outputs={scalarOutputs}")
+                | _ -> fail name "wrong ordinary/tuple call ABI or missing callable definition"
+
+    // A03: existing return plan -> exact owned backing in the ordinary ABI.
+    let returnPins reuse =
+        [ "BLADE_FP_REPRO", Some "1"; "BLADE_FP_CONTRACT", Some "off"; "BLADE_OMP_THREADS", Some "1"
+          "BLADE_BLAS", Some "off"; "BLADE_CSE", Some "0"; "BLADE_POOL_REUSE", Some reuse
+          // since the round-4 merge master's compute elision fuses the fixture's
+          // single-reader map into its fold, which leaves A03 no donor pool; the
+          // A03 / A04 facts pin the shape they are about
+          "BLADE_COMPUTE_ELIDE", Some "0" ]
+    let rec directLets e =
+        match e with
+        | Blade.IR.IRLet (id, value, body) -> (id, value) :: directLets body
+        | _ -> []
+    let computed e = match e with Blade.IR.IRCompute (Blade.IR.IRApplyCombinator _) -> true | _ -> false
+    let unchanged (ir: Blade.IR.IRProgram) (_: Blade.IR.IRCallable) = ir
+    let replaceFunction (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) =
+        { ir with Modules = ir.Modules |> List.map (fun m -> { m with Functions = m.Functions |> List.map (fun g -> if g.Id = f.Id then f else g) }) }
+    let emitReturnCase reuse src tweak =
+        withEnv (defaultEmissionEnv @ returnPins reuse) (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                match Lowering.lower src with
+                | Error e -> Error ("lowering: " + e)
+                | Ok ir ->
+                    let f = ir.Modules |> List.collect (_.Functions) |> List.find (fun f -> f.SourceName = "returned_pool")
+                    let ir = tweak ir f
+                    match IRValidate.validateIR ir with
+                    | Error errs -> Error ("validation: " + String.concat "; " errs)
+                    | Ok ir ->
+                        match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                        | Error e -> Error ("llvm: " + e)
+                        | Ok ll -> Ok (ll, Blade.Effects.Decisions.drain ())
+            finally Blade.Effects.Decisions.drain () |> ignore)
+    let corpusSource name =
+        Blade.Tests.Corpus.category "memfree" |> List.tryFind (fun (n, _) -> n = name) |> Option.map snd
+    let baselineName = "PM01 ordinary array return preserves the existing dead-pool reuse route"
+    for test in [baselineName; "LLVM return reuse keeps scalar snapshots and two live returned pools"] do
+        let name = "return pool reuse (llvm): " + test
+        match corpusSource test with
+        | None -> fail name "missing corpus control"
+        | Some src ->
+            match emitReturnCase "1" src unchanged, emitReturnCase "0" src unchanged with
+            | Ok (on, decisions), Ok (off, _) ->
+                let admitted = decisions |> List.filter (fun d -> d.Rule = "pool-reuse-llvm" && d.Outcome = Blade.Effects.Applied)
+                match returnPoolReuseProof true on, returnPoolReuseProof false off with
+                | Ok onSequence, Ok offSequence when onSequence = offSequence && admitted.Length = 1 ->
+                    let calls = match outlinedLifetimeBody "returned_pool" on with Some (symbol, _) -> outlinedLifetimeCallCount symbol on | None -> 0
+                    let expectedCalls = if test = baselineName then 1 else 2
+                    if calls = expectedCalls then pass name "owned donor returned; independent completed input freed once; same arithmetic instruction/flag sequence; exact call count"
+                    else fail name ($"ordinary calls={calls}, wanted={expectedCalls}")
+                | a, b -> fail name (sprintf "on=%A; off=%A; backend admissions=%d" a b admitted.Length)
+            | Error e, _ | _, Error e -> fail name e
+    match corpusSource baselineName with
+    | None -> fail "return pool reuse refusal controls" "missing baseline"
+    | Some baseline ->
+        let forceFirst ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.find (snd >> computed) |> fst
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            ir
+        let callerOwned ir (f: Blade.IR.IRCallable) =
+            Blade.Types.PoolReuseTable.recordReturn f.Id f.Params.Head.VarId
+            ir
+        let sameInput ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.filter (snd >> computed) |> List.last |> fst
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            ir
+        let letPlan ir (f: Blade.IR.IRCallable) =
+            let arrays = directLets f.Body |> List.filter (snd >> computed)
+            Blade.Types.PoolReuseTable.record (arrays |> List.last |> fst) (arrays.Head |> fst)
+            ir
+        let deferred ir (f: Blade.IR.IRCallable) =
+            let input = directLets f.Body |> List.filter (snd >> computed) |> List.last |> fst
+            let change e =
+                match e with
+                | Blade.IR.IRLet (id, Blade.IR.IRCompute inner, body) when id = input -> Blade.IR.IRLet (id, inner, body)
+                | other -> other
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let released ir (f: Blade.IR.IRCallable) =
+            // Only mean reads this pool before release; later maps read x.
+            // Close a real event scope, then forge the freed root as donor.
+            let donor, value = directLets f.Body |> List.find (snd >> computed)
+            let scope, ending = 990100, 990101
+            let change e =
+                match e with
+                | Blade.IR.IRLet (id, v, Blade.IR.IRLet (meanId, meanValue, rest)) when id = donor ->
+                    let release = Blade.IR.IRReleasePools (Blade.IR.IRVar (scope, Blade.Types.IRTUnit), [Blade.IR.IRVar (donor, Blade.IR.typeOf value)], "A03 released negative")
+                    let afterMean = Blade.IR.IRLet (ending, release, rest)
+                    let afterDonor = Blade.IR.IRLet (meanId, meanValue, afterMean)
+                    Blade.IR.IRLet (scope, Blade.IR.IRBeginPoolScope "A03 released negative", Blade.IR.IRLet (id, v, afterDonor))
+                | other -> other
+            Blade.Types.PoolReuseTable.recordReturn f.Id donor
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let releaseSource = baseline.Replace("let q = p - mean |> compute", "let q = x - mean |> compute")
+        // The release follows the completed mean snapshot, so only the old
+        // backing is dead; the later q reads x and the retained scalar mean.
+        let hiddenCapture = baseline.Replace("q * 0.5", "method_for(q) <@> lambda(v) -> v + p(0) |> compute")
+        let mismatch = baseline.Replace("type Ix = Idx<7>", "type Ix = Idx<7>\ntype Jx = Idx<3>").Replace("let p = x * 2.0 + 1.0 |> compute", "let p = method_for(range<Jx>) <@> lambda(i) -> Float64(i) |> compute").Replace("let q = p - mean |> compute", "let q = x - mean |> compute")
+        let view = baseline.Replace("function returned_pool(x:", "type Rows = Idx<3>\nfunction returned_pool(x:")
+        // Use an independently constructed matrix argument only in this
+        // refusal source; q is a row GEP with no owning allocation entry.
+        let view = view.Replace("Array<Float64 like Ix>) -> Array", "Array<Float64 like Ix>, matrix: Array<Float64 like Rows, Ix>) -> Array").Replace("let q = p - mean |> compute", "let q = matrix((1 : Rows))").Replace("q * 0.5", "q * mean").Replace("returned_pool(x)", "returned_pool(x, method_for(range<Rows>, range<Ix>) <@> lambda(i, j) -> Float64(i) + Float64(j) |> compute)")
+        let controls =
+            [ "caller-owned", baseline, callerOwned, "not a direct fresh computed body let"
+              "same input backing", baseline, sameInput, "input reads the donor backing"
+              "general let plan", baseline, letPlan, "let-donor plans are outside"
+              "latent producer", baseline, deferred, "input is deferred"
+              "array capture", hiddenCapture, forceFirst, "not closed scalar arithmetic"
+              "released event root", releaseSource, released, "inline lifetime region remains excluded"
+              "mismatched extent", mismatch, forceFirst, "donor type/extent does not match"
+              "row view root", view, forceFirst, "not an independent owned root" ]
+        for label, source, tweak, expected in controls do
+            let name = "return pool reuse declines (llvm): " + label
+            match emitReturnCase "1" source tweak with
+            | Error e -> fail name e
+            | Ok (ll, decisions) ->
+                let decline = decisions |> List.exists (fun d ->
+                    d.Rule = "pool-reuse-llvm" && (match d.Outcome with Blade.Effects.Declined why -> why.Contains(expected: string) | _ -> false))
+                let noSpeculativeForce =
+                    if label <> "latent producer" then true
+                    else
+                        match outlinedLifetimeBody "returned_pool" ll with
+                        | None -> false
+                        | Some (_, body) ->
+                            let pools = System.Text.RegularExpressions.Regex.Matches(body, @"(%r\d+) = call ptr @blade_alloc_cells\(")
+                            let ret = System.Text.RegularExpressions.Regex.Match(body, @"ret ptr (%r\d+)")
+                            // p plus a fresh final result, with q still virtual:
+                            // preflight must not insert a third input allocation.
+                            pools.Count = 2 && ret.Success && ret.Groups.[1].Value = pools.[1].Groups.[1].Value &&
+                            System.Text.RegularExpressions.Regex.Matches(body, @"call void @blade_free\(").Count = 1
+                if decline && noSpeculativeForce && not (ll.Contains "; A03: return pool reuse:") then
+                    pass name "fresh-result fallback; exact backend refusal; no speculative donor fill/input forcing"
+                else fail name (sprintf "decline=%b; no speculative force=%b; decisions=%A" decline noSpeculativeForce decisions)
+
+    // A04 / A06: ONE shared same-cell certificate (Blade.SameCellReturn), two
+    // realizations. The shared dead-donor tables stay unchanged; the C++
+    // lane (A06) fills the return in the donor's pool through one pointer,
+    // old cell to a scalar before the same-index store, and the knob off
+    // keeps its fresh-output/restrict path.
+    let samePins reuse defaultSchedule =
+        returnPins reuse @
+        [ "BLADE_HOT_ROW", (if defaultSchedule then None else Some "0")
+          "BLADE_CELL_EPILOGUE", (if defaultSchedule then None else Some "off")
+          "BLADE_EPILOGUE_LEGS", (if defaultSchedule then None else Some "0")
+          "BLADE_COMPACTION_FUSION", Some "0"; "BLADE_COMPACT_ROW_CLASSES", Some "0" ]
+    let emitSame reuse schedule pairedCpp src tweak =
+        withEnv (defaultEmissionEnv @ samePins reuse schedule) (fun () ->
+            Blade.Effects.Decisions.start ()
+            try
+                match Lowering.lower src with
+                | Error e -> Error ("lowering: " + e)
+                | Ok ir ->
+                    let f = ir.Modules |> List.collect (_.Functions) |> List.find (fun f -> f.SourceName = "same_cell")
+                    let ir = tweak ir f
+                    match IRValidate.validateIR ir with
+                    | Error errs -> Error ("validation: " + String.concat "; " errs)
+                    | Ok ir ->
+                        let donors = Blade.Types.PoolReuseTable.donors ()
+                        let returns = Blade.Types.PoolReuseTable.returnDonors ()
+                        // a C++ emission that RAISES fails the case (review A06-2):
+                        // a refusal is never mistaken for a working fresh fallback
+                        let cppR =
+                            if not pairedCpp then Ok ""
+                            else try Ok (fst (CodeGen.genSelfContainedProgramFromIR ir "facts")) with ex -> Error ("C++ emission raised: " + ex.Message)
+                        match cppR with
+                        | Error e -> Error e
+                        | Ok cpp ->
+                        match EmitLlvm.tryEmitProgramNamed "facts" ir with
+                        | Error e -> Error ("llvm: " + e)
+                        | Ok ll ->
+                            let unchanged = donors = Blade.Types.PoolReuseTable.donors () && returns = Blade.Types.PoolReuseTable.returnDonors ()
+                            Ok (ll, cpp, Blade.Effects.Decisions.drain (), unchanged)
+            finally
+                Blade.Types.PoolReuseTable.setCurrentReturnDonor None
+                Blade.Effects.Decisions.drain () |> ignore)
+    let sameName = "LLVM same-cell return keeps old scalar snapshots and two live call results"
+    match corpusSource sameName with
+    | None -> fail "same-cell return controls" "missing independent all-output corpus control"
+    | Some source ->
+        let source = source.Replace("\r\n", "\n")
+        for schedule in [false; true] do
+            let name = if schedule then "same-cell return: actual default scheduler" else "same-cell return: isolated ordinary maps"
+            match emitSame "1" schedule true source unchanged, emitSame "0" schedule true source unchanged with
+            | Ok (on, cppOn, decisions, tablesOn), Ok (off, cppOff, _, tablesOff) ->
+                let admissions = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-llvm" && d.Subject = "same_cell" && d.Outcome = Blade.Effects.Applied)
+                let cppAdmissions = decisions |> List.filter (fun d -> d.Rule = "same-cell-return-cpp" && d.Subject = "same_cell" && d.Outcome = Blade.Effects.Applied)
+                let count (pat: string) (t: string) = System.Text.RegularExpressions.Regex.Matches(t, pat).Count
+                let allocs = @" = \{ allocate<typename promote<double, 1>::type, nullptr>"
+                let frees = @"deallocate<typename promote<double, 1>::type, nullptr>"
+                // ON (A06): one pool, filled in place, returned; OFF: the fresh result pool
+                let cppSameCell =
+                    let body = System.Text.RegularExpressions.Regex.Match(cppOn, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return (__v\d+);\s*\}")
+                    body.Success && count allocs body.Value = 1 && count frees body.Value = 0 &&
+                    body.Value.Contains "const double __sc_old = __sc_pool[__sc_k];" &&
+                    body.Value.Contains ("double* __sc_pool = nested_array_utilities::pool_base(" + body.Groups.[2].Value + ".data);") &&
+                    not (body.Value.Contains "pool reuse:") && not (body.Value.Contains "BLADE_RESTRICT __sc")
+                let cppFreshOff =
+                    let body = System.Text.RegularExpressions.Regex.Match(cppOff, @"(?s)Array<double, 1> same_cell\(Array<double, 1> x\) \{(.*?)return __ret\d+;\s*\}")
+                    body.Success && count allocs body.Value = 2 && count frees body.Value = 1 &&
+                    not (body.Value.Contains "pool reuse:") && not (body.Value.Contains "__sc_")
+                match sameCellReturnProof true on, sameCellReturnProof false off with
+                | Ok a, Ok b when a = b && admissions.Length = 1 && cppAdmissions.Length = 1 && tablesOn && tablesOff && cppSameCell && cppFreshOff ->
+                    pass name "same-root old load before same-index store in BOTH lanes (LLVM A04, C++ A06: one pool, no result allocation, no in-callee free); one owner escapes; two calls and later input/result reads; same final-cell graph; knob off: C++ fresh result pool"
+                | a, b -> fail name (sprintf "on=%A off=%A admissions=%d/%d tables=%b/%b C++on=%b C++off=%b" a b admissions.Length cppAdmissions.Length tablesOn tablesOff cppSameCell cppFreshOff)
+            | Error e, _ | _, Error e -> fail name e
+
+        let tupleSource =
+            source.Replace(") -> Array<Float64 like Ix> = {", ") -> (Array<Float64 like Ix>, Float64) = {")
+                  .Replace("p * 0.5 + bias", "(p * 0.5 + bias, old_sum)")
+                  .Replace("let a = same_cell(x)", "let (a, old_a) = same_cell(x)")
+                  .Replace("let b = same_cell(y)", "let (b, old_b) = same_cell(y)")
+        match emitSame "1" false false tupleSource unchanged with
+        | Ok (ll, _, _, true) when not (ll.Contains "; A04: same-cell return:") && (outlinedLifetimeBody "same_cell" ll).IsNone ->
+            pass "same-cell tuple result excluded" "established tuple expansion retained; no ordinary return certificate or generic donor change"
+        | result -> fail "same-cell tuple result excluded" (sprintf "%A" result)
+
+        let tailKernel (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) change =
+            let rec last e = match e with Blade.IR.IRLet (_, _, body) -> last body | e -> e
+            match last f.Body with
+            | Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info) ->
+                match info.Kernel with
+                | Blade.IR.IRVar (kid, _) ->
+                    let k = ir.Modules |> List.collect (_.Functions) |> List.find (fun k -> k.Id = kid)
+                    replaceFunction ir (change k)
+                | _ -> failwith "same-cell control needs a named scalar kernel"
+            | _ -> failwith "same-cell control needs a computed tail"
+        let hiddenCapture ir (f: Blade.IR.IRCallable) =
+            let p = f.Params.Head
+            tailKernel ir f (fun k ->
+                { k with Captures = k.Captures @ [{ Id = p.VarId; Name = p.Name; Type = p.Type; IsMutable = false }]
+                         Body = Blade.IR.IRBinOp (Blade.IR.IRElementwise, Blade.IR.IRAdd, k.Body,
+                                  Blade.IR.IRIndex (Blade.IR.IRVar (p.VarId, p.Type), [Blade.IR.IRLit (Blade.IR.IRLitInt 0L)], None), Blade.IR.SrcLoc.Nowhere) })
+        let failure ir f =
+            tailKernel ir f (fun k ->
+                { k with Body = Blade.IR.IRLet (990400, Blade.IR.IRConstraintCheck (Blade.IR.IRLit (Blade.IR.IRLitBool false), "BL8010", "A04 retained failure", Blade.Ast.noSpan), k.Body) })
+        let latent ir (f: Blade.IR.IRCallable) =
+            match f.Body with
+            | Blade.IR.IRLet (id, Blade.IR.IRCompute value, body) -> replaceFunction ir { f with Body = Blade.IR.IRLet (id, value, body) }
+            | _ -> failwith "missing donor let"
+        let region ir (f: Blade.IR.IRCallable) =
+            let _, value = directLets f.Body |> List.head
+            let scope, scratch, ending = 990401, 990402, 990403
+            let release = Blade.IR.IRReleasePools (Blade.IR.IRVar (scope, Blade.Types.IRTUnit), [Blade.IR.IRVar (scratch, Blade.IR.typeOf value)], "A04 event refusal")
+            let body = Blade.IR.IRLet (scope, Blade.IR.IRBeginPoolScope "A04 event refusal", Blade.IR.IRLet (scratch, value, Blade.IR.IRLet (ending, release, f.Body)))
+            replaceFunction ir { f with Body = body }
+        let ownedElsewhere ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            Blade.Optimize.OrbitPullTable.record donor donor (Error "A04 forged external owner")
+            ir
+        let genericValue ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            // The owner key intentionally is NOT a callable; a scan limited
+            // to Callables.Keys would miss this still-live donation value.
+            Blade.Types.PoolReuseTable.recordReturn 990499 donor
+            ir
+        let hiddenOwner ir (f: Blade.IR.IRCallable) =
+            let donor = directLets f.Body |> List.head |> fst
+            Blade.Optimize.MemberHoistTable.record
+                { HostId = 990498; HostName = "outside body"; SetId = donor; SetName = "A04 donor"
+                  Kernels = Set.empty; Forced = 0; Admission = "A04 hidden owner control"; ScanOnly = false }
+            ir
+        let hiddenMetadata ir (f: Blade.IR.IRCallable) =
+            let p = f.Params.Head
+            let change e =
+                match e with
+                | Blade.IR.IRCompute (Blade.IR.IRApplyCombinator info) ->
+                    match info.Arrays, info.Loop with
+                    | [Blade.IR.IRVar (id, _)], Blade.IR.IRMethodFor loop when id <> p.VarId ->
+                        Blade.IR.IRCompute (Blade.IR.IRApplyCombinator { info with Loop = Blade.IR.IRMethodFor { loop with Arrays = [Blade.IR.IRVar (p.VarId, p.Type)] } })
+                    | _ -> e
+                | _ -> e
+            replaceFunction ir { f with Body = Blade.IR.mapIRExpr change f.Body }
+        let anonymousIndices ir (f: Blade.IR.IRCallable) =
+            let anon ty =
+                match ty with
+                | Blade.IR.ArrayElem a -> Blade.IR.mkArrayLike { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }
+                | ty -> ty
+            let change e =
+                match e with
+                | Blade.IR.IRVar (id, ty) -> Blade.IR.IRVar (id, anon ty)
+                | Blade.IR.IRMethodFor loop -> Blade.IR.IRMethodFor { loop with ArrayTypes = loop.ArrayTypes |> List.map (fun a -> { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }) }
+                | Blade.IR.IRApplyCombinator info ->
+                    Blade.IR.IRApplyCombinator
+                        { info with
+                            OutputType = anon info.OutputType
+                            ArrayTypes = info.ArrayTypes |> List.map (fun a -> { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Tag = None }) }) }
+                | _ -> e
+            replaceFunction ir { f with RetType = anon f.RetType; Params = f.Params |> List.map (fun p -> { p with Type = anon p.Type }); Body = Blade.IR.mapIRExpr change f.Body }
+        let staticKernel ir f = tailKernel ir f (fun k -> { k with IsStatic = true })
+        let badParamIndex ir f = tailKernel ir f (fun k -> { k with Params = k.Params |> List.map (fun p -> { p with Index = p.Index + 1 }) })
+        let externalCapture throughType (ir: Blade.IR.IRProgram) (f: Blade.IR.IRCallable) =
+            let donor, value = directLets f.Body |> List.head
+            let ty = Blade.IR.typeOf value
+            let captureTy =
+                if not throughType then ty
+                else
+                    match ty with
+                    | Blade.IR.ArrayElem a -> Blade.IR.mkArrayLike { a with IndexTypes = a.IndexTypes |> List.map (fun ix -> { ix with Dependencies = [donor] }) }
+                    | _ -> failwith "same-cell donor is not an array"
+            let shadow =
+                { f with Id = 990497; Name = "A04_unreferenced_capture"; SourceName = "A04 unreferenced capture"; Params = []
+                         RetType = Blade.Types.IRTScalar Blade.Types.ETFloat64; Body = Blade.IR.IRLit (Blade.IR.IRLitFloat 0.0)
+                         Captures = [{ Id = (if throughType then 990496 else donor); Name = "retained"; Type = captureTy; IsMutable = false }] }
+            { ir with Modules = ir.Modules |> List.map (fun m -> if m.Functions |> List.exists (fun g -> g.Id = f.Id) then { m with Functions = m.Functions @ [shadow] } else m) }
+        let currentDonor ir (f: Blade.IR.IRCallable) =
+            Blade.Types.PoolReuseTable.setCurrentReturnDonor (Some (directLets f.Body |> List.head |> fst))
+            ir
+        let caller = source.Replace("    let p = x * 2.0 + 1.0 |> compute\n", "").Replace("reduce(p, (+))", "reduce(x, (+))").Replace("p * 0.5 + bias", "x * 0.5 + bias")
+        let alias = source.Replace("    let old_sum = reduce(p, (+))", "    let held = p\n    let old_sum = reduce(held, (+))")
+        let gather = source.Replace("p * 0.5 + bias", "method_for(range<Ix>) <@> lambda(i) -> p(i) * 0.5 + bias |> compute")
+        let controls =
+            [ "caller-owned", caller, unchanged, "not one direct fresh computed local map"
+              "retained array name", alias, unchanged, "retains an array/alias/deferred read"
+              "gather closure", gather, unchanged, "donor is retained by a callable capture/type payload"
+              "division outside closed grammar", source.Replace("p * 0.5 + bias", "(p * 0.5 + bias) / 2.0"), unchanged, "return kernel/metadata"
+              "no scalar barrier", source.Replace("let old_sum = reduce(p, (+))", "let old_sum: Float64 = 1.0"), unchanged, "no completed scalar barrier"
+              "unsupported scalar snapshot", source.Replace("old_sum - 1.0", "sqrt(old_sum)"), unchanged, "unsupported scalar observation"
+              "hidden array capture", source, hiddenCapture, "return kernel/metadata"
+              "failure in kernel", source, failure, "return kernel/metadata"
+              "deferred donor", source, latent, "not one direct fresh computed local map"
+              "lifetime event", source, region, "inline lifetime region remains excluded"
+              "other planner owner", source, ownedElsewhere, "another planner owns this body"
+              "hidden owner value", source, hiddenOwner, "another planner owns this body"
+              "hidden loop metadata", source, hiddenMetadata, "return kernel/metadata"
+              "different anonymous index IDs", source, anonymousIndices, "parameter type/index provenance"
+              "static kernel", source, staticKernel, "return kernel/metadata"
+              "kernel parameter position", source, badParamIndex, "return kernel/metadata"
+              "unreferenced callable capture", source, externalCapture false, "callable capture/type payload"
+              "unreferenced capture type dependency", source, externalCapture true, "callable capture/type payload"
+              "other return donor value", source, genericValue, "another planner owns this body"
+              "current return donor", source, currentDonor, "another planner owns this body" ]
+        for label, src, tweak, expected in controls do
+            let name = "same-cell return declines (llvm + C++): " + label
+            // the C++ lane installs its current return donor per function body
+            // (genFuncDefCore), so the forged GLOBAL current donor is an
+            // LLVM-only control
+            // ... and a bare unforced donor let is IR the C++ emitter never receives
+            // (Lowering forces every body-level map; it raises BL9001), so the
+            // deferred-donor control is LLVM-only too
+            let pairedCpp = label <> "current return donor" && label <> "deferred donor"
+            match emitSame "1" false pairedCpp src tweak with
+            | Error e -> fail name e
+            | Ok (ll, cpp, decisions, tables) ->
+                let judged rule =
+                    match decisions |> List.filter (fun d -> d.Rule = rule && d.Subject = "same_cell") with
+                    | [d] ->
+                        match d.Outcome with
+                        | Blade.Effects.Declined why when label = "gather closure" -> why = expected
+                        | Blade.Effects.Declined why -> why.Contains(expected: string)
+                        | _ -> false
+                    | _ -> false
+                let declined = judged "same-cell-return-llvm"
+                let cppDeclined = not pairedCpp || (judged "same-cell-return-cpp" && not (cpp.Contains "same-cell return (A06") && not (cpp.Contains "__sc_old"))
+                let failureKept = label <> "failure in kernel" || ll.Contains "A04 retained failure"
+                if declined && cppDeclined && tables && failureKept && not (ll.Contains "; A04: same-cell return:") then
+                    pass name "one truthful refusal per lane (the shared certificate's reason); no same-cell fill; shared donor tables unchanged"
+                else fail name (sprintf "declined=%b cppDeclined=%b tables=%b failureKept=%b decisions=%A" declined cppDeclined tables failureKept (decisions |> List.filter (fun d -> d.Rule.StartsWith "same-cell")))
+
+    // ---- contains and membership hoisting (round 3, B-T1) ------------------
+    // The lane has a real IRContains arm (it used to refuse the node, so every
+    // `contains` program fell back to C++): a probe in a planned host reads
+    // the structure emitMain builds before the host statement through the
+    // shared C core (blade_member.h via the shim) -- init / has / fini, the
+    // forced representation as init's last argument -- and every other probe
+    // is the linear scan with early exit (`has.cond`), the target evaluated
+    // once before it. The knob off keeps the scan everywhere.
+    printSubHeader "contains and membership hoisting (B-T1)"
+    let memberSrc = """
+type Row = Idx<16>
+let probes: Array<Int64 like Row> = [-3, 0, 1, 2, 7, 12, 30, 31, 44, 45, 46, 57, 58, 60, 61, 62]
+let evens = Int64([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 44, 46, 58, 60])
+let hit = mask(probes, lambda(p) -> contains(evens, p))
+let one = contains(evens, Int64(44))
+"""
+    let memberOn = [ "BLADE_MEMBER_HOIST", None ]
+    check "member hoist: a planned mask host builds, probes and frees through the shim"
+        memberOn memberSrc
+        [ "call void @blade_member_init_i64(ptr "; ", i64 20, i64 0)"; "call i32 @blade_member_has_i64(ptr "
+          "call void @blade_member_fini_i64(ptr "
+          "declare i32 @blade_member_has_i64(ptr noundef, i64 noundef) #10"
+          "attributes #10 = { mustprogress nofree nosync nounwind willreturn memory(read) }" ]
+        []
+    check "member hoist: a top-level contains (no host) is the linear scan, in the same module"
+        memberOn memberSrc [ "has.cond"; "icmp eq i64" ] []
+    check "member hoist: BLADE_MEMBER_HOIST=hash forces the representation (init's last argument)"
+        [ "BLADE_MEMBER_HOIST", Some "hash" ] memberSrc [ ", i64 20, i64 3)" ] []
+    check "member hoist: BLADE_MEMBER_HOIST=0 keeps the linear scan everywhere"
+        [ "BLADE_MEMBER_HOIST", Some "0" ] memberSrc [ "has.cond" ] [ "blade_member_" ]
+    check "contains over a Float64 set: IEEE == in the scan"
+        memberOn "let fs = Float64([1.5, -0.0, 2.5])\nlet z = contains(fs, Float64(0.0))\n" [ "fcmp oeq double" ] [ "blade_member_" ]
+    // THE ROUTE of every contains program in the corpus (Codex diff reviews
+    // of W2-1, finding 4 and the second look's NEW 1-2): the table covers the
+    // corpus's contains programs EXACTLY (no missing, no stale row); a row
+    // whose program the lane emits has exactly its planned hosts -- each
+    // `init`'s report naming that host, in binding order -- with init ->
+    // report -> every probe of the slot -> fini; a row with no plan carries
+    // no member call at all; a refusing row is refused with EXACTLY its
+    // recorded reason. A lowering or validation error, or an exception, fails
+    // the row whatever it says.
+    (let (missing, stale) = memberHoistRouteCoverage ()
+     let name = "member hoist route table: the corpus's contains programs, exactly"
+     if missing.IsEmpty && stale.IsEmpty then pass name ($"{memberHoistRoutes.Length} rows = the corpus's contains programs")
+     else fail name ($"""missing rows: [{String.concat "; " missing}]; stale rows: [{String.concat "; " stale}]"""))
+    (for r in memberHoistRoutes do
+        let name = $"member hoist route (llvm): {r.Category} `{r.Test}` -- {r.Hosts.Length} build(s)"
+        match (try Blade.Tests.Corpus.category r.Category |> List.tryFind (fun (n, _) -> n = r.Test) with _ -> None) with
+        | None -> fail name "the corpus file is missing (renamed?)"
+        | Some (_, src) ->
+            let lowered =
+                try
+                    withEnv defaultEmissionEnv (fun () ->
+                        match fst (Lowering.lowerCaptured src) with
+                        | Error e -> Error ("lowering refused: " + e)
+                        | Ok ir ->
+                            match IRValidate.validateIR ir with
+                            | Error errs -> Error ("IR validation refused: " + String.concat "; " errs)
+                            | Ok ir -> Ok (EmitLlvm.tryEmitProgramNamed "facts" ir))
+                with ex -> Error ("raised: " + ex.Message)
+            match lowered, r.LlvmRefusal with
+            | Error e, _ -> fail name e
+            | Ok (Error why), Some want ->
+                if why.Contains want then pass name ($"refused with the recorded reason ({want})")
+                else fail name ($"refused for ANOTHER reason: {why} (recorded: {want})")
+            | Ok (Ok _), Some want -> fail name ($"emitted, but the table records the refusal `{want}` (update the table)")
+            | Ok (Error why), None -> fail name ("the lane refused: " + why)
+            | Ok (Ok raw), None ->
+                let lines = (instructionsOnly raw).Split('\n')
+                let initRe = System.Text.RegularExpressions.Regex(@"call void @blade_member_init_i64\(ptr (%[A-Za-z0-9_.]+),")
+                let inits = lines |> Array.indexed |> Array.choose (fun (i, l) -> let m = initRe.Match l in if m.Success then Some (i, m.Groups.[1].Value) else None)
+                // the host each report names: its string global's bytes
+                let strOf (sym: string) =
+                    lines |> Array.tryPick (fun l ->
+                        let m = System.Text.RegularExpressions.Regex.Match(l, "^" + System.Text.RegularExpressions.Regex.Escape sym + @" = .*c""([^""]*)\\00""")
+                        if m.Success then Some m.Groups.[1].Value else None)
+                let slotHost (i, slot: string) : string option =
+                    let has = lines |> Array.indexed |> Array.filter (fun (_, l) -> l.Contains($"@blade_member_has_i64(ptr {slot},")) |> Array.map fst
+                    let fini = lines |> Array.tryFindIndex (fun l -> l.Contains($"call void @blade_member_fini_i64(ptr {slot})"))
+                    let noteRe = System.Text.RegularExpressions.Regex("call void @blade_member_note_llvm\\(ptr " + System.Text.RegularExpressions.Regex.Escape slot + @", ptr (@[A-Za-z0-9_.]+),")
+                    let note = lines |> Array.indexed |> Array.tryPick (fun (k, l) -> let m = noteRe.Match l in if m.Success then Some (k, m.Groups.[1].Value) else None)
+                    match fini, note with
+                    | Some f, Some (n, hostSym) when has.Length > 0 && n > i && Array.min has > n && Array.max has < f -> strOf hostSym
+                    | _ -> None
+                let anyMember = lines |> Array.exists (fun l -> l.Contains "blade_member_")
+                if r.Hosts.IsEmpty then
+                    if anyMember then fail name "a member call in a program with no plan" else pass name "no structure, the scan"
+                else
+                    let hosts = inits |> Array.map slotHost |> List.ofArray
+                    if hosts |> List.exists Option.isNone then fail name "an init / report / probe / fini out of order (or a slot never probed)"
+                    else
+                        let got = hosts |> List.map Option.get
+                        if got <> r.Hosts then fail name ($"""hosts [{String.concat ", " got}], want [{String.concat ", " r.Hosts}]""")
+                        else pass name ($"""{String.concat ", " got}: init -> report -> probes -> fini"""))
+
+    printSubHeader "call argument order (gap G57; G79's run checks are runLlvmCallOrderRunTests)"
+    // G57: the ordered path (a call holding an explicit compute and a bare
+    // deferred argument) needs the call to be its statement's WHOLE value in
+    // main; nested in an expression it is refused by name, fail closed.
+    let nestedOrdered =
+        "type Row = Idx<1>\n"
+        + "let a: Array<Int64 like Row> = [1]\n"
+        + "let z: Array<Int64 like Row> = [0]\n"
+        + "let bad = method_for(z) <@> lambda(v) -> 1 / v\n"
+        + "let good = method_for(a) <@> lambda(v) -> v + 1\n"
+        + "function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)\n"
+        + "let r = 1 + h(a((a(0) : Row)), bad, good |> compute)\n"
+    (match emitUnder [] "facts" nestedOrdered with
+     | Error e when e.Contains "the ordered argument path needs the call to be a statement's whole value" ->
+         pass "g57_ordered_call_nested_in_an_expression_refuses" "refused by name"
+     | Error e -> fail "g57_ordered_call_nested_in_an_expression_refuses" ("refused for another reason: " + e)
+     | Ok _ -> fail "g57_ordered_call_nested_in_an_expression_refuses" "emitted (the hoisted force would run before the cast)")
+    // G75: a function body evaluates a deferred module map privately; a call
+    // from main AFTER main forced the map is refused by name (the forced
+    // snapshot is the class value, which the private evaluation would not
+    // read), and one BEFORE any force is taken.
+    let g75 (forceFirst: bool) =
+        "type Row = Idx<3>\n"
+        + "let z: Array<Int64 like Row> = [1, 2, 3]\n"
+        + "let lazy = method_for(z) <@> lambda(v) -> v * 10\n"
+        + "function at(n: Int64) -> Int64 = lazy(1) + n\n"
+        + (if forceFirst then "let w = lazy(0) + lazy(2)\n" else "")
+        + "let one = at(1)\n"
+    (match emitUnder [] "facts" (g75 true) with
+     | Error e when e.Contains "reads the deferred module binding 'lazy', which main forced before this call" ->
+         pass "g75_call_after_main_forced_the_map_refuses" "refused by name"
+     | Error e -> fail "g75_call_after_main_forced_the_map_refuses" ("refused for another reason: " + e)
+     | Ok _ -> fail "g75_call_after_main_forced_the_map_refuses" "emitted")
+    (match emitUnder [] "facts" (g75 false) with
+     | Ok ll when ll.Contains "define internal i64 @bl_at_" -> pass "g75_function_reads_unforced_map_privately" "taken (out-of-line `at`)"
+     | Ok _ -> fail "g75_function_reads_unforced_map_privately" "no out-of-line `at` in the emitted .ll"
+     | Error e -> fail "g75_function_reads_unforced_map_privately" e)
+    // G124 (round 4 wave 5): a RANK-RAISING ROW MAP (a row kernel returning a
+    // computed rank-1 row, examples/10 section 4) is refused BY NAME, so the
+    // program builds in the C++ lane and the fallback notice says why.
+    let rowMap =
+        "type I = Idx<3>\n"
+        + "type D = Idx<2>\n"
+        + "let x = Float64(range<I>)\n"
+        + "let Vt = method_for(range<D>, range<I>) <@> lambda(d, j) -> Float64(d) + Float64(j) |> compute\n"
+        + "let rows = (method_for(range<I>) <@> lambda(i) -> {\n"
+        + "    let e = (method_for(x) <@> lambda(b) -> b * x(i)) |> compute\n"
+        + "    (method_for(Vt) <@> lambda(vrow: T^1) -> prodsum(e, vrow)) |> compute\n"
+        + "}) |> compute\n"
+    (match emitUnder [] "facts" rowMap with
+     | Error e when e.Contains "rank-raising row map" && e.Contains "G124" ->
+         pass "g124_rank_raising_row_map_refuses_by_name" "refused by name"
+     | Error e -> fail "g124_rank_raising_row_map_refuses_by_name" ("refused for another reason: " + e)
+     | Ok _ -> fail "g124_rank_raising_row_map_refuses_by_name" "emitted: the lane grew the form -- replace this pin with a differential")
+
+    // G184 (round 4 wave 6): an array-returning call folded inside a kernel
+    // lambda is freed once per kernel application -- at module scope (main)
+    // and inside a function body (`per`) alike. Per call result: one tracking
+    // store, the scope-entry null reset BEFORE the call, and after the
+    // `; G184: kernel application cleanup` marker exactly one load of its slot
+    // and one free of that load, the pool register never named again.
+    let g184ProofOf (calleeRx: string) (minCalls: int) (ll: string) (fnRx: string) : Result<int, string> =
+        let text = ll.Replace("\r\n", "\n")
+        let fm = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define [^\n]*@" + fnRx + @"\([^\n]*\{\n.*?^\}")
+        if not fm.Success then Error ($"no function matching @{fnRx}")
+        else
+        let body = fm.Value
+        let rx (p: string) = System.Text.RegularExpressions.Regex.Matches(body, p)
+        let calls = rx (@"(%r\d+) = call ptr @(?:" + calleeRx + @")\(")
+        if calls.Count < minCalls then Error ($"@{fnRx}: {calls.Count} array-returning calls")
+        else
+        let problems =
+            [ for cm in calls do
+                let p = cm.Groups.[1].Value
+                let tok = System.Text.RegularExpressions.Regex.Escape p + @"(?![0-9])"
+                let stores = rx (@"store ptr " + tok + @", ptr (%r\d+)(?![0-9])")
+                if stores.Count <> 1 then yield $"{p}: {stores.Count} tracking stores"
+                else
+                    let slot = stores.[0].Groups.[1].Value
+                    let stok = System.Text.RegularExpressions.Regex.Escape slot + @"(?![0-9])"
+                    let reset = body.IndexOf("store ptr null, ptr " + slot + "\n")
+                    let mark = body.IndexOf("; G184: kernel application cleanup", stores.[0].Index)
+                    if reset < 0 || reset > cm.Index then yield $"{p}: no scope-entry reset of {slot} before the call"
+                    elif mark < 0 then yield $"{p}: no kernel cleanup after its store"
+                    // G204: no escape null of the slot between the tracking
+                    // store and the cleanup (it made the cleanup free null)
+                    elif body.Substring(stores.[0].Index, mark - stores.[0].Index).Contains("store ptr null, ptr " + slot + "\n") then
+                        yield $"{p}: slot {slot} nulled between its store and the cleanup"
+                    else
+                        let tail = body.Substring mark
+                        let loads = System.Text.RegularExpressions.Regex.Matches(tail, @"(%r\d+) = load ptr, ptr " + stok)
+                        if loads.Count <> 1 then yield $"{p}: slot loaded {loads.Count} times after the cleanup marker"
+                        else
+                            let l = System.Text.RegularExpressions.Regex.Escape loads.[0].Groups.[1].Value + @"\)"
+                            let frees = System.Text.RegularExpressions.Regex.Matches(tail, @"call void @blade_free\(ptr " + l)
+                            let later = System.Text.RegularExpressions.Regex.IsMatch(tail, tok)
+                            if frees.Count <> 1 || later then yield $"{p}: frees={frees.Count}, named after cleanup={later}" ]
+        match problems with
+        | [] -> Ok calls.Count
+        | ps -> Error (String.concat "; " ps)
+    let g184Proof (ll: string) (fnRx: string) = g184ProofOf @"bl_(?:big|small)_\d+" 2 ll fnRx
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Array Returning Call Folded Inside A Kernel Is Freed Per Cell (G184)") with
+     | None -> fail "g184_kernel_call_result_freed_per_application" "missing corpus witness memfree/055"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_call_result_freed_per_application" e
+         | Ok ll ->
+             match g184Proof ll "main", g184Proof ll @"bl_per_\d+" with
+             | Ok m, Ok f -> pass "g184_kernel_call_result_freed_per_application" ($"main: {m} call results, per: {f}, each freed once per application")
+             | a, b -> fail "g184_kernel_call_result_freed_per_application" (sprintf "main %A; per %A" a b))
+    // ... and its boundary (memfree/056): a pool that escapes an application
+    // (an outer `let mut` rebound to a row view of it, or to a producer
+    // reading it) is NOT freed by the kernel scope; a named fold kernel
+    // applied at two sites frees its local at both (exactly two cleanups in
+    // main, one free each, and no other free).
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Whose Pool Escapes Keeps It Alive (G184)") with
+     | None -> fail "g184_kernel_scope_escape_boundary" "missing corpus witness memfree/056"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_escape_boundary" e
+         | Ok ll ->
+             let text = ll.Replace("\r\n", "\n")
+             let m = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define i32 @main\(.*?^\}")
+             let count (p: string) = System.Text.RegularExpressions.Regex.Matches(m.Value, p).Count
+             let marks = count "; G184: kernel application cleanup"
+             let frees = count @"call void @blade_free\("
+             let calls = count @"= call ptr @bl_big_\d+\("
+             if m.Success && marks = 2 && frees = 2 && calls = 4 then
+                 pass "g184_kernel_scope_escape_boundary" "the escaping pools are kept; the twice-applied fold kernel frees its local at both sites"
+             else fail "g184_kernel_scope_escape_boundary" ($"main: {marks} cleanups, {frees} frees, {calls} calls of big (wanted 2, 2, 4)"))
+    // ... and two harmless changes that are not escapes (memfree/057): a
+    // hoisted force's alias and a reused tuple fold's scalar parameters.
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Hoisted Alias And A Reused Tuple Fold (G184)") with
+     | None -> fail "g184_kernel_scope_not_an_escape" "missing corpus witness memfree/057"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_not_an_escape" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_kernel_scope_not_an_escape" ($"main: {n} call results of big, each freed once per application")
+             | Error e -> fail "g184_kernel_scope_not_an_escape" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Reused Row Map And A Rebinding To Existing Storage (G184)") with
+     | None -> fail "g184_kernel_scope_param_and_existing_storage" "missing corpus witness memfree/058"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_kernel_scope_param_and_existing_storage" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_kernel_scope_param_and_existing_storage" ($"main: {n} call results of big, each freed once per application")
+             | Error e -> fail "g184_kernel_scope_param_and_existing_storage" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Inlined Scalar Tuple Call Frees Its Pool Per Application (G184)") with
+     | None -> fail "g184_inlined_tuple_call" "missing corpus witness memfree/059"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g184_inlined_tuple_call" e
+         | Ok ll ->
+             match g184ProofOf @"bl_big_\d+" 2 ll "main" with
+             | Ok n -> pass "g184_inlined_tuple_call" ($"main: {n} call results of big (top level and per cell), each freed once per application")
+             | Error e -> fail "g184_inlined_tuple_call" e)
+    // G204 (round 4 wave 7): (1) a deferred row map whose row PARAMETER is
+    // materialized inside its application (memfree/060): the row pool is the
+    // application's -- freed at its cleanup, never nulled first; (2) an outer
+    // `let mut` rebound to a ROW VIEW of storage that existed before the
+    // application (memfree/061 `got`) is not an escape: `big`'s result is
+    // freed per application; a view of the application's OWN pool (`got3`)
+    // is still an escape -- recorded, and nothing freed there.
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Frees Its Materialized Row Parameter (G204)") with
+     | None -> fail "g204_row_parameter_owned_by_application" "missing corpus witness memfree/060"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g204_row_parameter_owned_by_application" e
+         | Ok ll ->
+             match g184ProofOf "blade_alloc_cells" 1 ll "main" with
+             | Ok n -> pass "g204_row_parameter_owned_by_application" ($"main: {n} row pool(s), each freed once per application")
+             | Error e -> fail "g204_row_parameter_owned_by_application" e)
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "A Kernel Application Still Frees Beside A Rebinding To A View Of Existing Storage (G204)") with
+     | None -> fail "g204_view_of_existing_storage" "missing corpus witness memfree/061"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e -> fail "g204_view_of_existing_storage" e
+         | Ok ll ->
+             let text = ll.Replace("\r\n", "\n")
+             let m = System.Text.RegularExpressions.Regex.Match(text, @"(?ms)^define i32 @main\(.*?^\}")
+             let count (p: string) = System.Text.RegularExpressions.Regex.Matches(m.Value, p).Count
+             let marks = count "; G184: kernel application cleanup"
+             let kept = count "; G204: kernel application pools kept"
+             let frees = count @"call void @blade_free\("
+             let calls = count @"= call ptr @bl_big_\d+\("
+             if m.Success && marks = 1 && kept = 1 && frees = 1 && calls = 2 then
+                 pass "g204_view_of_existing_storage" "a view of existing storage frees big per application; a view of the application's own pool keeps it (recorded)"
+             else fail "g204_view_of_existing_storage" ($"main: {marks} cleanups, {kept} kept records, {frees} frees, {calls} calls of big (wanted 1, 1, 1, 2)"))
+    // ... and an outer array rebound inside a kernel applied PER CELL
+    // (memfree/063) is refused by name (it emitted invalid IR: the rebound
+    // register did not dominate the reads after the loop).
+    (match Blade.Tests.Corpus.category "memfree"
+           |> List.tryFind (fun (n, _) -> n = "An Outer Array Rebound Inside A Per-Cell Kernel Takes The C++ Lane (G204)") with
+     | None -> fail "g204_per_cell_rebinding_refused" "missing corpus witness memfree/063"
+     | Some (_, src) ->
+         match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+         | Error e when e.Contains "rebound inside" -> pass "g204_per_cell_rebinding_refused" "refused by name; the C++ lane takes it"
+         | Error e -> fail "g204_per_cell_rebinding_refused" ("refused for another reason: " + e)
+         | Ok _ -> fail "g204_per_cell_rebinding_refused" "emitted: the rebound register would not dominate the reads after the loop")
+    // ... also a rebinding to storage that existed before, inside a loop that
+    // may run zero times (memfree/064), and a LIVE row parameter forced inside
+    // a nested kernel loop (memfree/065)
+    for (title, pin) in [ ("An Outer Array Rebound Inside A Zero-Trip Kernel Loop Keeps Its Value (G204)", "g204_zero_trip_rebinding_refused")
+                          ("A Row Parameter Forced Inside A Nested Kernel Loop Takes The C++ Lane (G204)", "g204_live_parameter_in_nested_loop_refused")
+                          ("An Array Rebound Inside An If Arm Takes The C++ Lane (G204)", "g204_if_arm_rebinding_refused")
+                          ("A Rebinding After A Stored Read In A Zero-Trip Loop Keeps The Binding (G204)", "g204_rebinding_after_stored_read_refused")
+                          ("An Array Rebound In A Skipped Conditional Operand Keeps The Binding (G204)", "g204_skipped_operand_rebinding_refused") ] do
+        match Blade.Tests.Corpus.category "memfree" |> List.tryFind (fun (n, _) -> n = title) with
+        | None -> fail pin ("missing corpus witness: " + title)
+        | Some (_, src) ->
+            match emitUnder [ "BLADE_CALL_ELIDE", Some "0" ] "facts" src with
+            | Error e when e.Contains "rebound inside" -> pass pin "refused by name; the C++ lane takes it"
+            | Error e -> fail pin ("refused for another reason: " + e)
+            | Ok _ -> fail pin "emitted: the rebinding inside the loop would be read after it"
+    // G205 (round 4 wave 7): a let-bound lambda spliced at each KERNEL use
+    // stays INLINE -- the kernels never call the binding (its std::function
+    // value, kept for other uses, is never invoked in the C++ lane), no
+    // indirect call in the LLVM lane (numeric-defaults/101).
+    (match Blade.Tests.Corpus.category "numeric-defaults"
+           |> List.tryFind (fun (n, _) -> n = "a let-bound lambda in kernel position is instantiated at each use") with
+     | None -> fail "g205_let_lambda_kernel_inline" "missing corpus witness numeric-defaults/101"
+     | Some (_, src) ->
+         match Blade.Tests.Functions.cppOf "g205_inline" src, emitUnder [] "facts" src with
+         | Ok cpp, Ok ll ->
+             let indirect = System.Text.RegularExpressions.Regex.IsMatch(ll, @"call [^@\n]*%r\d+\(")
+             let calledByName = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"\b(sq|add|pos)\(")
+             if calledByName then fail "g205_let_lambda_kernel_inline" "a kernel calls the let-bound lambda value by name in the C++ text"
+             elif indirect then fail "g205_let_lambda_kernel_inline" "an indirect call in the LLVM IR"
+             else pass "g205_let_lambda_kernel_inline" "inline in both lanes: no call of the binding, no indirect call"
+         | Error e, _ -> fail "g205_let_lambda_kernel_inline" ("C++: " + e)
+         | _, Error e -> fail "g205_let_lambda_kernel_inline" ("llvm: " + e))
+
     printFooter "LLVM Fact Layer"
         [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
+
+/// Gap G79: an ORDINARY call (no `|> compute` argument) with two failing
+/// arguments evaluates them LEFT TO RIGHT in the llvm lane -- the checked cast
+/// (BL8006) before the later division by zero (BL8013) -- on the out-of-line
+/// and the capturing-inline path alike (the interpreter agrees; the C++ lane's
+/// order is unspecified there, g++ runs right to left: the open G79 row). Run,
+/// not read: the emitted guard order is not the executed order.
+///
+/// Its own block, NOT the fact layer: `test llvm goldens` (the fact layer's
+/// CI step, on Linux) is the toolchain-free gate and must spawn no compiler.
+/// Skipped without clang.
+let runLlvmCallOrderRunTests () : BlockResult =
+    printHeader "LLVM Call Argument Order (G79, compiled and run)"
+    let block = "LLVM Call Argument Order"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let mutable failedNames = []
+    let pass name detail =
+        passed <- passed + 1
+        resultLine Pass name detail
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [ name ]
+        resultLine Fail name detail
+    let ordinaryCall (inlined: bool) =
+        "type Row = Idx<1>\n"
+        + "let a: Array<Int64 like Row> = [1]\n"
+        + "let z: Array<Int64 like Row> = [0]\n"
+        + "let base: Array<Int64 like Row> = [100]\n"
+        + (if inlined then "let f = lambda(k: Int64, m: Int64) -> k + m + base(0)\n"
+           else "function f(k: Int64, m: Int64) -> Int64 = k + m\n")
+        + "let r = f(a((a(0) : Row)), 1 / z(0))\n"
+    let firstAbort name (source: string) (want: string) =
+        match Build.resolveClang () with
+        | None -> skipped <- skipped + 1; resultLine Skip name "no clang (BLADE_LLVM_CLANG)"
+        | Some _ ->
+        match emitUnder [] "facts" source with
+        | Error e -> fail name e
+        | Ok ll ->
+            let dir = Path.Combine("generated_cpp_tests", "llvm_facts")
+            Directory.CreateDirectory dir |> ignore
+            EmitLlvm.deployShim dir
+            let llFile = Path.Combine(dir, "facts_" + name + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e when e.StartsWith "Skipped:" -> skipped <- skipped + 1; resultLine Skip name e
+            | Error e -> fail name ("llvm compile: " + (if e.Length > 300 then e.Substring(0, 300) else e))
+            | Ok exe ->
+                match runExeCapture exe with
+                | Error e -> fail name e
+                | Ok (code, _, err) ->
+                    let first = err.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "error[")
+                    match first with
+                    | Some l when code <> 0 && l.StartsWith ("error[" + want + "]") -> pass name l
+                    | other -> fail name ($"exit {code}, first error {other}, wanted {want}")
+    firstAbort "g79_ordinary_call_left_to_right_out_of_line" (ordinaryCall false) "BL8006"
+    firstAbort "g79_ordinary_call_left_to_right_inlined" (ordinaryCall true) "BL8006"
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
+// Block 2b: the syrk tile core, raw bits across the lanes (M6)
+// ---------------------------------------------------------------------------
+//
+// The LLVM lane's tile core (blade_llvm_tiles.c, compiled by clang through
+// Build.buildLlvmTilesObject -- the object the lane links) and the C++ lane's
+// tile (blade_pgemm::dsyrk_tri, compiled by g++ with Build.optFlags) must
+// produce the SAME BITS for the same operand, in both contraction modes. One
+// polyglot source (src/cpp/llvm_tiles_rawbit.c) is built both ways; each build
+// self-checks every cell bitwise against its own serial chain, and the runner
+// compares the two builds' per-case hashes of the raw packed pool. Both modes
+// build into ONE directory, which also asserts the policy keying: the =off and
+// =fast tile objects must be different files.
+
+/// A sample block under a cap, the header's balanced rule (tri_kc).
+let private balancedKc (k: int64) (cap: int64) : int64 =
+    if k <= 0L then 0L
+    else
+        let nkb = (k + cap - 1L) / cap
+        (k + nkb - 1L) / nkb
+
+let runLlvmTilesRawBitTests () : BlockResult =
+    let blockName = "LLVM Tiles Raw-Bit"
+    printHeader "LLVM Tile Core vs C++ Tile (raw bits, both contraction modes)"
+    let skipBlock (why: string) =
+        printfn "  Skipped: %s" why
+        printFooter blockName [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    match Build.resolveClang () with
+    | None -> skipBlock "no clang found (set BLADE_LLVM_CLANG)."
+    | Some _ when not Build.capabilities.Value.HasGpp -> skipBlock "requires g++ for the C++ lane's tile."
+    | Some clang ->
+    let cppDir = Path.Combine(AppContext.BaseDirectory, "cpp")
+    let testSrc = Path.Combine(cppDir, "llvm_tiles_rawbit.c")
+    if not (File.Exists testSrc) then skipBlock $"llvm_tiles_rawbit.c not deployed at {testSrc}"
+    else
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let pass name detail =
+        passed <- passed + 1
+        resultLine Pass name detail
+    let fail name detail =
+        failed <- failed + 1
+        failedNames <- failedNames @ [ name ]
+        resultLine Fail name detail
+    let work = Path.Combine(Path.GetTempPath(), "blade-llvm-tiles-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory work |> ignore
+    // The cases, from the EMITTER's numbers: the kc cap it passes, and the
+    // scratch it allocates for that cap. (p, k, cap, mode, scale, data, short
+    // scratch?) -- smoke sizes around every edge the driver has: the
+    // crossover itself, ragged row (p mod 6) and column (p mod 8) panels,
+    // several K blocks (k > 336, and a cap of 7), a second NC column block
+    // (p = 2057), both scale tails, and the core's scalar fallback.
+    // (p, k, cap, row panels per group, mode, scale, data, scratch kind):
+    // the group (BLADE_TILE_TUNE syrk_g) is the driver's visiting order and
+    // sizes the A scratch; every group size the drivers accept (1..8) appears,
+    // with groups straddling the ragged last row panel and the top-aligned
+    // ragged first column panel.
+    // ... and the edge tiles' kloop (BLADE_TILE_TUNE tri_edge, blade_tiles.h
+    // blade_tri_tile_edge): every case under BOTH 0 (the full 6 x 8 kloop)
+    // and 1 (live accumulators only), plus every p from 13 to 30 (p mod 8 =
+    // 0..7: the top-aligned first column panel holds nr = 1..8 lanes; p mod 6
+    // = 0..5: ragged row panels) and the simplex bench's p = 61 / 171.
+    // SCRATCH KINDS: 0 = the emitter's exact size (the tile route, asserted),
+    // 1 = none (NULL), 2 = one cell short of the core's need (both the scalar
+    // route, asserted where a route is observable).
+    let baseCases =
+        [ 16, 4, 336, 1, 0, 1.0, 0, 0
+          17, 5, 336, 4, 0, 1.0, 1, 0
+          23, 31, 336, 2, 0, 1.0, 2, 0
+          24, 8, 336, 4, 2, 0.37, 0, 0
+          29, 1001, 336, 4, 0, 1.0, 1, 0
+          61, 31, 336, 4, 0, 1.0, 1, 0      // the bench's smoke size
+          61, 257, 336, 4, 1, 4.0, 0, 0
+          61, 701, 336, 8, 0, 1.0, 2, 0
+          97, 257, 336, 1, 1, 3.0, 1, 0
+          97, 513, 336, 4, 2, 0.1, 3, 0
+          130, 337, 336, 5, 0, 1.0, 4, 0
+          29, 50, 7, 4, 0, 1.0, 0, 0
+          31, 23, 5, 2, 1, 7.0, 2, 0
+          31, 23, 5, 3, 1, 0.0, 0, 0        // divide by zero, three K blocks: the tail waits for the last
+          2057, 5, 336, 4, 0, 1.0, 0, 0
+          40, 20, 336, 4, 0, 1.0, 2, 1
+          40, 20, 336, 4, 0, 1.0, 2, 2 ]
+    let edgeShapes =
+        [ for p in 13 .. 30 do
+            yield p, 17, 336, 4, 0, 1.0, 2, 0
+            yield p, 19, 7, 2, 1, 3.0, 0, 0
+          for p in [ 61; 171 ] do
+            yield p, 29, 336, 4, 0, 1.0, 2, 0 ]
+    let cases =
+        [ for edge in [ 0; 1 ] do
+            for (p, k, cap, g, mode, scale, data, sk) in baseCases @ edgeShapes do
+                yield p, k, cap, g, edge, mode, scale, data, sk ]
+    let caseLines =
+        cases |> List.map (fun (p, k, cap, g, edge, mode, scale, data, sk) ->
+            let kc =
+                if cap = 336 then Blade.CodeGenExprSupport.syrkTileKc (int64 k)
+                else balancedKc (int64 k) (int64 cap)
+            let exact = EmitLlvm.syrkTileScratchCells (int64 p) kc (int64 g)
+            let scratch = match sk with 0 -> exact | 1 -> 0L | _ -> exact - 1L
+            let route = if p = 0 || k = 0 then -1 elif sk = 0 then 1 else 0
+            let sc = scale.ToString("R", Globalization.CultureInfo.InvariantCulture)
+            let sc = if sc.Contains "." || sc.Contains "E" then sc else sc + ".0"
+            $"    {{ {p}, {k}, {cap}, {g}, {edge}, {scratch}, {route}, {mode}, {sc}, {data} }},")
+    if Blade.CodeGenExprSupport.syrkTileKcMax <> 336L then
+        fail "kc cap" $"the cases assume the emitter's cap 336; syrkTileKcMax is {Blade.CodeGenExprSupport.syrkTileKcMax}"
+    let fmtScale (scale: float) =
+        let sc = scale.ToString("R", Globalization.CultureInfo.InvariantCulture)
+        if sc.Contains "." || sc.Contains "E" then sc else sc + ".0"
+    // THE ANTISYM PAIR (M7): (p, n, comps, cx, cy, variant, nc cap, mode,
+    // scale, data, short scratch?). Every p from 0 to 30 over short chains
+    // (the strict triangle's empty last row; p = 0 / 1 empty pools), every
+    // p mod 24 over two periods (ragged row panels mod 6 / 4, column panels
+    // mod 8 / 4), several column blocks (nc cap 16), the component pairs
+    // (0,1) (1,0) (2,0) (1,1), both scale tails incl. a divide by zero, long
+    // chains around the simplex's KC and the bench's own shape, every data
+    // class, both schedules, and the core's scalar fallback.
+    // ... and the sample-block cap inside a tile visit (BLADE_TILE_TUNE
+    // anti_kc; 0 = the whole chain in one block): forced small (5, 7, 16:
+    // ragged chains of several blocks, the P / Q partials spilled and
+    // reloaded exactly), the tuned sizes over the bench chain, a cap above n.
+    // ... and the ROW GROUP (BLADE_TILE_TUNE anti_g): every case above takes
+    // one of g = 1, 2, 3, 4, 8 in turn (so every shape class meets every
+    // group size), then a dedicated block runs every g over group tails (p mod
+    // 6g / 4g), several column blocks (nc cap 16), p <= 1 and n = 0, and the
+    // route cases: the emitter's exact scratch FOR THAT g (the tile, asserted),
+    // one cell short (the scalar chain, asserted), and a scratch sized for
+    // g = 1 handed to a g = 4 call -- the emitter/core mismatch the core
+    // answers silently with its scalar chain.
+    // (p, n, comps, cx, cy, variant, nc cap, kc cap, mode, scale, data, scratch kind)
+    let antiBase =
+        [ for v in [ 0; 1 ] do
+            for p in 0 .. 30 do
+                for n in [ 0; 1; 2; 3; 5; 8; 13; 17 ] do
+                    yield p, n, 2, 0, 1, v, 0, 0, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), 0
+                    yield p, n, 2, 0, 1, v, 0, 7, 0, 1.0, 2, 0
+            for n in 0 .. 17 do
+                for d in [ 0; 3; 4; 5 ] do
+                    yield 9 + n, n, 2, 0, 1, v, 0, 0, 0, 1.0, d, 0
+                    yield 9 + n, n, 2, 1, 0, v, 0, 5, 0, 1.0, d, 0
+            yield 37, 23, 3, 2, 0, v, 0, 0, 0, 1.0, 2, 0
+            yield 37, 23, 3, 1, 1, v, 0, 7, 0, 1.0, 2, 0
+            for p in [ 1; 2; 13; 29; 61 ] do
+                yield p, 41, 2, 0, 1, v, 0, 0, 1, 401.0, 0, 0
+                yield p, 41, 2, 0, 1, v, 0, 16, 2, 0.25, 2, 0
+                yield p, 41, 2, 0, 1, v, 0, 0, 1, 0.0, 0, 0
+                yield p, 0, 2, 0, 1, v, 0, 7, 1, 0.0, 0, 0      // (+0 - +0) / 0
+            for p in 24 .. 71 do
+                yield p, 19, 2, 0, 1, v, 0, 0, 0, 1.0, 2, 0
+                yield p, 33, 2, 0, 1, v, 16, 16, 0, 1.0, 0, 0    // several column blocks AND sample blocks
+            for p in [ 101; 193 ] do
+                for n in [ 335; 337; 401; 600 ] do
+                    for kc in [ 0; 100; 128 ] do
+                        yield p, n, 2, 0, 1, v, 0, kc, 0, 1.0, 2, 0
+            yield 24, 8, 2, 0, 1, v, 0, 0, 0, 1.0, 1, 0          // the crossover
+            yield 40, 20, 2, 0, 1, v, 0, 7, 0, 1.0, 2, 1          // no scratch: the scalar chain
+            yield 61, 401, 2, 0, 1, v, 0, 0, 1, 7.0, 0, 1
+            yield 61, 401, 2, 0, 1, v, 0, 0, 1, 7.0, 0, 2 ]      // one cell short: the scalar chain
+    let groupCycle = [| 1; 2; 3; 4; 8 |]
+    // (..., g, scratch kind) -- kind 3 = sized for g = 1 whatever the call's g
+    let antiGroupCases =
+        [ for g in groupCycle do
+            for v in [ 0; 1 ] do
+                for p in [ 0; 1; 2; 7; 23; 24; 25; 29; 31; 47; 48; 49; 53; 61; 97 ] do
+                    yield p, 13, 2, 0, 1, v, 0, 0, g, 0, 1.0, 2, 0
+                    yield p, 0, 2, 0, 1, v, 0, 0, g, 1, 0.0, 0, 0
+                    yield p, 21, 2, 1, 0, v, 16, 5, g, 2, 0.5, 0, 0      // column blocks of 16, sample blocks
+                yield 61, 401, 2, 0, 1, v, 0, 0, g, 0, 1.0, 1, 0        // the exact scratch for this g: the tile
+                yield 61, 401, 2, 0, 1, v, 0, 0, g, 0, 1.0, 1, 2        // one short: the scalar chain
+          for v in [ 0; 1 ] do
+              yield 61, 401, 2, 0, 1, v, 0, 0, 4, 0, 1.0, 1, 3          // sized for g = 1, called with g = 4
+          for g in [ 1; 4 ] do
+              yield 1201, 401, 2, 0, 1, 0, 0, 0, g, 0, 1.0, 1, 0        // the bench's full shape
+              yield 1201, 401, 2, 0, 1, 0, 0, 128, g, 0, 1.0, 1, 0 ]    // ... in blocks of 101
+    let antiCases =
+        (antiBase |> List.mapi (fun i (p, n, comps, cx, cy, v, ncmax, kcmax, mode, scale, data, sk) ->
+            (p, n, comps, cx, cy, v, ncmax, kcmax, groupCycle.[i % groupCycle.Length], mode, scale, data, sk)))
+        @ antiGroupCases
+    let antiLines =
+        antiCases |> List.map (fun (p, n, comps, cx, cy, v, ncmax, kcmax, g, mode, scale, data, sk) ->
+            let exact = EmitLlvm.antisymTileScratchCells (int64 p) (int64 n) (v = 1) (int64 g)
+            let scratch =
+                match sk with
+                | 0 -> exact
+                | 1 -> 0L
+                | 2 -> exact - 1L
+                | _ -> EmitLlvm.antisymTileScratchCells (int64 p) (int64 n) (v = 1) 1L
+            let route = if p <= 1 || n = 0 then -1 elif sk = 0 then 1 else 0
+            $"    {{ {p}, {n}, {comps}, {cx}, {cy}, {v}, {ncmax}, {kcmax}, {g}, {scratch}, {route}, {mode}, {fmtScale scale}, {data} }},")
+    // THE RANK-3 SIMPLEX (M8): (p, n, kc cap, mode, scale, data, short?).
+    // Every p from 0 to 30 (the short rows near k = p; every equality
+    // stratum i = j = k, i = j < k, i < j = k, i < j < k), every p mod 24 with
+    // FORCED K blocks (caps 7 and 16: the stored unscaled partial reloaded,
+    // then the scale once), KC - 1 / KC / KC + 1 / 2 KC + 1 around the
+    // emitter's cap, both tails incl. a divide by zero, every data class
+    // (6 = subnormal TRIPLE products), the bench shape, the scalar fallback.
+    // ... every case under BOTH edge kloops (BLADE_TILE_TUNE tri_edge 0 / 1):
+    // p = 0..30 covers p mod 8 = 0..7 (the top-aligned first k panel holds
+    // nr = 1..8 lanes, nr = 1..4 the left-only family) and every mr tail
+    // 1..6, plus p = 61 / 171 (the bench's p = 171: 3-lane first panel).
+    // Scratch kinds as the syrk cases' (0 exact, 1 none, 2 one short).
+    let sym3Base =
+        [ for p in 0 .. 30 do
+            for n in [ 0; 1; 2; 3; 5; 8; 13; 17 ] do
+                yield p, n, 336, 0, 1.0, (if (p + n) % 2 = 0 then 0 else 2), 0
+          for n in 0 .. 17 do
+            for d in [ 0; 3; 6; 5 ] do
+                yield 9 + n, n, 336, 0, 1.0, d, 0
+          for p in [ 1; 2; 13; 29; 61 ] do
+            yield p, 67, 336, 1, 201.0, 0, 0
+            yield p, 67, 336, 2, 0.125, 2, 0
+            yield p, 67, 336, 1, 0.0, 0, 0
+            yield p, 0, 336, 1, 0.0, 0, 0                     // +0 / 0
+          for p in 24 .. 71 do
+            yield p, 19, 7, 1, 3.0, 2, 0                      // 3 K blocks of 7 / 6 / 6
+            yield p, 33, 16, 0, 1.0, 0, 0                     // 3 blocks of 11
+          for n in [ 335; 336; 337; 673 ] do
+            for p in [ 29; 37 ] do
+                yield p, n, 336, 1, 201.0, 2, 0
+          for p in [ 97; 101; 171 ] do
+            yield p, 201, 336, 1, 201.0, 1, 0                 // 171 x 201: the bench shape
+          yield 171, 23, 7, 0, 1.0, 2, 0                      // the bench's p, 4 K blocks
+          yield 24, 4, 336, 0, 1.0, 1, 0                      // the crossover
+          yield 29, 67, 336, 1, 67.0, 0, 1                    // no scratch: the scalar chain
+          yield 29, 67, 336, 1, 67.0, 0, 2                    // one cell short: the scalar chain
+          yield 61, 201, 336, 0, 1.0, 2, 1 ]
+    let sym3Cases =
+        [ for edge in [ 0; 1 ] do
+            for (p, n, cap, mode, scale, data, sk) in sym3Base do
+                yield p, n, cap, edge, mode, scale, data, sk ]
+    let sym3Lines =
+        sym3Cases |> List.map (fun (p, n, cap, edge, mode, scale, data, sk) ->
+            let kc =
+                if cap = 336 then Blade.CodeGenExprSupport.syrkTileKc (int64 n)
+                else balancedKc (int64 n) (int64 cap)
+            let exact = EmitLlvm.sym3TileScratchCells (int64 p) (int64 n) kc
+            let scratch = match sk with 0 -> exact | 1 -> 0L | _ -> exact - 1L
+            let route = if p = 0 || n = 0 then -1 elif sk = 0 then 1 else 0
+            $"    {{ {p}, {n}, {cap}, {edge}, {scratch}, {route}, {mode}, {fmtScale scale}, {data} }},")
+    let totalCases = cases.Length + antiCases.Length + sym3Cases.Length
+    File.WriteAllText(Path.Combine(work, "llvm_tiles_cases.h"),
+                      "static const tile_case tile_cases[] = {\n" + String.concat "\n" caseLines + "\n};\n"
+                      + "static const anti_case anti_cases[] = {\n" + String.concat "\n" antiLines + "\n};\n"
+                      + "static const sym3_case sym3_cases[] = {\n" + String.concat "\n" sym3Lines + "\n};\n")
+    File.Copy(testSrc, Path.Combine(work, "llvm_tiles_rawbit.c"), true)
+    EmitLlvm.deployShim work
+    let exeExt = if Platforms.os = Platforms.Windows then ".exe" else ".out"
+    let runText (exe: string) (args: string) =
+        let psi = ProcessStartInfo(exe, args)
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        psi.WorkingDirectory <- work
+        use pr = Process.Start psi
+        let o = Blade.Runtime.readToEndOffPool pr.StandardOutput
+        let e = Blade.Runtime.readToEndOffPool pr.StandardError
+        if pr.WaitForExit 300000 then (Some pr.ExitCode, o.Result.Replace("\r\n", "\n"), e.Result)
+        else
+            (try pr.Kill true with _ -> ())
+            (None, o.Result, e.Result)
+    let caseHashes (out: string) =
+        out.Split('\n') |> Array.filter (fun l -> l.StartsWith "CASE ") |> Array.toList
+    let objects = ResizeArray<string>()
+    let modeHashes = ResizeArray<string list>()
+    for (mode, contract) in [ "off", Some "off"; "fast", None ] do
+        withEnv [ "BLADE_FP_CONTRACT", contract; "BLADE_LLVM_FACTS", None ] (fun () ->
+            let fmaRef = if mode = "fast" then " -DBLADE_TEST_FMA_REF" else ""
+            match Build.buildLlvmTilesObject clang work with
+            | Error e -> fail $"tile object contract={mode}" e
+            | Ok (obj, _) ->
+                objects.Add obj
+                let src = Path.Combine(work, "llvm_tiles_rawbit.c")
+                let llvmExe = Path.Combine(work, $"tiles_llvm_{mode}{exeExt}")
+                let cppExe = Path.Combine(work, $"tiles_cpp_{mode}{exeExt}")
+                // The C side: the lane's tile flags (same contraction) for the
+                // reference chain too, linked with the REAL object.
+                let llvmBuild =
+                    runText clang ($"""-x c -std=c11 {(Build.llvmOptFlags ())}{(EmitLlvm.tilesContractFlag ())}{fmaRef} -I "{work}" -o "{llvmExe}" "{src}" -x none "{obj}" """)
+                let cppBuild =
+                    runText "g++" ($"""-x c++ -std=c++17 {(Build.optFlags ())}{fmaRef} -I "{work}" -I "{cppDir}" -o "{cppExe}" "{src}" """)
+                match llvmBuild, cppBuild with
+                | (Some 0, _, _), (Some 0, _, _) ->
+                    let (lc, lo, _) = runText llvmExe ""
+                    let (cc, co, _) = runText cppExe ""
+                    let summary (o: string) =
+                        o.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "LLVM TILES RAWBIT") |> Option.defaultValue "(no summary)"
+                    let firstFails (o: string) =
+                        o.Split('\n') |> Array.filter (fun l -> l.StartsWith "[FAIL]") |> Array.truncate 3 |> String.concat " | "
+                    (if lc = Some 0 then pass $"llvm tile core vs its serial chain, contract={mode}" (summary lo)
+                     else fail $"llvm tile core vs its serial chain, contract={mode}" (firstFails lo + " " + summary lo))
+                    (if cc = Some 0 then pass $"C++ tile vs its serial chain, contract={mode}" (summary co)
+                     else fail $"C++ tile vs its serial chain, contract={mode}" (firstFails co + " " + summary co))
+                    let lh, ch = caseHashes lo, caseHashes co
+                    let subtotal (o: string) =
+                        o.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "SUBTOTALS") |> Option.defaultValue ""
+                    printfn "      %s | %s" (subtotal lo) (subtotal co)
+                    // THE ROUTE: the llvm build asserted, per case, which path
+                    // its core took (the tile writes its scratch, the scalar
+                    // chain leaves it untouched); the line must exist and
+                    // count positive tile-route assertions, or a silent
+                    // scratch mismatch could pass on bits alone.
+                    let routes =
+                        lo.Split('\n') |> Array.tryFind (fun l -> l.StartsWith "ROUTES (llvm)")
+                    match routes with
+                    | Some l when lc = Some 0 && not (l.Contains "asserted on 0 cases") ->
+                        pass $"llvm tile route asserted, contract={mode}" (l.Trim())
+                    | Some l -> fail $"llvm tile route asserted, contract={mode}" (firstFails lo + " " + l.Trim())
+                    | None -> fail $"llvm tile route asserted, contract={mode}" "no ROUTES line in the llvm build's output"
+                    if lh.IsEmpty || lh.Length <> totalCases then
+                        fail $"cross-lane bits, contract={mode}" $"the llvm build printed {lh.Length} case hashes, expected {totalCases}"
+                    elif lh = ch then
+                        modeHashes.Add lh
+                        pass $"cross-lane bits, contract={mode}" $"{lh.Length} cases: every packed pool byte-identical"
+                    else
+                        let diffs = List.zip lh ch |> List.filter (fun (a, b) -> a <> b) |> List.truncate 3
+                        fail $"cross-lane bits, contract={mode}"
+                            (diffs |> List.map (fun (a, b) -> $"llvm `{a}` vs cpp `{b}`") |> String.concat " | ")
+                | (code, _, err), (Some 0, _, _) -> fail $"llvm driver build, contract={mode}" ($"exit {code}: " + err.Trim())
+                | _, (code, _, err) -> fail $"C++ driver build, contract={mode}" ($"exit {code}: " + err.Trim()))
+    for (mode, contract) in [ "off", Some "off"; "fast", None ] do
+        withEnv [ "BLADE_FP_CONTRACT", contract; "BLADE_LLVM_FACTS", None ] (fun () ->
+            // THE VFMADD CENSUS of the tile object, per entry point: clang -S
+            // of blade_llvm_tiles.c with the object's own flags. =off must
+            // fuse nothing (mul + add, as the serial loop); =fast must fuse
+            // in every core (the tile s loops: 12 packed fma per step).
+            let asmOut = Path.Combine(work, $"tiles_{mode}.s")
+            let sFlags = (Build.llvmTilesFlags ()).Replace("-c ", "-S ")
+            match runText clang ($"""{sFlags} -I "{work}" -o "{asmOut}" "{Path.Combine(work, EmitLlvm.tilesSourceFileName)}" """) with
+            | (Some 0, _, _) when File.Exists asmOut ->
+                let lines = File.ReadAllLines asmOut
+                let census =
+                    EmitLlvm.tilesSymbols |> List.map (fun sym ->
+                        let start = lines |> Array.tryFindIndex (fun l -> l.StartsWith (sym + ":"))
+                        match start with
+                        | None -> sym, -1
+                        | Some s ->
+                            let body =
+                                lines |> Array.skip (s + 1)
+                                |> Array.takeWhile (fun l -> not (l.Contains "-- End function"))
+                            sym, body |> Array.filter (fun l -> l.Contains "vfmadd" || l.Contains "vfmsub" || l.Contains "vfnmadd") |> Array.length)
+                let txt = census |> List.map (fun (s, k) -> $"{s} {k}") |> String.concat ", "
+                if census |> List.exists (fun (_, k) -> k < 0) then
+                    fail $"vfmadd census contract={mode}" $"an entry point is missing from the assembly: {txt}"
+                elif mode = "off" then
+                    if census |> List.forall (fun (_, k) -> k = 0) then pass "vfmadd census contract=off" txt
+                    else fail "vfmadd census contract=off" ($"fused instructions under -ffp-contract=off: {txt}")
+                else
+                    if census |> List.forall (fun (_, k) -> k >= 12) then pass "vfmadd census contract=fast" txt
+                    else fail "vfmadd census contract=fast" ($"a core did not contract: {txt}")
+            | (code, o, e) -> fail $"vfmadd census contract={mode}" ($"clang -S exit {code}: {(o + e).Trim()}"))
+    // The test has teeth only if the two modes give DIFFERENT bits somewhere
+    // (else a tile that never contracted would pass the fma reference too).
+    if modeHashes.Count = 2 then
+        let differing = List.zip modeHashes.[0] modeHashes.[1] |> List.filter (fun (a, b) -> a <> b) |> List.length
+        if differing > 0 then
+            pass "the two contraction modes are distinguishable" $"{differing}/{modeHashes.[0].Length} cases differ between =off and =fast"
+        else fail "the two contraction modes are distinguishable" "=off and =fast gave identical bits in every case"
+    // Same directory, two policies, two objects (the M6 keying requirement).
+    if objects.Count = 2 then
+        if objects.[0] <> objects.[1] && File.Exists objects.[0] && File.Exists objects.[1] then
+            pass "policy keying: =off and =fast build distinct tile objects in one directory"
+                $"{Path.GetFileName objects.[0]} / {Path.GetFileName objects.[1]}"
+        else fail "policy keying: =off and =fast build distinct tile objects in one directory" $"both resolved to {objects.[0]}"
+    (try Directory.Delete(work, true) with _ -> ())
+    printFooter blockName [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
 // Block 3: the simplex-blocks agreement pins
@@ -844,11 +3017,16 @@ let runSimplexAgreementTests () : BlockResult =
                     let closed = SimplexBlocksCore.packedOffsetR strict n coords
                     if closed <> k then
                         offRBad <- sprintf "strict=%b r=%d n=%d rank=%d -> %d" strict r n k closed :: offRBad
+                    // the per-coordinate split the canonical read tabulates (G34)
+                    if r >= 2 then
+                        let split = SimplexBlocksCore.packedOffsetSplit strict n coords
+                        if split <> k then
+                            offRBad <- sprintf "split strict=%b r=%d n=%d rank=%d -> %d" strict r n k split :: offRBad
                     if not (seen.Add closed) then
                         offRBad <- sprintf "collision strict=%b r=%d n=%d at %d" strict r n k :: offRBad
                 if int64 seen.Count <> cells then
                     offRBad <- sprintf "coverage strict=%b r=%d n=%d: %d of %d" strict r n seen.Count cells :: offRBad
-    check "packedOffsetR = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
+    check "packedOffsetR = packedOffsetSplit = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
         (if offRBad.IsEmpty then "every canonical cell, ranks 1-5, sym and antisym" else $"{offRBad.Length} failures, first: {(List.head (List.rev offRBad))}")
 
     // The bricks themselves: they cover the domain exactly once, an
@@ -998,7 +3176,7 @@ let runSimplexAgreementTests () : BlockResult =
     // what keeps every symmetric corpus file on exactly its pre-brick nest.
     let smallSym = """
 type Ix = Idx<4>
-let v: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0]
+let v: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0]
 let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
     // Large enough that the pre-measurement auto policy would have bricked it;
@@ -1007,7 +3185,7 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     // must still decompose it (that is how the next variant gets A/B'd).
     let bigSym = """
 type Bx = Idx<97>
-let v = method_for(range<Bx>) <@> lambda(i) -> 1.0 * i |> compute
+let v = method_for(range<Bx>) <@> lambda(i) -> Float64(i) |> compute
 let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
     let emitBrick knob name src = emitUnder [ "BLADE_LLVM_BRICKS", knob ] name src
@@ -1039,7 +3217,9 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     (match emitBrick None "blocks" smallSym,
            emitBrick None "blocks" (smallSym + "let t = s * 3.0\n") with
      | Ok bare, Ok mapped ->
-         let d = countOf "sdiv i64" (instructionsOnly mapped) - countOf "sdiv i64" (instructionsOnly bare)
+         // "sdiv " matches both spellings: the binomial row bases are
+         // `sdiv exact` (exact by construction, bench G34).
+         let d = countOf "sdiv " (instructionsOnly mapped) - countOf "sdiv " (instructionsOnly bare)
          check "an elementwise map over a packed pool costs no coordinate math" (d = 1)
              ($"row-base divisions added by `s * 3.0`: {d} (1 = its printer's, 0 = the map's)")
      | a, b ->
@@ -1060,9 +3240,20 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 /// `index-types` and `reynolds` are where the packed simplex pools live, and
 /// they joined the default sweep when the lane learned to emit them;
 /// `recursive-arrays` joined with the IRForRange arm (the ordered serial
-/// loop: `let rec` and whole-rank folds). Every other category is reachable
-/// standalone with `blade test llvm <category>`.
-let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays" ]
+/// loop: `let rec` and whole-rank folds); `sql-group-by` with the group_by
+/// port (2026-10), so the CSR build and its BL8006 aborts stay gated; `domains`
+/// with the closed-form domain nest (structural/06, bench G4); `sibling-folds`
+/// with the sibling-fold rewrite (round 2), whose joins every lane consumes.
+/// Every other category is reachable standalone with `blade test llvm <category>`.
+let defaultCategories = [ "basic"; "functions"; "loops"; "symmetry"; "index-types"; "reynolds"; "recursive-arrays"; "sql-group-by"; "domains"; "sibling-folds"; "multifile" ]
+
+/// The MULTI-FILE categories (tests/corpus/<dir>/<test>/*.blade): each test is
+/// lowered as ONE program through `lowerMultiSourceCaptured`, the lowering the
+/// corpus runner and `test interp` give it. `multifile` joined the default
+/// sweep with gap G199 (round 4 wave 7): an imported deferred map forced by
+/// another module read stale cells in this lane only, and no differential
+/// walked a multi-module program, so no gate could see it.
+let private multiFileDiffCategories = set [ "multifile" ]
 
 /// What happened to one file. `Matched` carries a note so an agreement that
 /// asserts NOTHING -- both lanes printed no values at all -- is visible in the
@@ -1090,15 +3281,27 @@ let private clearArtifacts (dir: string) (stems: string list) =
 /// is in-process and free while the C++ oracle costs a g++ invocation. Each
 /// lane lowers its OWN IRProgram from the same source, so neither back end can
 /// observe state the other left on a shared tree.
-let private runCase (dir: string) (name: string) (source: string) : CaseOutcome =
+/// `lower` produces a FRESH lowering on every call (each lane consumes its
+/// own, see below).
+let private runCaseWith (dir: string) (name: string) (lower: unit -> Result<Blade.IR.IRProgram, 'e>) : CaseOutcome =
     let stem = Build.sanitizeFileName name
     let cppStem = "llvmdiff_cpp_" + stem
     let llStem = "llvmdiff_ll_" + stem
     try
-        if name.EndsWith "(rejects)" || name.EndsWith "(aborts)" then
-            SkippedCase "a reject/abort probe (nothing to compare)"
+        // A `(rejects)` probe has no program to run. An `(aborts)` probe
+        // DOES: both lanes must abort the same way (below), which is the only
+        // place a dropped runtime guard (BL8006, BL8013, ...) can show up --
+        // skipping these is how the group_keys guards went missing unseen.
+        let isAbortProbe = name.EndsWith "(aborts)"
+        if name.EndsWith "(rejects)" then
+            SkippedCase "a reject probe (nothing to compare)"
         else
-        match Lowering.lower source with
+        // lowerCaptured, not lower: it resolves FILE-BACKED imports (stdlib
+        // `stats`, `units.SI`, `plot`) the way the corpus runner and `blade
+        // run` do, and hands warnings back instead of printing them. `lower`
+        // refused every stdlib-importing test, which this block then counted
+        // as a front-end skip rather than as lane coverage.
+        match lower () with
         | Error _ -> SkippedCase "the front end refuses this program"
         | Ok ir0 ->
         match IRValidate.validateIR ir0 with
@@ -1113,7 +3316,7 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             // their own analysis contexts over the IR they consume, and the
             // oracle has to be exactly what `blade test basic` would have
             // compiled -- not an IRProgram another emitter has already walked.
-            match Lowering.lower source with
+            match lower () with
             | Error _ -> SkippedCase "the front end refuses this program"
             | Ok ir1 ->
             match IRValidate.validateIR ir1 with
@@ -1143,8 +3346,8 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             | Ok cppExe ->
             match runExeCapture cppExe with
             | Error e -> SkippedCase ("the C++ oracle does not run: " + e)
-            | Ok (code, _, _) when code <> 0 -> SkippedCase ($"the C++ oracle exits {code}")
-            | Ok (_, cppOut, _) ->
+            | Ok (code, _, _) when code <> 0 && not isAbortProbe -> SkippedCase ($"the C++ oracle exits {code}")
+            | Ok (cppCode, cppOut, cppErr) ->
             // ---- llvm lane --------------------------------------------------
             let llFile = Path.Combine(dir, llStem + ".ll")
             File.WriteAllText(llFile, ll)
@@ -1152,9 +3355,19 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             | Error e when e.StartsWith "Skipped:" -> SkippedCase e
             | Error e -> FailedCase ($"""llvm compile failed ({llFile}): {(e.Replace("\n", " ") |> fun s -> if s.Length > 400 then s.Substring(0, 400) + "..." else s)}""")
             | Ok llExe ->
+            // An abort's identity: the `error[BLxxxx]: message` line and its
+            // `  --> file:line` location, in order. (The trace lines under them
+            // are the shadow-frame machinery's own business.)
+            let abortLines (err: string) =
+                err.Replace("\r\n", "\n").Split('\n')
+                |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> ")
+                |> List.ofArray
             match runExeCapture llExe with
             | Error e -> FailedCase ($"llvm run failed ({llFile}): {e}")
-            | Ok (code, out, err) when code <> 0 ->
+            | Ok (code, _, err) when cppCode <> 0 && (code <> cppCode || abortLines err <> abortLines cppErr) ->
+                let show (e: string) = String.concat " / " (abortLines e)
+                FailedCase ($"abort differs -- cpp exits {cppCode} with [{show cppErr}]; llvm exits {code} with [{show err}] ({llFile})")
+            | Ok (code, _, err) when code <> 0 && cppCode = 0 ->
                 FailedCase ($"llvm exe exits {code} ({llFile}): {(err.Trim())}")
             | Ok (_, llvmOut, _) ->
                 match compareRuns 3 cppOut llvmOut with
@@ -1162,11 +3375,21 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
                     // Keep only what a reader would want: matched artifacts
                     // are regenerable and 300 of them fill a scratch dir.
                     clearArtifacts dir [ cppStem; llStem ]
-                    Matched (if stripTiming cppOut = "" then "agreed, but neither lane printed a value" else "")
+                    Matched (if cppCode <> 0 then "both lanes aborted with the same error"
+                             elif stripTiming cppOut = "" then "agreed, but neither lane printed a value"
+                             else "")
                 | Error diffs ->
                     FailedCase
                         ($"""stdout differs -- {(String.concat " | " diffs)} (kept {cppFile} and {llFile})""")
     with ex -> FailedCase ($"harness exception: {ex.Message}")
+
+let private runCase (dir: string) (name: string) (source: string) : CaseOutcome =
+    runCaseWith dir name (fun () -> fst (Lowering.lowerCaptured source))
+
+/// runCase over a MULTI-FILE test: the member files lowered as one program
+/// (the corpus runner and `test interp` lower it the same way).
+let private runMultiCase (dir: string) (name: string) (files: (string * string) list) : CaseOutcome =
+    runCaseWith dir name (fun () -> fst (Blade.Runtime.runOnLargeStack (fun () -> Lowering.lowerMultiSourceCaptured files)))
 
 /// The differential sweep over a category list.
 let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
@@ -1200,7 +3423,13 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
     let mutable reasons = []
     for cat in categories do
         let tests =
-            try Ok (Blade.Tests.Corpus.category cat)
+            try
+                if multiFileDiffCategories.Contains cat then
+                    Ok (Blade.Tests.Corpus.multiFileCategory cat
+                        |> List.map (fun (name, files) -> (name, fun () -> runMultiCase dir name files)))
+                else
+                    Ok (Blade.Tests.Corpus.category cat
+                        |> List.map (fun (name, source) -> (name, fun () -> runCase dir name source)))
             with ex -> Error ex.Message
         match tests with
         | Error msg ->
@@ -1210,8 +3439,8 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
             failedNames <- failedNames @ [ $"category {cat}" ]
         | Ok tests ->
             printSubHeader ($"{cat} ({tests.Length} files)")
-            for (name, source) in tests do
-                match runCase dir name source with
+            for (name, run) in tests do
+                match run () with
                 | Matched note ->
                     passed <- passed + 1
                     resultLine Pass name note
@@ -1250,6 +3479,79 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
 /// The default sweep (`blade test llvm`).
 let runLlvmDifferentialTests () : BlockResult =
     runLlvmDifferentialTestsFor defaultCategories
+
+/// Gap G60 (review codex-diff-W4B-B-2 finding 1): ordinary positional reads
+/// of a deferred module map inside a top-level BLOCK keep the statement's
+/// force boundary in the llvm lane -- forced at the START of the whole
+/// statement, as the C++ lane's block pre-pass forces them -- so the two
+/// compiled lanes agree on the value twin (the write after the force: r = 15,
+/// g = [10, 5]) and the first-failure twin (g's BL8013 before the block's
+/// earlier cast). The interpreter evaluates both at the read (r = 7; BL8006):
+/// the inherited C++ / interpreter order gap is OPEN in G60, so these twins
+/// are C++-vs-LLVM differentials here rather than corpus files (`test interp`
+/// would fail them). Skipped without clang or g++.
+let runLlvmBlockForceTwins () : BlockResult =
+    printHeader "LLVM Block Force Boundary (C++ vs llvm, G60)"
+    let block = "LLVM Block Force Boundary"
+    let twins =
+        [ "block_reads_after_write_keep_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    g(0) + g(1)\n}\n"
+          "block_reads_after_failing_statement_keep_statement_boundary (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    g(0) + g(1) + early\n}\n"
+          // codex-diff-W4B-B-3 finding 1: an alias AND later direct reads --
+          // the pre-pass forces g at the statement start, the alias copies
+          "block_alias_with_later_reads_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    g(0) + g(1)\n}\n"
+          "block_alias_with_later_reads_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    g(0) + g(1) + early\n}\n"
+          // finding 2: a tuple INITIALIZER inside the block is covered by the
+          // pre-pass, not member-ordered
+          "block_tuple_initializer_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let t = (Int64(0), g(0) + g(1))\n    t[0] + t[1]\n}\n"
+          "block_tuple_initializer_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let t = (Int64(0), g(0) + g(1))\n    t[0] + t[1] + early\n}\n"
+          // codex-diff-W4B-B-4 finding 1: prodsum operands are pre-pass reads
+          "block_alias_with_later_prodsum_keeps_statement_boundary",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    prodsum(g, g)\n}\n"
+          "block_alias_with_later_prodsum_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    prodsum(g, g) + early\n}\n"
+          // finding 2: an alias of g must not suppress h's statement-start force
+          "block_alias_of_one_map_reads_of_another",
+          "type Row = Idx<2>\nlet mut x: Array<Int64 like Row> = [1, 2]\nlet g = method_for(x) <@> lambda(v) -> v + 1\nlet h = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    x(0) = 5\n    let b = g\n    h(0) + h(1) + b(0) + b(1)\n}\n"
+          // codex-diff-W4B-B-5 finding 1: a TOTAL kernel over a FAILING
+          // deferred input is not "cannot fail"; every collected map is
+          // forced up front in collector order (h, then later)
+          "block_total_kernel_over_failing_input_forced_in_order (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet bad = method_for(x) <@> lambda(v) -> 10 / v\nlet h = method_for(bad) <@> lambda(v) -> v + 1\nlet later = method_for(x) <@> lambda(v) -> x((v + 5 : Row))\nlet r = {\n    let first = h(0)\n    first + h(1) + later(0) + later(1)\n}\n"
+          "block_total_kernel_over_input_values",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 2]\nlet bad = method_for(x) <@> lambda(v) -> 10 / v\nlet h = method_for(bad) <@> lambda(v) -> v + 1\nlet later = method_for(x) <@> lambda(v) -> x((v - 1 : Row))\nlet r = {\n    let first = h(0)\n    first + h(1) + later(0) + later(1)\n}\n"
+          "block_alias_of_one_map_reads_of_another_after_failing_statement (aborts)",
+          "type Row = Idx<2>\nlet x: Array<Int64 like Row> = [1, 0]\nlet g = method_for(x) <@> lambda(v) -> v + 1\nlet h = method_for(x) <@> lambda(v) -> 10 / v\nlet r = {\n    let early = x((x(0) + 5 : Row))\n    let b = g\n    h(0) + h(1) + b(0) + b(1) + early\n}\n" ]
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found."
+        printFooter block [ "0 passed"; "0 failed"; $"{twins.Length} skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = twins.Length; FailedNames = [] }
+    | Some _ when not Build.capabilities.Value.HasGpp ->
+        printfn "Skipped: requires g++ for the C++ oracle lane."
+        printFooter block [ "0 passed"; "0 failed"; $"{twins.Length} skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = twins.Length; FailedNames = [] }
+    | Some _ ->
+    let dir = outputDir
+    Directory.CreateDirectory dir |> ignore
+    CodeGen.deployRuntimeHeaders dir
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable skipped = 0
+    let mutable names = []
+    for (name, src) in twins do
+        match runCase dir name src with
+        | Matched note -> passed <- passed + 1; resultLine Pass name (if note = "" then "C++ and llvm agree (whole stdout / abort identity)" else note)
+        | SkippedCase why -> skipped <- skipped + 1; resultLine Skip name why
+        | FailedCase why -> failed <- failed + 1; names <- names @ [ name ]; resultLine Fail name why
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = names }
 
 // ---------------------------------------------------------------------------
 // Block 5: the three-way blocked-simplex gate
@@ -1768,12 +4070,12 @@ let private rtShapes =
         Arms = [ armCpp; armLlvm ] }
       { Name = "dense licensed fold, n = 9,999,991"
         Fixture = "bench_dense_fold"
-        Note = "integer-valued cells: exact under any association, so the reassociated arms are value-comparable"
+        Note = "integer-valued cells: exact under any association, so the reassociated (default) and serial (repro) arms are value-comparable"
         Arms =
           [ armCpp
-            { Label = "cpp-reassoc"; Lane = LaneCpp; Pins = [ "BLADE_FP_REASSOC", Some "1" ] }
+            { Label = "cpp-repro"; Lane = LaneCpp; Pins = [ "BLADE_FP_REPRO", Some "1" ] }
             armLlvm
-            { Label = "llvm-reassoc"; Lane = LaneLlvm; Pins = [ "BLADE_FP_REASSOC", Some "1" ] } ] }
+            { Label = "llvm-repro"; Lane = LaneLlvm; Pins = [ "BLADE_FP_REPRO", Some "1" ] } ] }
       { Name = "symmetric map, n = 2003 (C(2004,2) = 2,007,006 cells)"
         Fixture = "bench_sym_map"
         Note = "the shape the brief named; ~3 ms of compute, close to first-touch noise"
@@ -1975,6 +4277,340 @@ let runLlvmBench () : int =
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
 // ---------------------------------------------------------------------------
+// Block: the runtime shim's build identity and its retained-block cache
+// (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M0 + M1)
+// ---------------------------------------------------------------------------
+
+/// A C driver over the shim's allocator ABI. It reads the cache counters
+/// (`blade_pool_cache_stats`, compiled in only under BLADE_POOL_CACHE_STATS)
+/// and asserts per mode: with the cache ON a released pool comes back to the
+/// next request of the same size and a recur-shaped workload (300 steps x 8
+/// rows of 20011 doubles) makes at most 8 fresh allocations; OFF, every
+/// allocation is fresh. Both modes: 64-byte payloads, null-safe free,
+/// zero-cell pools, the size band, the budget.
+let private shimPoolDriver = """
+#include <stdio.h>
+void *blade_alloc_cells(long long n, long long cellBytes);
+void blade_free(void *p);
+void blade_pool_cache_stats(long long *out);
+void blade_pool_cache_policy(long long *out);
+static int pass = 0, total = 0;
+static void check(const char *name, int ok) {
+    total++;
+    if (ok) { pass++; printf("  [PASS]: %s\n", name); } else printf("  [FAIL]: %s\n", name);
+}
+static long long st(int k) { long long s[5]; blade_pool_cache_stats(s); return s[k]; }
+int main(void) {
+    long long s0[5]; blade_pool_cache_stats(s0);
+    /* the policy in force (round 4 wave 6: the default is 32 MB / 64 MB): the
+     * band and budget cases below are sized from it */
+    long long pol[3]; blade_pool_cache_policy(pol);
+    int on = (int)s0[4];
+    printf("  [info]: cache %s\n", on ? "on" : "off");
+    blade_free((void *)0);
+    check("free_null_is_noop", 1);
+    void *z = blade_alloc_cells(0, 8);
+    check("zero_cell_pool_nonnull_aligned", z != 0 && ((unsigned long long)z & 63u) == 0);
+    blade_free(z);
+    void *a = blade_alloc_cells(3000, 8);
+    check("payload_aligned_64", ((unsigned long long)a & 63u) == 0);
+    ((double *)a)[2999] = 1.0;
+    blade_free(a);
+    long long r0 = st(1);
+    void *b = blade_alloc_cells(3000, 8);
+    if (on) check("same_size_reuses_released_pool", b == a && st(1) == r0 + 1);
+    else    check("off_never_reuses", st(1) == 0);
+    blade_free(b);
+    long long t0 = st(2);
+    void *small = blade_alloc_cells(100, 8);
+    void *huge = blade_alloc_cells(pol[0] / 8 + 1, 8);   /* one cell past the block cap */
+    blade_free(small); blade_free(huge);
+    check("small_and_huge_not_retained", st(2) == t0);
+    long long third = pol[1] * 3 / 8 / 8;                    /* 3/8 of the budget, in doubles */
+    void *x = blade_alloc_cells(third, 8), *y = blade_alloc_cells(third, 8), *w = blade_alloc_cells(third, 8);
+    long long e0 = st(3);
+    blade_free(x); blade_free(y); blade_free(w);
+    /* the 24 KB pool above is still retained too: the third 3/8-budget block
+     * evicts it AND the first one to stay within the budget */
+    if (on) check("budget_evicts_oldest", st(3) == e0 + 2);
+    long long f0 = st(0), u0 = st(1);
+    double sum = 0.0;
+    int step, k, i;
+    for (step = 0; step < 300; step++) {
+        double *t[8];
+        for (k = 0; k < 8; k++) {
+            t[k] = (double *)blade_alloc_cells(20011, 8);
+            for (i = 0; i < 20011; i++) t[k][i] = (double)(step + k);
+        }
+        for (k = 0; k < 8; k++) { sum += t[k][20010]; blade_free(t[k]); }
+    }
+    long long fresh = st(0) - f0, reused = st(1) - u0;
+    printf("  [info]: recur-shaped tripwire: fresh=%lld reused=%lld (of 2400 allocations)\n", fresh, reused);
+    if (on) check("recur_tripwire_fresh_le_8", fresh <= 8 && reused >= 2392);
+    else    check("recur_tripwire_off_all_fresh", fresh == 2400 && reused == 0);
+    check("recur_values", sum == (double)(8 * (299 * 300 / 2) + 300 * 28));
+    printf("SHIM POOL TESTS: %d/%d passed\n", pass, total);
+    return pass == total ? 0 : 1;
+}
+"""
+
+/// BLADE_POOL_RETAIN (round-3 A4, gap G52) through the real shim source: the
+/// 48 MB recur trajectory released once. Under a policy whose block cap admits
+/// it, it is RETAINED (not freed), handed back to the next request of its
+/// size, and EVICTED by the shim's atexit flush -- observed by an atexit hook
+/// registered before the shim's own (so it runs after it). Under the default,
+/// or a cap below 48 MB, it is freed at once and nothing is evicted at exit.
+let private shimRetainDriver = """
+#include <stdio.h>
+#include <stdlib.h>
+void *blade_alloc_cells(long long n, long long cellBytes);
+void blade_free(void *p);
+void blade_pool_cache_stats(long long *out);
+void blade_pool_cache_policy(long long *out);
+static int pass = 0, total = 0;
+static long long evicted_before_exit = 0;
+static void check(const char *name, int ok) {
+    total++;
+    if (ok) { pass++; printf("  [PASS]: %s\n", name); } else printf("  [FAIL]: %s\n", name);
+}
+static long long st(int k) { long long s[5]; blade_pool_cache_stats(s); return s[k]; }
+static void after_shim_flush(void) {
+    printf("  [atexit]: evicted_at_exit=%lld\n", st(3) - evicted_before_exit);
+    fflush(stdout);
+}
+int main(void) {
+    long long pol[3];
+    long long traj = 301LL * 20011LL;
+    int kept;
+    void *a, *b;
+    long long t0, r0;
+    atexit(after_shim_flush);              /* before the shim's: runs AFTER it */
+    blade_pool_cache_policy(pol);
+    kept = traj * 8 <= pol[0];
+    printf("  [info]: shim policy max_block=%lld budget=%lld arm=%lld; a 48 MB release is %s\n",
+           pol[0], pol[1], pol[2], kept ? "RETAINED" : "freed at once");
+#if defined(EXPECT_MAX)
+    check("shim_policy_reads_the_arm_defines", pol[2] == 1 && pol[0] == EXPECT_MAX && pol[1] == EXPECT_BUDGET);
+#else
+    check("shim_policy_default_is_32mb_64mb", pol[2] == 0 && pol[0] == (32LL << 20) && pol[1] == (64LL << 20));
+#endif
+    t0 = st(2); r0 = st(1);
+    a = blade_alloc_cells(traj, 8);
+    ((double *)a)[traj - 1] = 1.0;
+    blade_free(a);
+    if (kept) {
+        int retained = st(2) == t0 + 1;
+        b = blade_alloc_cells(traj, 8);
+        check("shim_48mb_release_retained_then_reused", retained && b == a && st(1) == r0 + 1);
+        blade_free(b);                      /* retained again: the exit flush evicts it */
+    } else {
+        check("shim_48mb_release_freed_inside", st(2) == t0);
+    }
+    evicted_before_exit = st(3);
+    printf("SHIM RETAIN TESTS: %d/%d passed\n", pass, total);
+    return pass == total ? 0 : 1;
+}
+"""
+
+let runLlvmRuntimeShimTests () : BlockResult =
+    printHeader "LLVM Runtime Shim (object identity, retained-block cache)"
+    let block = "LLVM Runtime Shim"
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+        printFooter block [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Some clang ->
+    let dir = Path.GetFullPath(Path.Combine(outputDir, "llvm_shim_identity"))
+    (try if Directory.Exists dir then Directory.Delete(dir, true) with _ -> ())
+    Directory.CreateDirectory dir |> ignore
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    let record (name: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            resultLine Pass name ""
+        else
+            failed <- failed + 1
+            failedNames <- failedNames @ [ name ]
+            resultLine Fail name detail
+    // M0: a normal, a memcheck, then a normal build of the shim in ONE
+    // directory. The memcheck object must be its own (the cache compiled
+    // out), and the second normal build must reuse the first's object rather
+    // than recompile or pick up the memcheck one.
+    let build memcheck =
+        withEnv [ "BLADE_MEMCHECK", (if memcheck then Some "1" else None) ] (fun () -> Build.buildLlvmShim clang dir)
+    match build false, build true with
+    | Ok (o1, id1), Ok (o2, id2) ->
+        let t1 = File.GetLastWriteTimeUtc o1
+        record "memcheck_shim_is_a_distinct_object" (o1 <> o2 && id1 <> id2 && File.Exists o1 && File.Exists o2)
+               $"normal {o1} / memcheck {o2}"
+        (match build false with
+         | Ok (o3, id3) ->
+             record "same_configuration_reuses_its_object" (o3 = o1 && id3 = id1 && File.GetLastWriteTimeUtc o3 = t1)
+                    $"rebuilt or switched object: {o3}"
+         | Error e -> record "same_configuration_reuses_its_object" false e)
+    | r1, r2 ->
+        let err = function Error (e: string) -> e | Ok _ -> "ok"
+        record "memcheck_shim_is_a_distinct_object" false ($"{err r1} / {err r2}")
+    // M1: the allocator itself, both modes, through the real shim source.
+    let driver = Path.Combine(dir, "shim_pool_driver.c")
+    File.WriteAllText(driver, shimPoolDriver)
+    let shimSrc = Path.Combine(dir, EmitLlvm.shimFileName)
+    for (mode, defines) in [ "on", "-DBLADE_POOL_CACHE_STATS=1"; "off", "-DBLADE_POOL_CACHE_STATS=1 -DBLADE_POOL_CACHE_OFF=1" ] do
+        let exe = Path.Combine(dir, $"shim_pool_{mode}{Platforms.exeExtension}")
+        match Build.runProc clang ($"-O2 {defines} -o \"{exe}\" \"{driver}\" \"{shimSrc}\"") 120000 with
+        | Error e -> record ($"shim_pool_cache_{mode}") false ($"driver compile failed: {e}")
+        | Ok () ->
+            match runExeCapture exe with
+            | Error e -> record ($"shim_pool_cache_{mode}") false e
+            | Ok (code, out, _) ->
+                printf "%s" out
+                let ok = code = 0 && out.Contains "SHIM POOL TESTS:" && not (out.Contains "[FAIL]")
+                record ($"shim_pool_cache_{mode}") ok ($"exit {code}")
+    // BLADE_POOL_RETAIN (round-3 A4, gap G52). (a) The policy is part of the
+    // shim object's identity (so of llvmExeCacheKey): the arm and a pair each
+    // build their own object, `default` and a malformed value build the DEFAULT
+    // one, `0` (the pre-wave-6 4 MB / 8 MB, round 4 wave 6) its own, and the
+    // defines are exactly the twin pair the C++ lane emits.
+    // Every default case says `default` explicitly: an UNSET variable falls back to
+    // blade.toolchain.json, which may have persisted the arm. Unset is tested
+    // once, against an isolated empty toolchain file (selector and parse cache
+    // restored afterwards).
+    let buildWith (v: string option) =
+        withEnv [ "BLADE_MEMCHECK", None; "BLADE_POOL_RETAIN", v ] (fun () -> Build.llvmShimDefines (), Build.buildLlvmShim clang dir)
+    let emptyToolchain = Path.Combine(dir, "pool_tc_empty.json")
+    File.WriteAllText(emptyToolchain, "{}")
+    let buildUnsetIsolated () =
+        withEnv [ "BLADE_TOOLCHAIN_FILE", Some emptyToolchain ] (fun () ->
+            Blade.Toolchain.refresh ()
+            try buildWith None finally Blade.Toolchain.refresh ())
+    (match buildWith (Some "default"), buildWith (Some "1"), buildWith (Some "32:64"), buildWith (Some "0"), buildWith (Some "bogus"), buildUnsetIsolated () with
+     | (d0, Ok (o0, i0)), (d1, Ok (o1, i1)), (d2, Ok (o2, i2)), (dz, Ok (oz, iz)), (db, Ok (ob, ib)), (du, Ok (ou, iu)) ->
+         record "pool_retain_default_adds_no_shim_define" (d0 = "" && db = "" && du = "") $"defines '{d0}' / '{db}' / unset '{du}'"
+         record "pool_retain_unset_isolated_is_the_default_identity" (iu = i0 && ou = o0) $"unset {iu} vs default {i0}"
+         record "pool_retain_arm_shim_defines" (d1 = " -DBLADE_POOL_MAX_BLOCK=67108864 -DBLADE_POOL_BUDGET=100663296"
+                                                && d2 = " -DBLADE_POOL_MAX_BLOCK=33554432 -DBLADE_POOL_BUDGET=67108864"
+                                                && dz = " -DBLADE_POOL_MAX_BLOCK=4194304 -DBLADE_POOL_BUDGET=8388608") $"'{d1}' / '{d2}' / off '{dz}'"
+         record "pool_retain_changes_the_shim_identity" (i1 <> i0 && i2 <> i0 && i1 <> i2 && o1 <> o0 && o2 <> o0 && iz <> i0 && oz <> o0)
+                $"default {i0} / arm {i1} / pair {i2} / off {iz}"
+         record "pool_retain_malformed_keeps_the_default_identity" (ib = i0 && ob = o0)
+                $"malformed {ib} vs default {i0}"
+     | _ -> record "pool_retain_shim_builds" false "a shim build under BLADE_POOL_RETAIN failed")
+    // (b) The allocator under each policy: the 48 MB release retained and
+    // evicted at exit under the arm, freed at once under the default and a
+    // 32 MB cap.
+    let retainDriver = Path.Combine(dir, "shim_retain_driver.c")
+    File.WriteAllText(retainDriver, shimRetainDriver)
+    for (mode, setting, keptExpected) in [ "default", None, false; "off", Some "0", false; "retain1", Some "1", true; "retain32_64", Some "32:64", false ] do
+        let p = Blade.Toolchain.parsePoolRetention setting "test"
+        let defs =
+            (Blade.Toolchain.poolRetentionDefines p |> List.map (fun (n, b) -> $" -D{n}={b}") |> String.concat "")
+            + (if p.IsDefault then "" else $" -DEXPECT_MAX={p.MaxBlockBytes}LL -DEXPECT_BUDGET={p.BudgetBytes}LL")
+        let exe = Path.Combine(dir, $"shim_retain_{mode}{Platforms.exeExtension}")
+        let name = $"shim_pool_retain_{mode}"
+        match Build.runProc clang ($"-O2 -DBLADE_POOL_CACHE_STATS=1{defs} -o \"{exe}\" \"{retainDriver}\" \"{shimSrc}\"") 120000 with
+        | Error e -> record name false ($"driver compile failed: {e}")
+        | Ok () ->
+            match runExeCapture exe with
+            | Error e -> record name false e
+            | Ok (code, out, _) ->
+                printf "%s" out
+                let evictLine = if keptExpected then "evicted_at_exit=1" else "evicted_at_exit=0"
+                let ok = code = 0 && out.Contains "SHIM RETAIN TESTS:" && not (out.Contains "[FAIL]") && out.Contains evictLine
+                record name ok ($"exit {code}; wanted {evictLine}")
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
+// Block: MUST-NATIVE fixtures (round 3 wave 4, W4B-C; gaps G64 / G67)
+// ---------------------------------------------------------------------------
+//
+// The differential maps ANY llvm emission refusal to a skip, so a program
+// claimed native could lose the lane while `blade test llvm <dir>` stays
+// green. The files below are claimed NATIVE: each is lowered,
+// `EmitLlvm.tryEmitProgramNamed` must SUCCEED (a refusal FAILS here),
+// the .ll is compiled and run, and its stdout must carry every `// EXPECT:`
+// pin of the file verbatim -- index-types/544's sign Booleans (`dn_neg`,
+// `dk_neg`) included. Runs after the differential of the category it names.
+let private mustNativeFixtures : (string * string) list =
+    [ "index-types", "544_whole_array_kernel_over_dense_is_call.blade"
+      "symmetry", "144_packed_comm_contraction_direct_call_accepted.blade"
+      "symmetry", "174_zero_level_compact_application_is_call.blade"
+      // A top-level compute forces its deferred operands (formalism 10.2):
+      // the alias class prints natively (wave 3 B, goal 1).
+      "symmetry", "147_deferred_alias_chain_packed.blade"
+      "loops", "599_compute_operand_force_prints_deferred_map.blade" ]
+
+let runLlvmMustNativeTestsFor (categories: string list) : BlockResult =
+    let block = "LLVM Must-Native"
+    let wanted = mustNativeFixtures |> List.filter (fun (c, _) -> List.contains c categories)
+    if wanted.IsEmpty then { Block = block; Passed = 0; Failed = 0; Skipped = 0; FailedNames = [] } else
+    printHeader "LLVM Must-Native (a refusal fails)"
+    match Build.resolveClang () with
+    | None ->
+        printfn "Skipped: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+        printFooter block [ "0 passed"; "0 failed"; "1 skipped" ]
+        { Block = block; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Some _ ->
+    let dir = Path.GetFullPath(Path.Combine(outputDir, "llvm_must_native"))
+    Directory.CreateDirectory dir |> ignore
+    EmitLlvm.deployShim dir
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames = []
+    for (cat, file) in wanted do
+        let name = $"{cat}/{file}: native llvm route, EXPECT pins"
+        let verdict =
+            let candidates =
+                [ Path.Combine(Directory.GetCurrentDirectory(), "tests", "corpus", cat, file)
+                  Path.Combine(AppContext.BaseDirectory, "tests", "corpus", cat, file) ]
+            match candidates |> List.tryFind File.Exists with
+            | None -> Error "corpus file not found"
+            | Some path ->
+            let source = File.ReadAllText path
+            let pins =
+                source.Replace("\r\n", "\n").Split('\n')
+                |> Array.choose (fun l -> if l.StartsWith "// EXPECT: " then Some (l.Substring("// EXPECT: ".Length).Trim()) else None)
+                |> List.ofArray
+            if pins.IsEmpty then Error "the fixture carries no EXPECT pin" else
+            match fst (Lowering.lowerCaptured source) with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir0 ->
+            match IRValidate.validateIR ir0 with
+            | Error errs -> Error ($"""IR validation: {String.concat "; " errs}""")
+            | Ok ir ->
+            let stem = "mustnative_" + Build.sanitizeFileName (Path.GetFileNameWithoutExtension file)
+            match (try EmitLlvm.tryEmitProgramNamed stem ir with ex -> Error ("raised: " + ex.Message)) with
+            | Error why -> Error ($"the llvm lane REFUSED a must-native fixture: {why}")
+            | Ok ll ->
+            let llFile = Path.Combine(dir, stem + ".ll")
+            File.WriteAllText(llFile, ll)
+            match Build.compileLlvmProgram llFile dir with
+            | Error e -> Error ($"llvm compile: {e}")
+            | Ok exe ->
+            match runExeCapture exe with
+            | Error e -> Error e
+            | Ok (code, out, err) when code <> 0 -> Error ($"exit {code}: {err.Trim()}")
+            | Ok (_, out, _) ->
+                let lines = out.Replace("\r\n", "\n").Split('\n') |> Array.map (fun l -> l.Trim())
+                match pins |> List.filter (fun p -> not (Array.contains p lines)) with
+                | [] -> Ok ($"""native; {pins.Length} pins: {String.concat "; " pins}""")
+                | missing -> Error ($"""native output lacks {String.concat "; " missing}: {out.Trim()}""")
+        match verdict with
+        | Ok note ->
+            passed <- passed + 1
+            resultLine Pass name note
+        | Error e ->
+            failed <- failed + 1
+            failedNames <- failedNames @ [ name ]
+            resultLine Fail name e
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
+    { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
+
+// ---------------------------------------------------------------------------
 // Entry points for `blade test llvm [category]`
 // ---------------------------------------------------------------------------
 
@@ -1987,9 +4623,13 @@ let runLlvmTests () : int =
         [ runLlvmCompareRuleTests ()
           runLlvmGoldenTests ()
           runLlvmFactTests ()
+          runLlvmCallOrderRunTests ()
+          runLlvmTilesRawBitTests ()
           runSimplexAgreementTests ()
           runLlvmSimplexGate ()
-          runLlvmDifferentialTests () ]
+          runLlvmRuntimeShimTests ()
+          runLlvmDifferentialTests ()
+          runLlvmMustNativeTestsFor defaultCategories ]
     printGrandTotal blocks
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
@@ -1999,7 +4639,7 @@ let runLlvmTests () : int =
 /// must be added here too -- a word missing here is refused before it runs
 /// (CI's `test llvm goldens` step was, once).
 let llvmCategoryWords =
-    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "blocks"; "simplex"; "bricks"; "bench" ]
+    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "tiles"; "blocks"; "simplex"; "bricks"; "bench"; "shim" ]
 
 let isLlvmCategoryWord (cat: string) =
     List.contains (cat.ToLower().TrimStart('-')) llvmCategoryWords
@@ -2037,7 +4677,16 @@ let runLlvmCategory (cat: string) : int =
         if r.Failed + g.Failed + f.Failed + s.Failed = 0 then 0 else 1
     | "facts" ->
         let f = runLlvmFactTests ()
-        if f.Failed = 0 then 0 else 1
+        let c = runLlvmCallOrderRunTests ()
+        let t = runLlvmBlockForceTwins ()
+        if f.Failed + c.Failed + t.Failed = 0 then 0 else 1
+    | "shim" ->
+        let s = runLlvmRuntimeShimTests ()
+        if s.Failed = 0 then 0 else 1
+    | "tiles" ->
+        // The tile core's cross-lane raw-bit block (M6): needs clang AND g++.
+        let t = runLlvmTilesRawBitTests ()
+        if t.Failed = 0 then 0 else 1
     | "blocks" | "simplex" | "bricks" ->
         let a = runSimplexAgreementTests ()
         let g = runLlvmSimplexGate ()
@@ -2048,4 +4697,5 @@ let runLlvmCategory (cat: string) : int =
         runLlvmBench ()
     | _ ->
         let r = runLlvmDifferentialTestsFor [ cat ]
-        if r.Failed = 0 then 0 else 1
+        let m = runLlvmMustNativeTestsFor [ cat ]
+        if r.Failed + m.Failed = 0 then 0 else 1

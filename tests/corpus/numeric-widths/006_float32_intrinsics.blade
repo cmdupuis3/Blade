@@ -1,0 +1,31 @@
+// TEST: Float32 Intrinsics
+// ============================================================================
+// A transcendental of a Float32 is the double libm value rounded once to
+// float; sqrt / floor / ceil / abs are the float operations.
+// A real intrinsic of a Float32 is a Float32 (the checker types it so), so the
+// scalar results print at Float32's 6 significant digits.
+// ============================================================================
+let x: Float32 = 0.7
+let s = sqrt(x)
+let e = exp(x)
+let l = log(x)
+let sn = sin(x)
+let c = cos(x)
+let at = atan(x)
+let fl = floor(x * 10.0)
+let ab = abs(-x)
+let v: Array<Float32 like Idx<3>> = [0.5, 1.5, 2.5]
+let ev = exp(v)
+let sv = sqrt(v)
+// EXPECT: x = 0.7
+// EXPECT: s = 0.83666
+// EXPECT: e = 2.01375
+// EXPECT: l = -0.356675
+// EXPECT: sn = 0.644218
+// EXPECT: c = 0.764842
+// EXPECT: at = 0.610726
+// EXPECT: fl = 7.0
+// EXPECT: ab = 0.7
+// EXPECT: v = [0.5, 1.5, 2.5]
+// EXPECT: ev = [1.64872, 4.48169, 12.1825]
+// EXPECT: sv = [0.707107, 1.22474, 1.58114]

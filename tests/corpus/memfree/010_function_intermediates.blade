@@ -8,7 +8,7 @@
 type C = Idx<4>
 type Steps = Idx<4>
 let SRC = method_for(range<C>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
-function chain4(u: Array<Float like C>) -> Array<Float like C> = {
+function chain4(u: Array<Float64 like C>) -> Array<Float64 like C> = {
     let k1 = 0.0 - u
     let k2 = 0.0 - (u + 0.05 * k1)
     let k3 = 0.0 - (u + 0.05 * k2)
@@ -17,10 +17,10 @@ function chain4(u: Array<Float like C>) -> Array<Float like C> = {
 }
 let topcall = chain4(SRC)
 let topmass = reduce(topcall, (+))
-let rec traj: Array<Float like Steps, C> =
+let rec traj: Array<Float64 like Steps, C> =
     match traj with
     | zero -> zero
-    | zero :: s -> zero :: [1.0, 2.0, 3.0, 4.0]
+    | zero :: s -> zero :: Float64([1.0, 2.0, 3.0, 4.0])
     | prefix :: n -> prefix :: chain4(prefix(n - 1))
 let fin = traj((3 : Steps))
 let mass = reduce(fin, (+))

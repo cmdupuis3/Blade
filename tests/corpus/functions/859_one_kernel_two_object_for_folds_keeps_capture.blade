@@ -1,0 +1,21 @@
+// TEST: Memfree One Kernel In Two Object For Folds Keeps Capture (G54 control)
+// ONE let-bound kernel `k` over the local `y` is the kernel of TWO object_for
+// fold lets. Each application names `k` twice (its kernel and the loop's
+// provenance, counted once), so `k` has two effective references in the
+// scope: neither slot is proved synchronous and `y` stays pinned to function
+// exit (a conservative leak, never an early free); `t`, read only as an
+// operand, is freed. Values: t = c * [0, 1, 2, 3, 4], y(4) = 4 c + 1,
+// s1 = 10 c (4 c + 1), s2 = 1 + s1.
+function kernel(c: Float64) -> Float64 = {
+    let t = Float64(0..5) * c |> compute
+    let y = t + 1.0 |> compute
+    let k = lambda(v: Float64) -> v * y(4)
+    let s1 = reduce(object_for(k) <@> t, (+))
+    let s2 = reduce(object_for(k) <@> t, (+), 1.0)
+    s1 + s2
+}
+
+let k2 = kernel(2.0)
+let k3 = kernel(3.0)
+// EXPECT: k2 = 361.0
+// EXPECT: k3 = 781.0

@@ -12,5 +12,5 @@ function g(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
     | _ -> { let h :: t = a
              h * g(t, b) }
 }
-let result = g((1.0, 2.0), (5.0, 6.0))
+let result = g((Float64(1.0), Float64(2.0)), (Float64(5.0), Float64(6.0)))
 // EXPECT: result = 7.0

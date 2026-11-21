@@ -1,0 +1,14 @@
+// TEST: String Concatenation Through A Generic Wrapper Is Refused With A Span (rejects)
+// ERROR: BL3001 @ 11:5
+// ERROR-CONTAINS: argument 1 of this call is a String value
+// ============================================================================
+// R11: `f`'s parameter is left open by `x + "!"` and falls to a numeric
+// default; the instance at String handed it a String. It was refused only by
+// the post-monomorphization backstop, with no source location; now at the
+// call `f(b)`. (The direct spelling, functions/915, is accepted.)
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> x + "!"
+    f(b)
+}
+let r = outer("a")

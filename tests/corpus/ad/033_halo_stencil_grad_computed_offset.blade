@@ -8,13 +8,13 @@ import ad as ad
 // ad/030, same answers: the route is a cost decision, never a contract one.
 // ============================================================================
 type H = Idx<5>
-let one = 1
-function f(a: Array<Float like H>) -> Float = {
+let one: Int64 = 1
+function f(a: Array<Float64 like H>) -> Float64 = {
     let d = method_for(halo<H, [-1, 0, 1]>) <@> lambda(w) -> a(w(one)) - a(w(0 - one)) |> compute
     reduce(d, (+))
 }
-let a0: Array<Float like H> = [0.0, 1.0, 2.0, 3.0, 4.0]
-let mut da: Array<Float like H> = [0.0, 0.0, 0.0, 0.0, 0.0]
+let a0: Array<Float64 like H> = [0.0, 1.0, 2.0, 3.0, 4.0]
+let mut da: Array<Float64 like H> = [0.0, 0.0, 0.0, 0.0, 0.0]
 let fv = ad.grad(f)(a0, da)
 // EXPECT: fv = 6.0
 // EXPECT: da = [-1.0, -1.0, 0.0, 1.0, 1.0]

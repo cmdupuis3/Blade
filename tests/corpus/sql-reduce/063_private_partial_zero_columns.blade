@@ -1,0 +1,6 @@
+// TEST: Private Partial Map With Zero Columns Returns Each Exact Seed
+type R = Idx<2>
+type C = Idx<0>
+let M: Array<Float64 like R, C> = [[], []]
+let rows = reduce(method_for(M) <@> lambda(v: Float64) -> v * v + 1.0, (+), -7.25)
+// EXPECT: rows = [-7.25, -7.25]

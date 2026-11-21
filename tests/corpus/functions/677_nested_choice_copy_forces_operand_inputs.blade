@@ -1,0 +1,14 @@
+// TEST: Nested Choice Copy Forces Operand Inputs
+// Gap G213 (round 4 wave 8, Codex review round 4): the nested twin of
+// functions/675: the inner inline choice copies p, which forces p input d
+// under its own name, so z reads the snapshot after the write to x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let c = (p <|> p) <|> x
+let w = reduce(c, (+), 0.0)
+x(0) = 10.0
+let z = d(0)
+// EXPECT: w = 15.0
+// EXPECT: z = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

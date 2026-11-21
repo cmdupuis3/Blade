@@ -1,0 +1,6 @@
+// TEST: Selected tuple over zero input preserves both nonzero seeds
+let x: Array<Float64 like Idx<0>> = []
+let keep = mask(x, lambda(v) -> v > 0.0)
+let y = compound(x, keep)
+let result = (reduce(y, (+), 7.0), reduce(y, lambda(a, b) -> a * 10.0 + b, -2.0))
+// EXPECT: result = (7.0, -2.0)

@@ -8,8 +8,8 @@ import ad as ad
 
 type I = Idx<3>
 
-function f(p: Array<Float like I>, s: Float) -> Float = {
-    let L = object_for(lambda(x: Float) -> x * s)
+function f(p: Array<Float64 like I>, s: Float64) -> Float64 = {
+    let L = object_for(lambda(x: Float64) -> x * s)
     let m = L <@> p |> compute
     reduce(m, (+))
 }

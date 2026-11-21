@@ -4,7 +4,7 @@
 type I = Idx<12>
 type C4 = Chunked<I, 4>
 type C12 = Chunked<I, 12>
-let a: Array<Float like I> = 1.0 + 0.5 * Float64(0..12)
+let a: Array<Float64 like I> = 1.0 + 0.5 * Float64(0..12)
 let s4 = segments(C4)
 let s12 = segments(C12)
 let n4 = extents(s4)

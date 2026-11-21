@@ -1,0 +1,13 @@
+// TEST: An imported compound keeps its kept positions
+// MODULE: Data
+// Compaction fusion v2's positions census (T4b) runs per module; a compound
+// another module names (here a keyed read through the import) is a use it
+// cannot certify, so the kept-position table is built, and the importing
+// module's keyed read binary-searches it as before.
+module Data
+
+type Ix = Idx<13>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 3) % 13) |> compute
+let keep = mask(x, lambda(v) -> v > 5.5)
+let y = compound(x, keep)
+let s = reduce(y * y, (+))

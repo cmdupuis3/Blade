@@ -1,0 +1,26 @@
+// TEST: Joined legs keep signed zeros in every lane when their kernels are repro
+// ============================================================================
+// The strict signed-zero cases, on folds that are SERIAL IN EVERY BUILD: the
+// kernel `radd` is a `where repro` function, so no lane reassociates it (no
+// `omp simd reduction` in C++, no `reassoc nsz` in LLVM). Every leg is then
+// unlicensed, so the sibling-fold pass joins them in every build, and each
+// leg's chain is its own: a -0.0 seed over -0.0 cells stays -0.0, a +0.0 seed
+// gives 0.0, and the identity seed -0.0 over [0.0, -0.0, -0.0] gives
+// (-0 + 0) + -0 + -0 = 0.0 -- the arithmetic an unseeded (+) leg's
+// synthesized seed performs (tests/corpus/sibling-folds/003 runs the unseeded
+// form itself). QUOTED pins compare the printed sign; 1.0 / n_neg pins it.
+// ============================================================================
+type R = Idx<3>
+
+function radd(p: Float64, q: Float64) where repro -> Float64 = p + q
+
+let (n_neg, pos, mixed) = {
+    let zs: Array<Float64 like R> = [-0.0, -0.0, -0.0]
+    let mz: Array<Float64 like R> = [0.0, -0.0, -0.0]
+    (reduce(zs, radd, -0.0), reduce(zs, radd, 0.0), reduce(mz, radd, -0.0))
+}
+let inv = 1.0 / n_neg
+// EXPECT: n_neg = "-0.0"
+// EXPECT: pos = "0.0"
+// EXPECT: mixed = "0.0"
+// EXPECT: inv = "-inf"

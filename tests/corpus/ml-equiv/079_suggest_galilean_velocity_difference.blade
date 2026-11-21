@@ -31,13 +31,13 @@ import ml as ml
 // ============================================================================
 
 // SUGGEST: function 'slip_energy' judges boost-invariant with velocity parameter(s) uc, ub: add 'where ml.galilean(uc, ub)'
-function slip_energy(uc: Float, ub: Float) -> Float = {
+function slip_energy(uc: Float64, ub: Float64) -> Float64 = {
     let d = uc - ub
     d * d
 }
 
 // The pinned twin: the proposal, written out, and checked.
-function slip_energy_pinned(uc: Float, ub: Float) where ml.galilean(uc, ub) -> Float = {
+function slip_energy_pinned(uc: Float64, ub: Float64) where ml.galilean(uc, ub) -> Float64 = {
     let d = uc - ub
     d * d
 }

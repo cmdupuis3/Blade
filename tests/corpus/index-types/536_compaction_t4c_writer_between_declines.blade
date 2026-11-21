@@ -1,0 +1,22 @@
+// TEST: Compaction fusion T4c: a write between the companions declines the shared selection
+// `bump(c2)` writes `c2` (through a `mut` parameter) between `y1` and `y2`.
+// The shared selection would gather `y2` at `y1`, BEFORE the write; the
+// shared write analysis sees it (`blade plan`: `the shared selection (T4c)
+// declined: `w` (between `keep` and `y2`) may write ...`), so `y2` gathers
+// `c2` after the write, as written: its first kept cell is 9, never 2.
+type Ix = Idx<4>
+function bump(a: mut Array<Int64 like Ix>) -> Int64 = {
+    a(1) = 9
+    7
+}
+let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0]
+let mut c2: Array<Int64 like Ix> = [1, 2, 3, 4]
+let keep = mask(x, lambda(v) -> v > 1.5)
+let y1 = compound(x, keep)
+// EXPECT: y1 = [2.0, 3.0, 4.0]
+let w = bump(c2)
+// EXPECT: w = 7
+let y2 = compound(c2, keep)
+// EXPECT: y2 = [9, 3, 4]
+let s2 = reduce(y2, (+))
+// EXPECT: s2 = 16

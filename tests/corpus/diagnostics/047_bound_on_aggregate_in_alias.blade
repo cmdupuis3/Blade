@@ -14,7 +14,7 @@ type B = Field<min=0.0, max=1.0>
 // `B` is deliberately NOT used below: a failed registration makes every
 // annotation mentioning it a cascading BL3001, which would say nothing about
 // this rejection.
-let ok = 1
+let ok: Int64 = 1
 // ERROR: BL4003
 // ERROR-CONTAINS: type alias 'B'
 // ERROR-CONTAINS: bounds apply to primitive types, not aggregates

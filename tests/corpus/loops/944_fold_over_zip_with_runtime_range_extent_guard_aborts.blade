@@ -1,0 +1,12 @@
+// TEST: A Fold Over A Zip With A Run-Time Range Checks Its Extents (aborts)
+// Gaps G265 (c) / G209 (round 4 wave 10 lane d): the fold over a zip of a run-time range (5 cells)
+// and b (3 cells) was a C++ BL9002 (`__range0` undeclared); the range's holder is declared at the
+// operand stage and the co-iteration guard compares it with b before the first cell (BL8011).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let s = reduce(method_for(zip(0..extents(a), b)) <@> lambda(i, v) -> v + Float64(i), (+))

@@ -1,0 +1,78 @@
+// TEST: Recursive Array Step Threaded Through Its Final Map (E-G5)
+// ============================================================================
+// Wave 3 (bench gap G5; src/Optimize.fs fuseSliceWritesModule, RecStepTable;
+// BLADE_REC_STEP_OMP): a `where omp` on the inductive arm's FINAL map is the
+// step-threading request. Slice-write fusion keeps the request (a nested
+// stage map with one still declines, as before) and proves the step reads
+// only its own cell of strictly earlier rows (`prefix(n - 1)` at the cell
+// being written), so the C++ lane runs the whole time loop on ONE team with
+// fixed contiguous x ownership and no per-step synchronization; the LLVM
+// lane and the interpreter run the same sequential loop. Four consumers:
+//   stored  -- the trajectory is ALSO read after the fold (no row-fold
+//              fusion): the team runs with no fold inside, the fold after;
+//   square  -- the fused `prodsum(row, row)` row fold: licensed builds fold
+//              each worker's chunk inside the team and combine the chunks
+//              ascending per row; a strict build folds complete rows after
+//              the team, serially;
+//   plain   -- a `reduce(row, (+))` row fold: complete rows, serially,
+//              after the team (only the self-dot has an in-team form);
+//   outer   -- `where omp` on the OUTER fold kernel too: a strict build
+//              folds complete rows into slots IN PARALLEL under that request
+//              (the row-slot gate), then the time chain in order.
+// Rows: [1, 2, 4] -> [1.5, 2, 3] -> [1.75, 2, 2.5] -> [1.875, 2, 2.25]
+// (step: v * 0.5 + 1.0 through a named stage); every sum below is exact in
+// binary under any association.
+// ============================================================================
+type T = Idx<4>
+type X = Idx<3>
+
+function step(u: Array<Float64 like X>) -> Array<Float64 like X> = {
+    let k1 = u * 0.5
+    method_for(zip(u, k1)) <@> lambda(v, a) where omp(v: 1) -> a + 1.0 |> compute
+}
+
+function stored(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+)) + traj((3 : T), (0 : X))
+}
+
+function square(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), (+))
+}
+
+function plain(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> reduce(row, (+)), (+))
+}
+
+function outer(u0: Array<Float64 like X>) -> Float64 = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: s -> zero :: u0
+        | prefix :: n -> prefix :: step(prefix(n - 1))
+    reduce(method_for(traj) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+}
+
+let u0: Array<Float64 like X> = [1.0, 2.0, 4.0]
+let s = stored(u0)
+let q = square(u0)
+let p = plain(u0)
+let o = outer(u0)
+// EXPECT: s = 27.75
+// EXPECT: q = 62.140625
+// EXPECT: p = 25.875
+// EXPECT: o = 62.140625

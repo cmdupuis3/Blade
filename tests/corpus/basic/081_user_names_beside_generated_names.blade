@@ -7,14 +7,14 @@
 // error. The user name now steps aside in the emitted C++ (the reserved-word
 // convention: a trailing `_`); what prints is the Blade name, unchanged.
 // ============================================================================
-let a = [1.0, 2.0, 3.0]
-let a_extents = 5
-let a__first = 2
+let a = Float64([1.0, 2.0, 3.0])
+let a_extents: Int64 = 5
+let a__first: Int64 = 2
 let b = a + 1.0
 let b_extents = a_extents + a__first
 let x: Array<Float64 like Idx<3>> = [1.0, 2.0, 4.0]
 let S = method_for(x, x) <@> lambda(p, q) where comm(p, q) -> p * q |> compute
-let S_symm = 9
+let S_symm: Int64 = 9
 // EXPECT: a_extents = 5
 // EXPECT: a__first = 2
 // EXPECT: b = [2.0, 3.0, 4.0]

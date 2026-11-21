@@ -1,6 +1,6 @@
 // TEST: Triangular Iteration
 // Same array used twice with commutative kernel - enables triangular iteration
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x * y
 let result = L <@> f |> compute

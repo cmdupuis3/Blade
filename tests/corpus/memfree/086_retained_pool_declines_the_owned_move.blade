@@ -1,0 +1,26 @@
+// TEST: A retained pool declines the owned move
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, the owned move): `y = w` frees
+// y's previous pool and takes w's (owned-move v1) -- but the row kernel
+// `keep` stored a row VIEW of y in `saved`, so the move freed storage saved
+// still reads. A computed map whose kernel may retain the target now declines
+// the move, and the emitter honours the frame's escape facts.
+// ============================================================================
+type R = Idx<2>
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    3
+}
+function f(x: Array<Float64 like R, I>) -> Float64 = {
+    let mut y = x * 2.0 |> compute
+    let ns = method_for(y) <@> keep |> compute
+    let w = x * 5.0 |> compute
+    y = w
+    reduce(y, (+), axes = 2) + saved(0) + Float64(reduce(ns, (+)))
+}
+let x: Array<Float64 like R, I> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = f(x)
+// EXPECT: result = 119.0
+// EXPECT: saved = [8.0, 10.0, 12.0]

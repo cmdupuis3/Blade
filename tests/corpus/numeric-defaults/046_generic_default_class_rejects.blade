@@ -1,0 +1,4 @@
+// TEST: generic default literals retain their numeric class (rejects)
+function offset(x: T^0, origin: T^0 = 0.0) = x - origin
+let result = offset(Int32(1))
+// ERROR: BL3001

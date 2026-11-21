@@ -1,0 +1,10 @@
+// TEST: Join Leg Whose Fold Kernel Fails Before Its Deferred Slot Reports The Leg (aborts)
+// Gap G207 (1) (round 4 wave 7 lane d): loops/669 with the leg's FOLD KERNEL
+// failing first (cell 1, where `e` is 50: integer modulo by zero) while its
+// shared deferred slot `e` fails later (cell 7: integer division by zero).
+// Every lane reports the fold kernel's failure.
+// ABORT: integer modulo by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let (s1, s2) = object_for(<&!>) <@> (reduce(e, lambda(p, q) -> p + 7 % (q - 50), 0), reduce(e, (+)))

@@ -1,0 +1,13 @@
+// TEST: Join Leg Whose Own Operand Fails Before Its Deferred Slot Reports The Leg (aborts)
+// Gap G207 (1) (round 4 wave 7 lane d): a reduction join whose leg's OWN
+// operand fails at an earlier cell (cell 2: `10 % (i - 2)`, integer modulo by
+// zero) than the deferred operand SLOT it shares (`e`, integer division by
+// zero at cell 7). The compiled lanes run one joint traversal, cell by cell,
+// so the leg's failure comes first; the interpreter forces the slot whole
+// before the leg's traversal and must still report the leg's failure (its
+// failure-order probe compares the cells). Two distinct messages pin it.
+// ABORT: integer modulo by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let (s1, s2) = object_for(<&!>) <@> (prodsum(e, method_for(range<I>) <@> lambda(i) -> 10 % (i - 2)), reduce(e, (+)))

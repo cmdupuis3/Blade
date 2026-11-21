@@ -1,0 +1,17 @@
+// TEST: Math solve of a spectra result (math elaborates BEFORE spectra)
+// #62: math meets `sp.power(x)` still in surface form (spectra elaborates
+// later); the spectra domain's registered shapes answer it. The nested and
+// the let-bound spellings both agree with an annotated twin.
+import math as m
+import spectra as sp
+let x: Array<Float64 like Idx<4>> = [1.0, 0.0, -1.0, 2.0]
+let A: Array<Float64 like Idx<4>, Idx<4>> = [[4.0, 1.0, 0.0, 0.0], [1.0, 4.0, 1.0, 0.0], [0.0, 1.0, 4.0, 1.0], [0.0, 0.0, 1.0, 4.0]]
+let y1 = m.solve(A, sp.power(x))
+let p = sp.power(x)
+let y2 = m.solve(A, p)
+let pt: Array<Float64 like Idx<4>> = sp.power(x)
+let y3 = m.solve(A, pt)
+let d = (y1(0) - y3(0)) + (y2(3) - y3(3))
+// EXPECT: d = 0.0
+let p0 = p(0)
+// EXPECT: p0 = 4.0

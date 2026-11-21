@@ -1,0 +1,17 @@
+// TEST: Anonymous plain slot beside a compact slot is checked (aborts)
+// ============================================================================
+// Gap G192 (1), Codex design review: a read that mixes a structured slot (a
+// compact group read by its flat coordinates) with a plain one used to skip
+// the whole read. The plain slot is judged on its own -- proven or checked
+// against its static extent -- while the compact coordinates keep their own
+// discipline. Position 5 of the leading Idx<2> stops with BL8006 in every
+// lane (the sparse-key twin is pinned in emission by instance-guards).
+// ============================================================================
+let a: Array<Float64 like Idx<2>, SymIdx<2, 3>> = method_for(range<Idx<2>, SymIdx<2, 3>>) <@> lambda(i, j, k) -> Float64(i + j + k) |> compute
+let ks: Array<Int64 like Idx<2>> = [1, 5]
+let k0 = ks(0)
+let fine = a(k0, 0, 1)
+let k1 = ks(1)
+let r = a(k1, 0, 1)
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (0 .. 1)
+// ABORT: .blade:14

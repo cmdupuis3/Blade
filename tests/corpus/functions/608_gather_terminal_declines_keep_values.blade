@@ -1,0 +1,52 @@
+// TEST: Gather Terminal Declines Keep Values
+// ============================================================================
+// PM28: gathers the gather-terminal certificate DECLINES keep their stored
+// pool; the values are pinned (the decline reasons are pinned by `blade test
+// optimize`, gather_terminal_*):
+// - two_sites: two checked subscripts (two failure points: which cell trips
+//   first would decide WHICH panic text prints);
+// - overlap: the gathered array is the gather's own operand (alias overlap);
+// - spaced: a statement between the gather and its fold;
+// - int_div_fold: the fold kernel may fail (integer `/`) before the gather;
+// - mapped: the consumer is a map, not a fold (v1 admits folds only).
+// ============================================================================
+type I = Idx<5>
+type K = Idx<7>
+function two_sites(A: Array<Float64 like I>, B: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A((i : I)) + B((i : I)) |> compute
+    reduce(g, (+))
+}
+function overlap(idx: Array<Int64 like K>) -> Int64 = {
+    let g = method_for(idx) <@> lambda(i) -> idx((i : K)) |> compute
+    reduce(g, (+))
+}
+function spaced(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute
+    let c: Float64 = 3.0
+    let t = reduce(g, (+))
+    t * c
+}
+function int_div_fold(N: Array<Int64 like I>, idx: Array<Int64 like K>) -> Int64 = {
+    let g = method_for(idx) <@> lambda(i) -> N((i : I)) |> compute
+    reduce(g, lambda(a, b) -> a / 2 + b, 0)
+}
+function mapped(A: Array<Float64 like I>, idx: Array<Int64 like K>, w: Array<Float64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute
+    let h = method_for(zip(g, w)) <@> lambda(a, b) -> a * b |> compute
+    reduce(h, (+))
+}
+let A: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let B: Array<Float64 like I> = [32.0, 64.0, 128.0, 256.0, 512.0]
+let N: Array<Int64 like I> = [10, 20, 30, 40, 50]
+let idx: Array<Int64 like K> = [4, 0, 2, 2, 1, 3, 0]
+let w: Array<Float64 like K> = [1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0]
+let v_two = two_sites(A, B, idx)
+// EXPECT: v_two = 1188.0
+let v_overlap = overlap(idx)
+// EXPECT: v_overlap = 15
+let v_spaced = spaced(A, idx)
+// EXPECT: v_spaced = 108.0
+let v_int = int_div_fold(N, idx)
+// EXPECT: v_int = 41
+let v_mapped = mapped(A, idx, w)
+// EXPECT: v_mapped = 49.0

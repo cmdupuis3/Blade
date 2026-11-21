@@ -1,0 +1,7 @@
+// TEST: Private transpose keeps each original column cancellation graph
+function ordered_add(a: Float64, b: Float64) where repro -> Float64 = a + b
+type R = Idx<3>
+type C = Idx<2>
+let M: Array<Float64 like R, C> = [[1e16, 1e16], [1.0, -1e16], [-1e16, 1.0]]
+let rows: Array<Float64 like C> = reduce(transpose(M, [0, 1]), ordered_add, 0.0)
+// EXPECT: rows = [0.0, 1.0]

@@ -6,7 +6,7 @@
 // `__match_5(0L)` and g++ refused it). Now the binder is renamed apart.
 // s = A + 2 * m(0) = A + 20.
 static function shift_by(x, k) = lambda(a) -> match k with | m -> a + m * x(0)
-let m = [10.0, 20.0]
-let A = [1.0, 2.0, 3.0]
-let s = (static object_for(shift_by(m, 2.0))) <@> A |> compute
+let m = Float64([10.0, 20.0])
+let A = Float64([1.0, 2.0, 3.0])
+let s = (static object_for(shift_by(m, Float64(2.0)))) <@> A |> compute
 // EXPECT: s = [21.0, 22.0, 23.0]

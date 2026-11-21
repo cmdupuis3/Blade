@@ -1,0 +1,19 @@
+// TEST: a non-mut parameter row written by the first stage of an applied composition (rejects)
+// ERROR: BL4005 @ 13:1
+// ERROR-CONTAINS: reaches the parameter `d` of `touch`, which is not `mut`
+// REJECT-AT: lower
+// R12 (deep review; Codex review of the fix, class closure): an applied
+// composition's FIRST stage receives the applied arrays, so `poke`'s `mut`
+// parameter writes `v`, a view of the non-`mut` parameter `d`: the caller's
+// array.
+type R = Array<Float64 like Idx<3>>
+type D = Array<Float64 like Idx<2>, Idx<3>>
+let mut g: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+function poke(a: mut R) -> Float64 = { a(1) = 7.0; 0.0 }
+function plus(x: Float64) -> Float64 = x + 1.0
+function touch(d: D) -> Float64 = {
+    let mut v = d(0)
+    let p = object_for(poke) >>@ object_for(plus)
+    p <@> v |> compute
+}
+let z = touch(g)

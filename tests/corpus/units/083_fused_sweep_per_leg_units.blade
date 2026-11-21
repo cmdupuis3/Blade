@@ -13,11 +13,11 @@
 // count 4; mean 2.5 m; population variance 30/4 - 2.5^2 = 1.25 m^2.
 // ============================================================================
 Unit meters
-let x: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let x: Array<Float64<meters> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 let L = method_for(x)
-let (s, ss, n) = reduce((L <@> lambda(t) -> t) <&!> (L <@> lambda(t) -> t * t) <&!> (L <@> lambda(t) -> 1.0), (+))
-let mean: Float<meters> = s / n
-let var: Float<meters^2> = ss / n - mean * mean
+let (s, ss, n) = reduce((L <@> lambda(t) -> t) <&!> (L <@> lambda(t) -> t * t) <&!> (L <@> lambda(t) -> Float64(1.0)), (+))
+let mean: Float64<meters> = s / n
+let var: Float64<meters^2> = ss / n - mean * mean
 // EXPECT: s = 10.0
 // EXPECT: ss = 30.0
 // EXPECT: n = 4.0

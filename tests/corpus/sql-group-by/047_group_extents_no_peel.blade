@@ -46,8 +46,8 @@ let esizes = extents(egk)
 // EXPECT: esizes = [2, 3, 0]
 
 // Compound (multi-key): one bucket per distinct tuple, first-occurrence order.
-let k1 = [0, 1, 0, 1]
-let k2 = [5, 5, 6, 5]
+let k1 = Int64([0, 1, 0, 1])
+let k2 = Int64([5, 5, 6, 5])
 let cgk = group_keys(k1, k2)
 let csizes = extents(cgk)
 // EXPECT: csizes = [1, 2, 1]

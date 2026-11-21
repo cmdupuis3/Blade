@@ -12,7 +12,7 @@ let static CFG = (SH2, SH2, SH2)
 let static WTP = ml.tp_weight_dim(CFG)
 let static WL = ml.linear_weight_dim(SH2, SH2)
 
-function pipe(px: Float, py: Float, pz: Float, wtp: Array<Float like Idx<WTP>>, wl: Array<Float like Idx<WL>>) where ml.equiv(O3) -> Array<Float like Idx<3>> = {
+function pipe(px: Float64, py: Float64, pz: Float64, wtp: Array<Float64 like Idx<WTP>>, wl: Array<Float64 like Idx<WL>>) where ml.equiv(O3) -> Array<Float64 like Idx<3>> = {
     let sh = ml.y_to(2, px, py, pz)
     let t = ml.tensor_product(CFG, sh, sh, wtp)
     let g = ml.gated(SH2, t)

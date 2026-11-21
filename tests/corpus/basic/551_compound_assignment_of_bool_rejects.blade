@@ -1,0 +1,14 @@
+// TEST: a compound assignment adding a Bool (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14:
+// "true is a boolean and is not compatible without type casting"): arithmetic
+// is defined on numbers only, so the type checker refuses it before either
+// lane runs. On master 1e6a871a this printed `r = 2`.
+// ============================================================================
+function f() -> Int32 = {
+    let mut s = 1
+    s += true
+    s
+}
+let r = f()
+// ERROR: BL3001

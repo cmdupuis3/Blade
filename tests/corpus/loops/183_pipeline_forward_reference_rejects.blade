@@ -9,8 +9,8 @@
 // itself.
 // ERROR: BL2001
 // ERROR-CONTAINS: Unbound variable: inc
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let r = (object_for(inc) >>@ object_for(dbl)) <@> A |> compute
 r
-function inc(x: Float) -> Float = x + 1.0
-function dbl(x: Float) -> Float = x * 2.0
+function inc(x: Float64) -> Float64 = x + 1.0
+function dbl(x: Float64) -> Float64 = x * 2.0

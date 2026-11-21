@@ -1,0 +1,16 @@
+// TEST: a block lambda also used as a value keeps one type (rejects)
+// ERROR: BL3001 @ 13:9
+// ERROR-CONTAINS: argument 1 of 'idl'
+// D5 (deep review N9b, the user's ruling of 2026-11-14; formalism 4.3): a
+// lambda bound in a block is one monomorphic value when the block checks that
+// way; when its applications do not agree on one type it is generic in exactly
+// the types it is used at. A lambda used as a VALUE (here an
+// alias) needs one value, so it is not generalized: the refusal is the one it
+// always was, word for word.
+function f() -> Float32 = {
+    let idl = lambda(x) -> x
+    let g = idl
+    let a = idl(1)
+    idl(2.0)
+}
+let r = f()

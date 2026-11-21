@@ -1,7 +1,7 @@
 // TEST: Anon Range Linspace
 // The coordinate-axis idiom: an affine map over Float64(0..n).
-let x0 = 1.5
-let dx = 0.25
+let x0: Float64 = 1.5
+let dx: Float64 = 0.25
 let axis = x0 + dx * Float64(0..5)
 let casted = Float64(2..6)
 // EXPECT: axis = [1.5, 1.75, 2.0, 2.25, 2.5]

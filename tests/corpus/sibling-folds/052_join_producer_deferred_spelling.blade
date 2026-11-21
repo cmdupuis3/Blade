@@ -1,0 +1,18 @@
+// TEST: The deferred spelling of a join producer (S2's force) is shared as well
+// ============================================================================
+// Round 4 wave 4, E2 / ST04: `p` written WITHOUT `|> compute` in a function
+// body is forced by S2 at lowering (its readers were separate folds then);
+// once the sibling-fold pass joins them, the join-producer plan returns it
+// to the bare map and the join's shared leaf computes each cell once.
+// ============================================================================
+type I = Idx<11>
+function stats(a: Array<Float64 like I>) -> Float64 = {
+    let p = method_for(a) <@> lambda(v) -> v * v - 2.0
+    let s1 = reduce(p, (+))
+    let s2 = reduce(method_for(p) <@> lambda(v) -> v * 3.0, (+))
+    let s3 = reduce(method_for(p) <@> lambda(v) -> v * v, (+))
+    s1 + s2 + s3
+}
+let x = Float64(range<Idx<11>>) |> compute
+let r = stats(x)
+// EXPECT: r = 25289.0

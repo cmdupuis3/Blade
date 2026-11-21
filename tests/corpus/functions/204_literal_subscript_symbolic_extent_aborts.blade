@@ -4,6 +4,6 @@
 // anonymous and has no static extent, so the literal `5` was not checked at
 // compile time and read past the 3-element argument. Run-time check, BL8006.
 function at5(m: Array<Float64 like Idx<n>>) -> Float64 = m(5)
-let x = [1.0, 2.0, 3.0]
+let x = Float64([1.0, 2.0, 3.0])
 let z = at5(x)
 // ABORT: BL8006

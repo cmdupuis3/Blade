@@ -1,0 +1,26 @@
+// TEST: Gram Node Syrk Tile With Units
+// A unit-carrying operand (Float64<meter>) takes the same tile at 24 x 8 (the
+// crossover is p >= 16, k >= 4): units erase at codegen, the stored doubles are
+// contracted exactly as without them, and the result's unit (meter^2) is the type
+// system's. Values read back through a dimensionless ratio.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and partial sum
+/// is an exact integer and ANY association gives the same G -- association-invariant pins
+/// (CLAUDE.md fold policy). The route is pinned by `blade plan` (tests/OptimizeTests.fs
+/// plan_gram_node_syrk_tile*) and the arithmetic bitwise by `blade test syrk-tile`.
+Unit meter
+type V = Idx<24>
+type S = Idx<8>
+let m1: Float64<meter> = 1.0
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> (Float64((i * 7 + s * 3) % 5) - 2.0) * m1 |> compute
+    let g = gram(x, x)
+    let u2 = m1 * m1
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> (g(i, j) / u2) * (g(i, j) / u2), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i) / u2, (+))
+    (total, g(0, 0) / u2, g(23, 3) / u2, g(22, 23) / u2, trace)
+}
+// EXPECT: ss = 47106.0
+// EXPECT: g00 = 16.0
+// EXPECT: g_mirror = 15.0
+// EXPECT: g_edge = -7.0
+// EXPECT: tr = 384.0

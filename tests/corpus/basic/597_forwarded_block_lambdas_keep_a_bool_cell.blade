@@ -1,0 +1,13 @@
+// TEST: a block lambda forwarded through another keeps a Bool kernel cell
+// ============================================================================
+// R10 remainder: `f`'s open parameter is linked to `g`'s, and `g`'s to the
+// kernel's cell; the cell decides `g`'s parameter a Bool, which decides `f`'s
+// (the links settle to a fixed point, Codex review of the link form). On the
+// base both parameters fell to the Float64 default.
+// ============================================================================
+let r = {
+    let f = lambda(x) -> x
+    let g = lambda(y) -> f(y)
+    method_for([true, false]) <@> lambda(b) -> g(b) |> compute
+}
+// EXPECT: r = [true, false]

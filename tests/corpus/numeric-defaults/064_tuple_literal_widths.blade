@@ -1,0 +1,11 @@
+// TEST: tuple literal components take their parameter widths recursively
+function narrow(p: (Int32, (Float32, Int32))) = p[0] + p[1][1]
+function wide(p: (Int64, (Float64, Int64))) = p[0] + p[1][1]
+let a = narrow(((2147483647 + 1) / 2, (0.25 + 0.5, 0)))
+let b = wide(((2147483647 + 1) / 2, (0.25 + 0.5, 0)))
+// EXPECT: a = -1073741824
+// EXPECT: b = 1073741824
+function shared(p: (T, T)) = p[0] + p[1]
+let typed: Float64 = 2.0
+let c = shared((typed, 1.0))
+// EXPECT: c = 3.0

@@ -10,5 +10,5 @@
 // total = 6, called twice (n = 2, 1) before the base case.
 function total(row) = reduce(row, (+))
 function rec_sum(a, n: Int64) = if n <= 0 then 0.0 else total(a) + rec_sum(a, n - 1)
-let s = rec_sum([1.0, 2.0, 3.0], 2)
+let s = rec_sum(Float64([1.0, 2.0, 3.0]), 2)
 // EXPECT: s = 12.0

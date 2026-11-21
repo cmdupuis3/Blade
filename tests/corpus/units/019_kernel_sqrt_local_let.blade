@@ -6,20 +6,20 @@
 Unit meters
 Unit area = meters^2
 type SIdx = Idx<2>
-let S: Array<Float<area> like SIdx> = [9.0, 16.0]
+let S: Array<Float64<area> like SIdx> = [9.0, 16.0]
 let sides = method_for(S) <@> lambda(s) -> sqrt(s) |> compute
-let m: Float<meters> = 1.0
+let m: Float64<meters> = 1.0
 let probe = sides((0 : SIdx)) + m
 // EXPECT: sides = [3.0, 4.0]
 // EXPECT: probe = 4.0
 
-let X: Array<Float<meters> like SIdx> = [5.0, 7.0]
-let Y: Array<Float<meters> like SIdx> = [2.0, 3.0]
+let X: Array<Float64<meters> like SIdx> = [5.0, 7.0]
+let Y: Array<Float64<meters> like SIdx> = [2.0, 3.0]
 let sqdiff = method_for(zip(X, Y)) <@> lambda(a, b) -> {
     let d = a - b
     d * d
 } |> compute
-let ar: Float<area> = 0.0
+let ar: Float64<area> = 0.0
 let probe2 = sqdiff((1 : SIdx)) + ar
 // EXPECT: sqdiff = [9.0, 16.0]
 // EXPECT: probe2 = 16.0

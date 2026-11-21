@@ -1,0 +1,9 @@
+// TEST: Two Runtime Range Operands Evaluate Their Extents Each At Its Position
+// Gap G207 (i) (round 4 wave 8 lane d; Codex diff review round 1): the two
+// `0..n` operands are two evaluations, one before and one after the mask
+// whose predicate assigns `n`: the output is 2 x 2 x 3 in every lane (a 2 x 2 x 2 output has 8 cells).
+// EXPECT: m = [0, 1, 2, 0, 1, 2, 1, 2, 3, 1, 2, 3]
+type I = Idx<2>
+let mut n: Int64 = 2
+let d: Array<Int64 like I> = [1, 2]
+let m = method_for(0..n, mask(d, lambda(a) -> { n = 3; true }), 0..n) <@> lambda(i, b, j) -> i + j |> compute

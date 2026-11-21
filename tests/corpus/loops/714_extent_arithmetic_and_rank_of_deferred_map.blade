@@ -1,0 +1,17 @@
+// TEST: Extent Arithmetic And Rank Of Deferred Map
+// Gap G218 (round 4 wave 8): extents(d) inside arithmetic, extents through a
+// deferred alias, a range bound over extents(d) and rank(d) read the shape of
+// the deferred map d without evaluating it: d (which fails at cell 1) is
+// never forced, so nothing fails and d prints nothing.
+type I = Idx<3>
+let iv: Array<Int64 like I> = [1, 0, 2]
+let d = method_for(iv) <@> lambda(v) -> 100 / v
+let e = d
+let n = extents(d) + 1
+let m = extents(e)
+let r = reduce(0..extents(d), (+))
+let k = rank(d)
+// EXPECT: n = 4
+// EXPECT: m = 3
+// EXPECT: r = 3
+// EXPECT: k = 1

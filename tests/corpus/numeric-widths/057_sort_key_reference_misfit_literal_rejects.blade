@@ -1,0 +1,11 @@
+// TEST: a sort key referenced by name meets the cells with a literal that does not fit them (rejects)
+// ============================================================================
+// G276 (1): the sort-key twin of the mask predicate.
+// ============================================================================
+function work(x: Array<Float32 like Idx<2>>) = {
+    let k = lambda(v) -> v * 1e100
+    sort(x, k)
+}
+let a: Array<Float32 like Idx<2>> = [2.0, 1.0]
+let r = work(a)
+// ERROR: BL3020

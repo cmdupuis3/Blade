@@ -49,7 +49,7 @@
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure.
-Require Import List Arith Lia Ring.
+From Stdlib Require Import List Arith Lia Ring.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -94,7 +94,7 @@ Section Shifted.
   Lemma smom_0 : forall c xs, smom c 0 xs = Ofnat (length xs).
   Proof.
     intros c xs. unfold smom.
-    rewrite (psum_0 R r0 r1 radd rmul), map_length.
+    rewrite (psum_0 R r0 r1 radd rmul), length_map.
     reflexivity.
   Qed.
 
@@ -153,7 +153,7 @@ Section Shifted.
     intros a b c xs H.
     assert (H1 : smom c 1 xs = r0) by (rewrite smom_1, H; ring).
     pose proof (central_preserved a b c xs H1) as H2.
-    rewrite smom_1, map_length in H2.
+    rewrite smom_1, length_map in H2.
     transitivity (Psum 1 (map (Aff a b) xs) -! Ofnat (length xs) *! Aff a b c
                   +! Ofnat (length xs) *! Aff a b c); [ring|].
     rewrite H2. ring.
@@ -189,7 +189,7 @@ Section Shifted.
     = a *! a
       *! (Ofnat (length xs) *! smom c 2 xs -! smom c 1 xs *! smom c 1 xs).
   Proof.
-    intros a b c xs xs'. unfold xs'. rewrite map_length, !smom_aff.
+    intros a b c xs xs'. unfold xs'. rewrite length_map, !smom_aff.
     cbn [rpow]. ring.
   Qed.
 
@@ -233,7 +233,7 @@ Section Shifted.
       intros c xs j H1 H2. destruct j as [|j]; [lia|]. unfold qs.
       cbn [nth fst snd].
       rewrite (nth_map_lt R nat _ (seq 1 r) j r0 0)
-        by (rewrite seq_length; lia).
+        by (rewrite length_seq; lia).
       rewrite seq_nth by lia. reflexivity.
     Qed.
 
@@ -281,7 +281,7 @@ Section Shifted.
     Proof.
       intros Y hb. constructor.
       - intros u [c xs] HN. cbn [snd] in *. unfold Fs. cbn [snd].
-        unfold Fm. rewrite map_length. exact HN.
+        unfold Fm. rewrite length_map. exact HN.
       - intros u [c xs] HN. apply shifted_step. exact HN.
       - intros [c xs] HN. cbn [snd] in *. rewrite rawobs_qs by exact HN.
         reflexivity.

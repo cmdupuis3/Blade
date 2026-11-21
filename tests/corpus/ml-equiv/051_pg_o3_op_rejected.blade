@@ -16,9 +16,9 @@ let static EC = [("E", 1)]
 let static WE = ml.pg_hom_dim("C4", EC, EC)
 let static SH1 = ml.sh_spec(1)
 
-function bad(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Float like Idx<WE>>,
-             a: Float, b: Float, c: Float)
-             where ml.equiv(C4) -> Array<Float like PgIrrepsIdx<C4, EC>> = {
+function bad(x: Array<Float64 like PgIrrepsIdx<C4, EC>>, w: Array<Float64 like Idx<WE>>,
+             a: Float64, b: Float64, c: Float64)
+             where ml.equiv(C4) -> Array<Float64 like PgIrrepsIdx<C4, EC>> = {
     let sh = ml.y_to(1, a, b, c)
     ml.derive_pg_linear(C4, EC, EC, x, w)
 }

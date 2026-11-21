@@ -1,0 +1,20 @@
+// TEST: AD A Body Reading A Module Binding Spelled Like The Sort Plumbing Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 review round 4, Codex 5a8b7b7d): differentiating
+// `sort` synthesizes `__sx_<s>`, `__sp_<s>` and `__si_<s>` (GradExpand
+// expandSort) by a deterministic spelling, which shadowed the module array
+// `__sp_s` the body reads -- the jvp printed (1.0, 5.0) for (7.0, 35.0). A
+// FREE read of such a spelling is now refused (BL5501 in the jvp).
+// ============================================================================
+type I = Idx<2>
+let __sp_s: Array<Float64 like I> = [7.0, 9.0]
+function f(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x)
+    s(0) * Float64(__sp_s(0))
+}
+let a: Array<Float64 like I> = [2.0, 1.0]
+let da: Array<Float64 like I> = [3.0, 5.0]
+let r = ad.jvp(f)(a, da)
+// ERROR: BL5501
+// ERROR-CONTAINS: the sort expansion's synthesized plumbing

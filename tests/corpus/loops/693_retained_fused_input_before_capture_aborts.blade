@@ -1,0 +1,14 @@
+// TEST: a fused consumer forces its map input before the map kernel capture (aborts)
+// Gap G199 (Codex diff review round 6): p maps the deferred d with a kernel
+// capturing the deferred h (read only through extents). Both fail: d divides
+// by zero at cell 1, h takes a modulo by zero at cell 1. The input d is
+// evaluated before the capture h in every lane (the C++ order), so the first
+// failure is d's division.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let h = method_for(x) <@> lambda(v) -> 20 % v
+let p = method_for(d) <@> lambda(v) -> v + extents(h)
+let s = prodsum(p, x)
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:7

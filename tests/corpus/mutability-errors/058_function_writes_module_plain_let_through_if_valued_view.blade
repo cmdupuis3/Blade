@@ -1,0 +1,21 @@
+// TEST: a function writes a module-level plain let through an if-valued view
+// ERROR: BL4005 @ 12:1
+// ERROR-CONTAINS: a write reaches `g` through a view
+// REJECT-AT: lower
+// D9 (deep review, the user's ruling of 2026-11-14; formalism 2.7): a callable
+// that only CAPTURES a binding writes it only when it was declared `let mut`.
+// The type checker refuses the direct store (048-051, 054); a store that
+// REACHES the binding is refused at lowering, by storage provenance.
+// Both arms of the `if` are views of `g`; so is a name later REBOUND to one
+// (the walk is flow-insensitive: a name that ever holds such a view is judged
+// as one).
+let g = [[1.0, 2.0], [3.0, 4.0]]
+function f(c: Bool) -> Float32 = {
+    let v = if c then g(0) else g(1)
+    v(0) = 9.0
+    let u = [5.0, 6.0]
+    u = g(1)
+    u(1) = 8.0
+    v(0) + u(1)
+}
+let r = f(true)

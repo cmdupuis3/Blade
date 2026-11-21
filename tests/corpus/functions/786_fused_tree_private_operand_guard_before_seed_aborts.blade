@@ -1,0 +1,17 @@
+// TEST: A Fused Tree Checks Its Private Operand Extents Before The Seed (aborts)
+// Gap G249 (round 4 wave 9 lane d): a and b are dense arrays whose extents (5 and 3) are known only at run
+// time, so the checker cannot refuse their co-iteration; the walk is bounded by the first operand.
+// da is a private operand of the tree (evaluated before the seed); the mismatch precedes the seed
+// 7 % z in every lane (Codex design review).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let da = method_for(a) <@> lambda(v) -> v + 1.0
+let p = method_for(zip(da, b)) <@> lambda(u, v) -> u - v
+let q = method_for(da) <@> lambda(v) -> v + 1.0
+let z: Int64 = 0
+let (s, t) = reduce(p <&!> q, (+), Float64(7 % z))

@@ -1,0 +1,39 @@
+// TEST: Kernel Application Ownership Never Shortens A Pool Lifetime (G204)
+// Gap G204 (Codex design review): the application-owned parameter rule of
+// the LLVM kernel scope must never free storage something outside the
+// application still reads. (1) `peek` applied first at top level (its
+// parameter left in the slot tables) and then inside a kernel over a local
+// `tmp` that the kernel reads again AFTER the call: `tmp` belongs to the
+// enclosing application, never to `peek`'s. (2) A row parameter forced
+// inside a NESTED lambda application and read again after it.
+// (1): peek(big(t)) = 0 + t, reduce = 500500 t; sum over t < 7: 21 + 10510500
+// (2): per row i: (i + 0) + (i + 1) + 0.5 = 2i + 1.5, i < 3: 1.5 + 3.5 + 5.5 = 10.5
+type Big = Idx<1001>
+type Rep = Idx<7>
+type R = Idx<3>
+type C = Idx<3>
+
+function big(w: Float64) -> Array<Float64 like Big> = {
+    method_for(range<Big>) <@> lambda(i) -> Float64(i) * w |> compute
+}
+function peek(a: Array<Float64 like Big>) -> (Float64, Float64) = (a((0 : Big)), a((1 : Big)))
+
+let seed = big(1.0)
+let warm = peek(seed)
+let w0 = warm[1]
+let got1 = reduce(method_for(range<Rep>) <@> lambda(t) -> {
+    let tmp = big(Float64(t))
+    let p = peek(tmp)
+    p[0] + p[1] + reduce(tmp, (+))
+}, (+))
+
+let mat = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j)
+let got2 = reduce(method_for(mat) <@> lambda(a: Array<Float64 like C>) -> {
+    let probe = lambda(z: Float64) -> a((0 : C)) + z
+    let x = probe(0.5)
+    x + a((1 : C))
+}, (+))
+
+// EXPECT: w0 = 1.0
+// EXPECT: got1 = 10510521.0
+// EXPECT: got2 = 10.5

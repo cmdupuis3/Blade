@@ -21,7 +21,7 @@ function chain(v: Float64) -> Float64 = {
             3.0))
 }
 let r3 = chain(1.0)
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> x * y
 let squares = L <@> f

@@ -79,9 +79,7 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
             let p =
                 src
                 |> Map.map (fun _ (fd: FunctionDecl) ->
-                    { StaticEval.Name = fd.Name
-                      StaticEval.Params = fd.Params |> List.map (_.Name)
-                      StaticEval.Body = fd.Body })
+                    StaticEval.staticFuncDefOf fd)
             staticFuncProjCache <- Some (box src, p)
             p
     { Values = env.StaticValues
@@ -89,7 +87,7 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
       Functions = projected
       CalledFunctions = ref Set.empty
       ProviderRoots = Map.empty
-      Segments = Map.empty
+      Segments = Map.empty; Widths = Map.empty
       Structs = env.StructStatics }
 
 let evalStaticIntExpr (env: TypeEnv) (expr: Expr) : int option =
@@ -237,8 +235,8 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
 /// this list used to be a `match` local to `prescanTypeVarNames`, which is
 /// still the only consumer of the predicate below.
 let builtinScalarNames : string list =
-    [ "Int"; "Int32"; "Int64"
-      "Float"; "Float32"; "Float64"; "Double"
+    [ "Int32"; "Int64"
+      "Float32"; "Float64"
       "Complex64"; "Complex128"
       "Bool"; "Void"; "Nat"; "String"; "Char"
       "Poly"; "Array" ]
@@ -258,8 +256,8 @@ let isBuiltinScalar (name: string) : bool = Set.contains name builtinScalarSet
 /// question (which bases OWN a unit slot) and is not interchangeable.
 let isConcreteTypeBaseName (name: string) : bool =
     match name with
-    | "Int" | "Int32" | "Int64"
-    | "Float" | "Float32" | "Float64" | "Double"
+    | "Int32" | "Int64"
+    | "Float32" | "Float64"
     | "Complex64" | "Complex128"
     | "Bool" | "Void" | "Nat" | "String" | "Char"
     | "Poly" | "Array" | "Dist" -> true
@@ -412,12 +410,17 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 | None when isIntBase ->
                     // `Nat<LatIdx>` -- the explicit spelling of what
                     // elemTypeForIterationIndex produces for `range<LatIdx>`.
+                    // The definition's own name is its IDENTITY (D11: an
+                    // imported `Cell` is `Geo.Cell`), the scope key only how
+                    // this module spells it.
                     match lookupTypeDef argName env with
-                    | Some (TDIIndexType _) ->
-                        IRTIdxTagged (taggedInner, IRefNamed argName)
-                    | Some (TDIEnumIdx (_, _, values, _)) ->
+                    | Some (TDIIndexType (ident, _, _)) ->
+                        IRTIdxTagged (taggedInner, IRefNamed ident)
+                    | Some (TDIEnumIdx (ident, _, values, _)) ->
                         IRTIdxTagged (IRTScalar (EnumValue.underlyingElemType values),
-                                      IRefNamed argName)
+                                      IRefNamed ident)
+                    | None when env.AmbiguousTypes.ContainsKey argName ->
+                        raise (TypeErrorRaised (AmbiguousImport ("type", argName, env.AmbiguousTypes.[argName]), None))
                     | _ -> baseType
                 | None -> baseType  // not a unit, ignore
             | [TyUnitExpr ue] ->
@@ -444,9 +447,9 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | _ -> baseType
         let tryResolveUnitArg baseType args = tryResolveTagArg baseType baseType args
         match name with
-        | "Int" | "Int32" -> tryResolveUnitArg (IRTScalar ETInt32) args
+        | "Int32" -> tryResolveUnitArg (IRTScalar ETInt32) args
         | "Int64" -> tryResolveUnitArg (IRTScalar ETInt64) args
-        | "Float" | "Float64" | "Double" -> tryResolveUnitArg (IRTScalar ETFloat64) args
+        | "Float64" -> tryResolveUnitArg (IRTScalar ETFloat64) args
         | "Float32" -> tryResolveUnitArg (IRTScalar ETFloat32) args
         | "Complex64" -> tryResolveUnitArg (IRTScalar ETComplex64) args
         | "Complex128" -> tryResolveUnitArg (IRTScalar ETComplex128) args
@@ -485,21 +488,25 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             | Some (TDIAlias resolvedTy) -> resolvedTy
             | Some (TDIStruct (n, _, _, _)) -> IRTNamed n
             | Some (TDIVariant (n, _, _)) -> IRTNamed n
-            | Some (TDIIndexType _) ->
+            | Some (TDIIndexType (ident, _, _)) ->
                 // Aliased index type in value position (function param,
                 // struct field, let-binding annotation, etc.). Under Option C
                 // this lowers to IRTIdxTagged (int64, IRefNamed name) -- an
-                // int64 tagged by the index type's nominal name. The codegen
+                // int64 tagged by the index type's nominal name (its
+                // IDENTITY, D11). The codegen
                 // emits `using <name> = int64_t;` so the C++ type carries
                 // the alias for documentation; runtime backing is still int.
-                IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
-            | Some (TDIEnumIdx (_, _, values, _)) ->
+                IRTIdxTagged (IRTScalar ETInt64, IRefNamed ident)
+            | Some (TDIEnumIdx (ident, _, values, _)) ->
                 // Same shape, but the underlying type follows the values
                 // list (all-string -> ETString, else ETInt64). The C++
                 // typedef emitted alongside resolves the alias to the
                 // matching primitive.
                 let underlying = EnumValue.underlyingElemType values
-                IRTIdxTagged (IRTScalar underlying, IRefNamed name)
+                IRTIdxTagged (IRTScalar underlying, IRefNamed ident)
+            | None when env.AmbiguousTypes.ContainsKey name ->
+                // Two imports declare it and this module does not (D11).
+                raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
                 // elsewhere in this declaration), bare T means T^0 (scalar).
@@ -834,11 +841,11 @@ and lowerElemType env ty : IRType =
     match ty with
     | TyNamed (name, []) ->
         match lookupTypeDef name env with
-        | Some (TDIIndexType _) ->
-            IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
-        | Some (TDIEnumIdx (_, _, values, _)) ->
+        | Some (TDIIndexType (ident, _, _)) ->
+            IRTIdxTagged (IRTScalar ETInt64, IRefNamed ident)
+        | Some (TDIEnumIdx (ident, _, values, _)) ->
             let underlying = EnumValue.underlyingElemType values
-            IRTIdxTagged (IRTScalar underlying, IRefNamed name)
+            IRTIdxTagged (IRTScalar underlying, IRefNamed ident)
         | _ -> lowerTypeExpr env ty   // struct, sum, alias, type variable, etc.
     | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ ->
         // Raw index type syntax in element position (e.g., Array<Idx<3> like ...>).
@@ -1239,6 +1246,8 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                    Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
                    Kind = SDimension; Dependencies = [] }
              | Error why -> raise (TypeErrorRaised (ConstrainedDomainRefused (name, why), None)))
+        | None when env.AmbiguousTypes.ContainsKey name ->
+            raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
         | _ ->
             { Id = id; Rank = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; IxKind = ixKindOfTag (Some name); Kind = SDimension; Dependencies = [] }
@@ -1268,10 +1277,10 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                               (match arr.ElemType with
                                | IRTScalar ETBool -> ()
                                | other ->
-                                   raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has element type {ppIRType other}", Some "BL3001")))
+                                   raise (TypeErrorRaised (TypeMismatchErr $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has element type {ppIRType other}", Some "BL3001")))
                               arr.IndexTypes |> List.sumBy (_.Rank)
                           | other ->
-                              raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has type {ppIRType other}", Some "BL3001")))
+                              raise (TypeErrorRaised (TypeMismatchErr $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has type {ppIRType other}", Some "BL3001")))
                      IRVar (vi.VarId, vi.Type), rank
                  | None -> lowerExtentExpr env maskExpr, 1)
             | _ -> lowerExtentExpr env maskExpr, 1
@@ -1288,7 +1297,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         let source, rank =
             match resolveSparseKeysSource env keysExpr with
             | Ok sr -> sr
-            | Error msg -> raise (TypeErrorRaised (Other msg, None))
+            | Error msg -> raise (TypeErrorRaised (IndexTypeErr msg, None))
         { Id = id; Rank = rank; Extent = IRSparseKeys source
           Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
           Kind = SDimension; Dependencies = [] }
@@ -1675,20 +1684,20 @@ let private multiAxisShapeClash (shape0: IRIndexType list) (rest: IRArrayType li
 /// record the walk will actually use. Reports the first offender (1-based).
 ///
 /// Three obligations, in this order, because that is decreasing severity:
-///   1. Packing (`indexPackingCoIterable`) -> BL3999, the band this function's
+///   1. Packing (`indexPackingCoIterable`) -> BL3027, the band this function's
 ///      other structural refusals already use. No walk exists at all.
 ///   2. Extent, LITERAL vs LITERAL only -> BL3016 (`ZipExtentMismatch`). The
 ///      walk exists and is out of bounds. Checked BEFORE names so that
 ///      `I8 + I2` reports the memory-safety fact rather than the naming one.
 ///      A symbolic extent reads `.extents[d]` at runtime and keeps the
 ///      historical looseness -- the same rule `kernelExtentClash` follows.
-///   3. Nominal identity (`indexNamesCoIterable`) -> BL3999. The walk is
+///   3. Nominal identity (`indexNamesCoIterable`) -> BL3027. The walk is
 ///      in-bounds; the operands just are not over the same index space.
 ///
 /// Only the HEAD is compared. A rank-2 operand zipped with a rank-1 one takes
-/// this arm too (`minRank <= 1`), and there the shared record is the leading
-/// one; the trailing records are the kernel's business, trimmed by its slice
-/// rank in buildApplyInfo.
+/// this arm too (`minRank <= 1`); when every record is plain dense the caller
+/// then refuses the rank mismatch (gap G99: neither lane co-iterates the
+/// leading axis of operands of different ranks).
 let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
     match arrayTypes with
     | [] | [_] -> None
@@ -1703,7 +1712,7 @@ let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
                 | [] -> None
                 | h :: _ ->
                     if not (indexPackingCoIterable h0 h) then
-                        Some (Other ($"co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over {(ppIndexType h0)} and operand {pos} is over {(ppIndexType h)}. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."))
+                        Some (IndexSpaceErr ($"co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over {(ppIndexType h0)} and operand {pos} is over {(ppIndexType h)}. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."))
                     else
                         match tryEvalIntIR h0.Extent, tryEvalIntIR h.Extent with
                         | Some e0, Some e when e0 <> e -> Some (ZipExtentMismatch (pos, e0, e))
@@ -1719,7 +1728,7 @@ let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
                                 // sentinels) comes back unchanged, so this is
                                 // the old text for everything that is not a
                                 // provider axis.
-                                Some (Other (sprintf
+                                Some (IndexSpaceErr (sprintf
                                         "co-iteration operands are over DIFFERENT index types: operand 1 is indexed by '%s' and operand %d by '%s'. A named index type carries provenance, so two of them do not interoperate merely by having the same extent (%s) -- that is what makes a subscript bounds-safe by construction. Index one of them through the other's space, or drop the annotation on one operand if they really are the same axis (an UNNAMED index co-iterates with either).%s"
                                         (displayTagName (defaultArg h0.Tag "?")) pos
                                         (displayTagName (defaultArg h.Tag "?")) (ppExtentOf h0.Extent)
@@ -1748,9 +1757,43 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             // reached g++ as invalid C++.
             match zipHeadClash arrayTypes with
             | Some e when minRank > 0 -> Error e
-            | _ -> Ok (if minRank > 0 then [shape0.Head] else [])
+            | _ ->
+            // RANK AGREEMENT (gap G99, round 4 wave 4): plain dense operands
+            // of DIFFERENT ranks (`zip(A, t)`, A over (R, C), t over R) have
+            // no shared index space -- the walk is over every axis of its
+            // operands, and the lower-rank one has no cells on the extra
+            // axes. Neither lane co-iterated the leading axis (a lambda kernel
+            // was typed rank-1 and stored a row into a scalar cell; a named
+            // row kernel emitted the OUTER product), so it is refused here,
+            // for every spelling that reaches the zip (method_for(zip(..)),
+            // a let-bound zip, a join leg). Grouped, ragged and dependent
+            // records keep their own rules. G113 (round 4 wave 5 lane c): a
+            // PACKED symmetric or a COMPOUND / sparse head took the old
+            // single-record arm and paired each cell with a whole row of the
+            // higher-rank operand (`zip(S, M)`, M over (SymIdx<2, I>, K); a
+            // compound with trailing dims beside its rank-1 twin): both lanes
+            // stored a row into a scalar cell (invalid C++, BL9002). Refused
+            // the same way.
+            let maxRank = arrayTypes |> List.map (_.IndexTypes.Length) |> List.max
+            let refusableRecord (ix: IRIndexType) =
+                isPlainDenseIx ix
+                || (ix.IxKind = IxKPlain && ix.Symmetry <> SymNone)
+                || ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic || ix.IxKind = IxKSparse
+            let allRefusable = arrayTypes |> List.forall (fun at -> at.IndexTypes |> List.forall refusableRecord)
+            if minRank > 0 && maxRank > minRank && allRefusable then
+                let shapeOf (at: IRArrayType) = at.IndexTypes |> List.map ppIndexType |> String.concat ", "
+                let hi = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = maxRank)
+                let lo = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = minRank)
+                let (a, b) = (min hi lo, max hi lo)
+                let at (i: int) = arrayTypes.[i]
+                Error (IndexSpaceErr
+                    ($"co-iteration operands must have the SAME rank: operand {a + 1} is over ({shapeOf (at a)}) (rank {(at a).IndexTypes.Length}) "
+                     + $"and operand {b + 1} over ({shapeOf (at b)}) (rank {(at b).IndexTypes.Length}). A zip walks every axis of its operands as ONE index space, "
+                     + "and the lower-rank operand has no cells on the extra axes. To pair each row of the higher-rank operand with one cell of the lower-rank one, "
+                     + "iterate the shared leading axis and read both: `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`."))
+            else Ok (if minRank > 0 then [shape0.Head] else [])
         elif not (rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)) then
-            Error (Other (multiAxisShapeClash shape0 rest))
+            Error (IndexSpaceErr (multiAxisShapeClash shape0 rest))
         elif isGroupedRaggedShape shape0 then
             // All operands grouped: the ragged member axis is NOT a product
             // axis, so this is not the plain-dense product rule -- the rows
@@ -1759,7 +1802,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
             // same-keys operands (checked by the caller).
             Ok shape0
         elif not (coIterableRecords shape0) then
-            Error (Other "co-iteration spans one index record per operand (dense rank-1 or packed symmetric), or a product of plain-dense records; mixed dense/packed multi-axis shapes are not supported")
+            Error (IndexSpaceErr "co-iteration spans one index record per operand (dense rank-1 or packed symmetric), or a product of plain-dense records; mixed dense/packed multi-axis shapes are not supported")
         else
             Ok shape0
 
@@ -1781,9 +1824,9 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
     let inner = lowerIndexType env 0 innerTy
     // One slot from one flat per-axis offset set.
     let slotOfInts (offsets: int list) : TypeResult<IRIndexType> =
-        if List.isEmpty offsets then Error (Other "halo<...>: offsets array must be non-empty")
+        if List.isEmpty offsets then Error (HaloFormErr "halo<...>: offsets array must be non-empty")
         elif inner.Rank <> 1 then
-            Error (Other "halo<...>: the inner index must be rank-1 (n-D = per-axis offset arrays [[..],[..],..] or separate range<halo<..>, ..> slots)")
+            Error (HaloFormErr "halo<...>: the inner index must be rank-1 (n-D = per-axis offset arrays [[..],[..],..] or separate range<halo<..>, ..> slots)")
         else
         let offCsv = offsets |> List.map string |> String.concat ","
         match inner.Extent with
@@ -1828,7 +1871,7 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
                     Tag = Some $"__halowin|d:{innerName}|{offCsv}"
                     IxKind = IxKPlain }
     match evalStaticValueExpr env offsetsExpr with
-    | Error msg -> Error (Other $"halo<...>: offsets must be a compile-time int array ({msg})")
+    | Error msg -> Error (HaloFormErr $"halo<...>: offsets must be a compile-time int array ({msg})")
     | Ok sv ->
         let asInt = function StaticEval.SVInt n -> Some (int n) | _ -> None
         match sv with
@@ -1859,8 +1902,8 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
                         | Error e, _ -> Error e
                         | _, Error e -> Error e) (Ok [])
                 else
-                    Error (Other "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
-        | _ -> Error (Other "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
+                    Error (HaloFormErr "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
+        | _ -> Error (HaloFormErr "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
 
 
 // ---------------------------------------------------------------------------
@@ -1906,8 +1949,11 @@ let resolveRaggedLensSource (env: TypeEnv) (lengths: IRExpr) : RaggedLensSource 
     // than falling through to RlRuntime: a negative row length is nonsense,
     // and reporting it as "the lens disagrees with the literal" beats "the
     // lens is not compile-time", which sends the reader after the wrong fix.
-    let ofTypedValue (te: TypedExpr) =
+    let rec ofTypedValue (te: TypedExpr) =
         match te.Kind with
+        // Explicit array casts retain a checked value boundary. A materialized
+        // integer literal underneath is still a compile-time lens.
+        | TExprCompute inner -> ofTypedValue inner
         | TExprArrayLit (rows, _) ->
             rows
             |> List.map (fun e ->

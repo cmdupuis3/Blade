@@ -1,0 +1,24 @@
+// TEST: A deferred producer over the argument stored externally retains it
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m6): `saved = method_for(a) <@> ..`
+// stores a map over the argument in a module mut. Not a reproducing member
+// in the C++ lane at the base (the assignment materializes the map into the
+// module storage; ASan-clean before and after): a regression pin.
+// ============================================================================
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = method_for(a) <@> lambda(v) -> v * 2.0
+    3
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let n = keep(y)
+    let z = x * 3.0 |> compute
+    reduce(z, (+)) + Float64(n)
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let s = f(x)
+let result = reduce(saved, (+))
+// EXPECT: s = 21.0
+// EXPECT: result = 24.0

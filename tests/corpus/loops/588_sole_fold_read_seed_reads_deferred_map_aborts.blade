@@ -1,0 +1,20 @@
+// TEST: Sole Fold Read Seed Reads Deferred Map (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60 (b), a NESTED deferred dependency with competing failures: c's only
+// reader is a fold inside a kernel whose SEED reads another deferred map h,
+// and both producers fail (c at cell 2, h at cell 1). The llvm lane's fusion
+// certificate audits the kernel and seed with the deferred facts, so a seed
+// reading the unforced h is not certified and c is stored first: c's BL8013
+// (at c's declaration) is the first failure, in every lane.
+// ----------------------------------------------------------------------------
+type X = Idx<3>
+let A: Array<Int64 like X> = [1, 1, 0]
+let B: Array<Int64 like X> = [1, 0, 1]
+let c = method_for(A) <@> lambda(x) -> 10 / x
+let h = method_for(B) <@> lambda(x) -> 10 / x
+type W = Idx<2>
+let ws: Array<Int64 like W> = [1, 2]
+let out = ws <@> lambda(w) -> w * reduce(c, (+), h((0 : X))) |> compute
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:12

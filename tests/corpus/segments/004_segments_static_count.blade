@@ -7,6 +7,6 @@ type CI = Chunked<I, 4>
 let static nseg = length(segments(CI))
 // EXPECT: nseg = 3
 type G = Idx<nseg>
-let ones = method_for(range<G>) <@> lambda(g) -> 1 |> compute
+let ones = method_for(range<G>) <@> lambda(g) -> Int64(1) |> compute
 let total = reduce(ones, (+))
 // EXPECT: total = 3

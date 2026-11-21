@@ -1,0 +1,60 @@
+{
+  "fusedchain": {
+    "smoke": {"checksum": 46.304649681954004, "input_checksum": 10027.016977054533, "sizes": {"n": 20011}},
+    "full": {"checksum": 4640.8912101863234, "input_checksum": 999516.0866920664, "sizes": {"n": 2000003}}
+  },
+  "onepass": {
+    "smoke": {"checksum": 1122911.4825406745, "input_checksum": 50086.33482095506, "sizes": {"n": 50021}},
+    "full": {"checksum": 112257923.88880093, "input_checksum": 4998570.4046063777, "sizes": {"n": 5000011}}
+  },
+  "stencil": {
+    "smoke": {"checksum": 1832.4204836448714, "input_checksum": 636.53345707757398, "sizes": {"ny": 31, "nx": 41}},
+    "full": {"checksum": 4998019.714731697, "input_checksum": 1502700.6994861355, "sizes": {"ny": 1501, "nx": 2003}}
+  },
+  "recur": {
+    "smoke": {"checksum": 2729.7354831553357, "input_checksum": 211.4869475774467, "sizes": {"nt": 11, "nx": 211}},
+    "full": {"checksum": 5495637.6753438096, "input_checksum": 20054.033954109065, "sizes": {"nt": 301, "nx": 20011}}
+  },
+  "maskagg": {
+    "smoke": {"checksum": 50009.275003391587, "input_checksum": 30049.359229410999, "sizes": {"n": 30011}},
+    "full": {"checksum": 1664272.5647455021, "input_checksum": 999324.11850266997, "sizes": {"n": 1000003}}
+  },
+  "dot": {
+    "smoke": {"checksum": 7442.4875710150263, "input_checksum": 29915.989193804096, "sizes": {"n": 30011}},
+    "full": {"checksum": 749475.14871274936, "input_checksum": 2998681.6774427094, "sizes": {"n": 3000017}}
+  },
+  "saxpy": {
+    "smoke": {"checksum": 36580.347055559563, "input_checksum": 19956.494551840704, "sizes": {"n": 20011}},
+    "full": {"checksum": 3663229.5836644014, "input_checksum": 1998718.3312928942, "sizes": {"n": 2000003}},
+    "control": {"checksum": 1282345.8203146306, "input_checksum": 699698.1910344502, "sizes": {"n": 700001}}
+  },
+  "band": {
+    "smoke": {"checksum": 325.09985348018768, "input_checksum": 105.74347378872335, "sizes": {"n": 211, "w": 5}},
+    "full": {"checksum": 34804.507020600446, "input_checksum": 10027.016977054533, "sizes": {"n": 20011, "w": 101}},
+    "narrow": {"checksum": 33262.059213556364, "input_checksum": 10027.016977054533, "sizes": {"n": 20011, "w": 11}}
+  },
+  "twofir": {
+    "smoke": {"checksum": 6305.2538380402657, "input_checksum": 10027.016977054533, "sizes": {"n": 20011}},
+    "full": {"checksum": 627080.78547036019, "input_checksum": 999516.0866920664, "sizes": {"n": 2000003}}
+  },
+  "tensorop": {
+    "smoke": {"checksum": 48998954.10306979, "input_checksum": 1510.839869080577, "sizes": {"n1": 11, "n2": 13, "n3": 17}},
+    "full": {"checksum": 2495355625970968.5, "input_checksum": 449401.4694633875, "sizes": {"n1": 89, "n2": 97, "n3": 101}}
+  },
+  "haloadjoint": {
+    "smoke": {"checksum": 931.84702902803338, "input_checksum": 994.20763162942603, "sizes": {"n": 1013}},
+    "full": {"checksum": 982246.50221908255, "input_checksum": 999284.5857284111, "sizes": {"n": 1000003}}
+  },
+  "hashjoin": {
+    "smoke": {"checksum": 966472222, "input_checksum": 156236, "sizes": {"n": 211, "m": 101, "k": 41}},
+    "full": {"checksum": 2251884269, "input_checksum": 2115829, "sizes": {"n": 2003, "m": 1009, "k": 401}}
+  },
+  "groupagg": {
+    "smoke": {"checksum": 1883737.6264091765, "input_checksum": 15174677.619158197, "sizes": {"n": 30011, "ngroups": 1009}},
+    "full": {"checksum": 1984333478.124723, "input_checksum": 504658603.05295414, "sizes": {"n": 1000003, "ngroups": 1009}}
+  },
+  "groupagg_dyn": {
+    "smoke": {"checksum": 1883737.6264091772, "input_checksum": 119932843430.61916, "sizes": {"n": 30011, "ngroups": 1009}},
+    "full": {"checksum": 1984333478.1247227, "input_checksum": 3988492455286.0527, "sizes": {"n": 1000003, "ngroups": 1009}}
+  }
+}

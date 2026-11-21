@@ -12,7 +12,7 @@ function mk(v: Float64) -> (Float64, Float64) = {
 let (x, y) = mk(3.0)
 let sum = x + y
 let arr = {
-    let base = 5.0
+    let base: Float64 = 5.0
     [base, base + 1.0]
 }
 // EXPECT: x = 3.0

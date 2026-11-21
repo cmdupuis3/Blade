@@ -1,0 +1,23 @@
+// TEST: Equijoin Named Spelling Declines
+// ----------------------------------------------------------------------------
+// The NAMED spelling of the same join (the research's R4 sketch): the key
+// equality pool, its mask and the payload pool are let-bound arrays, and every
+// named array stays stored (the bench protocol's output rule), so no N x M
+// representation can disappear. The hash join declines it by name; the values
+// are the inline spelling's (001).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let equal_keys = method_for(left_key, right_key) <@> lambda(l, r) -> l == r |> compute
+let keep = mask(equal_keys, lambda(e) -> e)
+let products = method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r |> compute
+let matched = compound(products, keep)
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [20, 40, 30, 30]
+// EXPECT: match_count = 4
+// EXPECT: total = 120

@@ -73,6 +73,72 @@ let blasFlavor () : BlasFlavor =
         | "openblas" -> FlavorOpenBlas
         | _ -> FlavorGeneric
 
+/// BLADE_BLAS_PREFER: who serves a contraction that BOTH a native Blade
+/// kernel and the configured BLAS library can serve, when the BLAS gate is
+/// on. Today that is the same-array `comm` row contraction and the
+/// `gram(A, A)` node at shapes the packed syrk tile takes (real f64, literal
+/// extents above `packedTriWorth`) -- no other native kernel preempts a
+/// library route. Read through `Toolchain.getWithOrigin`, so the env var wins
+/// and `blade.toolchain.json` (key spelled the same) is the per-machine
+/// setting `blade setup` persists:
+///
+///   unset / `auto`  -> `native`, unless the library is IDENTIFIED as MKL
+///                      (BLADE_BLAS_FLAVOR=mkl -- the setting an MKL build
+///                      already needs for its headers, so the identity is
+///                      reliable), then `library`. No other library is
+///                      identified: OPENBLAS_DIR / BLADE_BLAS_LINK name a
+///                      path, not a vendor, and guessing from it would not be
+///                      honest. Not a measured rule -- the bench measured
+///                      OpenBLAS only (the tile beat it, bench gap G28).
+///   `native`        -> the native kernel where it is eligible (the default).
+///   `library`       -> the library for every shape it serves, even where a
+///                      native kernel exists (`blas` is accepted as a spelling).
+///   anything else   -> read as `auto`, and the plan line says so.
+///
+/// With the gate off the preference is moot: the native kernel (or Blade's
+/// loops) is the only arm. Separate from BLADE_SYRK_TILE, which turns the
+/// tile itself on and off (`0` sends eligible shapes to the library with the
+/// gate on, and to the per-cell nest with it off). A FUNCTION, read per call;
+/// it changes the emission, so the exe cache keys on it for free.
+type BlasPreference =
+    | PreferNative
+    | PreferLibrary
+
+/// The resolved preference, with what `blade plan` reports: the setting as
+/// normalized, its source, and how `auto` (or a stray spelling) resolved.
+type BlasPreferenceDecision =
+    { Prefer: BlasPreference
+      /// "auto" | "native" | "library"
+      Setting: string
+      /// "env BLADE_BLAS_PREFER" | "blade.toolchain.json" | "default"
+      Source: string
+      /// Why `auto` resolved as it did, or the stray spelling read as auto.
+      Detail: string }
+
+let blasPreference () : BlasPreferenceDecision =
+    let (raw, source) =
+        match Toolchain.getWithOrigin "BLADE_BLAS_PREFER" with
+        | Some (v, Toolchain.FromEnv) -> (Some v, "env BLADE_BLAS_PREFER")
+        | Some (v, Toolchain.FromFile) -> (Some v, "blade.toolchain.json")
+        | None -> (None, "default")
+    let decide (prefer: BlasPreference) (setting: string) (detail: string) : BlasPreferenceDecision =
+        { Prefer = prefer; Setting = setting; Source = source; Detail = detail }
+    let resolveAuto (note: string) : BlasPreferenceDecision =
+        match blasFlavor () with
+        | FlavorMkl -> decide PreferLibrary "auto" (note + "the library is identified as MKL (BLADE_BLAS_FLAVOR=mkl): library preferred")
+        | _ -> decide PreferNative "auto" (note + "the library is not identified as MKL: native kernels preferred where eligible")
+    match raw |> Option.map (fun v -> v.Trim().ToLowerInvariant()) with
+    | None | Some "" | Some "auto" -> resolveAuto ""
+    | Some "native" -> decide PreferNative "native" ""
+    | Some ("library" | "blas") -> decide PreferLibrary "library" ""
+    | Some other -> resolveAuto $"unrecognized value '{other}' read as auto; "
+
+/// One line for `blade plan`: `BLADE_BLAS_PREFER=<setting> (<source>) -> <side>[: detail]`.
+let describeBlasPreference (d: BlasPreferenceDecision) : string =
+    let side = match d.Prefer with PreferNative -> "native" | PreferLibrary -> "library"
+    let detail = if d.Detail = "" then "" else $": {d.Detail}"
+    $"BLADE_BLAS_PREFER={d.Setting} ({d.Source}) -> {side}{detail}"
+
 /// Resolve the tier. Deliberately CHEAP -- a handful of env/file lookups and
 /// no filesystem probing -- because the gates below are consulted from
 /// codegen's per-node routing decisions. The filesystem half (locating the
@@ -84,13 +150,13 @@ let blasFlavor () : BlasFlavor =
 /// (a test's use-guard, a hand-run) silently ineffective. Every consultation
 /// re-reads.
 let resolveBlasTier () : BlasTier =
-    let gate = Toolchain.get "BLADE_BLAS" |> Option.map _.Trim().ToLowerInvariant()
+    let gate = Toolchain.parseSwitch (Toolchain.get "BLADE_BLAS")
     match gate with
-    | Some "0" | Some "off" -> TierOff
+    | Toolchain.SwitchOff -> TierOff
     | _ ->
         if (Toolchain.get "BLADE_BLAS_LINK").IsSome then TierExplicit
         elif (Toolchain.get "OPENBLAS_DIR").IsSome then TierOpenBlasDir
-        elif gate = Some "1" || gate = Some "on" then TierSystem
+        elif gate = Toolchain.SwitchOn then TierSystem
         else TierOff
 
 /// The BLAS availability gate -- the single source of truth, consulted by
@@ -232,9 +298,7 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
 /// CONTRACTIONS. A program can want either without the other.
 let cublasAvailable () : bool =
     not (reproScopeActive ())
-    && (match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
-        | "1" | "on" -> true
-        | _ -> false)
+    && Toolchain.envFlag "BLADE_CUBLAS" false
 
 // Backend mode
 
@@ -814,6 +878,37 @@ let recordRoute (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (res
             { Rule = "blas-routing"; Version = 1; Span = span
               Subject = subject; Outcome = outcome; Evidence = evidence }
 
+/// A route the library COULD take that Blade's own packed tile preempts
+/// (`CodeGenExprSupport.syrkTilePreferredOverBlas`, under the native
+/// `blasPreference`): recorded as a declined route naming the entry point it
+/// passed over and the preference with its source, so `blade plan` shows the
+/// choice and the two ways back (BLADE_BLAS_PREFER=library keeps the tile
+/// available for the gate-off build; BLADE_SYRK_TILE=0 turns it off).
+let recordTilePreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) (pref: BlasPreferenceDecision) : unit =
+    if Blade.Effects.Decisions.active () then
+        Blade.Effects.Decisions.record
+            { Rule = "blas-routing"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Declined "Blade's packed syrk tile preferred over host ?syrk (no dense staging; BLADE_BLAS_PREFER=library or BLADE_SYRK_TILE=0 routes it to the library)"
+              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"passed over: {entry}"; shape
+                           describeBlasPreference pref ] }
+
+/// The converse: a shape the packed tile WOULD take, routed to the library
+/// because the preference says so. Two records -- the route, applied, with
+/// the preference as evidence; and the tile, declined, saying why -- so the
+/// plan reads the same from either rule.
+let recordLibraryPreferred (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (entry: string) (shape: string) (pref: BlasPreferenceDecision) : unit =
+    if Blade.Effects.Decisions.active () then
+        let why = describeBlasPreference pref
+        Blade.Effects.Decisions.record
+            { Rule = "blas-routing"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Applied
+              Evidence = [ $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"; $"HostBlas: {entry}"
+                           $"tier {resolveBlasTier ()}"; why ] }
+        Blade.Effects.Decisions.record
+            { Rule = "microkernel"; Version = 1; Span = span; Subject = subject
+              Outcome = Blade.Effects.Declined $"packed syrk tile skipped for the library: {why}"
+              Evidence = [ "packed syrk tile"; shape ] }
+
 /// A shape that is NOT a BLAS route at all (mixed precisions, a non-dense
 /// layout): recorded as a declined route so the plan says why the loop ran.
 let recordUnroutable (span: Blade.Ast.Span) (subject: string) (what: string) (why: string) : unit =
@@ -926,7 +1021,7 @@ let classifyGramApply (a: IRExpr) (b: IRExpr) (x: IRExpr) : (LinAlgCall * LinAlg
 /// transposes. The first-class intrinsic's only classification.
 ///
 /// Only the `d` instance is reachable: `TypeCheck.inferMatmul` requires
-/// Float64 elements at the SURFACE (BL3999), so a f32/complex/int call never
+/// Float64 elements at the SURFACE (BL3007), so a f32/complex/int call never
 /// gets here. The precision generalisation below is a backstop that keeps
 /// this classifier honest if the surface is ever widened -- but widening it
 /// is a LANGUAGE decision (what should `matmul` mean for complex operands:
@@ -1132,6 +1227,14 @@ let private denseBlasArrayOfRank (rank: int) (t: IRArrayType) : Precision option
     elif List.length t.IndexTypes <> rank then None
     elif not (t.IndexTypes |> List.forall isPlainDenseAxis) then None
     else precisionOf t.ElemType
+
+/// A real f64 operand of exactly two ordinary dense axes (non-virtual): the
+/// row skeleton `blade_pgemm::dsyrk_tri` reads (`X.data[i]` = row i, n
+/// contiguous samples). The gram NODE's BLAS-off arm asks this before
+/// handing its operand to the packed-triangle tile; units erase at codegen, so
+/// a `Float64<u>` element answers yes.
+let isDenseRealF64Rank2 (t: IRArrayType) : bool =
+    denseBlasArrayOfRank 2 t = Some PrecD
 
 /// A rank-1 f64 operand that is only ever READ elementwise -- never iterated
 /// as a loop level and never peeled. `IxKIrreps` is admitted HERE and nowhere
@@ -1553,6 +1656,173 @@ let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                                Precision = prec
                                PackedTriangularResult = true }
                  | _ -> None)
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
+// (|RowContraction|_|) -- the antisym pair and the rank-3 simplex, for the tiles
+
+/// The two same-array row contractions BEYOND syrk that Blade's own packed
+/// tiles compute (blade_tiles.h; drivers `blade_pgemm::dantisym_tri` and
+/// `blade_pgemm::dsym3_tri`). Matched as ORDERED ARITHMETIC, never as a
+/// normalised signed sum: the subtraction, its operand order and each
+/// prodsum's operand order are exactly the ones below, or the match declines.
+type RowContractionShape =
+    /// `prodsum(a(cx), b(cy)) - prodsum(b(cx), a(cy))` over `method_for(Z, Z)`
+    /// with `where anticomm(a, b)`: Z a dense rank-3 (p, c, n) array, the
+    /// output Blade's STRICT packed triangle (AntisymIdx<2, p>, no diagonal).
+    /// P = sum_s Z(i, cx, s) Z(j, cy, s) and Q = sum_s Z(j, cx, s) Z(i, cy, s),
+    /// each one ascending chain, the subtraction once after both.
+    | AntiPair of cx: int64 * cy: int64
+    /// `prodsum(a, b, c)` over `method_for(X, X, X)` with `where comm(a, b, c)`:
+    /// X a dense rank-2 (p, n) array, the output the packed SymIdx<3, p>
+    /// simplex. The operands are the peels of levels 0, 1, 2 IN THAT ORDER, so
+    /// the serial chain's first product `a * b` reads only the two OUTER
+    /// levels and can be formed once per (i, j) prefix (the W panel) --
+    /// `prodsum(c, a, b)` would make it read the inner level and declines.
+    | Sym3
+
+type RowContraction = {
+    Shape: RowContractionShape
+    /// The one input array (both / all three slots name it).
+    ArrayName: string
+    /// The output (the nest's own materialized pool).
+    OutputName: string
+    /// The kernel's own trailing scalar, applied to each FINISHED cell (never
+    /// folded into an operand, never a reciprocal).
+    Scale: NestScale option
+}
+
+/// A component subscript `a(c)` on a peeled fiber with a LITERAL c (the
+/// stacked-inputs spelling `a((0 : Comp))`), answered as (fiber var, c).
+let private componentPeel (e: IRExpr) : (IRId * int64) option =
+    let rec lit (x: IRExpr) =
+        match x with
+        | IRLit (IRLitInt v) -> Some v
+        | IRUnaryOp (IRCast _, inner) -> lit inner
+        | _ -> None
+    match e with
+    | IRIndex (IRVar (id, _), [ ix ], _) -> lit ix |> Option.map (fun c -> (id, c))
+    | IRCurry (IRVar (id, _), ix, 1) -> lit ix |> Option.map (fun c -> (id, c))
+    | _ -> None
+
+/// The scalar-tail peel for the row-contraction tiles: `body`, `body / d`,
+/// `body * s` or `s * body`, where the scale is a literal, a plain variable, or
+/// a numeric CAST of one (`/ Float64(n)`, the moment kernels' spelling). A
+/// cast is admitted HERE and not in `ProdSumScaled` because the BLAS route's
+/// post-pass is pinned to that peel; the tile drivers divide each finished
+/// cell in place, which is the same operation whatever renders the divisor.
+let private (|ScaledBody|) (e: IRExpr) : IRExpr * NestScale option =
+    let rec scalarOk (s: IRExpr) =
+        (match s with
+         | IRLit (IRLitFloat _) | IRLit (IRLitFloat32 _) | IRLit (IRLitInt _) | IRVar _ -> true
+         | IRUnaryOp (IRCast (ETFloat64, _), (IRVar _ | IRLit _)) -> true
+         | _ -> false)
+        && (match typeOf s with
+            | IRTScalar ETFloat64 -> true
+            | _ -> false)
+    match e with
+    | IRBinOp (_, IRDiv, b, d, _) when scalarOk d -> (b, Some (ScaleDiv d))
+    | IRBinOp (_, IRMul, b, s, _) when scalarOk s && not (scalarOk b) -> (b, Some (ScaleMul s))
+    | IRBinOp (_, IRMul, s, b, _) when scalarOk s && not (scalarOk b) -> (b, Some (ScaleMul s))
+    | _ -> (e, None)
+
+/// THE MATCH. Every structural check `(|BlasL3|_|)` makes, re-stated for the
+/// two shapes (no fold wrapper / chunk, `nestModeOk`, one physical dense f64
+/// input in every slot, levels over the same extent of the same axis, the
+/// exact compact output group of the same extent, peels identified by
+/// `ArrayPosition` and `ParamVarId`), then the ordered kernel body. Precision
+/// is f64 only (the tiles are binary64 vector extensions). A scale that reads a
+/// kernel parameter is not a scale (it would vary per cell) and declines.
+///
+/// NO LICENCE IS CONSULTED and none is needed: the tiles keep every cell's
+/// operation sequence (one ascending chain per prodsum, the subtraction or the
+/// scale once on the finished value), so the match is the same in the default
+/// and the BLADE_FP_REPRO=1 build.
+let (|RowContraction|_|) ((streamedCount, operandTypes, cg): int * IRArrayType list * LoopNestCodeGen)
+        : RowContraction option =
+    if cg.FoldWrapper.IsSome || cg.FoldChunk.IsSome || cg.ShareDecl.IsSome then None
+    elif not (nestModeOk streamedCount cg) then None
+    else
+    let isKernelParam id = cg.KernelParams |> List.exists (fun (p: IRParam) -> p.VarId = id)
+    let scaleOk (scale: NestScale option) =
+        match scale with
+        | Some (ScaleDiv (IRVar (id, _))) | Some (ScaleMul (IRVar (id, _)))
+        | Some (ScaleDiv (IRUnaryOp (_, IRVar (id, _)))) | Some (ScaleMul (IRUnaryOp (_, IRVar (id, _)))) ->
+            not (isKernelParam id)
+        | _ -> true
+    let outGroup (rank: int) (sym: SymmetryClass) (extent: IRExpr) =
+        match cg.OutputType with
+        | ArrayElem outTy ->
+            not outTy.IsVirtual
+            && precisionOf outTy.ElemType = Some PrecD
+            && (match outTy.IndexTypes with
+                | [ ix ] ->
+                    ix.Rank = rank
+                    && ix.Symmetry = sym
+                    && ix.IxKind = IxKPlain
+                    && ix.Dependencies.IsEmpty
+                    && extentsAgree ix.Extent extent
+                    && (match ix.Tag with Some t -> not (isKindSentinelTag t) | None -> true)
+                | _ -> false)
+        | _ -> false
+    let peelOk (rank: int) (aName: string) (pos: int) (e: ElementBinding) =
+        (match e.Virtual with RealArray -> true | _ -> false)
+        && e.ArrayPosition = pos
+        && e.ArrayName = aName
+        && e.ArrayRank = rank
+        && e.DimIndex = 0
+        && precisionOf e.ArrayElemType = Some PrecD
+        && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)
+    let sameAxis (l0: LoopIndexBinding) (l: LoopIndexBinding) =
+        l.FusedRank.IsNone
+        && l.ExtentArrayRef = l0.ExtentArrayRef
+        && l.ExtentDimRef = l0.ExtentDimRef
+        && extentsAgree l0.Extent l.Extent
+    match cg.Bindings, cg.InputArrayNames, operandTypes with
+    // ---- the antisym pair: two levels, the STRICT triangle ----
+    | [ l0; l1 ], [ aName; bName ], [ aTy; bTy ]
+        when aName = bName
+             && l0.BoundDependencies.IsEmpty && l0.StrictOffset = 0 && l0.FusedRank.IsNone
+             && l1.BoundDependencies = [ 0 ] && l1.StrictOffset = 1
+             && sameAxis l0 l1
+             && denseBlasArrayOfRank 3 aTy = Some PrecD
+             && denseBlasArrayOfRank 3 bTy = Some PrecD
+             && outGroup 2 SymAntisymmetric l0.Extent ->
+        match l0.Elements, l1.Elements with
+        | [ e0 ], [ e1 ] when peelOk 3 aName 0 e0 && peelOk 3 aName 1 e1 && e0.ParamVarId <> e1.ParamVarId ->
+            let (ScaledBody (body, scale)) = cg.KernelExpr
+            match body with
+            | IRBinOp (_, IRSub, IRProdSum [ pa; pb ], IRProdSum [ qa; qb ], _) when scaleOk scale ->
+                match componentPeel pa, componentPeel pb, componentPeel qa, componentPeel qb with
+                | Some (v1, cx), Some (v2, cy), Some (v3, cx'), Some (v4, cy')
+                    when v1 = e0.ParamVarId && v2 = e1.ParamVarId
+                         && v3 = e1.ParamVarId && v4 = e0.ParamVarId
+                         && cx = cx' && cy = cy' && cx >= 0L && cy >= 0L ->
+                    Some { Shape = AntiPair (cx, cy); ArrayName = aName
+                           OutputName = cg.OutputName; Scale = scale }
+                | _ -> None
+            | _ -> None
+        | _ -> None
+    // ---- the rank-3 simplex: three levels, the inclusive simplex ----
+    | [ l0; l1; l2 ], [ aName; bName; cName ], [ aTy; bTy; cTy ]
+        when aName = bName && bName = cName
+             && l0.BoundDependencies.IsEmpty && l0.StrictOffset = 0 && l0.FusedRank.IsNone
+             && l1.BoundDependencies = [ 0 ] && l1.StrictOffset = 0
+             && Set.ofList l2.BoundDependencies = Set.ofList [ 0; 1 ] && l2.StrictOffset = 0
+             && sameAxis l0 l1 && sameAxis l0 l2
+             && [ aTy; bTy; cTy ] |> List.forall (fun t -> denseBlasArrayOfRank 2 t = Some PrecD)
+             && outGroup 3 SymSymmetric l0.Extent ->
+        match l0.Elements, l1.Elements, l2.Elements with
+        | [ e0 ], [ e1 ], [ e2 ]
+            when peelOk 2 aName 0 e0 && peelOk 2 aName 1 e1 && peelOk 2 aName 2 e2
+                 && e0.ParamVarId <> e1.ParamVarId && e1.ParamVarId <> e2.ParamVarId
+                 && e0.ParamVarId <> e2.ParamVarId ->
+            let (ScaledBody (body, scale)) = cg.KernelExpr
+            match body with
+            | IRProdSum [ IRVar (a, _); IRVar (b, _); IRVar (c, _) ]
+                when a = e0.ParamVarId && b = e1.ParamVarId && c = e2.ParamVarId && scaleOk scale ->
+                Some { Shape = Sym3; ArrayName = aName; OutputName = cg.OutputName; Scale = scale }
             | _ -> None
         | _ -> None
     | _ -> None

@@ -1,0 +1,11 @@
+// TEST: a nested function taking the sine of a Bool (rejects)
+// ============================================================================
+// R10 remainder: a nested generic function's intrinsic operand demand
+// (GONumericOperand, recorded whatever InLambdaBody says) is judged at its call,
+// spanned; the base refused it only at the post-mono IRValidate backstop.
+// ============================================================================
+let r = {
+    function f(x) = sin(x)
+    f(true)
+}
+// ERROR: BL3007 @ 8:7

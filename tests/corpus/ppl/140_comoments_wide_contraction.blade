@@ -1,0 +1,33 @@
+// TEST: Comoments Wide Contraction
+import ppl as ppl
+// A WIDE order-2 block: 44 variables is past the point where the fused
+// power-sum sweep can be compiled at all -- d(d+1)/2 = 990 accumulators in
+// one tuple join blow g++'s template instantiation depth (near d = 41). An
+// array asked only for order-2 moments/comoments spells its pair block as a
+// gram instead, so width is bounded only by storage.
+// Data is exact in binary: x(i, t) = i + t/4, so every cell is exact and
+// the pins are closed-form rather than oracle-copied.
+//   cov_ij = Var(t/4) = 5/64 for EVERY (i, j) -- the rows differ by a
+//            constant shift, so they are perfectly correlated with equal spread.
+//   raw_00 = E[(t/4)^2] = (0 + 1 + 4 + 9) / 64 = 0.21875
+let X: Array<Float64 like Idx<44>, Idx<4>> = method_for(range<Idx<44>>, range<Idx<4>>) <@> lambda(i: Int64, t: Int64) -> Float64(i) + 0.25 * Float64(t) |> compute
+let c2 = ppl.comoments(X, 2)
+// packed lex cells: (0,0) is the variance of row 0, (0,1) the first cross
+// term, and the last cell (43,43) the variance of the final row.
+let c_00 = c2(0)
+let c_01 = c2(1)
+let c_last = c2(989)
+// the raw block over the same rows
+let m2 = ppl.moments(X, 2)
+let raw_00 = m2(0)
+
+// The gram route takes the CENTERED rows' contraction, so it keeps the central
+// pool's guarantee: at a mean of 1e8 both centered rows are [-1, 0, 1] and the
+// covariance is exactly 2/3, not the 2 that raw E[xy] - E[x]E[y] gives.
+let B: Array<Float64 like Idx<2>, Idx<3>> = [[100000000.0, 100000001.0, 100000002.0], [1.0, 2.0, 3.0]]
+let cb = ppl.comoments(B, 2)
+// EXPECT: c_00 = 0.078125
+// EXPECT: c_01 = 0.078125
+// EXPECT: c_last = 0.078125
+// EXPECT: raw_00 = 0.21875
+// EXPECT: cb = [0.6666666666666666, 0.6666666666666666, 0.6666666666666666]

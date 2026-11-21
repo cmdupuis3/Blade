@@ -1,0 +1,27 @@
+// TEST: Fold Ring Partial Fold Vector
+// ============================================================================
+// PM35: the default partial fold `reduce(traj, (+))` of a rank-2 trajectory is
+// a row map (one row sum per step): with the trajectory ringed, each row's sum
+// is stored right after the row is written; only the 301-vector of sums is
+// stored, not the 301 x 7 history. The vector is then read as any array.
+// ============================================================================
+type T = Idx<301>
+type X = Idx<7>
+
+function decay(r: Array<Float64 like X>) -> Array<Float64 like X> = r * 0.997 + 0.001
+
+function trace(u0: Array<Float64 like X>) -> (Float64, Float64, Float64) = {
+    let rec traj: Array<Float64 like T, X> =
+        match traj with
+        | zero -> zero
+        | zero :: k -> zero :: u0
+        | prefix :: n -> prefix :: decay(prefix(n - 1))
+    let tr = reduce(traj, (+))
+    (tr(0), tr(150), reduce(tr, (+)))
+}
+
+let u: Array<Float64 like X> = [1.0, 0.5, 0.25, 0.125, 0.1, 0.2, 0.3]
+let (first, middle, all) = trace(u)
+// EXPECT: first = 2.475
+// EXPECT: middle = 2.42360291338937
+// EXPECT: all = 730.439905456159

@@ -13,5 +13,5 @@ function packprod(A: Poly<T^0>) -> T^0 = {
         head * packprod(tail)
       }
 }
-let result = packprod(2.0, 3.0, 4.0)
+let result = packprod(Float64(2.0), Float64(3.0), Float64(4.0))
 // EXPECT: result = 24.0

@@ -11,7 +11,7 @@ type J = Idx<3>
 
 let neg2 = lambda(x) -> 0.0 - 2.0 * x
 
-function f(a: Array<Float like J>) -> Float = {
+function f(a: Array<Float64 like J>) -> Float64 = {
     let m = neg2 <$> a |> compute
     reduce(m, (+))
 }

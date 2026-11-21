@@ -1,0 +1,10 @@
+// TEST: a bare extent read does not force, a kernel capture of the same map does (aborts)
+// Gap G218 with G214 (round 4 wave 8): the statement-level extents(d) reads
+// the shape only; the map kernel that captures d (reading only extents(d))
+// is a capture, which forces d under its own name before the traversal, so
+// d's division by zero fails there.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let n = extents(d)
+let s = reduce(method_for(x) <@> lambda(v) -> v + extents(d), (+), 0)
+// ABORT: BL8013

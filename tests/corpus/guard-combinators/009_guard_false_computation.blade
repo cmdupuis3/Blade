@@ -2,7 +2,7 @@
 // guard(false, L <@> f) |> compute — output should be zeroed.
 // Baseline for test156: establishes that the IRGuard codegen wraps a
 // non-Reynolds kernel with the predicate correctly.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A)
 let f = lambda(x) -> x + 10.0
 let cond = false

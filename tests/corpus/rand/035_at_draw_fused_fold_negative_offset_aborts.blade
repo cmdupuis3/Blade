@@ -1,0 +1,17 @@
+// TEST: Rand Indexed: a fused addressed draw keeps its guard before the fold (aborts)
+// ABORT: error[BL8001]
+// ABORT: sample offset
+// ============================================================================
+// PM47 (round 4 wave 4 B6): with the draw's map fused into its fold, the
+// range guards still run first, in their order: a negative run-time offset is
+// refused before any sample is drawn, exactly as the stored form refuses it.
+// ============================================================================
+import rand as r
+
+function chunk_sum(o: Int64) -> Float64 = {
+    let u = r.uniform_at(5, 1, o, 4)
+    let s = reduce(u, (+))
+    s
+}
+let start: Int64 = 2 - 3
+let t = chunk_sum(start)

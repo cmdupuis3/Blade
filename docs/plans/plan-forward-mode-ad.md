@@ -5,8 +5,8 @@ array-literal adjoint fix; F1 parity jvp + BL5501 + `ad-jvp/` corpus; F2
 forward-only extensions incl. units; F3 composition — HVP via
 `ad.jvp(ad.grad(f))` with depth-indexed tangent prefixes, and
 `ad.jvp(ad.jvp(f))`; the sqrt F0.7 unit fix cherry-picked). F4
-(combinators) remains future work — the per-combinator spec draft is the
-companion plan. Originally written 2026-08-15 against master `db83e85`;
+(combinators) LANDED on master in #38 (`0240bc78`, 2026-08-17), executing the
+companion plan `plan-ad-combinators.md`. Originally written 2026-08-15 against master `db83e85`;
 file:line cites below reflect that baseline, not the executed state.
 Prior art: the retired future plan §2.1 (forward mode as "DComp, tangent
 propagation") — never implemented; its vocabulary appears nowhere else in the
@@ -46,7 +46,7 @@ What forward mode buys that reverse mode cannot:
 
 ```blade
 import ad as ad
-function f(x: Float, w: Array<Float like Idx<3>>) -> Float = ...
+function f(x: Float64, w: Array<Float64 like Idx<3>>) -> Float64 = ...
 
 let (fv, df) = ad.jvp(f)(x0, w0, 1.0, [0.0, 0.0, 0.0])   // seed dx=1, dw=0
 let j = ad.jvp(f)                                          // binding form, free
@@ -114,7 +114,7 @@ let j = ad.jvp(f)                                          // binding form, free
   the `registryEntries` list (Diagnostics.fs:224-230) **and** a phase arm at
   :296-310 — the match defaults unlisted BL55xx codes to `PhElaborate "ml"`,
   which would mislabel every jvp error. Reject pins carry `// ERROR: BL5501`
-  + `// ERROR-CONTAINS:` (the bare-code-only pins in ad/007/008 are a
+  + `// ERROR-CONTAINS:` (the bare-code-only pins in ad/007/152 are a
   weakness not to inherit).
 
 ## 4. Stage ladder

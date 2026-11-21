@@ -1,0 +1,14 @@
+// TEST: prodsum over a sparse array with scalar keys is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a sparse array
+// ============================================================================
+// R13 (deep review): prodsum walks each operand as a dense rank-1 buffer.
+// Over a compound selection or a sparse array -- tabulated storage, at any
+// element type and in any position -- it was a g++ rejection (BL9002) after
+// `check` said OK. It is refused in the type checker, keyed on the operand's
+// STORAGE class (prodsumUnbuiltStorage), naming the fold that is built.
+// ============================================================================
+let static S = [2, 0, 1]
+let da: Array<Float64 like Idx<3>> = [2.0, 3.0, 4.0]
+let a = sparse(da, S)
+let r = prodsum(a, a)

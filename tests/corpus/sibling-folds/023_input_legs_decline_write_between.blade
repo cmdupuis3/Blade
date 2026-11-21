@@ -1,0 +1,26 @@
+// TEST: An intervening write to a leg's operand keeps the legs out of the producer's loop
+// ============================================================================
+// `bump(x)` writes x (a `mut` parameter) BETWEEN the producer and the legs.
+// The sibling join still forms (nothing writes between its legs), but riding
+// y2's loop would read x before the write: the epilogue-legs admission
+// declines (an intervening binding may write, by the shared write analysis),
+// and the legs see x(0) = 50.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function bump(a: mut Array<Float64 like Ix>) -> Float64 = {
+    a((0 : Ix)) = 50.0
+    0.0
+}
+let (s, t) = {
+    let mut x = inputs(7)
+    let y = inputs(5)
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let z = bump(x)
+    (s, reduce(x, (+)) + reduce(y, (+)) + z)
+}
+// EXPECT: s = 31021.0
+// EXPECT: t = 5057.0

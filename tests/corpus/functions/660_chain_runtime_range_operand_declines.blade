@@ -1,0 +1,11 @@
+// TEST: Deferred Chain To Fold Over A Run-Time Range Operand
+// Round 4 wave 7 (the B3 class-closure round of BLADE_COMPUTE_ELIDE=chain,
+// Codex): p maps a range of RUN-TIME extent (0..n, n a variable). The chain
+// arm used to read p in the fold nest, where the range descriptor was never
+// declared (invalid C++ under the opt-in arm); it declines such a range. Same
+// value in every build.
+let n = 3
+let p = method_for(0..n) <@> lambda(i) -> Int64(i) + 1
+let q = method_for(p) <@> lambda(v) -> v * v
+let r = reduce(q, (+), 0)
+// EXPECT: r = 14

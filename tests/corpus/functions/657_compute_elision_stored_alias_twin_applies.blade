@@ -1,0 +1,14 @@
+// TEST: compute elision still applies when the producer reads a stored array
+// Gap G98's stored twin of functions/656: `w` is a FORCED copy of the map, so
+// a read of `w(i)` runs nothing and the producer x is total -- compute
+// elision fuses x into the fold (no pool).
+type I = Idx<9>
+let z: Array<Int64 like I> = [3, 1, 2, 5, 4, 4, 7, 8, 9]
+let d = method_for(range<I>) <@> lambda(i) -> Float64(100 / z(i))
+let w = d |> compute
+let r = {
+    let x = method_for(range<I>) <@> lambda(i) -> w(i) * 2.0 |> compute
+    let s = reduce(x, (+))
+    s
+}
+// EXPECT: r = 580.0

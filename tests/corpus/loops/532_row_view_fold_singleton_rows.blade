@@ -1,0 +1,20 @@
+// TEST: Row View Fold Singleton Rows
+// Gap G51 (round 3, A2): one-cell rows (X = Idx<1>), 262147 of them -- enough
+// inner steps for the repro row-slot gate. An UNSEEDED fold of a one-cell row
+// is that cell itself (no addition: the licensed arm emits row[0], never
+// row[0] + an empty sum), and a SEEDED one is seed + cell exactly once.
+//   unseeded: sum_i u(i, 0);   seeded: 262147 * 0.25 + sum_i u(i, 0), from 1.0
+type Y = Idx<262147>
+type X = Idx<1>
+let (view, nested, view_seeded, nested_seeded) = {
+    let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 3 + j) % 13) * 0.5 - 3.0 |> compute
+    let a = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let b = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+)), lambda(p, q) where omp -> p + q, 0.0)
+    let c = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), (+), 0.25), lambda(p, q) where omp -> p + q, 1.0)
+    let d = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(method_for(range<X>) <@> lambda(j) -> u(i, j), (+), 0.25), lambda(p, q) where omp -> p + q, 1.0)
+    (a, b, c, d)
+}
+// EXPECT: view = -4.5
+// EXPECT: nested = -4.5
+// EXPECT: view_seeded = 65533.25
+// EXPECT: nested_seeded = 65533.25

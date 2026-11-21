@@ -102,10 +102,11 @@ tdim_extent ::= literal | input.extent(dim) | tdim_extent op tdim_extent
 Base types: `Int32/Int64/Float32/Float64/Complex64/Complex128`. Conversions
 are EXPLICIT: a scalar type name in call position is a numeric cast —
 `Float32(x)`, `Float64(extents(a))`, `Complex128(r)` — a plain-call
-intrinsic, shadowable like `abs`/`complex`, with the type-position aliases
-included (`Int` casts to Int32, `Float`/`Double` to Float64). Legal
+intrinsic, shadowable like `abs`/`complex`. Only bit-sized names exist in
+type and cast position: the width-less `Int`, `Float` and `Double` are
+refused with a steer (BL1004), as `True` / `False` are (BL1003). Legal
 conversions: int↔int, int→float, int→complex, float↔float, float→complex,
-complex↔complex, and the identity; units ride through unchanged. Refused
+complex↔complex, bool→any numeric (1 / 0), and the identity; units ride through unchanged. Refused
 (BL3019): a complex source into a real/int target — which real is meant is
 exactly what the cast cannot say; project with `real`/`imag`/`abs`/`arg` —
 and a float source into an int target unless the rounding is visible at the
@@ -141,11 +142,43 @@ the `reduce(row, (+))` of a `row: T^1` -- so an Int64 row's sum plus `0.5` is
 refused at the call; a body that means Float64 arithmetic converts first,
 `Float64(reduce(row, (+))) + 0.5`.
 
+**Arithmetic is defined on numbers only** (user ruling 2026-11-14). A Bool
+is not a number, and neither is a String, a struct, a sum-type value, a
+tuple, a function or the unit value: `+ - * / % ^`, the outer forms `[+]`
+`[*]`, negation, compound assignment (`s += b`), a builtin arithmetic fold
+(`reduce(m, (+))`), `prodsum` and the math intrinsics refuse such an operand
+-- or an array of them, a mask included -- in every position, and so does a
+comparison of one with a number (`true == 1`, `"a" < 2`); BL3001 (BL3007 for
+an intrinsic). The one arithmetic operator a non-number takes is `+` between
+two Strings, which joins them; two Bools, two Strings or two tuples still
+compare with each other. A Bool is not a number; convert it explicitly with a
+numeric cast: `Int64(b)` / `Float64(b)` is 1 / 0 (1.0 / 0.0, and `(1.0, 0.0)`
+for a complex target), element by element over a mask (`Float64(m)`), so
+`reduce(Int64(m), (+))` counts a mask's true cells. The logical
+operators mirror the rule: `!`, `&&` and `||` take Bools only (`!1` and
+`1 && 2` are BL3001, as `if 1 then ..` already was). A generic body is judged
+per instance: `function inc(x) = x + 1` refuses `inc(true)` at the call (a
+nested generic function or a block lambda used at several types too), and an
+instance with no element class (a struct, a tuple, a function) is judged on
+its full type. No argument is ever converted through a parameter left open: a
+lambda's parameter its body does not decide takes its call's argument type, a
+Bool, a String, a struct, a sum-type value or an index value included
+(`{ let idl = lambda(x) -> x; idl(true) }` is `true`), so the body's arithmetic
+is judged on it; a tuple or a function argument there is refused at the
+argument (annotate the parameter). An argument still open at the call (a
+kernel's cell) decides the parameter the same way once it is decided a
+non-number; a NUMERIC argument decided only later leaves the parameter to its
+default width (an open finding of R10: a deferred constraint would give it the
+argument's width).
+
 **Arithmetic semantics — one contract, every lane.** The compiled program
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
 (`src/EmitLlvm.fs` + `src/cpp/blade_llvm_shim.c`) and compile-time static
 evaluation compute the same value, or fail with the same code (a `let static`
-fold refuses at compile time instead):
+fold refuses at compile time instead) -- with one stated exception: a
+default build is FAST, and the floating-point ROUNDING of a compiled program
+may differ from the other lanes where the C++ compiler fuses `a * b + c`
+(see "Fast by default" below):
 
 | Operation | Result |
 |---|---|
@@ -153,13 +186,23 @@ fold refuses at compile time instead):
 | Int `/` `%` | truncate toward zero. A zero divisor PANICS **BL8013** (`integer division by zero` / `integer modulo by zero`). `MIN / -1` wraps to `MIN` and `MIN % -1` is `0` (C++ UB, an x86 trap, a .NET exception — defined here) |
 | Int `^` Int | EXACT, wrapping like `*` (square-and-multiply modulo 2ʷ); `0 ^ 0 = 1`; a negative exponent PANICS **BL8013** (`integer power with a negative exponent`) — convert to Float64 first for a real power |
 | Real or complex `^` Int | the exponent is NOT converted: the power is the BASE's type, computed by repeated squaring over a 64-bit exponent in one fixed order (libgcc's `__powidf2`, libstdc++'s `pow(complex, int)`: start at `x` for an odd exponent, else 1; each later set bit multiplies in the running square). A negative exponent is the reciprocal of the positive power, `1 / x^|n|` -- no panic (`2.0 ^ -2` is `0.25`; `2.0 ^ -1074` is `1 / ∞ = 0.0`). Float32 / Complex64 evaluate in double / Complex128 and round once. Never libm `pow`, so the value is exact-order IEEE arithmetic every lane (and a compile-time fold) reproduces bit for bit |
-| Real `^` Real | `x * x` when the exponent is exactly 2.0, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double. An Int base beside a floating exponent promotes like any mix (BL3020 for a non-literal base) |
+| Real `^` Real | `x * x` when the exponent is exactly 2.0, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double. An integer base beside a floating exponent is refused (BL3020), whether literal or variable; write a float base or convert it explicitly |
 | float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
 | Int64 → Int32 cast | wraps (two's complement) |
 | transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
 | complex transcendental intrinsics (`exp log sqrt sin cos tan sinh cosh tanh asin acos atan` on a complex operand) and complex `^` | the PLATFORM C library's complex functions (`cexp clog csqrt csin ccos ctan csinh ccosh ctanh casin cacos catan cpow` — libmingwex's on Windows), computed AT RUN TIME under the same barrier, so a constant operand and a run-time one agree bit for bit. Complex `^` a floating or complex exponent (an integer one squares, above) is libstdc++'s algorithm over those functions: complex ^ complex is `cpow`; complex ^ real is `pow(re, y)` for a positive real base, else `polar(exp(y · log(z).re), y · log(z).im)`; real ^ complex is `polar(pow(x, w.re), w.im · log(x))` for `x > 0`, else `cpow`. A Complex64 operand is evaluated by the Complex128 function and each component rounded once to Float32 |
 | `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
+| Float32 `+` `-` `*` `/` (and every Float32 operation above) | ONE float32 rounding per operation in every lane -- the C++ lane's `float`, the LLVM lane's `f32`, the interpreter's float32, a `let static` fold -- never a double intermediate (`fma` of three Float32s is `fmaf`, one rounding of the exact `a * b + c`) |
+| Complex `*` `/` | Complex128: libgcc's `__muldc3` / `__divdc3` (the naive product with Annex-G NaN recovery, Smith's scaled division). Complex64: Blade's OWN float algorithms, each operation one float32 rounding -- `(ac - bd) + (ad + bc)i`, and Smith's division (no NaN recovery); a real divided by a Complex64 is the division of `(s, 0)`, while `+` `-` and a real times a complex are componentwise. (A builtin `(*)` fold over Complex64 cells is emitted as C++'s own `complex<float>` product, the same four products and two sums, which keeps libstdc++'s Annex-G recovery when both parts come out NaN -- the one recorded difference; every `/` goes through Blade's division.) `abs` / `arg` of a Complex64 evaluate over the Complex128 widening (the magnitude rounded once to Float32) |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
+
+NaN payloads and signalling state are outside the contract. Every lane prints
+every NaN as `nan`; the provider boundary refuses a NaN in both directions
+(BL8015); no Blade operation or intrinsic distinguishes a signalling NaN from a
+quiet one, and none can construct one. A compiler rewrite may therefore insert
+an identity operation on a fold's chain (`-0.0 + x`, `1.0 * x`), which is
+bit-exact for every finite, infinite, signed-zero and quiet-NaN value and would
+only quiet a signalling NaN.
 
 A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) that
 names the faulting operator's source position (`  --> file:line`) and the
@@ -179,6 +222,8 @@ the libm functions are declared `const` under a non-builtin name
 (`blade_libm::`, `src/cpp/blade_runtime.hpp`), so a loop-invariant call is
 still hoisted — only the fold is gone.
 
+**Allocation failure is an environment outcome (rule R0, user decision 2026-11-08; gap G194).** The failure contract -- the same code at the same site, the FIRST failure of the as-written evaluation order -- is judged over environments in which every form of a program obtains every allocation it requests. An allocation the machine cannot satisfy (`std::bad_alloc`, reported as **BL8005** with no source position) is an outcome of the environment, like a full disk or a killed process, not of the program and its inputs: whether it happens depends on the memory available, the allocator's retained capacity and what else runs, none of which the program states. So an optimizer form may add, remove, resize or reorder allocations relative to the as-written evaluation -- a streamed read may move after an output allocation, a chunk cache may be allocated before the first read, a stored temporary may disappear -- and a BL8005 may then occur, not occur, or occur before a different failure than in the as-written form. Every PROGRAM-determined failure keeps its exact site and order in every form: the panics of the table above (BL8013, BL8014), checked reads (BL8006), the provider boundary and provider read failures (BL8015, a short or missing chunk), the private spool's own refusals (BL8016), and every other code a program and its inputs decide. The default routes that already change the allocation trace -- compute elision, the streamed provider sink, the stream mask replay, the halo chunk cache, runtime pool retention -- are consistent with this rule, and it is the rule they rely on.
+
 "The platform libm" is a per-platform claim: the interpreter P/Invokes the
 same library the compiled program links (ucrtbase on Windows), so the
 differential gates are byte-exact on one machine; two operating systems may
@@ -189,13 +234,153 @@ the same P/Invoked real functions. On a platform without that port the
 interpreter keeps best-effort textbook forms for complex `exp`/`log`/`sqrt`/`^`
 (not bit-verified) and declines the rest rather than guess. Outside the
 contract, documented rather than hidden: CUDA device bodies (device libm,
-`thrust::` complex, plain integer `/`), a host
-compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
-forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
+`thrust::` complex, plain integer `/` and `%`, an unchecked float → int
+cast, and a real `^` through the device `pow` -- none of them can raise a
+panic on the device; integer `^` stays exact and wrapping there for a
+literal nonnegative exponent, and a variable integer exponent is refused in
+a device body, since its negative-exponent BL8013 has no device form), a host
+compiler without asm labels (MSVC, the nvcc host pass on Windows:
+`blade_libm::` forwards to `std::` there, and MSVC has no `-fwrapv`, so
+integer overflow in host code it compiles is not guaranteed to wrap -- every
+g++ host line, the Linux nvcc host pass included, carries `-fwrapv`), and
+`lgamma`/`digamma`, which are Blade's own
 series on both sides (BL8008 outside `x > 0`).
 
-**The mixing rule: nothing converts implicitly.** `1` is an Int64 and `1.0`
-a Float64 -- the decimal point is the type, as in F#. An arithmetic operator
+**Fast by default; floating-point reproducibility is the opt-in.** The table
+fixes WHICH operations a program performs. How a compiled program ROUNDS a
+chain of them is fast by default and outside the cross-lane contract: user
+builds contract (`-ffp-contract=fast` in the g++ lane, a per-instruction
+`contract` flag in the LLVM lane), so `a * b + c` may become one FMA with a
+single rounding where the interpreter rounds twice, and a BLAS/LAPACK route
+may differ in the last ulp.
+
+*Fold association.* A fold is a left fold in ascending storage order (the
+`reduce` rule); that is its meaning, and the interpreter evaluates exactly that
+chain. A fold whose source carries a REORDER LICENCE -- a recognised builtin
+`+`/`*` body, a declared `comm`, `where omp` on the kernel (which requires one
+of the two, BL4016), and `prodsum` / reduction-join legs over builtin folds --
+is EMITTED in its fastest licensed form by default (since 2026-10-17): an
+`omp simd reduction`, a K-lane multi-accumulator sweep, or -- for a DOT-CLASS
+fold (`prodsum`, and a `(+)` fold whose body is a product of the level's
+rank-1 peels) -- the explicit K-lane VECTOR tree of `blade_fold_lanes.hpp`
+(K = 8 independent 32-byte accumulators in a fixed documented association,
+each product rounded before its add in every build mode; 2026-10-19,
+`BLADE_FOLD_LANES`); and, where `omp` asks and the build opens teams,
+per-thread partials that each take the same fast form inside their chunk;
+`reassoc nsz` on the accumulator in the LLVM lane. `where omp` therefore implies simd: a build that
+opens no team (`BLADE_OMP_THREADS=1`) still vectorizes the licensed fold. The
+result is the serial fold up to reassociation -- deterministic for a fixed
+binary (the lane form for a fixed K; the simd form for the vectorizer's
+width), not bit-reproducible across compilers or flags. A fold with no licence
+is the serial chain in every build. The thread licence may sit on the fold
+kernel or on the MAP the fold consumes: `omp(i: 1)` covering the outermost level
+of a reorder-licensed fold's nest threads that level (per-thread partials).
+The LLVM lane has no thread runtime, so it spends only the reordering half and
+reports the threading half with the census line. *Fold placement:* the thread form belongs to a
+fold that is the WHOLE value of its own `let`, at top level and in a function body alike: a
+function-body `let s = reduce(x, lambda(p, q) where omp -> p + q, s0)` opens the same team as the
+top-level spelling, and its first failure is the top-level spelling's (the seed evaluated once
+before the fold; an empty unseeded fold BL8003; corpus functions/535, `blade test omp-reduce`
+`g55_*`). `blade plan` names such a fold by one subject in every outcome: `<function>.<let>`
+(`fsum.s`) when its kernel is an anonymous lambda written in the let, else
+`<function>.<fold k>`, the k-th scalar fold let of the body in source order -- a spelling no let
+name can take, so it never collides with a real `<function>.<let>` (a named kernel carries no let
+name through lowering; gap G55). A fold that is an OPERAND of arithmetic, or a kernel's bare return, opens no team
+(the census says so) and keeps the single-thread licensed form. `blade plan` names each fold's form
+(`fold form: simd-reduction | K-lanes(k) | simd K-lanes(k) dot|self-dot|dot3|sum
+| threaded(...) | serial (repro) | serial (<why>)`; a `threaded(Path B chunks,
+...)` form names what runs inside each chunk).
+
+Integer arithmetic (exact under any association), the faults (BL8013,
+BL8014), the run-time libm and `fma(a, b, c)` (its own node: one rounding in
+every lane, under any setting) are unaffected. Reproducibility -- the
+interpreter's operation sequence, bit for bit -- is asked for, never assumed:
+
+- per function, `where repro`: the emitted body is compiled without
+  contraction, never re-inlined into a contracting caller, and declines
+  reordered folds and library routes (features.md, `where repro`). The
+  demand belongs to each fold the body PERFORMS, whatever its kernel: a
+  `reduce(xs, add)` in the body whose `add` is declared elsewhere (with
+  `comm`, even `omp`) keeps the ascending chain there, while `add`'s other
+  uses keep their licence (gap G80). The one kernel this cannot reach is a
+  function-typed PARAMETER (the kernel is whatever the caller passes): both
+  compiled lanes refuse such a fold (BL7004 deferred; BL9002 stored, a
+  pre-existing defect), so no reordered form of it exists. It is not
+  transitive: a function the body CALLS is repro only if it says so itself;
+- per build, `BLADE_FP_REPRO=1` (spelled `BLADE_FP_REASSOC=0` too): every fold
+  keeps the serial association, the threaded fold forms included (each prints
+  the `[omp] requested but emitted serial` census line); add
+  `BLADE_FP_CONTRACT=off` (contraction is its own knob) and BLAS routing off
+  (its default without `OPENBLAS_DIR`) for the interpreter's bits;
+- in the test gates: the interpreter, oracle and optimizer differentials pin
+  `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` for their own compiles, which is
+  what makes them byte-exact, while the default suite runs (and pins values
+  against, at 1e-9 relative) the fast default; `blade test` clears every
+  reorder, contraction and BLAS knob from the ambient environment.
+
+The interpreter and compile-time evaluation never contract and never
+reassociate.
+
+**Numeric literals: the spelling is the class, the context the width.** `1`
+is an integer and `1.0` a float -- the decimal point is the class, as in F#.
+Where nothing fixes its width, a literal takes the SMALLER default: an integer
+literal is an Int32 when its value fits Int32 (the test reads a negated
+literal's value, so `-2147483648` is an Int32) and an Int64 otherwise; a float
+literal is a Float32 unless its value lies outside Float32's finite range at
+either end -- a magnitude above FLT_MAX, or a nonzero value whose Float32
+rounding is zero or subnormal -- and then a Float64; `complex(re, im)` of two
+defaulted float literals is a Complex64. A Float32 literal's value is the
+float32 nearest the double nearest the source text (the lexer reads a double,
+and every lane and the compile-time evaluator derive from it). A literal
+ADAPTS within its class to whatever fixes its width, widening or narrowing: an
+operator partner (`x64 * 0.1` multiplies by the double 0.1, `a32 * 1.0` stays
+Float32, `i32 + 1` is Int32), a declared type (a `let`, a struct field, a
+return, a parameter), a cast target, a generic type variable that a
+NON-literal argument fixed (below), the other branch of an `if` / the other
+arms of a `match`, the other elements of an array literal, an index position.
+It adapts only when its VALUE fits the width it is given: an integer literal
+past Int32's range where an Int32 is fixed (`g(5000000000)` over `i: Int32`,
+`let x: Int32 = 5000000000`), or a float literal that does not round to a
+finite, normal Float32 (its round-to-nearest Float32 is an infinity, a
+subnormal or zero: `1e40`, `3.4028236e38`, `1e-40`; `3.4028235e38` rounds to
+FLT_MAX and fits) where a Float32 or Complex64 is fixed, is refused at
+compile time (BL3020, at the literal; at a generic instance, at the call) --
+never wrapped, nor rounded to an infinity, a subnormal or zero. A negated
+literal is judged whole (`-2147483648` fits Int32), and a literal-only
+expression leaf by leaf: `2147483647 + 1` at Int32 has two fitting literals and
+wraps by the integer contract, while `5000000000 - 4000000000` at Int32 is
+refused for its first leaf. A float literal is judged by what its SPELLING
+denotes, not by the double the lexer read: `1e400` (whose double is an
+infinity) and a nonzero `1e-400` (whose double is 0.0) fit no Float32, and
+their default is a Float64 by the rule above; a Float64 context keeps the
+double (inf, 0.0). An explicit cast is a conversion, not an
+adaptation: `Int32(5000000000)` wraps and `Float32(1e40)` is an infinity, as
+the same casts of a run-time value.
+An expression made ONLY of literals (literals, unary minus, `+ - * / % ^`, the
+math intrinsics, `complex`) adapts as a whole: `let c: Float64 = 1.0 / 3.0`
+divides in Float64, and the same expression unannotated is a Float32. A
+literal, or such an expression, under a width cast takes the CAST's width --
+`Float64(0.1)` is the double nearest 0.1, never the Float32 0.1 widened
+(0.100000001490116), and `Float64([0.1, 0.2])` the same for every element; a
+same-class cast of a literal is no conversion at all. A literal never changes
+CLASS: an integer literal is never a float. Index-like integers -- extents,
+counts, subscripts, range elements and loop coordinates -- are Int64, and a
+literal in those positions is an Int64. A `let static` value follows the same
+rules (a Float32 static folds in Float32, rounding after every operation, so it
+agrees bit for bit with the same expression at run time); an INTEGER static
+name adapts its width like a literal (an Int32 value widens exactly), a FLOAT
+static name does not -- it is a constant of its own width: a value that does
+not fit a declared width (an Int64 static past Int32 under `let static n:
+Int32`, a Float64 static under a Float32 one, an Int32 struct field) is
+refused, BL3020, at the value. A `static function`'s parameters and return have
+their declared widths, as at run time: an argument adapts to its parameter by
+the same rules (a literal or an integer static when it fits; a Float64 value
+never into a Float32) and the body computes at those widths, so `f(2147483647)`
+over `i: Int32` with body `i + 1` wraps to -2147483648 in both. (One place an
+integer literal still meets a float: an array literal that mixes them, `[1,
+2.5]`, is a float array -- a known inconsistency, kept for now.)
+
+**The mixing rule: nothing converts implicitly.** An arithmetic operator
 (`+ - * / %`) or a comparison (`== != < <= > >=`) whose operands' elements
 (scalars, or array elements: the rule is elementwise) are an integer and a
 float or complex is a type error (BL3020), whether either operand is a
@@ -204,7 +389,7 @@ an Int64 `n` and `A * 2` over a Float64 array are all refused at the integer
 operand -- write `2.0`, or convert with the type in call position,
 `Float64(n)` / `Float64(xs)`. Within one class, two widths (Float32 and
 Float64, Int32 and Int64, Complex64 and Complex128) are refused too unless
-one side is a LITERAL, which adapts to its partner's width (`a32 * 1.0` is
+one side is a LITERAL (or made only of literals), which adapts to its partner's width (`a32 * 1.0` is
 Float32, `i32 + 1` is Int32: the literal says the class, its partner the
 width). A real beside a complex is the exact embedding when the real is the
 complex's component width (`w * z` over Float64 and Complex128, Float32 with
@@ -215,9 +400,15 @@ uses the integer-exponent algorithm). The same rule holds where a value meets
 a declared type: an integer -- literal or variable -- is no argument for a
 `Float64` parameter and no value for a `Float64`-annotated binding (`let x:
 Float64 = 1` is refused; `1.0` is the float spelling), as a float is none for
-an integer one (BL3019's cast-site rounding is the only way down). A call
-still widens WITHIN a class (a Float32 argument into a Float64 parameter, an
-Int64 into an Int32 one), and a real into a complex parameter.
+an integer one (BL3019's cast-site rounding is the only way down). A fixed
+non-literal argument must match the parameter without conversion: Float32
+into Float64, Int64 into Int32, and real into complex parameters all require
+an explicit cast. The one exemption is an Int64 STATICALLY PROVEN to fit Int32:
+a `let rec` step ordinal (bounded by its axis's static extent), a `let` alias
+of a proven value, or `+` / `-` of one and an integer literal, passes to an
+Int32 parameter as it is; any other Int64 argument there is BL3020 at the call
+(`Int32(x)` at the call, or declare the parameter Int64). A literal adapts only
+within its own class.
 
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type. There is no promotion TYPE
@@ -225,9 +416,12 @@ in signatures: where two type variables would mix, the caller converts one
 with the target type in call position, so the signature names one variable
 (arithmetic between two bare variables -- `x + y` over `x: T, y: U` -- makes
 them that one variable, §5.1, rather than typing the result as the left one).
-Arguments sharing a variable agree EXACTLY: neither order converts and no
-literal adapts across them (`add(2.5, 1)` is refused like `add(1, 2.5)`; a
-literal's type is its spelling), and the same holds for two caret
+Arguments sharing a variable agree EXACTLY: neither order converts a
+VARIABLE. A LITERAL argument adapts in WIDTH to the variable a non-literal
+argument fixed -- `scale(data, 2.0)` over a Float64 `data` is a Float64
+instance whose literal is the double 2.0; literal arguments alone take the
+widest of their defaults -- but never in class (`add(2.5, 1)` is refused like
+`add(1, 2.5)`), and the same holds for two caret
 variables whose ELEMENTS meet through arithmetic (`a + b` over `a: T^1, b:
 U^1` refuses an Int64 and a Float64 array at the call). `^` is the exception:
 its EXPONENT is polymorphic and never shares the base's variable. `x ^ n` over
@@ -250,7 +444,7 @@ Complex values support literals and `conj(x)`; `conj` is the identity on real
 types and distributes elementwise over arrays.
 
 **Units of measure** are annotations on primitives, not types: `Unit meters`,
-`Unit velocity = meters / seconds`, `Float<velocity>`. Unit arithmetic checks
+`Unit velocity = meters / seconds`, `Float64<velocity>`. Unit arithmetic checks
 addition (same unit) and composes under `*`/`/` -- elementwise, outer
 (`a [*] b` is meters·seconds), in `prodsum`, and across the elements of an
 array literal (one element type, one unit). Through a GENERIC function the
@@ -258,7 +452,7 @@ body's demands are recorded once per declaration and judged at every call:
 `function add(x: T^0, y: T^0) = x + y` requires its two arguments to share a
 unit (as do comparisons, branch results, and a transcendental's argument
 being dimensionless), so `add(meters, seconds)` is BL3006 at the call.
-**Bounded primitives** (`Float<min=0, max=1>`) carry runtime-checked bounds
+**Bounded primitives** (`Float64<min=0, max=1>`) carry runtime-checked bounds
 and compose with units; the bound is checked wherever the annotation stands
 -- a `let`, an expression ascription `e : T`, a function parameter (on entry),
 a function return -- including through a type alias
@@ -280,7 +474,7 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 
 | Combinator | Signature sketch | Semantics | Status |
 |-----------|------------------|-----------|--------|
-| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
+| `zip(A₁..Aₙ)` | → Tuple elements over the operands' ONE shared index space | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; operands of different ranks -- plain dense, packed symmetric or compound records alike -- share no index space and are refused (BL3027, gaps G99 and G113: pair a row with a cell by iterating the leading axis, `method_for(range<I>) <@> lambda(i) -> A(i) + t(i)`); output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
 | `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments | **(planned)** |
 | `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s | **(planned)** — neighbor access today is `halo<I, [offsets]>` (§7.3) |
 | `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k | Implemented |
@@ -300,6 +494,71 @@ Over `ArrayExpr` (results are `ArrayExpr`):
 | `let mut x = e` | yes | yes |
 
 All parameters pass by reference; `mut` on a parameter permits callee mutation.
+
+**Who may write a binding.** "In scope" is the CALLABLE that defines the
+binding -- a function body, a lambda or kernel body, or the module's top
+level -- ordinary nested blocks included (a `{ ... }` block enters no scope).
+There, a `let` of either spelling may be assigned, whole or through an index
+or field. A callable that merely CAPTURES a binding -- a nested function, a
+lambda, a kernel, or a top-level function naming a module binding -- may write
+it only when it was declared `let mut`: the declaration then says the state is
+shared. A write to a captured plain `let` is refused (BL4005, "declare it
+`let mut`, or return the new value"); a PARALLEL body may not write a captured
+binding of either spelling (§5.2). A `let` binding a body makes itself is its
+own, whatever outer name it shadows. A PARAMETER is read-only unless declared
+`mut` (array parameters only; a lambda declares none), in its own callable and
+in every callable that captures it: writing it, directly or through anything
+that shares its storage, would change the array the caller passed.
+
+The rule is about STORAGE, not spelling, so it is judged in two places. The
+type checker refuses the direct store, whose target's root is the captured
+binding or the parameter (`x = ..`, `A(i) = ..`, `p.f = ..`, `g[0](i) = ..`).
+A store that REACHES a captured plain `let` or a non-`mut` parameter --
+through a local view (`let t = G(0)`; a partial index is a view, not a copy),
+a tuple or struct member holding one, a rebinding, an `if` or `match` value, a
+callee that returns its argument, a `mut` parameter the local is lent to, or a
+lambda that captures it -- is refused at lowering by the storage-provenance
+walk that also guards deferred maps (§10.2), with the same code. The walk
+fails closed (a target whose storage cannot be traced is refused) and reads
+the NAME BEING WRITTEN by the definitions that may reach the store: a whole `v
+= e` of the callable's own local rebinds the name and writes nothing, and
+after it `v` holds only `e` on that path (`let t = G(0); t = [0.0, 0.0]; t(0)
+= 1.0` writes the fresh array); the arms of an `if` or `match` join (a
+rebinding on one arm only keeps what `v` held before), and inside any other
+form -- a loop body, an operand -- every rebinding reaches every store.
+Every OTHER name the target reaches is judged by everything it ever held: a
+tuple holding `v` bound before the rebinding (`let w = (v, 1.0)`) still holds
+the old storage. A local that another callable rebinds (a lambda over a
+captured `let mut`), or that is rebound inside an expression a type carries (a
+range bound), is judged by everything it ever held; a store inside such an
+expression is judged like any other. An assignable copy (`let mut c = G`, of a
+dense or a compact array) is its own storage. A map or a composition applying
+a kernel judges each operand by ITS parameter: only the operands in written
+positions are written.
+A call through a FUNCTION VALUE is judged against the callables that can
+reach it: for a function-valued PARAMETER, the arguments its callable
+receives in that position at every direct call (through callers that forward
+a parameter of their own); otherwise -- the callable itself used as a value,
+a partial application, an argument that is any other function value (a
+closure held by a binding, an aggregate element, a call result, a name that
+is rebound) -- every callable the program uses as a value. The call may write
+the arrays it is handed when one of them writes a parameter, and its result
+may share what one of them returns.
+NOT COVERED (deep review R12, staged; the walk accepts these, for a captured
+plain `let` and a non-`mut` parameter alike): a view INSTALLED into a field, a
+tuple member or an array cell after the carrier was built (`b.r = G(0); let v
+= b.r; v(1) = ..`), a view held by an element of an array literal (`[Box { r =
+G(0) }]`), a direct call through a REBOUND function-valued local (`let h =
+fresh; h = ident; h(G(0))` is read as `fresh`), and a call through a closure
+returned by a call or held in a struct field, whose captured storage is not
+followed.
+
+A `let` (either spelling: both are assignable in their scope) whose value is
+an existing array holds a private DEEP COPY of it, with the source's storage
+class -- an element write through the new name never reaches the source --
+in every scope and lane, a kernel body included (gap G46: the C++ lane's
+kernel-body let used to alias the source's pool). Compound, sparse, ragged and
+dependent-index stores keep the alias.
 
 ### 2.8 Tuples and argument packs
 
@@ -397,12 +656,12 @@ to the co-iterated pair per iteration, equivalent to the flattened
 Two shapes are refused rather than guessed at:
 
 - A `where` clause (`comm`, `omp`, ...) together with a `Tuple<N>` kernel
-  parameter is refused (`BL3999`): `comm`/`anticomm` address parameters by
+  parameter is refused (`BL3034`): `comm`/`anticomm` address parameters by
   position and the parallel strategies by name, and realizing a `Tuple<N>`
   parameter as its `k` row parameters renumbers both. Write the parameters
   flat to use a `where` clause.
 - `zip(...)` cannot appear beside another array in one operand pack —
-  `(A, zip(B, C))` is refused (`BL3999`), both loop orientations. Co-iterating
+  `(A, zip(B, C))` is refused (`BL3033`), both loop orientations. Co-iterating
   a zip nested inside an outer loop is a real feature, just not implemented
   yet; hoist the zip to its own `<@>`, or pass its arrays as separate
   operands.
@@ -503,7 +762,17 @@ proofs.md §Binomial).
 - `make_sym` sorts; `component(idx, k)` projects in nondecreasing order.
 - `make_antisym` sorts and returns the permutation sign; access through
   non-canonical coordinates applies the sign (`transform`); diagonals are
-  implicit zeros (not stored).
+  implicit zeros (not stored). The zero is a CARRIER CONDITION, not a
+  consequence of the sign law: f(a, a) = −f(a, a) forces f(a, a) = 0 only on
+  a carrier without 2-torsion, and wrapping Int64 (§2.4) has one
+  (−MIN = MIN). So a kernel `where anticomm(...)` that fills an `AntisymIdx`
+  output asserts BOTH the sign law and a zero diagonal, and the checker
+  refuses (BL4013) a body whose diagonal it can show is not 0 — a nonzero
+  value (`(x - y) + MIN`, `if x > y then 1.0 else -1.0`) or a panic
+  (`6 / (x - y)`) — §5.2. The one stored-zero exception is a NON-FINITE float
+  diagonal (`inf - inf`, `0.0 / 0.0` = NaN): a structurally antisymmetric
+  float body has f(a, a) = g(a, a) − g(a, a) = 0 exactly for every finite
+  g(a, a), and the stored 0 stands in for the NaN.
 - Element writes mirror reads: `A(t) = v` through non-canonical coordinates
   stores `transform(v)` (negated / conjugated on odd parity) at the canonical
   cell, so `A(t)` reads back `v`; a write to an implicit zero (an antisymmetric
@@ -526,7 +795,7 @@ proofs.md §Binomial).
   maps, decompacts and passes to functions like a stored one (and is refused
   by `reduce` the way a stored one is). A count that stops inside a group, or
   completes a group with records after it left unread, has no residual class
-  and is refused (BL3999); `decompact(A, d)` first. The `S(i)` remainder above
+  and is refused (BL3026); `decompact(A, d)` first. The `S(i)` remainder above
   is the spec-level reading, not a value today.
 
 **Nested/mixed symmetry** (spec level, **(planned)**): `NestedSymIdx<n>` (symmetric pairs of
@@ -545,6 +814,22 @@ rectilinear mask makes the valid-tuple table **sorted by construction**, which
 is what buys contiguous layout and device-friendly slices; per-element hash
 gives O(1) coordinate lookup. Enumeration = exactly the in-bounds mask-true
 tuples, each once, in lex order (proofs.md §Compound).
+
+Representation, by rank of the mask (the compiler's choice, reported by
+`blade plan` as a `[compound v1]` line; the semantics above do not change):
+a **rank-1 mask** over one dense axis is a *compaction* — the valid set is a
+sorted list of kept positions, built by a count pass and one branchless fill
+(`pos[q] = i; q += keep[i]`), the compact buffer a gather by position; a keyed
+read `S(k)` binary-searches the kept positions and a position the mask
+rejected is the out-of-key-set read, BL8006. No hash node is built per kept
+cell (bench gap G9: that node was ~85% of a filter-and-sum's time). Both
+compiled lanes and the interpreter build this; the LLVM lane takes exactly
+these compounds (rank 1, no trailing dims) and hands every other to the C++
+lane. A **rank-k mask (k ≥ 2)** keeps the hashed index (`declined -- hashed
+SparseIdx ...`): the lex-sorted tuple table plus the tuple → rank hash.
+The kept order is the source order in every lane and at every thread count;
+compaction is sequential by construction (a parallel prefix would be a
+different algorithm).
 
 Two construction routes:
 
@@ -575,8 +860,8 @@ buffer is laid out in that order. Duplicate keys are a construction error.
 
 **A `static struct` name as an index type** (enumerable constrained domains,
 docs/plans/structural/06) — `range<R>` and `Array<T like R>` accept the name of
-a `static struct R { f₁: Int<min=a, max=b>, ... } where p₁, p₂, ...` whose
-fields are `Int` or `Nat` with static bounds: the iteration space is the
+a `static struct R { f₁: Int32<min=a, max=b>, ... } where p₁, p₂, ...` whose
+fields are `Int32` or `Nat` with static bounds: the iteration space is the
 struct's SOLUTION SET, in lex order of the fields (first field outermost), and
 the kernel takes one positional parameter per field. When every conjunct is a
 linear inequality on the fields (`i - j <= w`, `abs(i - j) <= w`,
@@ -591,6 +876,65 @@ refused (BL4020). Either way the slot is SparseIdx-shaped: the output is a
 sparse array over the solution set (full-key reads `R((i, j))`, flat folds in
 lex order), a domain slot is the whole iteration space (`range<R, J>` is
 refused), and an empty domain warns and iterates zero times.
+
+What is closed-form TODAY, consumer by consumer (bench gap G4; corpus
+`domains/`): a closed-form domain is never lowered to a key table to be
+ITERATED. A fold written over its map — `reduce(method_for(range<R>) <@> k,
+op[, init])`, at top level or inside a function body (a body-local map that
+only its fold reads is spliced into the fold and never built) — streams the
+affine nest with a scalar accumulator in lex order, in every lane (C++: the
+`r` nested `for`s, with a licensed fold kernel spent as `omp simd reduction`
+on the innermost field; LLVM: the same nest with compare-and-select bounds;
+the interpreter walks the same plan). A map that is MATERIALIZED (`|>
+compute`) is filled by the same nest — the cell counter is the storage offset
+— and keeps a sparse key view of the same lex order for keyed reads (C++: the
+`sparse_index_t`; LLVM: a per-prefix table of the outer fields, one entry per
+row, never per cell). Any number of fields is supported (every level gets its
+own affine interval; an unprojected general bound costs an empty inner loop
+at a dead prefix). A TABLE-enumerated domain has no nest: a fold written over
+its map is refused at codegen (BL7004, naming the linear spellings that
+stream), the LLVM lane refuses its range by name, and `|> compute` then
+`reduce` is the working spelling. `blade plan` reports each consumer as a
+`[domain-enum v1]` line (the bounds in the struct's field names, the cell
+count, and whether the consumer streams or fills). Fields may be `Int32`
+(Int32) with `let static` bounds and half-widths: a static integer in a
+conjunct is typed as the literal it folds to, a CHECKED conversion — a value
+outside Int32 refuses the declaration (BL4001) with the fix, `Int64<...>`
+fields.
+
+Diagonal order of a licensed band fold (bench gaps G33/G31). The lex order
+above is the order of the SOLUTION SET; a fold may visit it in another order
+only where its kernel licenses reordering. A two-field domain whose inner field
+is held to the outer from both sides with unit slope — `abs(i - j) <= w`,
+`abs(j - i) <= w`, `lo <= i - j <= hi`, any pair of difference conjuncts, which
+project to `j in [max(b, i - hi), min(B, i - lo)]` — is a BAND: its cells are
+the union of the diagonals k = i - j, each a contiguous run of i. A fold over
+its map whose kernel is the builtin `+` or `*` (the reorder licence of
+§2.4), outside `BLADE_FP_REPRO=1` and `where repro`, walks it k-outermost with
+i inner and contiguous (j = i - k): the same cells, each cell's arithmetic
+spelled and evaluated exactly as the source writes it, only the summation order
+moved — the expert's `do k = -w, w; do i`. A kernel term that depends on the
+cell only through i - j is then invariant in the inner run and the back end
+computes it once per diagonal; the emitter never tabulates it. Every other fold
+over the domain (an unlicensed or `where repro` kernel, a repro build, a fused
+join of several folds, a non-unit slope such as `abs(2 * i - j) <= c`, a map
+kernel that subscripts a matrix — a diagonal would stride it by a row — and a
+map kernel that may assign a capture or emit output, whose cells' side effects
+are ordered: the licence covers the combine, not the map) keeps
+the lex nest, and the interpreter keeps the lex walk for every fold, as it does
+for every licensed fold. `blade plan`'s `[domain-enum v1]` line ends with the
+fold's order and its reason (`order: diagonal (k = i - j outer, ...)` or
+`order: lexicographic (<why>)`); both compiled lanes read the same decision.
+`BLADE_DOMAIN_DIAGONAL=0` keeps the lex nest, for A/B. With `where omp` on the
+fold kernel, in a build that emits teams, the C++ lane runs the walk on ONE
+team: the outermost enumerated variable (k, or the first field of a lex nest,
+whose bounds are constants) is cut into contiguous per-thread blocks — each
+innermost run is cut instead when the team outnumbers the outer trips — and
+the per-thread partials combine in thread order, so for a given team size the
+value is a fixed function of the data. `BLADE_OMP_THREADS=1`,
+`BLADE_FP_REPRO=1` and a map kernel with side effects keep the serial pass
+with an `[omp] requested but emitted serial` census line; the LLVM lane has no
+thread-level form.
 
 Tuple indexing with wildcards: a full key is an O(1) hash lookup (a missing
 key is a runtime error); a wildcard/short-prefix partial returns the matching
@@ -649,9 +993,22 @@ NetCDF, Zarr, CSV and Icechunk providers are implemented (`blade test
 netcdf|zarr|csv|icechunk`); HDF5 is planned. (The earlier spelling
 `type ERA5 = NetCDFProvider<"era5.nc">` is gone.)
 
+A read is a value boundary too: **a missing value never crosses it disguised
+as a number.** A cell the store marks missing -- NaN or ±Inf in a floating
+variable; for NetCDF also `_FillValue`, `missing_value`, a cell outside the
+valid range, the default fill of a never-written floating cell -- makes every
+default read refuse (BL8015) in every lane; a finite Zarr/Icechunk
+`fill_value` is a value. The opt-in is the masked read,
+`era5.vars.t2m |> nc.read_present`: the present cells as a compound array
+(§4.5), built as `compound(raw, mask(raw, present))` over one raw read that
+the program never sees, and `nc.present` is that mask
+([features/sql.md §2a](features/sql.md)). A compile-time fold of such a variable
+(`let static ... |> read`) refuses too, at compile time, under BL4002 (the code of
+every `let static` fold failure) with the same sentence.
+
 ### 3.9 Symmetry lives in the index type
 
-`Array<Float like SymIdx<2, 1000>>` — not a dense array plus an annotation.
+`Array<Float64 like SymIdx<2, 1000>>` — not a dense array plus an annotation.
 The index type fixes storage (triangular), iteration (triangular), and access
 (canonicalizing): `cov(3, 1)` and `cov(1, 3)` are the same location. The
 symmetry system (§11) *infers* symmetric index types for outputs from kernel
@@ -703,16 +1060,59 @@ dense — prints its rows bracketed, so `A` above echoes as it was written;
 rank 1 is already one level of brackets and ranks ≥ 3 stay flat. The REPL
 additionally shows only the first five entries per level and elides the rest
 as `...`; that cap is the echo's alone, and `blade run` prints every cell.
+A tuple or a struct prints spelled like its literal too -- `t = (1, 2.0)`,
+`p = P { a = 1.0, b = 2.0 }` -- and so does each element of an array of
+structs, through the same formatter: `ps = [P { a = 1.0 }, P { a = 2.0 }]`.
+(A string inside one prints raw, as a string binding does.)
 
 Printing also agrees with the literal's TYPE. As in source, the decimal point
 is what tells a float from an integer: a `Float64`/`Float32` value, and each
 component of a `Complex128`/`Complex64`, prints with one — `2.0`, `-0.0`,
 `[2.0, 3.0]`, `(1.0,-2.0)` — while an `Int64` prints bare, so `[2, 3]` is only
-ever an integer array. Otherwise a float keeps its 15-significant-digit
-rendering (`0.1`, `2.5`); the exponent forms (`1e+20`, `1e-07`) read back as
-float literals already and print unmarked, as do `nan`, `inf` and `-inf`. Every
-lane prints the same bytes (the compiled program, the interpreter, the LLVM
-back end, and the REPL/notebook echo, which shows the program's own output).
+ever an integer array. Otherwise a value prints with the significant digits
+its width carries: a `Float64` (and each `Complex128` component) with 15
+(DBL_DIG, C's `%.15g`), a `Float32` (and each `Complex64` component) with 6
+(FLT_DIG, `%.6g`) -- so `0.1` stored as a Float32 prints `0.1`, not its
+widened double `0.100000001490116`, and a Float32 switches to the exponent
+form at 1e6 (`1.23457e+06`) where a Float64 does at 1e15. Digits are rounded
+from the exact binary value, ties to even (`123456.5` as a Float32 prints
+`123456.0`). The exponent forms (`1e+20`, `1e-07`) read back as float literals
+already and print unmarked, as do `nan`, `inf` and `-inf`. Every lane prints
+the same bytes (the compiled program, the interpreter, the LLVM back end, and
+the REPL/notebook echo, which shows the program's own output); under the
+`BLADE_PRINT_BITS` test instrument each float also carries its raw IEEE bits,
+16 hex digits for a Float64 and 8 for a Float32.
+
+**Two print forms.** Everything above is the TEST form: the spelling every
+`// EXPECT:` pin, doc fence, differential gate and harness reads, and what
+`blade test`, the REPL, notebooks and the editor print. The human-facing verbs
+(`blade run`, `compile`, `emit`, `plan`) default to the DISPLAY form instead
+(`--print-form test|display`, `BLADE_PRINT_FORM`; the default lives in one
+place, `Blade.PrintForm.cliDefault`). It differs in four ways and nowhere else
+(the labels, the rank regime and the selection are the test form's):
+
+- a float prints at its SHORTEST decimal that reads back to the same bits at
+  its own width -- a Float64 `1/3` is `0.3333333333333333`, `0.1 + 0.2` is
+  `0.30000000000000004`, a Float32 `1/3` is `0.33333334` -- laid out fixed for a
+  decimal exponent in [-4, 17) and as `d.ddde±dd` otherwise (`1e+20`, `1e-05`),
+  always visibly a float (`1.0`, `100.0`, `-0.0`); a complex value prints its
+  parts so; `BLADE_PRINT_BITS` appends nothing;
+- a unit-carrying value is followed by one space and its unit, an array's once
+  after its closing bracket (`dist = 10.0 meters`, `lens = [1.0, 2.5] meters`):
+  a quantity's own name, else the unit checker's spelling of the dims
+  (`meters / seconds`); a dimensionless value prints none;
+- a bare top-level expression prints its value with no `__exprN = ` label;
+- a sum-type value prints its constructor and its payload (`Circle(1.5)`,
+  `Empty`), and a tuple or struct holding one prints like its literal
+  (`Tagged { name = 7, shape = Square(2.0) }`) -- in the test form such a
+  binding prints nothing.
+
+All three lanes print the display form identically (one shortest-digit C
+text, `blade_shortest.h`, in both compiled lanes; the interpreter's twin,
+`CppFormat.displayDigits`, follows that search step for step -- the shortest
+digit count whose correctly rounded decimal, or its neighbour, reads back --
+and is deliberately not .NET's `"R"`, which answers 17 digits at some powers
+of two where 16 read back; `blade test print-form`).
 
 ### 3.10 Index values and nominal typing
 
@@ -728,7 +1128,7 @@ Iteration emits values tagged with their source index type as a **unit**:
 **The subscript judgment.** Every subscript `A(e)` into a slot of index type
 `I` is judged by three rules, eagerly and again once inference is complete:
 
-1. *Class.* `e` is an integer or an index value. `Float`, `Bool`, `Complex`
+1. *Class.* `e` is an integer or an index value. `Float32`, `Float64`, `Bool`, `Complex64`, `Complex128`
    and `String` subscripts are refused (BL4003); an otherwise unconstrained
    variable in subscript position defaults to `Int64`, not `Float64`.
    Keyed slots (`SparseIdx`, `EnumIdx`) and halo window offsets stand down.
@@ -742,8 +1142,8 @@ Iteration emits values tagged with their source index type as a **unit**:
    operation's result -- is checked at run time against the array's own
    extent instead (BL8006), named slot or anonymous alike. A literal index-typed VALUE -- a `Nat<I>`
    `let`, a cell of an index-typed foreign-key column -- is range-checked the
-   same way, with one exception: `-1`, group_by's "excluded" key. A string
-   `EnumIdx` literal must be one of the type's labels.
+   same way, with one exception: `-1`, group_by's "excluded" key. An
+   `EnumIdx` literal must be one of the type's keys (labels), BL4003.
 
 **Positions and casts.** Arithmetic on an index value yields a *position*:
 never a PROVEN index value (`i + 1` is not proved to lie in `I`). An
@@ -769,7 +1169,7 @@ DIFFERENT named index type is not an integer and the cast refuses it too
 `(Int64(j) : I)`, and is checked like any other integer.
 
 **What is guaranteed.** A read or write of a slot whose index type is NAMED
-is bounds-safe: its subscript is either PROVEN or CHECKED at run time
+is bounds-safe (and so is one whose slot is anonymous, below): its subscript is either PROVEN or CHECKED at run time
 (BL8006, in both lanes; against the static extent, or the array's own
 `extents` when the extent is only known at run time). Proven is a closed
 list that trusts no type: a compile-time-checked literal, a bare variable of
@@ -783,8 +1183,53 @@ leaf of a destructured `let`.
 Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
 branch, a call, an element read out of an index-typed array (foreign-key
 DATA, including a kernel parameter the loop feeds from such an array) -- is
-checked. A string key subscripting a string `EnumIdx` slot is mapped to its
-label's ordinal, a key that is no label stopping with BL8006. The checks
+checked. **`EnumIdx` subscripts are KEYS.** Every value of an `EnumIdx`
+type `R` is one of R's keys -- an integer one too: `range<R>` over
+`EnumIdx<[100, 200, 300]>` iterates 100, 200, 300, and a cell of an
+`Array<R like ...>` holds a key. An integer key is represented as its
+POSITION in the key list, so a value of type `R` subscripts an array over `R`
+directly, proven and unguarded, and the key is produced where the value is
+observed: printing (in every storage: dense, compound, grouped, ragged, a
+tuple member or struct field), arithmetic (`r + 1` is a key plus one, a plain `Int64`),
+comparison, a numeric cast, an integer parameter, a subscript into an axis of
+another type. EVERY observation produces the key, however the value arrives:
+negation; a fold of an arithmetic section and `prodsum` over an array of R
+keys (`reduce(codes, (+))` adds the keys); a literal match pattern (it names a
+key, as a literal of type `R` does); a lambda value or a named function used
+as the kernel of a map over R keys (it meets keys); a numeric parameter slot,
+at the top of an argument or as a component of a tuple argument; and a GENERIC callee whose
+body observes its parameter's values -- arithmetic, a comparison, a cast, an
+intrinsic, a fold, prodsum, a sort key -- is handed an R value, or an array of
+them, as its keys, `Int64(xs)`, so its instance is an `Int64` one (a callee
+that only passes the values on keeps them as R). So a generic callee that
+observes its argument and also returns it returns `Int64` keys, not values of
+R: the same numbers, but `group_keys` groups them in first-occurrence order
+instead of R's declared order, and an `Array<R like ..>` annotation on the
+result is a type mismatch (BL3001), as for any `Int64` array. Where the key
+cannot be produced the value is refused, BL4003, naming the spelling that
+states the key (`Int64(c)`): a call whose converted copy would change what the
+callee sees of the argument (a `mut` parameter, whose writes would land in the
+copy; a `comm` / `anticomm` callee, whose clause reads the arguments'
+identity), a computation on a value whose R type arrived only after the
+computing body was typed (an unannotated lambda bound in a block), a fold whose
+LAMBDA kernel computes on the values of R (unseeded, its accumulator starts as
+a value of R; seeded with an integer, the accumulator and the elements
+disagree, BL3001 -- fold the keys, `reduce(Int64(xs), ..)`, or use the
+section), a literal pattern that is none of R's keys, a whole-array
+observation of R values in a storage it is not built over (prodsum,
+negation or a call of an observing generic over any but a dense array; an
+intrinsic over a sparse or ragged one; a section fold over a sparse one
+(a compound array's keys are handed to a generic explicitly, `f(Int64(xs))`)
+-- a compound, ragged or grouped section fold folds
+the stored keys, `reduce(Int64(xs), ..)`), and -- the
+backstop -- any use of a value of R inside a body specialized at R (a generic
+callee the call did not hand keys, e.g. one handed a tuple or struct holding
+a value of R) other than travel: binding, passing, returning, a member or
+component, an `if` branch, a loop operand, a selection, a subscript of an axis
+of R itself, and `==` / `!=` against a value of the same R (positions and keys
+are in bijection, so equal positions are equal keys). A literal of type `R` must be one of its keys (BL4003). A plain
+integer or a string subscripting an `EnumIdx` slot is a key looked up among
+R's keys at run time, a key that is none of them stopping with BL8006. The checks
 are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
 removes them. The guarantee follows a named array into a generic parameter:
 an array parameter whose UNNAMED axis (`m: T^1`, `Float64^1`, an anonymous
@@ -792,11 +1237,29 @@ an array parameter whose UNNAMED axis (`m: T^1`, `Float64^1`, an anonymous
 that does -- is checked again for each call passing a NAMED axis there, as
 an ARRAY INSTANCE (§4.3) with the parameter typed as the argument, so the
 read is judged, proven or guarded against the name; a parameter pack's
-element (`P[0](k)`) is checked against its own extent for every caller. Not
-covered: a computed subscript into an ANONYMOUS index slot
-(an array without a named index type) is not checked -- name the index type
-to get the guarantee; compact, compound, sparse and ragged slots keep their
-own disciplines (a compact group's LITERAL coordinates are range-checked at
+element (`P[0](k)`) is checked against its own extent for every caller.
+
+**Anonymous slots.** The guarantee holds for a slot with NO named index type
+too (an array literal `let v = [1.0, 2.0, 3.0]`, an `Array<T like Idx<3>>`, a
+`T^1` parameter, an anonymous range, a view `a(i)` of any of them): a
+computed subscript into it is PROVEN or CHECKED at run time (BL8006,
+`index out of bounds: a position outside the array`, in every lane), against
+its static extent or, when that is only known at run time, the array's own
+`extents` (read off the variable a view starts from; an array expression
+with no variable -- a call result, an `if` of arrays -- is evaluated once and
+read through that value). An anonymous slot has no nominal tag, so its
+proven list is shorter: a literal (judged as rule 3 says), a lambda
+parameter a range feeds whose static bounds lie inside the slot's static
+extent (`method_for(0..3) <@> lambda(i) -> v(i)`, `range<Idx<3>>`), and a
+proven value of a NAMED index type whose static extent fits; an
+anonymous-tagged value is never proof, a symbolic extent never matches, and
+everything else is checked -- with the three leftovers gap row G208 records (a write
+through a variable-less array expression of runtime extent, a runtime-extent plain slot
+beside a compact or sparse slot, and the anonymous ascription `(5 : Idx<3>)` itself,
+whose READS are checked but not the ascription). A plain slot beside a structured one (a compact
+group read by its flat coordinates, a compound or sparse tuple key) is judged
+the same way against its static extent. Compact, compound, sparse and ragged
+slots keep their own disciplines (a compact group's LITERAL coordinates are range-checked at
 compile time, each against the group's extent); compiler-synthesized buffers and indices (`let rec`
 prefixes, which read zero past the prefix by design, reduce desugars, AD
 sweeps) own their walks. (The rank-2 offset arithmetic behind the proven
@@ -818,17 +1281,17 @@ error class.
 `T^r ≡ T^r(1, 2, ..., r)` (dense).
 
 **What `^` builds is decided by its left-hand side.** A TYPE gives an array
-type; a UNIT gives a unit power (`Unit area = meters^2`, `Float<meters^2>`,
+type; a UNIT gives a unit power (`Unit area = meters^2`, `Float64<meters^2>`,
 `seconds^-1`); a VALUE -- a literal or a static, including inside an extent
 such as `Idx<N^2>` -- gives an arithmetic power. Among types, a single
 capital that names no declared type is a type VARIABLE (`T^1`, any element);
 a type that IS declared or built in fixes the element instead (§13.2's
 Array-Intro with T a base type): `Float64^1` is a dense rank-1 array of
-`Float64`, any extent, `Speed^1` (after `type Speed = Float<mps>`) one of
+`Float64`, any extent, `Speed^1` (after `type Speed = Float64<mps>`) one of
 `Speed`, a declared struct's name the same, and `Float64^0` is `Float64`.
 The rank must be an integer literal, and a head that is itself an array type
 (`type Row = Array<...>`, then `Row^1`) is refused rather than nested (both
-BL1004). The concrete caret is DENSE only, like `Float<day>^2`: there is no
+BL1004). The concrete caret is DENSE only, like `Float64<day>^2`: there is no
 abstract-level symmetry spelling, so a compact argument (`SymIdx`,
 `AntisymIdx`, ...) is refused at the call (BL3001) rather than densified --
 write `T^2` to accept any symmetry class. Transitions: symmetry inference (§11) takes
@@ -865,7 +1328,7 @@ freely because they are the same thing:
 
 ```blade sketch
 let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
-models(lat, lon)(params)(t) : Float
+models(lat, lon)(params)(t) : Float64
 ```
 
 **Applied unannotated parameters.** Applying a parameter the program never
@@ -889,9 +1352,24 @@ array it is given (a generic declaration's per-type specializations are named
 the same way). A top-level `let` of a lambda that applies such a parameter IS that declaration
 when nothing can tell them apart -- the program only ever APPLIES it, and it
 has no `mut`, annotation, `where` clause or parameter defaults, and captures no
-binding that is ever assigned -- and is generic likewise. Any other lambda (one
+binding that is ever assigned -- and is generic likewise. A `let` of a lambda
+bound INSIDE A BLOCK is one monomorphic value whenever the block checks that
+way, and is generic only in the types it is actually used at otherwise: when
+its applications do not agree on one type (`let idl = lambda(x) -> x` applied
+to an Int32 and then to a Float32), a lambda the block only ever applies, at
+two or more sites, with no annotation, `where` clause or parameter defaults,
+never assigned and not self-referencing, is checked as a nested `function` is
+-- one body per type it is used at, and no others. A block that checks
+monomorphically is unchanged by this rule, and a block that checks under
+neither reading keeps the monomorphic reading's refusal. Any other lambda (one
 used as a VALUE: a kernel, an argument, an alias) is one body, so its first use
-decides for every later one; an array makes its application a subscript,
+decides for every later one -- a direct call by the name it is bound to, or a
+kernel slot whose cells it meets; a call THROUGH a value use (an alias, a block
+that returns the lambda, a tuple member, an argument) is monomorphic at the
+lambda's binding and decides nothing: its argument meets the width the
+parameter already has, or its default, and converts nothing (BL3020; `let h =
+lambda(v) -> v; let saved = h; saved(a32)` is refused, `h(a32)` decides `v` as
+a Float32); an array makes its application a subscript,
 checked the same way. Either way the body reads
 ONE value from the application: a higher-rank array (a partial read) or a
 function returning an array is refused at the argument, as is a scalar, or a
@@ -1008,30 +1486,67 @@ Return type follows `where` because it may depend on constraints (`comm` can
 produce `SymIdx` outputs). Nested `function` declarations desugar to
 immutable lambda bindings (internally the same marker `let static` uses).
 
+**Rank at a direct call.** A call never broadcasts and never reduces rank:
+each argument is taken at the rank its parameter declares, or refused at that
+argument (BL3001). A parameter declared `T` -- or `T^0`, the same variable --
+takes any value WHOLE, a scalar or an array of any rank, and the instance's
+result rank is whatever the body computes at that instance (an elementwise
+body over array arguments answers an array of their rank; a body that folds
+answers a scalar). A parameter declared `T^k` with k ≥ 1 takes exactly a
+rank-k array: a scalar, or an array of another rank, is refused rather than
+lifted or folded at the call site. Parameters that share one variable take
+one type, so two arrays of different rank cannot both be passed as `T`; a
+scalar meeting a `T^r` operand INSIDE the body broadcasts there, as any
+scalar-array arithmetic does, without the call expanding it. The fix the
+refusal suggests is the caller's or the declaration's: pass a value of the
+declared rank, or declare the parameter `T`.
+
 **Unannotated parameters.** A parameter written without a type is an
 anonymous type variable -- `function inc(x) = x + 1` is `function inc(x: T) =
 x + 1` -- so each call's argument decides its type (one monomorphized body per
-instance), never a default. A literal's type is its spelling (`1` is an Int64,
-`1.0` a Float64), so `inc(6)` is the Int64 7 and `inc(6) / 4` is the integer
-quotient 1, while `inc(2.5)` is refused at the argument (BL3019: the body's
-`1` meets a Float64 instance -- `x + 1.0` is the Float64 increment, and
-`x + x` needs no literal at all). Everything §2.4 says of `x: T` holds:
+instance), never a default. A literal argument nothing else fixes takes its
+default (`6` is an Int32), so `inc(6)` is the Int32 7 and `inc(6) / 4` is the
+integer quotient 1, while `inc(2.5)` is refused at the argument (BL3019: the
+body's `1` meets a float instance -- `x + 1.0` is the float increment, and
+`x + x` needs no literal at all). Inside the body a literal beside `x` takes
+the instance's width (`x * 0.5` computes in Float32 at a Float32 instance and
+in Float64 at a Float64 one); a literal bound to a local with nothing fixing it
+(`let c = 0.1`) is a Float32 VARIABLE, so `x * c` at a Float64 instance is a
+width mismatch. Everything §2.4 says of `x: T` holds:
 beside a float (`x + 1.0`) an Int64 argument is refused at that argument
 (BL3019; the caller writes `3.0` or `Float64(n)`). Two generic variables mixed
 by arithmetic are ONE variable -- there is no promotion type -- so `function
 add(x, y) = x + y` takes one type per call, and its arguments must agree
-EXACTLY: no argument converts implicitly, in either order and literals
-included, so `add(2.5, 1)` and `add(1, 2.5)` are both refused at the second
-(BL3999), as is an Int64 and a Float64 variable -- the caller writes
-`add(2.5, 1.0)` or `add(2.5, Float64(n))`. The one exception is `^`, whose
+EXACTLY: no argument converts implicitly, in either order, so `add(2.5, 1)`
+and `add(1, 2.5)` are both refused at the second (BL3024), as is an Int64 and
+a Float64 variable -- the caller writes `add(2.5, 1.0)` or `add(2.5,
+Float64(n))` (a float LITERAL beside a Float64 variable adapts its width:
+`add(x64, 1.0)` is a Float64 instance). The one exception is `^`, whose
 exponent is polymorphic (§2.4): `function pw(x, n) = x ^ n` keeps two
 variables and is typed as its base, so `pw(2.0, 3)` is the squared-out 8.0,
 `pw(2.0, 0.5)` a floating pow and `pw(2, 3)` the Int64 8, while `pw(2, 0.5)`
 is refused at the base (BL3019: a Float64 power of an Int64 base). A
 parameter the body uses as a subscript is pinned to that index (§3.10), one it
-applies is an arrow (§4.3); a top-level `let` of a lambda that is only applied
-is the declaration, and a lambda used as a value is one body whose first call
-decides its open parameters.
+applies is an arrow (§4.3), one a loop former iterates (`method_for(v)`,
+`for (a, b) in range<I>`) is a rank-1 array with a generic element -- it reads
+`v: T^1`, so the kernels the loop applies are instantiated per call, and a
+higher rank is written `v: T^k`; a top-level `let` of a lambda that is only applied
+is the declaration, and a lambda used as a value is one body whose first
+direct call decides its open parameters (a call through the value -- an alias,
+a block, a tuple member, an argument -- decides nothing, §4.3), and a literal
+beside such a parameter takes the width that call decides.
+
+**Sharing at a direct call.** The argument TYPES do not say whether two
+arguments are one array, and the identity groups of §8.3 do: so a declaration
+whose body applies a `comm` / `anticomm` kernel (or `gram`, or a `reynolds`
+kernel) over two or more of its array parameters -- directly, or by handing
+them to such positions of a resolved callee -- is instantiated per call on the
+SHARING PARTITION of those arguments as well as on their types (§8.3
+"Sharing-partition instances"). `f(A, A)` and `f(A, B)` are then two instances
+with two return types, packed and dense. A DECLARED type fixes the layout and
+the elaboration at its boundary instead: a declared array return type, or a
+`let` ascription of the call's value, keeps the declaration's generic,
+all-distinct elaboration (§8.3).
 
 ```blade
 function inc(x) = x + 1
@@ -1064,7 +1579,18 @@ binding captured from outside it -- its cells run concurrently, so the store
 would be a data race (BL4005). A serial body's write to a captured `let mut`
 (or a named function's write to a module-level one) is still accepted as an
 ordered side effect; the optimizer treats such calls as barriers (CSE never
-merges across them).
+merges across them), and no licence reorders it: a fold whose kernel or map
+body writes keeps its serial chain in every build -- `comm`, a map's `omp`,
+or a fold's `omp` chunks or lanes only a fold whose evaluations are free of
+writes. A JOIN is the one serial context that refuses a write, by a deliberate
+restriction (gap G43, an acceptance-policy change -- not a consequence of the
+race rule): a leg of a `<&!>` / `<&>` tree or of a reduction join (§10.2)
+whose map kernel, fold kernel (a fused tree's shared one included), or a named
+deferred computation it reads writes storage observable outside it is refused
+(BL4005), because the join defines no order for those writes (the lanes had
+three). A write to storage the leg makes itself (a local scalar, a fresh
+scratch array, a let-rec buffer) is not observable and stays legal. Force the
+writing map first (`|> compute`) or fold the legs separately.
 
 A lambda is a value that may outlive the scope that made it: returned from a
 function (`function mk(i) = lambda(j) -> i * 10 + j`), stored in a tuple, array
@@ -1089,6 +1615,61 @@ decided, and REFUSED (BL4013) when it is refuted: by a proved sign law
 sample points and their swaps (`x / y` is 2 at (2, 1) and 0.5 at (1, 2)).
 Under `reynolds(...)` the clause is an iteration license, not a claim about
 the bare kernel, and is never refuted (§5.3).
+
+The counterexample evaluator runs §2.4 arithmetic: an integer kernel is
+evaluated in exact Int64 (wrapping `+ - *`, truncating `/ %`, the BL8013 and
+BL8014 panics), so it neither refutes a law that holds under wrap nor prints
+float approximations of integer values. A `where anticomm(x, y)` is checked
+for the sign law AND, at sampled diagonal points, for f(a, a) = 0 — the
+claim strict-triangular storage relies on (§3.4) — even when the parity
+tables proved the sign law. A body that reads a CAPTURED Int/Float scalar
+evaluates with that capture bound to a sampled value: the clause is a law
+about the body as written, so it must hold for every value of the capture,
+and a claim true only for the capture's actual value is refused
+(conservatively) rather than trusted. A read of a CAPTURED array at integer
+coordinates evaluates the same way, per cell: each cell is sampled once and
+read consistently across the swap, and the samples honour the array's
+declared storage class (a `SymIdx` group answers every permutation of its
+coordinates from one cell, an `AntisymIdx` group negates by the permutation's
+sign and reads 0 on a repeated coordinate), so a claim the TYPE guarantees
+is never refuted. Cells are keyed by the read's SEMANTIC OPERAND KEY and
+canonical coordinate: the identity-transparent aliases of one array (§8.3 -- a
+top-level pure deferred alias class, a never-written stored alias `let v = w`)
+are ONE key and share samples, so a claim true because the two names hold the
+same cells is a law about one array and is accepted (`v(i) * w(j)` under
+`comm(i, j)`, `symmetry/157`). Distinct or unproved keys are sampled
+independently, exactly as two captured scalars are: an alias some declaration
+may write is no identity-transparent alias (a write mints a new version and
+invalidates every equality the shared samples would rely on), so the same
+claim over it is refused (`symmetry/158`). The key is §8.3's identity and is
+applied where it is -- a kernel checked at module level; a declared
+function's or pack kernel's body keeps binder keys. The kernel's FORMAL
+arguments stay independently sampled whatever arrays the operands are (the
+operands' identity licenses storage, not a law about the kernel,
+`symmetry/159`). LANGUAGE CHANGE (`docs/plans/plan-identity-transpose-compute.md`
+§2.5); before it every binder was sampled independently and a claim true only
+because two names alias was refused. A call of a
+pure (no writes, output or external reads),
+non-recursive user function -- declared, or a module-level `let` of a
+lambda -- evaluates through the function's body with the arguments
+substituted. Everything else stays unevaluable and the claim stays trusted:
+a captured function or Bool, a structured array read (compound, sparse,
+orbit, Hermitian, a partial read), a higher-order parameter, a recursive or
+effectful callee, a reduction.
+
+**Symmetry deduction is exact-ring algebra.** The parity tables prove
+`x + y + z` commutative in every pair by associativity and commutativity of
+`+` over the reals, and a declared `comm`/`anticomm` stands on exactly that.
+Compact storage then evaluates the body ONCE per canonical (sorted) index
+tuple and serves every permutation of it from that one value, so over floats
+a permuted read can differ from evaluating the body in the permuted order —
+in the last bits, or by more under cancellation (`[1.0, 1e16, -1e16]`: the
+cell (0, 1, 2) computes 0.0 and answers the read at (1, 2, 0), where the
+body evaluated in that order gives 1.0; corpus `symmetry/086`). Without a
+`where` clause nothing is stored compactly, so this is a licence the
+declaration grants — the same kind of licence a builtin or `comm` fold body
+grants a reassociated fold (§2.4, fold association) — not a deviation from the dense meaning the compiler
+takes on its own.
 
 Sections and partial application: operator sections `(+)`, `(*)`, ... as
 kernels; operand sections `(s +)` and `(* s)`, which ARE the lambdas
@@ -1123,6 +1704,20 @@ that buys still follows the H ∩ Stab law (§11.2):
   and not index-symmetric (`Out(i,j) = g(A(i),B(j)) + g(B(j),A(i))`, which is
   not `Out(j,i)`; pinned by corpus reynolds/013). Reynolds does not substitute
   for identity.
+
+A stage over a reynolds map -- `f <$> (M <@> reynolds(g))`, `(M <@>
+reynolds(g)) @>> c`, through guards, choices and named deferred stages --
+applies to the map's VALUES, i.e. to the symmetrized K(x), never to the
+summed terms: `f(K(x))`, not `Σ_σ f(g(x_σ))` (§10.1, `f <$> c ≡ c >>= pure ∘
+f`). The emitters fuse it into the same single pass, applying f once per
+cell after the sum, and the cells are what the LAST stage returns -- a Bool
+stage gives a Bool array; only the wrapped kernel g, whose values ARE
+summed, must return a number (BL3001, `functions/933`). Storage follows
+§10.5's map rule: a symmetric output stays packed (f(K) is symmetric), a
+strict antisymmetric one admits only a sign-odd f (BL4015, a Bool stage
+included). Before review round 3 (R20) every lane composed the stage into
+each term, and round 2 refused a non-number last stage for that reason
+(corpus reynolds/032-040, functions/935-970).
 
 Distinguish this from the INDEX-LEVEL (per-dimension) Reynolds of the proof
 tower — `R(i₁,i₂,j₁,j₂) = Σ over index swaps` — which genuinely has
@@ -1160,7 +1755,9 @@ A [+] B  =  method_for(A, B) <@> (+)                             // cross-iterat
 
 `(+)` remains the scalar kernel for combinator use; all three coincide at
 rank 0. Bracketed ops inherit primitive symmetry: `A [*] A` iterates
-triangularly automatically.
+triangularly automatically. Over two COMPACT operands the elementwise result's
+storage class follows the sign-character rule (§8.5): `A * A` of antisymmetric
+operands is symmetric, `A + S` dense.
 
 ### 6.2 Primitive symmetry annotations
 
@@ -1177,7 +1774,7 @@ exist only in static evaluation). What exists today: `reduce` (§6.4),
 `prodsum(a, b)` (the fused dot product), `gram`/`gram_apply`, the standard
 library's `stats.mean`/`variance`/`stddev`, and `import math as m` for
 `m.matmul`, `m.solve`, `m.lu`/`m.lu_solve`, `m.eigh`, `m.expm` (scaling-and-squaring Taylor-18, synthesized
-as plain Blade; corpus `math/092`–`093`). Equivariance signatures live in the ML module
+as plain Blade; corpus `math/129`–`130`). Equivariance signatures live in the ML module
 ([features/equivariant-nn.md](features/equivariant-nn.md)); the core carries
 the annotation hook only.
 
@@ -1201,7 +1798,28 @@ the annotation hook only.
   (`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`), `n = 1` by default (rank k in, rank k−n out;
   `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
   [features/sql.md](features/sql.md) §10 for typing details, the axis-count
-  rules and the empty-input rule. Under the default `n = 1`, an anonymous
+  rules and the empty-input rule. Without `init` the fold's value is the left
+  fold of the CELLS, `c0 ⊕ c1 ⊕ ...`. Over a STORED array that fold has no
+  identity: a statically empty operand is refused (BL3007), a dynamically
+  empty one panics BL8003 at the fold. A fused fold over a DEFERRED
+  computation (a `(+)` / `(*)` section; `<&!>` join legs, the rank-k full
+  fold) is seeded by the implementation, and the seed depends on the ROUTE
+  (gap G74): on a strict route -- one on which no lane may reorder the fold:
+  `BLADE_FP_REPRO=1`; inside a `where repro` function; a fold whose deferred
+  map body may WRITE (its evaluations are ordered side effects, §5.2, so
+  even the default build keeps the serial chain); the rank-k full fold over
+  a stored array, whose accumulator loop is serial in every build -- the `(+)`
+  seed is the EXACT identity, `-0.0` (`(-0.0, -0.0)` complex, `0` integer),
+  §2.4's identity insertion, so the chain is the left fold of the cells bit
+  for bit (an all-`-0.0` row folds to `-0.0`); on a licensed route it is
+  `+0.0`, and the sign of a zero result is the licence's (§2.4, "Fast by
+  default") -- also where a lane happens to emit a LICENSED fold serially for
+  want of a vector form (a join over a streamed source, a multi-level or
+  mixed-operator join): the route is the licence's, not the emitted shape's
+  (gap G74 records these). Its EMPTY fold is that seed: the deferred terminal has no BL8003
+  guard, so an empty deferred sum is `-0.0` on a strict route and `+0.0` on a
+  licensed one -- the two spellings keep distinct empty-input rules
+  (features/sql.md §10). Under the default `n = 1`, an anonymous
   deferred outer product `reduce(method_for(A, B) <@> lambda(a, b) -> f(a, b),
   op[, init])` (named rank-1 sources, no `where` clause on the map kernel, a
   `(+)`/`(*)` section or a seeded fold) is evaluated row by row -- an outer
@@ -1259,6 +1877,19 @@ decomposition.
 Kernels live in T-world: they see slices, never S-dims; `comm` is metadata for
 the loop object, not the kernel body. S-dims are deduced at application sites.
 
+*Zero S-dimensions.* When every operand is consumed whole (S = 0: an `object_for` application
+whose kernel parameter ranks equal the operands' known ranks) and the kernel returns a
+scalar, the application has no loop: `object_for(f) <@> (A1, .., An)` IS the call
+`f(A1, .., An)` -- each operand bound whole (dense or compound), the one term evaluated exactly
+once, its value (signed zero included) and its first failure the call's. It is lowered to that
+call before any lane (Lowering `isZeroLevelWholeArrayApply`; corpus index-types/543-544). The
+same holds when the kernel returns a COMPACT array (a packed `SymIdx` / `AntisymIdx` /
+`HermitianIdx` result): the application is the call -- a named kernel called by name, so its
+value, its first failure and its frames are the direct call's (a user-written lambda kernel is
+called as that lambda, its own frame kept), the operands forced as the call
+forces them -- lowered at typecheck before the §8.4 step 5 refusal, which needs an outer
+iteration dimension (corpus symmetry/174, 176-177).
+
 ### 7.3 Virtual arrays
 
 Type-level iteration sources with `Void` element type; they erase completely:
@@ -1278,8 +1909,11 @@ compose in one loop:
 kernels receive indices without breaking index anonymity.
 
 **Anonymous ranges.** `m..n` (half-open, Int64 elements) is a virtual array
-equivalent to `range<Idx<n-m>> + m`: `0..5` enumerates `0,1,2,3,4`. Bounds
-must be static (a `let static` name folds). The index type is anonymous, so
+equivalent to `range<Idx<n-m>> + m`: `0..5` enumerates `0,1,2,3,4`. Static
+bounds (literals, `let static` names, static calls) give a static extent:
+`0..N` with `let static N = 5` is an `Idx<5>`. A bound known only at run time
+(a parameter, a plain `let`) leaves the extent unknown in the type; it is read
+from the bounds when the range runs. The index type is anonymous, so
 its elements index any plain-`Idx` slot without a tag cast — which makes it
 the natural spelling for index generation feeding *arithmetic*, where
 `range<I>` would tag the result and demand `(k : I)` casts downstream.
@@ -1432,7 +2066,13 @@ Semantics: the binding denotes a family `(n : ℕ) → Array<T like Idx<n>, ...>
 destructures the family: `prefix` binds the same array at extent n, `n` the
 new step ordinal. Reading the binding at its declared extent (or any smaller
 one) instantiates the family; interior reads `qh(k)` and final-segment reads
-compose with every combinator.
+compose with every combinator. When the recursion axis is a NAMED index type
+the ordinal is that axis's index value, `n : Nat<Times>`, exactly the
+iteration index a `range<Times>` kernel receives: it reads any array over the
+same axis unchecked, and arithmetic on it (`n - 1`, `(n + 1) % 5`) is a
+position, checked at run time (§3.10). To index an array over a DIFFERENT
+named axis with it, convert explicitly, `Int64(n)` (a cast to the other axis
+refuses a foreign index value).
 
 Rules, all checked syntactically:
 
@@ -1476,6 +2116,39 @@ Rules, all checked syntactically:
   independently of the storage policy below. The rolling window in
   particular must preserve it — under a K+1-slot buffer an out-of-range lag
   must still read zero, not a recycled slot.
+- **Zero-fill elision** (storage policy; no value changes). The buffer is
+  allocated *without* its up-front zero fill when no read can observe a cell
+  before the recursion writes it, which the desugar decides syntactically:
+  (i) the inductive arm has no `while` guard (§7.5.1: a guard that fails at
+  the first step freezes a row nothing wrote), and (ii) every occurrence of
+  `prefix` in the inductive arm is the head of a non-empty application — a
+  row or cell read. Each such read is either provably inside the built
+  prefix `[0, n)` (a row the seed or an earlier step wrote) or guarded,
+  answering the implicit zero above without selecting the buffer's value;
+  the seed writes row 0 and the inductive arm row `n` for every remaining
+  step, so after the recursion every row has been written. A WHOLE-array use
+  of `prefix` (`reduce(prefix, (+))`, an alias `let h = prefix`, passing
+  `prefix` itself) sees the unbuilt rows, which must read zero, so it keeps
+  the fill; so does a mention of the array's own name. The elision applies
+  to dense, statically shaped buffers (IR `IRUninit`); the interpreter still
+  allocates zeros, which no admitted read can tell apart. Corpus
+  `recursive-arrays/009` (lags amplified by 1e300) and `024` pin both sides.
+- **Rolling window** (storage policy; no value changes; `BLADE_REC_WINDOW`).
+  A recursion bound in a block or function body is stored as a K+1-slot
+  ring -- slice `i` in slot `i mod (K+1)` -- when every prefix read in its
+  inductive arm is `prefix(n - c)` for a constant `c` (K the largest; `n`
+  and `n + c` read zero and need no slot) and every later use of the name is
+  a fixed-row read `NAME(p, ...)`. Each such row `p` gets its own snapshot,
+  copied when row `p` is written, and the name itself is no longer bound:
+  its later reads are the snapshots'. With lags at most K a slot written at
+  step `i` is next overwritten at step `i + K + 1`, after every read of it,
+  and the write slot never collides with a read slot, so no value changes;
+  out-of-range lags still read zero (the guard above never selects a slot).
+  The window applies only when it is smaller (K + 1 + snapshots below the
+  extent and at most max(8, N/4)); a `while` guard, a whole-prefix use, a
+  fixed or computed ordinal inside the recursion, any later whole use of
+  the array, and module scope keep the full buffer. Corpus
+  `recursive-arrays/033`-`045` pin both sides.
 - **Sequentiality is derived, not commanded.** The prefix dependence forces
   serial enumeration of the recursion axis; the compiler schedules the
   scheme as one serial sweep. Storage is policy, not semantics: consumers
@@ -1507,7 +2180,7 @@ extent from a trip count into a **budget**:
 
 ```blade sketch
 type It = Idx<200>                       // a BUDGET, not a trip count
-let rec u: Array<Float like It, Y, X> =
+let rec u: Array<Float64 like It, Y, X> =
     match u with
     | zero -> zero
     | zero :: s -> zero :: u0
@@ -1576,7 +2249,7 @@ the identity — resolving it to the surrounding operation's identity is
 recursion, the tuple-pattern spelling `let (head, tail) = args`, and an `nth`
 recursion-depth variable are **(planned)**: today each is refused with a
 diagnostic naming the built form -- the missing base arm (BL7004), the cons
-pattern (BL3999), an explicit depth parameter (BL3999).) Nested tuples preserve structure (`arity` counts
+pattern (BL3004), an explicit depth parameter (BL3033).) Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
 `(B, C)` is one tuple-typed argument, distinct from
@@ -1592,16 +2265,169 @@ fixed parameters takes either the argument in its place -- a parenthesized group
 `pk((a, b), k)` or a lone element `pk(a, k)` (a one-element pack) -- or, when
 there are more arguments than parameters, the surplus written flat in its place
 (`pk(a, b, k)`); several packs take one argument each, a group or a lone
-element. Anything else is refused at the call (`BL3002`): a group among flat
-elements, too few arguments, a flat list against two packs, and a pack passed as
-a tuple-typed variable (`let t = (a, b); pk(t, k)`) -- write the group out at
-the call.
+element. A tuple-typed VARIABLE in a pack's place is the group it names
+(§2.8: naming a pack does not change it) -- `let t = (a, b); pk(t, k)` is
+`pk((a, b), k)`. Anything else is refused at the call (`BL3002`): a group among
+flat elements, too few arguments, a flat list against two packs, and any other
+tuple-typed value in a pack's place (a call's tuple result) -- bind it to a
+variable, or write the group out at the call.
 
 ### 8.3 Identity groups
 
 At a call site, **neighboring identical arguments** form identity groups
 (syntactic identity by name; `(A, B, A)` is three singleton groups). `comm`
 licenses symmetry only *within* an identity group.
+
+Two arguments are IDENTICAL when they name the same array, OR when they name
+two members of one top-level IDENTITY-TRANSPARENT ALIAS CLASS. There are two
+kinds (`docs/plans/plan-identity-transpose-compute.md` §2.1):
+
+- A TOP-LEVEL PURE DEFERRED ALIAS CLASS (§10.2): a module-level `let g2 = g`
+  (chains `let g3 = g2` included) over a pure deferred map binds the same
+  deferred value, no member can be written (BL4005), so the members are one
+  array, and `method_for(g, g2) <@> lambda(a, b) where comm(a, b) -> ...` is
+  packed and triangular exactly as `method_for(g, g)` is (`blade plan` names the
+  operands as written: `operands: g, g2`). It fails closed to distinct arrays
+  for a root whose evaluation is not repeatable (it writes -- then it is stored
+  at its definition and its alias is a copy -- prints, reads external data, or
+  calls an unknown callee), and for a root that reads, directly or through a
+  callable it names, a deferred value that is not itself such a root (a writing
+  named map runs where it is read, so the reader is stored at its definition
+  too: `symmetry/152`, `153`). Corpus `symmetry/146`-`148`.
+- A TOP-LEVEL NEVER-WRITTEN STORED ALIAS: a module-level plain `let B = A`
+  (chains included) whose root is STORED at its own site -- an array literal, a
+  `|> compute` of a computed value, or a call of a function the module declares
+  -- in a plain or compact array type, when NOTHING in the program can ever
+  write `A`, `B` or a value that may share their storage. `let B = A`
+  deep-copies (an assignable array binding, `loops/081`), but with no write possible the two names
+  hold the same cells for their whole lifetime, so they are one array:
+  `method_for(A, B) <@> comm-kernel` is packed as `method_for(A, A)` is, and
+  `gram(M, N)` with `let N = M` is the same-array gram (`symmetry/154`, `156`).
+  The never-written proof is syntactic, module-wide and fail-closed, decided
+  before the program is typed, so a write LATER in the source counts. It fails
+  when any top-level declaration that names a member -- the root, the alias,
+  the alias's source, or any binding or function whose declaration names a
+  member (a view, alias, tuple, map or call result derived from one may share
+  its storage) -- holds an assignment of any kind (a write to local storage
+  counts), names another module's code or a qualified name, or names a
+  definition that may write (one that does any of that, transitively; every
+  expression counts, a lambda parameter's default included, `symmetry/160`);
+  when the root may share what it names -- a call, or a `|> compute` of anything
+  but a map -- its whole reach (the arguments, the callee and everything they
+  name) must be never written too (`symmetry/155`: `id1(X)` hands back `X`'s
+  cells, with or without `|> compute`); and when another
+  module of the program imports this one. `blade plan` records every judged
+  alias, `[alias-identity v1] B: applied [...]` or `declined -- <first failed
+  condition>`. Identity is a language fact: `BLADE_TRANSPOSE_ELIDE`, which
+  decides whether `B` also SHARES `A`'s storage (the read-only alias plan, whose
+  own never-written proof this one is stricter than), never changes it -- every
+  lane reads each operand by position, so a packed product over two equal
+  copies is the same value. Because the proof is module-wide, the output TYPE of
+  `method_for(A, B)` can change when an unrelated declaration naming `A` gains a
+  write (plan §2.6: accepted, fail-closed, recorded).
+
+Everything else keeps its own identity: an alias that is `let mut`, ascribed,
+or of another module's binding, an alias bound inside a block or a function
+body (a forcing copy, §10.2), a use inside a lambda or function body, a stored
+alias some declaration may write (`symmetry/150`, `155`), and the parameters of
+a helper (`f(A, A)` over `f(x, y)` stays dense). LANGUAGE CHANGE, P1 of
+`docs/plans/plan-identity-transpose-compute.md` (§2.1, the deferred class first,
+the stored alias second); before it an alias of a deferred map was a different
+array here (dense), contradicting §10.2, and so was a never-written stored
+alias. Corpus `symmetry/149`-`153` and `155` are the cases this does not
+change and the fail-closed edges (`149`'s helper is now packed by the
+sharing-partition rule below).
+
+**Sharing-partition instances** (`docs/plans/plan-identity-transpose-compute.md`
+§2.2, LANGUAGE CHANGE, no knob). Inside a function body the parameters are the
+arrays a CALL passes, so the identity groups of the body depend on the call. A
+declaration is IDENTITY-SENSITIVE when its body holds an application whose
+kernel declares `comm` / `anticomm` groups (or is a `reynolds` kernel, or a
+named kernel), a `gram`, or a call of an identity-sensitive declaration at its
+relevant positions, with two or more distinct array PARAMETERS as bare
+operands there; those parameters are its RELEVANT ones. A call of it is
+specialized on the normalized SHARING PARTITION of its relevant arguments --
+classes numbered in first-occurrence order, two arguments in one class when
+they are identical in the sense above (the same array, or members of one
+deferred alias class; an argument that is not a bare variable is its own
+class) -- in addition to its ordinary type instance. The all-distinct
+partition is the declaration itself; any other partition is an INSTANCE of it,
+checked with each relevant parameter carrying its class's identity, so
+`function f(x: T^1, y: T^1) where comm(x, y) = method_for(x, y) <@> lambda(a,
+b) where comm(a, b) -> a * b |> compute` called `f(A, A)` is the instance over
+`[0,0]`, packed `SymIdx<2, I>` and triangular, while `f(A, B)` is dense (the
+argument types are identical; the result types are not). Only the partitions a
+program encounters are made (at most Bell(k) for k relevant parameters), keyed
+by the partition, never by a root or a caller's name; an identity-insensitive
+declaration keeps its one instance. Transitively, `g(x, y) = f(x, y)` called
+`g(A, A)` is g's `[0,0]` instance, inside which `f(x, y)` is f's. Positions
+are preserved: `[0,1,0]` licenses no regrouping, so `(A, B, A)` keeps the
+adjacent-only rule above (dense in operand order). FAIL CLOSED to the
+all-distinct elaboration, recorded by `blade plan` as `[sharing-partition v1]
+<f>: declined -- <first failed condition>`: a call through a callable
+parameter, a lambda value, a `let` alias of the declaration (reassignable in
+its scope) or any unresolved head (no partition is decided); a
+recursive declaration; a `static`, `mpi` or `cuda` callable; a parameter pack;
+a declaration with array instances (§4.3 arrow parameters, computed reads of
+an unnamed axis, a symbolic rank); a relevant parameter that is `mut` or
+assigned in the body; a compiler-synthesized declaration -- in particular the
+bodies `ad.grad`, `ad.jvp` and `ad.vjp` differentiate, which keep INDEPENDENT
+argument slots even at `(A, A)` (§2.4 of the plan: distinct per-slot
+cotangents; tied differentiation is written `h(a) = floss(a, a)`); and an
+instance that does not check under the shared identities. An applied record
+reads `[sharing-partition v1] f: applied [partition [0,0] of (x, y); instance
+f__share1: ...]`. Corpus `symmetry/149`, `161`-`167`, `ad-jvp-comb/115`, `multifile/043`.
+
+**Declared signatures and ascriptions** (plan §2.3, LANGUAGE CHANGE). An
+explicit annotation fixes the externally visible layout AND the elaboration at
+that boundary. A declaration with a declared ARRAY return type (a concrete
+array, a `T^k` caret with k ≥ 1, or a tuple holding one; a declared scalar or
+element variable such as `-> Float64` or `-> T` fixes no layout) is not
+specialized on its sharing partition: `function make_g(a, b)
+-> Array<Float64 like I, I> = gram(a, b)` called `make_g(A, A)` stays dense
+with the generic declaration's cells and bits (`declined -- the declared
+return type fixes the layout ...`), and its BODY is elaborated to the declared
+layout by the ascription rule below (a body `f(x, x)` under a declared dense
+return keeps f's generic call); an UNANNOTATED helper infers its layout per
+instance. A `let` with a DENSE array ascription whose value the ordinary
+elaboration does not meet -- `let P: Array<Float64 like I, I> = method_for(A,
+A) <@> comm-kernel |> compute`, `gram(A, A)`, a call the partition would
+specialize -- is elaborated with every operand at the value's own level a
+distinct array (kernel bodies are not that boundary), so it is accepted and
+dense (it was BL3001); a `SymIdx` ascription stays accepted and packed, and a
+value the ordinary check accepts is untouched. Corpus `symmetry/164`, `165`,
+`167`.
+
+```blade
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I> = [4.0, 5.0, 6.0]
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let PAA = f(A, A)
+let PAB = f(A, B)
+let D: Array<Float64 like I, I> = f(A, A)
+// EXPECT: PAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: PAB = [[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [12.0, 15.0, 18.0]]
+// EXPECT: D = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+```
+
+This rule is proved SOUND and proved NOT OPTIMAL for non-adjacent repeats
+(proofs.md §Attain: `surface_comm_optimal`, `aba_beats_surface_rule`,
+`aba_orbit_count_forced`): the licence group H ∩ Stab of §11.2 is defined by
+array identity alone, so `(A, B, A)` under a kernel commutative in its first
+and third positions has orbit count n·C(n+1, 2), which a program that
+reorders the positions attains, where this rule stores n³. The rule is optimal
+exactly when the identity groups have pairwise distinct names. The compiler
+implements this rule (decision D9 of `docs/plans/plan-paper-1-comoment.md`,
+2026-10-12): a non-adjacent repeat is stored dense in operand order and earns a
+BL4010 advisory naming the adjacent spelling (`tests/corpus/symmetry/077`–
+`079`). Until then it took the by-name quotient silently and typed the output
+with the group axes concatenated, (A, A, B), so source-order subscripts read
+the wrong cells (`docs/research/orbit-work-measurements.md` §4). Presenting
+the by-name quotient in source axis order — the optimal count without the
+reorder — needs a position-permuted storage layout and is the open
+optimization, not a semantics question.
 
 ### 8.4 Output type deduction
 
@@ -1616,12 +2442,26 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
      S-tuple**: the g whole index *tuples* are interchangeable. When s = 1
      this is the familiar `SymIdx<g, I₁>`. The record carries its factors:
      the type prints and parses as written here, can be ascribed back
-     (`let H: Array<Float like SymIdx<3, <Idx<M>, Idx<N>>>> = ...`), is
+     (`let H: Array<Float64 like SymIdx<3, <Idx<M>, Idx<N>>>> = ...`), is
      nominative in them (an unrelated `SymIdx<3, P>` of the same extent is
      refused), and is read per dimension or by flat compound position (§3.2).
 4. **Concatenate** group contributions in order (concatenation, not
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
+   A kernel whose RETURN carries a compact group (`SymIdx` / `AntisymIdx` / `HermitianIdx`
+   T-dimensions) is refused in an application WITH AN OUTER ITERATION DIMENSION, BL4004
+   (S >= 1, or a co-iteration -- a `method_for` row map, an `object_for` whose kernel takes
+   only a trailing block of its operand): every S-cell would hold its own packed pool -- a
+   grouped compact output, which is not built (gap G67). A ZERO-LEVEL application (§7.2
+   "Zero S-dimensions": an `object_for` whose kernel takes every operand whole) has no outer
+   cell: `object_for(group_h) <@> jg` IS the call `group_h(jg)` and returns its packed array --
+   lowered to that call at typecheck, before the refusal and before any lane. The same function
+   called directly (`let h = group_h(jg)`) returns its packed array as usual. The supported
+   spellings for the refused shape store a dense cell (the callee ends in `decompact(h, 0)`) or
+   write the flat map over every axis (`method_for(range<G, P, P>) <@> lambda(g, a, b) ->
+   prodsum(x(g, a), x(g, b))`). Corpus symmetry/142 and 175 (the refusal and its span: a row
+   map, an `object_for` with one outer level), 143 (both spellings), 144 (the direct call), 174
+   (the zero-level application, the direct call's value in every lane), 176-177 (its first failure).
 
 **Correction vs v10 §10.9.** v10 step 3 emitted `SymIdx<g, extent>` *per
 S-dimension* (e.g. `(A, A)` over `Array<M, N, T>` → `SymIdx<2,M>, SymIdx<2,N>`,
@@ -1633,26 +2473,75 @@ store the joint-symmetric output at all: strict counting inequality
 ∏ⱼ C(nⱼ+r−1, r) < C(∏ⱼ nⱼ + r − 1, r)). See §12.5 and proofs.md
 §Core/§Counting.
 
-Correct examples:
+Correct examples (the input arrays and kernel results in these sketches
+have element type `Float64`; the examples illustrate index structure):
 
 ```blade sketch
 // Self-covariance, 1 S-dim: unchanged
-object_for(cov) <@> (A, A)      // A : Array<Float like Idx<N>, Idx<Time>>
-// Output: Array<Float like SymIdx<2, N>>
+object_for(cov) <@> (A, A)      // A : Array<Float64 like Idx<N>, Idx<Time>>
+// Output: Array<Float64 like SymIdx<2, N>>
 
 // Multi-dim S-space: JOINT symmetry over compound tuples
-object_for(comoment) <@> (A, A, A)   // A : Array<Float like Idx<M>, Idx<N>>
-// Output: Array<Float like SymIdx<3, <Idx<M>, Idx<N>>>>
+object_for(comoment) <@> (A, A, A)   // A : Array<Float64 like Idx<M>, Idx<N>>
+// Output: Array<Float64 like SymIdx<3, <Idx<M>, Idx<N>>>>
 // Speedup: 3! = 6× (joint), NOT (3!)² = 36×
 
 // Distinct groups multiply
 object_for(k) <@> (A, A, B, B)  // A over Idx<M>; B over Idx<K>; comm within groups
-// Output: Array<Float like SymIdx<2, M>, SymIdx<2, K>>
+// Output: Array<Float64 like SymIdx<2, M>, SymIdx<2, K>>
 // Speedup: 2! × 2! = 4× — product across GROUPS, never across one group's dims
 ```
 
 At r = 2, per-dimension product-*structured* storage is recoverable via the
 Cauchy split (§12.5); it does not change cardinality or this typing rule.
+
+### 8.5 Elementwise operators over compact operands: the sign-character rule
+
+A compact class stores one simplex and reconstructs the rest through a mirror
+involution on the VALUE: identity for `SymIdx` (character +1), negation for
+`AntisymIdx` (character −1). An elementwise operator `L op R` over two compact
+operands on ONE index space (same rank, same base) therefore has a result
+class fixed by the characters, not by the operands' class names:
+
+| op | operand characters | result |
+|----|--------------------|--------|
+| `*`, `/` | multiply: (−1)(−1) = +1, (−1)(+1) = −1 | `A * A`, `A / A`, `S * S` symmetric; `A * S`, `S * A`, `A / S` antisymmetric |
+| `+`, `-` | equal characters keep theirs | `A ± A` antisymmetric, `S ± S` symmetric |
+| `+`, `-` | mixed | `A ± S` has no mirror law: DENSE |
+| `%`, `^`, comparisons, logicals | respect no sign law | DENSE |
+
+One exception keeps the diagonal honest: `S / A` is sign-odd, but its diagonal
+is `s / 0` (inf/NaN, BL8013 for integers), which a strict class would store as
+0 — it is DENSE, so the diagonal is computed.
+
+Only `A ± A` and `S ∘ S` keep the operands' record, so only they co-iterate
+the stored cells (§6.1's zip). Every class CHANGE is a gather over the
+result's own range — `range<SymIdx<r, I>>`, `range<AntisymIdx<r, I>>` or the
+dense `range<I, ..., I>` — reading each operand by logical subscript, so each
+read applies its own mirror and the antisymmetric zero diagonal. `R * R` is
+therefore a `SymIdx` array whose diagonal is stored (0 · 0 = 0):
+
+```blade
+let A = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+let S = R * R
+let s10 = S(1, 0)
+let total = reduce(reduce(decompact(S, 0), (+)), (+))
+// EXPECT: s10 = 1.0
+// EXPECT: total = 28.0
+```
+
+Before this rule `R * R` zipped the strict cells and kept the antisymmetric
+class, so every mirrored read came back negated (`s10 = -1.0`, `total = 0.0`)
+in all three lanes alike; `A ± A` was refused (BL4015) and `A ∘ S` refused
+(BL3999). A WRITTEN co-iteration over antisymmetric operands,
+`method_for(zip(R, Q)) <@> k`, keeps the strict record, so it is certified by
+the kernel's JOINT sign parity — every operand reads the same mirrored cell, so
+they flip together: `a + b` is jointly odd (accepted), `a * b` jointly even
+(refused BL4015; the result is symmetric). The unary forms (`R + 1.0`,
+`abs(R)`, `R ^ 2.0`) keep their BL4015 refusal: a map's iteration is the
+input's strict simplex, which has no diagonal to write (decompact first).
+Corpus symmetry/096–101 pin each row.
 
 ## 9. Dimensional Currying
 
@@ -1714,22 +2603,282 @@ nest, and the legs accumulate side by side — so a join is the shared-fold
 terminal generalized to a fold PER leg. Unlike the map form, the legs need not
 come from the same MethodLoop: they must only agree on the joint index space
 (equal rank, and equal extents where statically known), because a reduction
-writes no cells and so has no output shape to reconcile.
+writes no cells and so has no output shape to reconcile. FAILURE ORDER: the joint
+traversal visits the cells in ascending order and, within a cell, first
+evaluates the SHARED named producers (a deferred map several legs spell,
+and every leg's deferred operand) in first-use order, then runs the legs in
+leg order, so when legs can fail the first failure is the EARLIEST failing
+cell's -- a shared producer's ahead of a leg's, leg order breaking a tie --
+not the first leg's (gap G101; every lane, the interpreter included).
 
 Legs referring to the same **named deferred** computation evaluate it once per
 joint cell; the name is the declaration, whether it stands in an operand slot
 (`prodsum(e, v)`) or is a leg's own traversal (`reduce(e, (+))`) -- the leg
-folds the shared cell, not a second evaluation. One leg is the identity (a scalar, not
+folds the shared cell, not a second evaluation. (The once-per-cell count is the
+join's VALUE semantics. It was never stated for effects, and since gap G43 the
+language refuses a leg that writes observable storage (§5.2) rather than
+specify an order for its writes -- a new restriction, not restored semantics;
+a NAMED writing map is not such a leg when it has another reader, see the next
+paragraph.) One leg is the identity (a scalar, not
 a 1-tuple); zero legs has no index space and is refused. Both spellings are
 pinned in `tests/corpus/`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
 over deferred MAPS keeps its existing reading (n-ary map fusion answering k
 arrays) — the legs, not the operator, say which join is meant.
+
+**Effectful named computations (gap G45).** A `let` bound to a map
+(`L <@> k`, an `object_for` application) whose evaluation WRITES observable
+storage (§5.2: its kernel, a callee, or a named deferred producer it reads
+assigns outside itself) is evaluated ONCE, COMPLETELY, at its definition, in
+ascending storage order -- exactly as `|> compute` would evaluate it -- in
+every scope: module level, a top-level block, a function body, a lambda body.
+Every later read (each of several folds, a view, a print, a join leg through
+an alias) reads the stored cells, so the number and order of the writes do not
+depend on where the program puts the `let` (extracting a block into a function
+changes nothing), on how many consumers read it, or on which lane runs it. A
+map whose evaluation writes nothing keeps the deferred reading (it runs where
+it is read, fused into its consumer): its evaluation count is unobservable.
+The one exception is the join's sharing declaration above: a writing map whose
+ONLY readers are the operand slots of reduction joins stays deferred, and the
+join refuses it (BL4005) -- write `|> compute` to share the stored cells. A
+value-keyed WRAPPER over arrays -- a `<|>` choice or a `<|:>` fallback --
+obeys the same rule (gap G50): bound by a `let` and writing, it is evaluated
+once, completely, at its definition, in every scope, and its folds read the
+stored cells; a pure one stays deferred at module level and in a top-level
+block (it is stored where a fold or another eager consumer first reads it)
+and is stored at its let in a function or lambda body, where a map is too. A
+join whose only reads of a writing wrapper are its operand slots is refused
+the same way. The computation wrappers `guard` and `sequence` keep the
+deferred protocol. Pinned by `loops/494`, `497`, `518`-`527` in every lane
+(`526`, a fallback, in the C++ lane and the interpreter: the LLVM lane has no
+`<|:>`).
+
+**Aliases and printing of deferred maps (gaps G60, G75).** A pure deferred
+map (one that writes nothing, so it keeps the deferred reading above) is
+evaluated where a FORCING USE reads it: a positional read, a capture by a
+kernel, an eager array operation (`sort`, the set operations, `group_by`,
+...), a call argument, or `|> compute`. An EXTENT or RANK read (`extents(g)`, `rank(g)`, a range bound
+`0..extents(g)`) is not a forcing use: it reads the static shape the map's
+type carries and evaluates nothing (gap G218; a cell-for-cell map whose extent
+is known only at run time -- a map over a compound, a co-iteration, a chain of
+such maps -- reads it from its first operand, gap G234; any other
+run-time-shaped map, a range with a run-time bound among them, is still forced
+there) -- but a kernel that captures `g`
+and reads only `extents(g)` still captures it (below). A capture also forces a
+map that the same traversal reads as an operand or folds as its own spine,
+once, under its own name: the traversal then reads that snapshot (gap G214) -- a
+leaf of a `<&!>` tree or a join leg as well as a whole spine of any rank, also
+when the force comes from another leaf's kernel or from the private evaluation
+of a leaf's deferred operand (gap G233, `loops/876`-`885`); a full fold
+`reduce(g, k, s, axes = n)` of a named deferred scalar-cell map is such a fused
+fold too, forcing nothing (`loops/880`).
+A CAPTURE is made when its kernel is
+formed for a traversal -- a map, a fold, a join -- so the captured map is
+forced before that traversal's FIRST cell, captures of the join's leg kernels,
+then of its shared producers' kernels (first-use order; gap G249,
+`functions/788`), then of its fold kernels, in order, even when the kernel reads it only at a
+later cell or never: its failure precedes every failure of the traversal's
+cells (gap G115, `loops/660`-`662`, `665` through a deferred alias, `666` a guard, every lane). A fold, a map or a join over it FUSES
+instead and forces nothing, and a member of a tuple value evaluates a COPY
+(next paragraph). Its evaluation count is unobservable, so a program observes
+exactly two things: WHERE its first failure fires -- at its first forcing use
+-- and WHETHER it prints. A deferred map has NO STORAGE OF ITS OWN, so a
+WRITE through it -- an element write, a whole reassignment, a write through
+any `let` view, alias or rebinding of it (in any scope), passing it to a
+`mut` parameter some call chain writes, or handing it to a callee the
+compiler cannot resolve (a callback) -- is REFUSED (BL4005, at lowering, so
+in every lane; materialize it first: `let c = g |> compute`). The judgment
+is a program-wide fixpoint by binder identity that stops only at a PROVED copy
+(an assignable `let a = Z` of a dense array) or fresh storage, and refuses
+what it cannot trace. It follows AGGREGATE carriers too: a tuple (nested, or
+selected by an `if` or a `match` value) or a struct holding a view of a deferred map
+carries that view, a projection reaches it along its path, and a `match`
+pattern variable reaches the part of its scrutinee the pattern binds, so `let pair =
+(m(0), m(1)); let row = pair[0]; row(1) = 9.0` is a write through `m` (gap
+G60(a), `tuples/069`-`071`, `073`, `077`, `loops/570`-`573`; a tuple wrapper is no copy; `x |> compute` of a
+STORED name or view and `pure(x)` are the identity and are followed too, `loops/572`, `tuples/077`; a
+`|> compute` of any computing form -- a map, a guard, a transpose -- and a transpose, stack, join or
+group_by result are FRESH cells, and writing them is accepted, `tuples/068`, `073`, its first failure at the computation, `loops/569`; a `sequence`
+result is fresh in the C++ lane, while the interpreter's concrete-array sequence SHARES its
+members' stores -- a recorded divergence, OPEN under G60; a bare `guard` / `<|>` / `<|:>` / bind
+is a deferred VALUE whose provenance the walk follows conservatively, not a storage identity). Every IR form is classified as followed or as fresh storage; a
+form added later is not silently fresh (the classification is exhaustive). The ALIAS rule: a TOP-LEVEL `let g2 = g` over a
+deferred map binds `g2` to the SAME deferred value -- substitution holds. The
+alias evaluates nothing (so nothing can fail there), and a use through `g2` is
+that use of `g` (`reduce(g2, (+))` fuses exactly as `reduce(g, (+))` does, and
+is refused where that is). A TOP-LEVEL projection of a wholly-deferred tuple
+whose member is a named deferred map (`let p = (d1, d2); let v = p[0]`) is
+such an alias of the member, by the same substitution (gap G111,
+`tuples/084`-`086`; the class includes sibling projections). A deferred map and its top-level aliases form ONE
+ALIAS CLASS (siblings and chains included), whose members are ONE array for
+the identity groups of §8.3 (`method_for(g, g2)` under a comm kernel is
+packed). The PRINT rule: a class prints,
+under EVERY name in it, iff a forcing use at MODULE LEVEL (a top-level
+statement or block, or the capture of a top-level kernel) has forced any
+member by the end of the program; every name prints the same cells (no member
+can be written). The class value is fixed at its FIRST forcing event: a later
+write to one of the map's INPUTS does not change the stored cells any name of
+the class reads or prints (a fold over the map, which fuses, still reads the
+current inputs). A map that only function bodies force is evaluated inside
+each call, privately, and never prints; a class nothing forces prints
+nothing. An alias bound inside a block or a function body (`let mut b = g`)
+is a local assignable COPY instead -- binding it is a forcing use of `g` --
+and is ordinary storage. In the LLVM lane (round 3, wave 4b) the force
+points follow the C++ lane's statement pre-pass: a top-level BLOCK forces,
+before any of its effects, every deferred map the pre-pass would (the bases
+of its positional reads, call arguments, prodsum operands and folds over a
+deferred choice, in first-read order; a chain ending in a tuple, its lets'
+reads only); any other forcing use in main stores the map at the start of
+its top-level statement; in a function body, at the start of the body
+statement that first forces it. A map read exactly ONCE is stored there
+too (a force nested in another such force at the start of that one), so its
+print reads the first-forcing cells and an unread failing cell fails there
+(`loops/576`, `579`, `580`); a fold that is a map's only reader keeps it fused
+only when the program has no assignment at all and the fold's kernel and
+seed cannot fail and read no unforced deferred map (`586`-`588`); an alias
+bound in a block is copied at its binding, its source forced AT the alias,
+after the block's earlier effects (`577`, `584`, `585`) -- unless the block's
+pre-pass already forced the source, when the alias only copies; a tuple's
+members take their own force points only for a top-level statement's root
+tuple or the tuple its let chain ends in (admitted as the C++ lane admits
+member order), never a tuple bound by an inner `let` of a block;
+`let v = g |> compute` no longer makes g print once v is forced (the compute
+is a copy; `581`); and a function body evaluates a deferred module map
+privately, as a whole, from the current inputs (`547`, `578`, `582`, `583`).
+LANE EXCEPTIONS (OPEN under G60 / G75): where that lane cannot place such a
+store -- a sole read inside an open `let rec` trip scope at module level, or
+in a statement whose slots an earlier in-place force already upgraded -- the
+read is consumed in place and the print still REDOES the producer over the
+current inputs; a block alias of a module map OFF that straight-line spine
+(a block inside a branch or a loop body), and a private map a function
+forces inside one of its loop scopes, are refused by that lane (the program
+runs in the C++ lane); tested on the witnesses above, not proved absent
+elsewhere. OPEN (G60 / G77, inherited): the interpreter forces at the read
+instead -- `let r = { x(0) = 5; g(0) + g(1) }` is r = 15 in the LLVM lane
+(the pre-pass's force) and r = 7 in the interpreter, and an earlier failing
+statement in the block wins in the interpreter only; likewise with an alias of the map, a prodsum over
+it, an inner tuple `let` reading it, or reads of a second map beside an
+alias of the first. What
+changed in round 3, wave 4: the C++ lane forced
+`g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
+failure fired at the alias; the interpreter forced and printed only the name
+read, and memoized and printed a module map a FUNCTION body forced; the LLVM
+lane forced through an alias where the fold should fuse; and writes through a
+deferred map gave three answers (the LLVM lane folded the unwritten map, a
+silent wrong value; a reassignment dropped the old producer's failure there).
+Pinned by `loops/540`-`561` and `576`-`588`. The LLVM lane runs `loops/545`,
+`547`, `578`, `582` and `583` (the G75 print rule and the function-body
+copy). LANE REFUSALS (not LLVM semantics; the program runs in the C++ lane):
+`loops/544` (its function returns a dynamic-extent `group_by` result), a call
+from main after main forced the map (its class value is then the stored
+snapshot, which the private evaluation would not read), a deferred module
+value that is not a map form, and the two off-spine shapes above.
+
+**Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
+of whose members are deferred computations is itself a deferred tuple: binding
+it evaluates nothing, and a projection reads one member. Any other tuple is a
+VALUE, and its members are evaluated AT ITS CONSTRUCTION, LEFT TO RIGHT, each
+at its own position: a deferred array member `(g, 1.0)` exactly as
+`g |> compute` evaluates it (a copy -- `g` itself is not forced, and prints only
+if a forcing use forces it), and a named deferred tuple member `(p, 1.0)` member
+by member. An `if` value whose arm is such a tuple (or an explicit
+`|> compute`) evaluates its condition, then ONLY the taken arm, members left to
+right; the untaken arm evaluates nothing. Two shapes of it are REFUSED (BL6002,
+at lowering, every lane): one inside a function body, a lambda or a loop body
+(the compiled lanes have no owner for the taken arm's storage after the
+branch), and one whose arm READS a deferred computation other than as such a
+copy member -- by position, through a kernel's capture, inside a computed
+member's own computation, or in a nested condition -- because that force
+would happen only on the taken arm, which no lane's static print list follows
+(force it before the `if`). The shared predicate follows a tuple-alias chain
+to its END, so every lane judges a long chain alike (gap G59: it stopped after
+16 links, and a longer chain met a backend refusal, BL7004, instead of BL6002;
+`tuples/074`-`076`, `073`), and judges a BLOCK-valued initializer (`let p0 = { let n =
+..; (m, m) }`) by its result (`loops/574`, `functions/854`); a chain that revisits a binder is refused. A tuple ALL of
+whose members are deferred is deferred in a FUNCTION body too: binding it
+evaluates nothing (gap G58, `tuples/068`; the C++ lane named the module map in
+a value tuple, BL9002). A call with an
+explicit `|> compute` argument
+evaluates EVERY argument left to right the same way, array-valued ones included
+(gap G57); so does an ORDINARY call two or more of whose arguments may fail
+(gap G79: C++ leaves argument evaluation order unspecified, and g++ evaluated
+them right to left) at exactly these sites: the whole value of a module-level
+or top-level-block `let`, the whole value of a function-body `let`, and a
+function's returned value (`tuples/078`-`079`, `functions/855`-`856`,
+`tuples/073`; in a function body its arguments are bound in
+source order before any fresh-array argument is hoisted). Anywhere else -- a
+call nested inside a larger expression, a call in an `if` arm -- the C++
+lane keeps its unspecified operand order (OPEN under G79, as for any two
+failing operands of one expression). In the LLVM lane a BARE deferred array argument of such a call is forced AT its position, under its own name, on the out-of-line and the inlined (capturing) call alike, when the call is a top-level binding's root value or a function-body statement's whole value (`tuples/063`-`065`, `080`-`082`); nested in an expression the LLVM lane refuses such a call (fail closed) and the C++ lane runs it. An `if` value OFF the member-ordered path (ordinary arms) whose
+arm FORCES a deferred computation -- a positional, extent or membership read,
+a whole-array call argument, a prodsum operand, a kernel's capture: `if c then
+g(0) else 0` -- is REFUSED (BL6002, at lowering, every lane; gap G77): only
+the taken arm is evaluated, and no lane has a print list or a first-failure
+point that follows the branch (the C++ lane forced both arms' maps at the
+statement's start, so an untaken arm's map printed and failed; the LLVM lane
+printed -- and so forced -- it after the program; the interpreter forced the
+taken arm's only). ONE binder is admitted: the one whose forcing read is the
+FIRST operation of the whole statement that may fail, evaluating operands left
+to right -- in the `if`'s condition or anywhere earlier in the statement
+(`g(0) + (if z(0) > 0 then g(0) else 0)`). Then it is
+forced first in every lane -- the C++ lane at the statement's start, the
+others where they reach it -- with nothing that could fail before it, so the
+print set and the first failure agree. The operations that may fail first are EXACTLY section 2.4's panics -- an
+integer `/` or `%`, an integer-base `^` (a negative exponent), a float -> integer
+cast, a checked read -- and a call (its body is not entered; its callee and
+arguments run before it); every other operation is inert after its operands:
+names, literals, `+ - *`, float `/`, a real-base `^`, comparisons, negation, a
+cast to Float64 / Float32, every libm intrinsic EXCEPT `lgamma` / `digamma` (Blade's
+own series: BL8008 outside x > 0, so a barrier), complex ops, fma, tuple and
+field projections, a `|> compute` of a STORED name. A type counts as scalar
+through any unit / index-tag wrappers (`Nat<Row>` is a scalar Int64), and a
+type that is not a PROVEN real or complex float scalar (an unresolved, named or
+Nat type) is treated as possibly integer: its `/`, `%`, `^` or integer cast keeps
+the barrier. Of `&&` / `||` only the LEFT
+operand counts -- the right one may be short-circuited away, so an inert left
+operand leaves no admissible force; a SCALAR `guard`'s condition and a scalar
+choice's LEFT operand run first (never its conditional body / right operand);
+an array-valued guard or choice, an eager `sequence` and every deferred
+computation held as a value are opaque (`loops/591`-`595`). The
+REGIONS are the emitters': a top-level BLOCK (a let chain) is ONE statement --
+the C++ lane forces the whole block's deferred reads before its lets, so
+every earlier statement of the block precedes the admitted force -- except
+that a block's final TUPLE is its own region (its reads force at the tuple's
+binding, after the block's statements); a binding's tuple value that the C++
+lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
+compute / deferred member -- the emitter's own judgment) is one region per
+leaf, left to right.
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude -- and there the evaluation COUNT is observable too, when the body writes an INPUT of the map between two forcing uses (a module array written by name, or by a callee, inside a loop step). Since round 4 wave 10 the compiled lanes follow it for a FUNCTION body's scalar positional reads (`functions/1030`-`1039`, `1048`): a body statement whose order the statement prefix cannot reproduce has each read replaced by a call of a one-statement helper that forces the map privately, and its spine put in evaluation order (Lowering.splitDeferredBodyReadsModule) -- a read in an untaken arm, a short-circuited operand, a loop step or after an operation that may fail is forced where the interpreter forces it; a statement the rewrite cannot prove equivalent (a read with an index that may fail, a non-scalar read or whole-array use, a fold or array event before a later read, a deferred capture of a callable the statement names) keeps the statement prefix and stays OPEN under G239. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+compute`) evaluates g's computation without forcing it or making it print,
+and counts as an operation that may fail. Force anything else before the `if`
+(`let v = g |> compute`, or a statement that reads it) and read the value in
+the arm. A fold or a map over a deferred map in an arm fuses and forces
+nothing and is admitted (`loops/562`-`568`, `575`, `functions/852`-`853`, `857`, `tuples/068`, `072`, `073`; `loops/564` the ordered tuple's failure). `match` ARMS are not judged (OPEN
+under G77). The first-failure consequence is
+deliberate: a failing member fails at the construction even when the program
+never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
+`held`, before a later failing statement (`tuples/041`). What changed in round
+3, wave 4: the C++ lane refused a bare member (`unevaluated computation used as
+value`), named undeclared members of a deferred tuple member or of an
+`if`-held tuple, and let g++ evaluate `std::make_tuple`'s arguments right to
+left; the interpreter held a bare member deferred inside the tuple and
+evaluated it at a later projection; the LLVM lane kept it a producer and ran
+it only where the tuple was read, and refused an `if`-held tuple. Pinned by
+`tuples/041`, `044`-`079`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
   reordering; associative. It is proved to be exactly shape concatenation with
   multiplicative cardinality (proofs.md §Trinity). `<*>` is purely structural
   — commutativity comes from the kernel later; the same MethodLoop under
   different kernels yields triangular or rectangular iteration accordingly.
+  Concatenation and multiplicative cardinality are facts about the MethodLoop,
+  its dense iteration space; the OUTPUT structure of `(M₁ <*> M₂) <@> f` is
+  the factors' identity groups glued at the seam, so under a `comm` kernel a
+  group that straddles the seam merges — `(method_for(A) <*> method_for(A))
+  <@> f` is `SymIdx<2, N>`, C(N+1, 2) cells, not N² — and the output's orbit
+  count is at most the product of the factors' counts, equal when no group
+  straddles the seam; for the same reason reordering the factors can change
+  the output structure (proofs.md §Transport: `out_shape_app`,
+  `shapeCard_product_seam`).
 - Runtime-arity loops: `fold(<*>, map(method_for, arrays))`; for object loops
   the fold is implicit in `object_for(f) <@> arrays`. Every n-ary loop is
   generated by unary loops under the product — arity polymorphism is the
@@ -1856,6 +3005,11 @@ lower₂₁(H) = H ∩ Stab(A₁, ..., Aₙ),   Stab = {σ ∈ Sₙ : ∀j. A_σ
   accidentally more symmetric — remark, not hedge. (proofs.md §Completeness.)
 - Sign-tracked variant: kernel anti-invariance ⇒ output antisymmetry
   (Hermitian = same statement with neg := conjugation). (proofs.md §Lowering.)
+  Strict storage (`AntisymIdx`, no diagonal cell) additionally needs a ZERO
+  DIAGONAL, which anti-invariance yields only on a carrier without 2-torsion;
+  wrapping Int64 is not one (−MIN = MIN), so the declared clause carries the
+  zero-diagonal condition itself and the checker refutes it where it can
+  (§3.4, §5.2).
 
 Input array symmetry, dually, is CONSUMED on read (`lower₁₀` is trivial —
 index permutations become element identity); it does not propagate through
@@ -2181,11 +3335,11 @@ a malformed literal (BL0003), not an implicit product.
 type LatIdx = Idx<180>                       // type aliases
 type OceanIdx = CompoundIdx<ocean_mask>
 
-let data: Array<Float like LatIdx, LonIdx, TimeIdx>
-let cov:  Array<Float like SymIdx<2, n>>
+let data: Array<Float64 like LatIdx, LonIdx, TimeIdx>
+let cov:  Array<Float64 like SymIdx<2, n>>
 let v = [1, 2, 3]                            // literals; nested for rank ≥ 2
 let ragged = [[1, 2, 3], [4], [5, 6]]        // ragged literal → RaggedIdx
-let empty : Array<Float like Idx<0>> = []    // empty needs annotation
+let empty : Array<Float64 like Idx<0>> = []    // empty needs annotation
 ```
 
 No separate List type — static-size arrays suffice; dynamic collections are a

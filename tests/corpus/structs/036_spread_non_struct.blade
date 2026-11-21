@@ -2,8 +2,8 @@
 // ERROR: BL3008
 // The spread base must be a value of the SAME struct type.
 struct Point {
-    x: Float,
-    y: Float
+    x: Float64,
+    y: Float64
 }
-let n = 5
+let n: Int64 = 5
 let q = Point { x = 1.0, ..n }

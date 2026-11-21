@@ -1,0 +1,22 @@
+// TEST: Compaction fusion: a writer hidden in another compound's operand between the mask and the compound
+// `zz = compound(bumped(x), other)` -- over a DISTINCT mask, so the shared-mask
+// refusal cannot hide it -- runs `bumped`, which writes x(0), at its own site;
+// the compound's operands live in a side table and its binding's value is a
+// placeholder. The payload audit sees the write: the opt-in mask-site gather
+// of `y` (BLADE_COMPACTION_FUSION=gather) declines, and y gathers x after the
+// write in every mode: y = [9.0, 2.0].
+type Ix = Idx<2>
+function bumped(a: mut Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    a(0) = 9.0
+    let b = a + 0.0 |> compute
+    b
+}
+let mut x: Array<Float64 like Ix> = [1.0, 2.0]
+let keep = mask(x, lambda(v) -> v > 0.0)
+let other = mask(x, lambda(v) -> v > 0.5)
+let zz = compound(bumped(x), other)
+// EXPECT: zz = [9.0, 2.0]
+let y = compound(x, keep)
+// EXPECT: y = [9.0, 2.0]
+let s = reduce(y, (+))
+// EXPECT: s = 11.0

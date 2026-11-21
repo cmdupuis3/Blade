@@ -26,6 +26,6 @@ let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
 let g = method_for(a) <@> lambda(x) -> scaleRow(x) |> compute
 // EXPECT: g = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
 
-let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let p = method_for(m) <@> lambda(row: Array<Float like Idx<3>>) -> row |> compute
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let p = method_for(m) <@> lambda(row: Array<Float64 like Idx<3>>) -> row |> compute
 // EXPECT: p = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]

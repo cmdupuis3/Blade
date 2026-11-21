@@ -27,7 +27,7 @@
 // just as well -- `tuples/015` pins the identical program in that spelling.
 function outer(r: ((Float64, Float64), (Float64, Float64))) -> Float64 =
     r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
-let deep = outer(((1.0, 2.0), (3.0, 4.0)))
+let deep = outer(((Float64(1.0), Float64(2.0)), (Float64(3.0), Float64(4.0))))
 // EXPECT: deep = 4321.0
 
 // Rule 3 precedence (a) on its own, at width-only: a single 2-tuple argument
@@ -35,7 +35,7 @@ let deep = outer(((1.0, 2.0), (3.0, 4.0)))
 // two scalars -- that reading would need two parameters, and the direct match
 // is tried first. Scalar elements, so the element slots resolve.
 function pr(p: Tuple<2>) -> Float64 = p[0] * 10.0 + p[1]
-let bound = pr((3.0, 4.0))
+let bound = pr((Float64(3.0), Float64(4.0)))
 // EXPECT: bound = 34.0
 
 // OPERAND position, pair of pairs: two `Tuple<2>` parameters each direct-bind

@@ -13,7 +13,7 @@ import ad as ad
 type R = Idx<2>
 type C = Idx<3>
 
-function f(a: Array<Float like R, C>) -> Float = {
+function f(a: Array<Float64 like R, C>) -> Float64 = {
     let s = method_for(a) <@> lambda(row: T^1) -> reduce(row, (+)) |> compute
     s(0) + 2.0 * s(1)
 }

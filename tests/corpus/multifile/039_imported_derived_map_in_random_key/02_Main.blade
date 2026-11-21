@@ -1,0 +1,10 @@
+// TEST: An imported map of a compound read inside a random fill's key keeps the kept positions
+// MODULE: Main
+module Main
+import Data
+import rand as r
+
+let u = r.uniform(Data.z(2), 1)
+// EXPECT: u = [0.580382050475229]
+let total = Data.zsum
+// EXPECT: total = 24698

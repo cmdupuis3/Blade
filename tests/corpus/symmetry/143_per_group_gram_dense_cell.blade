@@ -1,0 +1,28 @@
+// TEST: Per-Group Gram Blocks Through A Dense Cell (G67 spellings that work)
+// The two spellings BL4004's G67 refusal names (corpus symmetry/142): the
+// callee ends in `decompact(h, 0)`, so each cell of the row map is a DENSE
+// P x P block, and the flat map over every axis. Both read the canonical
+// h(2, 0, 1) = sum_s (24 + s)(28 + s) = 3014 and the mirrored
+// h(1, 2, 1) = sum_s (16 + s)(20 + s) = 1510 (distinct groups).
+type G = Idx<3>
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) -> Array<Float64 like P, P> = {
+    let hc = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+    decompact(hc, 0)
+}
+
+let jt = method_for(range<G, P, S>) <@> lambda(g, a, s) -> Float64(g * 12 + a * 4 + s) |> compute
+let h = method_for(range<G>) <@> lambda(g) -> group_h(jt(g)) |> compute
+let hf = method_for(range<G, P, P>) <@> lambda(g, a, b) -> prodsum(jt(g, a), jt(g, b)) |> compute
+let canon = h((2 : G), (0 : P), (1 : P))
+let mirror = h((1 : G), (2 : P), (1 : P))
+let canon_f = hf((2 : G), (0 : P), (1 : P))
+let mirror_f = hf((1 : G), (2 : P), (1 : P))
+let v = canon + mirror
+// EXPECT: canon = 3014.0
+// EXPECT: mirror = 1510.0
+// EXPECT: canon_f = 3014.0
+// EXPECT: mirror_f = 1510.0
+// EXPECT: v = 4524.0

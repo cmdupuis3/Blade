@@ -20,7 +20,7 @@
 // rather than the inherited class's. The remedy is the same steer:
 // decompact(B, 0) first — the kernel over the dense tensor carries no wreath
 // claim — or use a kernel odd in each argument (213/214's p * q).
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let h = lambda(p, q) where comm(p, q) -> p * p + q * q

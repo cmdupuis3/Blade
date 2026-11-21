@@ -53,8 +53,16 @@ values are copied and no compaction happens here. Compaction is deferred to
   operations (§3).
 - Predicate composition in a single pass is supported
   (`mask(A, lambda(x) -> p(x) && q(x))`).
-- Rank-1 sources only, currently. Rank-k masks are reserved for the compound
-  composition round (v7 emits an error).
+- Rank-1 sources, and rank-k PLAIN DENSE sources: the mask keeps the whole
+  index space and `compound(A, m)` then compacts every dimension (the masked
+  provider read of §2a is built this way). A rank-k packed, ragged or sparse
+  source, and a compound with trailing dimensions, is refused (BL7004).
+- An ALL-DIMS COMPOUND source -- a filtered set, or the rank-2 relation of an
+  equijoin (§6a) -- is masked over its PRESENT cells in storage (lex) order:
+  the mask keeps the compound's index (`keep(i, j)` reads the bit of a
+  present tuple), and `compound(J, keep)` selects those cells in that order,
+  over a fresh rank-1 index of their positions (join -> payload predicate ->
+  aggregate, ST15; sql-joins/024-026, sql-masks/019-021).
 
 v7: `TypeCheck.fs inferMask`, IR `IRMask`, codegen `materializeMaskForm`.
 Tests: `sql-masks` ("Mask Basic", "SQL WHERE", "Mask Composition").
@@ -93,6 +101,137 @@ v7: `TypeCheck.fs compoundViewType`, IR `IRCompoundMask`, index kinds
 `IxKCompound`/`IxKCompoundDynamic`. (`IRCompoundProject` is the residual
 carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
 `index-types/001–017`; the sparse counterparts are `index-types/171–184`.
+
+### Single-pass and shared selection (compaction fusion v2)
+
+A rank-1 compound over a let-bound `keep = mask(x, pred)` is a *compaction*:
+the kept cells are counted in the mask's own pass, and the value gather (plus
+the kept-position fill, when anything reads source positions) is ONE
+branchless pass at the compound. The kept-position table is compiler
+metadata: a fail-safe demand census elides it when every use reads only the
+compact buffer or the cardinality (folds, `extents`, derived maps, printing);
+a keyed read, `<|:>`, an argument, an alias or a capture keeps it. Under the
+opt-in `BLADE_COMPACTION_FUSION=gather` the gather moves into the mask pass
+itself (n + 1 private cells per buffer, capped by `BLADE_TILE_TUNE sel_cap`).
+
+When ONE mask feeds several compounds -- `y_j = compound(c_j, keep)` over
+different columns of the mask's index space (the WHERE of a multi-column
+SELECT) -- they share **one selection** (T4c): one index, counted in the
+mask pass, its positions (if any companion demands them) filled by one joint
+pass that gathers every companion at once, each companion keeping its own
+compact data store around the shared index. Values, cardinality, positions
+and the folds over each companion are exactly those of the separate passes.
+
+```blade
+type Ix = Idx<11>
+let x = method_for(range<Ix>) <@> lambda(i) -> Float64((Int64(i) * 4) % 11) |> compute
+let w = method_for(range<Ix>) <@> lambda(i) -> Int64(i) * 10 - 3 |> compute
+let keep = mask(x, lambda(v) -> v > 4.5)
+let y1 = compound(x, keep)
+let y2 = compound(w, keep)
+let k2 = y2(5)
+// EXPECT: k2 = 47
+let s2 = reduce(y2, (+))
+// EXPECT: s2 = 342
+```
+
+A mask predicate built from membership probes -- the semijoin `mask(cust,
+lambda(c) -> contains(elig, c))`, the antijoin `!contains(...)`, either `&&` a
+pure, total cell test -- joins the same plan when membership hoisting (§5)
+admitted that probe: its admission record certifies the probe pure and total
+(a stored, never-assigned set bound before the host; nothing writes), and every
+other operand must be a pure, total scalar of the cell. A probe membership
+hoisting declined (or `BLADE_MEMBER_HOIST=0`) keeps its scan, and the
+compaction keeps its separate passes. The shared selection declines -- each
+compound keeping its own passes -- when the mask is assigned or read between
+it and its last companion, when anything in that interval may write, when a
+companion is assigned, and when a companion's source is deferred or bound after
+the first companion. The mask's source and every companion's source must be
+proved STORED -- through any chain of `let B = A` aliases, as membership
+hoisting proves a set (a deferred map, directly or behind an alias, a range, a
+streamed read decline) -- and never assigned. `blade plan` rule `compaction-fusion`; `BLADE_COMPACTION_FUSION=unshared`
+is the pre-T4c form (one index per compound), `b4` the round-2 form, `0` off.
+Under `b4` and `unshared` the certificate is never used, but membership
+hoisting is independent of both: an admitted probe still reads its hoisted
+structure there (only membership hoisting's own refusal, or
+`BLADE_MEMBER_HOIST=0`, keeps the per-probe scan).
+
+Which SINGLE compounds changed emission with T4c, and why -- exactly two
+shapes, each newly admitted:
+
+- a single `compound(c, keep)` over a stored column `c` that is NOT the mask's
+  source, with a total predicate: before, its own count, fill and gather
+  passes ("the mask's source is not the compound's dense operand"); now the
+  shared-selection path with one companion -- counted in the mask pass, one
+  gather pass (the semijoin's `compound(amt, keep)` shape);
+- a single compound whose predicate is a CERTIFIED membership probe: before,
+  `totalScalar` refused the call and the compaction kept its separate passes;
+  now, over the mask's source, the ordinary compaction plan (count in the
+  mask pass, one fill+gather pass), and over another column the
+  shared-selection path above.
+
+A single `compound(x, keep)` over the mask's OWN source with a total
+predicate (the maskagg shape, `index-types/515–531`) emits exactly the text it
+did before, in both lanes (pinned against `unshared` by `blade test
+optimize`). Tests: `index-types/515–542`.
+
+## 2a. Missing values at a provider boundary — `read_present` / `present`
+
+**The boundary rule: a missing value never crosses a provider boundary disguised
+as a number.** A stored variable whose cells the store marks missing is
+REFUSED by every default read (`alias.read`, `.stream`, `load_compound`,
+`read_window`) with BL8015, which names the variable, the store, how many
+cells are missing and the first one. One rule per variable, fixed at compile
+time from the store's metadata:
+
+| Provider | A cell is missing when it is |
+|----------|------------------------------|
+| every provider, floating variable | NaN or ±Inf — fill or written alike |
+| NetCDF | equal to `_FillValue` or a `missing_value`; outside `valid_min` / `valid_max` / `valid_range` (inclusive bounds); the default fill (`NC_FILL_FLOAT` / `NC_FILL_DOUBLE`) of a floating variable with no `_FillValue` — a never-written cell |
+| Zarr / Icechunk | nothing more: a FINITE `fill_value` is a value and reads as one |
+| CSV | nothing more: `nan` / `inf` / `-inf` cells parse (the table is Float64) but are refused |
+
+An INTEGER NetCDF variable is refused only on an explicit attribute:
+`NC_FILL_INT`, `NC_FILL_SHORT` and `NC_FILL_BYTE` are representable integers,
+so an unwritten integer cell is indistinguishable from a stored one.
+NaN that a program COMPUTES is untouched — the rule is about values entering
+the program, not arithmetic inside it. The rule holds in every lane: the
+compiled reader scans the buffer it filled, the interpreter scans the same
+cells with the same predicate, and a compile-time fold (`let static ... |>
+read`) fails the `let static` assertion (BL4002, the code of every
+compile-time fold failure) carrying the same sentence. A streamed read
+(`.stream`) checks each fiber as it is read, with no pre-scan at open, so its
+refusal can come from inside the consuming loop after earlier output — the
+message then names the fiber's site coordinates. A `load_compound` read checks
+only the cells its mask marks present. Writes keep the round trip honest: a
+provider write of a NaN or infinite cell is refused under the same code, since
+every reader of the store would refuse it.
+
+**The opt-in is the masked read** — the present cells, as a compound array
+(§2), with no sentinel or NaN ever exposed:
+
+```blade
+import csv as c
+let obs  = c.load("tests/fixtures/csv_files/ms_nan.csv")  // 2 x 3, one nan and one inf cell
+let vals = obs.vars.data |> c.read_present  // compound array of the 4 present cells
+let ok   = c.present(obs.vars.data)         // Array<Bool like the table's axes>: true = present
+let n    = extents(vals)                    // COUNT(*) of the present cells
+```
+
+`alias.read_present` and `alias.present` take the same operand as `read`
+(`store.vars.<name>`, a dense variable) in both spellings, `alias.f(view)` and
+`view |> alias.f`, and must be the whole value of a module-level binding, like
+`compound`. They are built from §1 and §2: ONE raw read of the store, exempt
+from the rule and never visible to the program (not printed, not selectable
+with `--print`), then `mask(raw, present)` with the variable's rule spelled as
+the mask predicate, then `compound(raw, mask)` — so `read_present` is exactly
+`compound(raw, present)`, and the mask composes with companion columns like
+any other mask. v7: `src/ProviderDesugar.fs` (the masked read),
+`ProviderRegistry.MissingRule` (the rule and its two predicates). Tests:
+`blade test netcdf|zarr|csv|icechunk` (refusals per provider, the finite-fill
+case, the masked read) and the interpreter differential's provider block
+(`blade test interp <category>`), which pins the masked read's values and the
+refusal's sentence in both lanes.
 
 ## 2b. `sparse(values, keys)` — bundle values with an explicit key set
 
@@ -143,7 +282,11 @@ Full **SQL set semantics** — value-based and deduplicating:
 - `union`: distinct values from either; A's first occurrences before B's.
 
 Result extent is dynamic (runtime cardinality). Implementation: two-pass
-`unordered_set`. Contrast with §1's positional mask combination — masks preserve
+`unordered_set`. VALUE EQUALITY is the class of §9's key order, in every lane:
+every NaN is ONE value, `-0.0` and `+0.0` are one value, other values by `==`;
+each class keeps its FIRST occurrence (a `-0.0` before a `0.0` stays `-0.0`).
+The same holds for `unique` (§4). `contains` (§5) stays the scalar `==`: a NaN
+target matches nothing (gap G126, `sql-set-ops/014`). Contrast with §1's positional mask combination — masks preserve
 coordinates, set ops produce fresh dense value arrays.
 
 Tests: `sql-set-ops` ("Intersect Dedups A", "Union Dedups Both",
@@ -169,6 +312,19 @@ cardinality, so membership over an empty filtered set is safely `false`.
 Element type of `x` must unify with A's — mismatch is a type error.
 Tests: `sql-unique-contains/004–007`.
 
+**Evaluation contract (every lane).** The set operand is evaluated first — as
+the set itself, never a snapshot of its cells — then the target `x` exactly
+once, and only then are the cells read — also when the set is empty. A target
+that counts its evaluations counts one per probe; a failing target
+(`contains(empty, 100 / z)` with `z = 0`) aborts BL8013 even over an empty set;
+a target that writes the set through a `mut` parameter is seen by the scan
+(overwriting the probed key's cell makes it a miss). This order is a contract
+choice (formalism §6.5 delegates relational semantics to this page): the
+interpreter's, adopted by both compiled lanes in round 3. Tests:
+`sql-unique-contains/015–017`, `023` (a dense set, all lanes), `024` (a
+compound set: the C++ lane; the interpreter has no compound element store and
+the LLVM lane refuses a compound `mut` parameter).
+
 ## 6. Semijoin / antijoin — idiom, not keyword
 
 ```blade
@@ -182,13 +338,82 @@ let n_anti = extents(anti)
 // EXPECT: n_anti = 2
 ```
 
-Multiplicity-preserving (unlike `intersect`). **Performance status**: the
-O(|A|+|B|) hash-set fusion (pre-building a set from B) was attempted, found to be
-a no-op as wired, and removed; every `contains` is currently a linear scan, so the
-idiom is O(|A|·|B|). Re-landing the set-hoist is planned (open item 1 below).
-The `sql-semijoins` tests (7) guard correctness only, including "Pattern Does Not
-Fire On Conjunction" (the fusion must not misfire when the predicate is a
-conjunction).
+Multiplicity-preserving (unlike `intersect`). **Performance status: membership
+hoisting** (round 3, `Optimize.planMembershipHoist`, `blade plan` rule
+`member-hoist`, knob `BLADE_MEMBER_HOIST`). When the predicate is the kernel of an
+eager top-level host (a `mask`, a `|> compute` map, a fold, or the `compound` whose inline mask it is -- the idiom above) and B is a named,
+earlier rank-1 Int64 set that nothing writes and whose STORAGE is proved at the
+build point — a literal, a `|> compute`, a compound, an eager set operation, a
+call result or a provider read, through any chain of `let B = A` aliases (a
+deferred map, directly or through an alias, is not stored there and declines) —
+ONE search structure is built over B right before the host and every probe reads
+it: O(|A| + |B|). The PREFERRED representation (none for |B| <= 16 -- nothing
+is built and every probe is the as-written scan, and a LITERAL set that small
+is not hoisted at all (G185 (b), round 4 wave 6) --, a bitmap when the span is
+within 2^26 bits, else a hash) is chosen from (|B|, min, max) only; an allocation the build cannot make degrades the
+ACTUAL one (bitmap -> hash -> linear), and each build reports both and why
+(`BLADE_MEMBER_VERBOSE=1` on stderr, both lanes; the C++ run record's
+`member_hoist`). All three answer exactly integer `==` — build-side duplicates
+collapse, the probe side keeps its order and multiplicity, and conjunctions keep
+their short circuit (only the `contains` node reads the structure). One C core
+(`src/cpp/blade_member.h`) serves both compiled lanes; the interpreter keeps the
+scan. A writing party (the set's producer, the probing kernel, a fold kernel or
+seed, the host's payload), an unstored set, a kernel two hosts name, or non-Int64
+keys keep the per-probe scan. An admitted probe also lets the semijoin's
+compaction fuse: membership hoisting's admission certifies the mask predicate
+pure and total (§2, "Single-pass and shared selection"), so `y = compound(amt,
+keep)` over a hoisted `keep = mask(cust, lambda(c) -> contains(elig, c))` is
+counted in the mask pass and gathered in one pass (corpus
+`index-types/537-539`). Tests: `sql-unique-contains/011–026`, the
+`sql-semijoins` tests (correctness under the hoist, including "Pattern Does Not
+Fire On Conjunction").
+
+## 6a. Inner equijoin — idiom, not keyword
+
+```blade
+type LeftRow = Idx<3>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [1, 2, 1, 2]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [20, 40, 30, 30]
+// EXPECT: match_count = 4
+// EXPECT: total = 120
+```
+
+The relation is a rank-2 compound over (left row, right row), stored in lex order: left row
+ascending, then every matching right row ascending. It is a BAG — every left row pairs with
+every right row of equal key, duplicates on both sides kept (4 matches above; a set-based
+probe would find 2). **Performance status: the hash equijoin** (round 3 W3-2, item T2,
+`Optimize.planEquiJoin`, `blade plan` rule `hash-join`, knob `BLADE_HASH_JOIN`). Written
+INLINE as above — both outer products inside `compound(..)`, so they are compiler
+temporaries — the C++ lane never builds the N x M pools: it builds a stable CSR over the
+right keys (a counting sort over their measured span, or an open-addressing hash for a wide
+one; `src/cpp/blade_member.h`), counts the matches, then probes the left keys in order,
+storing each match's payload — O(N + M + J) instead of six passes over all N x M pairs, the
+same cells in the same order. Negative keys match like any other (equality has no
+negative-key drop, unlike `group_keys`); a left key no right row holds matches nothing,
+never an out-of-domain error. `matched` stays stored; `extents`, folds and printing read it
+as before. Admitted only when the keys are Int64 (plain or a positional `Idx<K>` tag), the
+key kernel is exactly `l == r`, the payload kernel is a pure, total, capture-free scalar of
+its two cells, the four sources are stored and never assigned, none of the parties whose
+work is SKIPPED or moved writes (the four sources' producers, the payload and key kernels, the
+predicate, the relation's own payload -- a fold kernel or seed that writes is left at its own
+site unchanged, and is admitted), and every use of the relation reads its cells or its count
+alone. A
+keyed read `matched(i, j)`, an alias, a call argument, a map over the relation, a writing or
+non-total kernel, float keys, a conjunctive key kernel (v1.1) or the NAMED spelling
+(`let equal_keys = method_for(..) <@> lambda(l, r) -> l == r |> compute`,
+`let keep = mask(equal_keys, ..)`, `let products = .. |> compute`, `compound(products,
+keep)` — every named array stays stored) keep the as-written passes, with the reason in
+the plan. The LLVM lane refuses rank-2 compounds (the program falls back to C++) and
+records the decline; the interpreter runs the as-written passes. Tests: `sql-joins/001–019`
+(014–019 are failure witnesses: a payload or key kernel that can panic on a NON-matching
+pair keeps the as-written passes, so the panic stays).
 
 ## 7. `group_keys(k₁, k₂, ...)` — grouping structure
 
@@ -241,6 +466,20 @@ of these used to typecheck, lower, emit, and then fail in g++ on undeclared
 `gk2__offsets`-style symbols; the aliased/tupled/parameter forms silently, the
 inline and returned forms as a `BL7001` backend-gap note that invited a bug
 report for a hole nobody intends to fill. Pinned by `sql-group-by/035`–`/039`.
+
+The GROUPED VALUE inherits the same limit wherever it would leave its grouped
+type: a `group_by` result, a per-group map of one, and each of its rows carry
+their row lengths in the grouping's side state, which no function signature,
+plain array annotation or struct field carries. So each of these is `BL3017`
+too, at the value: a function returning one (whole, a row, inside a tuple or a
+branch), a lambda returning one unless it is a per-group ROW KERNEL (its
+parameter is a row: `method_for(g) <@> lambda(r) -> r - mean(r)`), a binding
+annotated with a plain array type (`let h: Float64^2 = g`) or an assignment to
+one, and a struct field (`Box { data = g }`). They used to pass `check` and
+die in g++ (BL9002) or leave a null extents table. What a function returns is
+what it computes FROM the groups: a per-group fold (`reduce(g, (+))`) keeps
+only the group axis and is an ordinary array. Passing a grouped value INTO a
+function is the back end's `BL7004`. Pinned by `sql-group-by/077`–`/082`.
 
 This is the same invariant the same-keys co-iteration check in §8 already
 relies on: that check decides "same grouping" by comparing binding **names**,
@@ -321,7 +560,11 @@ recovers the original value at row `i` by ordinary gather. That is what lets a
 per-group aggregation be re-expressed as a dense gather through `bucket`, the
 shape reverse-mode AD needs through `group_by`
 (`docs/plans/plan-ad-combinators.md` §2.17a). A surface accessor for `rank` does not
-exist yet.
+exist yet. The rule that makes this compose: a plain integer subscript of a grouped
+value is a group POSITION (what `group_bucket` returns), checked against the group count,
+while a value of the grouping's key type (`Nat<R>` over an `EnumIdx R` grouping) is a KEY,
+mapped to its position (the D2 rule); the row coordinate is checked against that group's
+own length (BL8006 at run time, BL4003 for a literal past a static group count).
 
 Under `ad.grad` / `ad.jvp` you no longer write that gather yourself: a fully
 reduced per-group loss over a group-linear peel kernel (`reduce(r, (+))`,
@@ -350,7 +593,7 @@ let temps  = [20.0, 25.0, 22.0, 30.0, 27.0]
 let gk    = group_keys(region)
 let sums  = method_for(group_by(temps, gk)) <@> lambda(g) -> reduce(g, (+)) |> compute
 let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
-let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float64(n)) |> compute
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float32(n)) |> compute
 // EXPECT: sizes = [2, 2, 1]
 // EXPECT: means = [21.0, 26.0, 30.0]
 ```
@@ -398,12 +641,12 @@ let fs  = files(T)                            // the FILE level of a tiled axis:
 let v   = ungroup([v1, v2], T)                // a variable living in both stores, named over T
 let tiles = segments(C0, C1)                  // a rank-2 array's TILE grouping: one group per (g0, g1), slot order
 let t2  = segments(a)                         // the same, read off a's own annotation `Array<T like C0, C1>`
-let A: Array<Float like CX> = s.vars.A |> z.stream   // NOT materialized; consumers below stream it
+let A: Array<Float64 like CX> = s.vars.A |> z.stream   // NOT materialized; consumers below stream it
 let total = reduce(A, (+))                    // block-by-block in storage order: bitwise the flat fold
 let g = group_by(A, segments(A))              // one run read per group (rank 2: one TILE window per group)
 let d = method_for(halo<CX, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute   // run + ghost cells per segment
 let e = A * 2.0                               // elementwise: one block (rank 2: one band of rows) at a time
-let T: Array<Float like CLat, CLon> = s.vars.T |> z.stream    // a 2-D variable chunked in both dims
+let T: Array<Float64 like CLat, CLon> = s.vars.T |> z.stream    // a 2-D variable chunked in both dims
 let tiles = group_by(T, segments(T))          // each tile one window read; with inherited edges, one chunk file
 ```
 
@@ -464,8 +707,20 @@ flat fold -- the alias IS the axis, nothing is reassociated, no license is asked
 A per-segment fold is what `group_by(a, segments(A))` and an explicit combine
 spell; nothing implicit exists to refuse.
 
-Not yet: an elementwise map over a grouped array (the ragged-map emitter's
-standing refusal; stream the source instead, or `ungroup` then map); streaming
+Storage: over a never-written plain source, a top-level structural `group_by` reads its rows in the source's own storage and its `ungroup` shares it (no pool, no copy; `BLADE_GROUP_VIEW`). A per-group map `h = method_for(g) <@> f` whose result keeps the member axis is a grouped value over the same grouping (G90, `group-rowmap v1`): `f` takes one ELEMENT, or takes the ROW and returns an elementwise expression of that row and scalars after scalar lets -- the type checker proves the length that way and refuses any other row-returning kernel (BL3027); `ungroup(h)` / `ungroup(h, A)` restore the axis, and over a never-written structural grouping the reassembled array SHARES h's one pool, whose runs are already in axis order (`BLADE_GROUP_ROWMAP`). `ungroup` of a KEY grouping is refused (BL3029: a scatter by the grouping's permutation, G90 v2).
+
+```blade
+type I  = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(r) -> r - reduce(r, (+)) / Float64(extents(r)) |> compute
+let b = ungroup(h, CI)
+// EXPECT: b = [-1.0, 0.0, 1.0, -10.0, 0.0, 10.0, 0.0]
+```
+
+Not yet: the scatter `ungroup` of a key grouping (G90 v2); streaming
 of rank >= 3 variables, of a rank-2 stencil, and of netcdf/icechunk stores (zarr
 today); a stencil streaming MORE than one source; a two-dimensional mosaic of
 stores; string-label indexing of the `files` outer axis; static `segments` for
@@ -517,8 +772,8 @@ let b = [1.0, 1.0, 2.0, 2.0, 3.0]
 let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)
-let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
-                                              rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float32 like RaggedIdx<_>>,
+                                              rb: Array<Float32 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
 // per-group dot product
 // EXPECT: dots = [7.0, 17.0, 8.0]
 ```
@@ -542,13 +797,58 @@ and no outer product is formed.
   Two `group_keys` calls over identical key values are two independent
   partitions with structurally identical index records; each operand is chased
   to its `group_by` and the `group_keys` operands must resolve to the same
-  binding. Mismatched keys are `BL3999` — pinned by `sql-group-by/026`.
+  binding. Mismatched keys are `BL3027` — pinned by `sql-group-by/026`.
 - The kernel must **consume** its rows to a scalar (`prodsum`, `reduce`, …). A
   row-shaped result would need a grouped output type, which has no downstream
   consumers — the same reason the elementwise map above is gated.
 - Ragged-beside-dense operands remain refused.
 
 Tests: `sql-group-by` (25).
+
+### Aggregate-only groupings run in one pass
+
+A grouping inside a function body whose grouped arrays are consumed only by
+per-group aggregates — `reduce(r, k[, init])`, `prodsum(r, r)`, `prodsum(ra,
+rb)` over the same grouping, `extents(r)`, plus `extents(gk)` — compiles to ONE
+pass over the rows in source order: each row's key finds its group (positional:
+the key value; EnumIdx: its declared position; dynamic: one find-or-insert,
+groups numbered by first occurrence) and advances every aggregate's state there.
+No permutation is built and the rows are never gathered; the aggregate outputs
+are the same named, stored arrays.
+
+```blade sketch
+function stats(key: Array<G like Row>, x: Array<Float64 like Row>) = {
+    let gk = group_keys(key)
+    let g = group_by(x, gk)          // never gathered: every consumer below aggregates
+    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    let c = extents(gk)
+    (s, q, c)
+}
+```
+
+The values are the CSR form's (argued, and checked gate off against gate on bit
+for bit on witnesses -- not proved): each group's fold still visits its rows
+in ascending source order, from its own seed (or its first value), with its own
+kernel — the pass only interleaves independent chains — and the failures are
+where they were (a bad positional / EnumIdx key aborts at the grouping, row by
+row; an unseeded fold's empty group raises BL8003 at that fold, with the same
+location and frames as before). In the default build a LICENSED float fold (a
+builtin `+` over Float64, a Float64 prodsum) keeps today's form in both lanes --
+the C++ lane's per-group lane tree, the LLVM lane's flagged recurrence --
+because the one pass's ascending chain is a different association;
+`BLADE_FP_REPRO=1` takes the pass, and the experimental
+`BLADE_GROUP_AGG=licensed` opts into the association change. Integer folds,
+counts and kernels with no reorder licence take it in every build. Every
+grouped value source -- count-only and unused ones included -- must be proved
+stored with a write-free producer (a parameter through every call site's
+argument), and each fold's state, kernel parameters, kernel result, element and
+seed must share one scalar type; anything else keeps the CSR, as does a
+top-level grouping (the plan covers function bodies only) and anything else the
+plan does not recognize (a row read such as `r(0)`, a `group_bucket`, a
+`where omp` peel, a deferred or late source or seed). `blade plan` names the
+decision (`group-aggregate v1`). Tests: `sql-group-by/064-074` and the `cli`
+block's gate-off / gate-on raw-bit comparisons (gap G71).
 
 ## 9. `sort(A, keyFn)` — ORDER BY
 
@@ -557,13 +857,38 @@ sort : Array<T like I> × (T -> K) -> Array<T>   // fresh anonymous rank-1 index
 ```
 
 Takes a **key extractor**, not a comparator; ascending by key
-(`lambda(t) -> -t` for descending). Stable. On a compound operand, sorts the
+(`lambda(t) -> -t` for descending). Stable. The key order is a **total
+preorder**, the same in every lane: every NaN key orders before every other
+key and all NaNs tie (they keep their input order), `-0.0` and `+0.0` tie,
+other keys compare by `<`; String keys compare by Unicode CODE POINT (the
+UTF-8 byte order). The key must return a real, integer, Bool or String
+scalar: a complex key (no order), a tuple key and an array key are refused at
+the type check (BL3033), as is a range over a non-plain record
+(`range<SymIdx<2, n>>`, whose cells are index tuples) (gap G126,
+`sql-sort/011`-`014`). A descending key `-x` therefore still puts NaN
+keys first (a negated NaN is a NaN). The result is unique -- the order by
+(key, input position) -- so how often or in what order the key is evaluated
+is unspecified; the compiler evaluates a total, write-free key once per
+element (`sort-form v1`, `BLADE_SORT_FORM`). A range operand sorts its own
+values -- `sort(range<I>, lambda(i) -> k(i))` is the argsort, written with no
+materialized iota:
+
+```blade
+type R = Idx<5>
+let k: Array<Float64 like R> = [3.0, 1.0, 2.0, 1.0, 0.5]
+let perm = sort(range<R>, lambda(i) -> k(i))
+let sk = method_for(perm) <@> lambda(i) -> k(i) |> compute
+// EXPECT: perm = [4, 1, 3, 2, 0]
+// EXPECT: sk = [0.5, 1.0, 1.0, 2.0, 3.0]
+```
+
+On a compound operand, sorts the
 compact buffer; the result is honestly **dense** — sorting discards coordinate
 meaning, so the output gets a fresh anonymous index of the same extent. Sort
 order is not tracked in the type system (lazy key-map chains — sort-skip, merge
 joins — are a documented future direction).
 
-Tests: `sql-sort` (2) + type-recovery probe.
+Tests: `sql-sort` (001-010: ties, NaN keys, range operands, the key cache) + type-recovery probe.
 
 ## 10. `reduce(A[, kernel[, init]][, axes = n])` — aggregation
 
@@ -620,7 +945,13 @@ type, and the empty fold is defined as `init` — statically-empty arrays are
 legal and dynamically-empty operands return `init` with no guard. WITHOUT an
 init, statically-empty arrays remain a compile-time rejection and
 dynamic-extent operands keep the runtime non-emptiness guard (no identity, no
-defined empty fold). In the PARTIAL form the seed applies **per folded group**,
+defined empty fold). That rule is the STORED spelling's: an unseeded fused
+fold over a DEFERRED computation (`reduce(method_for(v) <@> k, (+))`) is
+seeded by the implementation and its empty fold is that seed -- `+0.0` on a
+licensed route, the exact identity `-0.0` on a strict one (`BLADE_FP_REPRO=1`,
+a `where repro` body, a deferred map body that may write; gap G74, formalism
+§6.4); corpus `sql-reduce/031`
+(stored, BL8003 before a later failure), `032` / `033` (deferred). In the PARTIAL form the seed applies **per folded group**,
 not once globally: `reduce(grid, (+), 100.0)` adds 100 to every row, while
 `reduce(grid, (+), 100.0, axes = 2)` adds it once to the grand total.
 
@@ -742,9 +1073,15 @@ Tests: `sql-foreign-keys` (10).
 
 ## Open items
 
-1. Semijoin/antijoin hash fusion (set-hoist) — removed no-op; redesign.
+1. ~~Semijoin/antijoin hash fusion (set-hoist).~~ **Landed as membership
+   hoisting (round 3 B-T1)**; see §6. Open: a deferred set forced once at the
+   host, Int32 / float keys, probes in nested lambdas and function bodies.
 2. ~~`reduce(A, op, init)` — empty-input identity.~~ **Landed (arc 4)**; see §10.
 3. Rank-k `mask` — with the compound composition round.
 4. Sort laziness / order-in-types — lazy key-map chains, merge joins.
 5. Static `CompoundIdx<mask>` type path — exercise the reserved route.
 6. Elementwise-over-grouped: stays rejected; revisit if a use case appears.
+7. Equijoin (§6a), v1.1: the LLVM lane's CSR build and probe; conjunctive (multi-key)
+   equality kernels; a fold fused into the probe (needs a snapshot proof that nothing
+   between the relation and the fold writes its sources); keyed reads of the relation
+   without the hashed index; the full-size bench run after a footprint / store audit.

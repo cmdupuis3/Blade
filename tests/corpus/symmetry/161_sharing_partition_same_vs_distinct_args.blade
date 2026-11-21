@@ -1,0 +1,41 @@
+// TEST: Sharing-Partition Instance: One Array Packs, Two Arrays Stay Dense
+// docs/plans/plan-identity-transpose-compute.md section 2.2 (wave 2, P1
+// parameters): a two-parameter comm helper is IDENTITY-SENSITIVE, so a call
+// is specialized on the normalized SHARING PARTITION of its relevant
+// arguments beside its type key. `f(A, A)` is the instance over [0,0], whose
+// body's `method_for(x, y)` is the identity group `method_for(x, x)` --
+// packed SymIdx<2, I> storage, triangular iteration, speedup x2 -- while
+// `f(A, B)` keeps the generic declaration (the all-distinct partition) and
+// is dense. The argument TYPES are identical; only the partition differs.
+// A NEVER-WRITTEN stored copy (`let C = A`) is the same array (section 2.1,
+// second step), so `f(A, C)` is [0,0] and packed too; a WRITTEN copy
+// (`let D = E` then `D(0) = 1.0`) keeps its own identity (section 2.9), so
+// `f(E, D)` is [0,1] and dense -- over its OWN root E, because the
+// never-written proof is module-wide and fail-closed: a write to any copy
+// of A would keep every alias of A distinct. `blade plan` records
+// `[sharing-partition v1] f: applied [partition [0,0] of (x, y); ...]`.
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I> = [4.0, 5.0, 6.0]
+let C = A
+let E: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let D = E
+D(0) = 1.0
+function f(x: T^1, y: T^1) where comm(x, y) =
+    method_for(x, y) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let PAA = f(A, A)
+let PAB = f(A, B)
+let PAC = f(A, C)
+let PED = f(E, D)
+// The layout is part of the type: the packed result meets a SymIdx
+// ascription, the dense one a dense ascription.
+let SAA: Array<Float64 like SymIdx<2, I>> = f(A, A)
+let DAB: Array<Float64 like I, I> = f(A, B)
+let off = PAA(0, 2) + PAA(2, 0)
+// EXPECT: PAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: PAB = [[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [12.0, 15.0, 18.0]]
+// EXPECT: PAC = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: PED = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
+// EXPECT: SAA = [[1.0, 2.0, 3.0], [4.0, 6.0], [9.0]]
+// EXPECT: DAB = [[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [12.0, 15.0, 18.0]]
+// EXPECT: off = 6.0

@@ -1,0 +1,11 @@
+// TEST: A deferred map of R values handed to an observing generic is observed at the call
+// ============================================================================
+// R3: `dm` is never stored on its own; the call reads it where every array
+// argument is read, at the call, now through the key observation.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let dm = method_for(codes) <@> lambda(c) -> c
+function inc(x: T) = x + 1
+let v = inc(dm)
+// EXPECT: v = [101, 201, 301]

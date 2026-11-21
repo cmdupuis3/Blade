@@ -1,0 +1,17 @@
+// TEST: A Nested Function Applying A Kernel Closure Of Its Enclosing Function Is Refused (rejects)
+// Gap G247 (round 4 wave 9 lane d): f captures outer local scale; apply, a function nested in
+// outer, receives the closure but not what it captured. The C++ lane inlined f and read apply's
+// parameter `scale` (10.0 per cell), the interpreter could not resolve the capture: no shared
+// meaning until the capture is forwarded, so every lane refuses at lowering (BL7004).
+// ERROR: BL7004
+// ERROR-CONTAINS: a binding of an enclosing function
+// REJECT-AT: lower
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+function outer() -> Array<Float64 like I> = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * scale
+    function apply(scale: Float64, a: Array<Float64 like I>) -> Array<Float64 like I> = { method_for(a) <@> f |> compute }
+    apply(10.0, a64)
+}
+let r = outer()

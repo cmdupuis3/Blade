@@ -1,0 +1,36 @@
+// TEST: Compute Of A Map Forces Its Deferred Operands So They Print
+// Formalism 10.2: a deferred map prints iff a module-level forcing use forced
+// a member of its alias class. A top-level `|> compute` of a map is such a use
+// for every deferred array OPERAND it iterates: an outer product's operand
+// (g), an object_for application's argument (h), a co-iteration's operand (k)
+// and an alias's root reached through the alias (r2 = r) all print, with the
+// cells fixed at the compute -- the write to x after it is not seen by g's
+// printed value. `v = w |> compute` is a COPY of w (10.2): it forces w's
+// operand (x is stored) but not w, which stays unprinted.
+type I = Idx<3>
+type J = Idx<2>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let y: Array<Float64 like J> = [5.0, 7.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(y) <@> lambda(v) -> v + 1.0
+let k = method_for(x) <@> lambda(v) -> v - 1.0
+let r = method_for(y) <@> lambda(v) -> v * 10.0
+let r2 = r
+let w = method_for(x) <@> lambda(v) -> v * 3.0
+let P = method_for(g, y) <@> lambda(a, b) -> a * b |> compute
+let O = object_for(lambda(a: Float64, b: Float64) -> a - b) <@> (h, y) |> compute
+let Z = method_for(zip(k, x)) <@> lambda(a, b) -> a + b |> compute
+let Q = method_for(r2, y) <@> lambda(a, b) -> a + b |> compute
+let v = w |> compute
+x(0) = 100.0
+// EXPECT: x = [100.0, 2.0, 3.0]
+// EXPECT: g = [2.0, 4.0, 6.0]
+// EXPECT: h = [6.0, 8.0]
+// EXPECT: k = [0.0, 1.0, 2.0]
+// EXPECT: r = [50.0, 70.0]
+// EXPECT: r2 = [50.0, 70.0]
+// EXPECT: P = [[10.0, 14.0], [20.0, 28.0], [30.0, 42.0]]
+// EXPECT: O = [[1.0, -1.0], [3.0, 1.0]]
+// EXPECT: Z = [1.0, 3.0, 5.0]
+// EXPECT: Q = [[55.0, 57.0], [75.0, 77.0]]
+// EXPECT: v = [3.0, 6.0, 9.0]

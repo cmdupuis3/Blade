@@ -5,10 +5,10 @@
 type I2 = Idx<2>
 
 function mk() -> (Array<Float64 like I2, I2, I2>, Array<Float64 like I2, I2>, Array<Float64 like I2>, Array<Float64 like I2, I2>) = {
-    let g = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
-    let u1 = [[1.0, 0.0], [0.0, 1.0]]
-    let s = [9.0, 10.0]
-    let u2 = [[0.5, 0.25], [0.125, 0.0625]]
+    let g = Float64([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])
+    let u1 = Float64([[1.0, 0.0], [0.0, 1.0]])
+    let s = Float64([9.0, 10.0])
+    let u2 = Float64([[0.5, 0.25], [0.125, 0.0625]])
     (g, u1, s, u2)
 }
 

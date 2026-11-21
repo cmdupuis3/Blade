@@ -1,0 +1,14 @@
+// TEST: Fold-Map Elision Leaves The Fold's Empty-Input Behaviour
+// ============================================================================
+// The fold node is kept as written (kernel, seed, extent): over an EMPTY
+// axis the centered fold behaves exactly as with the centered array stored.
+// The mean is seeded so the program reaches the variance fold.
+type E = Idx<0>
+function spread(a: Array<Float64 like E>) -> Float64 = {
+    let m = reduce(a, (+), 0.0)
+    let c = a - m
+    reduce(c * c, (+))
+}
+let none: Array<Float64 like E> = []
+let s = spread(none)
+// EXPECT: s = 0.0

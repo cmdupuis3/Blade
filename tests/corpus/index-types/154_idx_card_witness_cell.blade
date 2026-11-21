@@ -1,5 +1,5 @@
 // TEST: Idx Card Witness Cell (rejects)
-// ERROR: BL3999
+// ERROR: BL4002
 // ============================================================================
 // A CONJUNCT THAT DOES NOT FOLD NAMES THE CELL IT FAILED AT.
 //
@@ -54,8 +54,8 @@
 // first-failing-somewhere-interesting.
 // ============================================================================
 static struct Witness {
-    p: Int<min=0, max=4>,
-    q: Int<min=0, max=4>
+    p: Int32<min=0, max=4>,
+    q: Int32<min=0, max=4>
 } where p + q == not_a_static
 
 let static CARD = idx_card(Witness)

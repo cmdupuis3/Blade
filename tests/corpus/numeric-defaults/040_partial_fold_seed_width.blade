@@ -1,0 +1,11 @@
+// TEST: partial fold literal seeds take the source cell width
+let m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let r = reduce(m, (+), 100.0)
+let first: Float32 = r(0)
+let second: Float32 = r(1)
+let i = [[1, 2], [3, 4]]
+let ir = reduce(i, (+), 10)
+let ifirst: Int32 = ir(0)
+// EXPECT: first = 106.0
+// EXPECT: second = 115.0
+// EXPECT: ifirst = 13

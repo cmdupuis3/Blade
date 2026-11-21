@@ -1,0 +1,19 @@
+// TEST: A Mut Argument Beside An Array A Call-Valued Head Returned Is Refused (rejects)
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C, C2; Codex diff review 5f64f352 finding
+// 2): `factory(g)(1.0)` returns g itself through a closure; a storage-holding
+// result of a call whose head is itself a call is UNKNOWN beside a mut
+// argument (only an intrinsic head and an applied array keep the argument
+// reading): refused fail closed (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> A) = lambda(t: Float64) -> a
+function bump(y: mut A, z: A) -> Float64 = {
+    y(0) = 9.0
+    z(0)
+}
+let mut g: A = [2.0, 3.0]
+let r = bump(g, factory(g)(1.0))
+// ERROR: BL4005
+// ERROR-CONTAINS: could not be traced
+// REJECT-AT: lower

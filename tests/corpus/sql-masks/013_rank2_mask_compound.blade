@@ -1,0 +1,23 @@
+// TEST: Rank-2 Mask Compound
+// ----------------------------------------------------------------------------
+// mask(A, p) over a RANK-2 plain dense array keeps A's whole index space (a
+// Bool matrix), and compound(A, m) compacts BOTH dimensions into one
+// CompoundIdx axis, present cells in row-major order. `mask` was rank-1 only
+// (BL7004 / interpreter-unsupported); the provider masked read
+// (`alias.read_present`, docs/features/sql.md section 2a) is built on this.
+// ----------------------------------------------------------------------------
+type R = Idx<2>
+type C = Idx<3>
+let a: Array<Float64 like R, C> = [[1.5, -1.0, 4.0], [2.0, 3.0, -7.0]]
+let m = mask(a, lambda(x) -> x > 0.0)
+// EXPECT: m = [[true, false, true], [true, true, false]]
+let pos = compound(a, m)
+let n = extents(pos)
+let total = reduce(pos, (+))
+// EXPECT: n = 4
+// EXPECT: total = 10.5
+let both = compound(a, m && mask(a, lambda(x) -> x < 4.0))
+let n_both = extents(both)
+let s_both = reduce(both, (+))
+// EXPECT: n_both = 3
+// EXPECT: s_both = 6.5

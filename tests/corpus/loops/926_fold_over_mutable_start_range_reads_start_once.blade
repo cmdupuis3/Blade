@@ -1,0 +1,14 @@
+// TEST: A Fold Over A Range With A Mutable Start Reads The Start Once
+// Gap G209 (round 4 wave 10 lane d; the lead ruling): a range is a VALUE whose bounds are evaluated
+// ONCE where the range expression is evaluated. The kernel bumps `lo`; the interpreter re-read the
+// start per cell (2 + 4 + 6 + 8 = 20) and the C++ fold had no holder for it (BL9002). The start is
+// read once at the fold's operand stage: 2 + 3 + 4 + 5.
+function f(n: Int64) -> Int64 = {
+    let mut lo: Int64 = 2
+    reduce(method_for(lo..n) <@> lambda(k) -> {
+        lo = lo + 1
+        k
+    }, (+))
+}
+let r = f(6)
+// EXPECT: r = 14

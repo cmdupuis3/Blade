@@ -1,0 +1,15 @@
+// TEST: A Nested Lambda Applying A Closure Of Its Enclosing Function As Its Kernel Is Refused (rejects)
+// Gap G247 (round 4 wave 9 lane d; wave-end review F2): the lifted lambda applies f as a KERNEL and
+// receives f, not scale. On master the C++ lane inlined f there and named an undeclared `scale`
+// (BL9002), the LLVM lane computed [13.0, 14.0, 15.0], the interpreter could not resolve the
+// capture: refused at lowering in every lane until captures are forwarded (gap G247).
+// ERROR: BL7004
+// ERROR-CONTAINS: a binding of an enclosing function
+// REJECT-AT: lower
+function outer(a: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * scale
+    method_for(a) <@> (lambda(v: Float64) -> reduce(method_for(a) <@> f, (+)) + v) |> compute
+}
+let xs: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = outer(xs)

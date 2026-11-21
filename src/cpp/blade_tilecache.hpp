@@ -41,6 +41,7 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <cctype>
 #include <atomic>
 #include <random>
 #include <sys/types.h>
@@ -123,9 +124,18 @@ namespace blade_tiles {
 
   inline bool enabled() { return !dir().empty(); }
 
+  // The compiler's switch grammar (Toolchain.envFlag): trimmed and
+  // case-insensitive `1` / `on` / `true` is on; anything else -- `0` / `off` /
+  // `false`, unset, or an unrecognized value -- is off. (`off` used to mean ON.)
   BLADE_TILES_COLD inline bool verbose() {
     const char* v = std::getenv("BLADE_TILE_CACHE_VERBOSE");
-    return v && *v && !(v[0] == '0' && v[1] == '\0');
+    if (!v) return false;
+    std::string t(v);
+    const auto b = t.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return false;
+    t = t.substr(b, t.find_last_not_of(" \t\r\n") - b + 1);
+    for (auto& ch : t) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return t == "1" || t == "on" || t == "true";
   }
 
   // mkdir -p: create every missing component of `p`. A component that

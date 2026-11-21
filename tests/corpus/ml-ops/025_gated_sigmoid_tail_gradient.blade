@@ -10,15 +10,15 @@ import ad as ad
 // silu'(z) = s + z s (1 - s), s = sigmoid(z); at z = 2 that is
 // 1.0907842487848955, at z = -5 the value silu(-5) = -5 e^-5/(1+e^-5).
 let static s3 = [(0, 0, 3)]
-function act_sum(x: Array<Float like Idx<3>>) -> Float = {
+function act_sum(x: Array<Float64 like Idx<3>>) -> Float64 = {
     let g = ml.gated(s3, x)
-    g(0) + g(1) + g(2)
+    g(Int64(0)) + g(1) + g(2)
 }
-let xs: Array<Float like Idx<3>> = [-800.0, 2.0, -5.0]
+let xs: Array<Float64 like Idx<3>> = [-800.0, 2.0, -5.0]
 let gout = ml.gated(s3, xs)
 // EXPECT: gout = [0.0, 1.7615941559557646, -0.033464254621424279]
 
-let mut dx = [0.0, 0.0, 0.0]
+let mut dx = Float64([0.0, 0.0, 0.0])
 let v = ad.grad(act_sum)(xs, dx)
 let tail_grad_finite = dx(0) == dx(0)
 // EXPECT: tail_grad_finite = true
@@ -27,7 +27,7 @@ let mid_grad = dx(1)
 // EXPECT: tail_grad = 0.0
 // EXPECT: mid_grad = 1.0907842487848955
 
-let (jv0, jt0) = ad.jvp(act_sum)(xs, [1.0, 0.0, 0.0])
+let (jv0, jt0) = ad.jvp(act_sum)(xs, Float64([1.0, 0.0, 0.0]))
 let (jv1, jt1) = ad.jvp(act_sum)(xs, [0.0, 1.0, 0.0])
 // EXPECT: jt0 = 0.0
 // EXPECT: jt1 = 1.0907842487848955

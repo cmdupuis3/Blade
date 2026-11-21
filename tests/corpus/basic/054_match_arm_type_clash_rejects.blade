@@ -5,8 +5,8 @@
 // through `check` and died as a raw g++ ternary error.
 
 type A = Idx<2>
-let arr: Array<Float like A> = [1.0, 2.0]
-let x = 5
+let arr: Array<Float64 like A> = [1.0, 2.0]
+let x: Int64 = 5
 let r = match x with
     | n if n > 100 -> arr
     | _ -> 0

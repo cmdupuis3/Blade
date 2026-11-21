@@ -1,0 +1,13 @@
+// TEST: A Private Deferred Matrix Is Forced Once For Two Row Consumers
+// P has no keyed read or print demand. Both row outputs contribute to totals.
+type R = Idx<2>
+type C = Idx<3>
+let M: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let totals = {
+    let P = method_for(M) <@> lambda(v: Float64) -> v * v + 1.0
+    let first_rows = reduce(P, (+), 7.0)
+    let second_rows = reduce(P, (+), -7.0)
+    (reduce(first_rows, (+), 0.0), reduce(second_rows, (+), 0.0))
+}
+// Hand-derived: first_rows=[24,87], second_rows=[10,73].
+// EXPECT: totals = (111.0, 83.0)

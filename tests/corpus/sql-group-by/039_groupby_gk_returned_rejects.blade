@@ -11,7 +11,7 @@
 // gap rather than the rule. Same verdict now, from the checker, in the same
 // words as its four siblings -- and the caret lands on the returned
 // expression rather than on the whole body.
-let region = [0, 1, 0, 0, 1]
+let region = Int64([0, 1, 0, 0, 1])
 function mk(k: Array<Int64 like Idx<5>>) = {
     let gk = group_keys(k)
     gk

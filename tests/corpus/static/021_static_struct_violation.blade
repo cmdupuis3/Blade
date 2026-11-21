@@ -1,10 +1,10 @@
 // TEST: Static Struct Violation (rejects)
-// ERROR: BL3999
+// ERROR: BL4002
 // A violated conjunct fails the fold — a compile error under let-static
 // assertion semantics, not a runtime abort.
 struct Balanced {
-    a: Int,
-    b: Int,
-    total: Int
+    a: Int32,
+    b: Int32,
+    total: Int32
 } where a + b == total
 let static bad = Balanced { a = 1, b = 2, total = 9 }

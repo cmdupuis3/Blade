@@ -1,0 +1,13 @@
+// TEST: Sibling Maps Need One Cell Space For A Flat Sweep
+// ============================================================================
+// y1 maps x (5 cells) and y2 maps x2 (6 cells), sharing x only through a
+// captured read `x(0)`: that subscript is not proven in range (the closed
+// totality whitelist), and no single flat sweep would cover both cell spaces
+// anyway, so each map keeps its own loop.
+function two(x: Array<Float64 like Idx<5>>, x2: Array<Float64 like Idx<6>>) -> Float64 = {
+    let y1 = method_for(x) <@> lambda(a) -> a * 2.0 |> compute
+    let y2 = method_for(x2) <@> lambda(a) -> a * 3.0 + x(0) |> compute
+    reduce(y1, (+)) + reduce(y2, (+))
+}
+let r = two([1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+// EXPECT: r = 99.0

@@ -10,8 +10,8 @@ Unit hour = 3600 * second
 Unit minute = second * 60
 
 // No conversion anywhere: each value is stored in the unit it was declared in.
-let a: Float<day> = 1.0
-let b: Float<hour> = 12.0
+let a: Float64<day> = 1.0
+let b: Float64<hour> = 12.0
 
 // Unannotated: the LEFT operand's magnitude wins (unitJoin's existing
 // nominal preference, extended to scale), so this is a number of days.
@@ -21,12 +21,12 @@ let sum_days = a + b
 // operand converts straight into hours -- one exact factor apiece, computed
 // in the magnitude the programmer chose, not joined at the left and
 // corrected afterwards.
-let sum_hours: Float<hour> = a + b
+let sum_hours: Float64<hour> = a + b
 
 // A plain ascription across magnitudes is a conversion site too.
-let a_seconds: Float<second> = a
-let ninety: Float<second> = 90.0
-let ninety_min: Float<minute> = ninety
+let a_seconds: Float64<second> = a
+let ninety: Float64<second> = 90.0
+let ninety_min: Float64<minute> = ninety
 
 // EXPECT: sum_days = 1.5
 // EXPECT: sum_hours = 36.0

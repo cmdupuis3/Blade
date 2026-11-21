@@ -1,0 +1,31 @@
+// TEST: Compound Unforced Bool Map Mask
+// ----------------------------------------------------------------------------
+// The MASK operand of compound(dense, mask) as an unforced Bool map -- the
+// same constructor site as 014 (round-3 D-B1), on its other operand. Written
+// in place, the map took the computed-mask arm, which deferred it and lost
+// the record (`c__masksrc` was never declared); bound to a name and still
+// deferred, it was read by name with no forcing at all (`'m' was not
+// declared`). Both were BL9002 in the C++ lane while the interpreter ran
+// them. A forced name is printed like any materialized binding (`m`). The
+// stored `mask(...)` spelling is the control (`ctrl`).
+// ----------------------------------------------------------------------------
+type Row = Idx<5>
+let a: Array<Int64 like Row> = [10, 20, 30, 40, 50]
+let k: Array<Int64 like Row> = [1, 2, 1, 5, 2]
+
+let ctrl = compound(a, mask(k, lambda(v) -> v == 1))
+let s_ctrl = reduce(ctrl, (+), 0)
+// EXPECT: ctrl = [10, 30]
+// EXPECT: s_ctrl = 40
+
+let inline_map = compound(a, method_for(k) <@> lambda(v) -> v == 1)
+let s_inline = reduce(inline_map, (+), 0)
+// EXPECT: inline_map = [10, 30]
+// EXPECT: s_inline = 40
+
+let m = method_for(k) <@> lambda(v) -> v == 2
+let named = compound(a, m)
+let s_named = reduce(named, (+), 0)
+// EXPECT: m = [false, true, false, false, true]
+// EXPECT: named = [20, 50]
+// EXPECT: s_named = 70

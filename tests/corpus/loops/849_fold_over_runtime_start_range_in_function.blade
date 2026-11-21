@@ -1,0 +1,8 @@
+// TEST: A Fold Over A Range With A Run-Time Start Compiles In A Function Body
+// Gap G209 (round 4 wave 9 lane d): `lo..n` with both bounds run-time (a function parameter) was a
+// C++ BL9002 (`__range0` undeclared; with a holder, the per-cell start rendered without the
+// scope's names). The holder now evaluates the start with the extent, once, and the element
+// binding reads it from the holder (the map emitter's rule): 4 + 6 + 8 + 10.
+// EXPECT: s = 28
+function f(lo: Int64, n: Int64) -> Int64 = reduce(method_for(lo..n) <@> lambda(k) -> k * 2, (+))
+let s = f(Int64(2), Int64(6))

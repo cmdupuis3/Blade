@@ -9,8 +9,8 @@
 // a flat fold in lex order). The count agrees with the counting layer's
 // certificate: n(2w+1) - w(w+1) = 9*5 - 6 = 39.
 static struct Band {
-    i: Int<min=0, max=8>,
-    j: Int<min=0, max=8>
+    i: Int32<min=0, max=8>,
+    j: Int32<min=0, max=8>
 } where abs(i - j) <= 2
 
 let static CARD = idx_card(Band)

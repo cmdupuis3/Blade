@@ -10,12 +10,12 @@ import ad as ad
 
 type I = Idx<3>
 
-function fsym(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+function fsym(a: Array<Float64 like I>, b: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a, b) <@> reynolds(lambda(x, y) -> x * y * y) |> compute
     m(0, 1)
 }
 
-function fanti(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+function fanti(a: Array<Float64 like I>, b: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a, b) <@> reynolds(lambda(x, y) -> x * y * y, Antisymmetric) |> compute
     m(0, 1)
 }

@@ -9,10 +9,10 @@
 // included (the 15-significant-digit parity rule).
 // ============================================================================
 import plot
-let x = [0.0, 1.0, 2.0]
-let y = [0.0, 1.0]
-let z = [[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]]
-let ok = plot.contourf(x, y, z, 20: levels, "waves": title)
+let x = Float64([0.0, 1.0, 2.0])
+let y = Float64([0.0, 1.0])
+let z = Float64([[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]])
+let ok = plot.contourf(x, y, z, Int64(20): levels, "waves": title)
 let ok2 = plot.heatmap(x, y, z)
 // EXPECT: ok = true
 // EXPECT: ok2 = true

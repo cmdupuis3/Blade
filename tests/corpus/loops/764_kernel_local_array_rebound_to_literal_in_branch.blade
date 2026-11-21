@@ -1,0 +1,13 @@
+// TEST: A Kernel-Local Array Rebound To An Array Literal Inside A Branch
+// Gap G227 (round 4 wave 8 lane d): the lift pass binds the assigned literal
+// (`let t = [..]; out = t`); the C++ expression-block renderer treated that
+// let as a value (`auto x = <void>`, BL9002) and its materialized branch
+// dropped the assignment. The statement is now rendered: cell 0 keeps the
+// zeros, cell 1 sums the rebound literal.
+// EXPECT: total = 6.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    if k > 0 then { out = [1.0, 2.0, 3.0]; 1.0 } else 0.0
+    reduce(out, (+))
+}, (+))

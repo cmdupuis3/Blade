@@ -1,0 +1,21 @@
+// TEST: Gather Terminal Out Of Range Aborts (aborts)
+// ============================================================================
+// PM28: the gather is folded in place (gather-terminal), and the first
+// out-of-range index (cell 4, value 11) fails with the SAME panic as the
+// stored gather: the checked index cast's BL8006 at its own line, inside
+// `gsum`. Two more bad cells follow (12, -1): with one failure point every
+// failing cell raises the identical text, so which one trips is
+// unobservable. `blade test opt-diff` compares the whole output (stdout and
+// stderr, frames included) with the gate off and on.
+// ============================================================================
+type I = Idx<11>
+type K = Idx<9>
+function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A((i : I)) |> compute
+    reduce(g, (+))
+}
+let A = method_for(range<I>) <@> lambda(k) -> Float64(k) + 0.5 |> compute
+let idx: Array<Int64 like K> = [0, 3, 5, 2, 11, 1, 12, -1, 4]
+let s = gsum(A, idx)
+// ABORT: BL8006
+// ABORT: index cast out of range: the value is outside I (0 .. 10)

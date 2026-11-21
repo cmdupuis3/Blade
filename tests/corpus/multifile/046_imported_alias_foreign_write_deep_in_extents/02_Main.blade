@@ -1,0 +1,11 @@
+// TEST: An imported read-only alias keeps its copy across a foreign write deep in extents
+// MODULE: Main
+module Main
+import Lib
+function bump(v: mut Array<Int64 like Idx<3>>) -> Int64 = {
+    v(0) = 100
+    3
+}
+let m = method_for(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..bump(Lib.y0)))))))))))))))))))))) <@> lambda(v) -> v + 1 |> compute
+// EXPECT: m = [1, 2, 3]
+// EXPECT: Lib.y0 = [100, 2, 3]

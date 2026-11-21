@@ -1,0 +1,11 @@
+// TEST: a pipe-form explicit cast at the parameter's own width, through an alias (accepted)
+// ============================================================================
+// G275: the passing twin of numeric-widths/072 -- the cast value's width IS
+// the width the later direct call decides, so nothing converts.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let a = saved(2.5 |> Float32)
+let b = h(Float32(2.0))
+// EXPECT: a = 2.5
+// EXPECT: b = 2.0

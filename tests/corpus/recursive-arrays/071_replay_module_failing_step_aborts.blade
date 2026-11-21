@@ -1,0 +1,19 @@
+// TEST: Replay Module Failing Step Aborts (aborts)
+// ============================================================================
+// PRINT REPLAY keeps the FAILURE SITE: the step divides by zero at row 3
+// (BL8013). As written the trajectory fails at its own slot, before any
+// print; replayed, the C++ lane's FIRST sweep runs at the same slot and fails
+// at the same step -- the print-time sweep never starts, and `before` (bound
+// earlier, printed at the end) is never printed in either form.
+// ============================================================================
+type T = Idx<8>
+
+let before = 42
+let d: Int64 = 3
+
+let rec q: Array<Int64 like T> =
+    match q with
+    | zero -> zero
+    | zero :: s -> zero :: 10
+    | prefix :: n -> prefix :: prefix(n - 1) / (d - Int64(n))
+// ABORT: BL8013

@@ -37,7 +37,7 @@ From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankDomain BladeProuhet BladeNewton BladeReduceCompiler.
 From BladeReals Require Import BladeSmoothRank BladeRealCollision
   BladeRealDensity.
-Require Import Reals Lra List Arith Lia ZArith Bool.
+From Stdlib Require Import Reals Lra List Arith Lia ZArith Bool.
 Import ListNotations.
 Local Open Scope nat_scope.
 
@@ -115,7 +115,7 @@ Proof.
   (* A is one of the program's coefficients, so its variables are bound. *)
   assert (HdL : d < length (p_co P)).
   { destruct (strip_split (p_n P) (p_co P)) as [E _].
-    rewrite E, app_length. lia. }
+    rewrite E, length_app. lia. }
   assert (HAb : pbelow (p_n P) A = true)
     by (rewrite HA; apply Hco; apply nth_In; exact HdL).
   set (a := coefK R 0%R 1%R Rplus Rmult Ropp P th).
@@ -124,7 +124,7 @@ Proof.
   - intros zz _. unfold a, coefK, A'. rewrite freeze_ev.
     fold r. rewrite <- HA. reflexivity.
   - exists (wsummary R 0%R 1%R Rplus Rmult Ropp r z). split.
-    + unfold wsummary. rewrite map_length, firstn_length.
+    + unfold wsummary. rewrite length_map, length_firstn.
       destruct (nonroot_some A (p_n P) z Hnr) as [Lz _].
       unfold p_n in Lz. fold r in Lz. lia.
     + unfold A'. rewrite freeze_ev.

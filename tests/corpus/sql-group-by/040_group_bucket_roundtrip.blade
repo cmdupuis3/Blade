@@ -65,8 +65,8 @@ let nb = group_bucket(ngk)
 
 // Compound (multi-key): each distinct TUPLE is its own bucket, first-occurrence
 // order. (0,5) -> 0; (1,5) -> 1; (0,6) -> 2; (1,5) repeats -> 1.
-let k1 = [0, 1, 0, 1]
-let k2 = [5, 5, 6, 5]
+let k1 = Int64([0, 1, 0, 1])
+let k2 = Int64([5, 5, 6, 5])
 let cgk = group_keys(k1, k2)
 let cb = group_bucket(cgk)
 // EXPECT: cb = [0, 1, 2, 1]

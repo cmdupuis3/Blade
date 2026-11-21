@@ -1,0 +1,18 @@
+// TEST: AD A Local Binding Spelled Like The Synthesized Derivative Is Refused (rejects)
+import ad as ad
+// ============================================================================
+// Round 4 wave 9, lane A (A3 review round 5, Codex 5a8b7b7d): `ad.grad(f)` is
+// rewritten to a reference to the synthesized `f__grad`, and a LOCAL binding
+// of that spelling at the request site shadowed it -- g returned the local's
+// (100.0, 200.0) for (9.0, 6.0) (the same for `f__jvp` and `f__vjp`; a
+// top-level duplicate is BL2009). A program spelling the synthesized name is
+// now refused (BL5500, rename it).
+// ============================================================================
+function f(x: Float64) -> Float64 = x * x
+function g(x: Float64) -> (Float64, Float64) = {
+    let f__grad = lambda(y: Float64) -> (Float64(100.0), Float64(200.0))
+    ad.grad(f)(x)
+}
+let r = g(Float64(3.0))
+// ERROR: BL5500
+// ERROR-CONTAINS: is rewritten to that name

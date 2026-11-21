@@ -1,0 +1,21 @@
+// TEST: a mut kernel writes its first operand and only reads its second
+// R12 (deep review; Codex review of the fix, class closure): a map applying
+// `poke(a: mut R, b: R)` writes the operand in `a`'s position only: `b`, a
+// non-`mut` parameter of `touch`, is read, so it is no write (the first cut of
+// R12 judged every operand of a kernel that writes any parameter).
+type R = Array<Float64 like Idx<3>>
+type D = Array<Float64 like Idx<2>, Idx<3>>
+let mut g: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+function poke(a: mut R, b: R) -> Float64 = {
+    a(1) = 7.0
+    b(0)
+}
+function touch(a: mut D, b: D) -> Float64 = {
+    let w = method_for(a, b) <@> poke |> compute
+    reduce(w, (+), axes = 2)
+}
+let h: D = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let z = touch(g, h)
+let after = g(0, 1)
+// EXPECT: z = 100.0
+// EXPECT: after = 7.0

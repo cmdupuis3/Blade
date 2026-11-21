@@ -1,0 +1,15 @@
+// TEST: A generic ordering of two arrays of R compares their keys
+// ============================================================================
+// R3, a defect fixed: `a < b` between two generic values records no numeric
+// demand, so the instance at an array of R ordered the POSITIONS (the base
+// computed [false, false, true]). An ordering now marks the parameter
+// observed, and the call hands both arrays over as keys.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let rev: Array<R like Idx<3>> = [300, 200, 100]
+function lt(a: T, b: T) = a < b
+let o = lt(codes, rev)
+// EXPECT: o = [true, false, false]
+let os = lt(codes(0), rev(0))
+// EXPECT: os = true

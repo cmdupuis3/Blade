@@ -15,9 +15,9 @@
 // function (sql-group-by/049, loops/150) or capturing the grouped array.
 function rowsums(g: T^2) = method_for(g) <@> lambda(r: T^1) -> reduce(r, (+)) |> compute
 function rowdots(ga: T^2, gb: U^2) = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> prodsum(ra, rb) |> compute
-let region = [0, 1, 0, 1]
-let a = [1.0, 2.0, 3.0, 4.0]
-let b = [10.0, 20.0, 30.0, 40.0]
+let region = Int64([0, 1, 0, 1])
+let a = Float64([1.0, 2.0, 3.0, 4.0])
+let b = Float64([10.0, 20.0, 30.0, 40.0])
 let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)

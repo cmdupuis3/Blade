@@ -1,0 +1,8 @@
+// TEST: a computed map evaluates its kernel capture in a program without writes (aborts)
+// Gap G199 (Codex diff review round 7): `p = map |> compute` whose kernel
+// captures the deferred d (read only through extents) evaluates d first, in
+// every lane and in every program, so d's division by zero fails there.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let p = method_for(x) <@> lambda(v) -> v + extents(d) |> compute
+// ABORT: BL8013

@@ -1,0 +1,19 @@
+// TEST: Nested Sole Read Deferred Map Input Written
+// ----------------------------------------------------------------------------
+// Gap G60 (b), nested: `g` is read exactly once, by the KERNEL of another
+// deferred map `h`, and `h` is forced by the positional read `s = h(1)`.
+// Forcing h forces its inputs first (the C++ lane's order), so g is stored
+// at that statement and prints [10, 5] after its input is zeroed. The llvm
+// lane used to consume g per cell inside h's forced pass and rerun it at the
+// print, over the written input (BL8013 there).
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let h = method_for(range<Row>) <@> lambda(i) -> g(0) + Int64(i)
+let s = h(1)
+x(0) = 0
+// EXPECT: x = [0, 2]
+// EXPECT: g = [10, 5]
+// EXPECT: h = [10, 11]
+// EXPECT: s = 11

@@ -37,63 +37,63 @@ type Nine = store.index.nine
 // are pre-permuted to the real l=1 order (y, z, x) that ml.derive_poly's
 // irreps basis wants; the plain (x, y, z) copies are for the rotation
 // certificate, where the stored row-major 3x3 matrices act.
-let __ptr: Array<Float like SampTr, Pt, Xyz> = store.vars.pos_train_yzx |> z.read
-let __pte: Array<Float like SampTe, Pt, Xyz> = store.vars.pos_test_yzx |> z.read
-let __cte: Array<Float like SampTe, Pt, Xyz> = store.vars.pos_test |> z.read
-let __cnftr: Array<Float like SampTr> = store.vars.cnf_train |> z.read
-let __cnfte: Array<Float like SampTe> = store.vars.cnf_test |> z.read
-let __ytr: Array<Float like SampTr, Klass> = store.vars.y_train |> z.read
-let __yte: Array<Float like SampTe, Klass> = store.vars.y_test |> z.read
-let __powtr: Array<Float like SampTr, PowK> = store.vars.pow_train |> z.read
-let __powte: Array<Float like SampTe, PowK> = store.vars.pow_test |> z.read
-let __rot: Array<Float like RotK, Nine> = store.vars.rot3 |> z.read
+let __ptr: Array<Float64 like SampTr, Pt, Xyz> = store.vars.pos_train_yzx |> z.read
+let __pte: Array<Float64 like SampTe, Pt, Xyz> = store.vars.pos_test_yzx |> z.read
+let __cte: Array<Float64 like SampTe, Pt, Xyz> = store.vars.pos_test |> z.read
+let __cnftr: Array<Float64 like SampTr> = store.vars.cnf_train |> z.read
+let __cnfte: Array<Float64 like SampTe> = store.vars.cnf_test |> z.read
+let __ytr: Array<Float64 like SampTr, Klass> = store.vars.y_train |> z.read
+let __yte: Array<Float64 like SampTe, Klass> = store.vars.y_test |> z.read
+let __powtr: Array<Float64 like SampTr, PowK> = store.vars.pow_train |> z.read
+let __powte: Array<Float64 like SampTe, PowK> = store.vars.pow_test |> z.read
+let __rot: Array<Float64 like RotK, Nine> = store.vars.rot3 |> z.read
 
 let static PT = [(1, 1, 1)]
 let static SK2 = ml.sym_spec(PT, 2)
 let static SK3 = ml.sym_spec(PT, 3)
 let static SK4 = ml.sym_spec(PT, 4)
-let w2 = [1.0, 1.0]
-let w3 = [1.0, 1.0]
-let w4 = [1.0, 1.0, 1.0]
+let w2 = Float64([1.0, 1.0])
+let w3 = Float64([1.0, 1.0])
+let w4 = Float64([1.0, 1.0, 1.0])
 
 // Canonical per-class targets (class order: sc, fcc, bcc, tet).
-let t4c = [0.13333333333333333, 0.008333333333333333, 0.05925925925925926, 0.05925925925925926]
-let t3c = [0.0, 0.0, 0.0, 0.2222222222222222]
+let t4c = Float64([0.13333333333333333, 0.008333333333333333, 0.05925925925925926, 0.05925925925925926])
+let t3c = Float64([0.0, 0.0, 0.0, 0.2222222222222222])
 
 // One point's jet slot, vector fed in (y, z, x).
-function jet2slot(vy: Float, vz: Float, vx: Float, k: Int) -> Float = {
-    let v: Array<Float like IrrepsIdx<PT>> = [vy, vz, vx]
+function jet2slot(vy: Float64, vz: Float64, vx: Float64, k: Int32) -> Float64 = {
+    let v: Array<Float64 like IrrepsIdx<PT>> = [vy, vz, vx]
     let d = ml.derive_poly(PT, 2, SK2, v, w2)
     d(k)
 }
-function jet3slot(vy: Float, vz: Float, vx: Float, k: Int) -> Float = {
-    let v: Array<Float like IrrepsIdx<PT>> = [vy, vz, vx]
+function jet3slot(vy: Float64, vz: Float64, vx: Float64, k: Int32) -> Float64 = {
+    let v: Array<Float64 like IrrepsIdx<PT>> = [vy, vz, vx]
     let d = ml.derive_poly(PT, 3, SK3, v, w3)
     d(k)
 }
-function jet4slot(vy: Float, vz: Float, vx: Float, k: Int) -> Float = {
-    let v: Array<Float like IrrepsIdx<PT>> = [vy, vz, vx]
+function jet4slot(vy: Float64, vz: Float64, vx: Float64, k: Int32) -> Float64 = {
+    let v: Array<Float64 like IrrepsIdx<PT>> = [vy, vz, vx]
     let d = ml.derive_poly(PT, 4, SK4, v, w4)
     d(k)
 }
 
 // ---- train split: mean jet slot over the shell, then block powers ----
-function j2tr(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j2tr(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet2slot(__ptr(s)(p)(0), __ptr(s)(p)(1), __ptr(s)(p)(2), k)
     reduce(t, (+)) / __cnftr(s)
 }
-function j3tr(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j3tr(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet3slot(__ptr(s)(p)(0), __ptr(s)(p)(1), __ptr(s)(p)(2), k)
     reduce(t, (+)) / __cnftr(s)
 }
-function j4tr(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j4tr(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet4slot(__ptr(s)(p)(0), __ptr(s)(p)(1), __ptr(s)(p)(2), k)
@@ -102,22 +102,22 @@ function j4tr(s: Int, k: Int) -> Float = {
 // K=2 l=2 power: slots 1..5. K=3 power: all 10 slots (the l=1 block of a
 // closed shell is its mean vector = 0, so this is the l=3 power). K=4 l=4:
 // slots 6..14.
-function pow2tr(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<5>> =
+function pow2tr(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<5>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j2tr(s, k + 1) * j2tr(s, k + 1)
     reduce(t, (+))
 }
-function pow3tr(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<10>> =
+function pow3tr(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<10>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j3tr(s, k) * j3tr(s, k)
     reduce(t, (+))
 }
-function pow4tr(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<9>> =
+function pow4tr(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<9>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j4tr(s, k + 6) * j4tr(s, k + 6)
@@ -125,43 +125,43 @@ function pow4tr(s: Int) -> Float = {
 }
 
 // ---- test split, same shape ----
-function j2te(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j2te(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet2slot(__pte(s)(p)(0), __pte(s)(p)(1), __pte(s)(p)(2), k)
     reduce(t, (+)) / __cnfte(s)
 }
-function j3te(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j3te(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet3slot(__pte(s)(p)(0), __pte(s)(p)(1), __pte(s)(p)(2), k)
     reduce(t, (+)) / __cnfte(s)
 }
-function j4te(s: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j4te(s: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet4slot(__pte(s)(p)(0), __pte(s)(p)(1), __pte(s)(p)(2), k)
     reduce(t, (+)) / __cnfte(s)
 }
-function pow2te(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<5>> =
+function pow2te(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<5>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j2te(s, k + 1) * j2te(s, k + 1)
     reduce(t, (+))
 }
-function pow3te(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<10>> =
+function pow3te(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<10>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j3te(s, k) * j3te(s, k)
     reduce(t, (+))
 }
-function pow4te(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<9>> =
+function pow4te(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<9>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j4te(s, k + 6) * j4te(s, k + 6)
@@ -169,41 +169,41 @@ function pow4te(s: Int) -> Float = {
 }
 
 // ---- materialize per-sample powers once ----
-let rec __p2tr: Array<Float like SampTr> =
+let rec __p2tr: Array<Float64 like SampTr> =
     match __p2tr with
     | zero -> zero
     | prefix :: s -> prefix :: pow2tr(s)
-let rec __p3tr: Array<Float like SampTr> =
+let rec __p3tr: Array<Float64 like SampTr> =
     match __p3tr with
     | zero -> zero
     | prefix :: s -> prefix :: pow3tr(s)
-let rec __p4tr: Array<Float like SampTr> =
+let rec __p4tr: Array<Float64 like SampTr> =
     match __p4tr with
     | zero -> zero
     | prefix :: s -> prefix :: pow4tr(s)
-let rec __p2te: Array<Float like SampTe> =
+let rec __p2te: Array<Float64 like SampTe> =
     match __p2te with
     | zero -> zero
     | prefix :: s -> prefix :: pow2te(s)
-let rec __p3te: Array<Float like SampTe> =
+let rec __p3te: Array<Float64 like SampTe> =
     match __p3te with
     | zero -> zero
     | prefix :: s -> prefix :: pow3te(s)
-let rec __p4te: Array<Float like SampTe> =
+let rec __p4te: Array<Float64 like SampTe> =
     match __p4te with
     | zero -> zero
     | prefix :: s -> prefix :: pow4te(s)
 
 // ---- gate 1: differential vs the store's F# powers (running maxima) ----
-function dmax(prev: Float, v: Float) -> Float = if v > prev then v else prev
-let rec __df_tr: Array<Float like SampTr> =
+function dmax(prev: Float64, v: Float64) -> Float64 = if v > prev then v else prev
+let rec __df_tr: Array<Float64 like SampTr> =
     match __df_tr with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(dmax(dmax(prefix(s - 1),
         abs(__p2tr(s) - __powtr(s)(0))),
         abs(__p3tr(s) - __powtr(s)(1))),
         abs(__p4tr(s) - __powtr(s)(2)))
-let rec __df_te: Array<Float like SampTe> =
+let rec __df_te: Array<Float64 like SampTe> =
     match __df_te with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(dmax(dmax(prefix(s - 1),
@@ -219,52 +219,52 @@ diffs
 
 // ---- gate 2: the canonical table, per sample, via the one-hot label ----
 // per-sample targets t4(s) = sum_c y(s)(c) * t4c(c) (indicator arithmetic)
-function tgt4tr(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<4>> =
+function tgt4tr(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<4>> =
         match t with
         | zero -> zero
         | prefix :: c -> prefix :: __ytr(s)(c) * t4c(c)
     reduce(t, (+))
 }
-function tgt3tr(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<4>> =
+function tgt3tr(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<4>> =
         match t with
         | zero -> zero
         | prefix :: c -> prefix :: __ytr(s)(c) * t3c(c)
     reduce(t, (+))
 }
-function tgt4te(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<4>> =
+function tgt4te(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<4>> =
         match t with
         | zero -> zero
         | prefix :: c -> prefix :: __yte(s)(c) * t4c(c)
     reduce(t, (+))
 }
-function tgt3te(s: Int) -> Float = {
-    let rec t: Array<Float like Idx<4>> =
+function tgt3te(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<4>> =
         match t with
         | zero -> zero
         | prefix :: c -> prefix :: __yte(s)(c) * t3c(c)
     reduce(t, (+))
 }
 // running maxima of |power - canonical| and of the K=2 l=2 power itself
-let rec __tab_tr: Array<Float like SampTr> =
+let rec __tab_tr: Array<Float64 like SampTr> =
     match __tab_tr with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(dmax(prefix(s - 1),
         abs(__p4tr(s) - tgt4tr(s))),
         abs(__p3tr(s) - tgt3tr(s)))
-let rec __tab_te: Array<Float like SampTe> =
+let rec __tab_te: Array<Float64 like SampTe> =
     match __tab_te with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(dmax(prefix(s - 1),
         abs(__p4te(s) - tgt4te(s))),
         abs(__p3te(s) - tgt3te(s)))
-let rec __l2_tr: Array<Float like SampTr> =
+let rec __l2_tr: Array<Float64 like SampTr> =
     match __l2_tr with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(prefix(s - 1), __p2tr(s))
-let rec __l2_te: Array<Float like SampTe> =
+let rec __l2_te: Array<Float64 like SampTe> =
     match __l2_te with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(prefix(s - 1), __p2te(s))
@@ -274,36 +274,36 @@ let l2_power_max = [__l2_tr(ntr - 1), __l2_te(nte - 1)]
 l2_power_max
 
 // per-class mean l3 / l4 over train, printed beside the canonical table
-function clsum4(c: Int) -> Float = {
-    let rec t: Array<Float like SampTr> =
+function clsum4(c: Int32) -> Float64 = {
+    let rec t: Array<Float64 like SampTr> =
         match t with
         | zero -> zero
         | prefix :: s -> prefix :: __ytr(s)(c) * __p4tr(s)
     reduce(t, (+))
 }
-function clsum3(c: Int) -> Float = {
-    let rec t: Array<Float like SampTr> =
+function clsum3(c: Int32) -> Float64 = {
+    let rec t: Array<Float64 like SampTr> =
         match t with
         | zero -> zero
         | prefix :: s -> prefix :: __ytr(s)(c) * __p3tr(s)
     reduce(t, (+))
 }
-function clcnt(c: Int) -> Float = {
-    let rec t: Array<Float like SampTr> =
+function clcnt(c: Int32) -> Float64 = {
+    let rec t: Array<Float64 like SampTr> =
         match t with
         | zero -> zero
         | prefix :: s -> prefix :: __ytr(s)(c)
     reduce(t, (+))
 }
-let rec __mean4: Array<Float like Idx<4>> =
+let rec __mean4: Array<Float64 like Idx<4>> =
     match __mean4 with
     | zero -> zero
     | prefix :: c -> prefix :: clsum4(c) / clcnt(c)
-let rec __mean3: Array<Float like Idx<4>> =
+let rec __mean3: Array<Float64 like Idx<4>> =
     match __mean3 with
     | zero -> zero
     | prefix :: c -> prefix :: clsum3(c) / clcnt(c)
-let rec __cnts: Array<Float like Idx<4>> =
+let rec __cnts: Array<Float64 like Idx<4>> =
     match __cnts with
     | zero -> zero
     | prefix :: c -> prefix :: clcnt(c)
@@ -315,7 +315,7 @@ let class_mean_l3_train = __mean3 |> compute
 class_mean_l3_train
 
 // ---- gate 3: l=4 power invariant under the 8 baked fresh rotations ----
-function jet4rot(s: Int, r: Int, p: Int, k: Int) -> Float = {
+function jet4rot(s: Int32, r: Int32, p: Int32, k: Int32) -> Float64 = {
     let x = __cte(s)(p)(0)
     let y = __cte(s)(p)(1)
     let zz = __cte(s)(p)(2)
@@ -324,29 +324,29 @@ function jet4rot(s: Int, r: Int, p: Int, k: Int) -> Float = {
     let rz = __rot(r)(6) * x + __rot(r)(7) * y + __rot(r)(8) * zz
     jet4slot(ry, rz, rx, k)
 }
-function j4rot(s: Int, r: Int, k: Int) -> Float = {
-    let rec t: Array<Float like Pt> =
+function j4rot(s: Int32, r: Int32, k: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Pt> =
         match t with
         | zero -> zero
         | prefix :: p -> prefix :: jet4rot(s, r, p, k)
     reduce(t, (+)) / __cnfte(s)
 }
-function pow4rot(s: Int, r: Int) -> Float = {
-    let rec t: Array<Float like Idx<9>> =
+function pow4rot(s: Int32, r: Int32) -> Float64 = {
+    let rec t: Array<Float64 like Idx<9>> =
         match t with
         | zero -> zero
         | prefix :: k -> prefix :: j4rot(s, r, k + 6) * j4rot(s, r, k + 6)
     reduce(t, (+))
 }
-function rotdev(s: Int) -> Float = {
-    let rec t: Array<Float like RotK> =
+function rotdev(s: Int32) -> Float64 = {
+    let rec t: Array<Float64 like RotK> =
         match t with
         | zero -> zero
         | prefix :: r -> prefix :: dmax(prefix(r - 1), abs(pow4rot(s, r) - __p4te(s)))
     let n = extents(t)
     t(n - 1)
 }
-let rec __rotdev: Array<Float like SampTe> =
+let rec __rotdev: Array<Float64 like SampTe> =
     match __rotdev with
     | zero -> zero
     | prefix :: s -> prefix :: dmax(prefix(s - 1), rotdev(s))
@@ -354,9 +354,9 @@ let rot_invariance_max = __rotdev(nte - 1)
 rot_invariance_max
 
 // ---- verdict ----
-let ok_diff = if diff_max_tr < 1.0e-12 && diff_max_te < 1.0e-12 then 1 else 0
-let ok_table = if __tab_tr(ntr - 1) < 3.5e-3 && __tab_te(nte - 1) < 3.5e-3 then 1 else 0
-let ok_l2 = if __l2_tr(ntr - 1) < 1.0e-12 && __l2_te(nte - 1) < 1.0e-12 then 1 else 0
-let ok_rot = if rot_invariance_max < 1.0e-12 then 1 else 0
+let ok_diff: Int64 = if diff_max_tr < 1.0e-12 && diff_max_te < 1.0e-12 then 1 else 0
+let ok_table: Int64 = if __tab_tr(ntr - 1) < 3.5e-3 && __tab_te(nte - 1) < 3.5e-3 then 1 else 0
+let ok_l2: Int64 = if __l2_tr(ntr - 1) < 1.0e-12 && __l2_te(nte - 1) < 1.0e-12 then 1 else 0
+let ok_rot: Int64 = if rot_invariance_max < 1.0e-12 then 1 else 0
 let verdict = [ok_diff, ok_table, ok_l2, ok_rot]
 verdict

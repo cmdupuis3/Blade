@@ -18,11 +18,11 @@
 let ts: Array<Float64 like Idx<4>> = [10.0, 20.0, 30.0, 40.0]
 
 // Every row is the same constant vector.
-let g = (ts <@> lambda(t) -> [1.0, 2.5, 4.0]) |> compute
+let g = (ts <@> lambda(t) -> Float64([1.0, 2.5, 4.0])) |> compute
 // EXPECT: g = [[1.0, 2.5, 4.0], [1.0, 2.5, 4.0], [1.0, 2.5, 4.0], [1.0, 2.5, 4.0]]
 
 // Width 1: the degenerate row, which still raises the rank.
-let one = (ts <@> lambda(t) -> [7.0]) |> compute
+let one = (ts <@> lambda(t) -> Float64([7.0])) |> compute
 // EXPECT: one = [[7.0], [7.0], [7.0], [7.0]]
 
 // The rank-raised result is an ordinary array -- fold it back down the

@@ -13,13 +13,13 @@ import ad as ad
 
 type I = Idx<5>
 
-function f(a: Array<Float like I>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x)
+function f(a: Array<Float64 like I>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x)
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 
-let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
-let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
+let mut da = Float64([0.0, 0.0, 0.0, 0.0, 0.0])
+let gv = ad.grad(f)(Float64([3.0, 1.0, 4.0, 1.5, 2.0]), da)
 // EXPECT: gv = 42.0
 // EXPECT: da = [4.0, 1.0, 5.0, 2.0, 3.0]
 
@@ -45,14 +45,14 @@ let resid = jt - dirderiv
 // Hessian is 2 at (1,1) alone and the HVP along e1 is [0, 2, 0, 0].
 type J = Idx<4>
 
-function g(a: Array<Float like J>) -> Float = {
-    let s = sort(a, lambda(x: Float) -> x)
+function g(a: Array<Float64 like J>) -> Float64 = {
+    let s = sort(a, lambda(x: Float64) -> x)
     s(0) * s(0) + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0
 }
 
-let mut gg = [0.0, 0.0, 0.0, 0.0]
-let mut tgg = [0.0, 0.0, 0.0, 0.0]
-let (hp, ht) = ad.jvp(ad.grad(g))([3.0, 1.0, 4.0, 2.0], gg, [0.0, 1.0, 0.0, 0.0], tgg)
+let mut gg = Float64([0.0, 0.0, 0.0, 0.0])
+let mut tgg = Float64([0.0, 0.0, 0.0, 0.0])
+let (hp, ht) = ad.jvp(ad.grad(g))(Float64([3.0, 1.0, 4.0, 2.0]), gg, Float64([0.0, 1.0, 0.0, 0.0]), tgg)
 // EXPECT: hp = 30.0
 // EXPECT: gg = [3.0, 2.0, 4.0, 2.0]
 // EXPECT: tgg = [0.0, 2.0, 0.0, 0.0]

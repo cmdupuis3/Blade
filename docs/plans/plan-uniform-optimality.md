@@ -18,8 +18,8 @@ items remain unverified and are listed as such (§7.3).
 
 Companions: `plan-rank-r-former.md` and `structural/05-structured-operators.md`
 sit exactly on the far side of the boundary §5.2 draws;
-`plan-compact-sym-folds.md` is the fold corollary's customer; the unmerged
-`plan-fastest-way-principles.md` (branch `feat/fastest-way-principles`) owns the
+`plan-compact-sym-folds.md` is the fold corollary's customer; the design-only
+`plan-fastest-way-principles.md` owns the
 advisory channel §6 would report through.
 
 ---
@@ -575,7 +575,7 @@ P1 and P0 are independent after the sweep; P2 needs P1; P3 needs P0 only.
    statement rather than a scope note.
 3. **Where the census reports.** `blade plan` only (recommended), or also a
    BL-coded advisory for Δ_support? The latter should wait for the
-   fastest-way-principles branch's advisory channel rather than mint its own.
+   fastest-way-principles plan's advisory channel rather than mint its own.
 4. **Naming.** "Uniform optimality" / "orbit work" / "free orbit" are this
    doc's coinages; nothing in the tower uses them yet.
 

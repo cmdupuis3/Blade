@@ -1,0 +1,18 @@
+// TEST: Call Array Argument Before Compute (aborts)
+// ----------------------------------------------------------------------------
+// Codex review of W4-1, finding 5: in a call with an explicit-compute
+// argument, an EARLIER array-valued argument that evaluates (here a call that
+// fails a checked cast) is evaluated at its own position -- before the
+// compute's division by zero -- in every lane. The C++ lane used to leave
+// array-valued arguments in the call and run the compute first (BL8013).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+function checked(k: Array<Int64 like Row>) -> Array<Int64 like Row> = [a((k(0) : Row))]
+function g2(p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = p(0) + q(0)
+let r = g2(checked(a), bad |> compute)
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:12

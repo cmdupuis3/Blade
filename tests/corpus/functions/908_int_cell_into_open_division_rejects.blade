@@ -1,0 +1,10 @@
+// TEST: An Int64 Cell Into A Lambda Whose Parameter Defaulted To A Float Is Refused (rejects)
+// ERROR: BL3020 @ 9:41
+// ERROR-CONTAINS: widening it to Float64
+// ============================================================================
+// R11: the parameter of `lambda(x) -> x / 2` fell to its Float64 default
+// while the call was typed at the cell's Int64; g++ refused the generated
+// code (BL9002). Refused at the call.
+// ============================================================================
+let xs: Array<Int64 like Idx<2>> = [3, 5]
+let r = method_for(xs) <@> lambda(v) -> (lambda(x) -> x / 2)(v) |> compute

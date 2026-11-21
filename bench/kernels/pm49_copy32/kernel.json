@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "name": "pm49_copy32",
+  "group": "M",
+  "title": "PM49 streaming tier control: copy-scale Float32, ring recurrence",
+  "sizes": {
+    "smoke": {
+      "n": 2003,
+      "k": 5,
+      "kl": 4
+    },
+    "full": {
+      "n": 1500007,
+      "k": 21,
+      "kl": 20
+    },
+    "l1": {
+      "n": 1201,
+      "k": 25013,
+      "kl": 25012
+    },
+    "l2": {
+      "n": 12007,
+      "k": 2503,
+      "kl": 2502
+    },
+    "l3": {
+      "n": 300007,
+      "k": 101,
+      "kl": 100
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "2 logical streams x 4 B per cell per step; useful bytes per run = 8 * n * (k - 1). Tiers: l1/l2/l3/full(=DRAM) sized for the Ryzen 7 5800HS (32 KB L1d, 512 KB L2, 16 MB L3).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py"
+}

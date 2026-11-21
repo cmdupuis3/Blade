@@ -3,7 +3,7 @@
 // parameters are open, so the zip inside `(a - mean(a)) * (b - mean(b))` had
 // no names to compare either; the judgment runs after the parameters meet
 // the rows, for a lambda exactly as for a named kernel.
-// ERROR: BL3999
+// ERROR: BL3027
 // ERROR-CONTAINS: DIFFERENT index types: kernel operands 1 and 2 are CO-ITERATED by the body of this kernel
 // stats' `mean`, inlined: this runner does not resolve stdlib imports.
 function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))

@@ -1,0 +1,18 @@
+// TEST: Block Alias After Failing Statement (aborts)
+// ----------------------------------------------------------------------------
+// Gap G60 (c), first failure: the block's earlier statement fails (BL8006)
+// before the alias `b` forces g, whose cell 1 would divide by zero (BL8013).
+// The force happens at the alias, so the cast's failure is the one reported
+// -- a hoist of the force to the statement's start would report g's instead.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let x: Array<Int64 like Row> = [1, 0]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let r = {
+    let early = x((x(0) + 5 : Row))
+    let b = g
+    b(0) + early
+}
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:11

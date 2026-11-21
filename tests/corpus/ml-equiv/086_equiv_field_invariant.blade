@@ -27,12 +27,12 @@ struct Gains {
 // inherit that status.
 let G = Gains { lo = 2.0, hi = 3.0 }
 
-function score(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function score(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
     x(0) + G.lo
 
 // The field also serves in the invariant arithmetic of a longer body, and as
 // an ml op's invariant argument is covered by 085's bracket twin.
-function blend(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function blend(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
     (x(0) * G.hi) + (G.lo * G.hi)
 
 let a = score([2.0, 1.0, 1.0, 1.0])

@@ -1,0 +1,22 @@
+// TEST: Simplex Tile Three K Blocks Omp
+// The rank-3 simplex at p = 61 (61 = 10*6 + 1 prefix rows, 7*8 + 5 k lanes) over
+// n = 700 samples: three balanced sample blocks of 234/234/232, so every cell's
+// chain is stored UNSCALED and reloaded twice before the one multiply by the
+// kernel's scalar. The omp licence on the kernel threads the tile's i
+// sub-simplices (cells split across the team, sums never).
+/// X(i, s) = ((5 i + 2 s) mod 7) - 2: small integers, exact sums, and `* 0.5` is
+/// exact -- association-invariant pins; route by `blade plan`
+/// (tests/OptimizeTests.fs plan_simplex_tile_*), bits by `blade test row-tile`.
+type V = Idx<61>
+type S = Idx<700>
+let (ss, t111, t_mid, t_edge, t_last) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 5 + s * 2) % 7) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c), omp(a: 1) -> prodsum(a, b, c) * 0.5 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (total, t(1, 1, 1), t(30, 12, 47), t(59, 60, 60), t(60, 59, 58))
+}
+// EXPECT: ss = 553480112500.0
+// EXPECT: t111 = 4550.0
+// EXPECT: t_mid = 4200.0
+// EXPECT: t_edge = -700.0
+// EXPECT: t_last = -1050.0

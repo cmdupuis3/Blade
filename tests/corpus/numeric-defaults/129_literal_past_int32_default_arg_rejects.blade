@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 as an Int32 parameter's default (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function g(i: Int32 = 5000000000) -> Int32 = i + 1
+let r = g()
+// ERROR: BL3020 @ 5:23

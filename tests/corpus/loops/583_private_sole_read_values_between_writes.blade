@@ -1,0 +1,17 @@
+// TEST: Private Sole Read Values Between Writes
+// ----------------------------------------------------------------------------
+// Gap G75, the success twin of 582: `at` reads the module deferred map g
+// exactly once, by position, so each call evaluates the whole map privately
+// from the CURRENT input -- the write between the calls is seen by the second
+// -- and g itself is never stored or printed.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+function at(n: Int64) -> Int64 = g(1) + n
+let one = at(1)
+x(1) = 5
+let two = at(1)
+// EXPECT: x = [1, 5]
+// EXPECT: one = 6
+// EXPECT: two = 3

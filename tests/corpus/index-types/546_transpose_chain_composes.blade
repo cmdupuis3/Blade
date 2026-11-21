@@ -1,0 +1,16 @@
+// TEST: Transpose Chain Composes
+// Odd and rank-3 chains (transpose-normal-form v1): the composed permutation
+// is rebuilt as its MINIMAL swap sequence. Three [0, 1] swaps of a 2x3 are one
+// swap. On a 2x3x2, [0, 1] then [1, 2] then [0, 1] is the single swap [0, 2]
+// (R[k][j][i] = A[i][j][k]); [0, 1] then [1, 2] is a 3-cycle that needs both
+// swaps (already normal: kept as written). A(i, j, k) = 100 i + 10 j + k.
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let T3 = transpose(transpose(transpose(M, [0, 1]), [0, 1]), [0, 1])
+// EXPECT: T3 = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+let A: Array<Float64 like Idx<2>, Idx<3>, Idx<2>> = method_for(range<Idx<2>, Idx<3>, Idx<2>>) <@> lambda(i, j, k) -> Float64(100 * i + 10 * j + k) |> compute
+let R = transpose(transpose(transpose(A, [0, 1]), [1, 2]), [0, 1])
+// EXPECT: R = [0.0, 100.0, 10.0, 110.0, 20.0, 120.0, 1.0, 101.0, 11.0, 111.0, 21.0, 121.0]
+let R2 = transpose(transpose(A, [0, 1]), [1, 2])
+// EXPECT: R2 = [0.0, 100.0, 1.0, 101.0, 10.0, 110.0, 11.0, 111.0, 20.0, 120.0, 21.0, 121.0]
+let t = reduce(transpose(transpose(transpose(A, [0, 1]), [1, 2]), [0, 1]), (+), axes = 3)
+// EXPECT: t = 726.0

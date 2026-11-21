@@ -9,8 +9,8 @@
 // plain dense reduction over that for the grand total -- SUM(x) GROUP BY k
 // followed by SUM over groups. Exercises the dense-array downstream of the
 // SQL-side output with a dynamic (ngroups) extent.
-let region = [0, 1, 0, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let sums = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute

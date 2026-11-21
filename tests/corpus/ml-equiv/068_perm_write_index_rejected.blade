@@ -34,8 +34,8 @@ import ml as ml
 // makes the SAME judgment about the SAME expression, and reports it at the
 // index rather than at the assignment. BL4012.
 // ============================================================================
-function bad(x: Array<Int like Idx<4>>) where ml.perm_equiv(4) -> Float = {
-    let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+function bad(x: Array<Int32 like Idx<4>>) where ml.perm_equiv(4) -> Float64 = {
+    let mut acc: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
     acc(x(0)) = 1.0
     acc(0)
 }

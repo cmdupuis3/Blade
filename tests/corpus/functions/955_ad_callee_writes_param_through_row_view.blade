@@ -1,0 +1,30 @@
+// TEST: a differentiated function's kernel callee writes its non-mut parameter through a row view (rejects)
+// ERROR: BL4005 @ 17:1
+// ERROR-CONTAINS: reaches the parameter `d` of `touch`, which is not `mut`
+// REJECT-AT: lower
+import ad as ad
+// R12 (deep review): the shape ad/055, 057, 077 and 078 used to have -- a
+// kernel callee writing the CALLER'S array through a local view of a
+// non-`mut` parameter, inside a function `ad.grad` differentiates. It is
+// refused like the direct `d(0, 1) += 1` (formalism 2.7); a `mut` parameter
+// is not inlinable by AD (BL5500), so no callee writes the caller's array in
+// differentiated code (a tuple, an `if` or a `match` value is not differentiable
+// in v1 either) -- the replay pruner's view-write hazard is closed by
+// construction for callees (ad/055 and 057 keep it over a captured
+// module-level `let mut`).
+type R = Array<Int32 like Idx<2>>
+type D = Array<Int32 like Idx<1>, Idx<2>>
+function ident(a: R) -> R = a
+function touch(x: Float64, d: D) -> Float64 = {
+    let mut v = d(0)
+    v(1) += 1
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let mut d: D = [[1, 1]]
+    let t = x * Float64(d(0, 1))
+    let ys = method_for(range<Idx<2>>)
+        <@> lambda(i) -> touch(x, d) |> compute
+    t + reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(2.0))

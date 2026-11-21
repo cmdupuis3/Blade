@@ -1,0 +1,32 @@
+// TEST: Float32 Static
+// ============================================================================
+// A `let static` Float32 folds in Float32 at compile time (rounding after
+// every operation), so it agrees bit for bit with the same expression
+// evaluated at run time; an Int32 static wraps at 32 bits. A literal-only
+// value adapts AS A WHOLE to the annotation (`0.1 * 3.0 + 0.7` under Float32
+// is three float32 literals and two float32 operations), and a cast of a
+// literal-only operand takes the cast's width.
+// The checker types each static at its folded width (`sa` is a Float32).
+// ============================================================================
+let static sa: Float32 = 0.1
+let static sb: Float32 = sa * 3.0 + 0.7
+let static sc: Float32 = 0.1 * 3.0 + 0.7
+let ra: Float32 = 0.1
+let rb = ra * 3.0 + 0.7
+let same = sb == rb
+let same2 = sc == rb
+let static si: Int32 = 2147483647
+let static sw = si + 1
+let static sk = Int32(46341) * Int32(46341)
+let static sd = Float64(Float32(0.1))
+// EXPECT: sa = 0.1
+// EXPECT: sb = 1.0
+// EXPECT: sc = 1.0
+// EXPECT: ra = 0.1
+// EXPECT: rb = 1.0
+// EXPECT: same = true
+// EXPECT: same2 = true
+// EXPECT: si = 2147483647
+// EXPECT: sw = -2147483648
+// EXPECT: sk = -2147479015
+// EXPECT: sd = 0.100000001490116

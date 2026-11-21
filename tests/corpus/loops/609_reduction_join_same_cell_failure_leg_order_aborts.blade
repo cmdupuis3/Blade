@@ -1,0 +1,14 @@
+// TEST: two join legs failing at the SAME cell report the first leg's failure (aborts)
+// Gap G101 (round 4 wave 4 lane A; formalism 10.2): within one cell of the
+// join's shared traversal the legs run in leg order, so when both fail at cell
+// 4 the failure is leg 0's (`100 / a`, line 9 once the harness drops the TEST
+// line).
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 0, 6, 7, 8, 9, 10]
+let e: Array<Int64 like I> = [1, 2, 3, 4, 0, 6, 7, 8, 9, 10]
+let q = method_for(e) <@> lambda(b) -> 200 / b
+let p = method_for(d) <@> lambda(a) -> 100 / a
+let (sp, sq) = object_for(<&!>) <@> (reduce(p, (+)), reduce(q, (+)))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:9

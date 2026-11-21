@@ -1,0 +1,19 @@
+// TEST: Fold Capture In Expression And Seed Spine Read
+// Gaps G237 and G248 (round 4 wave 8, fable review): a fold in EXPRESSION
+// position whose kernel captures the deferred d forces d once under its own
+// name (the C++ lane forwarded an undeclared d, BL9002); a seed reading a
+// cell of the fold's own spine p forces p under its own name and the fold
+// reads that snapshot (the C++ lane raised a compile-time error). Both reads
+// after the write to x see the snapshots.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let e = 1.0 + reduce(x, lambda(a, b) -> a + b + d(1), 0.0)
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(p, (+), p(0))
+x(0) = 10.0
+let w = d(0)
+let wp = p(0)
+// EXPECT: e = 19.0
+// EXPECT: s = 14.0
+// EXPECT: w = 2.0
+// EXPECT: wp = 2.0

@@ -1,0 +1,21 @@
+// TEST: A seed whose string spells the range holder still runs after the bound
+// ============================================================================
+// Gap G201, Codex diff review of the holder: the holder declaration was
+// placed before the first emitted line MENTIONING its name, and a string
+// literal in the seed may spell it -- the bound then ran before the seed
+// (m = 21). Gap G209 (round 4 wave 10 lane d, the lead ruling; the G207
+// rule): the range bound is an operand, evaluated before the seed, so the
+// bound records 2, then the seed 1: m = 21 in every lane, the holder declared
+// at the fold's operand stage (the old pin, m = 12, encoded the
+// interpreter's pre-G207 order).
+// ============================================================================
+function mark(a: mut Array<Int64 like Idx<1>>, digit: Int64) -> Int64 = {
+    a(0) = a(0) * 10 + digit
+    3
+}
+function seed(a: mut Array<Int64 like Idx<1>>, label: String) -> Int64 = mark(a, 1)
+function probe(a: mut Array<Int64 like Idx<1>>) -> Int64 = reduce(method_for(0..mark(a, 2)) <@> lambda(k) -> k, (+), seed(a, "__range0_r1073741825."))
+let mut m: Array<Int64 like Idx<1>> = [0]
+let p = probe(m)
+// EXPECT: m = [21]
+// EXPECT: p = 6

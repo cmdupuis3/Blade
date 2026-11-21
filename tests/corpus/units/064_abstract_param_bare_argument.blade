@@ -20,12 +20,12 @@
 Unit second
 function total(x: T<second>^1) = reduce(x, (+))
 function twice(k: T<second>^0) = k * 2.0
-let fromLiteral = total([1.0, 2.0])
-let bare = [3.0, 4.0]
+let fromLiteral = total(Float64([1.0, 2.0]))
+let bare = Float64([3.0, 4.0])
 let fromBinding = total(bare)
-let bias: Float<second> = 10.0
+let bias: Float64<second> = 10.0
 let summed = fromLiteral + bias
-let scaled = twice(5.0)
+let scaled = twice(Float64(5.0))
 // EXPECT: fromLiteral = 3.0
 // EXPECT: fromBinding = 7.0
 // EXPECT: summed = 13.0

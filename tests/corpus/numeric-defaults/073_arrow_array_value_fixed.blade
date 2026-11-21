@@ -1,0 +1,6 @@
+// TEST: fixed narrow array values do not adapt through an arrow result (rejects)
+let k: Float64 = 2.0
+function scale(c) = c(0) * k
+let xs = [1.0, 2.0]
+let result = scale(xs)
+// ERROR: BL3020

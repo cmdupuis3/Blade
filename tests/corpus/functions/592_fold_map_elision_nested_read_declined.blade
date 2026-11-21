@@ -1,0 +1,14 @@
+// TEST: Fold-Map Elision Declines A Read Inside A Nested Map Operand
+// ============================================================================
+// `c * c * c` folds a map whose operands are c AND the inner map `c * c`: a
+// read inside a nested operand would evaluate the centering again per cell,
+// so the fold-of-map consumer declines (every read must be a direct operand
+// position of the fold's map) and c stays stored.
+type I = Idx<5>
+function skew(a: Array<Float64 like I>) -> Float64 = {
+    let m = reduce(a, (+)) / 5.0
+    let c = a - m
+    reduce(c * c * c, (+)) / 5.0
+}
+let s = skew([1.0, 2.0, 4.0, 8.0, 16.0])
+// EXPECT: s = 144.336

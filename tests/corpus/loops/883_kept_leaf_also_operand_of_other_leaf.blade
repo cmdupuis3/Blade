@@ -1,0 +1,14 @@
+// TEST: a kept leaf that is also the operand of another leaf
+// Gap G233, round 4 wave 10 (Codex design review, class closure): q reads p
+// as its operand AND captures it (`p(0)`); the capture forces p under its own
+// name before the seed writes x, so the p leaf folds the snapshot, and q's
+// operand reads the same stored p.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(p) <@> lambda(v) -> v + p(0)
+let s = reduce(p <&!> q, (+), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: p = [2.0, 4.0]
+// EXPECT: s = (6.0, 10.0)
+// EXPECT: w = 2.0

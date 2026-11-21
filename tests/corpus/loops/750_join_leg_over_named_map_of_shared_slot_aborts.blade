@@ -1,0 +1,13 @@
+// TEST: Join Leg Over A Named Map Of The Shared Slot Fails At Its Own Cell (aborts)
+// Gap G207 (1) (round 4 wave 8 lane d): leg 0 folds `p`, a NAMED map over
+// the shared slot `e`. The joint traversal evaluates the share e(i) and then
+// p(i) cell by cell (formalism 10.2), so p fails at cell 1 (integer modulo by
+// zero, e(1) = 50) long before e fails at cell 7 (integer division by zero).
+// The interpreter used to force `e` whole for leg 0 and report e at cell 7;
+// it now runs the joint traversal itself.
+// ABORT: integer modulo by zero
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5, 6, 7, 0, 9, 10]
+let e = method_for(d) <@> lambda(a) -> 100 / a
+let p = method_for(e) <@> lambda(a) -> 7 % (a - 50)
+let (s1, s2) = object_for(<&!>) <@> (reduce(p, (+)), reduce(e, (+)))

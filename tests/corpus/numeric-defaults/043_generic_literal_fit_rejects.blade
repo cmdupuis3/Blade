@@ -1,0 +1,4 @@
+// TEST: a generic operator literal must fit its instantiated integer width (rejects)
+function offset(x: T) = x + 3000000000
+let result = offset(Int32(1))
+// ERROR: BL3020

@@ -6,6 +6,6 @@
 // does the work. The negative control for the lift's SHARED-variable trigger.
 function mix(a: T^0, b: U^0) -> T^0 = a + b
 
-let A: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
+let A: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let r = mix(A, 2.0)
 // EXPECT: r = [3.0, 4.0, 5.0]

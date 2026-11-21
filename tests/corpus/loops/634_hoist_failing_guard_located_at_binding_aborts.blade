@@ -1,0 +1,13 @@
+// TEST: Hoisted Failing Guard Is Located At The Binding (aborts)
+// ABORT: BL8003
+// ABORT: reduce: empty array, no reduction possible
+// ============================================================================
+// G151, the location half: an empty fold's BL8003 has no span of its own and
+// is located at the declaration being emitted. Per cell, the inlined kernel
+// stood in `h`; the hoisted `reduce(z, (+))` runs in a helper the
+// optimizer minted, which used to have no declaration (no `-->` line in the
+// C++ lane). It is now located where its per-cell evaluation was.
+type C = Idx<3>
+let v: Array<Int64 like C> = [1, -1, 0]
+let z = intersect(Int64([1, 2]), Int64([3]))
+let h = method_for(v) <@> lambda(e) -> e * reduce(z, (+)) |> compute

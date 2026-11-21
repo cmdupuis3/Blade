@@ -33,25 +33,25 @@ import ml as ml
 
 // SUGGEST: function 'flux_pair' judges boost-invariant with velocity parameter(s) u: add 'where ml.galilean(u)'
 // SUGGEST: function 'flux_pair' judges boost-invariant with velocity parameter(s) v: add 'where ml.galilean(v)'
-function flux_pair(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>) -> Float =
+function flux_pair(u: Array<Float64 like Idx<4>>, v: Array<Float64 like Idx<4>>) -> Float64 =
   (u(1) - u(0)) + (v(1) - v(0))
 
 // Silent: `flux_pair` was proposed twice, so it is not in the speculative
 // table, so this call resolves to nothing and the judgment fails.
-function total_flux(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>) -> Float =
+function total_flux(u: Array<Float64 like Idx<4>>, v: Array<Float64 like Idx<4>>) -> Float64 =
   flux_pair(u, v) * 2.0
 
 // Both twins, both checked.
-function flux_pair_u(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>)
-                     where ml.galilean(u) -> Float =
+function flux_pair_u(u: Array<Float64 like Idx<4>>, v: Array<Float64 like Idx<4>>)
+                     where ml.galilean(u) -> Float64 =
   (u(1) - u(0)) + (v(1) - v(0))
 
-function flux_pair_v(u: Array<Float like Idx<4>>, v: Array<Float like Idx<4>>)
-                     where ml.galilean(v) -> Float =
+function flux_pair_v(u: Array<Float64 like Idx<4>>, v: Array<Float64 like Idx<4>>)
+                     where ml.galilean(v) -> Float64 =
   (u(1) - u(0)) + (v(1) - v(0))
 
-let uv = [1.0, 2.0, 4.0, 8.0]
-let vv = [10.0, 13.0, 17.0, 22.0]
+let uv = Float64([1.0, 2.0, 4.0, 8.0])
+let vv = Float64([10.0, 13.0, 17.0, 22.0])
 
 // (2 - 1) + (13 - 10) = 4
 let f = flux_pair(uv, vv)

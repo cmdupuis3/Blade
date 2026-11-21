@@ -1,0 +1,11 @@
+// TEST: A Function-Local Compound Range Over A Deferred Module Mask Forces The Mask In The Body
+// Gap G246 (round 4 wave 9 lane d): the CompoundIdx twin of loops/842 -- positions 2, 3, 4 kept.
+// EXPECT: r = 90
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let m = method_for(d) <@> lambda(a) -> a > 2
+function f() -> Int64 = {
+    let s = method_for(range<CompoundIdx<m>>) <@> lambda(i) -> i * 10 |> compute
+    reduce(s, (+))
+}
+let r = f()

@@ -1,0 +1,23 @@
+// TEST: AD Gather Fuse Declines A Primal-Reading Stencil Beside A Fresh Buffer
+import ad as ad
+// ============================================================================
+// `ad-gather-fuse` DECLINES a stencil whose taps read the PRIMAL (a product
+// of neighbours): the fresh-buffer twin of ad/046 (round 4 wave 9, lane A,
+// A1). The decline is static -- a tap reading storage is never interleaved
+// -- and `blade test access` pins it ("a tap reads storage or may fail").
+// The buffer is fresh: one sharing the primal is refused since round 4 wave
+// 8 (G190 (c), BL4005, ad/046), so the per-tap passes and a fused pass would
+// agree here; the value is d/dx of x0 x1 + x1 x2 + x2 x3.
+// ============================================================================
+type H = Idx<4>
+
+function f(x: Array<Float64 like H>) -> Float64 = {
+    let d = method_for(halo<H, [0, 1]>) <@> lambda(w) -> x(w(0)) * x(w(1)) |> compute
+    reduce(d, (+))
+}
+
+let a: Array<Float64 like H> = [1.0, 2.0, 3.0, 4.0]
+let mut da: Array<Float64 like H> = [0.0, 0.0, 0.0, 0.0]
+let z = ad.grad(f)(a, da)
+// EXPECT: z = 20.0
+// EXPECT: da = [2.0, 4.0, 6.0, 3.0]

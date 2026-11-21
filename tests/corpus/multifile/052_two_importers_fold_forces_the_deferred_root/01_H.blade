@@ -1,0 +1,8 @@
+// TEST: Two importers: a fold over a chain spanning three modules
+// MODULE: H
+// Gap G199: A maps H.d, Main maps A.pa and folds it: the fold evaluates
+// A.pa privately, which forces H.d under its own name. The later write to
+// H.x changes neither H.d nor A.pa.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0

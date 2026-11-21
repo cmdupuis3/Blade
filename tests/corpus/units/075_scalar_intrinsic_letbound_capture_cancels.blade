@@ -33,7 +33,7 @@ Unit day = 86400 * second
 Unit time: day
 Unit frequency: 1 / day
 
-let two_pi = 6.283185307179586
+let two_pi: Float64 = 6.283185307179586
 
 // let-bound intermediate -- the shape that regressed
 function viaLet(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
@@ -48,8 +48,8 @@ function inline_(freqs: T<frequency>^1, t_zero: T<time> = 0.0) = {
     freqs <@> lambda(fq) -> cos((two_pi * fq) * t_zero) |> compute
 }
 
-let fs: Array<Float<frequency> like Idx<2>> = [0.0, 0.25]
-let tz: Float<time> = 1.0
+let fs: Array<Float64<frequency> like Idx<2>> = [0.0, 0.25]
+let tz: Float64<time> = 1.0
 let a = viaLet(fs, tz)
 let b = inline_(fs, tz)
 // cos(0) = 1; cos(2pi * 0.25 * 1) = cos(pi/2) = 0 to rounding

@@ -1,6 +1,6 @@
 // TEST: Struct field assign
 // EXPECT: result = 3.0
-struct Point { x: Float, y: Float }
+struct Point { x: Float64, y: Float64 }
 let p = Point { x = 1.0, y = 2.0 }
 let result = {
     p.x = 3.0

@@ -147,8 +147,13 @@
 // PARAMETERIZED, so unlike the two macros above it cannot be a fixed _Pragma:
 // the operator and the accumulator's name are both emission-site facts. The
 // two-step stringize is the standard idiom (`_Pragma` takes a string literal;
-// `#spec` makes one out of the argument's tokens). `spec` must therefore be
-// comma-free, which every `<op>:<name>` reduction-spec is.
+// `#__VA_ARGS__` makes one out of the argument's tokens). VARIADIC, because a
+// fused fold / reduction join names SEVERAL accumulators in one list
+// (`+:s_0, s_1, s_2`) and the commas would otherwise split the argument; one
+// operator per clause, which the emitter guarantees (`fusedFoldSimdPlan`).
+//
+// THE DEFAULT FORM since 2026-10-17: every licensed fold takes it (or the
+// K-lane form) unless the build is BLADE_FP_REPRO=1.
 //
 // GATED ON OpenMP 4.0 (`_OPENMP >= 201307`), not merely on `_OPENMP`: `simd`
 // entered the standard in 4.0, and MSVC's `/openmp` is still 2.0 (`_OPENMP` =
@@ -159,10 +164,10 @@
 // site discharges the licence (`foldReorderLicensed` + the knob).
 #ifndef BLADE_OMP_SIMD_REDUCTION
   #if defined(_OPENMP) && (_OPENMP >= 201307)
-    #define BLADE_OMP_SIMD_PRAGMA_(x) _Pragma(#x)
-    #define BLADE_OMP_SIMD_REDUCTION(spec) BLADE_OMP_SIMD_PRAGMA_(omp simd reduction(spec))
+    #define BLADE_OMP_SIMD_PRAGMA_(...) _Pragma(#__VA_ARGS__)
+    #define BLADE_OMP_SIMD_REDUCTION(...) BLADE_OMP_SIMD_PRAGMA_(omp simd reduction(__VA_ARGS__))
   #else
-    #define BLADE_OMP_SIMD_REDUCTION(spec)
+    #define BLADE_OMP_SIMD_REDUCTION(...)
   #endif
 #endif
 
@@ -234,6 +239,40 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// BLADE_OMP_PARALLEL_NUM_THREADS(n) and blade_omp_get_{max_threads,
+// num_threads, thread_num}() -- the explicit TEAM the comm-licensed Path-B
+// folds open (CodeGenBinding's contiguous per-thread partials, the loop
+// nest's fold-combine region): request `n` threads, read back the team the
+// region actually got and each thread's id.
+//
+// These were the last raw `#pragma omp parallel` lines and unguarded omp_*
+// calls in emitted code. A generated `.cpp` compiled without OpenMP (by
+// hand, or cl.exe's host half of a CUDA build) then met an unknown pragma
+// and an omp_get_max_threads it could not link. Under no OpenMP the region
+// is the empty expansion and the queries answer the serial team -- one
+// thread, id 0 -- so the same code runs as ONE chunk covering the whole
+// range, combined exactly as the threaded form combines a one-thread team.
+// `parallel num_threads` is OpenMP 2.0, so `_OPENMP` alone gates it.
+#ifndef BLADE_OMP_PARALLEL_NUM_THREADS
+  #if defined(_OPENMP)
+    #define BLADE_OMP_NT_PRAGMA_(x) _Pragma(#x)
+    #define BLADE_OMP_PARALLEL_NUM_THREADS(n) BLADE_OMP_NT_PRAGMA_(omp parallel num_threads(n))
+  #else
+    #define BLADE_OMP_PARALLEL_NUM_THREADS(n)
+  #endif
+#endif
+#if defined(_OPENMP)
+  #include <omp.h>
+  inline int blade_omp_get_max_threads() { return omp_get_max_threads(); }
+  inline int blade_omp_get_num_threads() { return omp_get_num_threads(); }
+  inline int blade_omp_get_thread_num() { return omp_get_thread_num(); }
+#else
+  inline int blade_omp_get_max_threads() { return 1; }
+  inline int blade_omp_get_num_threads() { return 1; }
+  inline int blade_omp_get_thread_num() { return 0; }
+#endif
+
+// ---------------------------------------------------------------------------
 // BLADE_REPRO_FN -- the `where repro` discharge on an emitted function
 // definition: the body's floating-point operation sequence is the source's
 // (no FMA contraction), and the function is never re-inlined into a caller
@@ -248,6 +287,21 @@
 // `__declspec(noinline)` (the MSVC lane exists for CUDA hosts; repro x cuda
 // is refused upstream). The emission site is genFuncDef/genForwardDecls; the
 // licence-side vetoes (fold reorder, BLAS routing) are the compiler's.
+// BLADE_ONE_BODY -- the attribute of a lambda that must be ONE compiled body
+// at every call site (provider-sink-stream v1: the validation pass and the
+// write pass call the same block filler, so -ffp-contract=fast cannot contract
+// the kernel differently per call context). noinline keeps it out of each
+// caller; noclone keeps GCC's IPA-CP from specializing a copy per site.
+#ifndef BLADE_ONE_BODY
+  #if defined(__clang__)
+    #define BLADE_ONE_BODY __attribute__((noinline))
+  #elif defined(__GNUC__)
+    #define BLADE_ONE_BODY __attribute__((noinline, noclone))
+  #else
+    #define BLADE_ONE_BODY
+  #endif
+#endif
+
 #ifndef BLADE_REPRO_FN
   #if defined(__clang__)
     #define BLADE_REPRO_FN __attribute__((noinline))

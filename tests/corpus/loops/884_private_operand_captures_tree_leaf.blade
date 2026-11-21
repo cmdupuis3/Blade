@@ -1,0 +1,17 @@
+// TEST: a tree leaf captured through another leaf's private operand
+// Gap G233, round 4 wave 10 (Codex design review: the forcing closure
+// includes captures reached while a PRIVATE operand is evaluated): the leaf q
+// reads the deferred r, whose kernel captures the leaf p. Evaluating r for
+// the fold (privately, before the seed) forces p under its own name, so the
+// p leaf folds that snapshot -- the C++ lane hit an internal refusal (the
+// stored p was no unforced leaf) and the interpreter folded a fresh walk.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let r = method_for(x) <@> lambda(v) -> v + p(1)
+let q = method_for(r) <@> lambda(v) -> v + 1.0
+let s = reduce(p <&!> q, (+), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: p = [2.0, 4.0]
+// EXPECT: s = (6.0, 13.0)
+// EXPECT: w = 2.0

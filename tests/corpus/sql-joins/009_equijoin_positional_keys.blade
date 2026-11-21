@@ -1,0 +1,22 @@
+// TEST: Equijoin Positional Keys
+// ----------------------------------------------------------------------------
+// Keys of a POSITIONAL index type (`Array<KIdx like Row>`, KIdx = Idx<5>):
+// the right keys take the counting sort over their measured span (inside
+// [0, 5) by type). Bucket 2 is empty on the right (no right row holds 2) and
+// the left key 2 matches nothing; keys 0 and 4 sit at the span's edges.
+// Pairs: (0,0) (0,3) (1,1) (3,2) (4,0) (4,3).
+// ----------------------------------------------------------------------------
+type KIdx = Idx<5>
+type LeftRow = Idx<5>
+type RightRow = Idx<4>
+let left_key: Array<KIdx like LeftRow> = [0, 4, 2, 1, 0]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4, 5]
+let right_key: Array<KIdx like RightRow> = [0, 4, 1, 0]
+let right_amount: Array<Int64 like RightRow> = [10, 20, 30, 40]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let fp = reduce(matched, lambda(a, b) -> 3 * a + b, 0)
+// EXPECT: matched = [10, 40, 40, 120, 50, 200]
+// EXPECT: match_count = 6
+// EXPECT: total = 460

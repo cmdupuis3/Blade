@@ -1,0 +1,16 @@
+// TEST: A Fold Range Bound Reading An Alias Of The Fold Operand Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 4): `a` is a deferred alias of the
+// fold's own operand p, evaluated privately just before; reading a(0) in the range bound forces p
+// under its own name in the interpreter (a snapshot: after = 4). The private-operand refusal of
+// functions/1061 now follows the alias chain (it copied the private value into `a` and left p
+// deferred: after = 20). A coded refusal, BL7004.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: reads a cell of one of its own operands in a range bound
+// WARN-CODEGEN: reads a cell of one of its own operands in a range bound
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let a = p
+let result = reduce(method_for(p, 0..a(0)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+xs(0) = 10
+let after = p(0)

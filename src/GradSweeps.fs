@@ -55,6 +55,14 @@ type internal RevCtx = {
     /// revisits the name and still terminates; self-recursion is read off the
     /// declaration instead.
     Inlining: string list
+    /// Function-level locals whose storage is FRESH (scalars; arrays built
+    /// by a literal, a fill or a `compute`): a replayed write to one of them
+    /// cannot reach a caller's array (ad-replay-prune).
+    FreshLocals: Set<string>
+    /// Parameters whose declared type is a REAL FLOAT scalar (Float64 /
+    /// Float32, unit-carrying included): the positive float proof of the
+    /// replay-prune grammar (ad-replay-prune, round 4 wave 6) starts here.
+    RealScalars: Set<string>
 }
 
 /// A call to a same-module user function from inside a KERNEL BODY, resolved
@@ -226,7 +234,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
     // SAME condition (emitted code may use if/else freely).
     | ExprKind.ExprPure inner | ExprKind.ExprCompute inner -> adjointOf rc inner cot
     | ExprKind.ExprGuard (c, inner) ->
-        adjointOf rc inner (inheritSpan e (ExprIf (c, cot, fLit 0.0)))
+        adjointOf rc inner (inheritSpan e (ExprIf (c, cot, f64Lit 0.0)))
     | ExprKind.ExprBinOp (_, OpAdd, l, r) ->
         adjointOf rc l cot |> Result.bind (fun sl ->
         adjointOf rc r cot |> Result.map (fun sr -> sl @ sr))
@@ -265,7 +273,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         // so a negative base still differentiates. At b = 0 the exponent
         // term is its limit 0, not 0 * log 0 = NaN (powExpPartial).
         let pre, c = bindCot rc cot
-        adjointOf rc b (mul c (mul (asF64 e) (pow b (sub (asF64 e) (fLit 1.0))))) |> Result.bind (fun sb ->
+        adjointOf rc b (mul c (mul (asF64 e) (pow b (predOf e)))) |> Result.bind (fun sb ->
         adjointOf rc e (mul c (powExpPartial b e)) |> Result.map (fun se ->
             pre @ sb @ se))
     | ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
@@ -364,6 +372,64 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
                 NFor (j, iLit 0L, iLit (int64 n),
                       [ NLet (i, false, sub (v j) (iLit (int64 k)))
                         NAssign (cell, syn (ExprIf (inRange, collected, cell))) ]))
+        // PM38 (ad-gather-fuse v1): the taps' passes as ONE loop. Each tap's
+        // statement keeps its own guarded window (`i` scoped in its block), in
+        // the descending-offset order the passes ran, so every cell sees the
+        // same updates in the same order; the gathers read only the halo
+        // map's cotangent and primal values, never a gradient they write.
+        // ADMISSION (fail closed; Codex review round 1): the taps may be
+        // interleaved only when no tap reads storage another tap writes and
+        // none can fail. A caller may pass the primal and its gradient buffer
+        // as ONE array (`ad.grad(f)(identity(a), a)`), so a tap reading a
+        // primal array may read a cell an earlier tap of the same cell row
+        // already updated. Admitted: every addend and temp is arithmetic
+        // (+ - * /, negation) over literals, the cotangent cell `c` and the
+        // temps -- the linear stencil's reverse rule; anything else (an array
+        // read, a call, a cast, another name) keeps the per-tap passes.
+        let tempNames = temps |> List.map (fun (nm, _, _) -> nm) |> Set.ofList
+        let rec cotOnly (e: Expr) : bool =
+            match e.Kind with
+            | ExprKind.ExprLit (LitFloat _) | ExprKind.ExprLit (LitInt _) -> true
+            | ExprKind.ExprVar n -> n = c || tempNames.Contains n
+            | ExprKind.ExprTyped (inner, _) -> cotOnly inner
+            | ExprKind.ExprUnaryOp (OpNeg, inner) -> cotOnly inner
+            | ExprKind.ExprBinOp (Elementwise, (OpAdd | OpSub | OpMul | OpDiv), l, r) -> cotOnly l && cotOnly r
+            | _ -> false
+        let fusable =
+            (temps |> List.forall (fun (_, _, e) -> cotOnly e))
+            && (assigns |> List.forall (fun (_, rhs) -> match addend rhs with Some a -> cotOnly a | None -> true))
+        let gathers =
+            match gathers with
+            | _ :: _ :: _ when adGatherFuseEnabled () && not fusable ->
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Declined "a tap reads storage or may fail (only taps over the cotangent and literals are interleaved: a caller may pass a primal and its gradient as one array)"
+                      Evidence = [] }
+                gathers
+            | _ :: _ :: _ when adGatherFuseEnabled () ->
+                let taps =
+                    assigns
+                    |> List.choose (fun (t, rhs) ->
+                        windowTarget t |> Option.bind (fun (g, k) -> addend rhs |> Option.map (fun a -> (g, k, a))))
+                    |> List.sortByDescending (fun (_, k, _) -> k)
+                let stmts =
+                    taps |> List.map (fun (g, k, a) ->
+                        let cell = syn (ExprApp (v g, [ v j ]))
+                        let collected = syn (ExprBlock (letOf c cotRead :: tempLets, Some (add cell a)))
+                        NAssign (cell, syn (ExprBlock ([ letOf i (sub (v j) (iLit (int64 k))) ],
+                                                       Some (syn (ExprIf (inRange, collected, cell)))))))
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Applied
+                      Evidence = [ $"the halo gather's {taps.Length} taps ({wname}) accumulate into the caller's gradient in ONE pass over the input ordinal (was one pass per tap)"
+                                   "per cell the same updates in the same descending-offset order, the incoming gradient first: the same parenthesized sum" ] }
+                [ NFor (j, iLit 0L, iLit (int64 n), stmts) ]
+            | _ :: _ :: _ ->
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "ad-gather-fuse"; Version = 1; Span = noSpan; Subject = rc.Fname
+                      Outcome = Blade.Effects.Declined "disabled by BLADE_AD_GATHER_FUSE"; Evidence = [] }
+                gathers
+            | _ -> gathers
         let scalars = assigns |> List.filter (fun (t, _) -> isScalarTarget t)
         let scalarLoop =
             if scalars.IsEmpty then []
@@ -385,7 +451,7 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
         | ExprKind.ExprTyped (inner, _) | ExprKind.ExprCompute inner | ExprKind.ExprPure inner ->
             flow cotIdent cotAt dims inner
         | ExprKind.ExprGuard (c, inner) ->
-            flow false (fun idx -> syn (ExprIf (c, cotAt idx, fLit 0.0))) dims inner
+            flow false (fun idx -> syn (ExprIf (c, cotAt idx, f64Lit 0.0))) dims inner
         | ExprKind.ExprTranspose (inner, d1, d2) ->
             let swap (xs: 'a list) =
                 xs |> List.mapi (fun i x -> if i = d1 then xs.[d2] elif i = d2 then xs.[d1] else x)
@@ -589,6 +655,207 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
          | None -> Some (err rc.Fname "this combinator initializer needs statically-known dims to differentiate (v1)"))
     | _ -> None
 
+/// Function-level locals with FRESH storage (see RevCtx.FreshLocals): every
+/// `let` of a scalar, and every array `let` initialized by a literal, a fill
+/// or a `compute` -- never an alias or a view of another array. A name bound
+/// twice is fresh only when every binding is.
+let internal freshLocalsOf (arrays: Set<string>) (stmts: NStmt list) : Set<string> =
+    let rec freshInit (e: Expr) =
+        match e with
+        | { Kind = ExprKind.ExprArrayLit _ } | ConstFill _ -> true
+        | { Kind = ExprKind.ExprCompute _ } -> true
+        | { Kind = ExprKind.ExprTyped (inner, _) } -> freshInit inner
+        | _ -> false
+    let rec go (ok: Set<string>, bad: Set<string>) (ss: NStmt list) =
+        ss |> List.fold (fun (ok, bad) s ->
+            match s with
+            | NLet (n, _, value) when not (Set.contains n arrays) || freshInit value -> (Set.add n ok, bad)
+            | NLet (n, _, _) -> (ok, Set.add n bad)
+            | NAssign _ -> (ok, bad)
+            | NFor (_, _, _, body) -> go (ok, bad) body) (ok, bad)
+    let ok, bad = go (Set.empty, Set.empty) stmts
+    Set.difference ok bad
+
+let rec private stmtReads (s: NStmt) : Set<string> =
+    match s with
+    | NLet (_, _, value) -> allVarsDeep value
+    | NAssign (lhs, rhs) ->
+        // the TARGET name is written, not read; its subscripts are read
+        // a whole assignment writes its name; an INDEXED target reads its base
+        // binding (a view `v(1) = 7` needs `v` bound: Codex review round 2)
+        let lhsReads =
+            match lhs.Kind with
+            | ExprKind.ExprVar _ -> Set.empty
+            | _ -> allVarsDeep lhs
+        Set.union lhsReads (allVarsDeep rhs)
+    | NFor (_, lo, hi, body) ->
+        body |> List.fold (fun acc b -> Set.union acc (stmtReads b)) (Set.union (allVarsDeep lo) (allVarsDeep hi))
+
+let rec private stmtTargets (s: NStmt) : Set<string> =
+    match s with
+    | NLet (n, _, _) -> Set.singleton n
+    | NAssign ({ Kind = ExprKind.ExprVar n }, _) -> Set.singleton n
+    | NAssign ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) }, _) -> Set.singleton a
+    | NAssign _ -> Set.singleton "<unknown target>"
+    | NFor (_, _, _, body) -> body |> List.fold (fun acc b -> Set.union acc (stmtTargets b)) Set.empty
+
+/// The replayed body minus its dead statements (ad-replay-prune): scanned
+/// last to first, a statement is kept when it writes a name a LATER kept
+/// statement or the iteration's cotangent declarations / adjoints read, or a
+/// name that is neither loop-local nor a fresh function local (a parameter,
+/// an alias, a module binding: its contents are observable). Iterated to a
+/// FIXPOINT seeded with the reads of every kept statement, so a value an
+/// EARLIER statement of a LATER iteration's replay reads stays computed.
+/// ONLY two statement forms are ever dropped (Codex review, wave 5 round 1:
+/// a write through a loop-local VIEW reached storage an adjoint after the
+/// loop reads, and a dropped statement that could TRAP hid a replay-time
+/// BL8013): a loop-local `let` and a WHOLE assignment `n = e` of a fresh
+/// function local, each with a TRAP-FREE value (literals, names, `+ - *`,
+/// comparisons and logic, resolved intrinsics, int -> float casts, and
+/// subscripts whose indices are loop variables and literals under `+ - *`).
+/// Element writes, nested loops and anything that may fail are always kept.
+/// Returns (kept, dropped target names).
+let internal pruneReplay (decls: Set<string>) (values: Set<string>) (fresh: Set<string>) (stored: Set<string>) (realScalars: Set<string>) (scalarLocals: Set<string>) (ranks: Map<string, int>) (loopVar: string) (body: NStmt list) (after: NStmt list) : NStmt list * string list =
+    let loopLocal =
+        body |> List.choose (function NLet (n, _, _) -> Some n | _ -> None) |> Set.ofList
+    let rec forVars (ss: NStmt list) =
+        ss |> List.fold (fun acc s -> match s with NFor (v, _, _, b) -> Set.union (Set.add v acc) (forVars b) | _ -> acc) Set.empty
+    let indexVars = Set.add loopVar (forVars body)
+    let rec indexSafe (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit _ -> true
+        | ExprKind.ExprVar x -> Set.contains x indexVars
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul), a, b) -> indexSafe a && indexSafe b
+        // an ascription may carry a run-time check (BL8001 / BL8006): kept
+        | _ -> false
+    let intrinsicName (f: string) =
+        not (Set.contains f decls) && not (Set.contains f values) && not (Set.contains f loopLocal) && not (Set.contains f fresh)
+    // lgamma / digamma PANIC (BL8008) on a non-positive argument (Codex
+    // design review of the wave-6 widening: a dead `lgamma(forcing(0))`
+    // whose argument the reverse sweep moved to 0 failed only unpruned)
+    let partialIntrinsic (f: string) = f = "lgamma" || f = "digamma"
+    // THE POSITIVE REAL-SCALAR PROOF (round 4 wave 6): a value that is a
+    // real float SCALAR -- a float literal, a parameter declared Float64 /
+    // Float32, a loop-local let of such a value (in body order), a float
+    // cast of a scalar, a real intrinsic of a real scalar, `+ - * /` of two
+    // real scalars, a negation. Never an array (an elementwise `/` over
+    // arrays co-iterates and checks extents, BL8011) and never a complex
+    // (a real beside a complex promotes): BOTH operands must be proved.
+    let realLets = System.Collections.Generic.HashSet<string>()
+    let rec intScalar (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit (LitInt _) -> true
+        | ExprKind.ExprVar x -> Set.contains x indexVars
+        | _ -> false
+    let rec realScalar (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit (LitFloat _) -> true
+        | ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit (LitFloat _) }, (TyFloat64 | TyFloat32)) -> true
+        | ExprKind.ExprVar x -> (Set.contains x realScalars && not (Set.contains x loopLocal)) || realLets.Contains x
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, [ a ])
+            when intrinsicName f && (f = "Float64" || f = "Float32") -> realScalar a || intScalar a
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, [ a ])
+            when intrinsicName f && isMathIntrinsic f && not (partialIntrinsic f) -> realScalar a
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv), a, b) -> realScalar a && realScalar b
+        | ExprKind.ExprUnaryOp (OpNeg, a) -> realScalar a
+        | _ -> false
+    // THE POSITIVE SCALAR PROOF (round 4 wave 6, flip review round 1): an
+    // operation is trap-free only over proved SCALARS -- over arrays it
+    // co-iterates and checks extents (BL8011 when the reverse sweep changed
+    // a length). A scalar: a real scalar, an integer literal or loop
+    // variable, a fresh scalar function local, a loop-local let bound once
+    // to a scalar, a FULL subscript of stored storage of known rank, and
+    // operations / intrinsics of scalars.
+    let scalarLets = System.Collections.Generic.HashSet<string>()
+    let rec provedScalar (e: Expr) =
+        realScalar e || intScalar e
+        || (match e.Kind with
+            | ExprKind.ExprLit _ -> true
+            | ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit _ }, (TyFloat64 | TyFloat32 | TyInt64 | TyInt32 | TyBool)) -> true
+            | ExprKind.ExprVar x ->
+                (Set.contains x scalarLocals && not (Set.contains x loopLocal)) || scalarLets.Contains x
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idx) when Set.contains a stored ->
+                (match Map.tryFind a ranks with Some r -> r = idx.Length | None -> false)
+            | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr | OpMath2 _), a, b) ->
+                provedScalar a && provedScalar b
+            | ExprKind.ExprUnaryOp (_, a) -> provedScalar a
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args)
+                when intrinsicName f && not (partialIntrinsic f)
+                     && (isMathIntrinsic f || isBinaryMathIntrinsic f || isTernaryMathIntrinsic f || f = "Float64" || f = "Float32") ->
+                List.forall provedScalar args
+            | _ -> false)
+    let rec trapFree (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit _ -> true
+        // a bare name only when reading it cannot force a deferred value: a
+        // loop-local or fresh function local, a loop variable, a real-scalar
+        // parameter, stored storage -- never a module binding (binding a
+        // deferred module map forces it: Codex diff review of the wave-6
+        // grammar, round 2, `let unused = delayed`)
+        | ExprKind.ExprVar x ->
+            Set.contains x loopLocal || Set.contains x fresh || Set.contains x indexVars
+            || Set.contains x realScalars || Set.contains x stored
+        // a float literal ascribed its own width cannot fail
+        | ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit (LitFloat _) }, (TyFloat64 | TyFloat32)) -> true
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr | OpMath2 _), a, b) ->
+            provedScalar a && provedScalar b && trapFree a && trapFree b
+        // real division and a real-base power never panic (formalism 2.4:
+        // inf / NaN, repeated squaring or libm pow); an integer `/`, `%`, an
+        // integer-base `^` can (BL8013), so both sides must be PROVED real
+        // scalars (the exponent: a real scalar or an integer scalar)
+        | ExprKind.ExprBinOp (_, OpDiv, a, b) when realScalar a && realScalar b -> trapFree a && trapFree b
+        | ExprKind.ExprBinOp (_, OpCaret, a, b) when realScalar a && (realScalar b || intScalar b) -> trapFree a && trapFree b
+        | ExprKind.ExprUnaryOp (_, a) -> provedScalar a && trapFree a
+        // an intrinsic only when NO value or function binding shadows the name
+        // (a local array named `sin` is a checked subscript: Codex round 2),
+        // over proved scalars (a lifted intrinsic co-iterates: BL8011)
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args)
+            when intrinsicName f && not (partialIntrinsic f)
+                 && (isMathIntrinsic f || isBinaryMathIntrinsic f || isTernaryMathIntrinsic f || f = "Float64" || f = "Float32") ->
+            List.forall provedScalar args && List.forall trapFree args
+        // a subscript only of STORED storage (an array parameter, a fresh
+        // function local, a loop-local let of a fresh form): a read of a
+        // DEFERRED map runs its kernel, which may fail (Codex design review
+        // of the wave-6 widening: `delayed(0)` over `1 / Int64(..)`, BL8013)
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idx)
+            when not (Set.contains a decls) && Set.contains a stored ->
+            List.forall indexSafe idx
+        | _ -> false
+    // a name let ONCE in the body, in body order (a rebound name is never
+    // proved: its other binding may be an array)
+    let letCounts = body |> List.choose (function NLet (n, _, _) -> Some n | _ -> None) |> List.countBy id |> Map.ofList
+    for st in body do
+        match st with
+        | NLet (n, _, v) when letCounts.[n] = 1 ->
+            if realScalar v then realLets.Add n |> ignore
+            if provedScalar v then scalarLets.Add n |> ignore
+        | _ -> ()
+    let droppable (s: NStmt) =
+        match s with
+        | NLet (n, _, v) -> Set.contains n loopLocal && trapFree v
+        | NAssign ({ Kind = ExprKind.ExprVar n }, rhs) -> Set.contains n fresh && not (Set.contains n loopLocal) && trapFree rhs
+        | _ -> false
+    let afterReads = after |> List.fold (fun acc s -> Set.union acc (stmtReads s)) Set.empty
+    let scan (seed: Set<string>) =
+        let mutable needed = seed
+        let mutable dropped = []
+        let kept =
+            List.foldBack (fun s acc ->
+                let targets = stmtTargets s
+                let live = not (droppable s) || not (Set.intersect targets needed).IsEmpty
+                if live then
+                    needed <- Set.union needed (stmtReads s)
+                    s :: acc
+                else
+                    dropped <- (Set.toList targets) @ dropped
+                    acc) body []
+        kept, dropped |> List.distinct
+    let rec fix (seed: Set<string>) =
+        let kept, dropped = scan seed
+        let seed' = kept |> List.fold (fun acc s -> Set.union acc (stmtReads s)) afterReads
+        if seed' = seed then kept, dropped else fix seed'
+    fix afterReads
+
 /// Adjoint of one forward statement (statements arrive in REVERSE order).
 let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> =
     match s with
@@ -688,7 +955,7 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
                         | NLet (m, _, init) when m = n -> zerosLikeLiteral init
                         | _ -> None) with
                 | Some z -> NLet (dName n, true, z)
-                | None -> NLet (dName n, true, fLit 0.0))
+                | None -> NLet (dName n, true, f64Lit 0.0))
         let folded =
             List.rev body
             |> traverseR (adjointOfStmt rc)
@@ -712,7 +979,6 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
             match s with
             | NLet (n, _, _) when Set.contains n rc.Diff -> Some n
             | _ -> None)
-        let replay = body
         let localCots =
             localLets |> List.map (fun n ->
                 match body |> List.tryPick (fun s ->
@@ -723,12 +989,57 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
                         | NLet (m, _, init) when m = n -> zerosLikeLiteral init
                         | _ -> None) with
                 | Some z -> NLet (dName n, true, z)
-                | None -> NLet (dName n, true, fLit 0.0))
+                | None -> NLet (dName n, true, f64Lit 0.0))
         let folded =
             List.rev body
             |> traverseR (adjointOfStmt rc)
             |> Result.map List.concat
         folded |> Result.map (fun bodyAdjoints ->
+            let replay =
+                let decls = rc.Ctx.Decls |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                // stored storage a dropped subscript may read: an array
+                // PARAMETER or a fresh FUNCTION-LEVEL array local that no
+                // statement of the loop body writes or rebinds -- storage the
+                // replay does not rebuild, so its extent is the one the
+                // forward iteration read with the same indices (loop
+                // variables and literals). A loop-local array let is REBUILT
+                // by the replay from inputs the reverse sweep may have
+                // changed, so its extent can shrink and a read the forward
+                // run passed can fail BL8006 (Codex class-closure review
+                // under R0, wave 6: `sequence(make(..)) |> compute` read at
+                // a literal index): never stored. ARRAYS only: a fresh local
+                // may be a callable value, and `fn(0)` is then a call.
+                let bodyTargets = body |> List.fold (fun acc st -> Set.union acc (stmtTargets st)) Set.empty
+                let stored =
+                    Set.difference
+                        (Set.union (rc.ArrayIdxTys |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                   (Set.intersect rc.FreshLocals rc.Arrays))
+                        bodyTargets
+                // ranks of stored arrays: a FULL subscript is a scalar
+                let ranks =
+                    Map.fold (fun m k (ds: int list) -> Map.add k ds.Length m)
+                        (rc.ArrayIdxTys |> Map.map (fun _ ts -> ts.Length)) rc.Dims
+                let scalarLocals = Set.difference rc.FreshLocals rc.Arrays
+                let kept, dropped = pruneReplay decls rc.Known rc.FreshLocals stored rc.RealScalars scalarLocals ranks var body (localCots @ bodyAdjoints)
+                let record outcome evidence =
+                    Blade.Effects.Decisions.record
+                        { Blade.Effects.Rule = "ad-replay-prune"; Version = 1; Span = noSpan; Subject = $"{rc.Fname}: loop {var}"
+                          Outcome = outcome; Evidence = evidence }
+                if dropped.IsEmpty then body
+                else
+                match adReplayPruneMode () with
+                | ArpUnset ->
+                    record (Blade.Effects.Declined "opt-in (BLADE_AD_REPLAY_PRUNE=1): the second review of the replay-liveness class found three more members (round 4 wave 5, gap G164)") [ $"""dead replayed writes: {String.concat ", " dropped}""" ]
+                    body
+                | ArpOff ->
+                    record (Blade.Effects.Declined "disabled by BLADE_AD_REPLAY_PRUNE") [ $"""dead replayed writes: {String.concat ", " dropped}""" ]
+                    body
+                | ArpOn ->
+                    record Blade.Effects.Applied
+                        [ $"""{body.Length - kept.Length} of {body.Length} replayed statements dropped (targets {String.concat ", " dropped})"""
+                          "each is a loop-local let or a whole assignment of a fresh function local, with a trap-free value, that no kept replayed statement (a fixpoint over the iterations), cotangent declaration or adjoint of the iteration reads; element writes, nested loops and statements that may fail are kept"
+                          "a dropped statement cannot fail and writes no storage another name reaches, so no failure moves and no adjoint input changes" ]
+                    kept
             [NFor (var, lo, hi, replay @ localCots @ bodyAdjoints)])
 
 // The forward (tangent) sweep -- ad.jvp
@@ -745,7 +1056,12 @@ let rec internal adjointOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, stri
 /// params already include the previous round's `__t_*` names -- `tName`
 /// must stay injective against them or the second round's tangent of `x`
 /// would collide with the first round's tangent parameter `__t_x`.
-let internal tangentPrefix = ref "__t_"
+/// PER FLOW (gap G193's FlowCell; round 4 wave 9, lane A, A3 review round 6,
+/// Codex 5a8b7b7d): a process-global ref let two concurrent expansions
+/// overwrite each other's prefix, re-opening the composition capture the
+/// prefix choice avoids (`__t1_x` read by f: (15, 10, 25, 0) for
+/// (21, 14, 35, 0) when another program expanded at the same time).
+let internal tangentPrefix = FlowCell<string>(fun () -> "__t_")
 let internal tName (n: string) = tangentPrefix.Value + n
 
 /// Zero-folding expression builders. Folding `0.0` operands away matters
@@ -858,7 +1174,7 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         // term when the exponent is inactive (see the builder note above).
         tangentOfExpr rc bb |> Result.bind (fun tb ->
         tangentOfExpr rc ee |> Result.map (fun te ->
-            addZ (mulZ (mul (asF64 ee) (pow bb (sub (asF64 ee) (fLit 1.0)))) tb)
+            addZ (mulZ (mul (asF64 ee) (pow bb (predOf ee))) tb)
                  (mulZ (powExpPartial bb ee) te)))
     | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
         Ok (fLit 0.0)   // boolean-valued: no tangent
@@ -915,6 +1231,11 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         // Branch of tangents under the same condition (see walkExpr's arm).
         tangentOfExpr rc t |> Result.bind (fun tt ->
         tangentOfExpr rc f |> Result.map (fun tf ->
+            // Keep the condition evaluated even when both derivatives are
+            // zero, but materialize that conditional at the AD working width.
+            let tt, tf =
+                if isZeroLit tt && isZeroLit tf then f64Lit 0.0, f64Lit 0.0
+                else tt, tf
             inheritSpan e (ExprIf (c, tt, tf))))
     | ConstFill (cnt, _) -> Ok (zeroFill cnt)
     // C2-C5: the rank-0 MAP. See `tangentOfMap`. A bare-name loop side
@@ -923,6 +1244,13 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfMap rc e m.Mode m.Ops m.Kern
     | { Kind = ExprKind.ExprBinOp (_, OpApply, _, _) } ->
         err rc.Fname "differentiating `<@>` supports `method_for(<operands>) <@> <kernel>` and `object_for(<kernel>) <@> <operands>` (v1, directly or through a let-bound loop object); pipelines and section kernels are not yet differentiable"
+    // Preserve guard evaluation even for an inactive tangent. Its payload
+    // materializes at the derivative working width: the predicate prevents
+    // a surrounding numeric operation from adapting a bare zero payload.
+    | { Kind = ExprKind.ExprGuard (condition, inner) } ->
+        tangentOfExpr rc inner |> Result.map (fun t ->
+            let t = if isZeroLit t then f64Lit 0.0 else t
+            inheritSpan e (ExprGuard (condition, t)))
     // C1: same form, tangent operands (see the LinearForm doc comment).
     | LinearForm (ops, rebuild) ->
         ops |> traverseR (tangentOfExpr rc) |> Result.map rebuild
@@ -1189,6 +1517,9 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
         slots |> List.choose (function Choice2Of2 (p, _) -> Some p.Name | _ -> None) |> Set.ofList
     let rc' = { rc with Known = Set.union rc.Known passthroughNames }
     tangentOfExpr rc' bodyExpanded |> Result.map (fun tBody ->
+        // The kernel result becomes an array cell, including when the whole
+        // tangent simplified to zero (for example a cotangent zero-fill).
+        let tBody = if isZeroLit tBody then f64Lit 0.0 else tBody
         let operandsOut =
             slots |> List.map (function
                 | Choice1Of2 (_, _, idxTys, _) -> syn (ExprRange idxTys)
@@ -1208,7 +1539,7 @@ let rec internal tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | ExprKind.ExprArrayLit elems ->
         elems |> traverseR (tangentOfLit rc)
         |> Result.map (fun ts -> inheritSpan e (ExprArrayLit ts))
-    | _ -> tangentOfExpr rc e
+    | _ -> tangentOfExpr rc e |> Result.map (fun t -> if isZeroLit t then f64Lit 0.0 else t)
 
 /// The loop-object environment AFTER `s`. Loop-object bindings are resolved at
 /// their APPLICATION sites, so the environment has to be position-aware: a body
@@ -1346,7 +1677,11 @@ and internal tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> 
                          let total = temps |> List.map (fun (nm, _) -> v nm) |> List.reduce add
                          [s] @ (temps |> List.map (fun (nm, e) -> NLet (nm, false, e))) @ [ NLet (tName x, isMut, total) ])))
              | ConstFill (cnt, _) -> Ok [s; NLet (tName x, isMut, zeroFill cnt)]
-             | _ -> tangentOfExpr rc value |> Result.map (fun t -> [s; NLet (tName x, isMut, t)]))
+             | _ -> tangentOfExpr rc value |> Result.map (fun t ->
+                 // The simplifier keeps raw zero literals until a tangent is
+                 // materialized as state; that state has the AD working width.
+                 let t = if isZeroLit t then f64Lit 0.0 else t
+                 [s; NLet (tName x, isMut, t)]))
     | NAssign (lhs, rhs) ->
         let tangentLhs =
             match lhs.Kind with
@@ -1371,11 +1706,664 @@ let rec internal toStmts (ns: NStmt list) : Stmt list =
         match s with
         | NLet (n, isMut, value) ->
             StmtLet { Pattern = synPat (PatVar n)
-                      Type = None
-                      Value = value
+                      // the user's own array annotation, when this name is
+                      // its one binding (G187: a named-slot read keeps its
+                      // BL8006 guard in the derivative)
+                      Type = restoredLetAnnotation n
+                      Value = (match value with
+                               | LargeZeroFill n -> inheritSpan value (zeroFormerOfCount n).Kind
+                               | { Kind = ExprKind.ExprTyped ((LargeZeroFill n) as fill, ty) } ->
+                                   inheritSpan value (ExprTyped (inheritSpan fill (zeroFormerOfCount n).Kind, ty))
+                               | _ -> value)
                       Mutability = if isMut then BindMut else BindLet }
         | NAssign (lhs, rhs) -> StmtExpr (mkExpr (mergeSpan lhs.Span rhs.Span) (ExprAssign (lhs, rhs)))
         | NFor (var, lo, hi, body) -> StmtForIn (var, mkExpr (mergeSpan lo.Span hi.Span) (ExprDotDot (lo, hi)), toStmts body))
+
+// The checkpointed recurrence (PM40, round 4 wave 4 J1; rule `ad-checkpoint v1`)
+//
+// The CarryLoop reverse sweep reads the primal `s(t - 1)` off the T-cell
+// trajectory buffer, which is therefore the tape (plus a T-cell cotangent).
+// Checkpointed: the forward pass runs the SAME steps in the same order over
+// K-step segments, keeping one checkpoint per segment boundary (`ck`, nC + 1
+// cells) and the current segment (`seg`, K + 1 cells); the reverse sweep
+// visits the segments in descending order, REPLAYS each one from its
+// checkpoint into `seg`, then runs that segment's step adjoints descending,
+// its cotangent window `gseg` (K + 1 cells) seeded with exactly the value the
+// full cotangent buffer would hold at that point. O(T / K + K) cells instead
+// of 2 T; K = ceil(sqrt(T - 1)) by default.
+//
+// Same values: every step adjoint is the CarryLoop arm's own statement list,
+// the cotangent cells see the same additions in the same order (a row's
+// deposits accumulate into a scalar from +0.0 in their own order, then seed
+// its window cell; the carry row is copied), and the replayed primal is the
+// same step over the same inputs. The replay's BITS equal the first run's
+// when the two copies of the step round alike -- guaranteed under
+// `BLADE_FP_CONTRACT=off` (the reproducible build, pinned by the witness);
+// under fast contraction g++ may contract the two copies differently, as it
+// may the CarryLoop's own no-op replay. A failing step fails in the forward
+// pass exactly where it did; the replay re-runs only steps that completed.
+// Admission (fail closed, the first failed condition recorded): the tape is
+// the recursive-array expansion's own `let mut s = zeros(T); s(0) = seed;
+// loop` triple; every other forward read of s is a literal row (snapshotted
+// in the forward pass); every reverse touch of the cotangent outside the
+// loop is a literal row; the step reads nothing this function assigns, and,
+// when the function has gradient buffers, every array it reads (a caller may
+// pass one AS a gradient buffer, which the reverse sweep writes before the
+// replay reads it -- ad/046's alias) is SNAPSHOTTED before the forward loop
+// and only the replay reads the copy (round 4 wave 6, gap G162), when the
+// copy is provably a fresh plain dense array and taking it early cannot
+// fail; anything else declines.
+
+/// Rewrite every application `a(args)` with `a` in `names` through `f`;
+/// None when `f` refuses or a name of `names` occurs in any other position
+/// (fail closed: an unknown form mentioning one is a refusal).
+let rec private rewriteNamedApps (names: Set<string>) (f: string -> Expr list -> Expr option) (e: Expr) : Expr option =
+    let r = rewriteNamedApps names f
+    let re k = Some (inheritSpan e k)
+    match e.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, args) when Set.contains a names ->
+        traverseO r args |> Option.bind (fun args' -> f a args')
+    | ExprKind.ExprVar n -> if Set.contains n names then None else Some e
+    | ExprKind.ExprLit _ -> Some e
+    | ExprKind.ExprBinOp (m, op, l, x) ->
+        (match r l, r x with
+         | Some a, Some b -> re (ExprBinOp (m, op, a, b))
+         | _ -> None)
+    | ExprKind.ExprUnaryOp (op, i) -> r i |> Option.bind (fun a -> re (ExprUnaryOp (op, a)))
+    | ExprKind.ExprTyped (i, t) -> r i |> Option.bind (fun a -> re (ExprTyped (a, t)))
+    | ExprKind.ExprApp (fh, args) ->
+        (match r fh, traverseO r args with
+         | Some a, Some b -> re (ExprApp (a, b))
+         | _ -> None)
+    | ExprKind.ExprIf (c, a, b) ->
+        (match r c, r a, r b with
+         | Some c', Some a', Some b' -> re (ExprIf (c', a', b'))
+         | _ -> None)
+    | ExprKind.ExprTuple es -> traverseO r es |> Option.bind (fun es' -> re (ExprTuple es'))
+    | ExprKind.ExprTupleIndex (a, b) ->
+        (match r a, r b with
+         | Some a', Some b' -> re (ExprTupleIndex (a', b'))
+         | _ -> None)
+    | _ -> if mentionsDeep names e then None else Some e
+
+let rec private rewriteNamedAppsStmts (names: Set<string>) (f: string -> Expr list -> Expr option) (ss: NStmt list) : NStmt list option =
+    let r = rewriteNamedApps names f
+    ss |> traverseO (fun s ->
+        match s with
+        | NLet (n, m, value) -> r value |> Option.map (fun v' -> NLet (n, m, v'))
+        | NAssign (l, x) ->
+            (match r l, r x with
+             | Some a, Some b -> Some (NAssign (a, b))
+             | _ -> None)
+        | NFor (var, lo, hi, body) ->
+            (match r lo, r hi, rewriteNamedAppsStmts names f body with
+             | Some lo', Some hi', Some body' -> Some (NFor (var, lo', hi', body'))
+             | _ -> None))
+
+let rec private stmtsMention (names: Set<string>) (ss: NStmt list) : bool =
+    ss |> List.exists (fun s ->
+        match s with
+        | NLet (n, _, value) -> Set.contains n names || mentionsDeep names value
+        | NAssign (l, x) -> mentionsDeep names l || mentionsDeep names x
+        | NFor (var, lo, hi, body) ->
+            Set.contains var names || mentionsDeep names lo || mentionsDeep names hi || stmtsMention names body)
+
+let rec private litOf (e: Expr) : int64 option =
+    match e.Kind with
+    | ExprKind.ExprLit (LitInt p) -> Some p
+    | ExprKind.ExprTyped (i, _) -> litOf i
+    | _ -> None
+
+/// The tape fill the recursive-array expansion emits: T cells of +0.0.
+let private isZeroTapeOf (n: int64) (e: Expr) : bool =
+    match e with
+    | ConstFill ({ Kind = ExprKind.ExprLit (LitInt c) }, LitFloat z) -> c = n && z = 0.0
+    | { Kind = ExprKind.ExprArrayLit es } ->
+        int64 es.Length = n
+        && es |> List.forall (fun x ->
+            match x.Kind with
+            | ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit (LitFloat z) }, _) | ExprKind.ExprLit (LitFloat z) -> z = 0.0
+            | _ -> false)
+    | _ -> false
+
+/// The cotangent declaration of the tape: a zero fill, optionally ascribed
+/// with its unit-carrying array type. Returns the element ascription.
+let private cotDeclElem (n: int64) (e: Expr) : TypeExpr option option =
+    match e with
+    | { Kind = ExprKind.ExprTyped (inner, TyArray (elemTy, _)) } when isZeroTapeOf n inner -> Some (Some elemTy)
+    | _ when isZeroTapeOf n e -> Some None
+    | _ -> None
+
+let private zerosOfCount (n: int64) : Expr =
+    if n > 4096L then zeroFill (iLit n)
+    else syn (ExprArrayLit (List.replicate (int n) (f64Lit 0.0)))
+
+/// One recurrence. Ok (fwd, finalE, cotDecls, rev, evidence) or Error reason.
+let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<string>)
+                          (scalarParams: Set<string>) (paramTys: Map<string, TypeExpr>) (allParams: Set<string>)
+                          (fwd: NStmt list, finalE: Expr, cotDecls: NStmt list, rev: NStmt list)
+                          (s: string, t: string, hi: Expr, body: NStmt list)
+    : Result<NStmt list * Expr * NStmt list * NStmt list * string list, string> =
+    let gs = dName s
+    let fail (why: string) : Result<_, string> = Error why
+    match adCheckpointMode (), litOf hi with
+    | AdCkUnset, _ -> fail "opt-in (BLADE_AD_CHECKPOINT=1): the second review of the replay-input class found three more members (round 4 wave 5, gap G162); default-on awaits a review that finds none"
+    | AdCkOff, _ -> fail "disabled by BLADE_AD_CHECKPOINT"
+    | _, None -> fail "the recurrence extent is not a literal"
+    | mode, Some tN ->
+    let kOpt =
+        match mode with
+        | AdCkEvery k when tN - 1L > int64 k -> Ok (int64 k)
+        | AdCkEvery k -> Error $"the checkpoint interval {k} (BLADE_AD_CHECKPOINT) covers the whole recurrence of {tN - 1L} steps"
+        | _ when tN <= 4096L -> Error $"a tape of {tN} cells (<= 4096) is kept whole (it fits the first-level cache; replay would only add work)"
+        | _ -> Ok (int64 (ceil (sqrt (float (tN - 1L)))))
+    match kOpt with
+    | Error why -> fail why
+    | Ok kS ->
+    let nC = (tN - 2L) / kS + 1L
+    let lastLen = (tN - 1L) - (nC - 1L) * kS
+    let iLoop =
+        fwd |> List.tryFindIndex (fun st ->
+            match st with
+            | CarryLoop (b, _, _, _, _, _) -> b = s
+            | _ -> false)
+    match iLoop with
+    | None -> fail "the recurrence loop is not a top-level statement"
+    | Some iLoop ->
+    let triple =
+        if iLoop < 2 then None
+        else
+            match fwd.[iLoop - 2], fwd.[iLoop - 1] with
+            | NLet (b, true, fill), NAssign ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar b2 }, [ i0 ]) }, seed)
+                when b = s && b2 = s && litOf i0 = Some 0L && isZeroTapeOf tN fill && not (mentionsDeep (Set.singleton s) seed) ->
+                Some seed
+            | _ -> None
+    match triple with
+    | None -> fail "the tape is not the recursive-array expansion (`let mut s = zeros(T); s(0) = seed`) right before its loop"
+    | Some seed ->
+    let before = List.take (iLoop - 2) fwd
+    let after = List.skip (iLoop + 1) fwd
+    let names = Set.ofList [ s; gs ]
+    if stmtsMention names before then fail "the tape is named before its own declaration"
+    else
+    let lets, stepWrite = List.splitAt (body.Length - 1) body
+    let rhs =
+        match stepWrite with
+        | [ NAssign (_, x) ] -> Some x
+        | _ -> None
+    match rhs with
+    | None -> fail "the recurrence body does not end in its step write"
+    | Some rhs ->
+    // What the step reads: neither assigned by this function nor storage a
+    // caller may hand in as a gradient buffer.
+    let localLets = lets |> List.choose (function NLet (n, _, _) -> Some n | _ -> None) |> Set.ofList
+    let stepReads =
+        (rhs :: (lets |> List.choose (function NLet (_, _, x) -> Some x | _ -> None)))
+        |> List.fold (fun acc x -> Set.union acc (allVarsDeep x)) Set.empty
+        |> fun xs -> Set.difference xs (Set.union localLets (Set.ofList [ s; t ]))
+    let assigned = Blade.GradNormalize.assignedNames fwd
+    let rec letNames (ss: NStmt list) : Set<string> =
+        ss |> List.fold (fun acc st ->
+            match st with
+            | NLet (n, _, _) -> Set.add n acc
+            | NFor (var, _, _, b) -> Set.union (Set.add var acc) (letNames b)
+            | NAssign _ -> acc) Set.empty
+    let fwdLocals = letNames fwd
+    let rec loopVarsOf (ss: NStmt list) : Set<string> =
+        ss |> List.fold (fun acc st ->
+            match st with
+            | NFor (var, _, _, b) -> Set.union (Set.add var acc) (loopVarsOf b)
+            | _ -> acc) Set.empty
+    let loopVars = loopVarsOf fwd
+    // every value a forward local is bound to (nested lets included)
+    let rec letValues (ss: NStmt list) (acc: Map<string, Expr list>) : Map<string, Expr list> =
+        ss |> List.fold (fun acc st ->
+            match st with
+            | NLet (n, _, x) -> Map.add n (x :: (Map.tryFind n acc |> Option.defaultValue [])) acc
+            | NFor (_, _, _, b) -> letValues b acc
+            | NAssign _ -> acc) acc
+    let fwdValues = letValues fwd Map.empty
+    // An intrinsic or a numeric cast, RESOLVED: a user function of the same
+    // name (`function sin(a: Float64) -> A = backing`) is not one (Codex
+    // review of J1, round 3).
+    // A VALUE binding of the name (a module array `let sin = [[2.0]]`, a
+    // parameter, a forward local, a loop variable) shadows the intrinsic too:
+    // `sin(0)` is then a subscript (Codex design review of the wave-6
+    // snapshot, finding 2).
+    let storageFree (x: string) =
+        not (Map.containsKey x rc.Ctx.Decls)
+        && not (Map.containsKey x rc.Ctx.ModuleLets || Set.contains x rc.Ctx.ModuleVals)
+        && not (Set.contains x allParams || Map.containsKey x fwdValues || Set.contains x loopVars || Set.contains x localLets)
+        && (isMathIntrinsic x || isBinaryMathIntrinsic x || isTernaryMathIntrinsic x
+            || List.contains x [ "Float64"; "Float32"; "Int64"; "Int32" ])
+    // With gradient buffers a MODULE binding the step reads must be PROVED a
+    // scalar constant: its value is built only from numeric literals,
+    // arithmetic, storage-free calls and other such bindings. Any module
+    // ARRAY declines: three review rounds each found another way a module
+    // array may share storage with the buffer a caller passes (a call such
+    // as `identity(backing)`, a later `let mut backing = identity(forcing)`,
+    // a destructured component, an importing module, a parameter default, a
+    // user function shadowing an intrinsic), and storage provenance across
+    // the program is not proved here (gap G162). Without gradient buffers
+    // nothing writes during the reverse sweep, and module arrays are read
+    // freely.
+    let rec scalarConst (seen: Set<string>) (x: string) : bool =
+        match Map.tryFind x rc.Ctx.ModuleLets with
+        | None -> false
+        | Some _ when Set.contains x rc.Ctx.ModuleMuts || seen.Contains x -> false
+        | Some ml ->
+            let rec ok (e: Expr) =
+                match e.Kind with
+                | ExprKind.ExprLit _ -> true
+                | ExprKind.ExprBinOp (_, _, a, b) -> ok a && ok b
+                | ExprKind.ExprUnaryOp (_, a) -> ok a
+                | ExprKind.ExprVar n -> scalarConst (seen.Add x) n
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) -> storageFree f && List.forall ok args
+                | _ -> false
+            ok ml.Value
+    // What a name the step reads may observe, judged TRANSITIVELY through
+    // the forward locals it names (a local alias `let lf = forcing` is the
+    // module array itself, round 4 wave 5 finding 2): Ok () when the replay
+    // reads exactly what the first run read, Error <the offending name>.
+    let rec judge (seen: Set<string>) (x: string) : Result<unit, string> =
+        if seen.Contains x then Error x
+        elif Set.contains x localLets || x = s || x = t then Ok ()
+        elif Set.contains x assigned then Error x
+        elif Set.contains x scalarParams then Ok ()
+        elif Set.contains x arrayParams then Error x
+        elif Set.contains x loopVars && not (Map.containsKey x fwdValues) then Ok ()
+        elif Map.containsKey x fwdValues then
+            fwdValues.[x] |> List.fold (fun acc e ->
+                acc |> Result.bind (fun () ->
+                    allVarsDeep e |> Seq.fold (fun acc r ->
+                        acc |> Result.bind (fun () -> judge (seen.Add x) r)) (Ok ()))) (Ok ())
+            |> Result.mapError (fun _ -> x)
+        elif Map.containsKey x rc.Ctx.Decls then Error x
+        elif Map.containsKey x rc.Ctx.ModuleLets || Set.contains x rc.Ctx.ModuleVals then
+            if scalarConst Set.empty x then Ok () else Error x
+        elif storageFree x then Ok ()
+        else Error x
+    let writtenRead = stepReads |> Seq.tryFind (fun x -> Set.contains x assigned)
+    // THE REPLAY-INPUT SNAPSHOT (round 4 wave 6, gap G162). With gradient
+    // buffers, a name the step reads that `judge` cannot prove storage-free
+    // (an array parameter, a module array, a forward local holding one) is
+    // COPIED right before the checkpointed forward loop, and only the
+    // descending sweep's REPLAY reads the copy: the gradient buffers are
+    // first written by the reverse pass, after the whole forward pass, and
+    // the forward loop writes nothing the step reads, so every replayed step
+    // reads the cells the first run read, whatever storage a caller aliased
+    // into a gradient buffer. The forward loop and the step adjoints keep
+    // the live names (exactly the full-tape sweep's reads). A target is
+    // admitted only when its copy is a fresh PLAIN DENSE array (`let mut`
+    // deep-copies only those in every lane: a ragged / compound / sparse
+    // array or a closure would keep shared storage) and taking it early
+    // cannot fail: its binding value is a stored form (an array literal, a
+    // constant fill, `|> compute`, a user-function result, a parameter) or a
+    // TOTAL arithmetic form over such values (`+ - *`, negation, a float
+    // cast, a resolved math intrinsic, a literal range) -- the AST-level
+    // deferred-value predicate: a target that may be a deferred value is
+    // admitted only when forcing it whole cannot fail.
+    let rec scalarElemTy (t: TypeExpr) =
+        match t with
+        | TyFloat64 | TyFloat32 | TyInt64 | TyInt32 | TyBool -> true
+        | TyNamed (("Float64" | "Float32" | "Int64" | "Int32"), _) -> true
+        | TyBounded (b, _, _) -> scalarElemTy b
+        | TyNamed (n, []) when Map.containsKey n rc.Ctx.TypeAliases -> scalarElemTy (resolveTy rc.Ctx t)
+        | _ -> false
+    let plainDenseTy (ty: TypeExpr) =
+        match resolveArrayTy rc.Ctx ty with
+        | TyArray (elem, idxs) ->
+            scalarElemTy elem && not idxs.IsEmpty
+            && idxs |> List.forall (function TyIdx _ -> true | _ -> false)
+        | _ -> false
+    // Ok true = a plain dense array, Ok false = a scalar, Error = why not.
+    let rec storedDense (seen: Set<string>) (x: string) : Result<bool, string> =
+        if seen.Contains x then Error $"'{x}' is bound through a cycle"
+        elif Set.contains x assigned then Error $"'{x}' is assigned by this function"
+        elif Set.contains x arrayParams then
+            match Map.tryFind x paramTys with
+            | Some ty when plainDenseTy ty -> Ok true
+            | _ -> Error $"the array parameter '{x}' is not a plain dense array (its copy could share storage)"
+        elif Set.contains x scalarParams then Ok false
+        elif Map.containsKey x fwdValues then
+            match fwdValues.[x] with
+            | [ e ] -> formOf (seen.Add x) e
+            | _ -> Error $"the forward local '{x}' is bound more than once"
+        elif Set.contains x allParams then
+            Error $"the parameter '{x}' is neither a scalar nor a plain array (a tuple or a callable may carry an aliased array)"
+        elif Map.containsKey x rc.Ctx.ModuleLets then
+            let ml = rc.Ctx.ModuleLets.[x]
+            match ml.Ty with
+            | Some ty when plainDenseTy ty -> formOf (seen.Add x) ml.Value |> Result.map (fun _ -> true)
+            | Some ty when scalarElemTy (resolveTy rc.Ctx ty) -> formOf (seen.Add x) ml.Value
+            | Some _ -> Error $"the module binding '{x}' is not annotated as a plain dense array or a scalar"
+            | None -> formOf (seen.Add x) ml.Value
+        elif Set.contains x rc.Ctx.ModuleVals then
+            Error $"the module value '{x}' records no value a storage proof could read (a destructured component or an import)"
+        else Error $"'{x}' is not a binding this admission resolves"
+    and formOf (seen: Set<string>) (e: Expr) : Result<bool, string> =
+        let both a b =
+            formOf seen a |> Result.bind (fun ka -> formOf seen b |> Result.map (fun kb -> ka || kb))
+        match e with
+        | ConstFill _ -> Ok true
+        | _ ->
+        match e.Kind with
+        | ExprKind.ExprLit _ -> Ok false
+        // every LEAF a proved scalar: an unannotated literal of closures, of
+        // tuples holding arrays or of ragged arrays would be copied shallowly
+        // (Codex class-closure review of the snapshot, wave 6 round 1)
+        | ExprKind.ExprArrayLit es ->
+            let rec leaves (x: Expr) : Result<unit, string> =
+                match x.Kind with
+                | ExprKind.ExprArrayLit xs -> xs |> List.fold (fun acc y -> acc |> Result.bind (fun () -> leaves y)) (Ok ())
+                | _ ->
+                    match formOf seen x with
+                    | Ok false -> Ok ()
+                    | Ok true -> Error "an array literal whose element is itself an array (its copy could be shallow)"
+                    | Error why -> Error $"an array literal element is not a proved scalar ({why})"
+            // and RECTANGULAR: an uneven nested literal infers ragged storage,
+            // which `let mut` does not deep-copy (Codex class-closure review
+            // under R0, wave 6 round 2: `[[2.0], [4.0, 5.0]]`, dx 87296)
+            let rec shape (x: Expr) : int list option =
+                match x.Kind with
+                | ExprKind.ExprArrayLit [] -> None
+                | ExprKind.ExprArrayLit (h :: t) ->
+                    shape h |> Option.bind (fun sh ->
+                        if t |> List.forall (fun y -> shape y = Some sh) then Some (List.length (h :: t) :: sh) else None)
+                | _ -> Some []
+            match shape e with
+            | None -> Error "an array literal that is not rectangular (an uneven nested literal is ragged storage, which a copy shares)"
+            | Some _ ->
+            es |> List.fold (fun acc y -> acc |> Result.bind (fun () -> leaves y)) (Ok ()) |> Result.map (fun () -> true)
+        | ExprKind.ExprCompute i ->
+            formOf seen i |> Result.bind (fun k -> if k then Ok true else Error "a `|> compute` of a scalar")
+        | ExprKind.ExprTyped (i, ty) ->
+            if plainDenseTy ty then formOf seen i |> Result.map (fun _ -> true)
+            elif scalarElemTy (resolveTy rc.Ctx ty) then formOf seen i
+            else Error "an ascription that is not a plain dense array or a scalar"
+        | ExprKind.ExprVar y -> storedDense seen y
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Map.containsKey f rc.Ctx.Decls ->
+            (match rc.Ctx.Decls.[f].ReturnType with
+             | Some rt when plainDenseTy rt -> Ok true
+             | _ -> Error $"the call of '{f}' does not return a plain dense array (a closure or a ragged array keeps shared storage)")
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, [ a ])
+            when storageFree f && f <> "lgamma" && f <> "digamma" && (isMathIntrinsic f || f = "Float64" || f = "Float32") -> formOf seen a
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul), a, b) -> both a b
+        | ExprKind.ExprUnaryOp (OpNeg, a) -> formOf seen a
+        | ExprKind.ExprDotDot (lo, hi) when (litOf lo).IsSome && (litOf hi).IsSome -> Ok true
+        | _ -> Error "its value is not a stored form or a total arithmetic form (a deferred value whose early copy could fail, a subscript, a division, an integer cast, an unknown call)"
+    // WITHOUT gradient buffers the replay can still read another value: a
+    // statement of the body AFTER the recurrence runs before the descending
+    // sweep, and it may write the storage of an array the step reads through
+    // an alias the name check (`writtenRead`) cannot see --
+    // `let forcing = identity(backing)` read by the step, `backing(0) = 0.25`
+    // after it (round 4 wave 10, lane a, A2: the fresh class-closure round,
+    // Codex 81d2ce3b; dx 0.0180956572294235 for 0.00267982482910156 under
+    // auto, gap G162). A first fix took the snapshots only when a statement
+    // after the recurrence assigned or called a declared function; the second
+    // fresh round (Codex 0d817dd5) found two more members of that shortcut --
+    // a module LAMBDA writing the input in a later statement's ADJOINT, before
+    // the replay (ad/155), and a stateful lambda called INSIDE the step, which
+    // the skipped audit never refused (ad/156). So the replay-input audit and
+    // its snapshots run in EVERY build, gradient buffers or not: no effect on a
+    // step input between the forward pass and the replay reaches the replay,
+    // and a step reading anything the audit cannot snapshot declines.
+    ignore hasGradBuffers
+    let snapTargets, snapRefusal =
+            stepReads
+            |> Seq.filter (fun x -> match judge Set.empty x with Error _ -> true | Ok () -> false)
+            |> Seq.fold (fun (acc, refusal) x ->
+                match refusal with
+                | Some _ -> (acc, refusal)
+                | None ->
+                    if Map.containsKey x rc.Ctx.Decls then
+                        (acc, Some $"the step calls the user function '{x}' (a call inside the step is not audited)")
+                    else
+                        match storedDense Set.empty x with
+                        | Ok true -> (acc @ [ x ], None)
+                        | Ok false -> (acc, Some $"the step reads '{x}', not proved a scalar constant nor a plain dense array")
+                        | Error why -> (acc, Some $"the step reads '{x}', which the replay cannot snapshot: {why}")) ([], None)
+    let aliasable = snapRefusal
+    let loopVarsAll = Set.add t loopVars
+    let rec indexSafe (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit _ -> true
+        | ExprKind.ExprVar x -> Set.contains x loopVarsAll
+        | ExprKind.ExprTyped (i, _) -> indexSafe i
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul), a, b) -> indexSafe a && indexSafe b
+        | _ -> false
+    let rec stepValueTrapFree (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> true
+        | ExprKind.ExprBinOp (_, (OpAdd | OpSub | OpMul | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), a, b) ->
+            stepValueTrapFree a && stepValueTrapFree b
+        | ExprKind.ExprUnaryOp (_, a) -> stepValueTrapFree a
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args)
+            when storageFree f && f <> "lgamma" && f <> "digamma"
+                 && (isMathIntrinsic f || isBinaryMathIntrinsic f || f = "Float64" || f = "Float32") ->
+            List.forall stepValueTrapFree args
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, idx) when not (Map.containsKey a rc.Ctx.Decls) && not (storageFree a) ->
+            List.forall indexSafe idx
+        | _ -> false
+    // Under fast contraction g++ may round the replayed copy of the step
+    // differently from the first run; a float -> int cast is the only way
+    // such a difference reaches a check that can fail (a subscript, an
+    // integer division), so the replay could panic where the run did not.
+    let contractFast =
+        not (System.String.Equals(System.Environment.GetEnvironmentVariable "BLADE_FP_CONTRACT", "off", System.StringComparison.OrdinalIgnoreCase))
+    let stepCasts =
+        (rhs :: (lets |> List.choose (function NLet (_, _, x) -> Some x | _ -> None)))
+        |> List.exists (fun x -> let vs = allVarsDeep x in vs.Contains "Int64" || vs.Contains "Int32")
+    match writtenRead, aliasable with
+    | Some x, _ -> fail $"the step reads '{x}', which this function assigns: a replay could read another value"
+    | None, Some why -> fail why
+    // The full tape's descending sweep REPLAYS the whole step, its value
+    // included, reading the LIVE arrays (an aliased gradient buffer already
+    // written); the checkpointed sweep replays the value from the snapshot
+    // and runs only the lets and the adjoint live. So with a snapshot the
+    // step value must be TRAP-FREE, or a failure the full tape raises there
+    // would vanish (Codex class-closure review, wave 6 round 1:
+    // `lgamma(forcing(0))` with the buffer driven to 0 -- BL8008 on the full
+    // tape, a value checkpointed).
+    | None, None when not snapTargets.IsEmpty && not (stepValueTrapFree rhs) ->
+        fail "the step value may fail (only + - *, comparisons, float casts, intrinsics other than lgamma / digamma and subscripts by the step ordinal and literals are trap-free) and the full tape re-evaluates it LIVE in its descending sweep, reading the snapshotted arrays after the gradient buffers are written: a failure there could vanish"
+    | None, None when contractFast && stepCasts ->
+        fail "the step casts to an integer type under fast contraction (BLADE_FP_CONTRACT is not off): the replayed copy may round differently and fail a check the first run passed"
+    | None, None ->
+    // Storage.
+    let ck = fresh rc.Ctx "__ck"
+    let seg = fresh rc.Ctx "__seg"
+    let gseg = fresh rc.Ctx "__gseg"
+    let cell (a: string) (i: Expr) = syn (ExprApp (v a, [ i ]))
+    let snaps = System.Collections.Generic.Dictionary<int64, string>()
+    let deps = System.Collections.Generic.Dictionary<int64, string>()
+    let valueAt (p: int64) : Expr option =
+        if p < 0L || p >= tN then None
+        elif p = tN - 1L then Some (cell ck (iLit nC))
+        elif p % kS = 0L then Some (cell ck (iLit (p / kS)))
+        else
+            if not (snaps.ContainsKey p) then snaps.[p] <- fresh rc.Ctx "__snap"
+            Some (v snaps.[p])
+    let outerPrimal (a: string) (args: Expr list) : Expr option =
+        match args with
+        | [ i ] when a = s -> litOf i |> Option.bind valueAt
+        | _ -> None
+    // forward after the loop + the final expression: literal rows only
+    let afterR = rewriteNamedAppsStmts names outerPrimal after
+    let finalR = rewriteNamedApps names outerPrimal finalE
+    match afterR, finalR with
+    | None, _ | _, None -> fail "the trajectory is read after the recurrence other than at a literal row in range"
+    | Some after', Some finalE' ->
+    // reverse: locate the CarryLoop arm's descending loop
+    let jLoop =
+        rev |> List.tryFindIndex (fun st ->
+            match st with
+            | NFor (_, _, _, NLet (tt, false, _) :: rest) ->
+                tt = t && rest.Length >= body.Length && List.truncate body.Length rest = body
+            | _ -> false)
+    match jLoop with
+    | None -> fail "the descending sweep is not a top-level statement of the reverse pass"
+    | Some jLoop ->
+    let revBefore = List.take jLoop rev
+    let revAfter = List.skip (jLoop + 1) rev
+    let tail =
+        match rev.[jLoop] with
+        | NFor (_, _, _, _ :: rest) -> List.skip body.Length rest
+        | _ -> []
+    let deposit (a: string) (args: Expr list) : Expr option =
+        match args with
+        | [ i ] when a = gs ->
+            litOf i |> Option.bind (fun p ->
+                if p < 0L || p >= tN then None
+                else
+                    if not (deps.ContainsKey p) then deps.[p] <- fresh rc.Ctx "__dep"
+                    Some (v deps.[p]))
+        | _ -> outerPrimal a args
+    let rowZero (a: string) (args: Expr list) : Expr option =
+        match args with
+        | [ i ] when a = gs -> if litOf i = Some 0L then Some (cell gseg (iLit 0L)) else None
+        | _ -> outerPrimal a args
+    let cotIdx = cotDecls |> List.tryFindIndex (function NLet (n, true, _) -> n = gs | _ -> false)
+    let elemOpt = cotIdx |> Option.bind (fun i -> match cotDecls.[i] with NLet (_, _, z) -> cotDeclElem tN z | _ -> None)
+    match rewriteNamedAppsStmts names deposit revBefore, rewriteNamedAppsStmts names rowZero revAfter, cotIdx, elemOpt with
+    | None, _, _, _ -> fail "the cotangent is touched before the descending sweep other than at a literal row"
+    | _, None, _, _ -> fail "the cotangent is touched after the descending sweep other than at row 0"
+    | _, _, None, _ | _, _, _, None -> fail "the tape cotangent is not declared as a zero fill of the tape's extent"
+    | Some revBefore', Some revAfter', Some cotIdx, Some elemOpt ->
+    // the segment body: s(x) -> seg(x - cb), gs(x) -> gseg(x - cb)
+    let cb = fresh rc.Ctx "__cb"
+    let segRead (a: string) (args: Expr list) : Expr option =
+        match args with
+        | [ i ] when a = s -> Some (cell seg (sub i (v cb)))
+        | [ i ] when a = gs -> Some (cell gseg (sub i (v cb)))
+        | _ -> None
+    let stepStmts = lets @ [ NAssign (cell s (v t), rhs) ]
+    // The replay in the descending sweep reads each snapshot target through
+    // its copy (by subscript only: a whole-array use declines).
+    let cps = snapTargets |> List.map (fun x -> (x, fresh rc.Ctx "__cp"))
+    let cpOf = Map.ofList cps
+    let snapNames = Set.union names (Set.ofList snapTargets)
+    let segReadSnap (a: string) (args: Expr list) : Expr option =
+        match Map.tryFind a cpOf with
+        | Some cp -> Some (syn (ExprApp (v cp, args)))
+        | None -> segRead a args
+    match rewriteNamedAppsStmts names segRead stepStmts, rewriteNamedAppsStmts names segRead (lets @ tail),
+          rewriteNamedAppsStmts snapNames segReadSnap stepStmts with
+    | None, _, _ | _, None, _ -> fail "the step or its adjoint touches the tape other than at a subscript"
+    | _, _, None -> fail "the step reads a snapshotted array other than by subscript (a whole-array use)"
+    | Some stepSeg, Some adjSeg, Some stepSegSnap ->
+    let c = fresh rc.Ctx "__c"
+    let i = fresh rc.Ctx "__i"
+    let len = fresh rc.Ctx "__len"
+    let eq a b = syn (ExprBinOp (Elementwise, OpEq, a, b))
+    let lenOf =
+        if lastLen = kS then iLit kS
+        else syn (ExprTyped (syn (ExprIf (eq (v c) (iLit (nC - 1L)), iLit lastLen, iLit kS)), TyInt64))
+    let segHead = [ NLet (cb, false, mul (v c) (iLit kS)); NLet (len, false, lenOf) ]
+    let replayOf (steps: NStmt list) =
+        [ NAssign (cell seg (iLit 0L), cell ck (v c))
+          NFor (i, iLit 1L, add (v len) (iLit 1L), NLet (t, false, add (v cb) (v i)) :: steps) ]
+    let replay = replayOf stepSeg
+    let replaySnap = replayOf stepSegSnap
+    // forward
+    let snapDecls = snaps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, f64Lit 0.0)) |> List.ofSeq
+    let snapTakes =
+        snaps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv ->
+            let p = kv.Key
+            NAssign (v kv.Value, syn (ExprIf (eq (v c) (iLit (p / kS)), cell seg (iLit (p % kS)), v kv.Value))))
+        |> List.ofSeq
+    let fwdLoop =
+        [ NLet (ck, true, zerosOfCount (nC + 1L))
+          NLet (seg, true, zerosOfCount (kS + 1L)) ]
+        @ snapDecls
+        @ [ NAssign (cell ck (iLit 0L), seed) ]
+        @ (cps |> List.map (fun (x, cp) -> NLet (cp, true, v x)))
+        @ [ NFor (c, iLit 0L, iLit nC,
+                  segHead @ replay @ [ NAssign (cell ck (add (v c) (iLit 1L)), cell seg (v len)) ] @ snapTakes) ]
+    // reverse
+    let cc = fresh rc.Ctx "__cc"
+    let jj = fresh rc.Ctx "__jj"
+    let z = fresh rc.Ctx "__z"
+    let carry = fresh rc.Ctx "__carry"
+    let depZero = match elemOpt with Some ty -> syn (ExprTyped (fLit 0.0, ty)) | None -> f64Lit 0.0
+    let depDecls = deps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, depZero)) |> List.ofSeq
+    let gsegDecl =
+        let zs = zerosOfCount (kS + 1L)
+        match elemOpt with
+        | Some ty -> NLet (gseg, true, syn (ExprTyped (zs, TyArray (ty, [ TyIdx (iLit (kS + 1L)) ]))))
+        | None -> NLet (gseg, true, zs)
+    let seeds =
+        deps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv ->
+            let p = kv.Key
+            let cp = min (p / kS) (nC - 1L)
+            let idx = p - cp * kS
+            NAssign (cell gseg (iLit idx), syn (ExprIf (eq (v c) (iLit cp), v kv.Value, cell gseg (iLit idx)))))
+        |> List.ofSeq
+    let revLoop =
+        NFor (cc, iLit 0L, iLit nC,
+              [ NLet (c, false, sub (iLit (nC - 1L)) (v cc)) ]
+              @ segHead @ replaySnap
+              @ [ NLet (carry, false, cell gseg (iLit 0L))
+                  NFor (z, iLit 0L, v len, [ NAssign (cell gseg (v z), f64Lit 0.0) ])
+                  NAssign (cell gseg (v len), v carry) ]
+              @ seeds
+              @ [ NFor (jj, iLit 0L, v len,
+                        [ NLet (i, false, sub (v len) (v jj)); NLet (t, false, add (v cb) (v i)) ] @ adjSeg) ])
+    let cotDecls' = List.take cotIdx cotDecls @ (gsegDecl :: depDecls) @ List.skip (cotIdx + 1) cotDecls
+    let fwd' = before @ fwdLoop @ after'
+    let rev' = revBefore' @ [ revLoop ] @ revAfter'
+    let bytesFull = 16L * tN
+    let bytesCk = 8L * ((nC + 1L) + 2L * (kS + 1L) + int64 snaps.Count + int64 deps.Count)
+    Ok (fwd', finalE', cotDecls', rev',
+        [ $"{nC} segments of K = {kS} steps (the last {lastLen}); checkpoints {nC + 1L} cells, segment and cotangent windows {kS + 1L} cells each, {snaps.Count} row snapshot(s), {deps.Count} row deposit(s)"
+          $"tape {bytesFull} -> {bytesCk} bytes (primal + cotangent); one extra forward evaluation of the {tN - 1L} steps in the reverse sweep"
+          "every step adjoint is the CarryLoop statement list, in the same descending order; each cotangent cell sees the same additions in the same order"
+          (match cps with
+           | [] -> "the replay is the same step over unassigned inputs (scalar parameters, step locals and module scalar constants, judged through the forward locals): bit-identical under BLADE_FP_CONTRACT=off"
+           | _ ->
+               let names = cps |> List.map (fun (x, cp) -> $"{x} -> {cp}") |> String.concat ", "
+               $"replay-input snapshot: {names} copied (plain dense, stored or total) right before the forward loop, before any gradient buffer is written; only the descending sweep's replay reads the copies, the forward loop and the step adjoints read the live arrays: the replay reads the first run's cells, bit-identical under BLADE_FP_CONTRACT=off") ])
+
+/// Apply `checkpointOne` to every top-level recurrence of the forward pass.
+let internal checkpointCarries (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<string>)
+                               (scalarParams: Set<string>) (paramTys: Map<string, TypeExpr>) (allParams: Set<string>)
+                               (fwd: NStmt list) (finalE: Expr) (cotDecls: NStmt list) (rev: NStmt list)
+    : NStmt list * Expr * NStmt list * NStmt list =
+    let carries =
+        fwd |> List.choose (fun st ->
+            match st with
+            | CarryLoop (buf, t, _, hi, _, _) & NFor (_, _, _, body) -> Some (buf, t, hi, body)
+            | _ -> None)
+    // A recurrence NESTED in a loop body (a function with a `let rec` called
+    // inside a map kernel, inlined) keeps its full tape; its decline is
+    // recorded too (round 4 wave 10, A2, Codex 81d2ce3b: it had no record).
+    let rec nested (ss: NStmt list) =
+        ss |> List.iter (fun st ->
+            match st with
+            | NFor (_, _, _, body) ->
+                body |> List.iter (fun inner ->
+                    match inner with
+                    | CarryLoop (buf, _, _, _, _, _) ->
+                        Blade.Effects.Decisions.record
+                            { Blade.Effects.Rule = "ad-checkpoint"; Version = 1; Span = noSpan; Subject = $"{rc.Fname}: {buf}"
+                              Outcome = Blade.Effects.Declined "the recurrence is nested in a loop body (v1 checkpoints top-level recurrences of the differentiated body only); it keeps its full tape"
+                              Evidence = [] }
+                    | _ -> ())
+                nested body
+            | _ -> ())
+    nested fwd
+    carries |> List.fold (fun (fwd, finalE, cotDecls, rev) (s, t, hi, body) ->
+        let record outcome evidence =
+            Blade.Effects.Decisions.record
+                { Blade.Effects.Rule = "ad-checkpoint"; Version = 1; Span = noSpan; Subject = $"{rc.Fname}: {s}"
+                  Outcome = outcome; Evidence = evidence }
+        match checkpointOne rc hasGradBuffers arrayParams scalarParams paramTys allParams (fwd, finalE, cotDecls, rev) (s, t, hi, body) with
+        | Ok (fwd', finalE', cotDecls', rev', ev) ->
+            record Blade.Effects.Applied ev
+            (fwd', finalE', cotDecls', rev')
+        | Error why ->
+            record (Blade.Effects.Declined why) []
+            (fwd, finalE, cotDecls, rev)) (fwd, finalE, cotDecls, rev)
 
 // The shared prelude
 //
@@ -1441,12 +2429,87 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
     // A TRUSTED source -- one this pass itself synthesized, in a composition
     // chain -- binds reserved names by construction and skips the gate.
     let reservedName (n: string) =
-        n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
+        n = "__primal" || n = "__seed" || n.StartsWith "__g_" || n.StartsWith "__t_"
     let allNames = (fd.Params |> List.map _.Name) @ boundNames stmts
     onNames allNames
+    // ...and a name the body READS: a MODULE binding spelled like a reserved
+    // name (`let __g_x = 7.0` read by `f(x) = x * __g_x`) was shadowed by the
+    // synthesized cotangent -- (21.0, 0.0) for (21.0, 7.0), every lane (round
+    // 4 wave 9, lane A, A3 diff review, Codex 5a8b7b7d; also `__primal`,
+    // `__t_x` under ad.jvp and the vjp seed `__seed`)
+    let readNames =
+        let rec ofStmts (ss: NStmt list) =
+            ss |> List.fold (fun acc s ->
+                match s with
+                | NLet (_, _, e) -> Set.union acc (allVarsDeep e)
+                | NAssign (l, r) -> Set.union acc (Set.union (allVarsDeep l) (allVarsDeep r))
+                | NFor (_, lo, hi, b) -> Set.unionMany [ acc; allVarsDeep lo; allVarsDeep hi; ofStmts b ]) Set.empty
+        let direct = Set.union (ofStmts stmts) (allVarsDeep finalE)
+        // ...TRANSITIVELY through the user functions it names: a helper body
+        // substituted later (pure(helper(x)) |> compute, kernelCallBody)
+        // carries its own reads past this gate (Codex 5a8b7b7d round 4:
+        // helper(p) = p * __g_x gave (21.0, 0.0) for (21.0, 7.0))
+        let rec close (seen: Set<string>) (frontier: string list) (acc: Set<string>) =
+            match frontier with
+            | [] -> acc
+            | n :: rest when seen.Contains n -> close seen rest acc
+            | n :: rest ->
+                match Map.tryFind n ctx.Decls with
+                | Some d ->
+                    let rs =
+                        (d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body))
+                    close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
+                | None -> close (seen.Add n) rest acc
+        close Set.empty (Set.toList direct) direct
+    // the SURFACE body's reads (before any expansion binds plumbing), closed
+    // over the user functions it names the same way
+    let surfaceReads =
+        let direct = fd.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep fd.Body)
+        let rec close (seen: Set<string>) (frontier: string list) (acc: Set<string>) =
+            match frontier with
+            | [] -> acc
+            | n :: rest when seen.Contains n -> close seen rest acc
+            | n :: rest ->
+                match Map.tryFind n ctx.Decls with
+                | Some d ->
+                    let rs = d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body)
+                    close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
+                | None -> close (seen.Add n) rest acc
+        close Set.empty (Set.toList direct) direct
+    // the sort expansion's deterministic plumbing (__sx_<s>, __sp_<s>,
+    // __si_<s>, __spk; GradExpand.expandSort) shadowed a MODULE binding of
+    // that spelling the body reads (let __sp_s = [7.0, 9.0] read beside
+    // sort(a, ..) bound to s: jvp (1.0, 5.0) for (7.0, 35.0), Codex 5a8b7b7d
+    // round 4): a read of such a spelling in the SURFACE body (or a helper it
+    // names) is refused -- the plumbing exists only after the expansion
+    let plumbingName (n: string) =
+        n = "__spk" || n.StartsWith "__sx_" || n.StartsWith "__sp_" || n.StartsWith "__si_"
     match (if skipReservedGate then None else allNames |> List.tryFind reservedName) with
     | Some n ->
-        err fname $"binding or parameter '{n}' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it"
+        err fname $"binding or parameter '{n}' collides with a reserved AD name (`__g_*`, `__t_*`, `__primal` and `__seed` are synthesized by the transform and would shadow it); rename it"
+    | None ->
+    match (if skipReservedGate then None else readNames |> Seq.tryFind reservedName) with
+    | Some n ->
+        err fname $"the function reads '{n}', a name spelled like a reserved AD name (`__g_*`, `__t_*`, `__primal` and `__seed` are synthesized by the transform and would shadow it); rename the binding"
+    | None ->
+    match (if skipReservedGate then None else surfaceReads |> Seq.tryFind plumbingName) with
+    | Some n ->
+        err fname $"the function reads '{n}', a name spelled like the sort expansion's synthesized plumbing (`__sx_*`, `__sp_*`, `__si_*`, `__spk`), which would shadow it; rename the binding"
+    | None ->
+    // ...and a BINDER of that spelling anywhere in the source program: the
+    // expansion REUSES plumbing it finds bound (composition re-enters its own
+    // output), so a user `let __sp_s = sort(indices, ..)` was taken for the
+    // permutation of `s` -- jvp (1.0, 3.0) for (1.0, 5.0) (Codex 5a8b7b7d
+    // round 7). The census is the SOURCE program (Grad.programIdentifiers),
+    // which spells no plumbing unless the user wrote it; a trusted
+    // (composition) source skips the gate
+    let spelledPlumbing =
+        match mintedTaken.Value with
+        | null -> None
+        | l -> l.Force() |> Seq.tryFind plumbingName
+    match (if skipReservedGate then None else spelledPlumbing) with
+    | Some n ->
+        err fname $"the program binds or reads '{n}', a name spelled like the sort expansion's synthesized plumbing (`__sx_*`, `__sp_*`, `__si_*`, `__spk`), which the expansion would take for its own; rename it"
     | None ->
     // validate every expression in the fragment
     let sweepFinal = sweepFinalOf finalE

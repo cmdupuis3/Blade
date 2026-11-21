@@ -1,0 +1,19 @@
+// TEST: An Unused Alias Of A Named Bool Stage Converted After Summation Computes A Float64 Map
+// EXPECT: r = [[1.0, 1.0], [1.0, 1.0]]
+// ============================================================================
+// R20 (review round 3): the twin of functions/970 that round 2 held back with
+// NOPINS. `unused_alias` only renames the deferred stack `flags`; the forcing
+// use converts the Bool explicitly (`number`). The stages apply to each
+// symmetrized value (2xy > 0), so the cells are Float64 ones: master printed
+// `r = [[true, true], [true, true]]` in the compiled lanes (the output was
+// typed by the innermost stage) and `[[nan, nan], [nan, nan]]` in the
+// interpreter.
+// ============================================================================
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let g = lambda(x, y) -> x * y
+let positive = lambda(z: Float64) -> z > 0.0
+let number = lambda(v: Bool) -> Float64(v)
+let flags = positive <$> (method_for(a, b) <@> reynolds(g))
+let unused_alias = flags
+let r = number <$> flags |> compute

@@ -3,7 +3,7 @@
 // than needed are cheap no-ops (every converged rotation guards to the
 // identity), so the spectrum matches the default-budget run exactly.
 import math as m
-let static SW = 15
+let static SW: Int64 = 15
 let A: Array<Float64 like Idx<2>, Idx<2>> = [[3.0, 0.0], [4.0, 5.0]]
 let (U, S, V) = m.svd(A, SW)
 // EXPECT: S = [6.7082039324993694, 2.2360679774997894]

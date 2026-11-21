@@ -13,6 +13,6 @@ function accum(out: mut Array<Float64 like Idx<3>>) -> Float64 = {
     out(0) = 99.0
     out(0)
 }
-let mut a = [1.0, 2.0, 3.0]
-let mut b = [1.0, 2.0, 3.0]
+let mut a = Float64([1.0, 2.0, 3.0])
+let mut b = Float64([1.0, 2.0, 3.0])
 let r = accum(a + b)

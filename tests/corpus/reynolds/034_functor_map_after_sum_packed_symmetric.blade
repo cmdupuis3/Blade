@@ -1,0 +1,18 @@
+// TEST: A Functor Wrapper Over A comm-Licensed reynolds Map Keeps Packed Symmetric Storage
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// The comm licence stores the map as a packed SymIdx triangle; f(K) is
+// symmetric too, so the wrapped map keeps it. Master printed [[2.0, 9.0], [8.0]].
+let xs: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let kc = lambda(x: Float64, y: Float64) where comm(x, y) -> x - 2.0 * y
+let sq = lambda(v: Float64) -> v * v
+let plain = method_for(xs, xs) <@> reynolds(kc) |> compute
+let r = sq <$> (method_for(xs, xs) <@> reynolds(kc)) |> compute
+// EXPECT: plain = [[-2.0, -3.0], [-4.0]]
+// EXPECT: r = [[4.0, 9.0], [16.0]]

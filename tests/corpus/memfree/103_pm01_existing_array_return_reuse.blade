@@ -1,0 +1,15 @@
+// TEST: PM01 ordinary array return preserves the existing dead-pool reuse route
+// Odd-extent version of the existing demean return-donor proof. The final
+// map reads q, so it may reuse dead p; it must not overwrite q in place.
+type Ix = Idx<7>
+function returned_pool(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let mean = reduce(p, (+)) / Float64(extents(p))
+    let q = p - mean |> compute
+    q * 0.5
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let final = returned_pool(x)
+let final_sum = reduce(final, (+))
+// EXPECT: final = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
+// EXPECT: final_sum = 0.0

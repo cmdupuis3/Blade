@@ -8,9 +8,9 @@
 
 function f(y: Tuple<2>, z: Float64) -> Float64 = y[0] + y[1] * 10.0 + z * 100.0
 
-let t1 = 1.0, 2.0
-let a = 3.0
-let b = 4.0
+let t1 = Float64(1.0), Float64(2.0)
+let a: Float64 = 3.0
+let b: Float64 = 4.0
 
 // GREEDY: y prefers the tuple node t1, then z takes the next node.
 let greedy = f(t1, a)
@@ -19,7 +19,7 @@ let greedy = f(t1, a)
 // The regroup arm, same signature, no tuple node in sight: y takes the two
 // plain nodes. This is the pairing that makes `f(t1, a)` and `f(1.0, 2.0, a)`
 // the same call.
-let regrouped = f(1.0, 2.0, a)
+let regrouped = f(Float64(1.0), 2.0, a)
 // EXPECT: regrouped = 321.0
 
 // `f(t1, a, b)` is an ERROR under the greedy rule -- y takes t1, z takes a, and

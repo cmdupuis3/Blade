@@ -7,5 +7,5 @@
 // `y: Bool` stage that the direct application `object_for(lambda(y: Bool)
 // -> y) <@> A` refuses. The fused body now carries the annotation as an
 // ascription check.
-let A = [1, 2, 3]
+let A = Int64([1, 2, 3])
 let result = (object_for(lambda(x: Int64) -> x) >>@ object_for(lambda(y: Bool) -> y)) <@> A |> compute

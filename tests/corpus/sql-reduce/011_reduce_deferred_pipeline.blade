@@ -4,8 +4,8 @@
 // array — one loop, one accumulator (this exact form used to typecheck
 // and then emit non-compiling C++; now it is the blessed fused fold).
 // Both the inline form and the one-let-hop form (the <@> resolution rule).
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let s1 = reduce(method_for(zip(A, B)) <@> lambda(x, y) -> x * y, (+))
 let L = method_for(zip(A, B))
 let f = lambda(x, y) -> x * y

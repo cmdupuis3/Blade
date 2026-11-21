@@ -1,0 +1,11 @@
+// TEST: Math op on a user helper whose name looks like a generated routine
+// #62 regression witness (Codex round 7): a function the USER wrote keeps its
+// source span, so its annotated return is a user declaration whatever its
+// name (`__math_helper`); only a routine an elaborator spliced (zero span,
+// generated-routine name) counts as an inferred shape. The squared singular
+// values sum to the squared Frobenius norm, 9 + 16 + 25.
+import math as m
+function __math_helper() -> Array<Float64 like Idx<2>, Idx<2>> = { [[3.0, 0.0], [4.0, 5.0]] }
+let (U, sv, V) = m.svd(__math_helper())
+let fro = sv(0) * sv(0) + sv(1) * sv(1)
+// EXPECT: fro = 50.0

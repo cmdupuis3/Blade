@@ -4,7 +4,7 @@
 // An unknown constructor WITH a payload used to be accepted ("unknown variant
 // tag: allow it") and reached g++ as an undeclared name. Refused here,
 // listing the scrutinee type's constructors.
-type Shape = Circle : Float | Square : Float
+type Shape = Circle : Float64 | Square : Float64
 let s = Square(2.0)
 let area = match s with
     | Circle(r) -> r

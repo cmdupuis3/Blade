@@ -1,0 +1,13 @@
+// TEST: a row-kernel call of a lambda value that is also kept as a value, over Float32 rows (rejects)
+// ============================================================================
+// G226 member (f), lane B's row: `h` is also kept as a value (`saved`), so
+// its open parameter keeps its Float64 default, and the Float32 prodsum the
+// row kernel hands it would be converted. The base converted it silently
+// (r = [15.0, 78.0] as Float64); since G275 the call is refused. Deciding
+// `z` as Float32 at this call is the G226 follow-up.
+// ============================================================================
+let m32: Array<Float32 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let h = lambda(z) -> z + 1.0
+let saved = h
+let r = method_for(m32) <@> lambda(row) -> h(prodsum(row, row)) |> compute
+// ERROR: BL3020

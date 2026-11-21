@@ -7,7 +7,7 @@
 // by 016.
 import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
-function helper(a: Float) -> Float = a * 2.0
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function helper(a: Float64) -> Float64 = a * 2.0
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
     helper(x[1])
 let s = bad([2.0, 1.0, 1.0, 1.0])

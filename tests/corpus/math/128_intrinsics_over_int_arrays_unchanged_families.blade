@@ -1,0 +1,36 @@
+// TEST: The real-only intrinsics over Int64 arrays stay Float64 and abs keeps Int64
+// ============================================================================
+// R18 (deep review, one sub-point): formalism 2.4 -- a transcendental
+// intrinsic's INTEGER operand widens to double, and the scalar form types
+// `exp(x: Int64)` Float64. Lifted over an integer ARRAY the complex-capable
+// intrinsics (exp log sin cos tan sinh cosh tanh asin acos atan sqrt) typed
+// their kernel at the operand's own variable, so the result came out INTEGER:
+// g++ rejected the narrowing (BL9002) and the interpreter and LLVM lanes
+// printed truncated cells (exp([1, 4, 9]) = [2, 54, 8103]). The kernel
+// re-stamp in buildApplyInfo now types it Float64, each cell the scalar form's
+// value, in every lane.
+// ============================================================================
+// Untouched by the fix and pinned beside it: floor / ceil / log10 / lgamma /
+// digamma already lifted to Float64 with the scalar values; abs of an
+// integer keeps the integer in both forms; Float32 and complex kernels keep
+// their own widths.
+let a: Array<Int64 like Idx<3>> = [1, 4, 9]
+let fl = floor(a)
+let lg = log10(a)
+let gm = lgamma(a)
+let dg = digamma(a)
+let ab = abs(a)
+let x: Int64 = 4
+let abx = abs(x)
+let f: Array<Float32 like Idx<2>> = [1.0, 4.0]
+let f2 = method_for(f) <@> lambda(v) -> exp(v) * 2.0 |> compute
+let z: Array<Complex128 like Idx<2>> = [complex(1.0, 0.0), complex(0.0, 1.0)]
+let z2 = exp(z)
+// EXPECT: fl = [1.0, 4.0, 9.0]
+// EXPECT: lg = [0.0, 0.602059991327962, 0.954242509439325]
+// EXPECT: gm = [0.0, 1.79175946922806, 10.6046029027453]
+// EXPECT: dg = [-0.577215664901532, 1.2561176684318, 2.14064147795561]
+// EXPECT: ab = [1, 4, 9]
+// EXPECT: abx = 4
+// EXPECT: f2 = [5.43656, 109.196]
+// EXPECT: z2 = [(2.71828182845905,0.0), (0.54030230586814,0.841470984807897)]

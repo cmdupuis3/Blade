@@ -1,0 +1,11 @@
+// TEST: an integer literal on the left of a lambda value's open parameter takes the width its call decides
+// ============================================================================
+// G275 (2): `2147483647 + z` is typed while `z` is open; the first call makes
+// `z` an Int32, and the sum is an Int32 that wraps (formalism 2.4) -- it was
+// typed Int64 (the literal's wide representation) and printed 2147483648.
+// ============================================================================
+let h = lambda(z) -> 2147483647 + z
+let saved = h
+let f: Int32 = 1
+let w = h(f)
+// EXPECT: w = -2147483648

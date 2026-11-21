@@ -1,0 +1,21 @@
+// TEST: Ordered Call Fresh Array Second (aborts)
+// ----------------------------------------------------------------------------
+// Gap G79, finding 4: `consume(k / z(0), bad_array(k - 1))` as a body let.
+// The fresh-pool hoist lifted the array argument ahead of the first, so the
+// C++ lane failed inside bad_array; the arguments are now bound in source
+// order first: the first argument's division (BL8013 at h's line) fires
+// first, in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let z: Array<Int64 like Row> = [0, 1]
+function bad_array(k: Int64) -> Array<Int64 like Row> = [10 / k, 0]
+function consume(p: Int64, w: Array<Int64 like Row>) -> Int64 = p + reduce(w, (+))
+function consume2(w: Array<Int64 like Row>, p: Int64) -> Int64 = p + reduce(w, (+))
+function h(k: Int64) -> Int64 = {
+    let s = consume(k / z(0), bad_array(k - 1))
+    s + 1
+}
+let r = h(1)
+// ABORT: BL8013
+// ABORT: .blade:14
+// ABORT: at h

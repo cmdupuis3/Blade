@@ -1,0 +1,14 @@
+// TEST: A module binding spelled like the arrow instance of a function
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 2): the arrow
+// instance walk__arrow1 and a module binding of that spelling both reached
+// main's scope; the call resolved to the double (BL9002). A callable whose
+// spelling a binding takes now moves.
+// ============================================================================
+function walk(c, n: Int64) -> Float64 = c(n)
+let walk__arrow1: Float64 = 7.0
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let r = walk(a, Int64(0)) + walk__arrow1
+// EXPECT: walk__arrow1 = 7.0
+// EXPECT: a = [1.0, 2.0]
+// EXPECT: r = 8.0

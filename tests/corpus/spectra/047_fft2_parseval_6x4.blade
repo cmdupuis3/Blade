@@ -1,8 +1,10 @@
-// TEST: Spectra fft2: Parseval at 6x4 (naive rows axis, radix-2 cols axis)
-// sum|X|^2 = r*c * sum x^2 for the unnormalized transform. Both sums are
-// accumulated in row-major order exactly as the oracle does; the residual
-// comes out exactly 0 here (pinned from spectra/OracleDump.fs). The 6-row
-// axis takes the naive table-DFT path, the 4-col axis the radix-2 path.
+// TEST: Spectra fft2: Parseval at 6x4 (Bluestein rows axis, radix-2 cols axis)
+// sum|X|^2 = r*c * sum x^2 for the unnormalized transform. The 6-row axis
+// takes Bluestein's chirp-z path (F6), the 4-col axis the radix-2 path.
+// The residual is a rounding-level float (it was exactly 0 under the old
+// table DFT; now about 3.6e-12 compiled and 1.8e-12 interpreted, against
+// sums near 1.2e4): its bits depend on contraction and on each lane's
+// summation order, so the pin is the Parseval predicate, not the bits.
 import spectra as sp
 let x: Array<Float64 like Idx<6>, Idx<4>> = [[-3.0, -2.5, -2.0, -1.5], [-1.0, -0.5, 0.0, 0.5], [1.0, 1.5, 2.0, 2.5], [3.0, 3.5, 4.0, 4.5], [5.0, 5.5, 6.0, 6.5], [7.0, 7.5, 8.0, 8.5]]
 let X = sp.fft2(x)
@@ -11,4 +13,5 @@ let resid = {
     let sX = reduce(method_for(range<Idx<6>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> real(X(i, j)) * real(X(i, j)) + imag(X(i, j)) * imag(X(i, j)), (+), 0.0, axes = 2)
     sX - 24.0 * sx
 }
-// EXPECT: resid = 0.0
+let parseval_ok = abs(resid) < 1.0e-9
+// EXPECT: parseval_ok = true

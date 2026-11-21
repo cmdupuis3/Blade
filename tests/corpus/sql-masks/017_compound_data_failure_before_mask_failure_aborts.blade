@@ -1,0 +1,14 @@
+// TEST: Compound Data Failure Before Mask Failure (aborts)
+// ----------------------------------------------------------------------------
+// compound(dense, mask) with BOTH operands written in place as failing maps
+// (Codex review of round-3 W1-3): the dense operand is materialized first,
+// then the mask -- the interpreter's order -- so the dense operand's checked
+// cast (BL8006) fires before the mask's empty fold (BL8003). The valid-data
+// control is 018.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let none = compound(a, mask(a, lambda(v) -> v > 5))
+let c = compound(method_for(a) <@> lambda(v) -> a((v : Row)), method_for(a) <@> lambda(v) -> reduce(none, (+)) > v)
+// ABORT: BL8006
+// ABORT: outside Row

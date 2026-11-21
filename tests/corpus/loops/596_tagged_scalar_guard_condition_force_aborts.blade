@@ -1,0 +1,15 @@
+// TEST: Tagged Scalar Guard Condition Force (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the thirteenth Codex look of W4B-A: a scalar guard whose type is
+// INDEX-TAGGED (`Nat<Row>`) is still a scalar -- every unit / tag wrapper is
+// peeled -- so its condition, which reads g first, is walked and the arm's read
+// of g is admitted; g's kernel divides by zero there (BL8013 at the kernel's
+// line), first, in every lane.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+let k: Nat<Row> = 0
+let r = Int64(guard(g(0) > 0, k)) + (if z(0) > 0 then g(0) else 0)
+// ABORT: BL8013
+// ABORT: .blade:10

@@ -4,11 +4,11 @@
 // over its default (evaluated per kernel invocation, with the row params
 // bound). The same lambda also direct-calls at full and reduced arity.
 type SIdx = Idx<3>
-let A: Array<Float like SIdx> = [1.0, 2.0, 3.0]
-let scaled = method_for(A) <@> lambda(x, s = 2.0) -> x * s |> compute
-let f = lambda(x, s = 3.0) -> x * s
-let g = f(5.0)
-let h = f(5.0, 10.0)
+let A: Array<Float64 like SIdx> = [1.0, 2.0, 3.0]
+let scaled = method_for(A) <@> lambda(x, s = Float64(2.0)) -> x * s |> compute
+let f = lambda(x, s = Float64(3.0)) -> x * s
+let g = f(Float64(5.0))
+let h = f(5.0, Float64(10.0))
 // EXPECT: scaled = [2.0, 4.0, 6.0]
 // EXPECT: g = 15.0
 // EXPECT: h = 50.0

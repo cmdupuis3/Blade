@@ -35,11 +35,11 @@
 (* (perm_pair) -- the constructive meaning of s permutes the argument   *)
 (* positions.                                                           *)
 (*                                                                       *)
-(* Imports BladeDMWF, BladeLowering.  Coq 8.18, stdlib only.             *)
+(* Imports BladeDMWF, BladeLowering.  Rocq 9.0, stdlib only.             *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeLowering.
-Require Import List Arith Lia Permutation.
+From Stdlib Require Import List Arith Lia Permutation.
 Import ListNotations.
 
 (* Generic: lsum respects permutation of the list. *)

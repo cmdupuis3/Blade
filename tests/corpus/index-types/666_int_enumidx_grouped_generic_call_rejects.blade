@@ -1,0 +1,15 @@
+// TEST: A grouped array of R values handed to an observing generic is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a grouped array
+// ============================================================================
+// R3 (lead review): the call hands an observing generic callee the KEYS,
+// `Int64(g)`, but a grouped value does not survive the callee (the C++ lane
+// failed to compile it); refused in the type checker.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let ks: Array<Int64 like Idx<3>> = [1, 2, 1]
+let gk = group_keys(ks)
+let g = group_by(codes, gk)
+function inc(y: T) = y + 1
+let o = inc(g)

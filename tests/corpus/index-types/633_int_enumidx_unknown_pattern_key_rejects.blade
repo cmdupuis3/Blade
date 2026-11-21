@@ -1,0 +1,11 @@
+// TEST: A literal pattern under a value of R must be one of its keys (rejects)
+// ERROR: BL4003
+// ============================================================================
+// R3: a literal pattern names a key (index-types/632), so one that is none of
+// R's keys is refused, as a literal typed R is (index-types/502).
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let m = match codes(0) with
+    | 150 -> 1
+    | _ -> 0

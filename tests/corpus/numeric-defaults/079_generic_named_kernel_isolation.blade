@@ -1,0 +1,25 @@
+// TEST: named kernels remain independent across generic loop declarations
+function sq(x) = x * x
+function first_stats(v) = {
+    let L = method_for(v)
+    reduce((L <@> sq) <&!> (L <@> sq), (+))
+}
+function second_stats(v) = {
+    let w = method_for(v) <@> sq
+    let z, u = object_for(<&!>) <@> (reduce(w, (+)), prodsum(w, v))
+    z + u
+}
+let fa, fb = first_stats(Float64([1.0, 2.0, 3.0]))
+let ia, ib = first_stats(Int64([1, 2, 3]))
+let fs = second_stats(Float64([1.0, 2.0, 3.0]))
+let ismall = second_stats([1, 2, 3])
+let direct_float = sq(Float32(2.0))
+let direct_int = sq(Int64(3))
+// EXPECT: fa = 14.0
+// EXPECT: fb = 14.0
+// EXPECT: ia = 14
+// EXPECT: ib = 14
+// EXPECT: fs = 50.0
+// EXPECT: ismall = 50
+// EXPECT: direct_float = 4.0
+// EXPECT: direct_int = 9

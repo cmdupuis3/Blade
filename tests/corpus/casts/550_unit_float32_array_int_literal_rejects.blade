@@ -1,0 +1,6 @@
+// TEST: an integer literal in a Float32<meters> array literal (rejects)
+// ERROR: BL3020 @ 5:54
+// A float literal adapts within its class to a Float32<meters> cell and the
+// unit attaches (casts/537); an integer literal never stands for a float.
+Unit meters
+let a32m: Array<Float32<meters> like Idx<2>> = [1.0, 2]

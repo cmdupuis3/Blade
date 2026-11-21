@@ -5,9 +5,9 @@
 // Reaches the non-prefix parameter that prefix currying can't.
 // ----------------------------------------------------------------------------
 function scale_add(a, b) = a * 10.0 + b
-let addb = scale_add(_, 5.0)
+let addb = scale_add(_, Float64(5.0))
 let r1 = addb(2.0)
-let bind_first = scale_add(3.0, _)
+let bind_first = scale_add(Float64(3.0), _)
 let r2 = bind_first(0.25)
 // EXPECT: r1 = 25.0
 // EXPECT: r2 = 30.25

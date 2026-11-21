@@ -1,0 +1,8 @@
+// TEST: a negated integer literal below Int32's minimum (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function g(i: Int32) -> Int32 = i
+let r = g(-2147483649)
+// ERROR: BL3020 @ 6:11

@@ -1,0 +1,8 @@
+// TEST: the first float literal past the halfway point above FLT_MAX (rejects)
+// ============================================================================
+// R19: a float literal fits Float32 iff it rounds to a finite, normal Float32.
+// 3.4028235e38 rounds to FLT_MAX (numeric-widths/030); 3.4028236e38 lies past
+// the halfway point 3.4028235677973366e38 and rounds to an infinity.
+// ============================================================================
+let over: Float32 = 3.4028236e38
+// ERROR: BL3020 @ 6:21

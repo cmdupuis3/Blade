@@ -1,0 +1,26 @@
+// TEST: Replay Two Trajectories Reserved Name
+// ============================================================================
+// PRINT REPLAY of TWO module-level recursions, both admitted: a replay row is
+// no storage write, so the first trajectory's admission is not declined by
+// the second one's sweep. The first is named `new` (a C++ reserved word the
+// emitter renames): its snapshot `__snap_3_new` is declared and read under
+// one C++ name. a_n = a_{n-1} + 2 from 1; b_n = 3 b_{n-1} from 1.
+// ============================================================================
+type S = Idx<6>
+
+let rec new: Array<Float64 like S> =
+    match new with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) + 2.0
+
+let rec b: Array<Float64 like S> =
+    match b with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 3.0
+
+let t = new(3) + b(5)
+// EXPECT: new = [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
+// EXPECT: b = [1.0, 3.0, 9.0, 27.0, 81.0, 243.0]
+// EXPECT: t = 250.0

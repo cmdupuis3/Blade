@@ -1,0 +1,23 @@
+// TEST: A retaining row kernel keeps its operand alive
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m3, the row kernel): `keep` is the
+// KERNEL of a map over the rows of the caller local y (an IRApplyCombinator,
+// not an IRApp): each row view is stored in `saved`, the last one wins.
+// ============================================================================
+type R = Idx<2>
+type I = Idx<3>
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+function keep(a: Array<Float64 like I>) -> Int64 = {
+    saved = a
+    3
+}
+function f(x: Array<Float64 like R, I>) -> Float64 = {
+    let y = x * 2.0 |> compute
+    let ns = method_for(y) <@> keep |> compute
+    let z = x * 3.0 |> compute
+    reduce(z, (+), axes = 2) + saved(0) + Float64(reduce(ns, (+)))
+}
+let x: Array<Float64 like R, I> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = f(x)
+// EXPECT: result = 77.0
+// EXPECT: saved = [8.0, 10.0, 12.0]

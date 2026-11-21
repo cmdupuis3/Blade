@@ -1,0 +1,10 @@
+// TEST: Two modules each declaring struct P and constructor Red link
+// MODULE: B
+module B
+struct P { y: Int64 }
+type Light = Red | Amber
+function mk() -> P = P { y = 7 }
+function fy(p: P) -> Int64 = p.y
+function isRed(c: Light) -> Bool = match c with
+    | Red -> true
+    | Amber -> false

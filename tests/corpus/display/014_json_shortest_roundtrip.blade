@@ -32,7 +32,7 @@ let p2 = plot.line(x4, f32)
 // The axis samples of the deep lens, as the panel receives them: adjacent
 // Float64 samples one ulp apart near 0.74 are DISTINCT at shortest digits
 // (they were identical at 15).
-let a0 = -0.743643887037151
+let a0: Float64 = -0.743643887037151
 let a1 = a0 + 1.1102230246251565e-16
 let distinct = a1 > a0
 // EXPECT: p1 = true

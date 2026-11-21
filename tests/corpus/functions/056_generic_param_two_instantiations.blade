@@ -8,8 +8,8 @@
 // first call and reject the second. The class comparison binds nothing -- an
 // unresolved parameter declines to be classified at all.
 function idf(x: T^0) -> T^0 = x
-let a = idf(1.5)
-let b = idf(7)
+let a = idf(Float64(1.5))
+let b = idf(Int64(7))
 // EXPECT: a = 1.5
 // EXPECT: b = 7
 
@@ -17,8 +17,8 @@ let b = idf(7)
 // still reaches IR validation with the variable unresolved; that predates this
 // check and is not what this pin is about.)
 function sumOf(v: T^1) = reduce(v, (+))
-let c = sumOf([2.5, 3.5])
-let e = sumOf([1.0, 2.0, 3.0])
+let c = sumOf(Float64([2.5, 3.5]))
+let e = sumOf(Float64([1.0, 2.0, 3.0]))
 // EXPECT: c = 6.0
 // EXPECT: e = 6.0
 

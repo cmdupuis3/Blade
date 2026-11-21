@@ -1,0 +1,15 @@
+// TEST: a pack former's kernel with a let binds a fresh name per unrolled element
+// Gap G95 (round 4 wave 4 lane A; G93's class): the former unrolls into one
+// copy of the kernel body per pack element; the copies used to share the
+// body's `let` binder, so the C++ lane declared `auto __v4` three times in
+// one scope. Each copy's lets are now freshened.
+//   terms = [10 * 2 + 1, 20 * 2 + 1, 30 * 2 + 1] = [21, 41, 61]; sum 123.
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> {
+        let y = args[k] * 2.0
+        y + 1.0
+    } |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)
+// EXPECT: result = 123.0

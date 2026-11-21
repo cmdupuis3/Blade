@@ -1,0 +1,23 @@
+// TEST: fold ring declines a fold kernel that forces a deferred module map
+// PM35 constructor-table review round 1 (round 4 wave 3 B1): the fold
+// kernel `fk` calls `dsum`, which reads the DEFERRED module map `d` cell by
+// cell. Moving the fold into the sweep would force `d` -- and any failure in
+// its kernel -- inside the recursion instead of after it, so rec-fold-ring
+// declines the consumer (IRTotality refuses the deferred read) and the
+// trajectory stays whole. The value is the same either way.
+type I = Idx<4>
+type Step = Idx<64>
+let w: Float64 = 0.5
+let d = method_for(range<I>) <@> lambda(i) -> Float64(i) * w
+function dsum() -> Float64 = reduce(method_for(range<I>) <@> lambda(i) -> d(i), (+))
+function fk(a: Float64, b: Float64) -> Float64 = a + b + dsum()
+function run() -> Float64 = {
+    let rec x: Array<Float64 like Step> =
+        match x with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5
+    reduce(x, fk, 0.0)
+}
+let r = run()
+// EXPECT: r = 194.0

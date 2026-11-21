@@ -1,0 +1,12 @@
+// TEST: Transpose Fold Deferred Alias Failure Order (aborts)
+// Fold absorption (transpose-normal-form v1, rule 3) reads the transposed
+// base in place only when it is PROVED stored through any alias chain: here
+// `e` aliases the DEFERRED map `d`, whose kernel divides by zero. The
+// transposed copy forces d before the seed `1 % 0` runs, so the producer's
+// division must fail first, in every build -- the absorption declines
+// (Codex review of the wave-3 pass: the old one-level test admitted `e`).
+let M: Array<Int64 like Idx<2>, Idx<2>> = [[0, 2], [3, 4]]
+let d = method_for(M) <@> lambda(x) -> 10 / x
+let e = d
+let s = reduce(transpose(e, [0, 1]), (+), 1 % 0, axes = 2)
+// ABORT: division by zero

@@ -1,0 +1,28 @@
+// TEST: Functor Wrappers Over Rank-3 reynolds Maps, Under A Fold, And Capturing A Value Apply To The Sum
+// ============================================================================
+// R20 (review round 3): `f <$> c` applies f to each value c yields
+// (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
+// K(x) = sum over the permutations of g (formalism 5.3), so the stage runs
+// AFTER the sum: f(K(x)). Master composed the stage into every summed term
+// (sum f(g(x_sigma))); with an unannotated wrapper it also typed the result
+// a scalar and printed a heap pointer.
+// ============================================================================
+// Master printed rank3 = [1992.0, 2476.0, ...], same3 = [0.0, 6.0, 6.0, 18.0, ...],
+// rows = [79.0, 53.0], shifted = [[46.0, 73.0], [37.0, 56.0]].
+let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
+let c: Array<Float64 like Idx<2>> = [5.0, 6.0]
+let g = lambda(x: Float64, y: Float64, z: Float64) -> x + 2.0 * y + 3.0 * z
+let h = lambda(x: Float64, y: Float64, z: Float64) -> x * y - z
+let k = lambda(x: Float64, y: Float64) -> x - 2.0 * y
+let sq = lambda(v: Float64) -> v * v
+let s: Float64 = 10.0
+let shift = lambda(v: Float64) -> v * v + s
+let rank3 = sq <$> (method_for(a, b, c) <@> reynolds(g)) |> compute
+let same3 = sq <$> (method_for(a, a, a) <@> reynolds(h)) |> compute
+let rows = reduce(sq <$> (method_for(a, b) <@> reynolds(k)), (+))
+let shifted = shift <$> (method_for(a, b) <@> reynolds(k)) |> compute
+// EXPECT: rank3 = [11664.0, 14400.0, 14400.0, 17424.0, 14400.0, 17424.0, 17424.0, 20736.0]
+// EXPECT: same3 = [0.0, 4.0, 4.0, 36.0, 4.0, 36.0, 36.0, 144.0]
+// EXPECT: rows = [41.0, 61.0]
+// EXPECT: shifted = [[26.0, 35.0], [35.0, 46.0]]

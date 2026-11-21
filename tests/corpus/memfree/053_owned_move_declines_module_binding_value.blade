@@ -1,0 +1,20 @@
+// TEST: Owned Move Declines A Module Binding As The Moved Value (G92)
+// The fable review's counterexample to the first owned-move build: at main's
+// top level `t = r1` then `t = r2` moved r1's pool into t and the second move
+// FREED it -- but r1 is a module binding, and main's printer (and any
+// provider / constructor side table) reads it after every statement. A
+// module binding is never a moved value (`declined -- the value `r1` is a
+// module binding`); t keeps the pointer move and every binding prints its
+// own cells.
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let mut t = x * 2.0 |> compute
+let u = t + 1.0 |> compute
+let r1 = x + 1.0 |> compute
+let r2 = x + 2.0 |> compute
+t = r1
+t = r2
+// EXPECT: u = [3.0, 5.0, 7.0]
+// EXPECT: r1 = [2.0, 3.0, 4.0]
+// EXPECT: r2 = [3.0, 4.0, 5.0]
+// EXPECT: t = [3.0, 4.0, 5.0]

@@ -1,0 +1,18 @@
+// TEST: A local alias of an imported deferred map, folded at top level, keeps its failure order (aborts)
+// MODULE: Main
+// Round 4 wave 10 (lane A, A3: the fresh class-closure round of
+// BLADE_SIBLING_FOLDS=top, Codex af3eedf4, gap G107): y = d aliases a
+// deferred map of ANOTHER module; the operand admission judged the alias by
+// this module's open classifier, which never saw d, so under top the fold
+// of y joined a and forced d (BL8013 at Lib:6) ahead of fail (BL8014).
+// The fail-closed classifier now judges an alias's foreign target: no join,
+// BL8014 first in every build.
+module Main
+from Lib import I, d
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let y = d
+let fz: Float64 = 0.0
+let a = prodsum(x, x)
+let fail = Int64(floor(fz / fz))
+let b = prodsum(y, y)
+// ABORT: BL8014

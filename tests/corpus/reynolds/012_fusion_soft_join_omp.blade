@@ -8,7 +8,7 @@
 // annotation configures the shared header. Values are unchanged by the
 // backend choice; this pins that the join computes correctly (and compiles
 // under -fopenmp with the outer #pragma omp parallel for).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let mean = lambda(x) -> x
 let cov = lambda(x, y) where omp(x: 1) -> x * y
 let (m1, m2) = (object_for(mean) <@> (A)) <&> (object_for(cov) <@> (A, A)) |> compute

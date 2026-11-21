@@ -248,7 +248,17 @@ and TypedExprKind =
     // checker off the argument's own type. It rides along rather than being
     // re-read from the TypedExpr's type downstream so that the "is this extent
     // static?" question is asked (and refused) in exactly one place.
-    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * address: (TypedExpr * TypedExpr) option * dims: int list
+    //
+    // `inlineDraw`: for an ADDRESSED (`_at`) draw, the same samples as an ordinary
+    // expression -- a map over the shape whose cell is `__rand_sample_at` of
+    // the cell's own address (D13). A top-level `let` keeps the fill
+    // (Lowering's TDeclLet intercept); anywhere else -- a function body, a
+    // nested expression -- lowers this instead. `dims = []` with no inline is
+    // that per-sample draw itself (a scalar). `typedExprChildren` deliberately
+    // does NOT list `inlineDraw` (its operands are the node's own children,
+    // re-typed), so module-wide typed walkers do not see the block; it is
+    // consumed only by Lowering.
+    | TExprRandGen of kind: string * key: TypedExpr * pars: TypedExpr list * weights: (TypedExpr * int) option * address: (TypedExpr * TypedExpr) option * dims: int list * inlineDraw: TypedExpr option
     | TExprGuard of cond: TypedExpr * body: TypedExpr
     | TExprZero
     | TExprReynolds of kernel: TypedExpr * isAntisymmetric: bool
@@ -424,6 +434,10 @@ and TypedBinding = {
     Type: IRType
     Identity: ArrayIdentity option
     IsMutable: bool
+    /// Declared `let mut` (`IsMutable` is true for a plain `let` too: both
+    /// are assignable in their scope). Read by lowering for the rule on who
+    /// may write a captured binding (formalism 2.7; deep review D9).
+    IsLetMut: bool
     Value: TypedExpr
     /// Destructured sub-bindings: (name, varId, type) for PatTuple/PatCons/PatStruct
     SubBindings: (string * IRId * IRType) list
@@ -594,6 +608,55 @@ let mkTypedSpan kind ty span : TypedExpr =
 
 /// Create a typed literal
 let mkLit lit ty = mkTyped (TExprLit lit) ty
+
+/// THE UNSEEDED MARKER (gap G74). An unseeded `(+)` fold over a deferred
+/// computation has no seed: its value is the left fold of its cells. The
+/// checker still synthesizes the fold's base seed (the section's `+0.0` /
+/// `0` / `zero`, exactly as before) because the fused terminal needs one, and
+/// marks it with THIS span, which no source expression can carry (line 0, a
+/// file name no path has). Lowering (`lowerUnseededSeed`) turns the mark into
+/// the IR node `IRUnseededSeed`, which keeps the provenance until
+/// `resolveUnseededSeedsModule` (after monomorphization, before the optimizer)
+/// knows the fold's EFFECTIVE route: on an obligatorily serial one --
+/// `BLADE_FP_REPRO=1`, a `where repro` body, a repro-vetoed kernel, a deferred
+/// map body that may WRITE -- the seed becomes the EXACT identity (`-0.0` for a
+/// real float, `(-0.0, -0.0)` complex; formalism 2.4's identity insertion), so
+/// the seeded chain is the head-peeled one bit for bit; on a licensed route the
+/// base seed is kept unchanged (a licensed fold's signed zero is the
+/// licence's, G40). The mark is never a value: nothing but Lowering reads it.
+/// (The rank >= 2 full fold's accumulator loop is serial on every route and
+/// takes the identity at the checker directly; it carries no mark.)
+let unseededSeedSpan : Span =
+    { StartLine = 0; StartCol = -74; EndLine = 0; EndCol = -74; File = Some "<unseeded fold seed>" }
+
+/// Mark a checker-synthesized `(+)` seed as the seed of an UNSEEDED fold.
+let markUnseeded (e: TypedExpr) : TypedExpr = { e with Span = unseededSeedSpan }
+
+/// Is this typed expression a marked unseeded-fold seed?
+let isUnseededSeed (e: TypedExpr) : bool = e.Span = unseededSeedSpan
+
+/// THE KEPT SPINE NAME (gap G235 (a), formalism 10.2 / G214). A fused fold
+/// `reduce(p, k, s)` over a named deferred map p normally splices p's RESOLVED
+/// producer into the terminal, so the fold re-walks p's inputs. When a capture
+/// of the fold kernel forces p under its own name before the traversal (a
+/// captured map of p, an alias of p, p itself), the traversal must read that
+/// SNAPSHOT -- a seed that writes an input of p runs after the force. The
+/// checker then keeps the spine's NAME as the terminal's child, wrapped in a
+/// `TExprCompute` carrying THIS span (no source expression has it: line 0, a
+/// file name no path has), and Lowering lowers exactly such a child to
+/// `IRReduceCompute (IRVar p, ..)`, whose fused-terminal path in every lane runs
+/// the ordered capture prelude and then folds the stored spine. The decision
+/// rides on the FOLD NODE itself (spans survive zonking, as the unseeded mark
+/// does): an earlier side table keyed on the spine occurrence's (binder, span)
+/// could confuse two folds over one p whose synthesized nodes share a span
+/// (Ast.setSynthSpan; wave-end fable review). The wrapper is never a value:
+/// nothing but Lowering's TExprReduce arm reads it.
+let keptSpineSpan : Span =
+    { StartLine = 0; StartCol = -235; EndLine = 0; EndCol = -235; File = Some "<kept fold spine>" }
+
+/// Mark a fold's spine variable as KEPT (the child of the fused terminal).
+let markKeptSpine (spine: TypedExpr) : TypedExpr =
+    { Kind = TExprCompute spine; Type = spine.Type; Span = keptSpineSpan }
 
 /// Create a typed variable reference
 let mkVar name varId identity ty = 

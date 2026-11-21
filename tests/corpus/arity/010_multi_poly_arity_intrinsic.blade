@@ -1,8 +1,10 @@
 // TEST: Multi Poly Arity Intrinsic
 // arity(xs) and arity(ys) inside a multi-Poly body each resolve to their
 // own slot's arity literal after specialization.
-function shapes(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
+// (G275: the result was `T^0`, which the integer body made Int64, so the
+// Float64 elements were narrowed into Int64 parameters; it is Int64 now.)
+function shapes(xs: Poly<T^0>, ys: Poly<T^0>) -> Int64
 = arity(xs) * 100 + arity(ys)
 
-let result = shapes((1.0, 2.0), (1.0, 2.0, 3.0, 4.0))
+let result = shapes((Float64(1.0), Float64(2.0)), (Float64(1.0), Float64(2.0), Float64(3.0), Float64(4.0)))
 // EXPECT: result = 204

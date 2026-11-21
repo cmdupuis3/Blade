@@ -1,0 +1,20 @@
+// TEST: Fold Ring Declines Captured Trajectory
+// ============================================================================
+// PM35 decline control (Codex review round 1): a lambda that folds the
+// trajectory reads it whole from its own body, where the consumer scan does not
+// look -- the ring must decline, or the lambda would fold a 2-row ring.
+// ============================================================================
+type T = Idx<11>
+
+function via_lambda(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) + 1.0
+    let h = lambda(x: Float64) -> reduce(s, (+)) + x
+    h(0.0)
+}
+
+let v = via_lambda(1.0)
+// EXPECT: v = 66.0

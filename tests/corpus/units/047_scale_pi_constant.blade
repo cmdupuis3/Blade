@@ -12,13 +12,13 @@ Unit hz = 1 / second
 // One turn per second, expressed two ways: the 2*pi enters via `turn` and
 // leaves via the annotation, so the exponents cancel to nothing.
 Unit angular = turn / second
-let w: Float<angular> = 3.0
-let w_back: Float<angular> = w
+let w: Float64<angular> = 3.0
+let w_back: Float64<angular> = w
 
 // A half-turn IS pi radians: the rational part composes with the symbolic
 // part independently (1/2 * 2 * pi = pi).
 Unit half_turn = turn / 2
-let h: Float<half_turn> = 1.0
+let h: Float64<half_turn> = 1.0
 
 // EXPECT: w_back = 3.0
 // EXPECT: h = 1.0

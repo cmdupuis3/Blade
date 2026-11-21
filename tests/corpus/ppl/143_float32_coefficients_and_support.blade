@@ -1,0 +1,19 @@
+// TEST: PPL converts Float32 coefficients and keeps support guards Float64
+import ppl as ppl
+let rate: Float32 = 1.0
+let x: Float32 = 2.0
+let log_density = ppl.logpdf(exponential(rate), x)
+let outside = ppl.logpdf(exponential(rate), Float32(-1.0))
+let outside_is_negative_infinity = outside < -1e100
+type Sample = Idx<3>
+let data: Array<Float64 like Idx<1>, Sample> = [[0.0, 1.0, 2.0]]
+let prior = ppl.dist(data, 3)
+let intercept: Float32 = 1.0
+let slope: Float32 = 0.5
+let evidence = ppl.dist_expect(prior, intercept, slope)
+let posterior = ppl.dist_reweight(prior, intercept, slope)
+let posterior_mean = ppl.cumulant(posterior, 1)
+// EXPECT: log_density = -2.0
+// EXPECT: outside_is_negative_infinity = true
+// EXPECT: evidence = 1.5
+// EXPECT: posterior_mean = [1.22222222222222]

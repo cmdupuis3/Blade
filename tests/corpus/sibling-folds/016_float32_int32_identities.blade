@@ -1,0 +1,40 @@
+// TEST: Unseeded Float32 and Int32 legs join with width-correct identity seeds
+// ============================================================================
+// The identity seed keeps its operand's width: -(0.0f) for an unseeded
+// Float32 (+) leg (a double seed would promote the chain and narrow at the
+// store), a Float32 seed of 1.0f for (*), and an Int32-cast 0 / 1 for Int32.
+// Each group folds with one operator, so it joins in every build. (The LLVM
+// lane has no Float32 / Int32 array path; it hands such a program to C++.)
+// ============================================================================
+type R = Idx<4>
+
+let base: Array<Float64 like R> = [1.5, -0.5, 2.0, 4.0]
+let ibase: Array<Int64 like R> = [3, -1, 4, 2]
+
+let (f32sum, f32seeded) = {
+    let f = Float32(base)
+    (reduce(f, (+)), reduce(f, (+), Float32(1.0)))
+}
+
+let (f32prod, f32prod_seeded) = {
+    let g = Float32(base)
+    (reduce(g, (*)), reduce(g, (*), Float32(2.0)))
+}
+
+let (i32sum, i32seeded) = {
+    let i = Int32(ibase)
+    (reduce(i, (+)), reduce(i, (+), Int32(10)))
+}
+
+let (i32prod, i32prod_seeded) = {
+    let j = Int32(ibase)
+    (reduce(j, (*)), reduce(j, (*), Int32(2)))
+}
+// EXPECT: f32sum = 7.0
+// EXPECT: f32seeded = 8.0
+// EXPECT: f32prod = -6.0
+// EXPECT: f32prod_seeded = -12.0
+// EXPECT: i32sum = 8
+// EXPECT: i32seeded = 18
+// EXPECT: i32prod = -24
+// EXPECT: i32prod_seeded = -48

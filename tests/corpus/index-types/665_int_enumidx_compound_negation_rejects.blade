@@ -1,0 +1,13 @@
+// TEST: Negating a compound array of R values is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: stored as a compound array
+// ============================================================================
+// R3 (lead review): whole-array negation of R values is built over dense
+// storage only (over a compound array of keys the C++ lane failed to
+// compile; ragged storage is 668); refused in the type checker.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+let n = -sel

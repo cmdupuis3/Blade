@@ -1,0 +1,13 @@
+// TEST: a run-time extent of a deferred co-iteration evaluates nothing (aborts)
+// Gap G234, round 4 wave 9: the zip twin of loops/794 -- d co-iterates the
+// compound c with itself; its extent is the co-iterated operand's, read
+// without evaluating d (whose division by zero would fail), so the program
+// fails later, at the NaN cast, in every lane.
+let iv: Array<Int64 like Idx<4>> = [1, 0, 2, -1]
+let c = compound(iv, mask(iv, lambda(v) -> v >= 0))
+let d = method_for(zip(c, c)) <@> lambda(a, b) -> Float64(100 / (a * b))
+let e = d
+let fz: Float64 = 0.0
+let n = extents(e) + 1
+let fail = Int64(floor(fz / fz))
+// ABORT: BL8014

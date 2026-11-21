@@ -133,8 +133,8 @@ live in domain libraries. This is the boundary that keeps the core group-theory-
 ### 1. Annotations
 
 ```blade sketch
-let v: Array<Float like Idx<3>> with equiv(G, rep)
-let energy: Float with invariant(G)          // sugar for equiv(G, trivial)
+let v: Array<Float64 like Idx<3>> with equiv(G, rep)
+let energy: Float64 with invariant(G)          // sugar for equiv(G, trivial)
 
 function norm(v: T^1 with equiv(G, rep)) -> T^0 with invariant(G)
 function scale(s: T^0 with invariant(G), v: T^1 with equiv(G, rep)) -> T^1
@@ -266,9 +266,9 @@ struct CGPath {
 } where p_out == parity_mul(p1, p2)
 
 struct CGIndex<path: CGPath> {
-    m1:    Int<min=-path.l1,    max=path.l1>,
-    m2:    Int<min=-path.l2,    max=path.l2>,
-    m_out: Int<min=-path.l_out, max=path.l_out>
+    m1:    Int32<min=-path.l1,    max=path.l1>,
+    m2:    Int32<min=-path.l2,    max=path.l2>,
+    m_out: Int32<min=-path.l_out, max=path.l_out>
 } where m1 + m2 == m_out
 ```
 
@@ -332,7 +332,7 @@ inherit triangular storage from the existing symmetry system rather than
 from AD-specific logic.
 
 **ABI.** `grad(f)` (call-shaped special form; `f` a same-module top-level
-function returning `Float`) rewrites to `f__grad`, whose signature is f's
+function returning `Float64`) rewrites to `f__grad`, whose signature is f's
 parameters followed by **one `mut` out-buffer per Float-array parameter**
 (same type; ACCUMULATED into — callers zero them, PyTorch-style), returning
 the primal, or `(primal, dscalar…)` when f has Float scalar parameters.

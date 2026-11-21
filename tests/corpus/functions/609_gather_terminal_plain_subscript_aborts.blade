@@ -1,0 +1,21 @@
+// TEST: Gather Terminal Plain Subscript Aborts (aborts)
+// ============================================================================
+// PM28: functions/607's abort with a PLAIN subscript `A(i)` instead of an
+// index cast: the subscript's own run-time check (BL8006, "a position
+// outside I") is the gather's one failure point, so the gather is folded in
+// place and fails with the stored gather's panic text. `blade test opt-diff`
+// compares the full output with the gate off and on; `blade test llvm`
+// compares the two lanes' aborts.
+// ============================================================================
+type I = Idx<11>
+type K = Idx<9>
+function gsum(A: Array<Float64 like I>, idx: Array<Int64 like K>) -> Float64 = {
+    let g = method_for(idx) <@> lambda(i) -> A(i) * 2.0 |> compute
+    reduce(g, (+), 0.0)
+}
+let A = method_for(range<I>) <@> lambda(k) -> Float64(k) + 0.5 |> compute
+let idx: Array<Int64 like K> = [0, 3, 5, 2, 1, 4, 12, -1, 4]
+let s = gsum(A, idx)
+// WARN: BL4003
+// ABORT: BL8006
+// ABORT: index out of bounds: a position outside I (0 .. 10)

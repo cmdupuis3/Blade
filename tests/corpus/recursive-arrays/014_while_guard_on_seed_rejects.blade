@@ -6,7 +6,7 @@
 // not silently ignored.
 // ============================================================================
 type It = Idx<4>
-let rec s: Array<Float like It> =
+let rec s: Array<Float64 like It> =
     match s with
     | zero -> zero
     | zero :: n while n < 2 -> zero :: 1.0

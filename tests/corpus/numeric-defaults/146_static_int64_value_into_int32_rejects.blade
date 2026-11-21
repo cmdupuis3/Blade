@@ -1,0 +1,8 @@
+// TEST: an Int64 static value past Int32 under an Int32 static annotation (rejects)
+// ============================================================================
+// R28: compile-time evaluation follows the width rules of its run-time twin
+// (formalism 2.4: a `let static` value follows the same rules).
+// ============================================================================
+let static big = 5000000000
+let static n: Int32 = big
+// ERROR: BL3020 @ 6:23

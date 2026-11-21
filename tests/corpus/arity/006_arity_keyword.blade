@@ -5,5 +5,5 @@ function firstOrDefault(args: Poly<T^0>, fallback: T^0) -> T^0
 = if arity(args) == 1 then args[0] else fallback
 
 // A two-element pack: arity(args) is 2, so the fallback is returned.
-let a = firstOrDefault((7.0, 8.0), 1.0)
+let a = firstOrDefault((Float64(7.0), Float64(8.0)), Float64(1.0))
 // EXPECT: a = 1.0

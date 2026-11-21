@@ -21,5 +21,5 @@ import ad as ad
 // trigamma and pin digamma's derivative in a positive test. Deleting it would
 // silently re-merge the two readings of `None`.
 // ============================================================================
-function f(x: Float) -> Float = digamma(x) + x * x
+function f(x: Float64) -> Float64 = digamma(x) + x * x
 let (fv, dfv) = ad.grad(f)(3.0)

@@ -14,7 +14,7 @@ import ml as ml
 // The numerical shadow is inline: the same call boosted by U0 = 10 returns
 // the identical value (all-exact arithmetic, so the EXPECTs are hand-derived).
 // ============================================================================
-function closure(ul: Float, uc: Float, ur: Float, dx: Float, c: Float) where ml.galilean(ul, uc, ur) -> Float = {
+function closure(ul: Float64, uc: Float64, ur: Float64, dx: Float64, c: Float64) where ml.galilean(ul, uc, ur) -> Float64 = {
     let g = (ur - ul) / (2.0 * dx)
     let lap = ((ur - uc) - (uc - ul)) / (dx * dx)
     c * g * g + lap

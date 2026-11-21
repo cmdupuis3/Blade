@@ -24,16 +24,16 @@
 import units.SI
 import display as d
 import plot
-let ts: Array<Float<second> like Idx<3>> = [0.0, 1.0, 2.0]
-let vs: Array<Float<meter/second> like Idx<3>> = [0.0, 9.81, 19.62]
-let a = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 1: cmap, 5: levels)
-let b = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(5: levels)(1: cmap)
+let ts: Array<Float64<second> like Idx<3>> = [0.0, 1.0, 2.0]
+let vs: Array<Float64<meter/second> like Idx<3>> = [0.0, 9.81, 19.62]
+let a = plot.contourf(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]), Int64(1): cmap, Int64(5): levels)
+let b = plot.contourf(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]))(Int64(5): levels)(Int64(1): cmap)
 let c = plot.line(ts, vs, "fall": title, d.unit_label(ts): xlabel, d.unit_label(vs): ylabel)
-let e = plot.heatmap([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 256: maxdim, 2: cmap)
-let f = plot.contour([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(64: maxdim)(3: levels)
-let g = plot.line(ts, vs, 1: backend, "fall": title)
-let h = plot.heatmap([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(1: backend)(4: cmap)
-let i = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 9: backend)
+let e = plot.heatmap(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]), Int64(256): maxdim, Int64(2): cmap)
+let f = plot.contour(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]))(Int64(64): maxdim)(Int64(3): levels)
+let g = plot.line(ts, vs, Int64(1): backend, "fall": title)
+let h = plot.heatmap(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]))(Int64(1): backend)(Int64(4): cmap)
+let i = plot.contourf(Float64([0.0, 1.0]), Float64([0.0, 1.0]), Float64([[1.0, 2.0], [3.0, 4.0]]), Int64(9): backend)
 // EXPECT: a = true
 // EXPECT: b = true
 // EXPECT: c = true

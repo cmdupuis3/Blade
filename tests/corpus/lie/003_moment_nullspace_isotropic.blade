@@ -47,8 +47,8 @@ function act4(A: Array<Float64 like Idx<3>, Idx<3>>, M: Array<Float64 like Idx<8
 // basis element E_pq of gl(3) at column c = 3p + q; so(3) basis E_il - E_li at (i, l) = (0, 1), (0, 2), (1, 2)
 function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
 function eso(a: Int64) -> Array<Float64 like D, D> = {
-    let p = if a == 2 then 1 else 0
-    let q = if a == 0 then 1 else 2
+    let p: Int64 = if a == 2 then 1 else 0
+    let q: Int64 = if a == 0 then 1 else 2
     method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, p) * delta(j, q) - delta(i, q) * delta(j, p) |> compute
 }
 let Cgl_iso: Array<Float64 like R, C9> = method_for(range<R>, range<C9>) <@> lambda(r: R, c: C9) -> act4(egl(c), M4iso, r) |> compute
@@ -57,7 +57,7 @@ let Cso_oct: Array<Float64 like R, C3> = method_for(range<R>, range<C3>) <@> lam
 let (U1, S_gl_iso, V1) = m.svd(Cgl_iso)
 let (U2, S_so_iso, V2) = m.svd(Cso_iso)
 let (U3, S_so_oct, V3) = m.svd(Cso_oct)
-function count_zero(s: T^1) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> if v < 1e-12 then 1 else 0 |> compute, (+))
+function count_zero(s: T^1) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> Int64(v < 1e-12) |> compute, (+))
 let nullity_gl_iso = count_zero(S_gl_iso)
 let nullity_so_iso = count_zero(S_so_iso)
 let nullity_so_oct = count_zero(S_so_oct)

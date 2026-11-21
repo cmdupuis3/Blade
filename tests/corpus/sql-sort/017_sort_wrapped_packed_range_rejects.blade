@@ -1,0 +1,7 @@
+// TEST: sort over a packed range behind a block is refused (rejects)
+// Gap G126 (round 4 wave 5 lane c; Codex review round 2): the refusal reads
+// the operand's TYPE (a virtual range over a non-plain record), not its
+// spelling, so a block around `range<S>` is refused the same way (BL3033).
+// ERROR: BL3033
+type S = SymIdx<2, 3>
+let s = sort({ range<S> }, lambda(t) -> 1.0)

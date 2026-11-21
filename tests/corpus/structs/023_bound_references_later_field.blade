@@ -2,7 +2,7 @@
 // ERROR: BL3008
 // Field order matters: a bound may reference only EARLIER fields.
 struct Bad {
-    a: Int in 0 .. b,
-    b: Int
+    a: Int32 in 0 .. b,
+    b: Int32
 }
 let x = Bad { a = 1, b = 5 }

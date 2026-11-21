@@ -1,0 +1,28 @@
+// TEST: An existing reduction join absorbs a sibling fold over the same array
+// ============================================================================
+// bench/kernels/onepass in miniature: `kernel(x)` already folds four
+// statistics of x in ONE pass (an explicit `<&!>` join); the binding also sums
+// x. The sibling-fold pass inlines `kernel` and EXTENDS its join with the
+// input sum -- five legs, one traversal, each its own accumulator and seed
+// (the unseeded input sum takes -0.0). The kernel's own projections are
+// renumbered onto the new join. Integer-valued data, association-invariant.
+// ============================================================================
+type Ix = Idx<7>
+
+function kernel(x: Array<Float64 like Ix>) -> Float64 = {
+    let l = method_for(x)
+    let (s1, s2, s3, s4) = reduce((l <@> lambda(v) -> v) <&!> (l <@> lambda(v) -> v * v)
+        <&!> (l <@> lambda(v) -> v * v * v) <&!> (l <@> lambda(v) -> v * v * v * v), (+))
+    s1 + 2.0 * s2 + 3.0 * s3 + 4.0 * s4
+}
+
+function inputs() -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(i) - 2.0 |> compute
+}
+
+let (checksum, input_checksum) = {
+    let x = inputs()
+    (kernel(x), reduce(x, (+)))
+}
+// EXPECT: checksum = 1834.0
+// EXPECT: input_checksum = 7.0

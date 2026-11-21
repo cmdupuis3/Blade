@@ -1,0 +1,16 @@
+// TEST: a block lambda applied to a Bool, its result unused (rejects)
+// ============================================================================
+// R10 remainder (the numbers-only rule, formalism 2.4): a block lambda's
+// parameter its body leaves open is BOUND by a direct call's argument -- a Bool,
+// a String, a struct, a sum-type value, an index value -- as a numeric one always
+// was. It used to stay open, fall to zonk's Float64 default, and the call
+// converted the argument silently. In a function body, the
+// base accepted it when the result was never used.
+// ============================================================================
+function f() -> Int32 = {
+    let dbl = lambda(x) -> x + x
+    let c = dbl(true)
+    3
+}
+let r = f()
+// ERROR: BL3001 @ 10:28

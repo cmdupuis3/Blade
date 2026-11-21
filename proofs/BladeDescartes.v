@@ -57,19 +57,19 @@
 (* Scope, stated once.  Points are INTEGER points.  A rational point     *)
 (* reduces to an integer one by clearing denominators (every p_k is      *)
 (* homogeneous, so the rows of the Jacobian rescale by nonzero factors); *)
-(* a real point does not, and nothing here speaks to it.  "Linearly      *)
-(* independent" is over Z, equivalently over Q.  These are rank          *)
+(* a real point does not, and nothing here speaks to it.  'Linearly      *)
+(* independent' is over Z, equivalently over Q.  These are rank          *)
 (* statements about formal differentials; what a rank at a point forbids *)
 (* is BladeRankBound's theorem, against POLYNOMIAL encodings only.       *)
 (* Nothing here is about C^1 encodings.                                  *)
 (*                                                                       *)
 (* Imports BladeBinomial, BladeSummary, BladeMomentClosure,              *)
-(* BladeRankBound.  Coq 8.18, stdlib only.                               *)
+(* BladeRankBound.  Rocq 9.0, stdlib only.                               *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound.
-Require Import List Arith Lia ZArith Ring Bool.
+From Stdlib Require Import List Arith Lia ZArith Ring Bool.
 Import ListNotations.
 
 Open Scope Z_scope.
@@ -423,7 +423,7 @@ Proof.
       rewrite <- (zsumf_peval (dcoef c E s) (x l) n 0).
       simpl Nat.add. rewrite (sparse_eval c E s n (x l) Hb).
       apply Hroots. lia.
-    - rewrite map_length, seq_length. apply nnz_dcoef. apply seq_NoDup. }
+    - rewrite length_map, length_seq. apply nnz_dcoef. apply seq_NoDup. }
   rewrite Forall_forall in HF. rewrite <- (dcoef_at c E s t Ht HE).
   apply HF. apply in_map. apply in_seq. specialize (Hb t Ht). lia.
 Qed.

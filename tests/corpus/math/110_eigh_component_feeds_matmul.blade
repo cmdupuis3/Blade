@@ -1,0 +1,14 @@
+// TEST: Math eigh result feeds matmul through a destructured component (no annotation)
+// #62: the elaborators share one shape oracle (src/ElabShapes.fs), so the
+// result of one elaborated call is an operand of the next. Q is component 0
+// of eigh's (Q, LAM): P = S Q = Q diag(LAM), so column 0 of P dotted with
+// column 0 of Q is LAM(0) |q0|^2 = LAM(0) whatever the eigenvector's sign.
+// S = tridiag(1, 2, 1): eigenvalues 2 + sqrt(2), 2, 2 - sqrt(2).
+import math as m
+let S: Array<Float64 like Idx<3>, Idx<3>> = [[2.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 2.0]]
+let (Q, lam) = m.eigh(S)
+let P = m.matmul(S, Q)
+let w0 = P(0, 0) * Q(0, 0) + P(1, 0) * Q(1, 0) + P(2, 0) * Q(2, 0)
+let l0 = lam(0)
+// EXPECT: w0 = 3.414213562373095
+// EXPECT: l0 = 3.414213562373095

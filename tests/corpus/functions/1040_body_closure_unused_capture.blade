@@ -1,0 +1,17 @@
+// TEST: A Body Lambda Capturing A Deferred Map Bound But Never Called
+// ============================================================================
+// Gap G241, round 4 wave 10 (lane C, C2): a lambda bound in a function body
+// that captures a deferred module map and is only CALLED there forces the map
+// at each read inside its body, per call (formalism 10.2, the G239 contract);
+// binding it forces nothing. The C++ closure copy-captured the module binder
+// at the binding, which nothing declared (BL9002).
+// ============================================================================
+type A = Array<Int64 like Idx<1>>
+let mut backing: A = [0]
+let delayed = method_for(backing) <@> lambda(e) -> 8 / e
+function f(x: Float64) -> Float64 = {
+    let unused2 = lambda(v: Int64) -> v + delayed(0)
+    x
+}
+let r = f(Float64(3.0))
+// EXPECT: r = 3.0

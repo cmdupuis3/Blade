@@ -1,0 +1,22 @@
+// TEST: An extent rebinding of a local to a mut parameter does not free the caller array
+// ============================================================================
+// Round 4 wave 7 (lane c, gap G220; the class found by the Codex design review
+// 5909d69a): an assignment or alias hidden in a TYPE-CARRIED expression -- a
+// range bound `0..{ t = a; 3 }`, which the C++ lane evaluates -- was invisible
+// to the C++ ownership scans (they followed expression children only).
+// The scope-exit frees: `t = a` made t name the caller x, and the frame still
+// freed t at its exit -- x printed heap garbage (sibling-folds/058, flaky).
+// The scans now read every expression a type carries (embeddedExtentExprs).
+// ============================================================================
+function hidden(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    let mut t: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+    let m = method_for(0..{ t = a; 3 }) <@> lambda(v) -> v + 1 |> compute
+    t(0) = 100.0
+    reduce(m, (+))
+}
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let k = hidden(x)
+let s = reduce(x, (+))
+// EXPECT: x = [100.0, 2.0, 3.0]
+// EXPECT: k = 6
+// EXPECT: s = 105.0

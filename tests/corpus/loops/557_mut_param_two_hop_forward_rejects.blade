@@ -1,0 +1,18 @@
+// TEST: Mut Param Two Hop Forward (rejects)
+// ----------------------------------------------------------------------------
+// Finding 2's forwarding: `outer` forwards its `mut` parameter to `inner`,
+// which writes it, so passing the deferred map to `outer` writes it -- the
+// fixpoint follows the parameter through both calls (BL4005, every lane).
+// ----------------------------------------------------------------------------
+type Row = Idx<3>
+let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]
+let mut g = method_for(x) <@> lambda(v) -> v * 2.0
+function inner(b: mut Array<Float64 like Row>) -> Float64 = {
+    b(2) = 0.5
+    b(2)
+}
+function outer(a: mut Array<Float64 like Row>) -> Float64 = inner(a) + 1.0
+let r = outer(g)
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a write through `g`, a deferred computation
+// REJECT-AT: lower

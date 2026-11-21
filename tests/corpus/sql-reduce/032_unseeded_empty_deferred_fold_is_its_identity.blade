@@ -1,0 +1,21 @@
+// TEST: An unseeded fold over an EMPTY deferred computation is its identity
+// The DEFERRED spelling: `reduce(method_for(v) <@> k, (+))` over an empty
+// operand (an empty range, an empty literal, an empty generic argument) does
+// not abort -- the fused terminal folds from its synthesized seed, so its
+// empty fold is the identity: the base +0.0 on a licensed route, the exact
+// identity -0.0 on a strict one (BLADE_FP_REPRO=1, or a `where repro` body;
+// gap G74, formalism 6.4). The STORED spelling has none: BL3007 when
+// statically empty (corpus loops/531), BL8003 when dynamically so (031). The
+// numeric pins accept either zero; `blade test orbit-scatter` pins the bits
+// per route.
+type Z = Idx<0>
+let empty: Array<Float64 like Z> = []
+function total(v: T^1) -> Float64 = reduce(method_for(v) <@> lambda(q) -> q * 1.0, (+))
+let s = reduce(method_for(range<Z>) <@> lambda(i) -> Float64(i) * 1.0, (+))
+let s2 = reduce(method_for(empty) <@> lambda(q) -> q * 1.0, (+))
+let s3 = total(empty)
+let t = s + s2 + s3 + 1.0
+// EXPECT: s = 0.0
+// EXPECT: s2 = 0.0
+// EXPECT: s3 = 0.0
+// EXPECT: t = 1.0

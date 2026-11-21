@@ -1,0 +1,13 @@
+// TEST: a struct scaled by a number (rejects)
+// ============================================================================
+// The numbers-only rule (formalism 2.4; the user's ruling of 2026-11-14:
+// "true is a boolean and is not compatible without type casting"): arithmetic
+// is defined on numbers only, so the type checker refuses it before either
+// lane runs. On master 1e6a871a this died in g++ (BL9002).
+// ============================================================================
+struct P {
+    a: Float64
+}
+let p = P { a = 1.0 }
+let q = p * 2.0
+// ERROR: BL3001

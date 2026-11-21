@@ -3,8 +3,8 @@
 // ERROR-CONTAINS: raw indexing into an l>0
 import ml as ml
 let static S = [(0, 0, 2), (1, 1, 1)]
-function bad(k: Array<Int like IrrepsIdx<S>>) where ml.equiv(O3) -> Float = {
-  let mut acc: Array<Float like Idx<3>> = [0.0, 0.0, 0.0]
+function bad(k: Array<Int32 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 = {
+  let mut acc: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
   acc(k(2)) = 1.0
   acc(0)
 }

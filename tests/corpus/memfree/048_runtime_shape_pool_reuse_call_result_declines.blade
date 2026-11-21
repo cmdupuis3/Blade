@@ -1,0 +1,17 @@
+// TEST: Run-time-shaped pools keyed by a call result typed I never share
+// PM60 (review finding 1): pick returns its SECOND argument typed `like I`, so
+// u is typed I like the parameter x but carries 7 cells where x carries 5; a
+// map over u is keyed by nothing (a call result proves no extent), so it keeps
+// its own pool. Keying by the index TYPE would have aliased 7 cells onto 5.
+function pick(x: Array<Float64 like I>, y: Array<Float64 like I>) -> Array<Float64 like I> = { y }
+function probe(x: Array<Float64 like I>, n: Int64) -> Float64 = {
+    let u = pick(x, Float64(0..n))
+    let a = x * 2.0 |> compute
+    let sa = reduce(a, (+))
+    let b = u * 3.0 - sa |> compute
+    reduce(b, (+))
+}
+let n = Int64(floor(4.5))
+let s = probe(Float64(0..n), n + 2)
+// EXPECT: n = 4
+// EXPECT: s = -27.0

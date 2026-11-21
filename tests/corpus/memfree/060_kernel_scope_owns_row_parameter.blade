@@ -1,0 +1,17 @@
+// TEST: A Kernel Application Frees Its Materialized Row Parameter (G204)
+// Gap G204 (1): a deferred ROW map whose row parameter is materialized
+// inside its application (`sumrow` reads two cells of the row of a deferred
+// producer). The parameter was bound before the G184 kernel scope opened, so
+// the force read it as an escape of every scope: its tracking slot was nulled
+// and the cleanup freed null -- one 1001-cell row pool per application in the
+// LLVM lane. The parameter is now owned by its application (bound to an
+// unstored value no other binding shares), so the row pool is freed at the
+// application cleanup. `blade test llvm` pins the free (no null store of the
+// slot between the allocation and the cleanup).
+// total = sum over i < 7 of (i + (i + 1)) = 49
+type R = Idx<7>
+type C = Idx<1001>
+function sumrow(a: Array<Float64 like C>) -> Float64 = a((0 : C)) + a((1 : C))
+let mat = method_for(range<R, C>) <@> lambda(i, j) -> Float64(i) + Float64(j)
+let total = reduce(method_for(mat) <@> sumrow, (+))
+// EXPECT: total = 49.0

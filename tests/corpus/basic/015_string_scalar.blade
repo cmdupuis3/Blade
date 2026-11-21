@@ -3,7 +3,7 @@
 // litToCpp emission as std::string("..."), and string == comparison
 // (which lowers to C++ std::string operator==).
 let s = "hello"
-let same = if s == "hello" then 42 else 0
-let diff = if s == "world" then 1 else 0
+let same: Int64 = if s == "hello" then 42 else 0
+let diff: Int64 = if s == "world" then 1 else 0
 // EXPECT: same = 42
 // EXPECT: diff = 0

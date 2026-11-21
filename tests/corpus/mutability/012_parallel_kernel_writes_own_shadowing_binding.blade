@@ -2,10 +2,10 @@
 // The refusal of mutability-errors/004 is by BINDING, not by name: `acc`
 // inside the kernel is its own cell-private `let mut`, so assigning it is a
 // local store even though a module-level `acc` of the same name exists.
-let mut acc = 100.0
-let A = [1.0, 2.0, 3.0]
+let mut acc: Float64 = 100.0
+let A = Float64([1.0, 2.0, 3.0])
 let r = A <@> lambda(x) where omp(x: 1) -> {
-    let mut acc = 0.0
+    let mut acc: Float64 = 0.0
     acc = acc + x
     acc * 2.0
 } |> compute

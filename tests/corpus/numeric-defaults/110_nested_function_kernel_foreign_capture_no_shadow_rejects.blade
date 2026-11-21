@@ -1,0 +1,15 @@
+// TEST: A Nested Function Applying A Foreign-Capture Kernel Is Refused Without A Shadow Too (rejects)
+// Gap G247 (round 4 wave 9 lane d): the shadow-free twin of numeric-defaults/109 -- the C++ lane
+// named an undeclared `scale` (BL9002); refused at lowering in every lane.
+// ERROR: BL7004
+// ERROR-CONTAINS: a binding of an enclosing function
+// REJECT-AT: lower
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+function outer() -> Array<Float64 like I> = {
+    let scale: Float64 = 2.0
+    let f = lambda(x: Float64) -> x * scale
+    function apply(k: Float64, a: Array<Float64 like I>) -> Array<Float64 like I> = { method_for(a) <@> f |> compute }
+    apply(10.0, a64)
+}
+let r = outer()

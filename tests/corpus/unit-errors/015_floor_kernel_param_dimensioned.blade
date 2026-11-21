@@ -10,5 +10,5 @@
 // inferBinaryIntrinsic's `pin` makes for atan2/log_base. Scalar position keeps
 // the pin (and its eager complex rejection) -- units/020 is the accepting side.
 Unit meters
-let D: Array<Float<meters> like Idx<3>> = [1.5, 2.5, 3.5]
+let D: Array<Float64<meters> like Idx<3>> = [1.5, 2.5, 3.5]
 let bad = (method_for(D) <@> lambda(d) -> floor(d)) |> compute

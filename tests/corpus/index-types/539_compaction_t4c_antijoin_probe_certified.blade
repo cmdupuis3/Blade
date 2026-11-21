@@ -1,0 +1,18 @@
+// TEST: Compaction fusion T4c: the antijoin `!contains` certified, two companions
+// The antijoin keeps the rows whose id is NOT in the set; the certificate
+// takes `!contains(B, v)` exactly as `contains(B, v)` (and `&&` with a pure,
+// total cell test). Two companions share the one selection. Integer-valued
+// amounts: every sum exact.
+type Row = Idx<2003>
+type Ev = Idx<101>
+let elig = method_for(range<Ev>) <@> lambda(e) -> (Int64(e) * 199) % 20011 |> compute
+let cust = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 7919 + 13) % 20011 |> compute
+let amt = method_for(range<Row>) <@> lambda(i) -> Float64((Int64(i) * 31) % 1000) |> compute
+let drop = mask(cust, lambda(c) -> !contains(elig, c) && c > 100)
+let z = compound(amt, drop)
+let zsum = reduce(z, (+)) + Float64(extents(z))
+// EXPECT: zsum = 986205.0
+// EXPECT: zsum = 986205.0
+let zid = compound(cust, drop)
+let zidn = extents(zid)
+// EXPECT: zidn = 1982

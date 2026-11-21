@@ -10,9 +10,9 @@ let static SA = [(0, 0, 1), (1, 1, 1)]
 let static TPS = ml.tp_spec(SA, SA)
 let static WS = ml.sym_tp_weight_dim(SA)
 
-function bad(xbad: Array<Float like Idx<4>>, y: Array<Float like IrrepsIdx<SA>>,
-             w: Array<Float like Idx<WS>>)
-             where ml.equiv(O3) -> Array<Float like IrrepsIdx<TPS>> =
+function bad(xbad: Array<Float64 like Idx<4>>, y: Array<Float64 like IrrepsIdx<SA>>,
+             w: Array<Float64 like Idx<WS>>)
+             where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<TPS>> =
   ml.derive_sym_tp(SA, xbad, y, w)
 
-let out: Array<Float like IrrepsIdx<TPS>> = bad([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0])
+let out: Array<Float64 like IrrepsIdx<TPS>> = bad([1.0, 2.0, -0.5, 0.25], [-0.75, 0.5, 1.5, -2.0], [0.3, -0.7, 1.1, 0.9, -1.3, 0.4, 2.0])

@@ -1,0 +1,23 @@
+// TEST: An alias taken in a range bound keeps a module mut out of copy in place
+// ============================================================================
+// Round 4 wave 7 (lane c, gap G220; the class found by the Codex design review
+// 5909d69a): an assignment or alias hidden in a TYPE-CARRIED expression -- a
+// range bound `0..{ t = a; 3 }`, which the C++ lane evaluates -- was invisible
+// to the C++ ownership scans (they followed expression children only).
+// Copy in place: `saved = stg` in a range bound made saved share stg's pool;
+// copy in place then overwrote that pool in step(), changing saved.
+// The scans now read every expression a type carries (embeddedExtentExprs).
+// ============================================================================
+type I = Idx<3>
+let mut stg: Array<Float64 like I> = [0.0, 0.0, 0.0]
+let mut saved: Array<Float64 like I> = [0.0, 0.0, 0.0]
+let n = extents(0..{ saved = stg; 3 })
+function step() -> Float64 = {
+    let t: Array<Float64 like I> = [10.0, 20.0, 30.0]
+    stg = t
+    stg(0)
+}
+let value = step()
+let old = saved(0) + Float64(n)
+// EXPECT: value = 10.0
+// EXPECT: old = 3.0

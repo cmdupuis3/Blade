@@ -1,0 +1,15 @@
+// TEST: Memfree Inline Sparse Gather Bound By A Kernel-Local Let
+// A kernel body that names an inline partial sparse read with a block `let`
+// (`{ let row = F((i, _)); ... }`) renders as an expression-position let: the
+// gather is bound once at the scalar consumer (N7), the let aliases that one
+// buffer, and it is freed once when the cell's value is computed. The values
+// are the gathers' contents.
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+type E = Idx<4>
+let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]
+let F = sparse(flat, K)
+let v = method_for(0..3) <@> lambda(i) -> {
+    let row = F((i, _))
+    row(0) * 2.0 + Float64(extents(row))
+} |> compute
+// EXPECT: v = [6.0, 7.0, 3.0]

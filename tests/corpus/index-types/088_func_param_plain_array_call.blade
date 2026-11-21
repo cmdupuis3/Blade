@@ -5,6 +5,6 @@
 // "too few arguments" C++ error. Argument-driven companion-passing fixes
 // both ragged and non-ragged calls.
 function arraySum(A: Array<Float64 like Idx<3>>) -> Float64 = reduce(A, (+))
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let result = arraySum(A)
 // EXPECT: result = 6.0

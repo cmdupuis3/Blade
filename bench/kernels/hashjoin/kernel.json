@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "name": "hashjoin",
+  "group": "B",
+  "title": "inner equijoin of two keyed tables, the relation stored (inline T2 spelling: stable CSR over the right keys, left-major / right-minor probe)",
+  "sizes": {
+    "smoke": {
+      "n": 211,
+      "m": 101,
+      "k": 41
+    },
+    "full": {
+      "n": 2003,
+      "m": 1009,
+      "k": 401
+    }
+  },
+  "regimes": [
+    "serial-licensed-native",
+    "serial-repro-native"
+  ],
+  "inputonly": true,
+  "expected_llvm": "fallback",
+  "expected_llvm_reason": "the LLVM lane refuses a rank-2 compound (the hash equijoin is C++ v1, `hash-join` records `declined -- llvm lane: the hash equijoin is not built in this lane (v1.1)`); the program falls back to the C++ lane, so blade-llvm runs the C++ build",
+  "hypothesis": {
+    "natural": "WIN ~10-20x at the pilot (natural: two N x M nested comparison loops; Blade: O(N + M + J) CSR build, counting pass and probe)",
+    "expert": "LOSS ~0.75-0.9 at the pilot (expert: the same counting-sort CSR with total and fingerprint FUSED into the probe; Blade: the consumer folds stay at their own sites -- a separate total pass and a separate serial fingerprint chain over the stored relation -- and the CSR measures the key span instead of trusting the generated domain)"
+  },
+  "notes": "Round 3 wave 3 (W3-2, item T2, gap G72). PILOT size only: the 'full' entry here is the research pilot (N 2003, M 1009, K 401, P = N x M = 2,021,027 pairs, J = 5000 matches for these seeds -- uniform keys, E[J] = P / K ~ 5040); the research full size (N 100,003, M 20,011, K 10,007) is NOT benched this wave (the as-written six-pass OLD form would need ~16 GB of payload pool there). Named output: the relation `matched` (J cells, lex order), stored in every arm (store-AUDITED in the optimized code of blade-cpp and both gfortran tiers, spec.md 'Store audit'; ifx NOT audited); scalar outputs match_count, total, fp (the order fingerprint, (3 a + b) mod 1000000007 left fold -- exact, non-overflowing in every language: review B/13); checksum = total + J + fp (exact integers). Integer data throughout: licensed and repro are the same arithmetic (both regimes kept to show it). Serial only: a legal OUTPUT-OWNED threaded form exists (per-left-row output offsets from the counting pass, each thread storing its own rows' cells), but Blade's v1 is serial, so no mt8 arm. Input share at the pilot ~35-45% of the expert's region: inputonly twin per arm. The OLD Blade form (BLADE_HASH_JOIN=0) is the six passes over all P pairs (~41 MB table traffic, ~20.7 MB live pools, measured peak WS +20 MiB); NEW: O(N + M + J), ~51 KB live during construction; complete kernel 22,434 operations / 414 KB source-logical traffic vs the expert's 21,826 / 230 KB (spec.md cost table). Timings are bc3ddac9's emission; the overflow guards are not re-timed; OLD/NEW 108x is not an audited ratio (OLD unaudited). DROP criterion: the TOTAL-region expert / NEW ratio (directional 0.84 > 0.8, provisional); the input-net 0.75 is reported, not the criterion.",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "gfortran-natural",
+    "gfortran-expert",
+    "ifx-natural",
+    "ifx-expert"
+  ],
+  "parallel_notes": {
+    "blade-cpp": "serial (no mt8 arm): the CSR build, the counting pass and the probe are serial in v1",
+    "gfortran-expert": "serial (no mt8 arm); the output-owned threaded probe is legal but not built in any arm"
+  },
+  "source_of_truth": "bench/kernels/hashjoin/spec.md (round 3, W3-2, 2026-10-21)"
+}

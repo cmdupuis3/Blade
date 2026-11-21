@@ -1,0 +1,13 @@
+// TEST: Diag Empty Struct Pattern Is Nominal (rejects)
+// Deep review R1 (Codex review): the nominal rule for a declared EMPTY struct: `E {}` used to match any value
+// (no fields to compare, so the check was skipped). A struct pattern names a
+// type; a P is not an E.
+// ERROR: BL3004
+// ERROR-CONTAINS: Pattern 'E { ... }' incompatible with type P
+struct E {}
+struct P {
+    a: Float64
+}
+let p = P { a = 3.0 }
+let z = match p with
+    | E {} -> 99

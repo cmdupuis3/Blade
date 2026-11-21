@@ -2,11 +2,11 @@
 // Constrained construction inside a function body is guarded too (this
 // hole existed before: only module-level literals were validated).
 struct Balanced {
-    a: Int,
-    b: Int,
-    total: Int
+    a: Int32,
+    b: Int32,
+    total: Int32
 } where a + b == total
-function mk(a: Int, b: Int) -> Balanced = {
+function mk(a: Int32, b: Int32) -> Balanced = {
     let r = Balanced { a = a, b = b, total = a + b }
     r
 }

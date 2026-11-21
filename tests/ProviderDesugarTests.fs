@@ -1,4 +1,5 @@
-// Unit pins for src/ProviderDesugar.fs -- the icechunk `checkout` desugar.
+// Unit pins for src/ProviderDesugar.fs -- the icechunk `checkout` desugar
+// and the masked read (`alias.read_present` / `alias.present`, at the end).
 //
 // Fully hermetic and in-process: the pass is a raw-AST -> raw-AST rewrite, so
 // every case here is parse -> expand -> assert on the resulting nodes. No
@@ -497,7 +498,7 @@ let ck = repo.checkout("v1.0", z.tag)
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let ck = repo.checkout("main")
     x
 }
@@ -509,7 +510,7 @@ function pick(x: Float) -> Float = {
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = repo.checkout("main")
+function pick(x: Float64) -> Float64 = repo.checkout("main")
 """
      positional "checkout as a whole function body" src)
 
@@ -581,7 +582,7 @@ let ck = repo.checkout(name)
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(repo: Float) -> Float = {
+function pick(repo: Float64) -> Float64 = {
     let ck = repo.checkout("main")
     repo
 }
@@ -595,7 +596,7 @@ function pick(repo: Float) -> Float = {
 import icechunk as ic
 
 let repo = ic.load("r")
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let repo = 1.0
     let ck = repo.checkout("main")
     x
@@ -612,13 +613,103 @@ import icechunk as ic
 
 let repo = ic.load("r")
 let other = 42
-function pick(x: Float) -> Float = {
+function pick(x: Float64) -> Float64 = {
     let ck = other.checkout("main")
     x
 }
 """
      let ds = diagsOf src
      check "a non-handle receiver in a function body is not flagged" (List.isEmpty ds) $"%A{ds}")
+
+    // ---------------------------------------------------------------
+    // The MASKED READ (`alias.read_present` / `alias.present`): one hidden
+    // raw read, an in-language mask over the variable's missing-value rule,
+    // and (read_present) a compound. Needs the provider REGISTRY (the alias
+    // must name a registered provider) and the CSV store for the rule -- CSV
+    // is pure F#, so this still never skips.
+    // ---------------------------------------------------------------
+    Blade.ProviderStatics.install ()
+    let msCsv = "tests/fixtures/csv_files/ms_nan.csv"
+    let declNames (p: Program) =
+        p.Modules |> List.collect (_.Decls) |> List.choose (fun d ->
+            match d.Value with
+            | DeclLet b -> (match b.Pattern.Kind with PatternKind.PatVar n -> Some n | _ -> None)
+            | _ -> None)
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nlet t = obs.vars.data |> c.read_present\n"
+     match ProviderDesugar.expand (parse src) with
+     | Error ds -> check "read_present: expands" false $"%A{ds}"
+     | Ok p ->
+         check "read_present: raw read, mask, compound -- in that order, the user's name last"
+             (declNames p = [ "obs"; "__present_raw_t"; "__present_mask_t"; "t" ]) $"%A{declNames p}"
+         check "read_present: the raw read uses the unspellable verb"
+             (match (valueOf p "__present_raw_t").Kind with
+              | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar "c" }, v) }, [ _ ]) -> v = ProviderDesugar.rawReadVerb
+              | _ -> false) ""
+         check "read_present: the mask is mask(raw, lambda) over the rule (NaN/Inf -> y - y == 0.0)"
+             (match (valueOf p "__present_mask_t").Kind with
+              | ExprKind.ExprMask ({ Kind = ExprKind.ExprVar "__present_raw_t" },
+                                   { Kind = ExprKind.ExprLambda ([ _ ], None, { Kind = ExprKind.ExprBinOp (_, OpEq, { Kind = ExprKind.ExprBinOp (_, OpSub, _, _) }, _) }) }) -> true
+              | _ -> false) (sprintf "%A" (valueOf p "__present_mask_t").Kind)
+         check "read_present: t = compound(raw, mask)"
+             (match (valueOf p "t").Kind with
+              | ExprKind.ExprCompound ({ Kind = ExprKind.ExprVar "__present_raw_t" }, { Kind = ExprKind.ExprVar "__present_mask_t" }) -> true
+              | _ -> false) ""
+         check "read_present: idempotent (a second expand is a no-op)"
+             (match ProviderDesugar.expand p with Ok p2 -> declNames p2 = declNames p | Error _ -> false) "")
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nlet ok = c.present(obs.vars.data)\n"
+     match ProviderDesugar.expand (parse src) with
+     | Error ds -> check "present: expands" false $"%A{ds}"
+     | Ok p ->
+         check "present: raw read, then the mask under the user's name"
+             (declNames p = [ "obs"; "__present_raw_ok"; "ok" ]) $"%A{declNames p}"
+         check "present: ok = mask(raw, lambda)"
+             (match (valueOf p "ok").Kind with
+              | ExprKind.ExprMask ({ Kind = ExprKind.ExprVar "__present_raw_ok" }, _) -> true
+              | _ -> false) "")
+    // ONE hidden raw read per (provider, path, variable) (deep review R8),
+    // under a whole-program verb (ProviderDesugar.withRawReadSharing): both masked forms of one variable -- or one form bound twice, or two
+    // store bindings of one path -- read the FIRST site's raw binding, so the
+    // store is read once and `blade plan` lists the variable once. A
+    // declaration between them that may WRITE a store (any provider verb but
+    // a pure read) keeps the later site's own read.
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nlet vals = obs.vars.data |> c.read_present\nlet ok = obs.vars.data |> c.present\nlet again = c.present(obs.vars.data)\nlet obs2 = c.load(\"" + msCsv + "\")\nlet more = obs2.vars.data |> c.read_present\n"
+     // The test helpers' default is the fail-closed side: no sharing.
+     (match ProviderDesugar.expand (parse src) with
+      | Ok p ->
+          check "masked reads share nothing by default (no whole-program verb): one raw read each"
+              (declNames p |> List.filter (fun n -> n.StartsWith "__present_raw_") = [ "__present_raw_vals"; "__present_raw_ok"; "__present_raw_again"; "__present_raw_more" ])
+              $"%A{declNames p}"
+      | Error ds -> check "masked reads by default: expands" false $"%A{ds}")
+     match ProviderDesugar.withRawReadSharing (fun () -> ProviderDesugar.expand (parse src)) with
+     | Error ds -> check "masked reads of one variable: expands" false $"%A{ds}"
+     | Ok p ->
+         check "masked reads of one variable share ONE raw read, at the first site"
+             (declNames p = [ "obs"; "__present_raw_vals"; "__present_mask_vals"; "vals"; "ok"; "again"; "obs2"; "__present_mask_more"; "more" ])
+             $"%A{declNames p}"
+         check "the later masks read the first site's raw binding"
+             ([ "ok"; "again"; "__present_mask_more" ] |> List.forall (fun n ->
+                 match (valueOf p n).Kind with
+                 | ExprKind.ExprMask ({ Kind = ExprKind.ExprVar "__present_raw_vals" }, _) -> true
+                 | _ -> false)) ""
+         check "the later compound reads the first site's raw binding"
+             (match (valueOf p "more").Kind with
+              | ExprKind.ExprCompound ({ Kind = ExprKind.ExprVar "__present_raw_vals" }, { Kind = ExprKind.ExprVar "__present_mask_more" }) -> true
+              | _ -> false) "")
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nlet vals = obs.vars.data |> c.read_present\nlet _ = c.write(\"tests/fixtures/csv_files/ms_shared_out.csv\", [1.0, 2.0])\nlet ok = obs.vars.data |> c.present\n"
+     match ProviderDesugar.withRawReadSharing (fun () -> ProviderDesugar.expand (parse src)) with
+     | Error ds -> check "masked reads across a provider write: expands" false $"%A{ds}"
+     | Ok p ->
+         check "a provider write between two masked reads keeps the later site's own raw read"
+             (declNames p = [ "obs"; "__present_raw_vals"; "__present_mask_vals"; "vals"; "__present_raw_ok"; "ok" ])
+             $"%A{declNames p}")
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nfunction f(k: Float64) -> Float64 = {\n    let t = obs.vars.data |> c.read_present\n    k\n}\n"
+     let ds = diagsOf src
+     check "read_present inside a function body is refused (BL3007, positional)"
+         (ds |> List.exists (fun (code, msg) -> code = "BL3007" && msg.Contains "not in a position a masked read")) $"%A{ds}")
+    (let src = "import csv as c\nlet obs = c.load(\"" + msCsv + "\")\nlet d = obs.vars.data |> c.read\nlet t = d |> c.read_present\n"
+     let ds = diagsOf src
+     check "read_present of a non-store operand is refused (BL3007, operand)"
+         (ds |> List.exists (fun (code, msg) -> code = "BL3007" && msg.Contains "store.vars.<name>")) $"%A{ds}")
 
     // ---------------------------------------------------------------
     // Summary

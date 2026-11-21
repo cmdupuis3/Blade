@@ -1,0 +1,3 @@
+# Distributable raw-byte identities; do not normalize the frozen B04 evidence.
+frozen/** -text
+frozen-manifest.json -text

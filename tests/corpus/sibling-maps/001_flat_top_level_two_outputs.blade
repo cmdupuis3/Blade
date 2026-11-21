@@ -1,0 +1,14 @@
+// TEST: Sibling Maps Share One Flat Sweep At Top Level
+// ============================================================================
+// Two stored co-iterations over the same x and w (bench PM04): the planner
+// (`sibling-maps v1`, BLADE_SIBLING_MAPS) fuses them at the LAST sibling --
+// y1's allocation stays at its own statement, its loop moves down to y2's,
+// and one flat sweep writes both outputs, each cell its own kernel. Both
+// outputs stay stored and print. Values are the knob-off build's.
+type I = Idx<7>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let w: Array<Float64 like I> = [0.5, 0.25, 2.0, 1.0, 4.0, 0.125, 8.0]
+let y1 = method_for(zip(x, w)) <@> lambda(a, b) -> a * b + 1.0 |> compute
+let y2 = method_for(zip(x, w)) <@> lambda(a, b) -> a - b * 3.0 |> compute
+// EXPECT: y1 = [1.5, 1.5, 7.0, 5.0, 21.0, 1.75, 57.0]
+// EXPECT: y2 = [-0.5, 1.25, -3.0, 1.0, -7.0, 5.625, -17.0]

@@ -7,9 +7,9 @@ import ad as ad
 
 type R = Idx<4>
 
-function total(x: Array<Float64 like RaggedIdx<_>>) -> Float = reduce(x, (+))
+function total(x: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(x, (+))
 
-function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float64 = {
     let gk = group_keys(k)
     let g = group_by(v, gk)
     let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute

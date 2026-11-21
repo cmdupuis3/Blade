@@ -75,10 +75,10 @@
 (* hypotheses are load-bearing and why BladeMomentClosure's rank bounds  *)
 (* restrict to polynomial encodings instead.                             *)
 (*                                                                       *)
-(* No imports from the tower.  Coq 8.18, stdlib only.                    *)
+(* No imports from the tower.  Rocq 9.0, stdlib only.                    *)
 (* ===================================================================== *)
 
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ===================================================================== *)
@@ -466,7 +466,7 @@ Section Nerode.
       length l <= length zs.
   Proof.
     intros G hb c zs Hall l Hnd Ha Hd.
-    rewrite <- (map_length q l). apply NoDup_incl_length.
+    rewrite <- (length_map q l). apply NoDup_incl_length.
     - apply (distinguishable_summaries_distinct G hb c l Hnd Ha Hd).
     - intros z _. apply Hall.
   Qed.
@@ -528,7 +528,7 @@ Theorem countdown_needs_n_values : forall (Z : Type) (q : nat -> Z) G hb
   (forall z, In z zs) -> n <= length zs.
 Proof.
   intros Z q G hb zs n c Hall.
-  rewrite <- (seq_length n 0).
+  rewrite <- (length_seq n 0).
   apply (summary_card_lower_bound unit nat Z bool countdown q at_zero
            (fun _ => True) G hb c zs Hall).
   - apply seq_NoDup.
@@ -597,7 +597,7 @@ Section Dag.
     length (evalN KK d n) = n.
   Proof.
     induction n as [|n IH]; simpl; [reflexivity|].
-    rewrite app_length, IH. simpl. lia.
+    rewrite length_app, IH. simpl. lia.
   Qed.
 
   Theorem summary_dag_sound : forall n v, v < n ->

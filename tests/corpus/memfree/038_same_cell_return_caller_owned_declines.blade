@@ -1,0 +1,14 @@
+// TEST: Same-cell return declines over caller-owned storage
+// PM03 (A06): the return reads the FORMAL x, which the caller owns; there is
+// no fresh local donor, so both lanes keep the fresh result pool.
+type Ix = Idx<7>
+function caller_owned(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let old_sum = reduce(x, (+))
+    x * 0.5 + old_sum
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let a = caller_owned(x)
+let sa = reduce(a, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: a = [21.0, 21.5, 22.0, 22.5, 23.0, 23.5, 24.0]
+// EXPECT: sa = 157.5

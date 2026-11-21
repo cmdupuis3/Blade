@@ -145,7 +145,7 @@ let private memoTypeAgrees (cachedTy: IRType) (nowTy: IRType) : bool =
 /// env-free the conservative answer is to recompute them.
 let rec private memoizableValue (v: Value) : bool =
     match v with
-    | VInt _ | VInt32 _ | VFloat _ | VFloat32 _ | VComplex _
+    | VInt _ | VInt32 _ | VFloat _ | VFloat32 _ | VComplex _ | VComplex64 _
     | VBool _ | VString _ | VChar _ | VUnit -> true
     | VArray _ -> true
     | VTuple vs -> Array.forall memoizableValue vs
@@ -402,6 +402,12 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 // sizes the store from cellCountChecked (the same fold that
                 // validated shape[0] at metadata parse), so a length disagreement
                 // here is the store lying about its own class.
+                // The boundary rule over the pool (BL8015), as the compiled
+                // reader's assembly tallies it.
+                (match Blade.ProviderRegistry.checkPayload (pspec.MissingRuleOf spec.FilePath spec.VarName)
+                                                          spec.VarName spec.FilePath data.DimLengths data.Payload with
+                 | Some refusal -> raise (InterpPanic ("BL8015", refusal, None, 0))
+                 | None -> ())
                 let arr = ArrayOps.allocWreath spec.VarType.ElemType spec.VarType.IndexTypes levels n
                 let cells = ArrayOps.wreathCellCount arr
                 let got = data.DimLengths |> List.fold (*) 1
@@ -459,13 +465,28 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                                             $"NetCDF variable '{spec.VarName}' in '{spec.FilePath}' has dimension {d} of length {o} at run time; the program was compiled against {n}",
                                             None, 0))
                     | _ -> ())
+                // The provider boundary rule (BL8015), the compiled readers'
+                // twin: the same rule record, the same sentence. The masked
+                // read's raw half (AllowMissing) is exempt -- its mask is
+                // derived from these cells in-language.
+                if not spec.AllowMissing then
+                    match Blade.ProviderRegistry.checkPayload (pspec.MissingRuleOf spec.FilePath spec.VarName)
+                                                             spec.VarName spec.FilePath data.DimLengths data.Payload with
+                    | Some refusal -> raise (InterpPanic ("BL8015", refusal, None, 0))
+                    | None -> ()
                 let extents = observed |> Array.ofList
                 let store =
                     match ArrayOps.elemThrough arrTy.ElemType, data.Payload with
-                    | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PFloats xs -> SFloat xs
-                    | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PInts xs -> SFloat (xs |> Array.map float)
-                    | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PInts xs -> SInt xs
-                    | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PFloats xs -> SInt (xs |> Array.map int64)
+                    | Some ETFloat64, Blade.ProviderRegistry.PFloats xs -> SFloat xs
+                    | Some ETFloat64, Blade.ProviderRegistry.PInts xs -> SFloat (xs |> Array.map float)
+                    | Some ETInt64, Blade.ProviderRegistry.PInts xs -> SInt xs
+                    | Some ETInt64, Blade.ProviderRegistry.PFloats xs -> SInt (xs |> Array.map int64)
+                    // Float32 / Int32 elements: the cell the compiled lane's
+                    // `float` / `int32_t` pool holds (one rounding / a wrap).
+                    | Some ETFloat32, Blade.ProviderRegistry.PFloats xs -> SFloat32 (xs |> Array.map float32)
+                    | Some ETFloat32, Blade.ProviderRegistry.PInts xs -> SFloat32 (xs |> Array.map float32)
+                    | Some ETInt32, Blade.ProviderRegistry.PInts xs -> SInt32 (xs |> Array.map int32)
+                    | Some ETInt32, Blade.ProviderRegistry.PFloats xs -> SInt32 (xs |> Array.map int32)
                     | _ ->
                         raise (Core.InterpUnsupported
                                 $"provider read of '{spec.VarName}' into a non-numeric element type")
@@ -507,7 +528,9 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // frames before any binding evaluates.
     state.Global <- Some root
     for m in program.Modules do
-        for b in m.Bindings do
+        // A print-replay binding (rec-print-replay v1) is the C++ lane's
+        // schedule for x's print; the interpreter keeps x's full buffer.
+        for b in m.Bindings |> List.filter (fun b -> not (Blade.IR.isRecReplayBinding b)) do
           // A memo hit adopts the cached value and SKIPS the initializer --
           // the whole point of the cache. The type guard is load-bearing:
           // Blade infers across the whole session, so a later cell can pin an
@@ -517,7 +540,14 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
           // means, and why it is not `=`).
           let framesBefore = Blade.Display.Frame.emitted ()
           let producedBefore = Blade.Display.Frame.producedCount ()
-          match Map.tryFind b.Name memoIn.Values with
+          // A binding an optimizer pass SYNTHESIZED (filed in
+          // DerivedFuncOrigins: the top-level sibling-fold carriers `__sfj<id>`)
+          // is never adopted from the memo: its name derives from an IR id, so
+          // after a later cell shifts the ids the same name may hold another
+          // computation (round 4 wave 9, lane A, A4, Codex 0d750baf member 1:
+          // `c = 6.0` for 14.0).
+          let synthesized = Map.containsKey b.Id m.DerivedFuncOrigins
+          match (if synthesized then None else Map.tryFind b.Name memoIn.Values) with
           | Some (cachedTy, cachedV) when memoTypeAgrees cachedTy b.Type
                                           && (not (Set.contains b.Name memoIn.FrameEmitters)
                                               || Map.containsKey b.Name memoIn.Frames) ->
@@ -544,6 +574,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
             // main()-locals); the intercept order mirrors CodeGen.genBinding's
             // dispatch (ProviderReads, ProviderWrites, RandomInits, CompoundInits).
             let v =
+              try
                 match Map.tryFind b.Id m.ProviderReads with
                 | Some spec ->
                     materializeProviderRead state b spec
@@ -581,6 +612,16 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
                             Loops.materializeSparseBinding state root b valuesExpr
                         | None ->
                             Core.evalBinding state root b
+              with
+              // A runtime GUARD (shape / extent / key / empty reduce) carries no
+              // expression span; the compiled lane locates it at the declaration
+              // being emitted (CodeGenState.declPanicArgs), so this lane names
+              // the top-level binding being evaluated -- when lowering recorded
+              // its span in this flow. Otherwise it stays unlocated, as before.
+              | InterpPanic (code, msg, None, 0)
+                    when (let s = Blade.IR.declSpanOf b.Name in s.StartLine > 0 && s.File.IsSome) ->
+                  let s = Blade.IR.declSpanOf b.Name
+                  raise (InterpPanic (code, msg, s.File, s.StartLine))
             envBind root b.Id v |> ignore
             if Blade.Display.Frame.emitted () > framesBefore then
                 frameEmitters.Add b.Name |> ignore
@@ -590,11 +631,28 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // which bindings render and in what order/format (iostream parity), and
     // emits the leading "<name> completed in 0s" timing line (the gate strips
     // timing lines on both sides).
+    // ALIAS CLASSES (gap G60, formalism 10.2; IRLift.deferredAliasClasses, the
+    // classification the compiled lanes' print passes share): a deferred map
+    // and its top-level aliases are ONE value, so once any member was forced
+    // at module level every member prints, with that member's cells (a write
+    // through any member is refused at lowering, so they are the same cells).
+    let aliasClasses =
+        Blade.IRLift.deferredAliasClasses merged.Bindings (Blade.CodeGen.computeDeferredIds merged.Bindings)
+    let forcedOwn = System.Collections.Generic.HashSet<IRId>(state.ForcedDeferred)
+    aliasClasses |> Map.iter (fun m cls ->
+        if cls |> List.exists forcedOwn.Contains then state.ForcedDeferred.Add m |> ignore)
     let lookup (id: IRId) : Value option =
-        match envTryFind root id with
-        | Some cell -> Some cell.V
-        | None -> None
-
+        let own = match envTryFind root id with Some cell -> Some cell.V | None -> None
+        match own, Map.tryFind id aliasClasses with
+        | Some (VDeferred _), Some cls when state.ForcedDeferred.Contains id ->
+            cls |> List.tryPick (fun m ->
+                if forcedOwn.Contains m then
+                    match envTryFind root m with
+                    | Some cell when not cell.V.IsVDeferred -> Some cell.V
+                    | _ -> None
+                else None)
+            |> Option.orElse own
+        | _ -> own
     let sb = StringBuilder()
     // Frames first, one whole line each at column 0 -- the position the
     // compiled binary puts them in (main()'s body precedes the timing line and
@@ -622,7 +680,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // extending keeps its whole prefix warm.
     let outValues =
         program.Modules
-        |> List.collect _.Bindings
+        |> List.collect (fun m -> m.Bindings |> List.filter (fun b -> not (Map.containsKey b.Id m.DerivedFuncOrigins)))
         |> List.fold (fun acc b ->
             match envTryFind root b.Id with
             | Some cell when memoizableValue cell.V
@@ -653,6 +711,10 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
                    (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
     Blade.Runtime.runOnLargeStack (fun () ->
+        // The program's declaration spans (lowering attached them, gap G76):
+        // this flow may not be the one that lowered (the interpreter
+        // differential runs it in a Task), and the guard locator reads them.
+        Blade.IR.installDeclSpansOf program
         // Build the interpreter state OUTSIDE execProgram but capture it in a ref
         // the panic handler can read: on an escaping InterpPanic we render the
         // shadow-stack frames still live in the state (evalCall never pops on

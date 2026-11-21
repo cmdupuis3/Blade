@@ -5,5 +5,5 @@
 // instantiations resolve to the same concrete type.
 function id(x: T) -> T = x
 function twiceId(x: T) -> T = id(id(x))
-let r = twiceId(100)
+let r = twiceId(Int64(100))
 // EXPECT: r = 100

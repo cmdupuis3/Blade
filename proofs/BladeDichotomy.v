@@ -6,7 +6,8 @@
 (* sign.  This file closes the question that file left open -- higher    *)
 (* ranks involve mixed symmetry types -- NEGATIVELY at r = 3, and pins   *)
 (* the repair.  Prose development with the general-r statements:         *)
-(* the rank-dichotomy document (2026-08-02); the general theorem is      *)
+(* the rank-dichotomy document (2026-08-02), now mechanized at every r   *)
+(* in BladeDichotomyGeneral; the general theorem is                      *)
 (* that the minimal width of a scalar-access per-dimension-canonical     *)
 (* scheme is r! (the fiber over a free canonical cell carries the        *)
 (* regular representation; scalar weights invert only 1x1 blocks; S_r    *)
@@ -36,11 +37,11 @@
 (*    generalization of cauchy_cell_count.                               *)
 (*                                                                       *)
 (* Division-free throughout (factors 2 and 6 exhibited, never divided;   *)
-(* the BladeCauchy / BladeSymPower discipline).  Self-contained; Coq     *)
-(* 8.18 / Rocq 9.0, stdlib only, no axioms.                              *)
+(* the BladeCauchy / BladeSymPower discipline).  Self-contained;         *)
+(* Rocq 9.0, stdlib only, no axioms.                                     *)
 (* ===================================================================== *)
 
-Require Import List Arith Lia ZArith Psatz Ring.
+From Stdlib Require Import List Arith Lia ZArith Psatz Ring.
 Import ListNotations.
 Open Scope Z_scope.
 
@@ -379,7 +380,10 @@ Qed.
 
 (* --- C(i): the six-component scheme, abstract values ------------------ *)
 (* Store P_mu(a,b) = T(a ++ pact mu b) for the six mu; read T at any     *)
-(* index (pact s a ++ pact t b) as P_{pmul (pinv s) t}(a, b).  The       *)
+(* index (pact s a ++ pact t b) as P_{pmul t (pinv s)}(a, b) -- in that  *)
+(* order: S3 does not commute, and the reversed product pmul (pinv s) t  *)
+(* reads the wrong cell (audit 2026-10-15, F01: s = [1;0;2],             *)
+(* t = [1;2;0] gives 0 instead of 1 on a symmetric indicator).  The      *)
 (* identity below IS that scheme's soundness at every index, free or     *)
 (* tied, for values in ANY type: it is pure index algebra, the r = 3     *)
 (* instance of the document's Lemma 2.1 / Theorem 3.1 upper bound (the   *)
@@ -604,8 +608,9 @@ Proof. vm_compute. repeat split; reflexivity. Qed.
 (* CAN (Part C -- the m = r! scheme reconstructs everywhere, its         *)
 (* isotypic form reads through integer irrep matrices with the 6         *)
 (* exhibited, and the repaired store is exactly lossless in count).      *)
-(* The general-r statement (minimal width r!, with the (3,2,2)           *)
-(* tie-breaking exception) is the dichotomy document; general-r          *)
-(* mechanization would need a Coq development of Q[S_r] and is future    *)
-(* work, exactly as BladeWreath's general-r exactness.                   *)
+(* The general-r statement is mechanized in BladeDichotomyGeneral: the   *)
+(* minimal width is r! at every rank at a free cell (L, M >= r), with no *)
+(* Q[S_r] needed. Below the free cell, BladeDichotomyTies: the (3,2,2)   *)
+(* 'exception' is outside the r! premise. Only the ISOTYPIC form of the  *)
+(* repair (Part C's irrep rule) stays r = 3; at general r it needs Q[S_r]. *)
 (* ===================================================================== *)

@@ -27,18 +27,18 @@ let static WD = ml.hom_dim(SIN, SOUT)
 // EXPECT: WD = 4
 
 // SUGGEST: function 'layer_loose' judges equivariant under O3: add 'where ml.equiv(O3)' [signature: x transforms as IrrepsIdx<[(0, 0, 2), (1, 1, 1)]>, w invariant -> IrrepsIdx<[(0, 0, 1), (1, 1, 2)]>]
-function layer_loose(x: Array<Float like IrrepsIdx<SIN>>, w: Array<Float like Idx<WD>>)
-                     -> Array<Float like IrrepsIdx<SOUT>> =
+function layer_loose(x: Array<Float64 like IrrepsIdx<SIN>>, w: Array<Float64 like Idx<WD>>)
+                     -> Array<Float64 like IrrepsIdx<SOUT>> =
     ml.derive_linear(SIN, SOUT, w, x)
 
 // The pinned twin. No SUGGEST line: a function that already carries the
 // conjunct is not a candidate — it is CHECKED, which is the shipped path.
-function layer_tight(x: Array<Float like IrrepsIdx<SIN>>, w: Array<Float like Idx<WD>>)
-                     where ml.equiv(O3) -> Array<Float like IrrepsIdx<SOUT>> =
+function layer_tight(x: Array<Float64 like IrrepsIdx<SIN>>, w: Array<Float64 like Idx<WD>>)
+                     where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<SOUT>> =
     ml.derive_linear(SIN, SOUT, w, x)
 
-let wv = [0.5, 0.0 - 1.0, 2.0, 0.25]
-let xv = [1.0, 2.0, 3.0, 0.0 - 1.0, 0.5]
+let wv = Float64([0.5, 0.0 - 1.0, 2.0, 0.25])
+let xv = Float64([1.0, 2.0, 3.0, 0.0 - 1.0, 0.5])
 
 let loose = layer_loose(xv, wv)
 // EXPECT: loose = [-1.5, 6.0, -2.0, 1.0, 0.75, -0.25, 0.125]

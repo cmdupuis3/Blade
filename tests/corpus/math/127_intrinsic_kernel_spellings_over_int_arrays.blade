@@ -1,0 +1,46 @@
+// TEST: Every kernel spelling of a real intrinsic over an Int64 array is Float64
+// ============================================================================
+// R18 (deep review, one sub-point): formalism 2.4 -- a transcendental
+// intrinsic's INTEGER operand widens to double, and the scalar form types
+// `exp(x: Int64)` Float64. Lifted over an integer ARRAY the complex-capable
+// intrinsics (exp log sin cos tan sinh cosh tanh asin acos atan sqrt) typed
+// their kernel at the operand's own variable, so the result came out INTEGER:
+// g++ rejected the narrowing (BL9002) and the interpreter and LLVM lanes
+// printed truncated cells (exp([1, 4, 9]) = [2, 54, 8103]). The kernel
+// re-stamp in buildApplyInfo now types it Float64, each cell the scalar form's
+// value, in every lane.
+// ============================================================================
+// The lifted call is sugar for the kernel spelling, so the fix is made where
+// every spelling meets: the applied kernel's re-stamp (negation, arithmetic
+// between two such values, a block's let, a fold of the deferred map).
+Unit meters
+let a: Array<Int64 like Idx<3>> = [1, 4, 9]
+let k1 = method_for(a) <@> exp |> compute
+let k2 = method_for(a) <@> lambda(v) -> exp(v) |> compute
+let k3 = method_for(a) <@> lambda(v) -> { let e = exp(v); e } |> compute
+let k4 = method_for(a) <@> lambda(v) -> -sqrt(v) |> compute
+let k5 = method_for(a) <@> lambda(v) -> sqrt(v) + sqrt(v) |> compute
+let k6 = method_for(zip(a, a)) <@> lambda(u, v) -> sqrt(u) * sqrt(v) |> compute
+let k7 = reduce(method_for(a) <@> lambda(v) -> sqrt(v), (+))
+let d = exp <@> a
+let k8 = reduce(d, (+))
+let k9 = a |> sqrt
+let k10 = exp(sqrt(a))
+let k11 = sqrt([1, 4, 9])
+let m: Array<Int64 like Idx<2>, Idx<2>> = [[1, 4], [9, 16]]
+let k12 = sqrt(m)
+let am: Array<Int64<meters ^ 2> like Idx<3>> = [1, 4, 9]
+let k13 = sqrt(am)
+// EXPECT: k1 = [2.71828182845905, 54.5981500331442, 8103.08392757538]
+// EXPECT: k2 = [2.71828182845905, 54.5981500331442, 8103.08392757538]
+// EXPECT: k3 = [2.71828182845905, 54.5981500331442, 8103.08392757538]
+// EXPECT: k4 = [-1.0, -2.0, -3.0]
+// EXPECT: k5 = [2.0, 4.0, 6.0]
+// EXPECT: k6 = [1.0, 4.0, 9.0]
+// EXPECT: k7 = 6.0
+// EXPECT: k8 = 8160.40035943699
+// EXPECT: k9 = [1.0, 2.0, 3.0]
+// EXPECT: k10 = [2.71828182845905, 7.38905609893065, 20.0855369231877]
+// EXPECT: k11 = [1.0, 2.0, 3.0]
+// EXPECT: k12 = [[1.0, 2.0], [3.0, 4.0]]
+// EXPECT: k13 = [1.0, 2.0, 3.0]

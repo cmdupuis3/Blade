@@ -39,11 +39,11 @@
 (* still undefined, so the adjunction itself remains a conjecture.       *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeShape, BladeTrinityAsym, BladeLowering.       *)
-(* Coq 8.18, stdlib only.                                                *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeShape BladeTrinityAsym BladeLowering.
-Require Import List Arith Lia.
+From Stdlib Require Import List Arith Lia.
 Import ListNotations.
 
 (* ---------------- list plumbing ---------------- *)
@@ -163,7 +163,7 @@ Proof.
   - destruct H as [<- | []]. reflexivity.
   - apply in_flat_map in H as (th & Hth & Hm).
     apply in_map_iff in Hm as (tr & <- & Htr).
-    rewrite app_length.
+    rewrite length_app.
     apply enum_sound in Hth. apply canonical_length in Hth.
     rewrite Hth. f_equal. apply IH. exact Htr.
 Qed.

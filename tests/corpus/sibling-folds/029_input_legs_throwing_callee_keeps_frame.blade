@@ -1,0 +1,26 @@
+// TEST: A producer callee that may fail is not inlined for the input legs, and fails in its own frame (aborts)
+// The B1 shape of saxpy, but `kernel`'s body also divides by a value that is
+// zero at run time. Inlining it for the legs would move that failure out of
+// kernel's frame; the sibling pass's inliner refuses a callee whose body may
+// fail, so the epilogue-legs admission never sees a producer in the caller's
+// region: the call stays, the legs keep their joined pass, and BL8013 fires in
+// `kernel` at its own line (line 14 once the harness drops the TEST line).
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, z0: Int64) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    let q = 10 / z0
+    s + Float64(q)
+}
+let (s, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let z0 = Int64(floor(x((0 : Ix))))
+    (kernel(x, y, z0), reduce(x, (+)) + reduce(y, (+)))
+}
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:14

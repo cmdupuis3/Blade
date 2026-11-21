@@ -10,13 +10,13 @@
 // ============================================================================
 function first_at(P: Poly<T^1>, k: Int64) = P[0](k)
 function one_or(P: Poly<T^0>, fallback: T^0) -> T^0 = if arity(P) == 1 then P[0] else fallback
-let x = [1.0, 2.0, 3.0]
-let y = [4.0, 5.0, 6.0]
-let flat = first_at(x, y, 2)
-let grouped = first_at((y, x), 1)
-let single = first_at(y, 0)
-let n1 = one_or(7.0, 1.0)
-let n2 = one_or(7.0, 8.0, 1.0)
+let x = Float64([1.0, 2.0, 3.0])
+let y = Float64([4.0, 5.0, 6.0])
+let flat = first_at(x, y, Int64(2))
+let grouped = first_at((y, x), Int64(1))
+let single = first_at(y, Int64(0))
+let n1 = one_or(Float64(7.0), Float64(1.0))
+let n2 = one_or(Float64(7.0), Float64(8.0), Float64(1.0))
 // EXPECT: flat = 3.0
 // EXPECT: grouped = 5.0
 // EXPECT: single = 4.0

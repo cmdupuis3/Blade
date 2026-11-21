@@ -4,5 +4,5 @@ import ml as ml
 // v1 certifies boost-INVARIANT results only: returning the velocity itself
 // (BVar) is BL4009 (velocity-returning steppers are the documented v2
 // extension, alongside rational coefficient tracking).
-function bad(uc: Float, du: Float) where ml.galilean(uc) -> Float =
+function bad(uc: Float64, du: Float64) where ml.galilean(uc) -> Float64 =
   uc + du

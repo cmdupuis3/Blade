@@ -1,0 +1,36 @@
+// TEST: a mut parameter written through a row view; a plain parameter's copy written
+// R12 (deep review; formalism 2.7): the refused twins are 940-946. A `mut`
+// parameter may be written through a local view of it (the caller's array
+// changes: `touched`); a plain parameter may be COPIED (`let mut c = d`, a
+// deep copy in every lane) and the copy written (`g2` is unchanged); a whole
+// rebinding of a local view (`v = [..]`) leaves it a fresh array, so the
+// write after it reaches no parameter (`rebound`).
+type D = Array<Float64 like Idx<2>, Idx<3>>
+function touch(d: mut D) -> Float64 = {
+    let v = d(0)
+    v(1) = 7.0
+    0.0
+}
+let mut g: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let z = touch(g)
+let touched = g(0, 1)
+function copied(d: D) -> Float64 = {
+    let mut c = d
+    let v = c(0)
+    v(1) = 7.0
+    c(0, 1) + d(0, 1)
+}
+let g2: D = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let rc = copied(g2)
+function rebound(d: D) -> Float64 = {
+    let mut v = d(0)
+    v = [0.0, 0.0, 0.0]
+    v(1) = 7.0
+    v(1) + d(0, 1)
+}
+let rr = rebound(g2)
+let untouched = g2(0, 1)
+// EXPECT: touched = 7.0
+// EXPECT: rc = 9.0
+// EXPECT: rr = 9.0
+// EXPECT: untouched = 2.0

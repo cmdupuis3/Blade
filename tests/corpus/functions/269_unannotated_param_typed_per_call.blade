@@ -15,11 +15,11 @@
 // ============================================================================
 function inc(x) = x + 1
 function incf(x) = x + 1.0
-let a: Int64 = inc(6) / 4
-let b: Float64 = incf(2.5)
-let fv = 2.5
+let a: Int64 = inc(Int64(6)) / 4
+let b: Float64 = incf(Float64(2.5))
+let fv: Float64 = 2.5
 let c: Float64 = incf(fv)
-let d = inc([1, 2])
+let d = inc(Int64([1, 2]))
 // EXPECT: a = 1
 // EXPECT: b = 3.5
 // EXPECT: c = 3.5
@@ -27,8 +27,8 @@ let d = inc([1, 2])
 
 // No literal at all: the argument alone decides.
 function idf(x) = x
-let i1: Int64 = idf(3)
-let i2: Float64 = idf(2.5)
+let i1: Int64 = idf(Int64(3))
+let i2: Float64 = idf(Float64(2.5))
 // EXPECT: i1 = 3
 // EXPECT: i2 = 2.5
 
@@ -36,22 +36,22 @@ let i2: Float64 = idf(2.5)
 // in Float64.
 function half(x) = x / 2
 function halff(x) = x / 2.0
-let h1: Int64 = half(7)
-let h2: Float64 = halff(7.0)
+let h1: Int64 = half(Int64(7))
+let h2: Float64 = halff(Float64(7.0))
 // EXPECT: h1 = 3
 // EXPECT: h2 = 3.5
 
 // Two parameters mixed by arithmetic are one type variable (functions/274).
 function avg2(p, q) = (p + q) / 2
 function avg2f(p, q) = (p + q) / 2.0
-let v: Int64 = avg2(3, 6)
-let w: Float64 = avg2f(3.0, 6.0)
+let v: Int64 = avg2(Int64(3), Int64(6))
+let w: Float64 = avg2f(Float64(3.0), Float64(6.0))
 // EXPECT: v = 4
 // EXPECT: w = 4.5
 
 // A static function used at compile time and at run time.
 static function twice(x) = x * 2
-let static ct = twice(21)
+let static ct = twice(Int64(21))
 let rt: Int64 = twice(ct)
 // EXPECT: ct = 42
 // EXPECT: rt = 84

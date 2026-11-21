@@ -1,0 +1,14 @@
+// TEST: a static function's Float64 result handed through an alias to a parameter a later call makes Float32 (rejects)
+// ============================================================================
+// G275 / R28: a folded float static is a constant of its own width -- it
+// does not adapt as a literal does, whichever pass materializes it. The
+// later `h(Float32(2.0))` decides `v` as a Float32, so `d` would be narrowed
+// at the earlier alias call.
+// ============================================================================
+static function sf(x: Float64) -> Float64 = x * 2.0
+let static d = sf(1.5)
+let h = lambda(v) -> v
+let saved = h
+let a = saved(d)
+let b = h(Float32(2.0))
+// ERROR: BL3020

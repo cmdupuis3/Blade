@@ -163,6 +163,13 @@ let parseVariant (tokens: Token list) : ParseResult<VariantDecl> =
         | Some TokColon ->
             parseTypeExpr (advance afterName) >>= fun ty remaining ->
             success { Name = name; Data = Some ty } remaining
+        // The ML / Rust payload spelling `Circle(Float64)`. It used to fall
+        // through to the alias parser, which read `Circle` as a type and then
+        // refused the `(` as implicit multiplication (BL1001) -- a sentence
+        // about the wrong construct. Steer to Blade's spelling instead.
+        | Some TokLParen ->
+            let line, col = currentPos afterName
+            errorC "BL1004" $"a sum-type variant's payload is written with a colon, not parentheses: `{name} : Float64` (several values: `{name} : (Float64, Float64)` or a struct type), as in `type Shape = Circle : Float64 | Square : Float64`" line col
         | _ ->
             success { Name = name; Data = None } afterName
     | _ ->
@@ -210,6 +217,8 @@ let parseTypeDecl (tokens: Token list) : ParseResult<Decl> =
         let isSumType =
             match peek afterEq with
             | Some TokPipe -> true
+            // `Circle(Float64) | ...`: the payload spelling parseVariant steers.
+            | Some (TokIdent _) when (match peek (advance afterEq) with Some TokLParen -> true | _ -> false) -> true
             | Some (TokIdent _) ->
                 match parseVariant afterEq with
                 | Ok (_, rest) ->

@@ -137,6 +137,28 @@ let buildOutputNote (span: Span) : string option =
                `blade doctor` reports which stdlib root answered")
     | _ -> None
 
+// Emitter warnings: coded, spanned WARNINGS a back end raises while emitting
+// a program (today only BL7005, the opt-in kept inline of G69). One per KEY
+// (a lane and the event it was raised for), so an emitter that renders a
+// binding twice still warns once. Each lane's whole-program entry resets the
+// channel; the CLI drains it after the lane that produced the artifact and
+// prints the warnings on stderr (a lane that refuses and falls back discards
+// its own). Per async flow, like Effects.Decisions.
+
+module EmitterWarnings =
+    let private cell = System.Threading.AsyncLocal<(string * Diagnostic) list>()
+    let private get () = match box cell.Value with null -> [] | _ -> cell.Value
+    /// Start a fresh channel (each lane's whole-program entry).
+    let reset () = cell.Value <- []
+    /// Raise `d` once for `key`.
+    let add (key: string) (d: Diagnostic) =
+        let cur = get ()
+        if not (cur |> List.exists (fun (k, _) -> k = key)) then cell.Value <- cur @ [ (key, d) ]
+    /// Everything raised since the last reset, in order, and clear.
+    let drain () : Diagnostic list =
+        let cur = get ()
+        cell.Value <- []
+        cur |> List.map snd
 // Code registry: every code the compiler can emit, with a short title.
 // Test_Diagnostics asserts shape and uniqueness; emitting an unregistered
 // code is a bug the corpus tests catch.
@@ -221,10 +243,14 @@ module Codes =
             // (plan-match-statements.md §5 R1). Widened to every top-level
             // namespace: a second top-level `let`/`static` of a name (or one
             // beside a `function` of it), a second `type`/`struct`/sum type,
-            // a second `Unit`, and -- across the modules of one program --
-            // a type or variant-constructor name declared twice (type
-            // identity is not module-qualified yet).
+            // a second `Unit`, and a variant-constructor name two sum types
+            // of one module declare (across modules each module's
+            // declarations are its own -- module-qualified identity, D11).
             "BL2009", "duplicate declaration"
+            // BL2010: an unqualified type or constructor name two imported
+            // modules both declare (and the importing module does not); the
+            // message lists the qualified spellings (`A.Red`, `B.Red`).
+            "BL2010", "ambiguous imported name"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
@@ -323,6 +349,21 @@ module Codes =
             // (BL8002) on the missing ones.
             "BL3022", "unreachable match arm"
             "BL3023", "non-exhaustive match over a variant type"
+            // BL3024 - BL3034: the families split out of the BL3999 catch-all
+            // (deep review #49). Other families of that split went to the
+            // existing codes they belong to (BL3007 builtin arguments, BL3002
+            // counts, BL3016 extents, BL4002 `let static`, BL9001 internal, ...).
+            "BL3024", "generic type variable bound inconsistently"
+            "BL3025", "invalid reduction form"
+            "BL3026", "operation not valid on compact storage"
+            "BL3027", "operands over different index spaces"
+            "BL3028", "value must be known at compile time"
+            "BL3029", "invalid chunked or segmented domain"
+            "BL3030", "invalid recursive array definition"
+            "BL3031", "invalid halo window"
+            "BL3032", "wildcard not valid here"
+            "BL3033", "construct not yet supported"
+            "BL3034", "where clause not applicable here"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -448,6 +489,12 @@ module Codes =
             // instead of a g++ preprocessor error. BL7001 stays the
             // unhandled-node (back-end gap) code.
             "BL7004", "construct not supported by the C++ backend"
+            // A WARNING (never an error): the producer-input legs' kept one-level
+            // inline (round 3 A7c, gap G69) was RETAINED by a lane's emitter under
+            // the explicit opt-in BLADE_EPILOGUE_LEGS=1 -- its lifetime audit is
+            // incomplete. One per retained inline per lane; the default build
+            // declines the inline and never emits it.
+            "BL7005", "experimental kept inline with an incomplete lifetime audit"
             // BL8xxx: runtime (generated C++)
             "BL8001", "constraint violation"
             "BL8002", "non-exhaustive match"
@@ -477,7 +524,9 @@ module Codes =
             // recurrence did not converge, and freezing the last slice would
             // silently pretend it did. Emitted by inferRecArray's budget
             // check (an IRConstraintCheck after the recursion loop) and
-            // mirrored by the interpreter through the same node.
+            // mirrored by the interpreter through the same node. Also the
+            // math module's `m.eig` when its Francis QR budget (MAXITER) runs
+            // out on a finite operand (MathDecls.sBudgetSpent).
             "BL8010", "recursion budget exhausted"
             // Two operands co-iterated in one loop nest (`a + b`, `zip(a, b)`,
             // gram's contracted axis) disagree on the RUNTIME extent of a
@@ -514,6 +563,20 @@ module Codes =
             // the compiled lane used to answer x86's INT_MIN sentinel while
             // the interpreter saturated.
             "BL8014", "float-to-integer conversion out of range"
+            // THE PROVIDER BOUNDARY RULE: a missing value never crosses a
+            // provider boundary disguised as a number. A read whose variable
+            // holds a missing cell -- NaN / +-Inf in a floating variable, a
+            // NetCDF _FillValue / missing_value / valid-range sentinel -- is
+            // refused, naming the variable, the count and the first cell
+            // (ProviderRegistry.MissingRule: blade_rt::refuse_missing in the
+            // compiled lane, Interp/Run.fs materializeProviderRead in the
+            // interpreter; the static fold refuses (the `let static` assertion,
+            // BL4002) carrying the
+            // same sentence). A provider WRITE of a NaN / infinite cell is
+            // refused under the same code. The opt-in is the masked read,
+            // `alias.read_present` / `alias.present`.
+            "BL8015", "provider read holds missing values"
+            "BL8016", "private intermediate resource or protocol failure"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

@@ -14,14 +14,14 @@
 //     now agrees with scalar position, which is the consistency the pin broke;
 //     C++'s overload set promotes the integer, so the value is unchanged.
 // ============================================================================
-let F: Array<Float like Idx<4>> = [1.5, 2.5, -1.5, 3.0]
+let F: Array<Float64 like Idx<4>> = [1.5, 2.5, -1.5, 3.0]
 let down = (method_for(F) <@> lambda(x) -> floor(x)) |> compute
 let up = (method_for(F) <@> lambda(x) -> ceil(x)) |> compute
 
 let N: Array<Int64 like Idx<3>> = [7, 8, 9]
 let same = (method_for(N) <@> lambda(n) -> floor(n)) |> compute
 
-let P: Array<Float like Idx<3>> = [10.0, 100.0, 1000.0]
+let P: Array<Float64 like Idx<3>> = [10.0, 100.0, 1000.0]
 let decades = (method_for(P) <@> lambda(p) -> log10(p)) |> compute
 // EXPECT: down = [1.0, 2.0, -2.0, 3.0]
 // EXPECT: up = [2.0, 3.0, -1.0, 3.0]

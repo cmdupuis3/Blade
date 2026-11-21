@@ -1,0 +1,13 @@
+// TEST: a pack former used inline (not let-bound) is refused (rejects)
+// Gap G206 (round 4 wave 7 lane d; Codex diff review round 2): the unroller
+// handles only a let-bound former; a pack former written inline in a fold
+// (`reduce(method_for(range<..>) <@> lambda(k) -> args[k], (+))`) kept a pack
+// the specialization no longer has, and g++ rejected the emission. It is now
+// refused at lowering with the fix: bind the former with `let`.
+// ERROR: BL7004
+// ERROR-CONTAINS: Bind the former with `let` first
+// REJECT-AT: lower
+function polySum(args: Poly<T^0>) -> T^0 = {
+    reduce(method_for(range<Idx<arity(args)>>) <@> lambda(k) -> args[k], (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

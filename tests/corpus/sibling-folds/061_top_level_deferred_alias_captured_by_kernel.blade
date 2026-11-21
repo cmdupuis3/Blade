@@ -1,0 +1,21 @@
+// TEST: A deferred alias captured by a later fold kernel keeps its failure order (aborts)
+// ============================================================================
+// Round 4 wave 9 (lane A, A4: the fresh class-closure round of
+// BLADE_SIBLING_FOLDS=top, Codex 0d750baf, gap G107 member 2): the kernel of
+// `b` captures `y`, an ALIAS of the deferred map `d` (a capture forces it
+// once, G214: BL8013, 100 / 0). The leg totality judge read only the node
+// census, which knows `d` and not its alias, so under `top` b joined a at
+// `a` and the force (BL8013) moved ahead of `fail` (BL8014). A variable read
+// now resolves aliases and the program classifier: the pair is not joined
+// and BL8014 at `fail` stays the first failure in every build.
+// ============================================================================
+type I = Idx<3>
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let iv: Array<Int64 like I> = [1, 0, 2]
+let d = method_for(iv) <@> lambda(v) -> Float64(100 / v)
+let y = d
+let fz: Float64 = 0.0
+let a = prodsum(x, x)
+let fail = Int64(floor(fz / fz))
+let b = reduce(x, lambda(acc, v) -> { let unused = y; acc + v }, 0.0)
+// ABORT: BL8014

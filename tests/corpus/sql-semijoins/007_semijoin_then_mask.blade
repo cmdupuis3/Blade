@@ -4,7 +4,7 @@
 // mask and the comparison mask over A's shared named index, then compactify.
 type AB = Idx<8>
 let A: Array<Int64 like AB> = [1, 2, 3, 4, 5, 6, 7, 8]
-let B = [2, 3, 5, 7]
+let B = Int64([2, 3, 5, 7])
 let inB = mask(A, lambda(x) -> contains(B, x))
 let gt2 = mask(A, lambda(x) -> x > 2)
 let both = inB && gt2

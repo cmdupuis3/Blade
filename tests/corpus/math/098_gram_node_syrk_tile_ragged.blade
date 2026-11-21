@@ -1,0 +1,23 @@
+// TEST: Gram Node Syrk Tile Ragged
+// gram(A, A) at 61 x 701 with the BLAS gate off: the node's arm is the packed-
+// triangle syrk tile (blade_pgemm::dsyrk_tri) -- ragged last row and column panels
+// (61 = 10*6 + 1 = 7*8 + 5), three balanced K blocks of 234 samples. Same values
+// as the comm row-contraction twin, symmetry/102.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and partial sum
+/// is an exact integer and ANY association gives the same G -- association-invariant pins
+/// (CLAUDE.md fold policy). The route is pinned by `blade plan` (tests/OptimizeTests.fs
+/// plan_gram_node_syrk_tile*) and the arithmetic bitwise by `blade test syrk-tile`.
+type V = Idx<61>
+type S = Idx<701>
+let (ss, g00, g_mirror, g_edge, tr) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let g = gram(x, x)
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))
+    let trace = reduce(method_for(range<V>) <@> lambda(i) -> g(i, i), (+))
+    (total, g(0, 0), g(60, 3), g(59, 60), trace)
+}
+// EXPECT: ss = 2195730576.0
+// EXPECT: g00 = 1404.0
+// EXPECT: g_mirror = 2.0
+// EXPECT: g_edge = -702.0
+// EXPECT: tr = 85524.0

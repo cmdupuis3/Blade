@@ -36,9 +36,9 @@
 
 // lo = 0: only the zero-sum pairs (-1,1), (0,0), (1,-1).
 static struct CGlo0 {
-    m1:    Int<min=-1, max=1>,
-    m2:    Int<min=-1, max=1>,
-    m_out: Int<min=0, max=0>
+    m1:    Int32<min=-1, max=1>,
+    m2:    Int32<min=-1, max=1>,
+    m_out: Int32<min=0, max=0>
 } where m1 + m2 == m_out
 
 let static CARD0 = idx_card(CGlo0)
@@ -46,9 +46,9 @@ let static CARD0 = idx_card(CGlo0)
 
 // lo = 1: the anchor family. Mixed spellings in one declaration.
 static struct CGlo1 {
-    m1:    Int in -1 .. 2,
-    m2:    Int in -1 .. 2,
-    m_out: Int<min=-1, max=1>
+    m1:    Int32 in -1 .. 2,
+    m2:    Int32 in -1 .. 2,
+    m_out: Int32<min=-1, max=1>
 } where m1 + m2 == m_out
 
 let static CARD1 = idx_card(CGlo1)
@@ -67,20 +67,20 @@ let static CARD1 = idx_card(CGlo1)
 // perfectly good program. LO is declared BELOW its use on purpose: source
 // order must not be what makes this work.
 static struct CGlo2 {
-    m1:    Int<min=-1, max=1>,
-    m2:    Int<min=-1, max=1>,
-    m_out: Int<min=-LO, max=LO>
+    m1:    Int32<min=-1, max=1>,
+    m2:    Int32<min=-1, max=1>,
+    m_out: Int32<min=-LO, max=LO>
 } where m1 + m2 == m_out
 
-let static LO = 2
+let static LO: Int64 = 2
 
 let static CARD2 = idx_card(CGlo2)
 // EXPECT: CARD2 = 9
 
 // The dense pair count (2*l1+1)(2*l2+1) with l1 = l2 = 1, computed rather than
 // written, so the saturation identity is asserted and not merely asserted-at.
-let static L1 = 1
-let static L2 = 1
+let static L1: Int64 = 1
+let static L2: Int64 = 1
 let static DENSE = (2 * L1 + 1) * (2 * L2 + 1)
 // EXPECT: DENSE = 9
 

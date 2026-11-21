@@ -1,0 +1,12 @@
+// TEST: A Stored Section Applied To Generic Struct Cells Is Refused (rejects)
+// ERROR: BL3001 @ 9:36
+// ERROR-CONTAINS: the section `(+)` is applied to a P value
+// ============================================================================
+// R11: functions/901 instantiated at a struct (it died in g++ before).
+// ============================================================================
+struct P { x: Float64 }
+function outer(b) = {
+    let f = (+)
+    method_for(b) <@> lambda(v) -> f(v, v) |> compute
+}
+let r = outer([P { x = 1.0 }, P { x = 2.0 }])

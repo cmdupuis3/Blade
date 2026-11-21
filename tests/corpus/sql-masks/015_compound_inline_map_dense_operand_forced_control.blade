@@ -1,0 +1,24 @@
+// TEST: Compound Inline Map Dense Operand Forced Control
+// ----------------------------------------------------------------------------
+// The control for 014 (round-3 D-B1): the same operands written with an
+// explicit `|> compute`, which always took the materializing path. The values
+// must equal 014's, cell for cell.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<5>
+type RightRow = Idx<4>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 1, 5, 2]
+let left_amount: Array<Int64 like LeftRow> = [10, 20, 30, 40, 50]
+let right_key: Array<Int64 like RightRow> = [1, 1, 3, 2]
+let right_amount: Array<Int64 like RightRow> = [1, 2, 4, 8]
+
+let matched = compound((method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r) |> compute, mask((method_for(left_key, right_key) <@> lambda(l, r) -> l == r) |> compute, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+// EXPECT: matched = [10, 20, 160, 30, 60, 400]
+// EXPECT: match_count = 6
+// EXPECT: total = 680
+
+let doubled = compound((method_for(left_amount) <@> lambda(v) -> v * 2) |> compute, mask(left_key, lambda(k) -> k == 1))
+let doubled_total = reduce(doubled, (+), 0)
+// EXPECT: doubled = [20, 60]
+// EXPECT: doubled_total = 80

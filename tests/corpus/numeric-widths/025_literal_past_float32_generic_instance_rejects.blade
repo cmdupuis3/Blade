@@ -1,0 +1,10 @@
+// TEST: a float literal past FLT_MAX at a generic instance made Float32 (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function f(x: T, y: T) -> T = x * y
+function h(a) = f(a, 1e40)
+let a: Float32 = 3.0
+let r = h(a)
+// ERROR: BL3020 @ 6:17

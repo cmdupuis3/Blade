@@ -1,0 +1,11 @@
+// TEST: Fold State In Place Declines Non Pointwise Kernel
+// ============================================================================
+// PM14 decline control: the kernel reads the folded slice at a FIXED cell
+// (`b(0)`), so cell c of the next state is not a function of cell c alone;
+// the in-place update declines ("the kernel is not pointwise") and each step
+// materializes its result as written. Values identical either way.
+// ============================================================================
+let g = (method_for(range<Idx<5>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) + Float64(c) * 0.5 + 1.0)) |> compute
+let s = reduce(g, lambda(a: T^1, b: T^1) -> a + b * b(0))
+// EXPECT: s = [55.0, 62.5, 70.0]

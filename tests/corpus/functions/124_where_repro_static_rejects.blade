@@ -4,5 +4,5 @@
 // arithmetic -- there is no emitted body for the attribute to govern.
 
 static function sq(x: Int64) where repro = x * x
-let y = sq(3)
+let y = sq(Int64(3))
 // ERROR-CONTAINS: cannot apply to a `static function`

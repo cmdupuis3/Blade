@@ -1,0 +1,21 @@
+// TEST: A Map Over A Range And An Operand With A Mut Kernel Parameter Is Judged (rejects)
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C; wave-8 fable review, item 2): a map
+// over `range<Idx<2>>` beside the operand `a` applies the named kernel `step`
+// (through its eta wrapper) with a `mut` row of `a` while `step` reads `b`, a
+// module alias of `a`: BL4005 at lowering. A map whose operands do NOT line
+// up one to one with a mut kernel's parameters is refused fail closed.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function identity(m: M) -> M = m
+let mut a: M = [[2.0, 3.0], [4.0, 5.0]]
+let b = identity(a)
+function step(i: Int64, row: mut A) -> Float64 = {
+    row(0) = row(0) + b(0, 1)
+    row(0)
+}
+let r = method_for(range<Idx<2>>, a) <@> step |> compute
+// ERROR: BL4005
+// ERROR-CONTAINS: is passed to a mut parameter, but its storage also reaches the callee
+// REJECT-AT: lower

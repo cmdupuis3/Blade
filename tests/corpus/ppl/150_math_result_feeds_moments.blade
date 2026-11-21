@@ -1,0 +1,13 @@
+// TEST: PPL former over a math result (ppl elaborates BEFORE math)
+// #62: the former's source is a destructured component of m.svd(A), whose
+// shape the math domain's registered shapes answer although math elaborates
+// later; the moments agree bitwise with the annotated twin.
+import ppl as ppl
+import math as m
+let A: Array<Float64 like Idx<4>, Idx<3>> = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0], [1.0, 0.0, 1.0]]
+let (U, sv, V) = m.svd(A)
+let mu = ppl.moments(U, 1)
+let Ut: Array<Float64 like Idx<4>, Idx<3>> = U
+let mut2 = ppl.moments(Ut, 1)
+let d = (mu(0) - mut2(0)) + (mu(3) - mut2(3))
+// EXPECT: d = 0.0

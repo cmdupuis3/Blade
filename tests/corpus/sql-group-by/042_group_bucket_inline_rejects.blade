@@ -13,7 +13,7 @@
 // Refused at TYPECHECK with an explanation. Left to codegen this would emit C++
 // naming an undeclared symbol, i.e. a raw g++ error for what is a language
 // rule, or worse a silent miscompile.
-let keys = [0, 1, 0, 1]
+let keys = Int64([0, 1, 0, 1])
 let b = group_bucket(group_keys(keys))
 // The diagnostic says what to write instead: bind the keys to a name first,
 // then pass that name to group_bucket.

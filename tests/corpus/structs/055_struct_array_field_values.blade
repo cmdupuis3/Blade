@@ -6,7 +6,7 @@
 // The printed line has no pin grammar; the harness now fails any output
 // carrying a raw pointer, and the interpreter differential compares it.
 struct Probe {
-    id: Int,
+    id: Int32,
     samples: Array<Float64 like Idx<3>>,
     grid: Array<Int64 like Idx<2>, Idx<2>>
 }

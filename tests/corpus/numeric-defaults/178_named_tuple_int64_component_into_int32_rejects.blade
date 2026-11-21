@@ -1,0 +1,11 @@
+// TEST: a named tuple whose Int64 component meets an Int32 component of a parameter (rejects)
+// ============================================================================
+// G275 / R12: a component of a NAMED tuple has no expression to prove; an
+// Int64 there would wrap into the Int32 component (4294967296 is 0).
+// ============================================================================
+function pair(p: (Int32, Float64)) -> Int32 = p[0]
+let k: Int64 = 4294967296
+let a: Float64 = 1.0
+let t = (k, a)
+let y = pair(t)
+// ERROR: BL3020

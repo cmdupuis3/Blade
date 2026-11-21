@@ -1,0 +1,8 @@
+// TEST: a Float32 static beside a Float64 static (rejects)
+// ============================================================================
+// G275: the mixing rule at compile time -- two fixed float widths meet.
+// ============================================================================
+let static a: Float32 = 1.0
+let static b: Float64 = 2.0
+let static y = a + b
+// ERROR: BL3020

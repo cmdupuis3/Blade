@@ -6,10 +6,10 @@
 // mk_row(2.0, 1) == mk_row(2.0)(1).
 // ----------------------------------------------------------------------------
 function add3(a, b, c) = a + b + c
-let h1 = add3(100.0)
+let h1 = add3(Float64(100.0))
 let h2 = h1(20.0)
 let r1 = h2(3.0)
-let r2 = add3(100.0)(20.0, 3.0)
+let r2 = add3(Float64(100.0))(20.0, 3.0)
 
 function mk_row(s: Float64) -> Array<Float64 like Idx<3>> = [s, s * 2.0, s * 3.0]
 let r3 = mk_row(2.0, 1)

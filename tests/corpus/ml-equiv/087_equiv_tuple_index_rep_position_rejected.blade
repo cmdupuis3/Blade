@@ -23,8 +23,8 @@ import ml as ml
 let static S = [(0, 0, 1), (1, 1, 1)]
 let static WD = ml.hom_dim(S, S)
 
-function bad(x: Array<Float like IrrepsIdx<S>>, ws: Array<Float like Idx<2>, Idx<WD>>)
-             where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
+function bad(x: Array<Float64 like IrrepsIdx<S>>, ws: Array<Float64 like Idx<2>, Idx<WD>>)
+             where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<S>> =
     ml.derive_linear(S, S, ws[0], ws[1])
 
 let r = bad([1.0, 4.0, 0.0 - 2.0, 6.0], [[2.0, 0.5], [1.0, 1.0]])

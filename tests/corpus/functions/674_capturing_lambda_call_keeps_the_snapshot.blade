@@ -1,0 +1,13 @@
+// TEST: Capturing Lambda Call Keeps The Snapshot
+// Gap G238 (round 4 wave 8, Codex review round 3): a let-bound LAMBDA that
+// captures the deferred d is not a named function call: its capture forces d
+// under its own name (a snapshot), so z reads it after the write to x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let f = lambda(v: Float64) -> d(0) * v
+let r = f(1.0)
+x(0) = 10.0
+let z = d(0)
+// EXPECT: r = 2.0
+// EXPECT: z = 2.0
+// EXPECT: d = [2.0, 4.0, 6.0]

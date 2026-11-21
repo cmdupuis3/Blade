@@ -1,0 +1,14 @@
+// TEST: A Fold Range Bound Reading A Tuple Projection Of The Fold Operand Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 4): the projection twin of
+// functions/1063 -- `a = t[0]` with t a tuple of the deferred p is a deferred alias of p.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: reads a cell of one of its own operands in a range bound
+// WARN-CODEGEN: reads a cell of one of its own operands in a range bound
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let t = (p, p)
+let a = t[0]
+let result = reduce(method_for(p, 0..a(0)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+xs(0) = 10
+let after = p(0)

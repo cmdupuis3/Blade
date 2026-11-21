@@ -1,0 +1,12 @@
+// TEST: partial scalar kernels take their residual width from loop cells
+function add3(a, b, c) = a + b + c
+let small = [1.0, 2.0, 3.0]
+let wide = Float64([1.0, 2.0, 3.0])
+let a = method_for(small) <@> add3(100.0, 10.0) |> compute
+let b = method_for(wide) <@> add3(100.0, 10.0) |> compute
+let x: Float32 = a(0)
+let y: Float64 = b(0)
+// EXPECT: a = [111.0, 112.0, 113.0]
+// EXPECT: b = [111.0, 112.0, 113.0]
+// EXPECT: x = 111.0
+// EXPECT: y = 111.0

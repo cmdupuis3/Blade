@@ -1,0 +1,8 @@
+// TEST: a lambda doubling a Bool kernel parameter (rejects)
+// ============================================================================
+// R10 remainder: the arithmetic twin of basic/594 -- the lambda's parameter is
+// the kernel's Bool cell, so `x + x` is refused (the base converted the cell
+// to a Float64 default).
+// ============================================================================
+let r = method_for([true, false]) <@> lambda(b) -> (lambda(x) -> x + x)(b) |> compute
+// ERROR: BL3001 @ 6:66

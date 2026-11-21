@@ -1,0 +1,17 @@
+// TEST: a let-bound lambda kernel whose capture a using declaration rebinds is not spliced
+// Gap G205 (round 4 wave 7 lane d): the per-use splice of a let-bound kernel
+// lambda is HYGIENIC: in a declaration that binds a name the lambda reads
+// (`scale`, a parameter of `apply` here), the copy would read the parameter
+// instead of the module binding, so that use keeps the one typed lambda
+// (resolve-at-apply); the other use is spliced. (`apply` is not called: its
+// resolve-at-apply kernel reads the PARAMETER in the C++ lane today -- a
+// pre-existing name-capture bug, gap G224.)
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let scale: Float64 = 2.0
+let f = lambda(x) -> x * scale
+function apply(scale: Float64, a: Array<Float64 like I>) -> Array<Float64 like I> = {
+    method_for(a) <@> f |> compute
+}
+let t = method_for(a64) <@> f |> compute
+// EXPECT: t = [2.0, 4.0, 6.0]

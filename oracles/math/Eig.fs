@@ -120,8 +120,8 @@ let francis (n: int) (maxIter: int) (h: float[,]) : unit =
 
 /// Eigenvalues from the quasi-triangular form: 1x1 blocks are real, 2x2
 /// blocks solve the quadratic (complex pair emitted +im first). Sorted by
-/// DESCENDING modulus (selection, ties keep original order -- conjugate
-/// pairs stay adjacent).
+/// DESCENDING modulus, STABLY (`Jacobi.stableDescPerm`: ties keep their
+/// extraction order -- conjugate pairs stay adjacent, +im first).
 let extract (n: int) (h: float[,]) : float[] * float[] =
     let lre = Array.zeroCreate n
     let lim = Array.zeroCreate n
@@ -154,15 +154,10 @@ let extract (n: int) (h: float[,]) : float[] * float[] =
                     lim.[k] <- im
                     lim.[k + 1] <- -im
                 skip <- true
-    // selection sort by modulus^2 descending
-    for kk in 0 .. n - 1 do
-        let mutable best = kk
-        for j in kk + 1 .. n - 1 do
-            if lre.[j] * lre.[j] + lim.[j] * lim.[j] > lre.[best] * lre.[best] + lim.[best] * lim.[best] then
-                best <- j
-        let tr = lre.[kk] in lre.[kk] <- lre.[best]; lre.[best] <- tr
-        let ti = lim.[kk] in lim.[kk] <- lim.[best]; lim.[best] <- ti
-    (lre, lim)
+    // stable descending order by modulus^2 (ties keep extraction order, so a
+    // conjugate pair stays adjacent and +im first), one gather per output
+    let perm = Jacobi.stableDescPerm (Array.init n (fun j -> lre.[j] * lre.[j] + lim.[j] * lim.[j]))
+    (Array.init n (fun k -> lre.[perm.[k]]), Array.init n (fun k -> lim.[perm.[k]]))
 
 /// General real eigenvalues: (LRE, LIM), descending modulus, conjugate
 /// pairs adjacent with +im first. maxIter is the total Francis budget

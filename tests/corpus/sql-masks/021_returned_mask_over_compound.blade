@@ -1,0 +1,19 @@
+// TEST: Returned Mask Over Compound
+// ----------------------------------------------------------------------------
+// G128 class closure (Codex review round 2): a mask over a COMPOUND borrows
+// the compound index, so a function returning it must not free that index at
+// its exit (the mask is not a fresh pool for escape analysis: the index
+// leaks to the caller instead of being freed early).
+// ----------------------------------------------------------------------------
+type Row = Idx<4>
+let xs: Array<Int64 like Row> = [1, -1, 3, 4]
+function f(a: T^1) = {
+    let keep = mask(a, lambda(x) -> x > 0)
+    let pos = method_for(range<CompoundIdx<keep>>) <@> lambda(i) -> i |> compute
+    let bits = mask(pos, lambda(x) -> x > 1)
+    bits
+}
+let bits = f(xs)
+let n = extents(bits)
+// EXPECT: bits = [false, true, true]
+// EXPECT: n = 3

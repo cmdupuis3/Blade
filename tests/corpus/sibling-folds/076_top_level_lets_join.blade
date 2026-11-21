@@ -1,0 +1,24 @@
+// TEST: Separate top-level fold lets share one traversal
+// ============================================================================
+// Gap G107 (3): `let s = reduce(x, (+))` and `let ss = reduce(x * x ..)` as
+// separate top-level statements were never siblings (no record). Under the
+// OPT-IN arm BLADE_SIBLING_FOLDS=top the module's
+// binding sequence is now judged as one straight-line region: the join and
+// its projections become internal bindings placed before the first member
+// (emitted there in every lane), each member binding keeps its name and
+// prints where it did. The opaque `let static` binding and an intervening
+// pure binding change nothing. Integer-valued data: association-invariant.
+// ============================================================================
+type I = Idx<1003>
+let static scale = 3
+let x: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> Float64(i % 17) - 8.0 |> compute
+let s = reduce(x, (+))
+let note = Float64(scale) * 2.0
+let ss = reduce(method_for(x) <@> lambda(v) -> v * v, (+))
+let p = prodsum(x, x)
+let total = s + ss + p + note
+// EXPECT: s = 0.0
+// EXPECT: note = 6.0
+// EXPECT: ss = 24072.0
+// EXPECT: p = 24072.0
+// EXPECT: total = 48150.0

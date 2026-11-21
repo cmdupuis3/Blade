@@ -1,0 +1,10 @@
+// TEST: a named stage declaring a Float64 array parameter after a Float32 array stage, fused (rejects)
+// ============================================================================
+// G276 (2): the named stage's array annotation rides the fused kernel.
+// ============================================================================
+function f(x: Float32) -> Array<Float32 like Idx<2>> = [x, x]
+function g(x: Array<Float64 like Idx<2>>) = x
+let a: Array<Float32 like Idx<2>> = [1.0, 2.0]
+let p = object_for(f) >>@ object_for(g)
+let y = (p <@> a) |> compute
+// ERROR: BL3001

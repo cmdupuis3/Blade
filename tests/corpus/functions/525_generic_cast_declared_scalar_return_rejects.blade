@@ -1,0 +1,7 @@
+// TEST: A declared scalar return refuses an array cast instance (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `Float64(x)` over `x: T` is "T with element Float64"; `-> Float64` makes it
+// a scalar, so an array call is refused instead of returning one double.
+function f(x: T) -> Float64 = Float64(x)
+let g = f([1, 5, 3])

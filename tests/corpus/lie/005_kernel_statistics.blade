@@ -19,7 +19,7 @@ let mg_self = lie.mmd2_gauss_u(X, X, 1.5)
 let A: Array<Float64 like D, D> = [[0.0, -1.0, 0.5], [1.0, 0.0, 0.2], [-0.5, -0.2, 0.0]]
 let At = transpose(A, [0, 1])
 let AX: Array<Float64 like N, D> = gram(X, At)
-let s2 = 1.5 * 1.5
+let s2: Float64 = 1.5 * 1.5
 let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(X(a), AX(a), X(b), AX(b), s2) |> compute
 let qg = reduce(reduce(terms, (+)), (+)) / 16.0
 // A set against ITSELF is not zero under the U-statistic: the within terms drop

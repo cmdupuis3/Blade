@@ -1,0 +1,17 @@
+// TEST: explicit casts meeting parameters and accumulators of their own width are accepted
+// ============================================================================
+// G275 (Codex round 4): the passing twins of numeric-widths/066-068 -- a cast
+// value whose width IS the parameter's, and a fold kernel whose result is
+// its accumulator's width.
+// ============================================================================
+let h = lambda(v) -> v
+let saved = h
+let b = h(Float32(2.0))
+let a = saved(Float32(1.5) + Float32(1.0))
+// EXPECT: a = 2.5
+function f(x: Int64) -> Int64 = x * 2
+let y = f(Int64(3) + Int64(4))
+// EXPECT: y = 14
+function k(a: Int64, b: Int64) -> Int64 = a + b
+let r = reduce(Int64([1, 2, 3]), k)
+// EXPECT: r = 6

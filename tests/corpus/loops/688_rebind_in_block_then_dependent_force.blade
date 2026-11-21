@@ -1,0 +1,18 @@
+// TEST: A whole-array rebind inside a block, then a dependent force
+// Gap G199 (Codex diff review round 3): d is forced, x written and then
+// REBOUND inside one block statement, and p (over d and x) is forced later in
+// that statement: p reads the stored d and the rebound x. The LLVM lane used
+// to hoist p's force ahead of the rebound array (invalid IR); it now declines
+// such a force (the program runs in the C++ lane).
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(zip(d, x)) <@> lambda(a, b) -> a + b
+let r = {
+    let z = d(0)
+    x(0) = 5.0
+    x = [7.0, 8.0, 9.0]
+    let t = method_for(range<I>) <@> lambda(i) -> p(i) |> compute
+    reduce(t, (+), 0.0) + z
+}
+// EXPECT: r = 38.0

@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 as the seed of an Int32 fold (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let xs: Array<Int32 like Idx<3>> = [1, 2, 3]
+let s = reduce(xs, (+), 5000000000)
+// ERROR: BL3020 @ 6:25

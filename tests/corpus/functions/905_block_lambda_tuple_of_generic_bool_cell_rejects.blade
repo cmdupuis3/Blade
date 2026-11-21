@@ -1,0 +1,14 @@
+// TEST: A Block Lambda Building A Tuple From A Generic Bool Cell Is Refused (rejects)
+// ERROR: BL3001 @ 11:36
+// ERROR-CONTAINS: is not a number, and Blade converts nothing implicitly
+// ============================================================================
+// R11: `f`'s parameter fell to its numeric default (the checker never
+// decided it from outer's generic cell), so the instance at Bool converted
+// each cell to a float and the result was typed an array of (Float, Float)
+// tuples. Refused at the call `f(v)`.
+// ============================================================================
+function outer(b) = {
+    let f = lambda(x) -> (x, x)
+    method_for(b) <@> lambda(v) -> f(v) |> compute
+}
+let r = outer([true, false])

@@ -40,9 +40,9 @@ Unit time: day
 Unit frequency: 1 / day
 Unit volts
 
-let i = complex(0.0, 1.0)
-let w: Float<frequency> = 0.25
-let tz: Float<time> = 1.0
+let i: Complex128 = complex(0.0, 1.0)
+let w: Float64<frequency> = 0.25
+let tz: Float64<time> = 1.0
 
 // Scalar position, units cancel: the result stays COMPLEX.
 let z = exp(i * w * tz)
@@ -57,11 +57,11 @@ let za = arg(z)
 
 // A complex that genuinely CARRIES a signature: real/imag hand back components
 // that still carry it. The `Float<volts>` ascription is the load-bearing part.
-let v: Float<volts> = 3.0
-let zv = complex(3.0, 4.0) * v
+let v: Float64<volts> = 3.0
+let zv = Complex128(complex(3.0, 4.0)) * v
 let vr = real(zv)
 let vi = imag(zv)
-let vsum: Float<volts> = vr + vi
+let vsum: Float64<volts> = vr + vi
 let vmag = sqrt(vr * vr + vi * vi)
 // EXPECT: zv = (9.0,12.0)
 // EXPECT: vr = 9.0

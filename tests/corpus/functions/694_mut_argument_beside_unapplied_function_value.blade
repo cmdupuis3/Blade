@@ -1,0 +1,26 @@
+// TEST: A Callee That Only Names A Function Reading The Mut Argument Is Admitted
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; lead decision): a `mut` ARGUMENT
+// -- an ad.grad / ad.vjp gradient buffer and an ordinary `mut` parameter
+// alike -- may NOT share storage with anything the callee READS: another
+// array argument, or a module binding the callee reads by name (a module
+// alias such as `let forcing = identity(g)`, a deferred map over it), judged
+// by storage provenance and refused at lowering with BL4005 in every lane.
+// The callee's writes through the parameter would be visible through its own
+// reads mid-call; the lanes disagreed (c9: a silently wrong gradient, 20 for
+// 8, in both compiled lanes). No run-time check, one rule for AD buffers and
+// ordinary mut parameters.
+// ============================================================================
+// Codex diff review round 2: naming a function runs nothing.
+type A = Array<Float64 like Idx<2>>
+function identity(a: A) -> A = a
+let mut a: A = [2.0, 3.0]
+let view = identity(a)
+function read_a() -> Float64 = view(0)
+function f(y: mut A) -> Float64 = {
+    let unused = read_a
+    y(0) = 4.0
+    y(0)
+}
+let result = f(a)
+// EXPECT: result = 4.0

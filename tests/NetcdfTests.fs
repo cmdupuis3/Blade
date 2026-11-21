@@ -120,7 +120,7 @@ let runNetcdfTests () =
                 { Name = "lat"; Length = 180L }
                 { Name = "lon"; Length = 360L }
                 { Name = "time"; Length = 12L }
-              ]; TypeCode = 6 }  // NC_DOUBLE
+              ]; TypeCode = 6; CfAttrs = [] }  // NC_DOUBLE
         ]
     }
 
@@ -216,8 +216,10 @@ let runNetcdfTests () =
             (arr.IndexTypes.Length = 3) ($"got {arr.IndexTypes.Length}")
         check "A index types have no tags"
             (arr.IndexTypes |> List.forall (fun i -> i.Tag = None)) ""
-        check "A identity is AIDVariable 'A'"
-            (arr.Identity = Some (AIDVariable "A")) (sprintf "got %A" arr.Identity)
+        // The STORE's variable (plan-identity-transpose-compute 2.7), not the
+        // bare file variable name.
+        check "A identity is the store's variable netcdf:sample.A"
+            (arr.Identity = Some (providerVarIdentity "netcdf:sample" "A")) (sprintf "got %A" arr.Identity)
     | _ ->
         check "A is an array type" false ""
 
@@ -323,8 +325,8 @@ let runNetcdfTests () =
             { Name = "A"; Dims = [
                 { Name = "lat"; Length = 180L }
                 { Name = "lon"; Length = 360L }
-              ]; TypeCode = 6 }  // NC_DOUBLE
-            { Name = "only_first"; Dims = [ { Name = "lat"; Length = 180L } ]; TypeCode = 6 }
+              ]; TypeCode = 6; CfAttrs = [] }  // NC_DOUBLE
+            { Name = "only_first"; Dims = [ { Name = "lat"; Length = 180L } ]; TypeCode = 6; CfAttrs = [] }
         ]
     }
     let mockSecond : NetcdfProvider.NcFile = {
@@ -332,8 +334,8 @@ let runNetcdfTests () =
         Dims = [ { Name = "depth"; Length = 40L } ]
         Vars = [
             // Same name "A", deliberately different: Float32 / rank 1.
-            { Name = "A"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5 }  // NC_FLOAT
-            { Name = "only_second"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5 }
+            { Name = "A"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5; CfAttrs = [] }  // NC_FLOAT
+            { Name = "only_second"; Dims = [ { Name = "depth"; Length = 40L } ]; TypeCode = 5; CfAttrs = [] }
         ]
     }
 
@@ -376,6 +378,17 @@ let runNetcdfTests () =
          | Some (ArrayElem a) -> a.ElemType = IRTScalar ETFloat32 && a.IndexTypes.Length = 1
          | _ -> false)
         (sprintf "got %A" (memberOf "second" "vars" "A"))
+    // Same-named variables of two stores are two arrays (plan-identity-
+    // transpose-compute 2.7): the identity carries the store, so sameIdentity,
+    // which keys symmetric storage and the identity groups, never conflates them.
+    check "two loads: first.vars.A and second.vars.A are different identities"
+        (match memberOf "first" "vars" "A", memberOf "second" "vars" "A" with
+         | Some (ArrayElem a1), Some (ArrayElem a2) ->
+             (match a1.Identity, a2.Identity with
+              | Some i1, Some i2 -> not (sameIdentity i1 i2) && sameIdentity i1 i1
+              | _ -> false)
+         | _ -> false)
+        (sprintf "first %A second %A" (memberOf "first" "vars" "A") (memberOf "second" "vars" "A"))
 
     // Non-overlapping members: under the clobber these produced a spurious
     // "field not found" (first) / resolved fine only by luck (second).
@@ -745,11 +758,11 @@ let runNetcdfTests () =
             { Name = "temperature"; Dims = [
                 { Name = "lat"; Length = 180L }
                 { Name = "lon"; Length = 360L }
-              ]; TypeCode = 6 }
+              ]; TypeCode = 6; CfAttrs = [] }
             { Name = "pressure"; Dims = [
                 { Name = "lat"; Length = 180L }
                 { Name = "lon"; Length = 360L }
-              ]; TypeCode = 5 }  // NC_FLOAT
+              ]; TypeCode = 5; CfAttrs = [] }  // NC_FLOAT
         ]
     }
     
@@ -906,6 +919,74 @@ let _ = nc.write("out.nc", A)
      match writeSpecDimNames repeatedAxisWrite with
      | Ok names -> check name (names = ["dim0"; "dim1"]) (sprintf "got %A" names)
      | Error e -> check name false e)
+
+    // A non-literal extent cannot reach these emitters today -- every extent this
+    // provider produces is a literal from ncDimToNamedIndexType. The arms that
+    // used to handle one emitted placeholder C++ (an empty initializer; an
+    // unlimited dimension in the writer, which nc_put_var fills with zero
+    // records). Assert they are refusals, so a future runtime-shapes arc has to
+    // add real support instead of silently reviving a placeholder.
+    let dynBuilder = IRBuilder()
+    let dynIdx : IRIndexType =
+        { Id = dynBuilder.FreshId(); Rank = 1
+          Extent = IRVar (dynBuilder.FreshId(), IRTScalar ETInt64)
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    let dynArr : IRArrayType =
+        { ElemType = IRTScalar ETFloat64; IndexTypes = [dynIdx; dynIdx]
+          IsVirtual = false; Identity = Some (AIDVariable "D") }
+    let refusalOf (f: unit -> string list) =
+        try
+            f () |> ignore
+            Error "emitted code instead of refusing"
+        with
+        | Blade.Diagnostics.BladeDiagnosticException d -> Ok (d.Code, d.Message)
+        | ex -> Error $"{ex.GetType().Name}: {ex.Message}"
+    let refusesWith (label: string) (f: unit -> string list) =
+        let outcome = refusalOf f
+        check $"{label}: a runtime extent is refused (BL7001), not emitted"
+            (match outcome with
+             | Ok (code, msg) -> code = "BL7001" && msg.Contains "runtime NetCDF extents are not supported"
+             | Error _ -> false)
+            $"%A{outcome}"
+    refusesWith "genReadVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genReadVar "f.nc" "D" "D" dynArr)
+    refusesWith "genReadCompoundVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "D" "D_mask" "D" dynArr dynArr)
+    refusesWith "genWriteVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genWriteVar "f.nc" "D" "D" dynArr ["a"; "b"])
+
+    // CF packing and NC_CHAR: the provider reads RAW stored numbers and
+    // applies no `scale_factor` / `add_offset`, so a variable carrying one is
+    // refused by name (every read path consults unreadableReason) instead of
+    // read as values that silently mean something else; an NC_CHAR (text)
+    // variable likewise. `_FillValue` alone still reads (the fixtures carry it).
+    let plainVar : NetcdfProvider.NcVar =
+        { Name = "t"; Dims = [ { Name = "x"; Length = 3L } ]; TypeCode = 6; CfAttrs = [] }
+    check "unreadableReason: a plain double variable reads"
+        ((NetcdfProvider.unreadableReason plainVar).IsNone) ""
+    check "unreadableReason: a variable carrying only _FillValue still reads"
+        ((NetcdfProvider.unreadableReason { plainVar with CfAttrs = [] }).IsNone
+         && not (List.contains "_FillValue" NetcdfProvider.cfDecodingAttrs)) ""
+    for attr in NetcdfProvider.cfDecodingAttrs do
+        let r = NetcdfProvider.unreadableReason { plainVar with CfAttrs = [ attr ] }
+        check $"unreadableReason: a variable carrying {attr} is refused by name"
+            (r |> Option.exists (fun m -> m.Contains attr && m.Contains "'t'")) $"%A{r}"
+    let charR = NetcdfProvider.unreadableReason { plainVar with TypeCode = 2 }
+    check "unreadableReason: an NC_CHAR variable is refused as text"
+        (charR |> Option.exists (fun m -> m.Contains "NC_CHAR")) $"%A{charR}"
+
+    // Rank 0 is the other shape this emitter cannot express: the flat index has
+    // no leading component and `new T[]` (an empty extent product) is not valid
+    // C++. It used to raise IndexOutOfRangeException from inside the emitter.
+    let rank0Arr : IRArrayType =
+        { ElemType = IRTScalar ETFloat64; IndexTypes = []
+          IsVirtual = false; Identity = Some (AIDVariable "S") }
+    let rank0Outcome = refusalOf (fun () -> NetcdfProvider.CppNetcdf.genReadVar "f.nc" "S" "S" rank0Arr)
+    check "genReadVar: a scalar (rank-0) variable is refused (BL7001), not emitted"
+        (match rank0Outcome with
+         | Ok (code, msg) -> code = "BL7001" && msg.Contains "rank-0"
+         | Error _ -> false)
+        $"%A{rank0Outcome}"
 
     // genReadCompoundVar: load_compound's materializer. Reads the dense var and
     // the integer mask, converts nonzero -> bool, builds compound_index_t, and
@@ -1307,11 +1388,13 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
                                         ($"expected {expected.Length} values, got {parsed.Length}")
                                 else
-                                    // Float32 data printed at precision 15 round-trips exactly and
-                                    // x+x is exact in fp, so the tolerance only guards the parse.
+                                    // x+x is exact in fp, but a Float32 PRINTS with 6 significant
+                                    // digits (FLT_DIG, since the 2026-10-31 numeric defaults), so
+                                    // the printed value is the truth rounded to 6 significant
+                                    // digits: at most half a unit in the 6th digit, 5e-6 relative.
                                     let mutable firstBad = -1
                                     for i in 0 .. expected.Length - 1 do
-                                        if firstBad < 0 && abs (parsed.[i] - expected.[i]) > 1e-6 * max 1.0 (abs expected.[i]) then
+                                        if firstBad < 0 && abs (parsed.[i] - expected.[i]) > 5e-6 * abs expected.[i] then
                                             firstBad <- i
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)"
                                         (firstBad < 0)
@@ -1786,6 +1869,129 @@ let b = ps
                         (sprintf "got %A" (Map.tryFind "ps" se.Values))
                 | Error e -> check "static fold: resolveStatics" false e
      with ex -> unexpected "provider static fold" ex)
+
+    // ---------------------------------------------------------------
+    // The provider boundary rule (BL8015) and the masked read, BOTH lanes.
+    // tests/fixtures/missing.nc (tests/fixtures/gen_netcdf_fixtures.py) holds
+    // one 2 x 3 variable per rule: `_FillValue`, `missing_value`,
+    // `valid_range`, a never-written double (default fill), a NaN, a clean
+    // variable with a `_FillValue` nobody holds, an int `_FillValue`, and an
+    // int holding NC_FILL_INT with NO attribute (integer default fills are
+    // data). Needs libnetcdf (the interpreter reads in-process).
+    // ---------------------------------------------------------------
+    printfn "\n--- boundary rule (BL8015) + masked read over missing.nc (both lanes) ---"
+    (try
+        let ms = "tests/fixtures/missing.nc"
+        let outDir = "./generated_cpp_tests"
+        let prog (body: string) =
+            "import netcdf as nc\nlet m = nc.load(\"" + ms + "\")\n" + body + "\n"
+        let run (name: string) (body: string) = Blade.Tests.ProviderBoundaryTests.bothLanes outDir name [ ms ] (prog body)
+        let skipOrFail (what: string) (e: string) =
+            if nativeLibUnavailable e then printfn "  SKIP %s: %s" what e
+            else check ($"{what}: lowers") false e
+        // The rule record itself, per variable.
+        let rule v = NetcdfProvider.missingRuleOf ms v
+        check "rule: fill = NaN/Inf + _FillValue -999 (Float32, widened)"
+            ((rule "fill").NonFinite && (rule "fill").Sentinels = [ -999.0 ]) (sprintf "%A" (rule "fill"))
+        check "rule: vr = valid_range [0, 100]"
+            ((rule "vr").Lo = Some 0.0 && (rule "vr").Hi = Some 100.0) (sprintf "%A" (rule "vr"))
+        check "rule: unw (double, no _FillValue) = the default fill NC_FILL_DOUBLE"
+            ((rule "unw").Sentinels = [ 9.9692099683868690e+36 ]) (sprintf "%A" (rule "unw"))
+        check "rule: ifill (int) = its explicit _FillValue only, no NaN test"
+            (not (rule "ifill").NonFinite && (rule "ifill").IntSentinels = [ -9L ]) (sprintf "%A" (rule "ifill"))
+        check "rule: i64 (int64) carries NC_FILL_INT64 exactly (int64, not a double)"
+            ((rule "i64").IntSentinels = [ -9223372036854775806L ]) (sprintf "%A" (rule "i64"))
+        check "rule: iraw (int, no attribute) = no rule (NC_FILL_INT is data)"
+            (Blade.ProviderRegistry.isTrivialRule (rule "iraw")) (sprintf "%A" (rule "iraw"))
+        let refusals =
+            [ "fill", "2 cell(s) hold a missing value", "first at [0, 1]", "_FillValue -999.0"
+              "mv", "1 cell(s) hold a missing value", "first at [1, 0]", "missing_value -1.0"
+              "vr", "1 cell(s) hold a missing value", "first at [0, 2]", "outside valid_range [0.0, 100.0]"
+              "unw", "3 cell(s) hold a missing value", "first at [1, 0]", "the default fill 9.969209968386869E+36 (no _FillValue)"
+              "nanv", "1 cell(s) hold a missing value", "first at [0, 1]", "NaN or infinite"
+              "ifill", "1 cell(s) hold a missing value", "first at [0, 2]", "_FillValue -9"
+              "i64", "1 cell(s) hold a missing value", "first at [0, 1]", "_FillValue -9223372036854775806" ]
+        for (v, count, first, why) in refusals do
+            match run ($"nc_boundary_{v}") ($"let x = m.vars.{v} |> nc.read") with
+            | Ok r ->
+                Blade.Tests.ProviderBoundaryTests.expectRefusal check ($"netcdf: read of '{v}' refused") r
+                    [ $"provider read of '{v}' from '{ms}'"; count; first; why ]
+            | Error e -> skipOrFail ($"netcdf boundary '{v}'") e
+        (match run "nc_boundary_clean" "let o = m.vars.ok |> nc.read\nlet i = m.vars.iraw |> nc.read" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "netcdf: clean variables read (unheld _FillValue; integer NC_FILL_INT without attribute)" r
+                 [ "o = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]"; "i = [[1, -2147483647, 3], [4, 5, 6]]" ]
+         | Error e -> skipOrFail "netcdf boundary clean" e)
+        (match run "nc_boundary_present" "let t = m.vars.fill |> nc.read_present\nlet p = nc.present(m.vars.fill)\nlet n = extents(t)\nlet total = reduce(t, (+))\nlet w = m.vars.vr |> nc.read_present\nlet nw = extents(w)\nlet ti = m.vars.i64 |> nc.read_present\nlet ni = extents(ti)" with
+         | Ok r ->
+             Blade.Tests.ProviderBoundaryTests.expectValues check "netcdf: masked read (read_present / present)" r
+                 [ "n = 4"; "total = 12.0"; "p = [[true, false, true], [true, true, false]]"; "nw = 5"; "ni = 5" ]
+         | Error e -> skipOrFail "netcdf masked read" e)
+        // load_compound (compiled lane only -- the interpreter does not run
+        // compound provider reads): the PRESENT cells are checked, and the
+        // mask variable under its own rule.
+        (match run "nc_boundary_compound" "let d = nc.load_compound(m.vars.fill, m.vars.iraw) |> nc.read" with
+         | Ok r ->
+             (match r.Compiled with
+              | None -> printfn "  SKIP netcdf load_compound refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "netcdf: load_compound refuses missing PRESENT cells (BL8015)"
+                      (code <> 0 && out.Contains "error[BL8015]: provider read of 'fill'" && out.Contains "2 cell(s)" && out.Contains "first at [0, 1]") out
+              | Some (Error e) -> check "netcdf: load_compound refusal runs" false e)
+         | Error e -> skipOrFail "netcdf load_compound refusal" e)
+        (match run "nc_boundary_compound_mask" "let d = nc.load_compound(m.vars.ok, m.vars.ifill) |> nc.read" with
+         | Ok r ->
+             (match r.Compiled with
+              | None -> printfn "  SKIP netcdf load_compound mask refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "netcdf: load_compound refuses a mask holding its own _FillValue (BL8015)"
+                      (code <> 0 && out.Contains "error[BL8015]: provider read of 'ifill'" && out.Contains "first at [0, 2]") out
+              | Some (Error e) -> check "netcdf: load_compound mask refusal runs" false e)
+         | Error e -> skipOrFail "netcdf load_compound mask refusal" e)
+        // A STREAMED read checks each fiber as it is read (no pre-scan at
+        // open): the refusal comes from inside the nest and names the site.
+        (match run "nc_boundary_stream" "let A = m.vars.nanv |> nc.stream\nlet s = method_for(A) <@> lambda(x: Array<Float64 like c>) -> reduce(x, (+)) |> compute" with
+         | Ok r ->
+             (match r.Compiled with
+              | None -> printfn "  SKIP netcdf stream refusal: toolchain unavailable"
+              | Some (Ok (code, out)) ->
+                  check "netcdf: a streamed fiber holding NaN refuses (BL8015, site + cell coordinates)"
+                      (code <> 0 && out.Contains "error[BL8015]: provider read of 'nanv'" && out.Contains "1 cell(s)" && out.Contains "first at [0, 1]") out
+              | Some (Error e) -> check "netcdf: stream refusal runs" false e)
+         | Error e -> skipOrFail "netcdf stream refusal" e)
+        // The static fold refuses BEFORE folding, in its own phase (the `let static` assertion,
+        // BL4002),
+        // with the runtime sentence.
+        (match lower (prog "let static V = m.vars.fill |> nc.read") with
+         | Ok _ -> check "netcdf: static fold of a filled variable refused" false "lowered without error"
+         | Error e when nativeLibUnavailable e -> printfn "  SKIP netcdf fold refusal: %s" e
+         | Error e ->
+             check "netcdf: static fold refuses with the BL8015 sentence (the `let static` assertion)"
+                 (e.Contains "does not evaluate at compile time" && e.Contains "provider read of 'fill'" && e.Contains "2 cell(s) hold a missing value") e)
+     with ex -> unexpected "netcdf boundary rule" ex)
+
+    // sample.nc was REGENERATED for the rule (tests/fixtures/
+    // gen_netcdf_fixtures.py): B_mask is now written (it used to be all
+    // NC_FILL_BYTE, so load_compound read B's NaN fill columns as data). A
+    // and B themselves must be the old bytes, bit for bit (sha256 of the
+    // float32 payloads, as the generator printed them).
+    (try
+        let sha (xs: float[]) =
+            let bytes = xs |> Array.collect (fun x -> BitConverter.GetBytes(float32 x))
+            use h = Security.Cryptography.SHA256.Create()
+            h.ComputeHash bytes |> Array.map (sprintf "%02x") |> String.concat ""
+        let payload v =
+            match NetcdfProvider.readVarData "tests/fixtures/sample.nc" v with
+            | Ok { Payload = NcFloats xs } -> Some xs
+            | _ -> None
+        match payload "A", payload "B" with
+        | Some a, Some b ->
+            check "sample.nc: A is bit-identical to the pre-regeneration fixture"
+                (sha a = "2b50196f2b4f3ccb476fc0bdfb0f6f1bb6402ad01d4c7b12f3d78967e12f53fc") (sha a)
+            check "sample.nc: B is bit-identical to the pre-regeneration fixture"
+                (sha b = "31326bf6cc8fb3b8ba3775bbc566d676fa9a42f2bfafe462f2105be5510c3808") (sha b)
+        | _ -> printfn "  SKIP sample.nc payload hash: libnetcdf / fixture unavailable"
+     with ex -> unexpected "sample.nc payload hash" ex)
 
     // ---------------------------------------------------------------
     // Missing file at COMPILE time: `NetCDF.load("<absent>")` must fail

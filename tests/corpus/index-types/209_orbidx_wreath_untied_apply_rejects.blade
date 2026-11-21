@@ -16,7 +16,7 @@
 // story: this is a language limitation. The front-end gate here is what makes
 // it BL4003. Both layers stay -- the backstop is what keeps a future internal
 // producer loud instead of wrong.)
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

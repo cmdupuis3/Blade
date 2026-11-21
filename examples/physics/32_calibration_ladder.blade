@@ -54,8 +54,8 @@
 import ppl as ppl
 
 // noise tables (absolute velocity resolution; probe mass fuzz for D2)
-let NTAB = [-0.002, 0.0, 0.002]
-let PTAB = [-0.005, 0.0, 0.005]
+let NTAB = Float64([-0.002, 0.0, 0.002])
+let PTAB = Float64([-0.005, 0.0, 0.005])
 
 // one rung of a ladder with step rho (true rung velocity v = 2/(1+rho)),
 // read through the noise draw that is digit k of grid point r: the
@@ -77,7 +77,7 @@ let a_c2 = ppl.comoments(ARMV, 2)
 let amean = a_m1(0)
 let avar = a_c2(0)
 // linearized law: K g^2 Var(eta), g(4) = 25/8, Var(eta) = 2 sigma^2 / 3
-let r_lin = 6.0 * (25.0 / 8.0) * (25.0 / 8.0) * (2.0 * 0.002 * 0.002 / 3.0)
+let r_lin: Float64 = 6.0 * (25.0 / 8.0) * (25.0 / 8.0) * (2.0 * 0.002 * 0.002 / 3.0)
 let add_gap = (avar - r_lin) / r_lin
 
 // ---- the sweep: one-read ladders to M = 4096 at rho = 8, 16, 64 ----
@@ -104,8 +104,8 @@ let rfix64 = dvar * 2.0 / 12.0
 // analytic K^2 g(rho)^2 ladder costs to M = 4096 (units of 2 sigma^2/(3N)),
 // incl. the two un-simulatable ends: rho = 2 (K = 12) and the single jump
 // rho = 4096 (K = 1). The law is lifted over the table: no hand fractions.
-let RHO_L = [2.0, 4.0, 8.0, 16.0, 64.0, 4096.0]
-let K_L = [12.0, 6.0, 4.0, 3.0, 2.0, 1.0]
+let RHO_L = Float64([2.0, 4.0, 8.0, 16.0, 64.0, 4096.0])
+let K_L = Float64([12.0, 6.0, 4.0, 3.0, 2.0, 1.0])
 let G_L = (1.0 + RHO_L) * (1.0 + RHO_L) / (2.0 * RHO_L)
 let KG2 = K_L * K_L * G_L * G_L
 let kg2_2 = KG2(0)
@@ -115,7 +115,7 @@ let jump_ratio = KG2(5) / kg2_4
 // the universal optimum: h(rho) = g(rho)/ln(rho) is stationary at rho*
 // (analytic stationarity g'/g = 1/(rho ln rho)); an in-language scan
 // across it, lifted over the scan points, bottoms out at rho = 4.68
-let RHO_SCAN = [4.4, 4.6, 4.68, 4.8, 5.0]
+let RHO_SCAN = Float64([4.4, 4.6, 4.68, 4.8, 5.0])
 let G_SCAN = (1.0 + RHO_SCAN) * (1.0 + RHO_SCAN) / (2.0 * RHO_SCAN)
 let H_SCAN = G_SCAN / log(RHO_SCAN)
 let h468 = H_SCAN(2)
@@ -129,7 +129,7 @@ function probe_read(r: Int64, j: Int64) -> Float64 = {
     let v_hat = 0.4 + NTAB((r / 3 ^ j) % 3)
     (1.0 + PTAB(r % 3)) * (2.0 - v_hat) / v_hat / 4.0
 }
-let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 1) |> compute
+let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, Int64(1)) |> compute
 let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 2) |> compute
 let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 3) |> compute
 let GB = (G1 + G2 + G3) / 3.0

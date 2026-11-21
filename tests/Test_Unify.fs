@@ -411,10 +411,31 @@ let private test_dist_zonk_erases_to_component_tuple () =
          pass,
          sprintf "%A" zonked)
 
+let private test_snapshot_restores_literal_width_policy () =
+    // A discarded speculative check must not change how an existing literal
+    // defaults. Check observable zonking, and preserve pre-snapshot wide marks.
+    let subst = Subst()
+    let narrow = subst.FreshLiteral ETFloat32
+    let wide = subst.FreshLiteral ETInt32
+    match narrow, wide with
+    | IRTInfer n, IRTInfer w ->
+        subst.MarkWideDefault w
+        let before = subst.Snapshot()
+        subst.MarkWideDefault n
+        let speculative = zonkType subst narrow
+        subst.Restore before
+        let restored = zonkType subst narrow
+        let retained = zonkType subst wide
+        ("snapshot restores literal width policy without losing prior marks",
+         speculative = f64 && restored = IRTScalar ETFloat32 && retained = i64,
+         sprintf "speculative=%A restored=%A retained=%A" speculative restored retained)
+    | _ -> ("snapshot restores literal width policy without losing prior marks", false, "FreshLiteral did not return an inference variable")
+
 // ---- Runner ---------------------------------------------------------------
 
 let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
     let tests = [
+        test_snapshot_restores_literal_width_policy
         test_identical_concrete
         test_mixed_flat_vs_split_nested
         test_reverse_order_flat_vs_split_nested

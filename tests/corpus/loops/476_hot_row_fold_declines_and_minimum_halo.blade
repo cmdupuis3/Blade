@@ -1,0 +1,25 @@
+// TEST: Hot-Row Fold Declines (Kernel Reads Beyond Its Row) And The Minimum Halo
+// Two edges of Blade.Optimize.planHotRowFolds, values pinned either way:
+//   * `cross` folds a row kernel that also reads lap(0, 0) -- a row beyond the
+//     one being produced -- so the schedule is DECLINED (`blade plan`:
+//     "reads `lap` beyond its own row") and the two-pass form stays;
+//   * `one` is the smallest halo that has an interior at all (3 x 3 -> one
+//     cell), where the row-sum array has a single row and the seed enters the
+//     fold first exactly as in the two-pass form.
+// u(i, j) = i * j: the Laplacian is 0 everywhere, so every value here is the
+// seed's or the diagonal term's -- integer-valued, association-free.
+type Y = Idx<5>
+type X = Idx<4>
+let u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute
+let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+    u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) + 1.0 |> compute
+let cross = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row) + lap(0, 0), (+))
+// 3 rows x 2 cols of 1.0: each row contributes 2 + 1
+// EXPECT: cross = 9.0
+type P = Idx<3>
+type Q = Idx<3>
+let v = method_for(range<P, Q>) <@> lambda(i, j) -> Float64(Int64(i) * Int64(j)) |> compute
+let lap1 = method_for(range<halo<P, [-1, 0, 1]>, halo<Q, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+    v(wr(-1), wc(0)) + v(wr(1), wc(0)) + v(wr(0), wc(-1)) + v(wr(0), wc(1)) - 4.0 * v(wr(0), wc(0)) + 2.0 |> compute
+let one = reduce(method_for(lap1) <@> lambda(row) -> prodsum(row, row), lambda(p, q) -> p + q, 5.0)
+// EXPECT: one = 9.0

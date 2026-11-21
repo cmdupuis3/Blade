@@ -1,0 +1,20 @@
+// TEST: Math eigh result feeds matmul inside a function body and a block
+// #62: the lexical scope threads the shape of a function-local and a
+// block-local destructured binding; the function's annotated parameter is
+// the first shape witness.
+import math as m
+type M3 = Array<Float64 like Idx<3>, Idx<3>>
+let S: M3 = [[2.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 2.0]]
+function top_ritz(A: M3) -> Float64 = {
+    let (Q, lam) = m.eigh(A)
+    let P = m.matmul(A, Q)
+    P(0, 0) * Q(0, 0) + P(1, 0) * Q(1, 0) + P(2, 0) * Q(2, 0)
+}
+let r = top_ritz(S)
+// EXPECT: r = 3.414213562373095
+let blk = {
+    let (Q, lam) = m.eigh(S)
+    let P = m.matmul(S, Q)
+    P(0, 0) * Q(0, 0) + P(1, 0) * Q(1, 0) + P(2, 0) * Q(2, 0)
+}
+// EXPECT: blk = 3.414213562373095

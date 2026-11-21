@@ -1,0 +1,8 @@
+// TEST: A Function Returning A Sparse Range Map Over Deferred Module Keys Forces The Keys
+// Gap G246 (round 4 wave 9 lane d): the direct-return twin of loops/842 (the return pre-pass).
+// EXPECT: r = 35
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 5]
+let keys = method_for(d) <@> lambda(a) -> a * 2
+function f() = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> i + 1 |> compute
+let r = reduce(f(), (+))

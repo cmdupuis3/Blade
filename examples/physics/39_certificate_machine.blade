@@ -39,7 +39,7 @@
 // solve, and any certificate found becomes a pinned proof here.
 // ============================================================================
 
-let h = 0.707106781186548
+let h: Float64 = 0.707106781186548
 
 // ============ the machine: guarded LDL^T elimination ======================
 // pivots d_j = M_jj - sum_{k<j} L_jk^2 d_k; L_ij = (M_ij - sum L_ik L_jk
@@ -47,9 +47,9 @@ let h = 0.707106781186548
 // boundaries) -- legality there = the residual numerators vanish.
 
 // ---- (1) refutation: the negative-variance Hankel ----
-let hk11 = 1.0
-let hk12 = 2.0 * 1.41421356237309
-let hk22 = 4.0
+let hk11: Float64 = 1.0
+let hk12: Float64 = 2.0 * 1.41421356237309
+let hk22: Float64 = 4.0
 let hd1 = hk11
 let hL21 = hk12 / hd1
 let hd2 = hk22 - hL21 * hL21 * hd1
@@ -58,14 +58,14 @@ let refute_V = if hd2 < 0.0 then "NEGATIVE_PIVOT_NOT_A_MOMENT_MATRIX" else "NO"
 // ---- (2) extremal membership: the Tsirelson 5x5 ----
 // basis {1, A0, A1, B0, B1}: diag 1, marginals 0, c = (h, h, h, -h),
 // A0A1 = B0B1 = 0
-let td1 = 1.0
-let td2 = 1.0
-let td3 = 1.0
+let td1: Float64 = 1.0
+let td2: Float64 = 1.0
+let td3: Float64 = 1.0
 let tL42 = h / td2
 let tL43 = h / td3
 let td4 = 1.0 - tL42 * tL42 * td2 - tL43 * tL43 * td3
 let tr54 = 0.0 - tL42 * h - tL43 * (0.0 - h)
-let tL54 = 0.0
+let tL54: Float64 = 0.0
 let td5 = 1.0 - h * h - h * h - tL54 * tL54 * td4
 let tsir_V = if abs(td4) < 1.0e-12 && abs(td5) < 1.0e-12 && abs(tr54) < 1.0e-12 then "TSIRELSON_PSD_RANK3_EXTREMAL" else "NO"
 
@@ -73,13 +73,13 @@ let tsir_V = if abs(td4) < 1.0e-12 && abs(td5) < 1.0e-12 && abs(tr54) < 1.0e-12 
 // basis {u, a1, a2, a3, b1, b2, b3}; entries from the R^4 construction:
 // u.a_i = (s, s, 0), u.b_j = (-s, -s, 0), a1.a2 = s^2, b1.b2 = s^2,
 // a_i.a3 = a3.b12-type = 0 except the c_ij of ex 38
-let s = 0.25
-let rr = 0.9375
+let s: Float64 = 0.25
+let rr: Float64 = 0.9375
 let c11 = 0.0 - s * s + rr * 0.5
 let c13 = sqrt(rr) * h
-let c33 = 0.0
+let c33: Float64 = 0.0
 // elimination order u, a1, a2, a3, b1, b2, b3 (g-prefix)
-let gd1 = 1.0
+let gd1: Float64 = 1.0
 let gL21 = s
 let gL31 = s
 let gL51 = 0.0 - s
@@ -93,10 +93,10 @@ let gd3 = 1.0 - s * s - gL32 * gL32 * gd2
 let gL53 = (c11 + s * s - gL52 * gL32 * gd2) / gd3
 let gL63 = (c11 + s * s - gL62 * gL32 * gd2) / gd3
 let gL73 = (0.0 - c13 - gL72 * gL32 * gd2) / gd3
-let gd4 = 1.0
+let gd4: Float64 = 1.0
 let gL54 = c13
 let gL64 = 0.0 - c13
-let gL74 = 0.0
+let gL74: Float64 = 0.0
 // seven vectors in R^4: exactly four positive pivots; the last three
 // vanish, and legality of the vanishing = zero residual numerators
 let gd5 = 1.0 - gL51 * gL51 - gL52 * gL52 * gd2 - gL53 * gL53 * gd3 - gL54 * gL54
@@ -111,8 +111,8 @@ let gram_V = if gd2 > 0.0 && gd3 > 0.0 && gzero < 1.0e-12 then "SUPRA_POINT_PSD_
 // ---- (4) the dual certificate: Tsirelson's bound proven ----
 // Lambda = (p1 p1^T + p2 p2^T)/sqrt2, p1 = (0,1,0,-h,-h), p2 = (0,0,1,-h,h):
 // two outer products, written as such
-let P1 = [0.0, 1.0, 0.0, -0.707106781186548, -0.707106781186548]
-let P2 = [0.0, 0.0, 1.0, -0.707106781186548, 0.707106781186548]
+let P1 = Float64([0.0, 1.0, 0.0, -0.707106781186548, -0.707106781186548])
+let P2 = Float64([0.0, 0.0, 1.0, -0.707106781186548, 0.707106781186548])
 let LAM = (P1 [*] P1 + P2 [*] P2) * 0.707106781186548
 // (a) PSD by elimination: row 0 is zero; pivots at 1 and 2 are h; the
 // last two pivots and the cross-residual vanish (rank 2)

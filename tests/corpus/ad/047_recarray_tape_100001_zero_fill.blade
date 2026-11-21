@@ -1,0 +1,27 @@
+// TEST: AD Recursive Array, A 100001-Step Tape Starts From A Zero Fill
+import ad as ad
+// ============================================================================
+// Gap G118: the AD expansion of a `let rec` recurrence used to start its
+// T-cell tape from a T-element ARRAY LITERAL, typed cell by cell (`blade
+// check` 114 s at T = 20,001, unfinished at 100,001). Past 4096 cells the
+// tape now starts from the constant fill `replicate(T, pure(0.0)) |> compute`
+// (its cotangent the same fill), so this program compiles in seconds.
+// The logistic map at r = 2 from 0.25 reaches its fixed point 0.5 exactly
+// (s' = 0.5 - 2 e^2), where 1 - 2 s = 0: ds/dx = 0, and ds/dr satisfies
+// d = s (1 - s) + r (1 - 2 s) d = 0.25. Every pin is exact.
+// ============================================================================
+function f(x: Float64, r: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<100001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: r * prefix(n - 1) * (1.0 - prefix(n - 1))
+    s(100000)
+}
+let (gv, gx, gr) = ad.grad(f)(Float64(0.25), Float64(2.0))
+// EXPECT: gv = 0.5
+// EXPECT: gx = 0.0
+// EXPECT: gr = 0.25
+let (fr, tr) = ad.jvp(f)(Float64(0.25), Float64(2.0), Float64(0.0), Float64(1.0))
+// EXPECT: fr = 0.5
+// EXPECT: tr = 0.25

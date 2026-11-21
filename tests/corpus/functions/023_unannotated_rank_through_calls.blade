@@ -7,5 +7,5 @@
 // (double param passed to Array<double,1>).
 function total(row) = reduce(row, (+))
 function twice(a) = total(a) + total(a)
-let t = twice([1.0, 2.0])
+let t = twice(Float64([1.0, 2.0]))
 // EXPECT: t = 6.0

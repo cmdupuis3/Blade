@@ -28,25 +28,25 @@
 // compile-time fold would run .NET arithmetic that nothing holds to the
 // runtime series. Every call here evaluates at run time.
 // ============================================================================
-let half = digamma(0.5)
-let one = digamma(1.0)
-let two = digamma(2.0)
-let quarter = digamma(0.25)
-let three = digamma(3.0)
-let d1025 = digamma(10.25)
-let hundred = digamma(100.0)
-let tiny = digamma(0.001)
+let half: Float64 = digamma(0.5)
+let one: Float64 = digamma(1.0)
+let two: Float64 = digamma(2.0)
+let quarter: Float64 = digamma(0.25)
+let three: Float64 = digamma(3.0)
+let d1025: Float64 = digamma(10.25)
+let hundred: Float64 = digamma(100.0)
+let tiny: Float64 = digamma(0.001)
 // Straddling the x < 10 shift boundary, the one place a while-loop
 // transcription could diverge between the two evaluators. The pair also
 // witnesses that the recurrence/asymptotic junction is SEAMLESS: they differ
 // by 1.0517e-7 = trigamma(10) * 1e-6, i.e. by the true slope, with no step.
-let belowShift = digamma(9.999999)
-let atShift = digamma(10.0)
+let belowShift: Float64 = digamma(9.999999)
+let atShift: Float64 = digamma(10.0)
 // Integer operands promote, like every other intrinsic (see 004).
-let promoted = digamma(6)
+let promoted = digamma(Int64(6))
 // Kernel position: the eta-expansion that carries `sqrt` into `<@>` (see 007)
 // carries digamma too, through the same blade_rt::digamma emission.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let psis = digamma <@> A |> compute
 // EXPECT: half = -1.9635100260214229
 // EXPECT: one = -0.5772156649015324

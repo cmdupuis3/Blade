@@ -1,0 +1,44 @@
+// TEST: Observations of compound, grouped, ragged and row-view R arrays compute on keys
+// ============================================================================
+// R3 (lead review, F1): an arithmetic-section fold over a NON-dense array of
+// R values folds the STORED keys, `reduce(Int64(xs), ..)` -- the fused
+// deferred key map is built for dense operands only (over a compound it
+// reached BL7004 in the back end). An intrinsic over a compound or grouped
+// array and every observation of a row view (dense storage) read the keys as
+// well.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let keep = mask(codes, lambda(c) -> c > 150)
+let sel = compound(codes, keep)
+let s1 = reduce(sel, (+))
+// EXPECT: s1 = 500
+let s2 = reduce(sel, (*))
+// EXPECT: s2 = 60000
+let s3 = reduce(sel, (+), 0)
+// EXPECT: s3 = 500
+let op = (+)
+let s4 = reduce(sel, op)
+// EXPECT: s4 = 500
+let a1 = abs(sel)
+// EXPECT: a1 = [200, 300]
+let o1 = sort(sel, lambda(e) -> e)
+// EXPECT: o1 = [200, 300]
+let ks: Array<Int64 like Idx<3>> = [1, 2, 1]
+let gk = group_keys(ks)
+let g = group_by(codes, gk)
+let gs = reduce(g, (+))
+// EXPECT: gs = [400, 200]
+let ga = abs(g)
+// EXPECT: ga = [[100, 300], [200]]
+let rg: Array<R like Idx<2>, RaggedIdx<_>> = [[100], [200, 300]]
+let rs = reduce(rg, (+))
+// EXPECT: rs = [100, 500]
+let m: Array<R like Idx<2>, Idx<2>> = [[100, 200], [300, 100]]
+let row = m(1)
+let rn = -row
+// EXPECT: rn = [-300, -100]
+let rp = prodsum(row, row)
+// EXPECT: rp = 100000
+let rf = reduce(row, (+))
+// EXPECT: rf = 400

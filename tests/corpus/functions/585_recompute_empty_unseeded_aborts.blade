@@ -1,0 +1,16 @@
+// TEST: Recompute Selection Keeps BL8003 At The First Consumer (aborts)
+// ============================================================================
+// Two UNSEEDED folds over an empty computed x. A recomputed fold would be
+// seeded with the identity and return it, so BLADE_RECOMPUTE admits an
+// unseeded fold only over a literal extent >= 1 (`Optimize.elidedFoldSeed`):
+// here (extent 0) it declines, x stays materialized, and the FIRST consumer
+// aborts with today's message.
+function stats(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    let s = reduce(x, (+))
+    let q = reduce(x, (*))
+    s + q
+}
+let none: Array<Float64 like Idx<0>> = []
+let t = stats(none)
+// ABORT: error[BL8003]: reduce: empty array, no reduction possible

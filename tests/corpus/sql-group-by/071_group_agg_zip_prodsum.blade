@@ -1,0 +1,24 @@
+// TEST: Group aggregate one pass, co-grouped prodsum
+// `prodsum(ra, rb)` over two arrays grouped by the SAME grouping (the
+// same-keys co-iteration peel) and `prodsum(r, r)`: under the one pass (gap
+// G71) the PRODSUM state machine -- `acc = 0`, then `acc += a * b` per row,
+// the product's operands in the order written -- over both value sources.
+type Region = Idx<3>
+type Row = Idx<6>
+
+function dots(k: Array<Region like Row>, a: Array<Int64 like Row>, b: Array<Int64 like Row>) = {
+    let gk = group_keys(k)
+    let ga = group_by(a, gk)
+    let gb = group_by(b, gk)
+    let ab = method_for(zip(ga, gb)) <@> lambda(ra: Array<Int64 like RaggedIdx<_>>, rb: Array<Int64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+    let aa = method_for(ga) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute
+    (ab, aa)
+}
+
+let keys: Array<Region like Row> = [0, 2, 0, 2, 2, 0]
+let a: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6]
+let b: Array<Int64 like Row> = [10, 20, 30, 40, 50, 60]
+let (ab, aa) = dots(keys, a, b)
+// group 0 = rows 0, 2, 5; group 1 = empty; group 2 = rows 1, 3, 4
+// EXPECT: ab = [460, 0, 450]
+// EXPECT: aa = [46, 0, 45]

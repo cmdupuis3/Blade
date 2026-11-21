@@ -6,7 +6,7 @@
 // primal) collapses the chain into one kernel bottom-up, so there is one
 // loop and no staged buffer at all.
 // `>>@` runs its LEFT stage first: h(g(f(x))) = ((x+1)*2) - 3.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x) -> x + 1.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x - 3.0

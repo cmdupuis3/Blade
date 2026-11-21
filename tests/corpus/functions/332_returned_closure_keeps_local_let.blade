@@ -8,19 +8,19 @@ function mk(i: Int64) = {
     lambda(j: Int64) -> base + j
 }
 function summer(n: Float64) = {
-    let v = [1.0, 2.0, 3.0] * n
+    let v = Float64([1.0, 2.0, 3.0]) * n
     lambda(k: Float64) -> reduce(v, (+)) + k
 }
 function relay(n: Float64) = {
-    let w = [4.0, 5.0] * n
+    let w = Float64([4.0, 5.0]) * n
     let f = lambda(k: Float64) -> reduce(w, (+)) * k
     f
 }
 let r1 = mk(4)(5)
-let s = summer(2.0)
-let t = relay(1.5)
-let r2 = s(0.5)
-let r3 = t(2.0)
+let s = summer(Float64(2.0))
+let t = relay(Float64(1.5))
+let r2 = s(Float64(0.5))
+let r3 = t(Float64(2.0))
 let r4 = summer(3.0)(1.0) + s(0.0)
 // EXPECT: r1 = 405
 // EXPECT: r2 = 12.5

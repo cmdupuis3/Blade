@@ -1,0 +1,24 @@
+// TEST: A Mut Argument Beside A Closure In A Sort Key Slot Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3-kernel), round 4 wave 9 (lane C, C2): a function value no
+// resolution reaches -- the closure `kf` a module let holds -- standing in a
+// KERNEL slot (a sort key) runs inside the callee with unknown reads, so a
+// `mut` argument beside it is refused FAIL CLOSED (BL4005), as the same
+// closure applied in a call already was (ad/103). It used to be accepted: the
+// read scan saw a bare variable, not a call. (The ad.grad form is refused
+// earlier by grad itself, BL5500: a non-lambda sort key is not
+// differentiable.)
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf = factory(g)
+function bump(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    let s = sort(y, kf)
+    s(0)
+}
+let r = bump(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

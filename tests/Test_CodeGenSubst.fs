@@ -10,8 +10,11 @@ module Blade.Tests.CodeGenSubst
 //
 // As of M1, that optimization moved to the IR level (rewriteMaskContains
 // + IRMaskWithSet + IRSetMember). The IRContains arm now ALWAYS renders the
-// IIFE linear scan and never consults the substitution; mask+contains fusion
-// happens before codegen runs.
+// IIFE linear scan and never consults the substitution. Round 3 (B-T1):
+// membership hoisting is a side-table plan (Optimize.MemberHoistTable), not
+// the SubstMap, and outside a planned host it is this same scan -- under the
+// one target-evaluation contract: the set bound once (`__cs`), the target
+// evaluated once (`__cx`), BEFORE the loop reads any cell.
 //
 // The SubstMap itself is NOT dead, though: exprToCppCore still consults it,
 // at the IRIndex arm, for the halo-carousel rewrite (a hoisted dense window
@@ -72,9 +75,15 @@ let test_irContains_renders_as_iife = {
             |> Map.add 1 "B"
             |> Map.add 2 "x"
         let output = exprToCppWithSubst [] names cont
-        checkOutput output
-            ["[&]()"; "B.extents[0]"; "B["; "return true"; "return false"]
-            ["B.count("]
+        let (ok, msg) =
+            checkOutput output
+                ["[&]()"; "auto&& __cs = B;"; "const auto __cx = x;"; "__cs.extents[0]"; "__cs[__ci] == __cx"; "return true"; "return false"]
+                ["B.count("; "== x)"]
+        // the target is evaluated once, before the scan reads any cell
+        let tgt = output.IndexOf "const auto __cx = x;"
+        let loop = output.IndexOf "for ("
+        if ok && not (tgt >= 0 && loop > tgt) then (false, $"the target is not evaluated before the scan: {output}")
+        else (ok, msg)
 }
 
 let test_contains_arm_never_substitutes = {
@@ -105,7 +114,7 @@ let test_contains_arm_never_substitutes = {
         let names = Map.empty |> Map.add 1 "B" |> Map.add 2 "x"
         let output = exprToCppWithSubst [(twin, "ghost_set")] names inTree
         checkOutput output
-            ["[&]()"; "B.extents[0]"; "return true"; "return false"]
+            ["[&]()"; "auto&& __cs = B;"; "__cs.extents[0]"; "return true"; "return false"]
             ["ghost_set"]
 }
 

@@ -1,0 +1,12 @@
+// TEST: A Fused Fold Whose Bool Result Feeds Its Number Accumulator Is Refused (rejects)
+// ERROR: BL3001 @ 8:27
+// ERROR-CONTAINS: returns a Bool value, but its accumulator parameter
+// ============================================================================
+// R11: `k(1, 2)` decided the kernel's parameters (Int32); it returns a Bool,
+// which the fused fold fed back into `acc + x`. Base: the C++ lane printed
+// `r = true`, the LLVM lane `r = 1`.
+// ============================================================================
+let k = lambda(acc, x) -> acc + x > 0
+let warm = k(1, 2)
+let xs = [1, 2, 3]
+let r = reduce(method_for(xs) <@> lambda(x) -> x, k, 0)

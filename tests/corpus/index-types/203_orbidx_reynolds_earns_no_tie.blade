@@ -15,7 +15,7 @@
 //
 // The values are the reynolds sum h(p,q) + h(q,p) = 2(p + q) over every ordered
 // pair of S's cells, dense in both blocks.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

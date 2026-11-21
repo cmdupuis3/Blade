@@ -34,11 +34,11 @@
 (* behavior layer.                                                       *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeShape, BladeTrinityAsym, BladeCompute.        *)
-(* Coq 8.18, stdlib only.                                                *)
+(* Rocq 9.0, stdlib only.                                                *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeShape BladeTrinityAsym BladeCompute.
-Require Import List Arith Lia Setoid Permutation.
+From Stdlib Require Import List Arith Lia Setoid Permutation.
 Import ListNotations.
 
 (* ---------------- 1. the computation monad ---------------- *)
@@ -207,7 +207,7 @@ Proof.
     unfold segswap in E.
     assert (LS : length (skipn (swidth s2) t)
                  = length (skipn (swidth s2) t')).
-    { rewrite !skipn_length, Lt, Lt'. reflexivity. }
+    { rewrite !length_skipn, Lt, Lt'. reflexivity. }
     assert (Es : skipn (swidth s2) t = skipn (swidth s2) t').
     { eapply app_split_length; [exact LS | exact E]. }
     rewrite Es in E. apply app_inv_head in E.

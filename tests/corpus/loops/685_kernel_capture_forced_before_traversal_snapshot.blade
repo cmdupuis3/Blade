@@ -1,0 +1,23 @@
+// TEST: Kernel Capture Forced Before Traversal Snapshot
+// Gap G199 (Codex diff review round 2): a kernel that captures a deferred map
+// forces it under its own name before its traversal, even when every read of
+// it folds to a constant (extents(d) of a static extent): d keeps those cells
+// after x is written. And a producer rebuilt over a hoisted force (p over d,
+// its kernel reading h) still lets the later force of h hoist ahead of the
+// statement, so its pool dominates the later read and the print.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(x) <@> lambda(v) -> v + Float64(extents(d))
+let z = p(0)
+let e = method_for(x) <@> lambda(v) -> v * 5.0
+let h = method_for(x) <@> lambda(v) -> v * 3.0
+let q = method_for(e) <@> lambda(v) -> v + h(0)
+let zq = q(0)
+x(0) = 10.0
+let w = d(0)
+let wh = h(0)
+// EXPECT: z = 4.0
+// EXPECT: zq = 8.0
+// EXPECT: w = 2.0
+// EXPECT: wh = 3.0

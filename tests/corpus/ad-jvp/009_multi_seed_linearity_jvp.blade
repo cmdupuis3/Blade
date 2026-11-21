@@ -4,7 +4,7 @@
 // (2, 3): primal 12, df/dx = 2xy = 12, df/dy = x^2 = 4; seed (1,1) -> 16.
 import ad as ad
 
-function f(x: Float, y: Float) -> Float = x * x * y
+function f(x: Float64, y: Float64) -> Float64 = x * x * y
 
 let (v1, tx) = ad.jvp(f)(2.0, 3.0, 1.0, 0.0)
 let (v2, ty) = ad.jvp(f)(2.0, 3.0, 0.0, 1.0)

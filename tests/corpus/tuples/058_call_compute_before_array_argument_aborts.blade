@@ -1,0 +1,15 @@
+// TEST: Call Compute Before Array Argument (aborts)
+// ----------------------------------------------------------------------------
+// Finding 5's reverse order: the explicit compute comes FIRST and divides by
+// zero (BL8013) before the later array argument's checked cast (BL8006).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let bad = method_for(z) <@> lambda(v) -> 1 / v
+function checked(k: Array<Int64 like Row>) -> Array<Int64 like Row> = [a((k(0) : Row))]
+function g2(p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = p(0) + q(0)
+let r = g2(bad |> compute, checked(a))
+// ABORT: BL8013
+// ABORT: integer division by zero
+// ABORT: .blade:8

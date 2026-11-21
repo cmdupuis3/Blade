@@ -16,7 +16,7 @@
 //
 // `anticomm` is the PIN spelling: the kernel is used AS-IS (no permutation
 // sum), storing f(a,b) for a < b only, so the cells are S[a] - S[b].
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where anticomm(p, q) -> p - q

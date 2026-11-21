@@ -1,0 +1,26 @@
+// TEST: Llvm Antisym Tile Three Components Scaled
+// The antisym pair over a THREE-component stack Z(p, 3, n) reading components
+// (2, 0) -- so the tile's operand rows sit at Z(i, 2) and Z(i, 0), a component
+// stride of n and a row stride of 3n, the leading dims the LLVM lane passes the
+// shared C core -- with the kernel's own scalar `* 0.25` applied once to each
+// FINISHED difference, at p = 53 (8*6 + 5 rows, 6*8 + 4 strict columns: ragged
+// row and column panels) and n = 401 (a chain longer than the simplex's sample
+// block: the antisym tile runs each cell's P and Q whole).
+/// Z(i, c, s) = ((3 i + 5 c + 2 s) mod 9) - 4: small integers, exact sums, and
+/// `* 0.25` is exact -- association-invariant pins; route by
+/// `blade test llvm facts` / `blade test row-tile`, bits by `blade test llvm tiles`.
+type P = Idx<53>
+type C = Idx<3>
+type S = Idx<401>
+let (ss, l01, l_mirror, l_edge, row7) = {
+    let z = method_for(range<P>, range<C>, range<S>) <@> lambda(i, c, s) -> Float64((i * 3 + c * 5 + s * 2) % 9) - 4.0 |> compute
+    let l = method_for(z, z) <@> lambda(a: Array<Float64 like C, S>, b: Array<Float64 like C, S>) where anticomm(a, b) -> (prodsum(a((2 : C)), b((0 : C))) - prodsum(b((2 : C)), a((0 : C)))) * 0.25 |> compute
+    let total = reduce(method_for(range<P>) <@> lambda(i) -> reduce(method_for(range<P>) <@> lambda(j) -> l(i, j) * l(i, j), (+)), (+))
+    let r7 = reduce(method_for(range<P>) <@> lambda(j) -> l(7, j), (+))
+    (total, l(0, 1), l(52, 3), l(51, 52), r7)
+}
+// EXPECT: ss = 170154816.75
+// EXPECT: l01 = 300.75
+// EXPECT: l_mirror = -300.75
+// EXPECT: l_edge = 300.75
+// EXPECT: row7 = -300.75

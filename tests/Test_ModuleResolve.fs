@@ -83,10 +83,10 @@ let private textOf (ds: Blade.Diagnostics.Diagnostic list) =
 let private siProgram =
     "import units.SI\n"
     + "Unit accel = meter / second^2\n"
-    + "let mass: Float<kilogram> = 2.0\n"
-    + "let a: Float<accel> = 3.0\n"
-    + "let force: Float<newton> = mass * a\n"
-    + "let extra: Float<newton> = 4.0\n"
+    + "let mass: Float64<kilogram> = 2.0\n"
+    + "let a: Float64<accel> = 3.0\n"
+    + "let force: Float64<newton> = mass * a\n"
+    + "let extra: Float64<newton> = 4.0\n"
     + "let total = force + extra\n"
 
 /// The same program written against a SELECTIVE import. `newton` alone is not
@@ -95,9 +95,9 @@ let private siProgram =
 let private siSelectiveProgram =
     "from units.SI import newton, kilogram, meter, second\n"
     + "Unit accel = meter / second^2\n"
-    + "let mass: Float<kilogram> = 2.0\n"
-    + "let a: Float<accel> = 3.0\n"
-    + "let force: Float<newton> = mass * a\n"
+    + "let mass: Float64<kilogram> = 2.0\n"
+    + "let a: Float64<accel> = 3.0\n"
+    + "let force: Float64<newton> = mass * a\n"
 
 let private cppOf (name: string) (ir: IR.IRProgram) =
     fst (CodeGen.genSelfContainedProgramFromIR ir name)
@@ -150,7 +150,7 @@ let runModuleResolveTests () : BlockResult =
             ($"""roots: {(String.concat " ; " roots)}""")
 
     // -- nothing to resolve: the single-file path, unchanged ---------------
-    let plainPath = scratch.Write "plain.blade" "let x = 1.0\nlet y = x + 2.0\n"
+    let plainPath = scratch.Write "plain.blade" "let x: Float64 = 1.0\nlet y = x + 2.0\n"
     let plainSrc = File.ReadAllText plainPath
     let plainRes = Blade.ModuleResolve.resolveEntry plainPath plainSrc
     check "no_imports_resolves_to_exactly_the_entry_file"
@@ -207,8 +207,8 @@ let runModuleResolveTests () : BlockResult =
     let siBadPath =
         scratch.Write "si_bad.blade"
             ("import units.SI\n"
-             + "let a: Float<meter> = 1.0\n"
-             + "let b: Float<second> = 2.0\n"
+             + "let a: Float64<meter> = 1.0\n"
+             + "let b: Float64<second> = 2.0\n"
              + "let c = a + b\n")
     let siBad = fst (Blade.Lowering.lowerFileDiag siBadPath (File.ReadAllText siBadPath))
     check "imported_units_still_reject_a_dimension_mismatch"
@@ -228,9 +228,9 @@ let runModuleResolveTests () : BlockResult =
         scratch.Write "si_selective_bad.blade"
             ("from units.SI import newton, kilogram, meter, second\n"
              + "Unit accel = meter / second^2\n"
-             + "let m: Float<kilogram> = 2.0\n"
-             + "let a: Float<accel> = 3.0\n"
-             + "let bad: Float<newton> = m + a\n")
+             + "let m: Float64<kilogram> = 2.0\n"
+             + "let a: Float64<accel> = 3.0\n"
+             + "let bad: Float64<newton> = m + a\n")
     let selBad = fst (Blade.Lowering.lowerFileDiag selBadPath (File.ReadAllText selBadPath))
     check "selectively_imported_units_reject_a_dimension_mismatch"
         (match selBad with
@@ -239,7 +239,7 @@ let runModuleResolveTests () : BlockResult =
         (match selBad with Error ds -> textOf ds | Ok _ -> "accepted a kilogram + accel sum")
 
     // -- user modules beside the entry file --------------------------------
-    scratch.Write "mylib/helpers.blade" "module mylib.helpers\nlet base_rate = 5.0\n" |> ignore
+    scratch.Write "mylib/helpers.blade" "module mylib.helpers\nlet base_rate: Float64 = 5.0\n" |> ignore
     let userPath =
         scratch.Write "user_main.blade"
             ("import mylib.helpers\n"
@@ -255,7 +255,7 @@ let runModuleResolveTests () : BlockResult =
         (match userLowered with Ok _ -> "" | Error ds -> textOf ds)
 
     // -- transitive discovery ----------------------------------------------
-    scratch.Write "chain/C.blade" "module chain.C\nlet c_val = 1.0\n" |> ignore
+    scratch.Write "chain/C.blade" "module chain.C\nlet c_val: Float64 = 1.0\n" |> ignore
     scratch.Write "chain/B.blade" "module chain.B\nimport chain.C\nlet b_val = C.c_val + 1.0\n" |> ignore
     scratch.Write "chain/A.blade" "module chain.A\nimport chain.B\nlet a_val = B.b_val + 1.0\n" |> ignore
     let chainPath = scratch.Write "chain_main.blade" "import chain.A\nlet top = A.a_val + 1.0\n"
@@ -312,7 +312,7 @@ let runModuleResolveTests () : BlockResult =
         (textOf selfRes.Errors)
 
     // -- header / import-name agreement + duplicates ------------------------
-    scratch.Write "wrong/name.blade" "module some.other\nlet w = 1.0\n" |> ignore
+    scratch.Write "wrong/name.blade" "module some.other\nlet w: Float64 = 1.0\n" |> ignore
     let wrongPath = scratch.Write "wrong_main.blade" "import wrong.name\nlet x = 1.0\n"
     let wrong = Blade.ModuleResolve.resolveEntry wrongPath (File.ReadAllText wrongPath)
     check "module_header_must_agree_with_the_import_name"
@@ -322,7 +322,7 @@ let runModuleResolveTests () : BlockResult =
 
     // A dependency that forgot its `module` header parses as `Main`, which the
     // entry file already is. Two files, one module name: refuse.
-    scratch.Write "dup/thing.blade" "let d = 1.0\n" |> ignore
+    scratch.Write "dup/thing.blade" "let d: Float64 = 1.0\n" |> ignore
     let dupPath = scratch.Write "dup_main.blade" "import dup.thing\nlet x = 1.0\n"
     let dup = Blade.ModuleResolve.resolveEntry dupPath (File.ReadAllText dupPath)
     check "two_files_declaring_one_module_are_refused"
@@ -332,7 +332,7 @@ let runModuleResolveTests () : BlockResult =
 
     // -- BLADE_STDLIB override ---------------------------------------------
     let altRoot = Path.Combine(scratch.Root, "alt_stdlib")
-    scratch.Write "alt_stdlib/fake/Mod.blade" "module fake.Mod\nlet fake_val = 7.0\n" |> ignore
+    scratch.Write "alt_stdlib/fake/Mod.blade" "module fake.Mod\nlet fake_val: Float64 = 7.0\n" |> ignore
     let altMain = scratch.Write "alt_main.blade" "import fake.Mod\nlet v = Mod.fake_val\n"
     let overrideOk =
         use _pin = pinEnv "BLADE_STDLIB" (Some altRoot)

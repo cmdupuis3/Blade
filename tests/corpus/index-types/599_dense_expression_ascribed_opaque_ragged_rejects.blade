@@ -1,0 +1,14 @@
+// TEST: A dense array ascribed an opaque RaggedIdx type in an expression is refused (rejects)
+// ============================================================================
+// Gap G190 (a), the ARGUMENT case (round 4 wave 8, lane C, C3; Codex diff
+// review): an EXPRESSION ascription `(d : Array<Float64 like RaggedIdx<_>>)`
+// of a dense array hid its provenance from the call-boundary refusal exactly
+// as a let ascription did (the interpreter printed 3.0, the C++ lane could
+// not convert it, BL9002). Refused at lowering in every lane, BL4003.
+// ============================================================================
+function f(a: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(a, (+))
+let d: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let s = f((d : Array<Float64 like RaggedIdx<_>>))
+// ERROR: BL4003
+// ERROR-CONTAINS: a dense array ascribed an opaque
+// REJECT-AT: lower

@@ -1,0 +1,19 @@
+// TEST: A where-omp kernel folds over a range whose bound is a block with lets
+// ============================================================================
+// Gap G201 (round 4 wave 6 lane C's control): the range bound is a BLOCK with
+// its own lets and a call that writes its own scratch. It lowered, but the
+// C++ lane read the fold's bound off `__range0.extents[0]`, which nothing
+// declared (BL9002), and the LLVM lane fell back to it. A fold over a
+// deferred computation whose one operand is a runtime-extent anonymous range
+// now declares the range holder at the loop entry (after the seed), its
+// extent evaluated once there, a negative one an empty range. The serial
+// twin is loops/676; the order and empty-range pins loops/677.
+// ============================================================================
+function bump(a: mut Array<Int64 like Idx<3>>) -> Int64 = {
+    a(0) = 3
+    3
+}
+let xs: Array<Int64 like Idx<4>> = [1, 2, 3, 4]
+let ys = method_for(xs) <@> lambda(v) where omp(v: 1) -> v * reduce(method_for(0..{ let mut scratch: Array<Int64 like Idx<3>> = [1, 2, 3]; bump(scratch) }) <@> lambda(k) -> k, (+)) |> compute
+// EXPECT: xs = [1, 2, 3, 4]
+// EXPECT: ys = [3, 6, 9, 12]

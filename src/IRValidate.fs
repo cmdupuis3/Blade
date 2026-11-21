@@ -186,6 +186,150 @@ let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
                         |> List.filter (fun f ->
                             Set.contains f.Id reachable || not (funcStillPolymorphic f)) }) }
 
+/// THE NUMBERS-ONLY JUDGMENT OF ONE NODE after monomorphization (formalism
+/// 2.4; check 1d below and R11's spanned twin, Lowering.refuseArgumentConversions,
+/// which runs it before the optimizer and reports at the node's source span):
+/// the refusal messages, each prefixed by its code, of an arithmetic, comparison,
+/// math or logical node whose operand is not of its class. Children are not
+/// visited.
+let numbersOnlyClashes (e: IRExpr) : string list =
+    let errors = ResizeArray<string>()
+    let addError (_: unit) (msg: string) = errors.Add msg
+    let ctx = ()
+    let nonNumeric (t: IRType) : string option =
+        let rec cls (t: IRType) =
+            match t with
+            | IRTUnitAnnotated (inner, _) -> cls inner
+            | IRTIdxTagged (inner, _) -> cls inner
+            | IRTScalar ETBool -> Some "Bool"
+            | IRTScalar ETString -> Some "String"
+            | IRTScalar ETUnit -> Some "unit"
+            | IRTScalar _ -> None
+            | IRTTuple _ -> Some "tuple"
+            | IRTNamed n -> Some (TypeOrigins.sourceName n)
+            | ArrayElem arr -> cls arr.ElemType
+            | FuncElem _ -> Some "function"
+            | _ -> None
+        cls t
+    // The operand's full type: the reconstructing `typeOf` (a conditional over
+    // tuples, a struct field read through a generic receiver -- the cases
+    // `exprTypeIfKnown`'s scalar-only answers leave open), never throwing.
+    let tyOf (e: IRExpr) : IRType option =
+        try Some (typeOf e) with _ -> exprTypeIfKnown e
+    (match e with
+     | IRBinOp (_, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret as op), l, r, _) ->
+         let lt = tyOf l |> Option.bind nonNumeric
+         let rt = tyOf r |> Option.bind nonNumeric
+         let opS = match op with IRAdd -> "+" | IRSub -> "-" | IRMul -> "*" | IRDiv -> "/" | IRMod -> "%" | _ -> "^"
+         // `+` with a String side is concatenation unless the other side is
+         // KNOWN not to be a String (its type may be unknown here: a call
+         // result, a stdlib JSON helper's string).
+         let rec numericT (t: IRType) =
+             match t with
+             | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+             | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+             | ArrayElem arr -> numericT arr.ElemType
+             | _ -> false
+         let knownNotString (e: IRExpr) =
+             match tyOf e with
+             | Some t -> numericT t || (match nonNumeric t with Some k -> k <> "String" | None -> false)
+             | None -> false
+         (match lt, rt with
+          | Some "String", _ when op = IRAdd && not (knownNotString r) -> ()
+          | _, Some "String" when op = IRAdd && not (knownNotString l) -> ()
+          | Some k, _ | _, Some k ->
+              addError ctx $"BL3001: arithmetic is defined on numbers only: `{opS}` meets a {k} value (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass a number"
+          | _ -> ())
+     // (No logical-operator mirror here: a section bound as a value, `let
+     // op = (&&)`, is lowered over Float64 parameters, so `IRAnd` over a
+     // number is not evidence of a user error at this level. The type
+     // checker's GOBoolOperand judges the generic instances.)
+     // A comparison of a number with a non-numeric value (a generic `x ==
+     // 1` instantiated at a tuple, a struct, a function).
+     | IRBinOp (_, (IREq | IRNeq | IRLt | IRLe | IRGt | IRGe), l, r, _) ->
+         let rec numericT (t: IRType) =
+             match t with
+             | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+             | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+             | IRTNat _ -> true
+             | ArrayElem arr -> numericT arr.ElemType
+             | _ -> false
+         let num (e: IRExpr) = tyOf e |> Option.exists numericT
+         let nn (e: IRExpr) = tyOf e |> Option.bind nonNumeric
+         (match nn l, nn r with
+          | Some k, None when num r ->
+              addError ctx $"BL3001: a comparison converts nothing: it meets a {k} value and a number (a generic function instantiated at a non-numeric type) -- compare values of one type"
+          | None, Some k when num l ->
+              addError ctx $"BL3001: a comparison converts nothing: it meets a {k} value and a number (a generic function instantiated at a non-numeric type) -- compare values of one type"
+          | _ -> ())
+     // A math intrinsic of a non-number (a generic `sin(x)` at a struct).
+     | IRUnaryOp (IRMath name, x) ->
+         (match tyOf x |> Option.bind nonNumeric with
+          | Some k ->
+              addError ctx $"BL3007: {name} expects a numeric operand, and this one is a {k} value (a generic function instantiated at a non-numeric type)"
+          | None -> ())
+     | IRBinOp (_, IRMath2 name, l, r, _) ->
+         (match (tyOf l |> Option.bind nonNumeric), (tyOf r |> Option.bind nonNumeric) with
+          | Some k, _ | _, Some k ->
+              addError ctx $"BL3007: {name} expects numeric operands, and one is a {k} value (a generic function instantiated at a non-numeric type)"
+          | _ -> ())
+     | IRProdSum args ->
+         (match args |> List.tryPick (fun a -> tyOf a |> Option.bind nonNumeric) with
+          | Some k ->
+              addError ctx $"BL3001: arithmetic is defined on numbers only: prodsum() meets an array of {k} cells (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass numbers"
+          | None -> ())
+     // The linear-algebra nodes (R11): their operands' cells are multiplied
+     // and summed like prodsum's.
+     | IRGram (_, _, _) | IRMatmul (_, _) | IRSolve (_, _) | IRGramApply (_, _, _) | IREigh _ | IRLu _ | IRLuSolve _ ->
+         let (name, operands) =
+             match e with
+             | IRGram (a, b, _) -> ("gram()", [ a; b ])
+             | IRMatmul (a, b) -> ("matmul()", [ a; b ])
+             | IRSolve (a, b) -> ("solve()", [ a; b ])
+             | IRGramApply (a, b, x) -> ("gram_apply()", [ a; b; x ])
+             | IREigh a -> ("eigh()", [ a ])
+             | IRLu a -> ("lu()", [ a ])
+             | IRLuSolve (lu, _, b, _) -> ("lu_solve()", [ lu; b ])
+             | _ -> ("", [])
+         (match operands |> List.tryPick (fun o -> tyOf o |> Option.bind nonNumeric) with
+          | Some k ->
+              addError ctx $"BL3001: arithmetic is defined on numbers only: {name} meets an array of {k} cells (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass numbers"
+          | None -> ())
+     // A complex component or conjugate of a non-number (a generic `conj(x)`
+     // instantiated at a Bool).
+     | IRUnaryOp ((IRConj | IRReal | IRImag | IRArg), x) | IRArrayConjugate x ->
+         (match tyOf x |> Option.bind nonNumeric with
+          | Some k ->
+              let name =
+                  match e with
+                  | IRUnaryOp (IRReal, _) -> "real" | IRUnaryOp (IRImag, _) -> "imag" | IRUnaryOp (IRArg, _) -> "arg" | _ -> "conj"
+              addError ctx $"BL3007: {name} expects a numeric operand, and this one is a {k} value (a generic function instantiated at a non-numeric type)"
+          | None -> ())
+     // The logical mirror, for an operand that is a non-numeric value other
+     // than a Bool (a generic `!x` instantiated at a tuple, a struct, a
+     // function). A NUMBER is not judged here: a section bound as a value
+     // (`let op = (&&)`) is lowered over Float64 parameters, and generic
+     // numeric instances are the type checker's (GOBoolOperand).
+     | IRBinOp (_, (IRAnd | IROr as op), l, r, _) ->
+         let bad (x: IRExpr) = tyOf x |> Option.bind nonNumeric |> Option.filter (fun k -> k <> "Bool")
+         (match bad l, bad r with
+          | Some k, _ | _, Some k ->
+              let opS = if op = IRAnd then "&&" else "||"
+              addError ctx $"BL3001: a logical operator takes Bools only: `{opS}` meets a {k} value (a generic function instantiated at a non-Bool type), and Blade converts nothing implicitly"
+          | _ -> ())
+     | IRUnaryOp (IRNot, x) ->
+         (match tyOf x |> Option.bind nonNumeric |> Option.filter (fun k -> k <> "Bool") with
+          | Some k ->
+              addError ctx $"BL3001: a logical operator takes Bools only: `!` meets a {k} value (a generic function instantiated at a non-Bool type), and Blade converts nothing implicitly"
+          | None -> ())
+     | IRUnaryOp (IRNeg, x) | IRArrayNegate x ->
+         (match tyOf x |> Option.bind nonNumeric with
+          | Some k ->
+              addError ctx $"BL3001: arithmetic is defined on numbers only: `-` meets a {k} value (a generic function instantiated at a non-numeric type), and Blade converts nothing implicitly -- pass a number"
+          | None -> ())
+     | _ -> ())
+    List.ofSeq errors
+
 /// Validate a single IRModule, returning a list of errors
 let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationError list =
     let errors = ResizeArray<IRValidationError>()
@@ -285,6 +429,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
              let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
              let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
              (match src with
+              // The cast domain (formalism 2.4): numbers and Bool only.
+              | Some ((ETString | ETUnit) as s) ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a {ppIRType (IRTScalar s)} value (a generic function instantiated at a non-numeric type): a numeric cast takes a number or a Bool"
               | Some s when isComplex s && not (isComplex target) ->
                   addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a complex value (a generic function instantiated at {ppIRType (IRTScalar s)}): project a real component first -- real(z), imag(z), abs(z), or arg(z)"
               | Some s when isFloat s && isInt target && not rounded ->
@@ -297,6 +444,22 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     // A specialization's C++ name (`toint_HM_10000_double`) is not a name the
     // program wrote: the message names the declaration it was cloned from.
     for f in modul.Functions do checkCasts $"in function '{f.SourceName}'" f.Body
+
+    // --- Check 1d: arithmetic on numbers only, after monomorphization ---
+    // The numbers-only rule (formalism 2.4): the type checker refuses an
+    // arithmetic operator over a non-number wherever it can see the operand
+    // (TypeCheckSupport.judgeNonNumericOperand, the post-zonk sweep, the
+    // GONumericOperand call judgment). This is the backstop for an instance
+    // those cannot name -- a generic body instantiated at a struct, a tuple
+    // or a function value, which has no element class for the call judgment:
+    // a specialized body whose `+ - * / % ^` or negation meets such a value
+    // is refused here instead of reaching g++ (BL9002) or answering a Bool.
+    let rec checkArith (ctx: string) (e: IRExpr) =
+        for msg in numbersOnlyClashes e do addError ctx msg
+        let (ExprShape (children, _)) = e
+        children |> List.iter (checkArith ctx)
+    for b in modul.Bindings do checkArith $"in binding '{b.Name}'" b.Value
+    for f in modul.Functions do checkArith $"in function '{f.SourceName}'" f.Body
 
     // --- Check 2: No dangling VarId references ---
     // Scope threads through every binder via BinderShape (IRLet's body,
@@ -344,6 +507,144 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         let captureIds = f.Captures |> List.map _.Id |> Set.ofList
         let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
+
+    // --- Check 2b: inline allocation lifetime regions ---
+    // Unit lets make the events sequence points. The begin binder is a real
+    // IR id and the release's scope/pools are normal IRVar children, so every
+    // canonical substitution and freshening sees the ownership references.
+    let hasLifetimeEvents =
+        (modul.Bindings |> List.exists (fun b -> containsPoolLifetimeEvent b.Value))
+        || (modul.Functions |> List.exists (fun f -> containsPoolLifetimeEvent f.Body))
+    if hasLifetimeEvents then
+        let nodeTypes e =
+            match e with
+            | IRVar (_, ty) | IRParam (_, _, ty) | IRApp (_, _, ty) -> [ty]
+            | IRArrayLit (_, at) -> [mkArrayLike at]
+            | IRMethodFor info -> info.ArrayTypes |> List.map mkArrayLike
+            | IRApplyCombinator info -> info.OutputType :: (info.ArrayTypes |> List.map mkArrayLike)
+            | IRComposeApply info -> [info.OutputType]
+            | IRZero ty | IRUninit ty -> [ty]
+            | _ -> []
+        let rec typeRefs ty =
+            let indices xs = xs |> List.map (fun ix -> Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent)) |> Set.unionMany
+            match ty with
+            | IRTArrow (slots, ret, _) ->
+                Set.union (typeRefs ret)
+                    (slots |> List.map (function SVal t -> typeRefs t | SIdx ix | SIdxVirt ix -> indices [ix]) |> Set.unionMany)
+            | IRTTuple ts -> ts |> List.map typeRefs |> Set.unionMany
+            | IRTLoop lt -> (lt.ArrayTypes @ Option.toList lt.KernelType) |> List.map typeRefs |> Set.unionMany
+            | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) -> typeRefs t
+            | IRTIdxTagged (t, IRefAnon (_, extent)) -> Set.union (typeRefs t) (exprRefs extent)
+            | IRTIdxTagged (t, _) -> typeRefs t
+            | IRTDist (_, t, axes) -> Set.union (typeRefs t) (indices axes)
+            | IRTGroupKeys (outer, source, _) -> indices [outer; source]
+            | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ | IRTInfer _ -> Set.empty
+        and exprRefs e =
+            let own = match e with IRVar (id, _) -> Set.singleton id | _ -> Set.empty
+            let carried = nodeTypes e |> List.map typeRefs |> Set.unionMany
+            let structural = childrenOf e |> List.map exprRefs |> Set.unionMany
+            let axes =
+                match e with
+                | IRRange (xs, _) -> xs
+                | IRApplyCombinator info -> info.SharedIndexTypes @ info.KernelTDims
+                | IRMethodFor info -> info.SharedIndexTypes
+                | _ -> []
+            let embedded = axes |> List.map (fun ix -> Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent)) |> Set.unionMany
+            Set.unionMany [own; carried; structural; embedded]
+        let initialDependencies =
+            modul.Functions
+            |> List.map (fun f ->
+                let attrs = exprAttrs f.Body
+                let ps = f.Params |> List.map _.VarId |> Set.ofList
+                (f.Id, Set.union (f.Captures |> List.map _.Id |> Set.ofList)
+                    (Set.difference (exprRefs f.Body) (Set.union ps attrs.BoundVars))))
+            |> Map.ofList
+        let storageDependencies (v: IRExpr) =
+            // Scalar results are snapshots. Keep dependencies of carried extents
+            // separately: an array/view/deferred value may read both its expression
+            // operands and the expressions embedded in its type/loop metadata.
+            if Blade.Optimize.holdsNoStorage (typeOf v) then
+                nodeTypes v |> List.map typeRefs |> Set.unionMany
+            else exprRefs v
+        let referenceClosure (deps: Map<IRId, Set<IRId>>) (id: IRId) =
+            let rec loop pending seen =
+                match pending with
+                | [] -> seen
+                | x :: rest when Set.contains x seen -> loop rest seen
+                | x :: rest ->
+                    let next = Map.tryFind x deps |> Option.defaultValue Set.empty |> Set.toList
+                    loop (next @ rest) (Set.add x seen)
+            loop [id] Set.empty
+        let checkLifetimes ctx deps expr =
+            let mutable hasEvent = false
+            iterIRExpr (function IRBeginPoolScope _ | IRReleasePools _ -> hasEvent <- true | _ -> ()) expr
+            let checkRef released deps id =
+                let dead = Set.intersect released (referenceClosure deps id)
+                if not dead.IsEmpty then
+                    let ids = dead |> Seq.map (sprintf "v%d") |> String.concat ", "
+                    addError ctx $"reference to released inline pool: {ids} (through v{id})"
+            let rec value released deps e =
+                for ty in nodeTypes e do
+                    for id in typeRefs ty do checkRef released deps id
+                let axes =
+                    match e with
+                    | IRRange (xs, _) -> xs
+                    | IRApplyCombinator info -> info.SharedIndexTypes @ info.KernelTDims
+                    | IRMethodFor info -> info.SharedIndexTypes
+                    | _ -> []
+                for ix in axes do
+                    for id in Set.union (Set.ofList ix.Dependencies) (exprRefs ix.Extent) do checkRef released deps id
+                match e with
+                | IRVar (id, _) -> checkRef released deps id
+                | IRLet _ -> spine [] released deps e
+                | IRBeginPoolScope _ | IRReleasePools _ ->
+                    addError ctx "inline lifetime event must be a unit let statement"
+                | ExprShape (children, _) -> children |> List.iter (value released deps)
+            and spine (regions: (IRId * Map<IRId, IRType>) list) released deps e =
+                match e with
+                | IRLet (sid, IRBeginPoolScope _, rest) ->
+                    spine ((sid, Map.empty) :: regions) released deps rest
+                | IRLet (_, IRReleasePools (scope, pools, _), rest) ->
+                    let ids = pools |> List.choose (function IRVar (id, _) -> Some id | _ -> None)
+                    let named = Set.ofList ids
+                    if ids.Length <> pools.Length || ids.Length <> named.Count then
+                        addError ctx "inline release pools must be distinct binding references"
+                    let remaining =
+                        match scope, regions with
+                        | IRVar (sid, IRTUnit), (owner, owned) :: parents when sid = owner ->
+                            let ownedIds = owned |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                            if named <> ownedIds then
+                                addError ctx "inline release names pools not owned by its inline region, or omits an owned pool"
+                            for pool in pools do
+                                match pool with
+                                | IRVar (pid, pty) when Map.tryFind pid owned = Some pty -> ()
+                                | _ -> addError ctx "inline release pool type disagrees with its owned allocation"
+                            parents
+                        | _ ->
+                            addError ctx "inline release has no matching innermost begin event"
+                            regions
+                    spine remaining (Set.union released named) deps rest
+                | IRLet (id, v, rest) ->
+                    value released deps v
+                    let regions' =
+                        match regions, v with
+                        | (sid, owned) :: parents, IRCompute (IRApplyCombinator _)
+                            when (match stripUnits (typeOf v) with ArrayElem _ -> true | _ -> false) ->
+                            (sid, Map.add id (typeOf v) owned) :: parents
+                        | _ -> regions
+                    let deps' = Map.add id (storageDependencies v) deps
+                    spine regions' released deps' rest
+                | tail ->
+                    value released deps tail
+                    if not regions.IsEmpty then addError ctx "inline pool scope has no release event"
+            if hasEvent then spine [] Set.empty deps expr
+        let mutable lifetimeDeps = initialDependencies
+        for b in modul.Bindings do
+            checkLifetimes $"in binding '{b.Name}'" lifetimeDeps b.Value
+            let deps = Set.union (typeRefs b.Type) (if Blade.Optimize.holdsNoStorage b.Type then Set.empty else exprRefs b.Value)
+            lifetimeDeps <- Map.add b.Id deps lifetimeDeps
+        for f in modul.Functions do
+            checkLifetimes $"in function '{f.SourceName}'" lifetimeDeps f.Body
 
     // --- Check 3: ApplyInfo consistency ---
     let checkApplyInfoNode (ctx: string) (expr: IRExpr) =

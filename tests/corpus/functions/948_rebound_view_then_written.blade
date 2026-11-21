@@ -1,0 +1,35 @@
+// TEST: a local view rebound to a fresh array, then written, in a function over a captured plain let
+// R12 (deep review, defect 4; formalism 2.7): a whole `v = e` rebinds the name
+// and writes no storage; after it, on that path, `v` holds only `e`. So the
+// stores below reach the fresh arrays, never the captured plain `g` (they
+// were refused: the walk read every value `v` ever held). The refused twins:
+// 949 (rebound on one arm only), 950 (a tuple bound before the rebinding
+// still holds the view), 951 (rebound back to a view before the write).
+let g: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+function straight() -> Float64 = {
+    let v = g(0)
+    v = [5.0, 6.0]
+    v(0) = 9.0
+    v(0)
+}
+let r1 = straight()
+function both(c: Bool) -> Float64 = {
+    let v = g(0)
+    let k = if c then { v = [5.0, 6.0]; 1 } else { v = [7.0, 8.0]; 2 }
+    v(1) = 9.0
+    v(0) + v(1)
+}
+let r2 = both(false)
+function later() -> Float64 = {
+    let v = g(0)
+    v = [5.0, 6.0]
+    v(0) = 9.0
+    let s = v(0)
+    v = g(1)
+    s + v(0)
+}
+let r3 = later()
+// EXPECT: g = [[1.0, 2.0], [3.0, 4.0]]
+// EXPECT: r1 = 9.0
+// EXPECT: r2 = 16.0
+// EXPECT: r3 = 12.0

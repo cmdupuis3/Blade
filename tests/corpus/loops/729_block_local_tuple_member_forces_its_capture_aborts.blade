@@ -1,0 +1,8 @@
+// TEST: a block-local map copied as a tuple member forces its capture (aborts)
+// Gap G216 (round 4 wave 8): the tuple value (p, 1) evaluates its deferred
+// member p as a copy, which forces the kernel capture d, so d fails (BL8013)
+// in every lane even though only the scalar member is read.
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let z = { let p = method_for(x) <@> lambda(v) -> v + extents(d); let t = (p, 1); t[1] }
+// ABORT: BL8013

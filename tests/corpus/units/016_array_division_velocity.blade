@@ -7,13 +7,13 @@ Unit meters
 Unit seconds
 Unit velocity = meters / seconds
 type SIdx = Idx<3>
-let dists: Array<Float<meters> like SIdx> = [10.0, 20.0, 30.0]
-let dt: Float<seconds> = 2.0
+let dists: Array<Float64<meters> like SIdx> = [10.0, 20.0, 30.0]
+let dt: Float64<seconds> = 2.0
 let vels = dists / dt
-let vcap: Float<velocity> = 100.0
+let vcap: Float64<velocity> = 100.0
 let fastest = vels((2 : SIdx))
 let margin = vcap - fastest
-function total_v(v: Array<Float<velocity> like SIdx>) -> Float<velocity> = reduce(v, (+))
+function total_v(v: Array<Float64<velocity> like SIdx>) -> Float64<velocity> = reduce(v, (+))
 let vsum = total_v(vels)
 // EXPECT: vels = [5.0, 10.0, 15.0]
 // EXPECT: margin = 85.0

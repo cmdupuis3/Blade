@@ -1,0 +1,8 @@
+// TEST: Spectra fft: inline array argument takes the routine's Float64
+// #62: an inline literal argument has a syntactic shape and its width is
+// fixed by its context (the generated fft takes Float64), so it needs no
+// staging binding (it used to be refused). fft(x)(0) = 1 + 2 + 3 + 4.
+import spectra as sp
+let X = sp.fft([1.0, 2.0, 3.0, 4.0])
+let s0 = real(X(0))
+// EXPECT: s0 = 10.0

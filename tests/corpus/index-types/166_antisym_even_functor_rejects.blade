@@ -10,7 +10,7 @@
 // (applyFunctorWrappers / mapKernelInner) and allocates from the INNER apply's
 // type, which was deduced when the kernel was still the identity — odd, and so
 // certified. The strict pool it allocates then holds v*v values.
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let g = lambda(x, y) where comm(x, y) -> x - y
 let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let out = (lambda(v) -> v * v) <$> (method_for(C) <@> lambda(w) -> w) |> compute

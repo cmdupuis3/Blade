@@ -1,0 +1,13 @@
+// TEST: a literal beside a kernel parameter over an operand EXPRESSION takes its narrow width
+// Gap G114 (round 4 wave 5 lane c): `method_for(x + x)`, the implicit former
+// `(x * x) <@> ..` and a zip member expression hint their Float32 element to
+// the kernel parameter, so the literal partners are Float32 (the first two
+// typed Float64: BL3001 at these annotations).
+type I = Idx<4>
+let x: Array<Float32 like I> = [1.0, 2.0, 3.0, 4.0]
+let y: Array<Float32 like I> = method_for(x + x) <@> lambda(v) -> v + 0.5 |> compute
+let z: Array<Float32 like I> = (x * x) <@> lambda(v) -> v - 1.0 |> compute
+let w: Array<Float32 like I> = method_for(zip(x + x, x)) <@> lambda(a, b) -> a * b + 1.0 |> compute
+// EXPECT: y = [2.5, 4.5, 6.5, 8.5]
+// EXPECT: z = [0.0, 3.0, 8.0, 15.0]
+// EXPECT: w = [3.0, 9.0, 19.0, 33.0]

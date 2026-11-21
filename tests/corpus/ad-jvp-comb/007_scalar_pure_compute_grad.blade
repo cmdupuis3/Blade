@@ -8,13 +8,13 @@
 // f = w0*w1 + w2 at [2,3,4]: 10; dw = [3, 2, 1].
 import ad as ad
 
-function f(w: Array<Float like Idx<3>>) -> Float = {
+function f(w: Array<Float64 like Idx<3>>) -> Float64 = {
     let c = pure(w(0) * w(1)) |> compute
     c + w(2)
 }
 
-let mut dw = [0.0, 0.0, 0.0]
-let gv = ad.grad(f)([2.0, 3.0, 4.0], dw)
+let mut dw = Float64([0.0, 0.0, 0.0])
+let gv = ad.grad(f)(Float64([2.0, 3.0, 4.0]), dw)
 // EXPECT: gv = 10.0
 // EXPECT: dw = [3.0, 2.0, 1.0]
 let (jv, jt) = ad.jvp(f)([2.0, 3.0, 4.0], [1.0, 0.0, 0.0])

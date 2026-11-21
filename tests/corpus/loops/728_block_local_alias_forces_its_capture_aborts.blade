@@ -1,0 +1,9 @@
+// TEST: a block-local alias of a map forces the map capture (aborts)
+// Gap G216 (round 4 wave 8): q is a block-local alias of the deferred map p,
+// whose kernel captures the failing deferred d. Consuming q (prodsum) forces
+// p prerequisites through the alias, so d fails (BL8013) in every lane (the
+// LLVM lane printed 22).
+let x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let d = method_for(x) <@> lambda(v) -> 10 / v
+let z = { let p = method_for(x) <@> lambda(v) -> v + extents(d); let q = p; prodsum(q, x) }
+// ABORT: BL8013

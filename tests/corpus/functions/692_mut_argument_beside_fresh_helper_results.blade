@@ -1,0 +1,27 @@
+// TEST: Two Results Of One Allocating Helper Are Separate Storage For A Mut Argument
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; lead decision): a `mut` ARGUMENT
+// -- an ad.grad / ad.vjp gradient buffer and an ordinary `mut` parameter
+// alike -- may NOT share storage with anything the callee READS: another
+// array argument, or a module binding the callee reads by name (a module
+// alias such as `let forcing = identity(g)`, a deferred map over it), judged
+// by storage provenance and refused at lowering with BL4005 in every lane.
+// The callee's writes through the parameter would be visible through its own
+// reads mid-call; the lanes disagreed (c9: a silently wrong gradient, 20 for
+// 8, in both compiled lanes). No run-time check, one rule for AD buffers and
+// ordinary mut parameters.
+// ============================================================================
+// Codex diff review round 2: a helper's own let is fresh per call.
+type A = Array<Float64 like Idx<2>>
+function bump(x: A, y: mut A) -> Float64 = {
+    y(0) = y(0) + x(1)
+    y(0)
+}
+function fresh(x: Float64) -> A = {
+    let a: A = [x, x]
+    a
+}
+let left = fresh(1.0)
+let mut right = fresh(2.0)
+let result = bump(left, right)
+// EXPECT: result = 3.0

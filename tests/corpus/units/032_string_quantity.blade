@@ -6,5 +6,5 @@ Unit title: 1
 let s = ("K" : title)
 function greet(name: String<title>) -> String<title> = name
 let g = greet(s)
-let ok = if g == "K" then 1 else 0
+let ok: Int64 = if g == "K" then 1 else 0
 // EXPECT: ok = 1

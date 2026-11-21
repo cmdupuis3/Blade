@@ -1,0 +1,22 @@
+// TEST: Fold Ring Declines Read In Range Extent
+// ============================================================================
+// PM35 decline control (Codex review round 3): after the fold, the trajectory
+// is read inside a RANGE's extent (`0..Int64(floor(s(0)))`) -- an expression a
+// type carries, which the consumer census must see too. Under a ring that read
+// would see an overwritten slot (11 instead of 1); the ring declines.
+// ============================================================================
+type T = Idx<11>
+
+function hidden(a: Float64) -> Float64 = {
+    let rec s: Array<Float64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) + 1.0
+    let total = reduce(s, (+))
+    let ys = 0..Int64(floor(s(0)))
+    total + Float64(reduce(ys, (+), 0))
+}
+
+let v = hidden(1.0)
+// EXPECT: v = 66.0

@@ -3,9 +3,9 @@
 // literal: a `let static` value, a static-function call, and static arithmetic
 // over them all resolve during type-checking (same StaticEval the lowering
 // phase uses) and normalize to a concrete unroll factor.
-static function order() = 2
-let static base = 1
-let A = [1.0, 2.0, 3.0]
+static function order() = Int64(2)
+let static base: Int64 = 1
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A)
 let c = L <@> lambda(x) -> x + 10.0
 let result = replicate(order() + base, c) |> compute

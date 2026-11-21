@@ -5,7 +5,7 @@
 // absolute branch of the harness comparison).
 import ad as ad
 
-function f(x: Float, y: Float) -> Float = exp(x) * sin(y) + x * y
+function f(x: Float64, y: Float64) -> Float64 = exp(x) * sin(y) + x * y
 
 let (gv, gdx, gdy) = ad.grad(f)(1.0, 0.5)
 let (jvx, jtx) = ad.jvp(f)(1.0, 0.5, 1.0, 0.0)

@@ -1,0 +1,10 @@
+// TEST: a generic sort whose key turns complex at the instance is refused (rejects)
+// Gap G126 (round 4 wave 5 lane c; Codex review round 1): the key's result is
+// a type variable in the generic body, so the type check cannot see it; the
+// instance fixes it to Complex128, which has no order. Refused after
+// monomorphization with the same BL3033.
+// ERROR: BL3033
+// REJECT-AT: lower
+function ordered(a: T^1) = sort(a, lambda(x) -> x)
+let z: Array<Complex128 like Idx<2>> = [complex(2.0, 0.0), complex(1.0, 0.0)]
+let result = ordered(z)

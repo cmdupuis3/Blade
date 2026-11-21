@@ -1,0 +1,26 @@
+// TEST: Row View Fold Writer Through Base View
+// Gap G51 (round 3, A2), the producer party of the five-party audit: the
+// inner fold's kernel writes the BASE the rows are views of, through another
+// view (`let v = u((1 : Y))`: dense partial indexing yields a view, and a
+// write through a view is a write to its base). Every application during row
+// 0's fold bumps u(1, 0) -- row 1's HEAD, read when row 1's fold starts -- so
+// the serial walk reads u(1, 0) + 508 there; every later application (row 1's
+// own 508 among them) lands after that read. A form that evaluated row 1
+// concurrently with row 0 would read an earlier u(1, 0) and race on the
+// stores: the write audit declines every threaded form, and the serial walk's
+// value stands.
+//   head  = u(1, 0) after the fold = 0.75 + 521 * 508 = 264668.75
+//   total = (sum of the original u) + 508
+type Y = Idx<521>
+type X = Idx<509>
+let (total, head) = {
+    let mut u = method_for(range<Y, X>) <@> lambda(i, j) -> Float64((i * 7 + j * 3) % 11) * 0.25 - 1.0 |> compute
+    let t = reduce(method_for(range<Y>) <@> lambda(i) -> reduce(u(i), lambda(a, b) -> {
+        let v = u((1 : Y))
+        v((0 : X)) = v((0 : X)) + 1.0
+        a + b
+    }), lambda(p, q) where omp -> p + q, 0.0)
+    (t, u((1 : Y), (0 : X)))
+}
+// EXPECT: total = 66806.0
+// EXPECT: head = 264668.75

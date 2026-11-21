@@ -1,0 +1,21 @@
+// TEST: Equijoin Residual First Conjunct
+// ----------------------------------------------------------------------------
+// The residual written FIRST (`l > 1 && l == r`): the as-written mask pass
+// evaluates `l > 1` on every pair, the probe only on the matched ones -- the
+// same relation, because the residual is a pure total scalar of the keys
+// (round 4 wave 4 D3, ST15). Skew: one hot key (2) on every right row.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<4>
+type RightRow = Idx<5>
+let left_key: Array<Int64 like LeftRow> = [2, 1, 2, 2]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4]
+let right_key: Array<Int64 like RightRow> = [2, 2, 2, 2, 2]
+let right_amount: Array<Int64 like RightRow> = [1, 10, 100, 1000, 10000]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l > 1 && l == r, lambda(e) -> e))
+let match_count = extents(matched)
+let total = reduce(matched, (+), 0)
+let fp = reduce(matched, lambda(a, b) -> a * 3 + b)
+// EXPECT: match_count = 15
+// EXPECT: total = 88888
+// EXPECT: matched = [1, 10, 100, 1000, 10000, 3, 30, 300, 3000, 30000, 4, 40, 400, 4000, 40000]
+// EXPECT: fp = 851953282

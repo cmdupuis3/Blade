@@ -1,0 +1,15 @@
+// TEST: Group Row Map Reassembled Array Written Keeps The Copy
+// G90: `b = ungroup(h, CI)` is a SNAPSHOT of h. The later `b(0) = 100.0`
+// must not reach h, so group-rowmap v1 declines (b is assigned) and the
+// ungroup copies: h's first run still starts at 1.0. An ELEMENT kernel.
+type I = Idx<7>
+type CI = Chunked<I, 3>
+let a: Array<Float64 like I> = Float64(0..7) |> compute
+let seg = segments(CI)
+let g = group_by(a, seg)
+let h = method_for(g) <@> lambda(e) -> e + 1.0 |> compute
+let b = ungroup(h, CI)
+b(0) = 100.0
+let firsts = method_for(h) <@> lambda(r) -> r(0) |> compute
+// EXPECT: firsts = [1.0, 4.0, 7.0]
+// EXPECT: b = [100.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]

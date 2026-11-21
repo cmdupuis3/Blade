@@ -1,0 +1,6 @@
+// TEST: mixed array literals type every literal row at the parameter width
+function second(a: Array<Float64 like Idx<2>, Idx<2>>) = a(1, 0)
+let h: Float64 = 0.0
+let value = second([[h + 1.0, 2.0], [0.1, 0.2]])
+let exact = value == Float64(0.1)
+// EXPECT: exact = true

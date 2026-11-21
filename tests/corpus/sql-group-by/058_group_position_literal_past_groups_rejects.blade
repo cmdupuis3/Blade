@@ -1,0 +1,12 @@
+// TEST: GroupBy literal group position past a static group count (rejects)
+// ERROR: BL4003 @ 11:17
+// G1: over an EnumIdx grouping the group count is static (three keys), so a
+// plain integer literal -- a group POSITION -- past it is refused at type
+// checking. A KEY is spelled as a value of the key type, `(205 : LandType)`
+// (see 059).
+type LandType = EnumIdx<[101, 205, 307]>
+let codes: Array<LandType like Idx<6>> = [307, 101, 205, 307, 101, 205]
+let temps: Array<Float64 like Idx<6>> = [30.0, 20.0, 25.0, 32.0, 22.0, 27.0]
+let gk = group_keys(codes)
+let grouped = group_by(temps, gk)
+let x = grouped(205)

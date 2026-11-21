@@ -1,0 +1,8 @@
+// TEST: an integer literal past Int32 as an Int32 variant payload (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+type S = A : Int32 | B
+let s = A(5000000000)
+// ERROR: BL3020 @ 6:11

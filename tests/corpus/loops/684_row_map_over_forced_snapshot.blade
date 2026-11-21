@@ -1,0 +1,17 @@
+// TEST: Row Map Over A Forced Snapshot
+// Gap G199 (Codex diff review round 2): p maps the ROWS of the deferred d;
+// d is forced (z = d(0, 0)) and x written, then p is read. Rebuilding p over
+// the stored d materializes its row operand, which used to re-enter the
+// rebuild without end in the LLVM lane (a stack overflow); every lane reads
+// the snapshot.
+type R = Idx<2>
+type C = Idx<3>
+function sumrow(r: Array<Float64 like C>) -> Float64 = reduce(r, (+), 0.0)
+let mut x: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> sumrow
+let z = d(0, 0)
+x(0, 0) = 10.0
+let w = p(0)
+// EXPECT: z = 2.0
+// EXPECT: w = 12.0

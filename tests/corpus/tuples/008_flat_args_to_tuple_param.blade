@@ -13,8 +13,8 @@
 
 function addPair(t: Tuple<2>) -> Float64 = t[0] + t[1]
 
-let b = 1.0
-let c = 2.0
+let b: Float64 = 1.0
+let c: Float64 = 2.0
 let t = b, c
 
 let flat = addPair(b, c)
@@ -27,7 +27,7 @@ let bound = addPair(t)
 // MIXED schema at a direct call: the fold is per-parameter, so a width-1
 // parameter beside a width-2 one slices 1 + 2 out of the flat list.
 function mix(a: Float64, p: Tuple<2>) -> Float64 = a * 100.0 + p[0] * 10.0 + p[1]
-let d = 3.0
+let d: Float64 = 3.0
 let u = c, d
 let m0 = mix(b, c, d)
 let m1 = mix(b, (c, d))
@@ -38,8 +38,8 @@ let m2 = mix(b, u)
 
 // The fully written tuple type is the same schema entry as the width-only one.
 function written(p: (Float64, Float64)) -> Float64 = p[0] + p[1]
-let w0 = written(3.0, 4.0)
-let w1 = written((3.0, 4.0))
+let w0 = written(Float64(3.0), Float64(4.0))
+let w1 = written((Float64(3.0), Float64(4.0)))
 // EXPECT: w0 = 7.0
 // EXPECT: w1 = 7.0
 

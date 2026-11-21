@@ -1,0 +1,8 @@
+// TEST: Diag Error Location Of A Fieldless Case Survives A Later Sibling (diag)
+// ERROR: BL3007 @ 6:47
+// ERROR-CONTAINS: group_keys: all key arrays must be rank-1
+// Deep review #48 (2026-11-14): this refusal's error case used to have no
+// fields, so every raise was one shared object and could hold no location of
+// its own; the report drifted to the tuple's later member `123`.
+let x = ({ let gk = group_keys([1, 2], [1, 2, 3]); 0 },
+ 123)

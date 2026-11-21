@@ -1,0 +1,13 @@
+// TEST: a block-local operator section given Bools (rejects)
+// ============================================================================
+// R10 remainder: a non-numeric argument binds the open parameter of EVERY callee
+// that is one value -- an alias of a lambda, a lambda applied where it is written,
+// a block-local operator section (judged on its arguments) -- not only a let-bound
+// lambda called by its own name; the body's arithmetic is then refused. Here: `let op = (+)` in a
+// block, applied to two Bools.
+// ============================================================================
+let r = {
+    let op = (+)
+    op(true, false)
+}
+// ERROR: BL3001 @ 10:8

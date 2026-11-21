@@ -1,0 +1,17 @@
+// TEST: A Single-Underscore Array Beside A User Binding Spelled Like Its Generated Extents Name
+// ============================================================================
+// Round 4 wave 9, lane A (A4: the class-closure round of
+// BLADE_STREAM_GROUP_AGG, Codex 0219820a -- the C++ name-hygiene member).
+// The C++ lane emits an array `a` with generated names `a_extents`,
+// `a__first`, ...; a user binding spelled like one steps aside (a trailing
+// `_`, CodeGenState.installUserNameRenames). Names starting with `_` were
+// left out of that rename wholesale, so `_a` beside a user `_a_extents`
+// redeclared the generated name. Only `__` internals and `_(` tuple temps
+// are left out now.
+// ============================================================================
+let _a: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let _a_extents = 5
+let r = reduce(_a, (+)) + Float64(_a_extents)
+// EXPECT: r = 11.0
+// EXPECT: _a = [1.0, 2.0, 3.0]
+// EXPECT: _a_extents = 5

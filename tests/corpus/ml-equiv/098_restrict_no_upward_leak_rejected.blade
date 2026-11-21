@@ -46,8 +46,8 @@ let static V = [(1, 1, 1)]
 // `where ml.equiv(C4)` is refused one step earlier, at the SIGNATURE, because
 // an IrrepsIdx parameter under a point-group certificate is corpus 048 — the
 // branching table names the restricted space but does not relabel the buffer.
-function stretch_z(v: Array<Float like IrrepsIdx<V>>)
-                   where ml.equiv(O3) -> Array<Float like IrrepsIdx<V>> =
+function stretch_z(v: Array<Float64 like IrrepsIdx<V>>)
+                   where ml.equiv(O3) -> Array<Float64 like IrrepsIdx<V>> =
     [v(0), 2.0 * v(1), v(2)]
 
 let out = stretch_z([1.0, 2.0, 3.0])

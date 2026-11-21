@@ -1,8 +1,20 @@
 # LLVM lane: ragged and grouped shapes (RaggedIdx, EnumIdx/group_by)
 
-Status: RAGGED LANDED — Phases 0-2 for the RaggedIdx family (plus the ragged
-function-parameter ABI) implemented 2026-08-20 on `feat/llvm-ragged`; group_by
-phases (4-5) not started. Revised 2026-08-19 after review: the first draft
+Status: RAGGED + GROUP_BY LANDED — Phases 0-2 for the RaggedIdx family (plus
+the ragged function-parameter ABI) implemented 2026-08-20 on `feat/llvm-ragged`
+(merged); the group_by slice implemented the same day on `feat/llvm-groupby`:
+all three key regimes (positional / int EnumIdx / dynamic first-occurrence
+discovery, the last as a pure-.ll linear scan rather than the planned shim
+hash — the shim stays the perf upgrade), group_by / group_bucket / extents(gk),
+fn-body regime recovery, and the grouped placeholder print (ported onto master
+2026-10-17 on `feat/llvm-audit-2026-10`: the CSR pools are zeroed explicitly --
+the allocator stopped zeroing -- and grouped arrays now print their rows, as
+master's C++ lane does; sql-group-by 18/0). The grouped array
+IS the ragged pair (one CSR pool, gathered once), so the peel/reduce/print
+machinery needed zero new arms. `blade test llvm sql-group-by` 17/0 (was 0
+emitted). Open: multi-key, string EnumIdx, zip co-iteration over grouped,
+runtime-extent returns (`Idx<__ngroups>` crossing a call), row-valued grouped
+peels (the loops files). Revised 2026-08-19 after review: the first draft
 phased static-ragged first; that was wrong and the revision inverted it. See §0.
 
 Landed shape (src/EmitLlvm.fs): `GRagged of rows * RaggedTable` spans two axes;

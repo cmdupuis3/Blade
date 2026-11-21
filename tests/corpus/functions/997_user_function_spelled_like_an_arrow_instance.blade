@@ -1,0 +1,16 @@
+// TEST: A user function spelled like the compiler's arrow instance of another
+// ============================================================================
+// Round 4 wave 10 (lane A, A1, gap G252, Codex 067cb140 round 1): an applied
+// parameter c makes f generic in its arrow; its array instance is minted
+// f__arrow1, which a user function may spell -- two C++ definitions of one
+// name (BL9002). Callables of one emitted spelling and different identities
+// are separated at IR level: the user-written one keeps the spelling.
+// ============================================================================
+function f(c, n: Int64) -> Float64 = c(n)
+function f__arrow1(c: Float64^1, n: Int64) -> Float64 = c(n) * 10.0
+let a: Float64^1 = [1.0, 2.0, 3.0]
+let r = f(a, Int64(1))
+let s = f__arrow1(a, Int64(1))
+// EXPECT: a = [1.0, 2.0, 3.0]
+// EXPECT: r = 2.0
+// EXPECT: s = 20.0

@@ -1,0 +1,8 @@
+// TEST: an argument past Int32 into a static function's Int32 parameter (rejects)
+// ============================================================================
+// R28: compile-time evaluation follows the width rules of its run-time twin
+// (formalism 2.4: a `let static` value follows the same rules).
+// ============================================================================
+static function f(i: Int32) -> Int32 = i + 1
+let static r = f(5000000000)
+// ERROR: BL3020 @ 6:18

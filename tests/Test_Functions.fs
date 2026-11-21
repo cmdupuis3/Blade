@@ -62,7 +62,7 @@ let runFactoryFlattenTests () : BlockResult =
     let header =
         "Unit levels: 1\n\
          Unit cmap: 1\n\
-         function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float = x + n * 100.0 + c * 7.0\n"
+         function plot(x: Float64, n: Float64<levels> = 10.0, c: Float64<cmap> = 0.0) -> Float64 = x + n * 100.0 + c * 7.0\n"
     let flat    = header + "let d = plot(1.0, 2.0: levels, 3.0: cmap)\n"
     let chained = header + "let d = plot(1.0)(2.0: levels)(3.0: cmap)\n"
     let swapped = header + "let d = plot(1.0)(3.0: cmap)(2.0: levels)\n"
@@ -125,7 +125,7 @@ let runClosureCaptureEmissionTests () : BlockResult =
         + "}\n"
         + "function weighted(v: Array<Float64 like Idx<4>>, s: Float64) = reduce(v, lambda(a, b) -> a + b * s)\n"
         + "function tally(x: Float64) = {\n"
-        + "    let mut seen = 0.0\n"
+        + "    let mut seen: Float64 = 0.0\n"
         + "    let bump = lambda(d: Float64) -> {\n"
         + "        seen = seen + d\n"
         + "        seen\n"
@@ -135,7 +135,7 @@ let runClosureCaptureEmissionTests () : BlockResult =
         + "let r = mk(2)(3)\n"
         + "let r2 = relay(4)(5)\n"
         + "let r3 = weighted([1.0, 2.0, 3.0, 4.0], 0.5)\n"
-        + "let r4 = tally(1.5)\n"
+        + "let r4 = tally(Float64(1.5))\n"
     match cppOf "closure_capture" src with
     | Ok cpp ->
         let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())

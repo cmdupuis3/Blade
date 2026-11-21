@@ -1,0 +1,20 @@
+// TEST: Fold Ring Declines May Panic Kernel
+// ============================================================================
+// PM35 decline control: an Int64 fold kernel with an integer division may
+// panic (BL8013), and moving it into the sweep would run it before later steps
+// -- a failure-order change. The ring declines; the fold runs after the
+// recursion, as written. No divisor is zero here.
+// ============================================================================
+type T = Idx<23>
+
+function ints(a: Int64) -> Int64 = {
+    let rec s: Array<Int64 like T> =
+        match s with
+        | zero -> zero
+        | zero :: k -> zero :: a
+        | prefix :: n -> prefix :: prefix(n - 1) + 3
+    reduce(s, lambda(p, q) -> p + 1000 / q)
+}
+
+let q = ints(5)
+// EXPECT: q = 796

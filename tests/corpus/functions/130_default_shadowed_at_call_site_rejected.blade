@@ -8,7 +8,7 @@
 // the splice used to read that instead (`g(99)` gave 99 where the
 // declaration says 10). The splice compares binding identities against the
 // ones recorded at the declaration and refuses.
-let k = 10
+let k: Int64 = 10
 function f(x: Int64 = k) = x
 function g(k: Int64) = f()
-let result = g(99)
+let result = g(Int64(99))

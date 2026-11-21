@@ -7,7 +7,7 @@
 // ARROW -- the argument decides the kind: here a function of an Int64, so the
 // application is a call and the lambda's parameter is typed Int64.
 let g = lambda(i) -> 10.0 * Float64(i)
-function first(c) = c(0) + 1.0
+function first(c) = c(Int64(0)) + 1.0
 let d = first(g)
 // EXPECT: d = 1.0
 let e = first(lambda(i) -> 10.0 * Float64(i + 2))

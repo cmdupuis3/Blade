@@ -1,0 +1,14 @@
+// TEST: a let-bound lambda spliced at its kernel use keeps the lambda unit semantics
+// Gap G205 (round 4 wave 7 lane d; Codex diff review round 3): splicing the
+// kernel use removed the binding's last VALUE use, so the arrow-let
+// generalization turned `f` into a generic declaration whose body is unit-
+// checked on its own -- `log(x / scale)` then read as a log of 1 / meters
+// (BL3006). A spliced binding stays a lambda (it was used as a value in the
+// source); the spliced kernel is typed at its use, where x / scale cancels.
+Unit meters
+type I = Idx<2>
+let a: Array<Float64<meters> like I> = [2.0, 4.0]
+let scale: Float64<meters> = 2.0
+let f = lambda(x) -> log(x / scale)
+let p = method_for(a) <@> f |> compute
+// EXPECT: p = [0.0, 0.693147180559945]

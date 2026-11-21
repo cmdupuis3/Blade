@@ -17,7 +17,7 @@
 // a read->write roundtrip -- both sides of a roundtrip shift together, so it
 // cannot catch an order mismatch (plan-orbidx-bijections §3, the antisym
 // storage post-mortem).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let g = lambda(x, y) where comm(x, y) -> x * y
 let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q

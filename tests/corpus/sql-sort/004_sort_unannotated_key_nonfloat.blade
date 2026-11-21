@@ -9,7 +9,7 @@
 // Index-typed elements: the key body INDEXES another array with the element,
 // which needs a size_t-shaped param (`double` is a hard g++ error here).
 type N5 = Idx<5>
-let A = [30.0, 10.0, 50.0, 20.0, 40.0]
+let A = Float64([30.0, 10.0, 50.0, 20.0, 40.0])
 let idxs = method_for(range<N5>) <@> lambda(i) -> i |> compute
 let perm = sort(idxs, lambda(i) -> A(i))
 // A ascending is 10@1, 20@3, 30@0, 40@4, 50@2

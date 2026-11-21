@@ -12,8 +12,8 @@
 function rowsum(row: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(row, (+))
 
 // --- grouped source: rows are __group_member ---
-let region = [0, 1, 0, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 
@@ -28,7 +28,7 @@ let gvia = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -
 
 // --- ragged literal source: rows are __raggedidx (a different IxKind through
 // the same wrapper chooser) ---
-let lens = [3, 2, 1]
+let lens = Int64([3, 2, 1])
 let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 
 let rsums = method_for(r) <@> rowsum |> compute

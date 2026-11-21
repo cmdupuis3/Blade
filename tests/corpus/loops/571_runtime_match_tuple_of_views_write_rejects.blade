@@ -1,0 +1,19 @@
+// TEST: Runtime Match Tuple Of Views Write (rejects)
+// ----------------------------------------------------------------------------
+// Gap G60(a) through a `match` on a RUNTIME scrutinee: both case bodies are
+// tuples of row views of the deferred map m; the walk follows each along the
+// path, so the write through `pair[1]` is refused at lowering (BL4005).
+// ----------------------------------------------------------------------------
+type Y = Idx<2>
+type X = Idx<3>
+let m = method_for(range<Y>, range<X>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j)
+let k = extents(m(0))
+let pair = match k with
+    | 3 -> (m(0), m(1))
+    | _ -> (m(1), m(0))
+let row = pair[1]
+row(1) = 9.0
+let s = reduce(m, (+), axes = 2)
+// ERROR: BL4005 @ 14:1
+// ERROR-CONTAINS: a write through `m`, a deferred computation
+// REJECT-AT: lower

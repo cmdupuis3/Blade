@@ -7,7 +7,7 @@
 // index space so compound(vals, m) typechecks.
 type V = Idx<3>
 let vals: Array<Float64 like V> = [3.0, 1.0, 2.0]
-let w = method_for(vals) <@> lambda(q) -> if q > 1.0 then 1.0 else 0.0
+let w = method_for(vals) <@> lambda(q) -> if q > 1.0 then Float64(1.0) else Float64(0.0)
 let m = mask(w, lambda(x) -> x > 0.5)
 let f = compound(vals, m)
 let n = extents(f)

@@ -1,0 +1,16 @@
+// TEST: a block lambda whose open parameter is given a tuple (rejects)
+// ============================================================================
+// R10 remainder (the numbers-only rule, formalism 2.4): a block lambda's
+// parameter its body leaves open is BOUND by a direct call's argument -- a Bool,
+// a String, a struct, a sum-type value, an index value -- as a numeric one always
+// was. It used to stay open, fall to zonk's Float64 default, and the call
+// converted the argument silently. A tuple argument is not
+// bound (the body was typed as a single value); the call is refused at the
+// argument instead of converting it (the base died in g++).
+// ============================================================================
+let r = {
+    let idl = lambda(x) -> x
+    idl((true, 1))
+}
+// ERROR: BL3001 @ 12:9
+// ERROR-CONTAINS: Annotate the parameter

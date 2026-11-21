@@ -32,10 +32,10 @@ import ml as ml
 // ============================================================================
 
 // Vacuity: the velocity parameter is not read. No candidate, no proposal.
-function drag_stub(u: Float, cd: Float) -> Float = cd * cd
+function drag_stub(u: Float64, cd: Float64) -> Float64 = cd * cd
 
 // Failed judgment: both parameters read, no hypothesis survives.
-function advect_stub(u: Float, dt: Float) -> Float = u * dt
+function advect_stub(u: Float64, dt: Float64) -> Float64 = u * dt
 
 let d = drag_stub(4.0, 3.0)
 // EXPECT: d = 9.0

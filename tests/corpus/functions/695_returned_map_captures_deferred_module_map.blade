@@ -1,0 +1,14 @@
+// TEST: A Returned Map Whose Kernel Captures A Deferred Module Map
+// ============================================================================
+// Gap G190 (b), round 4 wave 8 (lane C, C1; Codex diff review): the statement
+// pre-pass of a function body's private forces covers a RETURNED map too: its
+// kernel's capture of the deferred module map is forced before the return
+// (it was `'delayed' was not declared`, BL9002).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [4.0]
+let delayed = method_for(backing) <@> lambda(e) -> 8.0 / e
+function f(x: Float64) -> A =
+    method_for(backing) <@> lambda(e) -> e * x * delayed(0) |> compute
+let r = f(Float64(3.0))
+// EXPECT: r = [24.0]

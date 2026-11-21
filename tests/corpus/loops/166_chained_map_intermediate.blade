@@ -21,7 +21,7 @@
 // depends on deferred operands NOT being materialized -- is untouched.
 // ============================================================================
 let A: Array<Float64 like Idx<4>> = [0.0, 1.0, 2.0, 3.0]
-let w = 2.0
+let w: Float64 = 2.0
 
 // The shape that emitted an undeclared `arr0`, with a lambda inner kernel.
 let chained_lambda = ((A <@> lambda(t) -> w * t) <@> cos) |> compute

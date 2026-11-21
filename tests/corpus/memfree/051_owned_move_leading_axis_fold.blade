@@ -1,0 +1,25 @@
+// TEST: Owned Move Frees The Leading Axis Fold State Per Step (G92)
+// Gap G92's measured case: the leading-axis fold desugar (`acc = nxt` per
+// step) with a NON-pointwise kernel (it reads `b(0)`, so PM14's in-place
+// state declines, loops/602) moved each step's fresh slice into the state
+// by pointer and leaked the previous one -- one slice per step. The owned
+// move frees it. Top level (main's ledger knows the state's pool) and in a
+// function body; `blade test memfree-g92` pins that the ASan outstanding
+// blocks do not grow with the row count (40 vs 4 rows).
+// Every row is [1.0, 1.5, 2.0] and b(0) = 1, so each step adds the row:
+// 40 rows fold to [40.0, 60.0, 80.0].
+type Rows = Idx<40>
+type C = Idx<3>
+
+let g = (method_for(range<Rows>) <@> lambda(r) ->
+          (method_for(range<C>) <@> lambda(c) -> Float64(c) * 0.5 + 1.0)) |> compute
+
+function fold_rows(m: Array<Float64 like Rows, C>) -> Array<Float64 like C> =
+    reduce(m, lambda(a: T^1, b: T^1) -> a + b * b(0))
+
+let s = reduce(g, lambda(a: T^1, b: T^1) -> a + b * b(0))
+let f = fold_rows(g)
+let total = reduce(f, (+))
+// EXPECT: s = [40.0, 60.0, 80.0]
+// EXPECT: f = [40.0, 60.0, 80.0]
+// EXPECT: total = 180.0

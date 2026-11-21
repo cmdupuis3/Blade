@@ -1,0 +1,12 @@
+// TEST: A Fold Range Bound Reading A Deferred Map In A Branch Is Refused (rejects)
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 4): the untaken arm p(0) must not
+// force p (the interpreter returns 1); a hoisted force would evaluate p and fail. A bound that reads
+// a deferred map inside a branch is a coded refusal, BL7004.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: evaluates a range bound that reads a deferred map beside another name
+// WARN-CODEGEN: evaluates a range bound that reads a deferred map beside another name
+type I = Idx<2>
+let xs: Array<Int64 like I> = [2, 3]
+let z = 0
+let p = method_for(xs) <@> lambda(x) -> 200 % (x - 3)
+let result = reduce(method_for(0..(if z == 0 then 2 else p(0))) <@> lambda(k) -> k, (+), 0)

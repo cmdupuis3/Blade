@@ -2,7 +2,7 @@
 // ============================================================================
 // The runtime-extent guard (index-types/311) passes every key that is a
 // position of RegionIdx.
-let nr = 3
+let nr: Int64 = 3
 type StationIdx = Idx<4>
 type RegionIdx = Idx<nr>
 let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 1]

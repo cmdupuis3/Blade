@@ -217,7 +217,7 @@ let private test_hermitian_adjoint_type () =
 // Rank-2 symmetric decompact -> fully dense [Idx; Idx].
 let private test_decompact_sym_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0])\n" +
         "let L = method_for(A, A)\n" +
         "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
         "let sym = L <@> reynolds(g) |> compute\n" +
@@ -234,7 +234,7 @@ let private test_decompact_sym_type () =
 // separately by a value-checked test.
 let private test_elementwise_over_symmetric_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0])\n" +
         "let L = method_for(A, A)\n" +
         "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
         "let sym = L <@> reynolds(g) |> compute\n" +
@@ -248,7 +248,7 @@ let private test_elementwise_over_symmetric_type () =
 // control case — if even a dense axis didn't propagate, the others couldn't.
 let private test_elementwise_over_idx_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0, 4.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0])\n" +
         "let h = lambda(x) -> x * 2.0\n" +
         "let result = method_for(A) <@> h |> compute\n"
     assertBindingType "elementwise over Idx" src "result"
@@ -260,7 +260,7 @@ let private test_elementwise_over_idx_type () =
 // unchanged by a rank-0 elementwise kernel).
 let private test_elementwise_over_antisym_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0])\n" +
         "let L = method_for(A, A)\n" +
         "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
         "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n" +
@@ -351,7 +351,7 @@ let private test_elementwise_over_depidx_type () =
 // scalar, so the row structure — and therefore the ragged kind — is unchanged.
 let private test_elementwise_over_ragged_type () =
     let src =
-        "let r = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]\n" +
+        "let r = Float64([[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]])\n" +
         "let h = lambda(e) -> e * 2.0\n" +
         "let result = method_for(r) <@> h |> compute\n"
     assertIndexKinds "elementwise over ragged preserves IxKRaggedInline" src "result"
@@ -442,7 +442,7 @@ let private test_product_symmetry_fiber_type () =
 // Rank-2 antisym decompact -> fully dense [Idx; Idx].
 let private test_decompact_anti_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0])\n" +
         "let L = method_for(A, A)\n" +
         "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
         "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n" +
@@ -455,7 +455,7 @@ let private test_decompact_anti_type () =
 // the residual shape is checked directly.
 let private test_decompact_anti3_peel_first_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0, 4.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0])\n" +
         "let L = method_for(A, A, A)\n" +
         "let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z\n" +
         "let anti = L <@> reynolds(f, Antisymmetric) |> compute\n" +
@@ -466,7 +466,7 @@ let private test_decompact_anti3_peel_first_type () =
 // Rank-3 antisym decompact, peel-LAST (d=2): residual [AntisymIdx<2>; Idx(freed)].
 let private test_decompact_anti3_peel_last_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0, 4.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0])\n" +
         "let L = method_for(A, A, A)\n" +
         "let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z\n" +
         "let anti = L <@> reynolds(f, Antisymmetric) |> compute\n" +
@@ -478,7 +478,7 @@ let private test_decompact_anti3_peel_last_type () =
 // the freed axis: [AntisymIdx<2>; Idx(freed); AntisymIdx<2>].
 let private test_decompact_anti5_interior_type () =
     let src =
-        "let A = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n" +
         "let L = method_for(A, A, A, A, A)\n" +
         "let f = lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a * a * a * a * b * b * b * c * c * d\n" +
         "let anti = L <@> reynolds(f, Antisymmetric) |> compute\n" +
@@ -492,7 +492,7 @@ let private test_decompact_anti5_interior_type () =
 // by checking that matchesTypePattern returns false for the wrong pattern.
 let private test_negative_control () =
     let src =
-        "let A = [1.0, 2.0, 3.0, 4.0]\n" +
+        "let A = Float64([1.0, 2.0, 3.0, 4.0])\n" +
         "let L = method_for(A, A, A)\n" +
         "let f = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z\n" +
         "let anti = L <@> reynolds(f, Antisymmetric) |> compute\n" +
@@ -530,7 +530,7 @@ let private test_negative_control () =
 /// copies of it. spec = [(0,0,2), (1,1,1)] -> total_dim = 2*1 + 1*3 = 5.
 let private irrepsCommPrologue =
     "let static spec = [(0, 0, 2), (1, 1, 1)]\n" +
-    "let x: Array<Float like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
+    "let x: Array<Float64 like IrrepsIdx<spec>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n" +
     "let L = method_for(x, x)\n" +
     "let f = lambda(a, b) where comm(a, b) -> a * b\n"
 
@@ -576,7 +576,7 @@ let private test_sym_irreps_annotation_matches_inference () =
     let inferred = irrepsCommPrologue + "let result = L <@> f |> compute\n"
     let annotated =
         irrepsCommPrologue
-        + "let result: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute\n"
+        + "let result: Array<Float64 like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute\n"
     match soleIndexOf inferred "result", soleIndexOf annotated "result" with
     | Error e, _ -> (name, false, $"inferred side: {e}")
     | _, Error e -> (name, false, $"annotated side: {e}")
@@ -740,8 +740,8 @@ let private test_fused_output_irreps_x_irreps () =
 let private test_outer_let_identity_fuses () =
     checkFusedOutput
         "outer product through let: identity fuses to SymIdx<2, 4>"
-        ("let A = [1.0, 2.0]\n" +
-         "let B = [3.0, 4.0]\n" +
+        ("let A = Float64([1.0, 2.0])\n" +
+         "let B = Float64([3.0, 4.0])\n" +
          "let Q = A [*] B\n" +
          "let L = method_for(Q, Q)\n" +
          "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
@@ -754,8 +754,8 @@ let private test_outer_let_identity_fuses () =
 let private test_outer_inline_stays_dense () =
     assertBindingType
         "outer product inline twice: no identity, stays dense"
-        ("let A = [1.0, 2.0]\n" +
-         "let B = [3.0, 4.0]\n" +
+        ("let A = Float64([1.0, 2.0])\n" +
+         "let B = Float64([3.0, 4.0])\n" +
          "let f = lambda(x, y) where comm(x, y) -> x * y\n" +
          "let result = method_for(A [*] B, A [*] B) <@> f |> compute\n")
         "result"
@@ -767,7 +767,7 @@ let private test_outer_inline_stays_dense () =
 let private test_compose_apply_output_type () =
     assertBindingType
         "composed apply carries stage-2 element type (Bool)"
-        ("let A = [1.0, 2.0, 3.0]\n" +
+        ("let A = Float64([1.0, 2.0, 3.0])\n" +
          "let o1 = object_for(lambda(v) -> v + 1.0)\n" +
          "let o2 = object_for(lambda(v) -> v > 2.0)\n" +
          "let result = (o1 >>@ o2) <@> A |> compute\n")
@@ -884,7 +884,7 @@ let private test_orbidx_empty_is_plain_idx_record () =
 /// compute C(4+16-1, 16) over the raw axis count instead).
 let private test_orbidx_depth2_record_and_cardinality () =
     let name = "OrbIdx [(2,-),(2,+)] depth-2 record: rank 4, SymWreath, 21 cells at n=4"
-    let src = "type Riemann = OrbIdx<[(2,-), (2,+)], 4>\nlet x = 1\n"
+    let src = "type Riemann = OrbIdx<[(2,-), (2,+)], 4>\nlet x: Int64 = 1\n"
     match aliasIndexRecord src "Riemann" with
     | Error e -> (name, false, e)
     | Ok ix ->
@@ -925,7 +925,7 @@ let private test_orbidx_level_lists_are_identity () =
     let src =
         "type Tied = OrbIdx<[(2,+), (2,+)], 4>\n" +
         "type Anti = OrbIdx<[(2,-), (2,-)], 4>\n" +
-        "let x = 1\n"
+        "let x: Int64 = 1\n"
     match aliasIndexRecord src "Tied", aliasIndexRecord src "Anti" with
     | Error e, _ | _, Error e -> (name, false, e)
     | Ok t, Ok a ->

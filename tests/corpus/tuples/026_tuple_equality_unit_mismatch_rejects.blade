@@ -17,9 +17,9 @@
 Unit meters
 Unit seconds
 Unit mps = meters / seconds
-let speed = 4.0: Float<mps>
-let dist = 4.0: Float<meters>
-let t1 = speed, 1
-let t2 = dist, 1
+let speed = 4.0: Float64<mps>
+let dist = 4.0: Float64<meters>
+let t1 = speed, Int64(1)
+let t2 = dist, Int64(1)
 let r = t1 == t2
 // EXPECT: typecheck failure -- mps and meters are not comparable

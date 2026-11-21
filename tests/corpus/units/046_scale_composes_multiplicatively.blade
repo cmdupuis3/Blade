@@ -8,23 +8,23 @@ Unit second
 Unit km = 1000 * meter
 
 // Scale rides in the type: no factor is emitted for either operand.
-let d: Float<km> = 3.0
-let t: Float<second> = 2.0
+let d: Float64<km> = 3.0
+let t: Float64<second> = 2.0
 let v = d / t
 
 // Declaring the same composite unit gives a signature the division matches,
 // which is only true if the 1000 survived the divide.
 Unit kmps = km / second
-let v2: Float<kmps> = v
+let v2: Float64<kmps> = v
 
 // Squaring must square the magnitude too.
 Unit km2 = km^2
-let side: Float<km> = 4.0
-let area: Float<km2> = side * side
+let side: Float64<km> = 4.0
+let area: Float64<km2> = side * side
 
 // The exact rational cancels rather than round-tripping through floats: a
 // km value read back as km needs no factor at all.
-let back: Float<km> = d
+let back: Float64<km> = d
 
 // EXPECT: v2 = 1.5
 // EXPECT: area = 16.0

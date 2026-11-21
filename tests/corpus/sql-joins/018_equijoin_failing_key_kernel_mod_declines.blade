@@ -1,0 +1,25 @@
+// TEST: Equijoin Failing Key Kernel Mod Declines (aborts)
+// ----------------------------------------------------------------------------
+// A FAILURE-ADMISSION witness on the KEY kernel: `l == 100 % r` uses integer
+// `%`, and the right key of row j = 4 is 0, so the pair (0, 4) panics BL8013
+// while the as-written program builds its N x M equality pool. The key kernel
+// is not the plain equality `l == r` of its two parameters, so the join
+// declines and the panic stays.
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<3>
+type RightRow = Idx<5>
+let left_key: Array<Int64 like LeftRow> = [1, 2, 9]
+let left_amount: Array<Int64 like LeftRow> = [2, 3, 7]
+let right_key: Array<Int64 like RightRow> = [3, 7, 3, 7, 0]
+let right_amount: Array<Int64 like RightRow> = [10, 10, 20, 10, 5]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == 100 % r, lambda(e) -> e))
+let match_count = extents(matched)
+// ABORT: BL8013
+// ABORT: .blade:14
+// The failure SITE is pinned as well as the code (the line -- the corpus harness strips the
+// `// TEST:` line, so a pinned line is the file's line minus one, as in index-types/521 --
+// and for a call the callee's
+// frame), checked in the C++ lane and by the interpreter differential. The LLVM lane
+// refuses this program (a rank-2 compound) and the run falls back to C++: no LLVM panic or
+// location is pinned here; the lane's hash-join refusal and record are pinned only by the
+// synthetic tests/OptimizeTests.fs decision_hash_join_llvm_declines.

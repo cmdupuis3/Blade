@@ -1,0 +1,17 @@
+// TEST: A literal match on a value of R inside a generic function is refused (rejects)
+// ERROR: BL4003
+// ERROR-CONTAINS: literal pattern
+// ============================================================================
+// R3, a refusal that stays (fail closed): the whitelist backstop judges every
+// body specialized by a call, and cannot tell a literal pattern the checker
+// folded to a position from a key a generic body compares with a position.
+// The base compared the POSITION with the key here (`m` took the wildcard
+// arm). Outside a generic function the same match names keys
+// (index-types/632); here, match `Int64(r)` against the keys.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+function m(r: Nat<R>, u: T) = match r with
+    | 100 -> 1
+    | _ -> 0
+let w = m(codes(0), Float64(1.0))

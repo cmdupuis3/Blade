@@ -1,0 +1,15 @@
+// TEST: Same-cell return declines when the return co-iterates a second array
+// PM03 (A06): the return reads the formal x beside p's cell; it is not a
+// same-cell map of the donor alone, so the fresh result pool stays.
+type Ix = Idx<7>
+function mixed(x: Array<Float64 like Ix>) -> Array<Float64 like Ix> = {
+    let p = x * 2.0 + 1.0 |> compute
+    let old_sum = reduce(p, (+))
+    method_for(zip(p, x)) <@> lambda(a, b) -> a * 0.5 + b + old_sum |> compute
+}
+let x: Array<Float64 like Ix> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let a = mixed(x)
+let sa = reduce(a, (+))
+// EXPECT: x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: a = [49.5, 51.5, 53.5, 55.5, 57.5, 59.5, 61.5]
+// EXPECT: sa = 388.5

@@ -1,0 +1,14 @@
+// TEST: Compute Elision Keeps BL8003 On An Empty Input (aborts)
+// ============================================================================
+// An UNSEEDED fold over an empty `|> compute` panics BL8003 at the fold. The
+// fused terminal would seed with the identity and return it, so
+// BLADE_COMPUTE_ELIDE admits an unseeded fold only over a LITERAL extent
+// >= 1: here (extent 0) it declines, x keeps its stored form, and the fold
+// still aborts with the message pinned today.
+function total(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 + 1.0 |> compute
+    reduce(x, (+))
+}
+let none: Array<Float64 like Idx<0>> = []
+let t = total(none)
+// ABORT: error[BL8003]: reduce: empty array, no reduction possible

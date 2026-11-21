@@ -35,12 +35,17 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 //   `off`  -> no -march flag (portable / cross-machine repro)
 //   other  -> `-march=<value>` verbatim (e.g. `skylake`, `x86-64-v3`)
 //
-// `-ffp-contract` defaults to `fast` (FMA on). Contraction fuses a*b+c into
-// one rounding, which breaks the BYTE-IDENTITY differential harnesses:
-// src/Interp/Numerics.fs is bit-pinned to non-FMA scalar semantics. Those
-// harnesses PIN `BLADE_FP_CONTRACT=off` for their own runs (tests/
-// InterpDiff.fs, tests/DiffOracle.fs), since byte-identity is a property
-// of the differential gates, not of user builds.
+// `-ffp-contract` defaults to `fast` (FMA on): Blade is FAST BY DEFAULT, and
+// floating-point reproducibility is the opt-in (formalism 2.4, "Fast by
+// default"). Contraction fuses a*b+c into one rounding, so a default build
+// may round differently from the interpreter (src/Interp/Numerics.fs is
+// bit-pinned to non-FMA scalar semantics); that is outside the cross-lane
+// contract by design. The reproducible modes are `where repro` per function
+// (BLADE_REPRO_FN: noinline + -ffp-contract=off on the body),
+// `BLADE_FP_CONTRACT=off` per build, and the differential harnesses, which
+// PIN `BLADE_FP_CONTRACT=off` for their own runs (tests/InterpDiff.fs,
+// tests/DiffOracle.fs) -- byte-identity is a property of those gates and of
+// builds that ask for it, not of default user builds.
 //   unset  -> `fast` (default: FMA on)
 //   other  -> `-ffp-contract=<value>` verbatim (`fast` | `on` | `off`)
 // The `fma(a, b, c)` intrinsic is the explicit, lane-identical form: it is its
@@ -112,10 +117,7 @@ let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno -
 /// Whether `blade run` / `compile` / `emit` try the direct LLVM back end first.
 /// UNSET IS THE DEFAULT AND MEANS OFF: with the variable absent every lane in
 /// the compiler behaves byte-for-byte as it did before the back end existed.
-let llvmEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_LLVM") with
-    | "1" | "on" -> true
-    | _ -> false
+let llvmEnabled () : bool = Toolchain.envFlag "BLADE_LLVM" false
 
 /// Optimization flags for the clang lane. `-O3` plus the SAME `BLADE_MARCH`
 /// mapping the g++ lane uses, so an A/B between the two back ends compares
@@ -136,6 +138,18 @@ let llvmEnabled () : bool =
 /// construction (EmitLlvm emits no `nsw`/`nuw`); the flag governs whatever C++
 /// the clang driver still compiles on this lane.
 let llvmOptFlags () = "-O3" + marchFlag () + " -fno-math-errno -fwrapv"
+
+/// Let LLVM's loop vectorizer take an IN-ORDER floating-point reduction: the
+/// loop body (the terms) runs packed and the accumulator still adds them one
+/// at a time in ascending order, so every bit of the serial chain is kept --
+/// this licenses nothing a `reassoc`-free `.ll` does not already say. g++ does
+/// this by default; LLVM does it only with the flag, so without it an
+/// unlicensed or BLADE_FP_REPRO=1 fold stayed wholly scalar in this lane while
+/// the C++ lane vectorized its terms (bench gap G33: band's repro build, two
+/// divisions per cell, 12.1 -> 4.7 ms with the checksum unchanged). The
+/// vectorizer's cost model still decides per loop. Passed on the program's own
+/// `.ll` compile only -- the shim and the tile core are C and keep their flags.
+let llvmOrderedReductionsFlag = " -mllvm -force-ordered-reductions"
 
 type HostPlatform = PWindows | PLinux | PMacOS
 
@@ -339,6 +353,22 @@ let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string>
             else Error $"{exe} failed (exit {proc.ExitCode}):\n{combined}\nCommand: {exe} {args}"
     with ex -> Error $"{exe} exception: {ex.Message}"
 
+/// nvcc's HOST-compiler flags, one definition per role so every CUDA build
+/// line agrees. `-fwrapv` rides every g++ host pass (Linux): integer
+/// overflow WRAPS (formalism section 2.4), as on every other g++ line
+/// (optFlags). MSVC (the Windows host) has no such flag and is documented as
+/// outside that clause; `/Zc:preprocessor` is there because CCCL
+/// (thrust/complex.h) refuses MSVC's traditional preprocessor.
+let cudaSharedHostFlags (onWindows: bool) : string =
+    if onWindows then "-shared -Xcompiler /Zc:preprocessor"
+    else "-shared -Xcompiler -fPIC,-fwrapv"
+
+/// Host flags for a whole-program `.cu` compile (compileCuda) and for the
+/// `.cu` half of the split build (compileCudaSplit).
+let cudaProgramHostFlags (onWindows: bool) : string =
+    if onWindows then "-Xcompiler /Zc:preprocessor"
+    else "-Xcompiler -Werror=float-conversion,-Werror=narrowing,-fwrapv"
+
 /// The include line a cuBLAS-dispatching program carries, analogous to the
 /// `blade_linalg.hpp` / `blade_lapack.hpp` sniffs below: codegen writes it
 /// exactly when `LinAlgPatterns.resolveNodeRoute` picked the device backend.
@@ -392,9 +422,7 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         | None ->
         // /Zc:preprocessor: CCCL headers refuse MSVC's traditional
         // preprocessor (same rule as compileCudaSplit / compileCudaMpiHybrid).
-        let sharedFlags =
-            if onWindows then "-shared -Xcompiler /Zc:preprocessor"
-            else "-shared -Xcompiler -fPIC"
+        let sharedFlags = cudaSharedHostFlags onWindows
         let args =
             $"-std=c++17 -O2 {sharedFlags} -o \"{libFile}\" \"{cuFile}\" -lcublas"
         match runProc "nvcc" args 300000 with
@@ -446,6 +474,14 @@ let private copyRuntimeDllBesideExe (searchDirs: string list) (exeFullPath: stri
 /// programs, and extra link inputs (nvcc-built device DLLs) -- each needs
 /// its own MSVC link recipe that no current memcheck consumer exercises.
 ///
+/// Every arm passes `-DBLADE_POOL_CACHE_OFF=1` (`/D` for cl): the runtime's
+/// retained-block cache (nested_array_utilities.hpp, `blade_pool`) would turn
+/// a free into a no-op the leak counter cannot see and hide a use-after-free
+/// from ASan. The header also self-disables on `__SANITIZE_ADDRESS__`, but the
+/// define is the contract -- BLADE_MEMCHECK is an environment setting, and an
+/// environment setting is no preprocessor macro until a command line makes it
+/// one.
+///
 /// `srcText` is the generated source the caller just wrote to `cppFile`, when
 /// it still has it in memory; `None` falls back to reading the file back.
 let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (cppFile: string) (outputDir: string) : Result<string, string> =
@@ -484,7 +520,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 // a memcheck build is a measurement run, not the enforcement
                 // gate the release compile already provides.
                 let args =
-                    $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"{exeFullPath}\" \"{cppFullPath}\""
+                    $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -DBLADE_POOL_CACHE_OFF=1 -o \"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc cxx args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -506,7 +542,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 let objPath = Path.ChangeExtension(cppFullPath, ".obj")
                 let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
                 let args =
-                    $"/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"{objPath}\" /Fd\"{fdPath}\" /Fe\"{exeFullPath}\" \"{cppFullPath}\""
+                    $"/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /DBLADE_POOL_CACHE_OFF=1 /Fo\"{objPath}\" /Fd\"{fdPath}\" /Fe\"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc "cl" args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -523,7 +559,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
             // the /Od /Zi profile. LeakSanitizer (where the platform has it)
             // comes for free on top of the BLADE-MEMCHECK report line.
             let args =
-                $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"{exeFullPath}\" \"{cppFullPath}\""
+                $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -DBLADE_POOL_CACHE_OFF=1 -o \"{exeFullPath}\" \"{cppFullPath}\""
             match runProc "g++" args 300000 with
             | Error e -> Error e
             | Ok () -> Ok exeFullPath
@@ -559,25 +595,18 @@ let private exeCacheDir () : string option =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "exe-cache"))
-    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE" with
-    | null | "" -> defaultDir ()
-    | v ->
-        match v.Trim() with
-        | "" -> defaultDir ()
-        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
-        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
-        | t when Path.IsPathRooted t -> Some t
-        | _ -> None
+    match Toolchain.envSwitch "BLADE_EXE_CACHE" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
 
 /// `[cache] hit/store <hash8>` tracing on stderr. `compileCppWithExtraSource`
 /// takes no verbose parameter (it is reached from the CLI, the REPL and five
 /// test blocks), so the flag travels as a process-level env pin -- the same
 /// spelling `--memcheck` uses for BLADE_MEMCHECK. `blade run --verbose` sets it
 /// during argument parsing (Cli.fs).
-let private exeCacheVerbose () =
-    match Environment.GetEnvironmentVariable "BLADE_EXE_CACHE_VERBOSE" with
-    | null | "" | "0" -> false
-    | _ -> true
+let private exeCacheVerbose () = Toolchain.envFlag "BLADE_EXE_CACHE_VERBOSE" false
 
 /// The compiler's identity: resolved g++ path + the first line of
 /// `g++ --version`. Memoized for the process (one subprocess, ~50-170 ms, and
@@ -673,6 +702,65 @@ let private runtimeHeaderDigest : Lazy<string> =
             |> String.concat ""
         with _ -> "")
 
+/// `#include "x"` / `#include <x>` lines of a text, by FILE NAME (a relative
+/// path is reduced to its leaf: every runtime header is deployed flat beside
+/// the .cpp).
+let private includeLineRx =
+    System.Text.RegularExpressions.Regex(
+        "^[ \\t]*#[ \\t]*include[ \\t]*[\"<]([^\">\\r\\n]+)[\">]",
+        System.Text.RegularExpressions.RegexOptions.Multiline)
+
+let private includedFileNames (text: string) : string list =
+    [ for m in includeLineRx.Matches text -> Path.GetFileName(m.Groups.[1].Value.Trim()) ]
+
+/// Per runtime header: the hash of its (name, text) and the runtime headers
+/// its own text names. Computed once per process, like `runtimeHeaderDigest`.
+let private runtimeHeaderFacts : Lazy<Map<string, string * string list>> =
+    lazy (
+        let registry = Set.ofList CodeGen.runtimeHeaderNames
+        use sha = System.Security.Cryptography.SHA256.Create()
+        CodeGen.runtimeHeaderNames
+        |> List.map (fun name ->
+            let text = CodeGen.runtimeHeaderText name
+            let hash =
+                sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(name + " " + text))
+                |> Array.map _.ToString("x2")
+                |> String.concat ""
+            (name, (hash, includedFileNames text |> List.filter registry.Contains)))
+        |> Map.ofList)
+
+/// The runtime headers' contribution to ONE program's executable-cache key:
+/// the headers its text includes, closed under the headers those include
+/// (docs/plans/plan-test-tiers.md, P1). Hashing all of them, as the key did
+/// before, made an edit to a header only a handful of programs include
+/// (blade_lapack.hpp, blade_tilecache.hpp) invalidate every cached executable.
+///
+/// Sound because a generated program reaches a runtime header only through an
+/// include LINE: its own (codegen writes one per header it uses) or one in a
+/// header it already reached. Every include line counts, whatever conditional
+/// surrounds it, so the set can only be too large, never too small. A name
+/// outside the registry (a system header, a file some other step deploys) is
+/// ignored here exactly as the whole-set digest ignored it.
+///
+/// Empty on any failure, which returns the key to "no header contribution" --
+/// the same degradation `runtimeHeaderDigest` has.
+let private runtimeHeaderDigestFor (cppText: string) : string =
+    try
+        let facts = runtimeHeaderFacts.Value
+        let rec close (seen: Set<string>) (todo: string list) : Set<string> =
+            match todo with
+            | [] -> seen
+            | h :: rest when seen.Contains h -> close seen rest
+            | h :: rest ->
+                match facts.TryFind h with
+                | Some (_, deps) -> close (seen.Add h) (deps @ rest)
+                | None -> close seen rest
+        close Set.empty (includedFileNames cppText)
+        |> Set.toList
+        |> List.map (fun h -> h + ":" + fst facts.[h])
+        |> String.concat " "
+    with _ -> ""
+
 /// Size + mtime of every DLL named outright on the link line (netcdf.dll,
 /// libopenblas.dll). Their PATH is already in `args`, but their CONTENT is
 /// not: a reinstalled OpenBLAS at the same path must invalidate.
@@ -695,7 +783,7 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
         args.Replace(exeFullPath, "<EXE>").Replace(cppFullPath, "<CPP>")
     let material =
         String.concat " "
-            [ "blade-exe-cache-v1"
+            [ "blade-exe-cache-v2"
               gppIdentity.Value
               normalizedArgs
               // Only when the flag is `native`, and deliberately: an explicit
@@ -704,7 +792,7 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
               // So the common non-native configurations keep the keys they had
               // rather than being invalidated for a hazard they do not have.
               (if (marchFlag ()).Contains "native" then nativeTargetIdentity.Value else "")
-              runtimeHeaderDigest.Value
+              runtimeHeaderDigestFor cppText
               linkedDllStamp args
               cppText ]
     use sha = System.Security.Cryptography.SHA256.Create()
@@ -716,7 +804,14 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
 // count and a byte ceiling are needed; a trip on either prunes oldest-mtime
 // first down to 3/4 of the cap, so eviction runs rarely rather than on every
 // store past the line.
-let private exeCacheMaxEntries = 8192
+//
+// The entry cap was 8192 until the test-tier plan (docs/plans/plan-test-tiers.md,
+// P1): one full gate -- the default suite, the interpreter and optimizer
+// differentials, the LLVM lane's C++ oracle -- compiles more distinct programs
+// than that, so a gate evicted its own entries and the next run started cold.
+// At the observed ~126 KB per entry, 32768 entries are about 4 GB, under the
+// byte ceiling, which stays the limit that matters for large executables.
+let private exeCacheMaxEntries = 32768
 let private exeCacheMaxBytes = 6L * 1024L * 1024L * 1024L
 
 /// Prune the cache when either ceiling is exceeded. Called only on STORE (a
@@ -760,15 +855,11 @@ let tileCacheDir () : string option =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "tile-cache"))
-    match Environment.GetEnvironmentVariable "BLADE_TILE_CACHE" with
-    | null | "" -> None
-    | v ->
-        match v.Trim() with
-        | "" -> None
-        | t when t = "1" || t.ToLowerInvariant() = "on" || t.ToLowerInvariant() = "true" -> defaultDir ()
-        | t when t = "0" || t.ToLowerInvariant() = "off" || t.ToLowerInvariant() = "false" -> None
-        | t when Path.IsPathRooted t -> Some t
-        | _ -> None
+    match Toolchain.envSwitch "BLADE_TILE_CACHE" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
 
 /// The exe cache's caps, applied to tile files: oldest-mtime first, down to
 /// 3/4 of whichever cap tripped. BOTH caps matter and for the exe cache's
@@ -776,13 +867,18 @@ let tileCacheDir () : string option =
 /// grid makes them large (8 tiles of a 4000 x 4000 float64 field are 128 MB,
 /// measured) and a count cap alone would let the store reach hundreds of
 /// gigabytes before it evicted anything.
+///
+/// The tile COUNT cap keeps the value the two stores shared (8192) when the
+/// exe cache's was raised: nothing has measured a tile store against it.
+let private tileCacheMaxEntries = 8192
+
 let private evictTileCache (dir: string) : unit =
     try
         if Directory.Exists dir then
             let entries = DirectoryInfo(dir).GetFiles("*.tile", SearchOption.AllDirectories)
             let total = entries |> Array.sumBy _.Length
-            if entries.Length > exeCacheMaxEntries || total > exeCacheMaxBytes then
-                let targetCount = (exeCacheMaxEntries * 3) / 4
+            if entries.Length > tileCacheMaxEntries || total > exeCacheMaxBytes then
+                let targetCount = (tileCacheMaxEntries * 3) / 4
                 let targetBytes = (exeCacheMaxBytes / 4L) * 3L
                 let mutable count = entries.Length
                 let mutable bytes = total
@@ -812,6 +908,63 @@ let private toolchainIdentity (flags: string) : string =
     |> Array.map _.ToString("x2")
     |> String.concat ""
     |> fun h -> h.Substring(0, 16)
+
+/// Process-wide counters for the test harness's timing report
+/// (docs/plans/plan-test-tiers.md, P0): how many g++ processes ran and for how
+/// long, how many compiles the executable cache served, how many programs ran.
+/// Counting only -- nothing reads these to decide anything. One lock: every
+/// update sits beside a process launch or a file copy.
+module CompileStats =
+    let private gate = obj ()
+    let mutable private cacheHits = 0
+    let mutable private gppRuns = 0
+    let mutable private gppTicks = 0L
+    let mutable private programRuns = 0
+    let mutable private programTicks = 0L
+
+    let recordCacheHit () : unit =
+        lock gate (fun () -> cacheHits <- cacheHits + 1)
+
+    let recordGpp (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            gppRuns <- gppRuns + 1
+            gppTicks <- gppTicks + elapsed.Ticks)
+
+    let recordRun (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            programRuns <- programRuns + 1
+            programTicks <- programTicks + elapsed.Ticks)
+
+    /// (cache hits, g++ runs, g++ seconds summed over processes,
+    ///  program runs, program seconds summed over processes).
+    let snapshot () : int * int * float * int * float =
+        lock gate (fun () ->
+            (cacheHits, gppRuns, TimeSpan.FromTicks(gppTicks).TotalSeconds,
+             programRuns, TimeSpan.FromTicks(programTicks).TotalSeconds))
+
+    // The precompiled prelude (below): compiles that used one, preludes built
+    // and the time that took, compiles re-run without one after failing with it.
+    let mutable private pchUses = 0
+    let mutable private pchBuilds = 0
+    let mutable private pchBuildTicks = 0L
+    let mutable private pchRetries = 0
+
+    let recordPchUse () : unit =
+        lock gate (fun () -> pchUses <- pchUses + 1)
+
+    let recordPchBuild (elapsed: TimeSpan) : unit =
+        lock gate (fun () ->
+            pchBuilds <- pchBuilds + 1
+            pchBuildTicks <- pchBuildTicks + elapsed.Ticks)
+
+    let recordPchRetry () : unit =
+        lock gate (fun () -> pchRetries <- pchRetries + 1)
+
+    /// (compiles that used a prelude, preludes built, seconds building them,
+    ///  compiles re-run without one).
+    let pchSnapshot () : int * int * float * int =
+        lock gate (fun () ->
+            (pchUses, pchBuilds, TimeSpan.FromTicks(pchBuildTicks).TotalSeconds, pchRetries))
 
 /// Cache lookup. On a hit the entry is copied to `exeFullPath` (the exact file
 /// a real compile would have written) and its mtime is bumped so eviction sees
@@ -852,6 +1005,239 @@ let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : un
             if exeCacheVerbose () then eprintfn "[cache] store %s" (key.Substring(0, 8))
             evictExeCache dir
     with _ -> ()
+
+// ---------------------------------------------------------------------------
+// The precompiled prelude (docs/plans/plan-test-tiers.md, P6).
+//
+// A generated program opens with a block of #include lines (about seventeen
+// standard headers and the core runtime headers), and parsing them is about two
+// thirds of a cold compile. Nearly every program opens with one of two such
+// blocks, so each block is compiled ONCE per flag set into a GCC precompiled
+// header and handed to later compiles with `-include`.
+//
+// What keeps the compiled program the same:
+//   - The prelude is the program's OWN leading block: the include lines that
+//     precede everything else in its text, in its order. Putting them first a
+//     second time changes nothing -- every header is guarded, and GCC matches a
+//     guarded header already in the precompiled file by size and checksum, not
+//     by path -- so the translation unit is the one g++ would have read. A
+//     program with anything ahead of its first include (a non-default pool
+//     policy's #define lines) has no leading block and compiles as before.
+//   - The precompiled file is built with the compile's own flags (every -D and
+//     -f among them) from the same header text the compile deploys beside the
+//     .cpp, and is keyed on both, on the compiler and on the CPU that
+//     `-march=native` resolves to.
+//   - ANY failure of a compile that used the prelude is re-run without it, and
+//     that second result is the one reported. So a stale or unusable
+//     precompiled file costs time, never a verdict, and every diagnostic text
+//     is the plain compile's.
+//   - The emitted text and the executable-cache key do not change: the output
+//     is the same program (the generated assembly was compared byte for byte).
+//
+// BLADE_PCH: unset / 1 / on = %LOCALAPPDATA%\Blade\pch-cache; 0 / off =
+// disabled; an absolute path = that directory. Read per call.
+// Its `--verbose` lines carry the executable cache's `[cache]` prefix, which
+// the harnesses that compare a verbose run's stderr already strip.
+// ---------------------------------------------------------------------------
+
+let private pchCacheDir () : string option =
+    let defaultDir () =
+        let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+        if String.IsNullOrEmpty root then None
+        else Some (Path.Combine(root, "Blade", "pch-cache"))
+    match Toolchain.envSwitch "BLADE_PCH" with
+    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
+    | Toolchain.SwitchOff -> None
+    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
+    | Toolchain.SwitchOther _ -> None
+
+/// One line of a leading block: an include and nothing else but a `//` comment.
+let private leadingIncludeRx =
+    System.Text.RegularExpressions.Regex(
+        "^[ \\t]*#[ \\t]*include[ \\t]*([\"<][^\">]+[\">])[ \\t]*(//.*)?$")
+
+/// The include lines that open `cppText`, as their `<x>` / `"x"` operands in
+/// order. Blank lines and whole-line `//` comments are passed over; the block
+/// ends at the first line that is anything else. A line ending in a backslash
+/// ends it too (a spliced comment could swallow the next line).
+let private leadingIncludeBlock (cppText: string) : string list =
+    use reader = new StringReader(cppText)
+    let block = ResizeArray<string>()
+    let mutable go = true
+    while go do
+        match reader.ReadLine() with
+        | null -> go <- false
+        | line ->
+            let s = line.Trim()
+            if s.EndsWith "\\" then go <- false
+            else
+                let m = leadingIncludeRx.Match line
+                if m.Success then block.Add m.Groups.[1].Value
+                elif not (s = "" || s.StartsWith "//") then go <- false
+    List.ofSeq block
+
+/// A block shorter than this is not worth a precompiled file.
+let private pchMinIncludes = 8
+
+/// Precompiled files kept (about 76 MB each at the usual block): oldest-used
+/// first down to 3/4 when the count is exceeded, like the executable cache.
+let private pchMaxEntries = 12
+
+/// A prelude that failed this many compiles which then succeeded without it
+/// is dropped for the rest of the process and its file deleted, so a stale
+/// file is rebuilt instead of doubling every compile.
+let private pchMaxStrikes = 3
+
+type private PchState =
+    | PchReady of string
+    | PchUnusable
+
+let private pchMemo = System.Collections.Concurrent.ConcurrentDictionary<string, PchState>()
+let private pchStrikes = System.Collections.Concurrent.ConcurrentDictionary<string, int>()
+let private pchGate = obj ()
+
+let private pchKey (compileHalf: string) (preludeText: string) : string =
+    let material =
+        String.concat " "
+            [ "blade-pch-v1"
+              gppIdentity.Value
+              compileHalf
+              (if (marchFlag ()).Contains "native" then nativeTargetIdentity.Value else "")
+              runtimeHeaderDigestFor preludeText
+              preludeText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map _.ToString("x2")
+    |> String.concat ""
+    |> fun h -> h.Substring(0, 32)
+
+/// Prune the store: the oldest-used precompiled files past the cap, and the
+/// first-sighting markers (directories that never got a file) older than a
+/// week. Race-tolerant like the executable cache's eviction.
+let private evictPchCache (dir: string) : unit =
+    try
+        let subdirs = DirectoryInfo(dir).GetDirectories()
+        let built =
+            subdirs
+            |> Array.choose (fun d ->
+                let gch = FileInfo(Path.Combine(d.FullName, "blade_prelude.hpp.gch"))
+                if gch.Exists then Some (d, gch.LastWriteTimeUtc) else None)
+        if built.Length > pchMaxEntries then
+            let keep = (pchMaxEntries * 3) / 4
+            for (d, _) in built |> Array.sortBy snd |> Array.truncate (built.Length - keep) do
+                (try d.Delete true with _ -> ())
+        let stale = DateTime.UtcNow.AddDays -7.0
+        for d in subdirs do
+            if not (File.Exists (Path.Combine(d.FullName, "blade_prelude.hpp.gch")))
+               && d.LastWriteTimeUtc < stale then
+                (try d.Delete true with _ -> ())
+    with _ -> ()
+
+/// Build `<keyDir>/blade_prelude.hpp.gch`. The runtime headers are deployed
+/// into the key directory (the same text every compile deploys beside its
+/// .cpp), the precompiled file is written under a temporary name and moved
+/// into place, so a concurrent reader never sees half of one.
+let private buildPrecompiledPrelude (dir: string) (keyDir: string) (compileHalf: string) (preludeText: string) : bool =
+    let prelude = Path.Combine(keyDir, "blade_prelude.hpp")
+    let gch = prelude + ".gch"
+    let tmp = Path.Combine(keyDir, $"""blade_prelude.{(Guid.NewGuid().ToString("N"))}.tmp""")
+    try
+        CodeGen.deployRuntimeHeaders keyDir
+        if not (File.Exists prelude && File.ReadAllText prelude = preludeText) then
+            File.WriteAllText(prelude, preludeText)
+        let psi = ProcessStartInfo("g++", $"{compileHalf} -x c++-header \"{prelude}\" -o \"{tmp}\"")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+        let watch = Stopwatch.StartNew ()
+        use proc = Process.Start(psi)
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
+        let finished = proc.WaitForExit(120000)
+        if not finished then (try proc.Kill() with _ -> ())
+        stdoutTask.Result |> ignore
+        let stderr = stderrTask.Result
+        CompileStats.recordPchBuild watch.Elapsed
+        if finished && proc.ExitCode = 0 && File.Exists tmp then
+            (try File.Move(tmp, gch) with _ -> ())
+            (try File.Delete tmp with _ -> ())
+            if exeCacheVerbose () then eprintfn "[cache] pch built %s" (Path.GetFileName keyDir)
+            evictPchCache dir
+            File.Exists gch
+        else
+            (try File.Delete tmp with _ -> ())
+            if exeCacheVerbose () then
+                eprintfn "[cache] pch build failed %s: %s" (Path.GetFileName keyDir) (stderr.Trim())
+            false
+    with _ ->
+        (try File.Delete tmp with _ -> ())
+        false
+
+/// The precompiled prelude for this compile, if one is ready: (memo key, path of
+/// `blade_prelude.hpp`). A block is precompiled at its SECOND sighting -- the
+/// first leaves only an empty key directory -- so a one-off include block (a
+/// hand-written harness program) never pays for a file nobody reuses. The
+/// build runs under one process-wide gate: the other workers that want the
+/// same prelude wait for it instead of each building their own.
+let private tryPrecompiledPrelude (compileHalf: string) (cppText: string) : (string * string) option =
+    if Platforms.os <> Platforms.Windows then None else
+    match pchCacheDir () with
+    | None -> None
+    | Some dir ->
+        try
+            let block = leadingIncludeBlock cppText
+            if List.length block < pchMinIncludes then None
+            else
+                let preludeText = block |> List.map (fun i -> "#include " + i + "\n") |> String.concat ""
+                let key = pchKey compileHalf preludeText
+                // The process-wide memo is per STORE: a harness may point
+                // BLADE_PCH at another directory mid-process.
+                let memoKey = dir + "|" + key
+                let ready () =
+                    match pchMemo.TryGetValue memoKey with
+                    | true, PchReady p when File.Exists (p + ".gch") -> Some (Some (memoKey, p))
+                    | true, PchUnusable -> Some None
+                    | _ -> None
+                match ready () with
+                | Some r -> r
+                | None ->
+                    lock pchGate (fun () ->
+                        match ready () with
+                        | Some r -> r
+                        | None ->
+                            let keyDir = Path.Combine(dir, key)
+                            let prelude = Path.Combine(keyDir, "blade_prelude.hpp")
+                            let gch = prelude + ".gch"
+                            if File.Exists gch then
+                                // Stamped as used, once per process, for eviction.
+                                (try File.SetLastWriteTimeUtc(gch, DateTime.UtcNow) with _ -> ())
+                                pchMemo.[memoKey] <- PchReady prelude
+                                Some (memoKey, prelude)
+                            elif not (Directory.Exists keyDir) then
+                                Directory.CreateDirectory keyDir |> ignore
+                                None
+                            elif buildPrecompiledPrelude dir keyDir compileHalf preludeText then
+                                pchMemo.[memoKey] <- PchReady prelude
+                                Some (memoKey, prelude)
+                            else
+                                pchMemo.[memoKey] <- PchUnusable
+                                None)
+        with _ -> None
+
+/// A compile failed with the prelude and succeeded without it. After
+/// `pchMaxStrikes` of those the prelude is dropped for this process and its
+/// file deleted (the next process rebuilds it).
+let private notePreludeOnlyFailure (key: string) : unit =
+    let strikes = pchStrikes.AddOrUpdate(key, 1, fun _ n -> n + 1)
+    if strikes >= pchMaxStrikes then
+        match pchMemo.TryGetValue key with
+        | true, PchReady p ->
+            pchMemo.[key] <- PchUnusable
+            (try File.Delete (p + ".gch") with _ -> ())
+            if exeCacheVerbose () then
+                eprintfn "[cache] pch dropped %s after %d failures" (Path.GetFileName (Path.GetDirectoryName p)) strikes
+        | _ -> pchMemo.[key] <- PchUnusable
 
 /// Compile a C++ file with g++. `extraLinkInputs` are appended after the
 /// source (linker order) -- e.g. the hybrid mpi+cuda build passes the
@@ -993,7 +1379,13 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 let tid = toolchainIdentity (optFlags () + " " + ompFlag)
                 $" -DBLADE_TOOLCHAIN_ID={tid}"
             else ""
-        let args = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        // Split at the output: `compileHalf` is everything that decides how a
+        // header is compiled (the precompiled prelude is built with exactly
+        // it); `args` is the same text as before the split, so the executable
+        // cache's keys are unchanged.
+        let compileHalf = $"-std=c++17 {optFlags ()}{rrDefines}{tileDefines} {ompFlag} {safetyFlags}{blasCompileFlags}"
+        let linkHalf = $" -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
+        let args = compileHalf + linkHalf
         
         // The executable cache (Stage 4.1, above). v1 scope, deliberately
         // narrow -- every excluded lane is one whose inputs are not fully
@@ -1013,47 +1405,78 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 | Some dir -> Some (dir, exeCacheKey args cppText exeFullPath cppFullPath)
 
         match cacheSlot with
-        | Some (dir, key) when tryExeCacheHit dir key exeFullPath -> Ok exeFullPath
+        | Some (dir, key) when tryExeCacheHit dir key exeFullPath ->
+            CompileStats.recordCacheHit ()
+            Ok exeFullPath
         | _ ->
 
-        let psi = ProcessStartInfo("g++", args)
-        psi.RedirectStandardOutput <- true
-        psi.RedirectStandardError <- true
-        psi.UseShellExecute <- false
-        psi.CreateNoWindow <- true
+        // One g++ process: Error = it timed out; Ok = (exit code, its output).
+        let runGpp (gppArgs: string) : Result<int * string, string> =
+            let psi = ProcessStartInfo("g++", gppArgs)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
 
-        use proc = Process.Start(psi)
-        // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
-        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
-        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
-        
-        // 300s: spectra-scale generated programs (rank-2 transforms, capped
-        // at 65536 cells) can legitimately push g++ this long under -O3.
-        if not (proc.WaitForExit(300000)) then
-            try proc.Kill() with _ -> ()
-            Error "Compilation timed out after 300s"
-        else
-        
-        let stdout = stdoutTask.Result
-        let stderr = stderrTask.Result
-        
-        let allOutput = 
-            [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
-             if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
-            |> String.concat "\n"
-        
-        if proc.ExitCode = 0 then
+            use proc = Process.Start(psi)
+            // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
+            let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+            let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
+
+            let gppWatch = Stopwatch.StartNew ()
+            // 300s: spectra-scale generated programs (rank-2 transforms, capped
+            // at 65536 cells) can legitimately push g++ this long under -O3.
+            if not (proc.WaitForExit(300000)) then
+                (try proc.Kill() with _ -> ())
+                Error "Compilation timed out after 300s"
+            else
+                let stdout = stdoutTask.Result
+                let stderr = stderrTask.Result
+                let allOutput =
+                    [if not (String.IsNullOrWhiteSpace stdout) then yield stdout
+                     if not (String.IsNullOrWhiteSpace stderr) then yield stderr]
+                    |> String.concat "\n"
+                CompileStats.recordGpp gppWatch.Elapsed
+                Ok (proc.ExitCode, allOutput)
+
+        // The precompiled prelude (above), when one is ready for this program's
+        // leading include block and these flags. A program that carries an
+        // `#error` guard is refused by g++ either way, so it is not offered one.
+        // ANY failure with the prelude is re-run without it: the verdict and
+        // the text reported are always the plain compile's.
+        let prelude =
+            if cppText.Contains "#error" then None
+            else tryPrecompiledPrelude compileHalf cppText
+        let outcome =
+            match prelude with
+            | None -> runGpp args
+            | Some (pchKey, preludePath) ->
+                match runGpp ($"{compileHalf} -include \"{preludePath}\"{linkHalf}") with
+                | Ok (0, out) ->
+                    CompileStats.recordPchUse ()
+                    Ok (0, out)
+                | _ ->
+                    CompileStats.recordPchRetry ()
+                    let plain = runGpp args
+                    (match plain with
+                     | Ok (0, _) -> notePreludeOnlyFailure pchKey
+                     | _ -> ())
+                    plain
+
+        match outcome with
+        | Error e -> Error e
+        | Ok (0, _) ->
             // Publish for the next identical translation unit. Best-effort:
             // a store that fails costs a future recompile, never this result.
             (match cacheSlot with
              | Some (dir, key) -> storeExeCache dir key exeFullPath
              | None -> ())
             Ok exeFullPath
-        else
+        | Ok (exitCode, allOutput) ->
             if String.IsNullOrWhiteSpace allOutput then
-                Error $"Compilation failed (exit {proc.ExitCode}) with no output. Command: g++ {args}"
+                Error $"Compilation failed (exit {exitCode}) with no output. Command: g++ {args}"
             else
-                Error $"Compilation failed (exit {proc.ExitCode}):\n{allOutput}\nCommand: g++ {args}"
+                Error $"Compilation failed (exit {exitCode}):\n{allOutput}\nCommand: g++ {args}"
     with ex ->
         Error $"Compilation exception: {ex.Message}\n{ex.StackTrace}"
 
@@ -1085,13 +1508,7 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         // front-end doesn't accept -Werror=float-conversion, so route it via
         // -Xcompiler (cl.exe uses different flag spellings, so Windows drops
         // the g++-specific ones and relies on nvcc/cl defaults).
-        let hostWarn =
-            if Platforms.os = Platforms.Windows then
-                // CCCL (thrust/complex.h) refuses MSVC's traditional
-                // preprocessor; the conforming one is safe for all generated
-                // CUDA code, so it is passed unconditionally.
-                "-Xcompiler /Zc:preprocessor"
-            else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
+        let hostWarn = cudaProgramHostFlags (Platforms.os = Platforms.Windows)
 
         let args = $"-std=c++17 -O2 {hostWarn} -o \"{exeFullPath}\" \"{cuFullPath}\""
 
@@ -1163,8 +1580,11 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
     else
         // Linux: nvcc compiles the .cu (host code via g++), g++ compiles the
         // .cpp; both share the g++ ABI, so the split + link is safe.
-        let nvccCu = $"-std=c++17 -O2 -c -o \"{cuObj}\" \"{cuFull}\""
-        let gppCpp = $"-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"{cppObj}\" \"{cppFull}\""
+        // `-fwrapv` on both host halves: integer overflow WRAPS (formalism
+        // section 2.4), as on every other g++ line (optFlags). MSVC hosts (the
+        // Windows arm above) have no such flag and are outside that clause.
+        let nvccCu = $"-std=c++17 -O2 -Xcompiler -fwrapv -c -o \"{cuObj}\" \"{cuFull}\""
+        let gppCpp = $"-std=c++17 -O2 -fwrapv -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"{cppObj}\" \"{cppFull}\""
         let nvccLink = $"-std=c++17 -O2 -Xcompiler -fopenmp -o \"{exeFull}\" \"{cuObj}\" \"{cppObj}\""
         match runProc "nvcc" nvccCu 120000 with
         | Error e -> Error e
@@ -1192,31 +1612,11 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         let dllFull = Path.Combine(Path.GetFullPath outputDir, Path.GetFileNameWithoutExtension cuFile + "_cuda" + dllExt)
         // /Zc:preprocessor on Windows: CCCL (thrust/complex.h) refuses MSVC's
         // traditional preprocessor (see compileCudaSplit).
-        let sharedFlags =
-            if caps.Platform = PWindows then "-shared -Xcompiler /Zc:preprocessor"
-            else "-shared -Xcompiler -fPIC"
+        let sharedFlags = cudaSharedHostFlags (caps.Platform = PWindows)
         let nvccArgs = $"-std=c++17 -O2 {sharedFlags} -o \"{dllFull}\" \"{cuFull}\""
         match runProc "nvcc" nvccArgs 180000 with
         | Error e -> Error e
         | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
-
-/// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
-/// object to link. Recompiled only when the `.o` is missing or older than the
-/// `.c` EmitLlvm just deployed, so the per-program cost is one link input, not
-/// a C compile.
-let private buildLlvmShim (clang: string) (outputDir: string) : Result<string, string> =
-    let dir = Path.GetFullPath outputDir
-    let src = Path.Combine(dir, EmitLlvm.shimFileName)
-    let obj = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
-    if not (File.Exists src) then
-        Error $"llvm shim source missing at {src} (EmitLlvm.deployShim should have written it)"
-    elif File.Exists obj && File.GetLastWriteTimeUtc obj >= File.GetLastWriteTimeUtc src then
-        Ok obj
-    else
-        let args = $"-c -O2 -o \"{obj}\" \"{src}\""
-        match runProc clang args 120000 with
-        | Error e -> Error e
-        | Ok () -> Ok obj
 
 /// Identity stamp for one clang binary without spawning it: path, size,
 /// mtime ticks. A replaced or upgraded clang changes the stamp — the same
@@ -1227,6 +1627,83 @@ let private clangStamp (clang: string) : string =
         if fi.Exists then $"{clang}:{fi.Length}:{fi.LastWriteTimeUtc.Ticks}"
         else $"{clang}:missing"
     with _ -> $"{clang}:?"
+
+/// The preprocessor defines the shim is compiled with, beyond `-c -O2`. A
+/// memcheck build (BLADE_MEMCHECK=1) compiles the allocator with its
+/// retained-block cache OFF (`blade_llvm_shim.c`, BLADE_POOL_CACHE_OFF): a
+/// cached free is no free at all to a leak counter, and it hides a
+/// use-after-free. The ENVIRONMENT setting is not a C define by itself; this is
+/// where it becomes one. Read per call, like every environment gate here.
+///
+/// BLADE_POOL_RETAIN (round-3 A4, gap G52): a NON-default pool-retention
+/// policy becomes `-DBLADE_POOL_MAX_BLOCK=<bytes> -DBLADE_POOL_BUDGET=<bytes>`
+/// here -- the C++ lane's twin defines, which that lane writes into the
+/// emitted text instead. They are part of `flags`, so they enter the shim
+/// object's identity hash and, through it, `llvmExeCacheKey`. The default
+/// adds nothing (the default shim object and its key are unchanged in shape).
+let internal llvmShimDefines () : string =
+    let retention = Blade.Toolchain.poolRetention ()
+    Blade.Toolchain.warnPoolRetention retention
+    let pool =
+        Blade.Toolchain.poolRetentionDefines retention
+        |> List.map (fun (name, bytes) -> $" -D{name}={bytes}")
+        |> String.concat ""
+    (if CodeGen.memcheckEnabled () then " -DBLADE_POOL_CACHE_OFF=1" else "") + pool
+
+/// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
+/// object to link and its IDENTITY (a hash of everything the `clang -c` reads
+/// or is told: the shim source text, the full flag/define string, and the
+/// clang stamp).
+///
+/// The object is NAMED by that identity (`blade_llvm_shim-<hash>.o`) and reused
+/// only when a file of exactly that name exists. It used to be one fixed name
+/// reused by TIMESTAMP alone, so a memcheck build in a directory that already
+/// held a normal build linked the normal object -- the retained-block cache
+/// silently ON under the leak counter (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc)
+/// M0). Now two configurations sharing a directory each link their own object,
+/// and a rebuild in the same configuration is still one link input, not a C
+/// compile. The identity also enters the executable cache key
+/// (`llvmExeCacheKey`), so a cached exe is never one linked against a
+/// differently-configured shim.
+let internal buildLlvmShim (clang: string) (outputDir: string) : Result<string * string, string> =
+    let dir = Path.GetFullPath outputDir
+    let src = Path.Combine(dir, EmitLlvm.shimFileName)
+    if not (File.Exists src) then
+        Error $"llvm shim source missing at {src} (EmitLlvm.deployShim should have written it)"
+    else
+        let flags = "-c -O2" + llvmShimDefines ()
+        let srcText = File.ReadAllText src
+        // The headers the shim #includes from its own directory (deployed
+        // beside it by EmitLlvm.deployShim): their text is part of what the
+        // compile reads, so it is part of the identity -- an edited header
+        // must never link a stale object.
+        let headerTexts =
+            EmitLlvm.shimIncludedHeaders |> List.map (fun h ->
+                let p = Path.Combine(dir, h)
+                if File.Exists p then h + "\n" + File.ReadAllText p else h + ":missing")
+        let identity =
+            use sha = System.Security.Cryptography.SHA256.Create()
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(String.concat "\n" ([ "blade-llvm-shim-v1"; clangStamp clang; flags; srcText ] @ headerTexts)))
+            |> Array.map _.ToString("x2")
+            |> String.concat ""
+        let stem = Path.GetFileNameWithoutExtension EmitLlvm.shimFileName
+        let obj = Path.Combine(dir, $"{stem}-{identity.Substring(0, 16)}{Platforms.objExtension}")
+        if File.Exists obj then Ok (obj, identity)
+        else
+            // Compile beside the final name and move into place, so a compile
+            // killed half way never leaves a truncated object under a name
+            // the next build would trust.
+            let tmp = obj + $".{Environment.ProcessId}.tmp"
+            let args = $"{flags} -o \"{tmp}\" \"{src}\""
+            match runProc clang args 120000 with
+            | Error e ->
+                (try File.Delete tmp with _ -> ())
+                Error e
+            | Ok () ->
+                try
+                    File.Move(tmp, obj, true)
+                    Ok (obj, identity)
+                with ex -> Error $"llvm shim object could not be placed at {obj}: {ex.Message}"
 
 /// What `-march=native` ACTUALLY SELECTED for one clang on this machine,
 /// hashed -- the LLVM lane's twin of `nativeTargetIdentity`, and missing from
@@ -1285,11 +1762,16 @@ let private clangNativeTargetIdentity (clang: string) : string =
 /// clang's own resolution of `native`; and the version tag is its own, so the
 /// two lanes can never collide on a key. v2: v1 keys carried no CPU identity,
 /// so no v1 entry can say which CPU it was built for and none is trusted.
-let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shimText: string) (exeFullPath: string) (llFullPath: string) : string =
-    let normalizedArgs = args.Replace(exeFullPath, "<EXE>").Replace(llFullPath, "<LL>")
+/// v3: the runtime input is the shim OBJECT's identity (`buildLlvmShim`:
+/// source + flags + defines + clang), not the source text alone, so a
+/// memcheck (cache-off) exe and a normal one can never share an entry; the
+/// object's path is normalized out of the argument text like the exe's.
+let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shimIdentity: string) (shimObjPath: string) (exeFullPath: string) (llFullPath: string) : string =
+    let normalizedArgs = args.Replace(exeFullPath, "<EXE>").Replace(llFullPath, "<LL>").Replace(shimObjPath, "<SHIM>")
+    let shimText = shimIdentity
     let material =
         String.concat " "
-            [ "blade-llvm-exe-cache-v2"
+            [ "blade-llvm-exe-cache-v3"
               clangStamp clang
               normalizedArgs
               // Only when the flag is `native`, as in `exeCacheKey`: an
@@ -1301,6 +1783,72 @@ let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shi
     sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
     |> Array.map _.ToString("x2")
     |> String.concat ""
+
+// ---------------------------------------------------------------------------
+// The LLVM lane's TILE CORE object (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc)
+// item M6): blade_llvm_tiles.c over blade_tiles.h -- the same arithmetic core
+// the C++ lane's blade_pgemm::dsyrk_tri includes -- compiled by clang as C.
+//
+// SEPARATE from the print/panic/alloc shim on purpose: the shim is built
+// `-O2` with no target or contraction flags (its job is I/O bytes), while the
+// tile must be built with the lane's NUMERIC policy, so one object per policy.
+// The object is CONTENT-ADDRESSED: its file name carries the key (source +
+// header text, clang stamp, the full flag string, and -- when -march is
+// native -- what native resolved to), so a BLADE_FP_CONTRACT or BLADE_MARCH
+// switch in the same build directory compiles and links a DIFFERENT object
+// instead of reusing a stale one by timestamp. Only programs whose `.ll`
+// calls the core get it compiled or linked at all.
+// ---------------------------------------------------------------------------
+
+/// The clang flags the tile object is built with: the lane's own optimization
+/// flags plus the contraction mode its IR uses (`contract` per instruction
+/// <=> `-ffp-contract=fast`), so the tile contracts exactly where the nest it
+/// replaces would. Re-read per call (env pins).
+let llvmTilesFlags () : string =
+    $"-c -x c -std=c11 {(llvmOptFlags ())}{(EmitLlvm.tilesContractFlag ())}"
+
+/// The tile object's identity key (hex, 16 chars used in the file name).
+let private llvmTilesKey (clang: string) (flags: string) (srcText: string) (hdrText: string) : string =
+    let material =
+        String.concat "\n"
+            [ "blade-llvm-tiles-v1"
+              clangStamp clang
+              flags
+              (if (marchFlag ()).Contains "native" then clangNativeTargetIdentity clang else "")
+              srcText
+              hdrText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map _.ToString("x2")
+    |> String.concat ""
+
+/// Build (or reuse) the tile-core object in `outputDir` for the CURRENT
+/// policy, returning its path and its key. Expects EmitLlvm.deployShim to have
+/// written blade_llvm_tiles.c and blade_tiles.h beside the `.ll`.
+let buildLlvmTilesObject (clang: string) (outputDir: string) : Result<string * string, string> =
+    let dir = Path.GetFullPath outputDir
+    let src = Path.Combine(dir, EmitLlvm.tilesSourceFileName)
+    let hdr = Path.Combine(dir, EmitLlvm.tilesHeaderFileName)
+    if not (File.Exists src) || not (File.Exists hdr) then
+        Error $"llvm tile core source missing at {src} (EmitLlvm.deployShim should have written it)"
+    else
+        let flags = llvmTilesFlags ()
+        let key = llvmTilesKey clang flags (File.ReadAllText src) (File.ReadAllText hdr)
+        let obj =
+            Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.tilesSourceFileName
+                              + "-" + key.Substring(0, 16) + Platforms.objExtension)
+        if File.Exists obj then Ok (obj, key)
+        else
+            // Compile to a private name, then move: a concurrent build in the
+            // same directory never links a half-written object.
+            let tmp = obj + "." + Guid.NewGuid().ToString("N") + ".tmp"
+            match runProc clang $"{flags} -I \"{dir}\" -o \"{tmp}\" \"{src}\"" 120000 with
+            | Error e -> Error e
+            | Ok () ->
+                (try File.Move(tmp, obj, true) with _ -> ())
+                if File.Exists obj then Ok (obj, key)
+                elif File.Exists tmp then Ok (tmp, key)
+                else Error $"llvm tile core object vanished after compiling {src}"
 
 /// Compile and link a `.ll` the LLVM lane emitted into an executable.
 ///
@@ -1320,14 +1868,28 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         let dir = Path.GetFullPath outputDir
         let llFull = Path.GetFullPath llFile
         let exeFull = Path.Combine(dir, Path.GetFileNameWithoutExtension llFile + Platforms.exeExtension)
+        // The tile core (M6) links only into programs that call it; its key
+        // joins the exe cache key below (the object path in `args` lives in a
+        // per-run directory, so the KEY is what identifies it).
+        let tiles =
+            let usesTiles =
+                try (let t = File.ReadAllText llFull in EmitLlvm.tilesSymbols |> List.exists (fun s -> t.Contains ("@" + s))) with _ -> false
+            if usesTiles then buildLlvmTilesObject clang dir |> Result.map Some else Ok None
+        match tiles with
+        | Error e -> Error e
+        | Ok tiles ->
+        let tilesArg, tilesIdentity =
+            match tiles with
+            | Some (obj, key) -> $" \"{obj}\"", $"\ntiles:{key}"
+            | None -> "", ""
         match buildLlvmShim clang dir with
         | Error e -> Error e
-        | Ok shimObj ->
+        | Ok (shimObj, shimIdentity) ->
             let args =
-                $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\""
+                $"{(llvmOptFlags ())}{llvmOrderedReductionsFlag} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\"{tilesArg}"
             // Windows-only for the same reason as the g++ arm; a key that
-            // cannot be built (unreadable .ll/shim source) just skips the
-            // cache, never the compile.
+            // cannot be built (unreadable .ll) just skips the cache, never
+            // the compile.
             let cacheSlot =
                 if Platforms.os <> Platforms.Windows then None
                 else
@@ -1336,8 +1898,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
                     | Some cdir ->
                         try
                             let llText = File.ReadAllText llFull
-                            let shimText = File.ReadAllText (Path.Combine(dir, EmitLlvm.shimFileName))
-                            Some (cdir, llvmExeCacheKey clang args llText shimText exeFull llFull)
+                            Some (cdir, llvmExeCacheKey clang args llText (shimIdentity + tilesIdentity) shimObj exeFull llFull)
                         with _ -> None
             match cacheSlot with
             | Some (cdir, key) when tryExeCacheHit cdir key exeFull -> Ok exeFull
@@ -1467,7 +2028,9 @@ let runExecutableIn (cwd: string) (exeFile: string) : Result<int * string, strin
         // Memcheck runs get 600s: /Od plus ASan interception is a 5-20x
         // slowdown on exactly those simulation-scale programs.
         let timeoutMs = if CodeGen.memcheckEnabled () then 600000 else 120000
+        let runWatch = Stopwatch.StartNew ()
         if proc.WaitForExit(timeoutMs) then
+            CompileStats.recordRun runWatch.Elapsed
             let stdout = stdoutTask.Result
             let stderr = stderrTask.Result
             let output = if String.IsNullOrEmpty(stderr) then stdout else stdout + "\n[stderr]: " + stderr
@@ -1596,23 +2159,32 @@ let runExecutableMpiIn (cwd: string) (ranks: int) (exeFile: string) : Result<int
 let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
     runExecutableMpiIn (Path.GetDirectoryName(Path.GetFullPath exeFile)) ranks exeFile
 
-/// Sanitize a test name for use as a filename (cross-platform).
+/// Sanitize a generated artifact name (cross-platform). Existing ASCII names
+/// retain their spelling. Native Windows toolchains can change Unicode argv
+/// output paths, so project non-ASCII characters to '_' and disambiguate their
+/// original UTF-8 spelling with a fixed-size digest (no per-character growth).
 let sanitizeFileName (name: string) : string =
-    name
-        .Replace("&&", "_and_")
-        .Replace("||", "_or_")
-        .Replace(" ", "_")
-        .Replace(":", "")
-        .Replace("/", "_")
-        .Replace("\\", "_")
-        .Replace("(", "")
-        .Replace(")", "")
-        .Replace("|", "_")
-        .Replace("&", "_")
-        .Replace("+", "_")
-        .Replace(",", "_")
-        .Replace("<", "_")
-        .Replace(">", "_")
-        .Replace("\"", "")
-        .Replace("*", "_")
-        .Replace("?", "_")
+    let sanitized =
+        name
+            .Replace("&&", "_and_")
+            .Replace("||", "_or_")
+            .Replace(" ", "_")
+            .Replace(":", "")
+            .Replace("/", "_")
+            .Replace("\\", "_")
+            .Replace("(", "")
+            .Replace(")", "")
+            .Replace("|", "_")
+            .Replace("&", "_")
+            .Replace("+", "_")
+            .Replace(",", "_")
+            .Replace("<", "_")
+            .Replace(">", "_")
+            .Replace("\"", "")
+            .Replace("*", "_")
+            .Replace("?", "_")
+    if sanitized |> Seq.forall (fun c -> int c <= 127) then sanitized
+    else
+        let ascii = String(sanitized |> Seq.map (fun c -> if int c <= 127 then c else '_') |> Seq.toArray)
+        let digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes name)
+        ascii + "_u" + Convert.ToHexString(digest).Substring(0, 16)

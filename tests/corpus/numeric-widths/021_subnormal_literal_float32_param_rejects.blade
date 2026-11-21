@@ -1,0 +1,8 @@
+// TEST: a float literal whose Float32 rounding is subnormal, into a Float32 parameter (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+function g(x: Float32) -> Float32 = x
+let r = g(1e-40)
+// ERROR: BL3020 @ 6:11

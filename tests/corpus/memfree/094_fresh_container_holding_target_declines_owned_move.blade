@@ -1,0 +1,23 @@
+// TEST: A fresh container holding the target declines the owned move
+// ============================================================================
+// Round 4 wave 8 (lane a, gap G221 member m8, contents provenance; found by
+// the Codex diff review d71e628b round 3): `[Box { a = y }]` is a fresh
+// allocation whose CELL names y's pool; the owned move `y = w` freed that
+// pool while the box still read it. A fresh value whose cells can hold
+// storage is now a second holder of what it names.
+// ============================================================================
+type I = Idx<3>
+type One = Idx<1>
+struct Box {
+    a: Array<Float64 like I>
+}
+function f(x: Array<Float64 like I>) -> Float64 = {
+    let mut y = x * 2.0 |> compute
+    let boxes: Array<Box like One> = [Box { a = y }]
+    let w = x * 5.0 |> compute
+    y = w
+    reduce(boxes(0).a, (+)) + reduce(y, (+))
+}
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let result = f(x)
+// EXPECT: result = 42.0

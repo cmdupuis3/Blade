@@ -1,0 +1,14 @@
+// TEST: a join's SHARED producer fails ahead of the legs in its cell (aborts)
+// Gap G101 (round 4 wave 4 lane A; formalism 10.2), the fable review's case:
+// `q` is spelled by two legs, so every lane evaluates it once per cell at the
+// top of the iteration, before leg 0. All three legs fail at cell 4; the
+// failure is q's `200 / b` (line 9 once the harness drops the TEST line), not
+// leg 0's `100 / a`.
+type I = Idx<10>
+let d: Array<Int64 like I> = [1, 2, 3, 4, 0, 6, 7, 8, 9, 10]
+let e: Array<Int64 like I> = [1, 2, 3, 4, 0, 6, 7, 8, 9, 10]
+let q = method_for(e) <@> lambda(b) -> 200 / b
+let (sp, sq, sqq) = object_for(<&!>) <@> (reduce(method_for(d) <@> lambda(a) -> 100 / a, (+)), reduce(q, (+)), prodsum(q, q))
+// ABORT: BL8013
+// ABORT: -->
+// ABORT: .blade:9

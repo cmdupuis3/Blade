@@ -8,5 +8,5 @@
 function total(row) = reduce(row, (+))
 function twice(a) = total(a) + total(a)
 function thrice(b) = twice(b) + twice(b)
-let t = thrice([1.0, 2.0, 3.0])
+let t = thrice(Float64([1.0, 2.0, 3.0]))
 // EXPECT: t = 24.0

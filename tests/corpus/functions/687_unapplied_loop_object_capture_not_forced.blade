@@ -1,0 +1,17 @@
+// TEST: An Unapplied Loop Object Capturing A Deferred Module Map Forces Nothing
+// ============================================================================
+// Gap G190 (b), Codex design review round 2 of the statement pre-pass: a body
+// statement that only BINDS a loop object (or a lambda) evaluates none of its
+// kernel's captures, so the deferred module map it captures -- whose kernel
+// would divide by zero -- is never evaluated: r = 3.0 in every lane. The
+// pre-pass forces the captures of APPLIED callables only.
+// ============================================================================
+type A = Array<Int64 like Idx<1>>
+let mut backing: A = [0]
+let delayed = method_for(backing) <@> lambda(e) -> 8 / e
+function f(x: Float64) -> Float64 = {
+    let unused = object_for(lambda(v: Int64) -> v + delayed(0))
+    x
+}
+let r = f(Float64(3.0))
+// EXPECT: r = 3.0

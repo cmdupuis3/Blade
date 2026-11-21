@@ -1,0 +1,24 @@
+// TEST: AD Deferred Module Map Read In A Fold Seed
+import ad as ad
+// ============================================================================
+// Gap G190 (b), round 4 wave 8: a DEFERRED MODULE MAP read inside a function
+// body is forced PRIVATELY (G75: re-evaluated per call, never printed). The
+// C++ lane forces it once per reading statement, before the statement, under
+// a fresh holder per re-force (bodyForceHolderName); it used to redeclare
+// `forcing` / `forcing_extents` when two statements of one body -- the forward
+// and reverse sweeps of a derivative -- each forced it, or leave it undeclared
+// when the reading statement was a scalar let, a body map whose kernel
+// captures it, or a fold seed. Fresh gradient buffers (no aliasing).
+// ============================================================================
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [4.0]
+let forcing = method_for(backing) <@> lambda(e) -> 8.0 / e
+function f(x: Float64, w: A) -> Float64 = {
+    let ys = method_for(range<Idx<3>>) <@> lambda(i) -> x * x |> compute
+    reduce(ys, (+), forcing(0)) * x + w(0)
+}
+let w0: A = [4.0]
+let mut dw: A = [0.0]
+let (value, dx) = ad.grad(f)(Float64(1.0), w0, dw)
+// EXPECT: value = 9.0
+// EXPECT: dx = 11.0

@@ -3,7 +3,7 @@
 // shape as parallel but with the fusion operator. genFusionTree at
 // CodeGen.fs:3175 extracts IRApplyCombinator infos to drive a single
 // fused loop nest; an IRComposeApply leaf isn't extractable that way.
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let f = lambda(x) -> x + 1.0
 let g = lambda(x) -> x * 2.0
 let h = lambda(x) -> x - 1.0

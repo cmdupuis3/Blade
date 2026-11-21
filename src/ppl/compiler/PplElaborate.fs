@@ -23,11 +23,14 @@
 ///                       (exact for central pair comoments).
 ///
 /// A moment-formed array must be a module-level `let`/`let static` with a
-/// compile-time shape: either an Array annotation (`Array<Elem like I1, ...,
-/// Ik, SampleIdx>`) with statically resolving index extents, or -- for
-/// COMPUTED arrays -- an un-annotated `method_for(range<...>) <@> kernel
-/// [|> compute]` RHS whose iteration space is the shape (one axis per dense
-/// range slot, halo slots shrunk to their interior; see computedShapeOf).
+/// compile-time shape, which the shared oracle Blade.ElabShapes answers: an
+/// Array annotation (`Array<Elem like I1, ..., Ik, SampleIdx>`) with
+/// statically resolving index extents; a COMPUTED array -- an un-annotated
+/// `method_for(range<...>) <@> kernel [|> compute]` RHS whose iteration space
+/// is the shape (one axis per dense range slot, halo slots shrunk to their
+/// interior; ElabShapes.computedAxes), read as Float64; the result of an
+/// elaborated call (`let (U, S, V) = m.svd(A)`); or an alias / destructured
+/// component of one. An un-annotated literal (its default width) is not one.
 module Blade.Ppl.Elaborate
 
 open Blade.Ast
@@ -37,6 +40,15 @@ open Blade.StaticEval
 
 let private v (n: string) = syn (ExprVar n)
 let private fLit (x: float) = syn (ExprLit (LitFloat x))
+/// Round 6 (numeric defaults): a USER scalar this elaborator binds or combines
+/// (a weight, coefficient, family parameter, evaluation point, or chain control) is read
+/// through a cast to the width the PPL computes in -- Float64, Int64 for an RNG key. A literal
+/// argument then takes that width exactly (a literal under a width cast takes the cast's width)
+/// instead of the Float32 / Int32 default a bare synthesized `let` would settle on, and a
+/// Float32 / Int32 variable is CONVERTED rather than refused. PPL is Float64-only this round;
+/// width-generic elaboration is the follow-up.
+let private asF64 (e: Expr) = syn (ExprApp (syn (ExprVar "Float64"), [ e ]))
+let private asI64 (e: Expr) = syn (ExprApp (syn (ExprVar "Int64"), [ e ]))
 let private addE a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
 let private divE a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
 let private mulE a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
@@ -44,6 +56,8 @@ let private subE a b = syn (ExprBinOp (Elementwise, OpSub, a, b))
 let private powE a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let private sLet n value = StmtLet { Pattern = synPat (PatVar n); Type = None; Value = value; Mutability = BindLet }
 let private sMutStmt nm vl = StmtLet { Pattern = synPat (PatVar nm); Type = None; Value = vl; Mutability = BindMut }
+// PPL accumulators have a fixed working width even when initialized by a bare zero.
+let private sMutFloat nm vl = StmtLet { Pattern = synPat (PatVar nm); Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindMut }
 let private assignStmt (lhs: Expr) (rhs: Expr) = StmtExpr (syn (ExprAssign (lhs, rhs)))
 let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
     StmtForIn (var, syn (ExprDotDot (lo, hi)), body)
@@ -110,6 +124,22 @@ let private nonemptySubsets (k: int) : int list list =
 // P_S = Sum_t Prod_{l in S} row_l(t) replaces per-cell-per-order prodsum loops. Combinator algebra: rows -> zip -> shared
 // method_for -> one product kernel per multiset -> chain -> reduce((+)); single-leading-axis sources with static extents only.
 let private iLit (n: int) = syn (ExprLit (LitInt (int64 n)))
+/// P3-24 declarative accumulation: the +0.0-seeded builtin-`(+)` fold of `term` over `var` in 0 .. n-1 (a static
+/// range) -- `reduce(method_for(range<Idx<n>>) <@> lambda(var) -> term, (+), Float64(0.0))`, the fused fold. Licensed:
+/// under BLADE_FP_REPRO=1 it is the ascending chain from +0.0, bitwise the `acc = 0.0; acc = acc + term` loop it
+/// replaces. Coordinates are read as `lo + var` (Int64), as the loop's were.
+let private rangeMapE (n: int) (var: string) (term: Expr) =
+    applyE (methodForE [ syn (ExprRange [ TyIdx (iLit n) ]) ])
+           (lambdaE [ { Name = var; Type = None; Default = None; NameSpan = noSpan } ] None term)
+let private sumFrom0E (src: Expr) = syn (ExprReduce (src, syn (ExprSection OpAdd), Some (asF64 (fLit 0.0)), None))
+let private sumOverE (n: int) (var: string) (term: Expr) = sumFrom0E (rangeMapE n var term)
+/// Two seeded `(+)` folds in ONE traversal: `let a, b = object_for(<&!>) <@> (reduce(ma, (+), 0.0), reduce(mb, (+),
+/// 0.0))` -- a reduction join, each leg its own ascending chain from +0.0.
+let private joinSums2 (aN: string) (bN: string) (ma: Expr) (mb: Expr) : Stmt =
+    StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar aN); synPat (PatVar bN) ]); Type = None
+              Value = applyE (syn (ExprObjectFor (syn (ExprSection OpFusion))))
+                             (syn (ExprTuple [ sumFrom0E ma; sumFrom0E mb ]))
+              Mutability = BindLet }
 
 /// Canonical (non-decreasing) label tuples of rank p over dim d, lex order.
 let private canonicalTuples (d: int) (p: int) : int list list =
@@ -153,11 +183,13 @@ let private poolMean (pool: PoolInfo) (i: int) : Expr =
 /// point -- at [1e8, 1e8+1, 1e8+2] the binary64 variance P_ii/N - (P_i/N)^2 is 2, not 2/3 -- while the sums about a
 /// shift that tracks the data carry a relative error independent of the mean's magnitude (the shifted-moment
 /// reduction, proofs/BladeShiftedMoments.v + proofs/reals/BladeShiftedRounding.v: any shift, a rounded mean included).
+let private poolRowName (uniq: string) (i: int) = $"__ppl_row_{uniq}_{i}"
+
 let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-    let rowName i = $"__ppl_row_{uniq}_{i}"
+    let rowName i = poolRowName uniq i
     let shiftName i = $"__ppl_c_{uniq}_{i}"
     let rowDecls =
         if center then
@@ -201,6 +233,14 @@ let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr lis
 let private rowSlices (aName: string) (d: int) : Expr list =
     [ for i in 0 .. d - 1 -> appE (v aName) [iLit i] ]
 
+/// `gram(A, A)` contracts x_i . x_j over the sample fiber WITHOUT conjugation only for REAL elements; the complex
+/// instance is Hermitian (x_i . conj x_j), a different tensor from the raw comoment P_ij, so the contraction route is
+/// real-only.
+let private isRealElem (elem: TypeExpr) : bool =
+    match elem with
+    | TyNamed (("Float" | "Float64" | "Float32"), []) -> true
+    | _ -> false
+
 /// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
     if r = 1 then poolMean pool labels.[0] else
@@ -214,93 +254,12 @@ let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
 
 // Module context: array annotations, alias resolution, static extents
 
-/// Array annotations in scope: name -> (element TypeExpr, index TypeExprs); only annotated bindings participate, formers never infer a shape.
-let private collectArrays (decls: Located<Decl> list) : Map<string, TypeExpr * TypeExpr list> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclLet b | DeclStatic b ->
-            match b.Pattern, b.Type with
-            | { Kind = PatternKind.PatVar name }, Some (TyArray (elem, idxs)) -> Map.add name (elem, idxs) acc
-            | _ -> acc
-        | _ -> acc) Map.empty
+// The shape queries are the shared oracle's (Blade.ElabShapes, deep-review #62): one alias table, one extent resolver.
+let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> = Blade.ElabShapes.collectAliases decls
 
-let private collectAliases (decls: Located<Decl> list) : Map<string, TypeExpr> =
-    decls |> List.fold (fun acc d ->
-        match d.Value with
-        | DeclType (TyDeclAlias (name, _, body)) -> Map.add name body acc
-        | _ -> acc) Map.empty
-
-/// Resolve an index TypeExpr to its static extent, following alias chains.
-let rec private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (ty: TypeExpr) : int option =
-    match ty with
-    | TyIdx extent ->
-        match evalExpr statics maxSteps extent with
-        | Ok (SVInt n) -> Some (int n)
-        | _ -> None
-    | TyNamed (name, []) ->
-        match Map.tryFind name aliases with
-        | Some body -> resolveExtent aliases statics body
-        // Not a source alias: a provider axis path, registered by TypeEnv during checking, so the extent comes from store metadata.
-        | None -> providerIndexExtent statics name
-    | _ -> None
-
-/// Shape inference for COMPUTED source arrays: an un-annotated module-level `let A = method_for(range<...>) <@> kernel
-/// [|> compute]` has no declared TyArray, but its iteration space IS its shape -- one axis per range slot, halo slots shrunk
-/// to their interior (interior = n - (hi - lo)). Unresolvable slots return None; element type Float64.
-let private computedShapeOf (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (value: Expr) : (TypeExpr * TypeExpr list) option =
-    // Interior extents of one halo slot: flat offsets -> [n - reach]; nested per-axis form -> one shrunk extent per axis.
-    let haloExtents (innerTy: TypeExpr) (offsetsExpr: Expr) : int list option =
-        resolveExtent aliases statics innerTy |> Option.bind (fun n ->
-            let asInt = function SVInt v -> Some (int v) | _ -> None
-            let shrunk (offs: int list) =
-                if List.isEmpty offs then None
-                else
-                    let lo = min 0 (List.min offs)
-                    let hi = max 0 (List.max offs)
-                    Some (n - (hi - lo))
-            match evalExpr statics maxSteps offsetsExpr with
-            | Ok (SVInt v) -> shrunk [int v] |> Option.map List.singleton
-            | Ok (SVTuple vs) when not vs.IsEmpty ->
-                let flat = vs |> List.map asInt
-                if List.forall Option.isSome flat then
-                    // Flat form: one axis.
-                    shrunk (flat |> List.map Option.get) |> Option.map List.singleton
-                else
-                    // Nested per-axis form: every entry a non-empty int array.
-                    let perAxis =
-                        vs |> List.map (function
-                            | SVTuple xs ->
-                                let os = xs |> List.map asInt
-                                if List.forall Option.isSome os && not os.IsEmpty
-                                then shrunk (os |> List.map Option.get) else None
-                            | _ -> None)
-                    if List.forall Option.isSome perAxis
-                    then Some (perAxis |> List.map Option.get) else None
-            | _ -> None)
-    let slotExtents (ty: TypeExpr) : int list option =
-        match ty with
-        | TyHalo (inner, offs) -> haloExtents inner offs
-        | _ -> resolveExtent aliases statics ty |> Option.map List.singleton
-    // Unwrap |> compute and walk down the <@> application to the loop source.
-    let rec sourceOf (e: Expr) : Expr option =
-        match e.Kind with
-        | ExprKind.ExprCompute inner -> sourceOf inner
-        | ExprKind.ExprBinOp (_, OpApply, l, _) -> sourceOf l
-        | ExprKind.ExprMethodFor [src] -> Some src
-        | _ -> None
-    sourceOf value |> Option.bind (fun src ->
-        let slots =
-            match src.Kind with
-            | ExprKind.ExprRange idxTys -> Some idxTys
-            | ExprKind.ExprHalo (inner, offs) -> Some [TyHalo (inner, offs)]
-            | _ -> None
-        slots |> Option.bind (fun tys ->
-            if List.isEmpty tys then None else
-            let exts = tys |> List.map slotExtents
-            if List.forall Option.isSome exts then
-                let idxs = exts |> List.collect Option.get |> List.map (fun n -> TyIdx (iLit n))
-                Some (TyNamed ("Float64", []), idxs)
-            else None))
+/// Resolve an index TypeExpr to its static extent, following alias chains (Blade.ElabShapes.resolveExtent).
+let private resolveExtent (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (ty: TypeExpr) : int option =
+    Blade.ElabShapes.resolveExtent aliases statics ty
 
 // Misplaced-use detection: formers are decl-RHS only.
 let rec private anyExpr (p: Expr -> bool) (e: Expr) : bool =
@@ -391,7 +350,26 @@ type private Ctx = {
     /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped tensors (binding name -> variable-axis extent d); consumers
     /// like comoments_merge switch to cell-wise flat reads for these.
     FlatDims: Map<string, int> ref
+    /// Source arrays whose whole second-order demand is a CONTRACTION: read only by moments/comoments, never above
+    /// order 2, real elements. Their pair block is emitted as a `gram` so codegen's own BLAS gate can route it (syrk
+    /// into the packed upper triangle the cells read), and so width is not bounded by one d(d+1)/2-accumulator tuple
+    /// join (g++ template depth refuses it near d = 41); only the O(d n) singles stay a sweep. Derived from the
+    /// module's statistic demand, not a size threshold.
+    GramArrays: Set<string>
+    /// Raw `gram(A, A)` bindings for `moments(A, 2)` (source array name -> binding name).
+    Grams: Map<string, string> ref
+    /// Central `gram(Ac, Ac)` bindings for `comoments(A, 2)`, Ac = A's rows shifted by their means (source array name ->
+    /// binding name). Centered, not raw-and-corrected: the raw gram minus N c_i c_j is exactly the cancellation the
+    /// central pool exists to avoid.
+    CentralGrams: Map<string, string> ref
 }
+
+/// Does this array's order-2 block go through the gram contraction?
+let private gramRoute (ctx: Ctx) (aName: string) : bool = Set.contains aName ctx.GramArrays
+
+/// The pair moment P_ij / N read off a packed gram block.
+let private gramMoment (gName: string) (n: float) (i: int) (j: int) : Expr =
+    divE (appE (v gName) [iLit i; iLit j]) (fLit n)
 
 /// The module's pool for a single-axis source array: reuse if already emitted, else emit ONE maximal sweep (sizes 1..max over
 /// every former that reads this array) at the first former's position and cache it.
@@ -400,7 +378,10 @@ let private acquirePool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: flo
     match Map.tryFind aName ctx.Pools.Value with
     | Some pool -> ([], pool)
     | None ->
-        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        // On the gram route the pair sums come from the contraction, so the sweep shrinks to the singles.
+        let maxR =
+            if gramRoute ctx aName then 1
+            else max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
         let (pd, pool) = poolDecls span aName false (rowSlices aName d) needed n
         ctx.Pools.Value <- Map.add aName pool ctx.Pools.Value
@@ -413,11 +394,42 @@ let private acquireCentralPool (ctx: Ctx) (span: Span) (aName: string) (d: int) 
     match Map.tryFind aName ctx.CentralPools.Value with
     | Some pool -> ([], pool)
     | None ->
-        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        let maxR =
+            if gramRoute ctx aName then 1
+            else max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
         let (pd, pool) = poolDecls span $"{aName}_c" true (rowSlices aName d) needed n
         ctx.CentralPools.Value <- Map.add aName pool ctx.CentralPools.Value
         (pd, pool)
+
+/// The module's raw `gram(A, A)` binding: emitted once at the first `moments(A, 2)`, then reused.
+let private acquireGram (ctx: Ctx) (span: Span) (aName: string) : Located<Decl> list * string =
+    match Map.tryFind aName ctx.Grams.Value with
+    | Some g -> ([], g)
+    | None ->
+        let gName = $"__ppl_gram_{aName}"
+        let decl = { Value = DeclLet { Pattern = pvar gName; Type = None
+                                       Value = syn (ExprGram (v aName, v aName))
+                                       Mutability = BindLet }; Span = span }
+        ctx.Grams.Value <- Map.add aName gName ctx.Grams.Value
+        ([decl], gName)
+
+/// The module's CENTRAL gram: `gram(Ac, Ac)` over the central pool's shifted rows, stacked into one array so both
+/// operands are the same binding (the identity syrk and packed storage need). Returns the decls (the central singles
+/// pool first, if not yet emitted), the gram binding, and that pool, whose P_i / N is the ~0 residue of each mean.
+let private acquireCentralGram (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: float)
+    : Located<Decl> list * string * PoolInfo =
+    let (pd, pool) = acquireCentralPool ctx span aName d n 2
+    match Map.tryFind aName ctx.CentralGrams.Value with
+    | Some g -> (pd, g, pool)
+    | None ->
+        let cName = $"__ppl_cen_{aName}"
+        let gName = $"__ppl_cgram_{aName}"
+        let mkDecl name value =
+            { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+        let stacked = arrLitE [ for i in 0 .. d - 1 -> v (poolRowName $"{aName}_c" i) ]
+        ctx.CentralGrams.Value <- Map.add aName gName ctx.CentralGrams.Value
+        (pd @ [ mkDecl cName stacked; mkDecl gName (syn (ExprGram (v cName, v cName))) ], gName, pool)
 
 let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
 
@@ -425,7 +437,7 @@ let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
 let private arrayShape (ctx: Ctx) (what: string) (name: string) : Result<TypeExpr * TypeExpr list * TypeExpr * int, string> =
     match Map.tryFind name ctx.Arrays with
     | None ->
-        Error $"{what}: '{name}' must be a module-level let with an Array<Elem like ..., SampleIdx> annotation (the formers read the declared shape)"
+        Error $"{what}: '{name}' must be a module-level array with a static shape -- an Array<Elem like ..., SampleIdx> annotation, a computed range map, or the result of an elaborated call (the formers read the shape at compile time)"
     | Some (_, idxs) when idxs.Length < 2 ->
         Error $"{what}: '{name}' needs at least one variable axis plus the sample axis (Array<Elem like VarIdx, SampleIdx>); a lone sample axis has no comoment structure"
     | Some (elem, idxs) ->
@@ -449,8 +461,18 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
         arrayShape ctx "moments" aName |> Result.map (fun (elem, leading, fiber, n) ->
             match leading with
             | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                // Single-pass path: mu_S = P_S / N from the shared pool sweep.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
+                if k = 2 && gramRoute ctx aName then
+                    // Contraction path: the raw order-2 block IS A.A^T / N over the sample fiber.
+                    let (gd, gName) = acquireGram ctx span aName
+                    let cells =
+                        [ for labels in canonicalTuples d 2 ->
+                            match labels with
+                            | [i; j] -> gramMoment gName (float n) i j
+                            | _ -> fLit 0.0 ]
+                    gd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
+                else
+                // Single-pass path: mu_S = P_S / N from the shared pool sweep.
                 let (pd, pool) = acquirePool ctx span aName d (float n) k
                 let cells = [ for labels in canonicalTuples d k -> poolMoment pool labels ]
                 pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
@@ -496,14 +518,21 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
             arrayShape ctx "comoments" aName |> Result.map (fun (elem, leading, fiber, n) ->
                 match leading with
                 | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                    // Single-pass path: C_ij = P_ij/N - (P_i/N)(P_j/N) off the shared pool.
+                    // C_ij = P_ij/N - (P_i/N)(P_j/N) about the row means. The pair block is the O(d^2 n) contraction:
+                    // gram(Ac, Ac) over the centered rows on the gram route, else the shared central pool sweep.
                     let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
+                    let (pd, rawPair, pool) =
+                        if gramRoute ctx aName then
+                            let (gd, gName, pool) = acquireCentralGram ctx span aName d (float n)
+                            (gd, (fun i j -> gramMoment gName (float n) i j), pool)
+                        else
+                            let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
+                            (pd, (fun i j -> poolMoment pool [i; j]), pool)
                     ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
                     let cells =
                         [ for labels in canonicalTuples d 2 ->
                             match labels with
-                            | [i; j] -> subE (poolMoment pool labels) (mulE (poolMoment pool [i]) (poolMoment pool [j]))
+                            | [i; j] -> subE (rawPair i j) (mulE (poolMoment pool [i]) (poolMoment pool [j]))
                             | _ -> fLit 0.0 ]
                     pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
                 | _ ->
@@ -529,7 +558,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | [ix], [iy] ->
                     match resolveExtent ctx.Aliases ctx.Statics ix, resolveExtent ctx.Aliases ctx.Statics iy with
                     | Some dx, Some dy ->
-                        let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (fLit 0.0))))
+                        let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (syn (ExprTyped (fLit 0.0, TyFloat64))))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error $"comoments: independent zero block needs static variable-axis extents for '{xName}' and '{yName}'"
                 | _ -> Error "comoments: independent zero blocks support one variable axis per array so far (multi-axis blocks deferred)"
@@ -1070,7 +1099,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     | Some dx, Some dy ->
                         let cellCount =
                             (canonicalTuples dx p |> List.length) * (canonicalTuples dy q |> List.length)
-                        let zeros = arrLitE (List.replicate cellCount (fLit 0.0))
+                        let zeros = arrLitE (List.replicate cellCount (syn (ExprTyped (fLit 0.0, TyFloat64))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
                     | _ -> Error "mixed_cumulants: independent zero block needs static variable-axis extents"
                 | _ -> Error "mixed_cumulants: independent zero blocks support one variable axis per array so far"
@@ -1586,7 +1615,7 @@ let private elabDistExpect (ctx: Ctx) (span: Span) (binding: Binding)
                 let mDecls, mRead = rawMomentDecls span ("ex_" + outName) info q
                 let value =
                     coeffs
-                    |> List.mapi (fun j c -> if j = 0 then c else mulE c (mRead j))
+                    |> List.mapi (fun j c -> if j = 0 then asF64 c else mulE (asF64 c) (mRead j))
                     |> List.reduce addE
                 Ok (mDecls @ [ { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
@@ -1610,7 +1639,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                 let zName = $"__ppl_tb_rw_{dName}_Z"
                 let zVal =
                     coeffs
-                    |> List.mapi (fun c cf -> if c = 0 then cf else mulE cf (mRead c))
+                    |> List.mapi (fun c cf -> if c = 0 then asF64 cf else mulE (asF64 cf) (mRead c))
                     |> List.reduce addE
                 let zDecl = { Value = DeclLet { Pattern = pvar zName; Type = None; Value = zVal; Mutability = BindLet }; Span = span }
                 let wName j = $"__ppl_tb_rw_{dName}_w{j}"
@@ -1618,7 +1647,7 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
                     [ for j in 1 .. rOut ->
                         let num =
                             coeffs
-                            |> List.mapi (fun c cf -> mulE cf (mRead (j + c)))
+                            |> List.mapi (fun c cf -> mulE (asF64 cf) (mRead (j + c)))
                             |> List.reduce addE
                         { Value = DeclLet { Pattern = pvar (wName j); Type = None
                                             Value = divE num (v zName); Mutability = BindLet }
@@ -1663,7 +1692,7 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
                             Sources = Set.union d1.Sources d2.Sources
                             Dim = Some 1
                             Flat = true }
-            Ok ([ bind w1Name w1; bind w2Name w2; bind wsName (addE (v w1Name) (v w2Name)) ]
+            Ok ([ bind w1Name (asF64 w1); bind w2Name (asF64 w2); bind wsName (addE (v w1Name) (v w2Name)) ]
                @ m1Decls @ m2Decls @ mixDecls @ compDecls, outInfo)))
         | _ ->
             Error "dist_mix expects dist_mix(w1, d1, w2, d2) with two previously declared dist bindings"
@@ -1727,7 +1756,7 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                                 Sources = info.Sources
                                 Dim = Some (dim - 1)
                                 Flat = true }
-                Ok ([ bind xN xE
+                Ok ([ bind xN (asF64 xE)
                       bind sN (k2 i i)
                       bind devN (subE (v xN) (k1 i))
                       bind comps.[0] (arrLitE meanCells)
@@ -1771,8 +1800,8 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let bindDecls =
                 [ for i in 0 .. k - 1 do
-                    yield bind (xName i) rest.[2 * i]
-                    yield bind (wName i) rest.[2 * i + 1] ]
+                    yield bind (xName i) (asF64 rest.[2 * i])
+                    yield bind (wName i) (asF64 rest.[2 * i + 1]) ]
             let wsName = $"__ppl_tb_at_{dName}_ws"
             let wsDecl = bind wsName ([ for i in 0 .. k - 1 -> v (wName i) ] |> List.reduce addE)
             let mName j = $"__ppl_tb_at_{dName}_m{j}"
@@ -1808,7 +1837,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
             else
                 let xName i = $"__ppl_tb_ng_{outName}_x{i}"
                 let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) xs.[i] ]
+                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) (asF64 xs.[i]) ]
                 let mDecls, mRead = rawMomentDecls span ("ng_" + outName) info (sPts - 1)
                 let cellName j = $"__ppl_tb_ng_{outName}_c{j}"
                 let cellDecls =
@@ -1908,10 +1937,10 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
             let r = int x
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let pName i = $"__ppl_fam_{dName}_p{i}"
-            let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) e)
+            let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) (asF64 e))
             let p i = v (pName i)
             let direct (kappa: int -> Expr) =
-                [ for k in 1 .. r -> bind (distComponentName dName k) (arrLitE [ kappa k ]) ]
+                [ for k in 1 .. r -> bind (distComponentName dName k) (asF64 (arrLitE [ kappa k ])) ]
             let compDecls =
                 match fam with
                 | "gaussian" ->
@@ -2017,7 +2046,8 @@ let private eqE a b = syn (ExprBinOp (Elementwise, OpEq, a, b))
 let private andE a b = syn (ExprBinOp (Elementwise, OpAnd, a, b))
 let private orE a b = syn (ExprBinOp (Elementwise, OpOr, a, b))
 let private notE a = syn (ExprUnaryOp (OpNot, a))
-let private guardE c e = syn (ExprGuard (c, e))
+// PPL computes in Float64 even when a guarded constant has no numeric partner.
+let private guardE c e = syn (ExprGuard (c, asF64 e))
 
 /// Exactly 0.0 on the support, -inf (log 0) off it. The -inf is a literal's
 /// log, so neither sweep carries anything out of it.
@@ -2092,7 +2122,7 @@ let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Ex
 let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr) : (string * Expr) list * Expr =
     let pName i = $"__ppl_lp_{tok}_p{i}"
     let xName = $"__ppl_lp_{tok}_x"
-    let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
+    let pBinds = ps |> List.mapi (fun i e -> (pName i, asF64 e))
     let p i = v (pName i)
     // The closed forms read `x` = the evaluation point moved onto the
     // support (onSupportE); the support term adds the -inf off it. On the
@@ -2150,7 +2180,7 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
             ([], addE (xlogyE x (p 0))
                       (xlogyE (subE (fLit 1.0) x) (subE (fLit 1.0) (p 0))))
         | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
-    (pBinds @ [ (xName, xExpr) ] @ supportBinds @ extra, withSupport value)
+    (pBinds @ [ (xName, asF64 xExpr) ] @ supportBinds @ extra, withSupport value)
 
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
 /// arithmetic over once-bound parameters, -inf off the family's support
@@ -2181,9 +2211,9 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
     : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
         | None ->
-            Error $"loglik: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
+            Error $"loglik: '{aName}' must be a module-level let with an Array<Float64 like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
         | Some (_, idxs) when idxs.Length <> 1 ->
-            Error $"loglik: '{aName}' carries {idxs.Length} declared axes -- a univariate family sums a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward (dist_map/dist_affine) first"
+            Error $"loglik: '{aName}' carries {idxs.Length} declared axes -- a univariate family sums a rank-1 sample vector (Array<Float64 like SampleIdx>); slice or push forward (dist_map/dist_affine) first"
         | Some (_, idxs) ->
             let fiber = idxs.Head
             match resolveExtent ctx.Aliases ctx.Statics fiber with
@@ -2191,7 +2221,7 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
             | Some n ->
                 let nF = float n
                 let pName i = $"__ppl_ll_{tok}_p{i}"
-                let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
+                let pBinds = ps |> List.mapi (fun i e -> (pName i, asF64 e))
                 let p i = v (pName i)
                 let accN i = $"__ppl_ll_{tok}_acc{i}"
                 let iN = $"__ppl_ll_{tok}_i"
@@ -2352,9 +2382,9 @@ let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr lis
 let private bayesSampleVector (ctx: Ctx) (aName: string) : Result<int, string> =
     match Map.tryFind aName ctx.Arrays with
     | None ->
-        Error $"bayes: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
+        Error $"bayes: '{aName}' must be a module-level let with an Array<Float64 like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
     | Some (_, idxs) when idxs.Length <> 1 ->
-        Error $"bayes: '{aName}' carries {idxs.Length} declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward first"
+        Error $"bayes: '{aName}' carries {idxs.Length} declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float64 like SampleIdx>); slice or push forward first"
     | Some (_, idxs) ->
         match resolveExtent ctx.Aliases ctx.Statics idxs.Head with
         | None -> Error $"bayes: '{aName}' sample axis extent must be statically known (Idx<n> directly or through aliases)"
@@ -2386,8 +2416,8 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
             let prN i = nm $"pr{i}"
             let lkN i = nm $"lk{i}"
             let paramDecls =
-                (priorPs |> List.mapi (fun i e -> bind (prN i) e))
-                @ (likPs |> List.mapi (fun i e -> bind (lkN i) e))
+                (priorPs |> List.mapi (fun i e -> bind (prN i) (asF64 e)))
+                @ (likPs |> List.mapi (fun i e -> bind (lkN i) (asF64 e)))
             let pr i = v (prN i)
             let lk i = v (lkN i)
             // The one sufficient statistic every pair needs beyond the static
@@ -2395,12 +2425,8 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
             // loglik's accumulation idiom, read through a `__` alias so the
             // synthesized-buffer gate applies.
             let srcN, sumN, iN, accN = nm "src", nm "sum", nm "i", nm "acc"
-            let sumVal =
-                syn (ExprBlock (
-                        [ sMutStmt accN (fLit 0.0)
-                          forIn iN (iLit 0) (iLit n)
-                              [ assignStmt (v accN) (addE (v accN) (appE (v srcN) [v iN])) ] ],
-                        Some (v accN)))
+            let sumVal = sumOverE n iN (appE (v srcN) [ addE (iLit 0) (v iN) ])
+            ignore accN
             let statDecls = [ bind srcN (v aName); bind sumN sumVal ]
             let S = v sumN
             // Posterior hyperparameters (Density.fs Conjugate's formulas,
@@ -2876,7 +2902,7 @@ let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: stri
         elif info.Order > 6 then
             Error $"{former}: the Edgeworth/Cornish-Fisher series are generated up to order 6 and '{dn}' carries {info.Order} -- rebuild or project the tower at order <= 6"
         else
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let r = info.Order
             let muN = $"__ppl_ax_{tag}_mu"
             let sdN = $"__ppl_ax_{tag}_sd"
@@ -2892,7 +2918,7 @@ let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: stri
 /// Horner builder for U(z) over them. Caller guarantees r >= 3.
 let private cfCorrectionDecls (span: Span) (tag: string) (lam: int -> Expr) (r: int)
     : Located<Decl> list * (Expr -> Expr) =
-    let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+    let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
     let grouped = axCornishFisherU r
     let maxDeg = grouped |> Map.toList |> List.map fst |> List.max
     let cName i = $"__ppl_cf_{tag}_c{i}"
@@ -2917,7 +2943,7 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
     | [{ Kind = ExprKind.ExprVar dn }; xExpr] ->
         approxSetupDecls "dist_pdf_approx" ctx span ("ea_" + outName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let maxJ = 3 * (r - 2)
             let cs = axEdgeworthCoeffs r
             let xN = $"__ppl_ea_{outName}_x"
@@ -2941,7 +2967,7 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
             let sqrt2pi = sqrt (2.0 * System.Math.PI)
             let value = divE (mulE (divE (expE (mulE (mulE (fLit -0.5) z) z)) (fLit sqrt2pi)) (v fN)) sd
             setup
-            @ [ bind xN xExpr
+            @ [ bind xN (asF64 xExpr)
                 bind zN (divE (subE (v xN) mu) sd) ]
             @ heDecls
             @ [ bind fN factor
@@ -2958,12 +2984,12 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
     | [{ Kind = ExprKind.ExprVar dn }; pExpr] ->
         approxSetupDecls "dist_quantile_approx" ctx span ("cf_" + outName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
-            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
+            let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = Some (TyNamed ("Float64", [])); Value = vl; Mutability = BindLet }; Span = span }
             let nm suffix = $"__ppl_cf_{outName}_{suffix}"
             let pN, qN, r0N, r1N, ceN, vtN, zN = nm "p", nm "q", nm "r0", nm "r1", nm "ce", nm "vt", nm "z"
             let z = v zN
             let ppndDecls =
-                [ bind pN pExpr
+                [ bind pN (asF64 pExpr)
                   bind qN (subE (v pN) (fLit 0.5))
                   bind r0N (ifE (ltE (v qN) (fLit 0.0)) (v pN) (subE (fLit 1.0) (v pN)))
                   bind r1N (sqrtE (negE (logE (v r0N))))
@@ -3053,15 +3079,15 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
                 let fN = $"__ppl_sm_{sName}_fill"
                 let affine = addE (v muN) (mulE (v sdN) (v "__u"))
                 let body = if fam = "gaussian" then affine else expE affine
-                [ bind muN ps.[0]
-                  bind sdN (sqrtE ps.[1])
+                [ bind muN (asF64 ps.[0])
+                  bind sdN (sqrtE (asF64 ps.[1]))
                   bind fN (appE (v "__rand_normal") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) body }; Span = span } ]
             | "uniform" ->
                 let aN = $"__ppl_sm_{sName}_a"
                 let wN = $"__ppl_sm_{sName}_w"
                 let fN = $"__ppl_sm_{sName}_fill"
-                [ bind aN ps.[0]
+                [ bind aN (asF64 ps.[0])
                   bind wN (subE ps.[1] (v aN))
                   bind fN (appE (v "__rand_uniform") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) (addE (v aN) (mulE (v wN) (v "__u"))) }; Span = span } ]
@@ -3162,7 +3188,7 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
 // =========================================================================
 
 let private tyFloat64 = TyNamed ("Float64", [])
-let private tyIntP = TyNamed ("Int", [])
+let private tyIntP = TyNamed ("Int32", [])
 let private tyFloatArr (n: int) = TyArray (tyFloat64, [TyIdx (iLit n)])
 let private mkParamD (nm: string) (ty: TypeExpr) : ParamDecl =
     { Name = nm; Type = Some ty; Mutability = Immutable; Default = None; NameSpan = noSpan }
@@ -3234,9 +3260,9 @@ let private elabMh (ctx: Ctx) (span: Span) (chainName: string) (binding: Binding
                                     StepVar = tN
                                     SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
                                     Guard = None }) }
-                [ bind x0N x0E
+                [ bind x0N (asF64 x0E)
                   bind scN scaleE
-                  bind keyN keyE
+                  bind keyN (asI64 keyE)
                   bind epsN (appE (v "__rand_normal") [addE (v keyN) (iLit 1000003); iLit n])
                   bind uN (appE (v "__rand_uniform") [addE (v keyN) (iLit 2000003); iLit n])
                   mkFnDecl span stepN [mkParamD prevN tyFloat64; mkParamD tN tyIntP] tyFloat64 stepBody
@@ -3316,10 +3342,10 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
                                 StepVar = tN
                                 SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
                                 Guard = None }) }
-            Ok ([ bind x0N x0E
-                  bind epsN epsE
+            Ok ([ bind x0N (asF64 x0E)
+                  bind epsN (asF64 epsE)
                   bind eps2N (divE (v epsN) (fLit 2.0))
-                  bind keyN keyE
+                  bind keyN (asI64 keyE)
                   bind pFillN (appE (v "__rand_normal") [addE (v keyN) (iLit 3000017); iLit n])
                   bind uN (appE (v "__rand_uniform") [addE (v keyN) (iLit 4000037); iLit n])
                   mkFnDecl span stepN [mkParamD prevN tyFloat64; mkParamD tN tyIntP] tyFloat64 stepBody
@@ -3346,7 +3372,7 @@ let private chainSource (ctx: Ctx) (chains: Map<string, int>) (former: string) (
              | Some (_, idxs) ->
                  Error $"{former}: '{nmv}' carries {idxs.Length} declared axes -- chain diagnostics run on rank-1 chains"
              | None ->
-                 Error $"{former}: '{nmv}' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float like Idx<n>> annotation")
+                 Error $"{former}: '{nmv}' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float64 like Idx<n>> annotation")
     | _ -> Error $"{former}: the chain argument must be a named module-level binding"
 
 let private staticNat (ctx: Ctx) (former: string) (what: string) (e: Expr) : Result<int, string> =
@@ -3372,23 +3398,17 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let nmOf s = $"""__ppl_{(if isVar then "cv" else "cm")}_{outName}_{s}"""
             let srcN, iN, aN, bN = nmOf "src", nmOf "i", nmOf "acc", nmOf "acc2"
-            let read = appE (v srcN) [v iN]
+            let read = appE (v srcN) [ addE (iLit burn) (v iN) ]
+            let nKept = len - burn
             let value =
                 if isVar then
-                    // population variance of the suffix: E[x^2] - mean^2
+                    // population variance of the suffix: E[x^2] - mean^2, both sums in ONE traversal (a reduction join)
                     syn (ExprBlock (
-                            [ sMutStmt aN (fLit 0.0)
-                              sMutStmt bN (fLit 0.0)
-                              forIn iN (iLit burn) (iLit len)
-                                  [ assignStmt (v aN) (addE (v aN) read)
-                                    assignStmt (v bN) (addE (v bN) (mulE read read)) ] ],
+                            [ joinSums2 aN bN (rangeMapE nKept iN read) (rangeMapE nKept iN (mulE read read)) ],
                             Some (subE (divE (v bN) (fLit m))
                                        (mulE (divE (v aN) (fLit m)) (divE (v aN) (fLit m))))))
                 else
-                    syn (ExprBlock (
-                            [ sMutStmt aN (fLit 0.0)
-                              forIn iN (iLit burn) (iLit len) [ assignStmt (v aN) (addE (v aN) read) ] ],
-                            Some (divE (v aN) (fLit m))))
+                    divE (sumOverE nKept iN read) (fLit m)
             Ok [ bind srcN (v src)
                  { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
@@ -3399,10 +3419,10 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
 let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt list * string * string =
     let muN, mN, vN, tN, dN = $"__mu_{tok}", $"__m_{tok}", $"__v_{tok}", $"__t_{tok}", $"__d_{tok}"
     let stmts =
-        [ sMutStmt muN (fLit 0.0)
+        [ sMutFloat muN (fLit 0.0)
           forIn tN (iLit 0) (iLit n) [ assignStmt (v muN) (addE (v muN) (srcRead (v tN))) ]
           sLet mN (divE (v muN) (fLit (float n)))
-          sMutStmt vN (fLit 0.0)
+          sMutFloat vN (fLit 0.0)
           forIn tN (iLit 0) (iLit n)
               [ sLet dN (subE (srcRead (v tN)) (v mN))
                 assignStmt (v vN) (addE (v vN) (mulE (v dN) (v dN))) ] ]
@@ -3410,6 +3430,8 @@ let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt l
 
 /// autocorr(c, maxlag): a synthesized function (mut array + element writes +
 /// nested for loops, the grad-emission shape) applied to the chain.
+/// STAYS A LOOP (P3-24): as a map over lags of runtime-length `(+)` folds its `blade check` front end measured
+/// ~140 ms slower (and ess's, sharing the mean / centered-sum prologue); a conversion may not cost compile time.
 let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
     (chains: Map<string, int>) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -3428,10 +3450,10 @@ let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Bin
             let body =
                 syn (ExprBlock (
                         pre
-                        @ [ sMutStmt rN (computeE (syn (ExprReplicate (iLit (maxlag + 1), syn (ExprPure (fLit 0.0))))))
+                        @ [ sMutStmt rN (computeE (syn (ExprReplicate (iLit (maxlag + 1), syn (ExprPure (asF64 (fLit 0.0)))))))
                             assignStmt (appE (v rN) [iLit 0]) (fLit 1.0)
                             forIn kN (iLit 1) (iLit (maxlag + 1))
-                                [ sMutStmt aN (fLit 0.0)
+                                [ sMutFloat aN (fLit 0.0)
                                   forIn tN (iLit 0) (subE (iLit len) (v kN))
                                       [ assignStmt (v aN)
                                             (addE (v aN)
@@ -3461,7 +3483,7 @@ let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
             let (pre, mN, vN) = meanVarStmts "0" read len
             let tauN, stopN, kN, aN, bN, tN, gN = "__tau", "__stop", "__k", "__a", "__b", "__t2", "__g"
             let lagSum (accN: string) (lag: Expr) =
-                [ sMutStmt accN (fLit 0.0)
+                [ sMutFloat accN (fLit 0.0)
                   forIn tN (iLit 0) (subE (iLit len) lag)
                       [ assignStmt (v accN)
                             (addE (v accN)
@@ -3472,8 +3494,8 @@ let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
             let body =
                 syn (ExprBlock (
                         pre
-                        @ [ sMutStmt tauN (fLit -1.0)
-                            sMutStmt stopN (fLit 0.0)
+                        @ [ sMutFloat tauN (fLit -1.0)
+                            sMutFloat stopN (fLit 0.0)
                             forIn kN (iLit 0) (iLit pairs)
                                 (lagSum aN evenLag
                                  @ lagSum bN oddLag
@@ -3512,14 +3534,13 @@ let private elabRhat (ctx: Ctx) (span: Span) (outName: string) (binding: Binding
             let tN, dN = "__t", "__d"
             let segStmts =
                 segs |> List.mapi (fun j (srcP, lo) ->
-                    let read = appE (v srcP) [v tN]
-                    [ sMutStmt (muN j) (fLit 0.0)
-                      forIn tN (iLit lo) (iLit (lo + m)) [ assignStmt (v (muN j)) (addE (v (muN j)) read) ]
+                    // P3-24: the segment mean and centered sum of squares as two dependent seeded `(+)` folds.
+                    let read = appE (v srcP) [ addE (iLit lo) (v tN) ]
+                    let d = subE read (v (mN j))
+                    ignore dN
+                    [ sLet (muN j) (sumOverE m tN read)
                       sLet (mN j) (divE (v (muN j)) (fLit mF))
-                      sMutStmt (vvN j) (fLit 0.0)
-                      forIn tN (iLit lo) (iLit (lo + m))
-                          [ sLet dN (subE read (v (mN j)))
-                            assignStmt (v (vvN j)) (addE (v (vvN j)) (mulE (v dN) (v dN))) ]
+                      sLet (vvN j) (sumOverE m tN (mulE d d))
                       sLet (sN j) (divE (v (vvN j)) (fLit (mF - 1.0))) ])
                 |> List.concat
             let wN, mbN, bigBN, vpN = "__W", "__mb", "__B", "__vp"
@@ -4216,7 +4237,7 @@ let private stripDecl (aliases: Set<string>) (d: Located<Decl>) : Located<Decl> 
         | other -> other
     { d with Value = value }
 
-let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+let private expandModuleCore (modules: ModuleDecl list) (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     // User definitions shadow the formers entirely (same rule as ML ops and the math intrinsics).
     let declNames =
         decls |> List.choose (fun d ->
@@ -4336,18 +4357,24 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
         | Some e -> Error e
         | None ->
         let aliases = collectAliases rest
-        // Inferred shapes for UN-annotated computed arrays (method_for over range/halo slots) seed the map; explicit
-        // annotations and struct-field aliases override them.
-        let inferredArrays =
+        // The formers' source arrays: every module-level value the shared oracle (Blade.ElabShapes) shapes as an array
+        // -- an annotation, a computed range map (read as Float64, the formers' assumption), the result of an elaborated
+        // call (`let (U, S, V) = m.svd(A)`, a math call answered by math's registered shapes although math elaborates
+        // after this pass), an alias or destructured component of one. A literal's DEFAULT width is not a former source:
+        // an un-annotated literal stays refused, as before. Struct-field aliases override.
+        let sharedArrays =
+            let env = Blade.ElabShapes.moduleEnv modules rest statics (fun _ -> None)
             rest |> List.fold (fun acc d ->
                 match d.Value with
                 | DeclLet b | DeclStatic b ->
-                    match b.Pattern, b.Type with
-                    | { Kind = PatternKind.PatVar name }, None ->
-                        match computedShapeOf aliases statics b.Value with
-                        | Some shape -> Map.add name shape acc
-                        | None -> acc
-                    | _ -> acc
+                    Blade.ElabShapes.patternNames b.Pattern |> List.fold (fun a name ->
+                        match env.Values name with
+                        | Some (Ok (Blade.ElabShapes.VArray s)) ->
+                            match s.Elem with
+                            | Blade.ElabShapes.ElemDeclared t -> Map.add name (t, s.Idxs) a
+                            | Blade.ElabShapes.ElemComputed _ -> Map.add name (tyFloat64, s.Idxs) a
+                            | _ -> a
+                        | _ -> a) acc
                 | _ -> acc) Map.empty
         // Pre-scan: dist-over-chain wrappers. Pass 2 synthesizes an
         // Idx<1> x Idx<n> wrapper for `dist(chain, r)` over an mh/hmc chain
@@ -4384,8 +4411,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     |> Option.map (fun n -> ($"__ppl_dist_{dName}_chain", (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)])))
                 | _ -> None)
         let arrays =
-            collectArrays rest
-            |> Map.fold (fun acc k s -> Map.add k s acc) inferredArrays
+            sharedArrays
             |> fun annotated -> aliasArrays |> Map.fold (fun acc k s -> Map.add k s acc) annotated
             |> fun withAliases -> distChainWraps |> List.fold (fun acc (k, s) -> Map.add k s acc) withAliases
         // Pre-scan: the maximal multiset size each source array needs across
@@ -4402,8 +4428,29 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                      | _ -> None)
                 | _ -> None)
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
+        // Arrays some OTHER single-array former reads: cumulants/free_cumulants/mstate consume the whole multiset
+        // lattice off one central sweep, so an array they touch keeps its fused pool (its pair sums are already a
+        // byproduct -- a gram would duplicate them).
+        let poolOther =
+            rest |> List.choose (fun d ->
+                match d.Value with
+                | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ({ Kind = ExprKind.ExprVar a } :: _)) } }
+                    when (List.contains f ["cumulants"; "free_cumulants"; "mstate"]) && active f -> Some a
+                | _ -> None)
+            |> Set.ofList
+        // The contraction route: everything this array is asked for is an order-2 (or order-1) moments/comoments
+        // block over real elements, so its pair block is exactly a gram and belongs in the intrinsic.
+        let gramArrays =
+            poolMax
+            |> Map.toSeq
+            |> Seq.filter (fun (a, k) ->
+                k = 2 && not (Set.contains a poolOther)
+                && (match Map.tryFind a arrays with Some (elem, _) -> isRealElem elem | None -> false))
+            |> Seq.map fst
+            |> Set.ofSeq
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
-                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
+                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty
+                    GramArrays = gramArrays; Grams = ref Map.empty; CentralGrams = ref Map.empty }
         // Pass 1.5: expression-position logpdf/loglik inside top-level
         // function bodies (the density-form model layer, plan section 4) --
         // each site becomes a block of statement lets, so `function
@@ -4415,7 +4462,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 acc |> Result.bind (fun ds ->
                     match d.Value with
                     | DeclFunction fd ->
-                        Blade.Ast.synthSpan <- d.Span
+                        Blade.Ast.setSynthSpan (d.Span)
                         rewriteBodyFormers active ctx fd.Name fd.Body
                         |> Result.map (fun b -> ds @ [ { d with Value = DeclFunction { fd with Body = b } } ])
                     | _ -> Ok (ds @ [d]))) (Ok [])
@@ -4431,7 +4478,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             rest |> List.fold (fun acc d ->
                 acc |> Result.bind (fun (ds, dists, mstates) ->
                     // Stamp the user decl's span so every syn-built (former-generated) node attributes to this decl's line.
-                    Blade.Ast.synthSpan <- d.Span
+                    Blade.Ast.setSynthSpan (d.Span)
                     match d.Value with
                     // moments(d, k) on a DIST binding: reconstruction (kappa->mu, Wick under closure), dispatched by registry
                     // membership, ahead of the data-array form.
@@ -4622,14 +4669,14 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
 /// Import-gated wrapper. With no `import ppl` in the module, PPL elaboration is a no-op -- bare former names are left unbound.
 /// With an alias in scope, the qualified surface (`ppl.moments(...)`, `ppl.cumulant(...)`) is normalized to the internal
 /// forms the core passes and the checker recognize. The `import ppl` decl itself is consumed here.
-let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
+let private expandModule (modules: ModuleDecl list) (decls: Located<Decl> list) : Result<Located<Decl> list, string> =
     pplAliasesOf decls |> Result.bind (fun aliases ->
         if Set.isEmpty aliases then Ok decls
         else
             decls
             |> List.filter (not << isPplImport)
             |> List.map (stripDecl aliases)
-            |> expandModuleCore)
+            |> expandModuleCore modules)
 
 /// Entry point: elaborate PPL formers across a program. Runs after ML-op elaboration and before grad expansion, so grad()
 /// differentiates the generated pipelines as plain Blade source.
@@ -4644,14 +4691,21 @@ let private expandStr (program: Program) : Result<Program, string> =
     program.Modules
     |> List.fold (fun acc m ->
         acc |> Result.bind (fun ms ->
-            expandModule m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
+            expandModule program.Modules m.Decls |> Result.map (fun ds -> ms @ [{ m with Decls = ds }])))
         (Ok [])
     |> Result.map (fun ms -> { program with Modules = ms })
+
+/// The ppl surface for the shared shape oracle (Blade.ElabShapes): a former's output shape is not reported to the passes
+/// that run before ppl (sgs), so such an operand is refused there with the annotation that fixes it. The passes after
+/// ppl (math, spectra) read the former's elaborated binding. Idempotent; TypeCheck runs it before the first pass.
+let registerShapes () =
+    Blade.ElabShapes.registerDomain "ppl" (fun _ _ op _ ->
+        Error $"a ppl.{op} result's shape is not reported to the elaborators that run before ppl; annotate the binding it is bound to (`let m: Array<Float64 like ...> = ppl.{op}(...)`)")
 
 /// Boundary: string-errored internals -> coded diagnostics. The span is the ambient synthSpan -- stamped per-decl by expandStr,
 /// so a mid-elaboration failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL5100" (Blade.Diagnostics.Codes.phaseOfCode "BL5100") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL5100" (Blade.Diagnostics.Codes.phaseOfCode "BL5100") (Blade.Ast.synthSpan ()) msg ])

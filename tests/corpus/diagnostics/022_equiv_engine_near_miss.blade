@@ -6,7 +6,7 @@
 // ERROR-CONTAINS: build the layer with the synthesized basis (ml.derive_pg_linear)
 import ml as ml
 let static EC = [("E", 1)]
-function almost(x: Array<Float like PgIrrepsIdx<C4, EC>>)
-                where ml.equiv(C4) -> Float =
+function almost(x: Array<Float64 like PgIrrepsIdx<C4, EC>>)
+                where ml.equiv(C4) -> Float64 =
     x(0) * x(0) + 0.9999999 * x(1) * x(1)
 let r = almost([3.0, 4.0])

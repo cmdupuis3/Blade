@@ -109,10 +109,25 @@ let private cotUnit (lossUnit: UnitExpr option) (valueUnit: UnitExpr option) : U
     | None, Some p -> Some (UnitDiv (UnitOne, p))
     | Some l, Some p -> Some (UnitDiv (l, p))
 
+/// Round 6: the AD engine differentiates FLOAT64 functions (its cotangents
+/// and tangents are Float64); a Float32 parameter or result -- the width
+/// float literals now default to -- is refused up front with that reason,
+/// not as a type error from inside the synthesized derivative. Float32 AD is
+/// a recorded follow-up (cotangents at the function's own width).
+let private float32Mention (ctx: Ctx) (fd: FunctionDecl) : bool =
+    let rec has (t: TypeExpr) =
+        match t with
+        | TyFloat32 -> true
+        | TyNamed ("Float32", _) -> true
+        | TyArray (elem, _) -> has elem
+        | _ -> false
+    let tys = (fd.Params |> List.choose (fun p -> p.Type)) @ (fd.ReturnType |> Option.toList)
+    tys |> List.exists (fun t -> has t || has (resolveTy ctx t))
+
 let private floatOfUnit (u: UnitExpr option) : TypeExpr =
     match u with
-    | None -> TyNamed ("Float", [])
-    | Some ue -> TyNamed ("Float", [TyUnitExpr ue])
+    | None -> TyNamed ("Float64", [])
+    | Some ue -> TyNamed ("Float64", [TyUnitExpr ue])
 
 /// The declared type of a parameter's cotangent: <loss unit> / <parameter
 /// unit> on the parameter's own index domain (plan-fortran-killer-2.md
@@ -284,6 +299,18 @@ let private adBodyWhere : WhereClause option =
     Some { Commutativity = []; Antisymmetry = []; Parallel = []; Repro = false; TDims = []
            Custom = [ ("__ad_body", []) ] }
 
+/// Does the program being expanded SPELL `n` anywhere (a binding, a
+/// parameter, a read)? A synthesized derivative `f__grad` / `f__vjp` /
+/// `f__jvp` is referenced by name at the request site, where a program
+/// binding of that spelling would shadow it (round 4 wave 9, lane A, A3
+/// review round 5, Codex 5a8b7b7d: a local `let f__grad = lambda(..)` made
+/// `ad.grad(f)(x)` return its value, (100.0, 200.0) for (9.0, 6.0)).
+/// Top-level duplicates are BL2009.
+let private programSpells (n: string) : bool =
+    match mintedTaken.Value with
+    | null -> false
+    | l -> l.Force().Contains n
+
 /// `synthesize` builds `f__grad` (scalar loss, seed 1.0). With `vjp = true`
 /// it builds `f__vjp` for an ARRAY-valued `f` (plan-fortran-killer-2 section
 /// 6.3, the reverse half of a matrix-free linearization): the body's value
@@ -299,6 +326,7 @@ let private adBodyWhere : WhereClause option =
 let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<FunctionDecl, string> =
     errMode.Value <- (if vjp then "vjp" else "grad")
     let fname = fd.Name
+    resetLetAnnotations fname
     let modeName = if vjp then "vjp" else "grad"
     let suffix = if vjp then vjpSuffix else gradSuffix
     let seedName = "__seed"
@@ -317,8 +345,13 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // user function of that name would silently shadow one of them.
     (if Map.containsKey (fname + suffix) ctx.Decls then
         err fname $"a function named '{fname}{suffix}' already exists in this module; {modeName} would synthesize a colliding declaration -- rename it"
+     elif programSpells (fname + suffix) then
+        err fname $"the program spells '{fname}{suffix}' (a local binding, a parameter or a read): ad.{modeName}(f) is rewritten to that name, which the program's own binding would shadow at the call site -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
+    if float32Mention ctx fd then
+        err fname $"ad.{modeName} differentiates Float64 functions; this one is Float32 (Float32 AD is not supported yet) -- declare its parameters and result Float64"
+    else
     // Return type must be a Float scalar (checked syntactically; the
     // typechecker re-verifies the generated function anyway). A unit-carrying
     // loss is fine: its unit is the numerator of every cotangent's unit.
@@ -328,7 +361,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     match vjp, fd.ReturnType |> Option.map (resolveTy ctx) with
     | false, Some t when isFloatScalar t -> Ok ()
     | false, Some _ -> err fname "grad requires a function returning Float (scalar loss); for an array-valued function use ad.vjp"
-    | false, None -> err fname "grad requires an explicit `-> Float` return annotation"
+    | false, None -> err fname "grad requires an explicit `-> Float64` return annotation"
     | true, Some (TyArray (elem, _)) when isFloatScalar (resolveTy ctx elem) -> Ok ()
     | true, Some _ -> err fname "vjp requires a function returning an array of Float; for a scalar loss use ad.grad"
     | true, None -> err fname "vjp requires an explicit `-> Array<...>` return annotation"
@@ -367,7 +400,14 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
             | _ -> m) paramDims
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty; Dims = dimsEnv
-               SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = [] }
+               SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
+               FreshLocals = freshLocalsOf arrays stmts
+               RealScalars =
+                   fd.Params |> List.choose (fun p ->
+                       match p.Type |> Option.map (resolveTy ctx) with
+                       | Some (TyFloat64 | TyFloat32) -> Some p.Name
+                       | Some (TyNamed (("Float64" | "Float32"), _)) -> Some p.Name
+                       | _ -> None) |> Set.ofList }
 
     // cotangent declarations for function-level diff LOCALS (params' array
     // cotangents are mut parameters; scalar-param cotangents are locals).
@@ -376,10 +416,14 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // before units were admitted.
     let localUnits = unitGuessOfBody ctx fd stmts
     let ascribeCot (n: string) (zero: Expr) (dims: int list option) : Expr =
+        let dimensionlessZero =
+            match dims with
+            | None -> syn (ExprTyped (zero, TyFloat64))
+            | Some _ -> zero
         match Map.tryFind n localUnits with
         | Some vu ->
             (match cotUnit lossUnit vu with
-             | None -> zero
+             | None -> dimensionlessZero
              | Some cu ->
                  let elemTy = floatOfUnit (Some cu)
                  let ty =
@@ -387,7 +431,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
                      | Some ds -> TyArray (elemTy, ds |> List.map (fun d -> TyIdx (iLit (int64 d))))
                      | None -> elemTy
                  syn (ExprTyped (zero, ty)))
-        | None -> zero
+        | None -> dimensionlessZero
     let localDecls =
         stmts |> List.choose (fun s ->
             match s with
@@ -399,8 +443,9 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
                         zerosLikeLiteral value |> Option.map (fun z -> NLet (dName n, true, ascribeCot n z dims))
                     | _ ->
                         // C6: combinator-built locals get a zero buffer
-                        // sized from the dims env (else rejected below)
-                        dims |> Option.map (fun ds -> NLet (dName n, true, ascribeCot n (zerosOfDims ds) (Some ds)))
+                        // sized from the dims env (else rejected below),
+                        // built as a zero FILL, never an n-cell literal (G68)
+                        dims |> Option.map (fun ds -> NLet (dName n, true, ascribeCot n (zeroFillOfDims ctx ds) (Some ds)))
                 else Some (NLet (dName n, true, ascribeCot n (fLit 0.0) None))
             | _ -> None)
     // reject function-level diff array locals whose initializer has neither
@@ -414,7 +459,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     // exist, for reasons worth stating.
     let badArrayLocal =
         let dimsMsg (form: string) =
-            $"is initialized by {form}, whose shape is not statically known here; the reverse sweep sizes a cotangent BUFFER from it, so a partial answer is not available -- annotate the binding `Array<Float like Idx<n>, ...>`, or build it from operands with literal extents"
+            $"is initialized by {form}, whose shape is not statically known here; the reverse sweep sizes a cotangent BUFFER from it, so a partial answer is not available -- annotate the binding `Array<Float64 like Idx<n>, ...>`, or build it from operands with literal extents"
         stmts |> List.tryPick (fun s ->
             match s with
             | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
@@ -467,7 +512,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
     let scalarCots =
         scalarDiff |> List.map (fun p ->
             let cty = cotangentTy ctx lossUnit (paramTyOf p)
-            let zero = if carriesUnit cty then syn (ExprTyped (fLit 0.0, cty)) else fLit 0.0
+            let zero = syn (ExprTyped (fLit 0.0, cty))
             NLet (dName p, true, zero))
 
     // seed: adjoint of the final expression with cotangent 1.0. The seed is
@@ -497,14 +542,46 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
         |> Result.map List.concat
     folded |> Result.map (fun reverse ->
 
+    // PM40 (ad-checkpoint v1): a long recurrence keeps checkpoints and
+    // replays its segments in the descending sweep instead of its tape.
+    let hasGradBuffers = prep.Classes |> List.exists (fun (_, c) -> match c with DiffArray -> true | _ -> false)
+    let arrayParams =
+        fd.Params |> List.choose (fun p ->
+            match p.Type |> Option.map (resolveArrayTy ctx) with
+            | Some (TyArray _) -> Some p.Name
+            | _ -> None)
+        |> Set.ofList
+    // A parameter is a SCALAR only when its declared type is positively a
+    // scalar numeric (or Bool) type: a tuple or a callable parameter may
+    // carry an array a caller aliased into a gradient buffer (Codex design
+    // review of the wave-6 snapshot, finding 1), so it is neither an array
+    // parameter nor a scalar one and the replay admission declines it.
+    let rec scalarParamTy (t: TypeExpr) =
+        match resolveTy ctx t with
+        | TyFloat64 | TyFloat32 | TyInt64 | TyInt32 | TyBool -> true
+        | TyNamed (("Float64" | "Float32" | "Int64" | "Int32"), _) -> true
+        | TyBounded (b, _, _) -> scalarParamTy b
+        | _ -> false
+    let scalarParams =
+        fd.Params |> List.choose (fun p ->
+            match p.Type with
+            | Some t when not (Set.contains p.Name arrayParams) && scalarParamTy t -> Some p.Name
+            | _ -> None)
+        |> Set.ofList
+    let paramTys = fd.Params |> List.choose (fun p -> p.Type |> Option.map (fun t -> (p.Name, t))) |> Map.ofList
+    let allParams = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let stmtsCk, finalCk, cotsCk, revCk =
+        checkpointCarries rc hasGradBuffers arrayParams scalarParams paramTys allParams
+            stmts finalE (localDecls @ scalarCots) (seed @ reverse)
     // assemble: forward + primal + cot decls + seed + reverse + return
     let primalName = "__primal"
-    let fwd = toStmts stmts @ [ StmtLet { Pattern = synPat (PatVar primalName)
-                                          Type = None
-                                          Value = finalE
-                                          Mutability = BindLet } ]
-    let cotDecls = toStmts (localDecls @ scalarCots)
-    let revStmts = toStmts (seed @ reverse)
+    letAnnotationOwner.Value <- fname
+    let fwd = toStmts stmtsCk @ [ StmtLet { Pattern = synPat (PatVar primalName)
+                                            Type = None
+                                            Value = finalCk
+                                            Mutability = BindLet } ]
+    let cotDecls = toStmts cotsCk
+    let revStmts = toStmts revCk
     let retExpr =
         match scalarDiff with
         | [] -> v primalName
@@ -560,12 +637,18 @@ let private jvpSuffix = "__jvp"
 let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result<FunctionDecl, string> =
     errMode.Value <- "jvp"
     let fname = fd.Name
+    resetLetAnnotations fname
     let isFloatish (t: TypeExpr) =
         isFloatTy t || (match t with TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> true | _ -> false)
     (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
         err fname $"a function named '{fname}{jvpSuffix}' already exists in this module; jvp would synthesize a colliding declaration -- rename it"
+     elif programSpells (fname + jvpSuffix) then
+        err fname $"the program spells '{fname}{jvpSuffix}' (a local binding, a parameter or a read): ad.jvp(f) is rewritten to that name, which the program's own binding would shadow at the call site -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
+    if float32Mention ctx fd then
+        err fname "ad.jvp differentiates Float64 functions; this one is Float32 (Float32 AD is not supported yet) -- declare its parameters and result Float64"
+    else
     match fd.ReturnType |> Option.map (resolveTy ctx) with
     | Some t when isFloatish t -> Ok ()   // units included: the tangent carries the same
     // All-Float tuples: the shape of a synthesized source's return
@@ -586,7 +669,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
                                     | TyArray (elem, _) -> isFloatish (resolveTy ctx elem)
                                     | rt -> isFloatish rt) -> Ok ()
     | Some _ -> err fname "jvp requires a function returning Float, an array of Float, or a tuple of those (v1)"
-    | None -> err fname "jvp requires an explicit `-> Float` (or `-> Array<...>`) return annotation"
+    | None -> err fname "jvp requires an explicit `-> Float64` (or `-> Array<...>`) return annotation"
     |> Result.bind (fun () ->
     // Tuple-returning sources (f__grad's `(primal, dscalars...)`) sweep
     // per component; the surrogate keeps taint/validation walks off the
@@ -598,11 +681,20 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
         |> List.reduce add
     // Pick the first depth-indexed tangent prefix no existing name uses
     // (composition rounds each get their own; see tangentPrefix).
+    // ...and no name the PROGRAM spells (round 4 wave 9, lane A, A3 review
+    // round 3, Codex 5a8b7b7d: a module binding `__t1_x` read by `f` passed
+    // the gate of the first round and became the second round's tangent
+    // parameter -- `ad.jvp(ad.jvp(f))` printed (15, 10, 25, 0) for
+    // (21, 14, 35, 0); the trusted second round skips the gate)
     let pickTangentPrefix (allNames: string list) =
+        let spelled = match mintedTaken.Value with null -> null | l -> l.Force ()
+        let used (cand: string) =
+            allNames |> List.exists (fun n -> n.StartsWith cand)
+            || (not (isNull spelled) && spelled |> Seq.exists (fun n -> n.StartsWith cand))
         tangentPrefix.Value <-
             (let rec pick k =
                 let cand = if k = 0 then "__t_" else $"__t{k}_"
-                if allNames |> List.exists (fun n -> n.StartsWith cand) then pick (k + 1) else cand
+                if used cand then pick (k + 1) else cand
              pick 0)
     prepareForSweeps ctx fd surrogateOf pickTangentPrefix trusted |> Result.bind (fun prep ->
     let stmts = prep.Stmts
@@ -634,7 +726,8 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     // one's operands.
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = prep.Known
                ArrayIdxTys = prep.ArrayIdxTys; LoopBindings = Map.empty
-               Dims = Map.empty; SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = [] }
+               Dims = Map.empty; SortPlans = prep.SortPlans; LuOf = luFactorsOf prep.Stmts; Inlining = []
+               FreshLocals = Set.empty; RealScalars = Set.empty }
 
     // tangent-interleaved body + (primal, tangent) return
     let sweptR = tangentOfStmts rc stmts
@@ -663,7 +756,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
       Params = jvpParams
       WhereClause = adBodyWhere
       ReturnType = Some (TyTuple retTys)
-      Body = inheritSpan fd.Body (ExprBlock (toStmts swept, Some retExpr))
+      Body = (letAnnotationOwner.Value <- fname; inheritSpan fd.Body (ExprBlock (toStmts swept, Some retExpr)))
       IsStatic = false
       NameSpan = noSpan }))))))
 
@@ -800,6 +893,12 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclLet b | DeclStatic b -> patNames b.Pattern
             | _ -> [])
         |> Set.ofList
+    let moduleMuts =
+        decls |> List.collect (fun d ->
+            match d.Value with
+            | DeclLet b when b.Mutability = BindMut -> patNames b.Pattern
+            | _ -> [])
+        |> Set.ofList
     // What each FUNCTION declaration can see: everything declared above it,
     // plus itself (a named function may self-recurse; mutual recursion is
     // BL2001). Snapshotted in declaration order rather than collected
@@ -862,6 +961,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         if requestsOrdered.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals
+                        ModuleMuts = moduleMuts
                         ModuleLets = moduleLets; Fresh = ref 0
                         NormMemo = System.Collections.Generic.Dictionary()
                         PackMemo = System.Collections.Generic.Dictionary() }
@@ -911,7 +1011,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                             // Stamp the ambient synthesis span with the
                             // ROOT source decl's span (composition chains
                             // inherit it) before building the derivative.
-                            Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue Blade.Ast.synthSpan)
+                            Blade.Ast.setSynthSpan ((Map.tryFind fname funcSpans |> Option.defaultValue (Blade.Ast.synthSpan ())))
                             let ctx2 = ctxFor fname
                             // A synthesized source is trusted: it binds
                             // reserved names by construction, and the
@@ -939,7 +1039,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             match synthResult with
             | Error e -> Error e
             | Ok () ->
-                Blade.Ast.synthSpan <- noSpan
+                Blade.Ast.setSynthSpan (noSpan)
                 // Splice each synthesized decl after its ROOT source decl,
                 // in synthesis order (f, f__grad, f__grad__jvp, ...).
                 let rootOf (synthName: string) =
@@ -971,6 +1071,118 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         d :: mine
                     | _ -> [d]))))
 
+/// Every identifier a program spells -- each reference (`allVarsDeep`, which
+/// is exhaustive over the expression grammar) and each BINDER (function
+/// names and parameters, let / static patterns, lambda parameters, match
+/// patterns, block lets, for-in variables, recursive-array names and step /
+/// prefix variables), in every module. The hygiene set of `fresh` (round 4
+/// wave 9, the class-closure review of ad-checkpoint: a synthesized name must
+/// never equal one the user wrote). Over-collecting is harmless (a skipped
+/// counter value); missing a name is the capture, so the binder walk visits
+/// every child the reference walk does.
+let programIdentifiers (program: Program) : System.Collections.Generic.HashSet<string> =
+    let acc = System.Collections.Generic.HashSet<string>()
+    let addAll (s: Set<string>) = for n in s do acc.Add n |> ignore
+    // a pattern's binders AND the expressions its guards carry
+    let rec pat (p: Pattern) : unit =
+        for n in patternBoundNames p do acc.Add n |> ignore
+        match p.Kind with
+        | PatternKind.PatGuarded (sub, g) -> pat sub; addAll (allVarsDeep g); binders g
+        | PatternKind.PatTuple ps -> List.iter pat ps
+        | PatternKind.PatCons (a, b) -> pat a; pat b
+        | PatternKind.PatStruct (_, fields) -> fields |> List.iter (snd >> pat)
+        | PatternKind.PatVariant (_, sub) -> Option.iter pat sub
+        | PatternKind.PatTyped (sub, _) -> pat sub
+        | PatternKind.PatWildcard | PatternKind.PatLit _ | PatternKind.PatVar _ -> ()
+    and binders (e: Expr) : unit =
+        let each (es: Expr list) = List.iter binders es
+        let opt (o: Expr option) = Option.iter binders o
+        match e.Kind with
+        | ExprKind.ExprLambda (ps, _, b) ->
+            for p in ps do
+                acc.Add p.Name |> ignore
+                opt p.Default
+            binders b
+        | ExprKind.ExprLet (bnd, b) ->
+            pat bnd.Pattern
+            binders bnd.Value; binders b
+        | ExprKind.ExprMatch (s, cases) ->
+            binders s
+            for c in cases do
+                pat c.Pattern
+                opt c.Guard; binders c.Body
+        | ExprKind.ExprBlock (ss, fe) -> List.iter stmt ss; opt fe
+        | ExprKind.ExprRecArray d ->
+            acc.Add d.Name |> ignore; acc.Add d.PrefixVar |> ignore; acc.Add d.StepVar |> ignore
+            (match d.SeedArm with Some (n, se) -> acc.Add n |> ignore; binders se | None -> ())
+            binders d.SliceExpr; opt d.Guard
+        | ExprKind.ExprBinOp (_, _, l, r) -> each [ l; r ]
+        | ExprKind.ExprUnaryOp (_, i) -> binders i
+        | ExprKind.ExprApp (f, args) -> binders f; each args
+        | ExprKind.ExprTupleIndex (t, i) -> each [ t; i ]
+        | ExprKind.ExprField (t, _) -> binders t
+        | ExprKind.ExprIf (c, t, f) -> each [ c; t; f ]
+        | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+        | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+        | ExprKind.ExprGroupKeys es -> each es
+        | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> each es
+        | ExprKind.ExprObjectFor k -> binders k
+        | ExprKind.ExprDotDot (l, h) -> each [ l; h ]
+        | ExprKind.ExprHalo (_, o) -> binders o
+        | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+        | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+        | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+        | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+        | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> binders i
+        | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+        | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+        | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+        | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+        | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+        | ExprKind.ExprAssign (l, r) -> each [ l; r ]
+        | ExprKind.ExprGramApply (a, b, x) -> each [ a; b; x ]
+        | ExprKind.ExprReduce (a, k, i, ax) -> each [ a; k ]; opt i; opt ax
+        | ExprKind.ExprStruct (_, fields, spread) -> fields |> List.iter (snd >> binders); opt spread
+        | ExprKind.ExprFor (src, _, k) ->
+            (match src with
+             | ForArrays (es, inc) -> each es; opt inc
+             | ForKernel k2 -> binders k2)
+            opt k
+        | ExprKind.ExprQualified parts -> for n in parts do acc.Add n |> ignore
+        | ExprKind.ExprArity n -> acc.Add n |> ignore
+        | ExprKind.ExprLit _ | ExprKind.ExprWildcard
+        | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+        | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
+        | ExprKind.ExprVar _ -> ()
+    and stmt (s: Stmt) : unit =
+        match s with
+        | StmtSpanned (inner, _) -> stmt inner
+        | StmtLet b ->
+            pat b.Pattern
+            binders b.Value
+        | StmtExpr ex -> binders ex
+        | StmtAssign (l, _, r) -> binders l; binders r
+        | StmtForIn (v, r, body) -> acc.Add v |> ignore; binders r; List.iter stmt body
+    let expr (e: Expr) = addAll (allVarsDeep e); binders e
+    let func (fd: FunctionDecl) =
+        acc.Add fd.Name |> ignore
+        for p in fd.Params do
+            acc.Add p.Name |> ignore
+            Option.iter expr p.Default
+        expr fd.Body
+    for m in program.Modules do
+        for d in m.Decls do
+            match d.Value with
+            | DeclFunction fd -> func fd
+            | DeclImpl im -> List.iter func im.Methods
+            | DeclLet b | DeclStatic b ->
+                pat b.Pattern
+                expr b.Value
+            | DeclImport (_, ImportSelective names) -> for n in names do acc.Add n |> ignore
+            | DeclImport (_, ImportQualified (Some a)) -> acc.Add a |> ignore
+            | DeclImport _ | DeclType _ | DeclInterface _ | DeclUnit _ -> ()
+    acc
+
 /// C7 generalized: the SAME pipeline fusion the AD path runs, applied to
 /// EVERY program.
 ///
@@ -992,6 +1204,8 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 /// Declines are SILENT here, unlike in differentiated code: a shape fusion
 /// will not touch is one the existing IRComposeApply path still handles.
 let fuseProgram (program: Program) : Program =
+    // the hygiene set of `fresh` for this program (see programIdentifiers)
+    mintedTaken.Value <- lazy (programIdentifiers program)
     let fuseModule (m: ModuleDecl) : ModuleDecl =
         let typeAliases =
             m.Decls |> List.collect (fun d ->
@@ -1017,6 +1231,7 @@ let fuseProgram (program: Program) : Program =
         let freshCell = ref 0
         let ctxNow () =
             { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
+              ModuleMuts = Set.empty
               ModuleLets = Map.empty; Fresh = freshCell
               NormMemo = System.Collections.Generic.Dictionary()
               PackMemo = System.Collections.Generic.Dictionary() }
@@ -1087,7 +1302,13 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
+    // Per-program synthesis state (gap G193): a fresh one for this flow.
+    installProgramState ()
+    tangentPrefix.Reset ()
+    // The hygiene set of `fresh`: every identifier the program spells (round
+    // 4 wave 9: a synthesized name never captures a user binding).
+    mintedTaken.Value <- lazy (programIdentifiers program)
     let result =
         expandStr program
         |> Result.mapError (fun msg ->
@@ -1102,8 +1323,8 @@ let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic lis
                 if isPack then "BL5502"
                 elif msg.StartsWith "jvp" then "BL5501"
                 else "BL5500"   // grad's and vjp's (the seeded reverse mode shares grad's subset and code)
-            [ Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) Blade.Ast.synthSpan msg ])
+            [ Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) (Blade.Ast.synthSpan ()) msg ])
     // Reset AFTER the diagnostic is built (the span is the failing decl's),
     // so no stamp leaks into later passes.
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     result

@@ -64,7 +64,7 @@
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
   BladeRankBound BladeDescartes BladeRankDomain BladeProuhet BladeNewton.
 From BladeReals Require Import BladeSmoothRank BladeRealCollision.
-Require Import Reals Lra Psatz List Arith Lia FunctionalExtensionality.
+From Stdlib Require Import Reals Lra Psatz List Arith Lia FunctionalExtensionality.
 Import ListNotations.
 
 Open Scope R_scope.
@@ -354,13 +354,13 @@ Lemma nth_bl : forall ts r k, (1 <= k)%nat -> (k <= r)%nat ->
 Proof.
   intros ts r k H1 Hr. destruct k as [|k]; [lia|]. unfold bl. cbn [nth].
   rewrite (nth_map_lt R nat ts (seq 1 r) k 0 0%nat)
-    by (rewrite seq_length; lia).
+    by (rewrite length_seq; lia).
   rewrite seq_nth by lia. reflexivity.
 Qed.
 
 Lemma bl_length : forall ts r, length (bl ts r) = S r.
 Proof.
-  intros. unfold bl. cbn [length]. rewrite map_length, seq_length.
+  intros. unfold bl. cbn [length]. rewrite length_map, length_seq.
   reflexivity.
 Qed.
 
@@ -546,9 +546,9 @@ Lemma nth_qr : forall r (xs : list R) i,
 Proof.
   intros r xs i. unfold qr. destruct (Nat.ltb_spec i r) as [Hlt|Hge].
   - rewrite (nth_map_lt R nat _ (seq 1 r) i 0 0%nat)
-      by (rewrite seq_length; exact Hlt).
+      by (rewrite length_seq; exact Hlt).
     rewrite seq_nth by exact Hlt. reflexivity.
-  - apply nth_overflow. rewrite map_length, seq_length. exact Hge.
+  - apply nth_overflow. rewrite length_map, length_seq. exact Hge.
 Qed.
 
 (* The existence sentence of section 9: a polynomial in the summary that *)
@@ -622,5 +622,5 @@ Proof.
     as [rt' [Hpos' [Hincr' Hne]]].
   apply (closure_refused_R_at_point rt' d r N a Hpos' Hincr' Hd Hr HN).
   rewrite Ha; [exact Hne|].
-  unfold qr. rewrite map_length, seq_length. reflexivity.
+  unfold qr. rewrite length_map, length_seq. reflexivity.
 Qed.

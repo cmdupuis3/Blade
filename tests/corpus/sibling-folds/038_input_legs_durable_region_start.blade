@@ -1,0 +1,48 @@
+// TEST: The return-boundary event's region start survives a dropped first let and CSE
+// ============================================================================
+// The event names its region by the FIRST OWNED POOL's binder (W2-4 fourth
+// review NEW 2) -- never a let the rebuild or CSE may remove. Region 1: 032's
+// kernel with its unused Jx join moved to the START (the sibling pass drops
+// it into the caller's Jx join); the Ix plan still admits, validates and
+// releases y2 once. Region 2 (driver): the callee's FIRST let is a scalar
+// builtin expression equal to one driver already computed (CSE would remove
+// it; since the round-4 merge CSE leaves an event-bearing function alone)
+// (a builtin: a user call in the callee would decline the inline, round 7); the
+// plan admits and validates. Values are the as-written ones.
+// ============================================================================
+type Ix = Idx<1003>
+type Jx = Idx<1009>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function inputs_j(m: Int64) -> Array<Float64 like Jx> = {
+    method_for(range<Jx>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, u: Array<Float64 like Jx>, v: Array<Float64 like Jx>) -> Float64 = {
+    let unused = reduce((method_for(u) <@> lambda(a) -> a) <&!> (method_for(v) <@> lambda(a) -> a), (+))
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a + b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s
+}
+let (r, t) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    let u = inputs_j(11)
+    let v = inputs_j(3)
+    (kernel(x, y, u, v), reduce(x, (+)) + reduce(y, (+)) + 100.0 * reduce(u, (+)) + 1000.0 * reduce(v, (+)))
+}
+function kernel2(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let h = sqrt(3.0 + Float64(extents(x)))
+    let y2 = method_for(zip(x, y)) <@> lambda(a, b) -> a - b |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s + h
+}
+function driver(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let pre = sqrt(3.0 + Float64(extents(x)))
+    let k = kernel2(x, y)
+    pre + k + 10.0 * (reduce(x, (+)) + reduce(y, (+)))
+}
+let d = driver(inputs(9), inputs(4))
+// EXPECT: r = 31021.0
+// EXPECT: t = 1516307.0
+// EXPECT: d = 69292.4350061086

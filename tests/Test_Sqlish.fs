@@ -67,8 +67,8 @@ let runGatherElisionTests () : BlockResult =
         failedNames <- failedNames @ [name]
         resultLine Fail name detail
     let header =
-        "let keys = [0, 1, 0, 2, 1, 0]\n\
-         let vals = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]\n\
+        "let keys = Int64([0, 1, 0, 2, 1, 0])\n\
+         let vals = Float64([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])\n\
          let gk = group_keys(keys)\n\
          let g = group_by(vals, gk)\n"
     let sizesPeel =
@@ -127,7 +127,7 @@ let runGatherElisionTests () : BlockResult =
           // `extents(gk)` needs no grouped array at all -- the direct spelling
           // allocates nothing per group and copies nothing.
           "extents(gk) emits no group_by gather at all",
-          "let keys = [0, 1, 0, 2, 1, 0]\n\
+          "let keys = Int64([0, 1, 0, 2, 1, 0])\n\
            let gk = group_keys(keys)\n\
            let sizes = extents(gk)\n", None,
           ["sizes[__g] = (int64_t)(gk__offsets[__g + 1] - gk__offsets[__g]);"],

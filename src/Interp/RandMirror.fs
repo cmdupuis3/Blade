@@ -345,6 +345,18 @@ let bernoulli (key: int64) (p: float) (n: int) : float[] =
 let beta (key: int64) (a: float) (b: float) (n: int) : float[] =
     fill key n (fun g -> nextBeta g a b)
 
+/// The inverse-CDF step both categorical fills share (rand_runtime.hpp
+/// `categorical_index`): the SMALLEST j in [0, k-1) with u < cum[j], else
+/// k-1 -- the linear walk's answer, found by binary search. `cum` is
+/// nondecreasing, so the two agree index for index.
+let private categoricalIndex (cum: float[]) (k: int) (u: float) : int =
+    let mutable lo = 0
+    let mutable hi = k - 1
+    while lo < hi do
+        let mid = lo + (hi - lo) / 2
+        if u < cum.[mid] then hi <- mid else lo <- mid + 1
+    lo
+
 /// blade_rand::categorical(out, n, key, w, k): `n` indices in [0, k) with
 /// P(i) proportional to w_i. Mirrors the header body statement for statement --
 /// the clamp of non-positive/NaN weights to 0, the running left-to-right scan,
@@ -368,9 +380,7 @@ let categorical (key: int64) (weights: float[]) (n: int) : int64[] =
         let u = nextUniform g
         if degenerate then 0L
         else
-            let mutable j = 0
-            while j + 1 < k && u >= cum.[j] do j <- j + 1
-            int64 j)
+            int64 (categoricalIndex cum k u))
 
 /// Dispatch on the runtime `kind` string that codegen records in
 /// RandGen (IR.fs RandomFillSpec), with the already-evaluated runtime Float64
@@ -452,6 +462,20 @@ let drawsAt (kind: string) (key: int64) (stream: int64) (offset: int64) (pars: f
     | other, _ ->
         failwith $"RandMirror.drawsAt: unknown indexed rand kind '{other}' with {List.length pars} parameter(s)"
 
+/// ONE sample of a PARAMETERLESS addressed family exactly as the compiled
+/// lane's `blade_rand::uniform_at_one` / `normal_at_one` (fill_at at n = 1):
+/// no checks -- the draw's range guards ran before its map -- the stream key
+/// truncated to its counter word and the sample index taken unsigned, the
+/// fill's own address arithmetic. (The checked path above panicked on an
+/// index past Int64.MaxValue, `offset + i` wrapping negative, where the
+/// compiled lane drew the sample: round 4 wave 4 B6, Codex review.)
+let drawAtOneUnchecked (kind: string) (key: int64) (stream: int64) (index: int64) : float option =
+    let g () = PhiloxStream(key, uint32 stream, uint64 index) :> IRaw64
+    match kind with
+    | "uniform_at" -> Some (nextUniform (g ()))
+    | "normal_at" -> Some (nextNormal (g ()))
+    | _ -> None
+
 /// `drawsCategorical` for `categorical_at`: the scan once, one uniform per
 /// sample from that sample's own stream.
 let drawsCategoricalAt (kind: string) (key: int64) (stream: int64) (offset: int64) (weights: float[]) (n: int) : int64[] =
@@ -474,9 +498,7 @@ let drawsCategoricalAt (kind: string) (key: int64) (stream: int64) (offset: int6
         let u = nextUniform g
         if degenerate then 0L
         else
-            let mutable j = 0
-            while j + 1 < k && u >= cum.[j] do j <- j + 1
-            int64 j)
+            int64 (categoricalIndex cum k u))
 
 // RandomFillSpec executor.
 

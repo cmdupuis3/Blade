@@ -14,14 +14,14 @@
 // declared between the two expressions, and `__expr5` reads `d`, declared
 // after three of them. The `__exprN` numbering is itself part of the contract,
 // since it is what an EXPECT pin has to name.
-let a = 1
+let a: Int64 = 1
 a + 10
-let b = 2
+let b: Int64 = 2
 a + b
-let c = [1, 2, 3]
+let c = Int64([1, 2, 3])
 reduce(c, (+))
 b == 2
-let d = 4
+let d: Int64 = 4
 d * d
 // EXPECT: a = 1
 // EXPECT: __expr1 = 11

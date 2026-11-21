@@ -1,0 +1,26 @@
+// TEST: Zero-Level Compact Application Is The Direct Call (G67 boundary)
+// symmetry/142's BL4004 needs an OUTER ITERATION DIMENSION: every outer cell
+// would hold its own packed pool. A ZERO-LEVEL application -- `object_for(f)
+// <@> jg` whose kernel takes the operand WHOLE -- has no outer cell: it IS the
+// call `group_h(jg)` (formalism 7.2 "Zero S-dimensions"), its value the
+// kernel's packed SymIdx<2, P> array. It is lowered to that call at
+// typecheck, before the refusal and before any lane, so every lane runs the
+// direct call of symmetry/144 and prints the same packed pool: canonical
+// h(0, 1) = sum_s (24 + s)(28 + s) = 3014, mirrored h(2, 1) = 3958. The bare
+// spelling (no `|> compute`) is the same call.
+type P = Idx<3>
+type S = Idx<4>
+
+function group_h(jg: Array<Float64 like P, S>) = method_for(jg, jg) <@> lambda(ra, rb) where comm(ra, rb) -> prodsum(ra, rb)
+
+let jg = method_for(range<P, S>) <@> lambda(a, s) -> Float64(24 + a * 4 + s) |> compute
+let h = object_for(group_h) <@> jg |> compute
+let h2 = object_for(group_h) <@> jg
+let canon = h((0 : P), (1 : P))
+let mirror = h((2 : P), (1 : P))
+let mirror2 = h2((1 : P), (0 : P))
+// EXPECT: h = [[2606.0, 3014.0, 3422.0], [3486.0, 3958.0], [4494.0]]
+// EXPECT: h2 = [[2606.0, 3014.0, 3422.0], [3486.0, 3958.0], [4494.0]]
+// EXPECT: canon = 3014.0
+// EXPECT: mirror = 3958.0
+// EXPECT: mirror2 = 3014.0

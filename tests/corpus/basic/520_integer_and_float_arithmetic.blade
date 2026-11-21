@@ -4,12 +4,12 @@
 // class needs no conversion, and a mixed computation converts with the type
 // in call position.
 // ============================================================================
-let n = 7
+let n: Int64 = 7
 let m = n * 2 + 1
 // EXPECT: m = 15
 let q = n / 2
 // EXPECT: q = 3
-let x = 7.0
+let x: Float64 = 7.0
 let y = x * 2.0 + 1.0
 // EXPECT: y = 15.0
 let half = Float64(n) / 2.0

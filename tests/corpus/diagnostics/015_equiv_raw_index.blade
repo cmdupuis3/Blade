@@ -11,5 +11,5 @@ import ml as ml
 // provably not equivariant, and here is the generator it fails at"); that
 // message is pinned in 025_equiv_engine_lie_generator.blade.
 let static S = [(0, 0, 2), (1, 1, 1)]
-function bad(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
+function bad(x: Array<Float64 like IrrepsIdx<S>>) where ml.equiv(O3) -> Float64 =
   exp(x(2))

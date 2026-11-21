@@ -187,6 +187,22 @@ let private fsharpParallelEnabled () : bool =
 /// The one place the pipeline lock is taken. Every use of `fsharpPipelineLock`
 /// must go through here, or the experiment gate measures half a change.
 let private withFsharpPipelineLock (body: unit -> 'T) : 'T =
+    // Timed INSIDE the lock, so the figure is the pass itself and not the wait
+    // for the lock (Timings: reporting only).
+    let timed () : 'T =
+        let sw = System.Diagnostics.Stopwatch.StartNew ()
+        try body ()
+        finally Blade.Tests.TestHarness.Timings.recordFrontEnd sw.Elapsed
+    if fsharpParallelEnabled () then timed ()
+    else lock fsharpPipelineLock timed
+
+/// The same lock, for F#-side work that is NOT a front-end pass but runs while
+/// `runFullTest` workers are in flight: the interpreter differential's walks and
+/// its multi-file lowering (tests/InterpDiff.fs). Holding it keeps that work
+/// from overlapping another test's front-end pass, which is the arrangement the
+/// differential had when it ran one test at a time. Same experiment gate; not
+/// counted as a front-end pass in the Timings table.
+let underPipelineLock (body: unit -> 'T) : 'T =
     if fsharpParallelEnabled () then body ()
     else lock fsharpPipelineLock body
 
@@ -247,6 +263,9 @@ type private FsPipelineOutcome =
 let private runFsharpPipelineLocked (source: string) (testName: string) (outputDir: string) (compileAndRun: bool) (wantDiags: bool) : FsPipelineOutcome * Blade.Diagnostics.Diagnostic list =
     withFsharpPipelineLock (fun () ->
         let (irResult, capturedWarnings) = lowerCaptured source
+        // The coded EMITTER warnings (BL7005) the generating lane raised join the
+        // captured channel, so `// WARN:` pins read them under the same rule.
+        let mutable emitterWarnings : Blade.Diagnostics.Diagnostic list = []
         let outcome =
             match irResult with
             | Error e ->
@@ -287,6 +306,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         match Blade.EmitLlvm.tryEmitProgramNamed testName ir with
                         | Error reason -> FpBackendRefused (ir, reason)
                         | Ok llText ->
+                            emitterWarnings <- Blade.Diagnostics.EmitterWarnings.drain ()
                             let llFile = Path.Combine(outputDir, safeName + ".ll")
                             File.WriteAllText(llFile, llText)
                             FpLlvmGenerated (ir, llFile)
@@ -294,6 +314,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         let safeName = sanitizeFileName testName
                         try
                             let (cppCode, codegenWarnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+                            emitterWarnings <- Blade.Diagnostics.EmitterWarnings.drain ()
                             // Backend requirement is inferred from the settled
                             // codegen output. CUDA codegen emits device kernels
                             // (.cu, compiled by nvcc); CPU codegen does not
@@ -317,7 +338,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                             FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags, cppCode)
                         with ex ->
                             FpGenError (ir, $"Generation failed: {ex.Message}")
-        outcome, capturedWarnings
+        outcome, capturedWarnings @ emitterWarnings
     )
 
 /// Run a full test: IR lowering + C++ generation + compilation + execution
@@ -1186,7 +1207,13 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
         // ERROR pins, EXPECT lines that cannot be checked, and a value test
         // that pins nothing without saying so.
         let isRejects = testName.EndsWith "(rejects)"
+        // An "(aborts)" probe, the single-file runner's rule (isExpectedAbort):
+        // it compiles, runs, exits nonzero, and the merged output carries every
+        // `// ABORT:` pin of any member (round 4 wave 10, lane a: the failure-order
+        // witnesses multifile/083, 085, 086 -- the runner had no such probe).
+        let isAborts = testName.EndsWith "(aborts)"
         let texts = sources |> List.map snd
+        let abortPins = texts |> List.collect parseAbortExpectations
         let unionExpected = texts |> List.collect parseExpectedValues
         let pinProblems =
             (texts |> List.collect parseMalformedDiagPinLines |> List.map (fun l -> $"{l}  <- malformed ERROR pin"))
@@ -1198,7 +1225,8 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                | Some "" -> [ "// NOPINS: needs a reason" ]
                | Some _ when not unionExpected.IsEmpty -> [ "// NOPINS: marker on a test that HAS EXPECT pins" ]
                | Some _ -> []
-               | None when not isRejects && unionExpected.IsEmpty && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
+               | None when isAborts && abortPins.IsEmpty -> [ "an (aborts) probe pins no // ABORT: message" ]
+               | None when not isRejects && not isAborts && unionExpected.IsEmpty && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
                    [ "the test pins nothing -- add // EXPECT: pins, or `// NOPINS: <reason>`" ]
                | None -> [])
         if not pinProblems.IsEmpty then
@@ -1295,6 +1323,19 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                         failedNames <- failedNames @ [testName]
                     | Ok exeFile ->
                         match runExecutable exeFile with
+                        | Ok (code, output) when isAborts ->
+                            let missing = abortPins |> List.filter (fun sub -> not (output.Contains sub))
+                            if code = 0 then
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName "abort-probe exited 0: the program was expected to abort"
+                                failed <- failed + 1
+                                failedNames <- failedNames @ [testName]
+                            elif not missing.IsEmpty then
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"""abort output lacks '{String.concat "', '" missing}': {output}""")
+                                failed <- failed + 1
+                                failedNames <- failedNames @ [testName]
+                            else
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName "aborted with the pinned message"
+                                passed <- passed + 1
                         | Ok (0, output) ->
                             // EXPECT pins are the UNION over the member files
                             // (they used to be read from the LAST file only, so
@@ -1375,7 +1416,9 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
         
         testArray
         |> Array.Parallel.mapi (fun idx (testName, source) ->
+            let testWatch = System.Diagnostics.Stopwatch.StartNew ()
             let result = runFullTest testName source outputDir gppAvailable
+            Blade.Tests.TestHarness.Timings.recordTest testName testWatch.Elapsed.TotalSeconds
             let status =
                 match result.CompileResult with
                 | Ok _ -> "ok"

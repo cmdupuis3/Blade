@@ -1,0 +1,15 @@
+// TEST: A Default Argument A Kernel Lambda Elaborates Reads The Module Binding
+// Gap G224 (round 4 wave 8 lane d): `offset()` elaborates its default
+// `scale` inside the kernel lambda `f`; used as a kernel inside `apply`,
+// whose parameter is also named `scale`, the C++ lane read the parameter
+// (out = 306.0). Every lane reads the module binding: out = 3 * 3.0 + 6.0.
+// EXPECT: out = 15.0
+type I = Idx<3>
+let a64: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let scale: Float64 = 3.0
+function offset(x: Float64 = scale) -> Float64 = x
+let f = lambda(x: Float64) -> x + offset()
+function apply(scale: Float64, a: Array<Float64 like I>) -> Float64 = {
+    reduce(method_for(a) <@> f, (+), 0.0)
+}
+let out = apply(100.0, a64)

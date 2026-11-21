@@ -1,0 +1,44 @@
+// TEST: Hot-Row Cell Chain Over Short And Ragged Rows
+// Round-2 cell epilogues, B2r for a hot-row fold: under BLADE_FP_REPRO=1 the
+// row's `prodsum(row, row)` chain advances on each cell right behind its
+// store (register-consume) inside the producer's row loop -- per thread when
+// the row loop is threaded -- instead of re-reading the finished row. The
+// interior widths 1, 17 and 33 put every row length on both sides of the
+// optional mini-block sizes (BLADE_TILE_TUNE epi_blk_r = 8 / 16 / 32), so the
+// strip-mine's tail block is exercised whatever the knob says.
+// u(i, j) = (3 i + 5 j) mod 11: integer-valued, every sum exact.
+type Y = Idx<7>
+type X1 = Idx<3>
+type X17 = Idx<19>
+type X33 = Idx<35>
+
+function w1() -> Float64 = {
+    let u = method_for(range<Y, X1>) <@> lambda(i, j) -> Float64((Int64(i) * 3 + Int64(j) * 5) % 11) |> compute
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X1, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function w17() -> Float64 = {
+    let u = method_for(range<Y, X17>) <@> lambda(i, j) -> Float64((Int64(i) * 3 + Int64(j) * 5) % 11) |> compute
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X17, [-1, 0, 1]>>) <@> lambda(wr, wc) where omp(wr: 1) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), lambda(p, q) where omp -> p + q, 0.0)
+    s
+}
+
+function w33() -> Float64 = {
+    let u = method_for(range<Y, X33>) <@> lambda(i, j) -> Float64((Int64(i) * 3 + Int64(j) * 5) % 11) |> compute
+    let lap = method_for(range<halo<Y, [-1, 0, 1]>, halo<X33, [-1, 0, 1]>>) <@> lambda(wr, wc) ->
+        u(wr(-1), wc(0)) + u(wr(1), wc(0)) + u(wr(0), wc(-1)) + u(wr(0), wc(1)) - 4.0 * u(wr(0), wc(0)) |> compute
+    let s = reduce(method_for(lap) <@> lambda(row) -> prodsum(row, row), (+))
+    s
+}
+
+let s1 = w1()
+let s17 = w17()
+let s33 = w33()
+// EXPECT: s1 = 1694.0
+// EXPECT: s17 = 26499.0
+// EXPECT: s33 = 50820.0

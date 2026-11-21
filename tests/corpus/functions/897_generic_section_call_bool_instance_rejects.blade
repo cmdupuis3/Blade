@@ -1,0 +1,12 @@
+// TEST: a block-local section called on a generic parameter, instantiated at a Bool (rejects)
+// ============================================================================
+// R10 remainder: a section call over an operand still open records the same
+// generic demand an infix `b + b` does, judged at `outer(true)` (the base
+// computed 2.0).
+// ============================================================================
+function outer(b) = {
+    let op = (+)
+    op(b, b)
+}
+let r = outer(true)
+// ERROR: BL3001 @ 10:15

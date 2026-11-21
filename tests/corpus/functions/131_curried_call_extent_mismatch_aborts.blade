@@ -11,6 +11,6 @@
 // residual parameter to that instance (`T` taught by `a`), so the outer
 // application compares `b`'s extent against 3 at compile time.
 function f(a: T^1, b: T^1) = a + b
-let a = [1.0, 2.0, 3.0]
-let b = [4.0, 5.0]
+let a = Float64([1.0, 2.0, 3.0])
+let b = Float64([4.0, 5.0])
 let out = f(a)(b)

@@ -1,0 +1,7 @@
+// TEST: A Fold Over An Outer Product Of Run-Time Ranges
+// Gap G209 (round 4 wave 10 lane d): `method_for(0..n, 0..m)` in a function body was a C++ BL9002
+// (`__range<i>` undeclared); every range operand of the fold gets a holder at the operand stage,
+// so the inner level's bound is evaluated once, not per outer cell: (0 + 1 + 2) * (0 + 1 + 2 + 3).
+function g(n: Int64, m: Int64) -> Int64 = reduce(method_for(0..n, 0..m) <@> lambda(i, j) -> i * j, (+), axes = 2)
+let r = g(3, 4)
+// EXPECT: r = 18

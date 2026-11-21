@@ -1,0 +1,30 @@
+// TEST: A checkpointed step that calls a stateful module lambda declines
+// ============================================================================
+// Round 4 wave 10 (lane A, A2: the second fresh class-closure round, Codex
+// 0d817dd5, gap G162 m24): the step calls tick, a module lambda that writes
+// forcing on every call; without gradient buffers the step-read audit was
+// skipped, so the checkpoint was APPLIED and the segment replays ran the
+// callback again (auto: dx 0.00578498840332031 for the full tape's
+// 0.00985376536846161). The audit now runs in every build: a callable value
+// read by the step is not a stored form, the checkpoint declines (blade test
+// access pins the decline and the bits).
+// ============================================================================
+import ad as ad
+type A = Array<Float64 like Idx<1>>
+let mut forcing: A = [0.125]
+let tick = lambda(n: Int64) -> {
+    forcing(0) = 0.375 - forcing(0)
+    forcing(0)
+}
+function f(x: Float64) -> Float64 = {
+    let rec s: Array<Float64 like Idx<5001>> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: x
+        | prefix :: n -> prefix :: 0.5 * prefix(n - 1) * prefix(n - 1) + tick(n)
+    s(4)
+}
+let (value, dx) = ad.grad(f)(Float64(0.5))
+// EXPECT: forcing = [0.125]
+// EXPECT: value = 0.161200270522386
+// EXPECT: dx = 0.00985376536846161

@@ -1,0 +1,14 @@
+// TEST: Choice Over Deferred Map Prints No Operand
+// Gap G213 (round 4 wave 8): a fold over the named choice c forces c under
+// its own name; c evaluates its operands as COPIES, so p is not forced under
+// its own name and prints nothing in every lane (the LLVM lane printed p).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let c = p <|> p
+let z = d(0)
+x(0) = 10.0
+let w = reduce(c, (+), 0.0)
+// EXPECT: c = [3.0, 5.0, 7.0]
+// EXPECT: z = 2.0
+// EXPECT: w = 15.0

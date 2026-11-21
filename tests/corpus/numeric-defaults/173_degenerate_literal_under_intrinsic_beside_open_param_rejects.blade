@@ -1,0 +1,10 @@
+// TEST: a degenerate literal under a math intrinsic beside a lambda value's parameter (rejects)
+// ============================================================================
+// R19: `1e-400` is judged by its spelling inside the literal-only operand
+// `sqrt(1e-400)`; the call makes the partner a Float32.
+// ============================================================================
+let h = lambda(v) -> v * sqrt(1e-400)
+let saved = h
+let a: Float32 = 1.0
+let y = h(a)
+// ERROR: BL3020

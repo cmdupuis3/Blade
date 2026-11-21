@@ -1,0 +1,17 @@
+// TEST: Run-time-shaped scratch reuse declines at the return position
+// PM60 v1: the return map has the same run-time shape as the dead y, but its
+// wrapper would leave the frame with its own run-time extents table, so the
+// return keeps its own pool (recorded); values unchanged.
+function ret_shape(x: Array<Float64 like I>) -> Array<Float64 like I> = {
+    let y = x * 2.0 + 1.0 |> compute
+    let m = reduce(y, (+))
+    x * m
+}
+let n = Int64(floor(5.5))
+let v = Float64(0..n)
+let r = ret_shape(v)
+let s = reduce(r, (+))
+// EXPECT: n = 5
+// EXPECT: v = [0.0, 1.0, 2.0, 3.0, 4.0]
+// EXPECT: r = [0.0, 25.0, 50.0, 75.0, 100.0]
+// EXPECT: s = 250.0

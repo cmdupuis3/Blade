@@ -1,0 +1,12 @@
+// TEST: a float power of a lambda value's open parameter is typed as its base
+// ============================================================================
+// G275 (2): `v ^ 2.0` is typed as its BASE (formalism 2.4); the call decides
+// the base Float32, so the power is a Float32 (it was typed Float64).
+// ============================================================================
+let h = lambda(v) -> v ^ 2.0
+let saved = h
+let a: Float32 = 1.1
+let y = h(a)
+let z = y + y
+// EXPECT: y = 1.21
+// EXPECT: z = 2.42

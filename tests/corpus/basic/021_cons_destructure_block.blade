@@ -8,7 +8,7 @@
 // and a tuple-typed binding prints nothing in any case, so the block returns a
 // digit-weighted scalar that pins all three leaves at once.
 let result = {
-    let t = (1, 2, 3)
+    let t = (Int64(1), Int64(2), Int64(3))
     let head :: tail = t
     let (t0, t1) = tail
     head * 100 + t0 * 10 + t1

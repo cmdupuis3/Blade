@@ -6,11 +6,11 @@
 // interp gate (the loops/143 idiom).
 import ad as ad
 
-function f(x: Float) -> Float = exp(sin(x)) * x
+function f(x: Float64) -> Float64 = exp(sin(x)) * x
 
 let (jv, jt) = ad.jvp(f)(1.2, 1.0)
 let presid = jv - f(1.2)
-let h = 0.000001
+let h: Float64 = 0.000001
 let fd = (f(1.2 + h) - f(1.2 - h)) / (2.0 * h)
 let agree = abs(fd - jt) < 0.000001 * (abs(jt) + 1.0)
 // EXPECT: presid = 0.0

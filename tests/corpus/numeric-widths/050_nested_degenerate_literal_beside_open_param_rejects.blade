@@ -1,0 +1,10 @@
+// TEST: a degenerate literal inside a literal-only operand beside a lambda value's parameter (rejects)
+// ============================================================================
+// R19: `1e-400` is judged by its spelling wherever it sits in a literal-only
+// tree; the call makes the partner a Float32, which it does not fit.
+// ============================================================================
+let h = lambda(v) -> v * (1e-400 + 1.0)
+let saved = h
+let a: Float32 = 1.0
+let y = h(a)
+// ERROR: BL3020

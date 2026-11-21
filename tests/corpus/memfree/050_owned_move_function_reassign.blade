@@ -1,0 +1,30 @@
+// TEST: Owned Move Frees A Reassigned Let Mut Array In A Function (G92)
+// Gap G92: a whole-array reassignment `a = <fresh>` of a `let mut` array
+// compiled to a raw pointer move -- the previous pool was never freed, and
+// because the move made the two names share storage, NEITHER pool was freed
+// at the function's return either. The owned move (`blade plan` rule
+// `owned-move`) frees the previous pool, then the binding takes the fresh
+// one, which is freed at the scope's exit like any owned pool. Called once
+// per step of a recursion: `blade test memfree-g92` pins the frees and that
+// the ASan outstanding blocks do not grow with the step count (40 vs 4).
+// a = 2x, then x + 2x = 3x, then 1.5x: sum(1.5 * [1..7]) = 42 per call.
+type I = Idx<7>
+type Steps = Idx<40>
+
+function step(x: Array<Float64 like I>) -> Float64 = {
+    let mut a = x * 2.0 |> compute
+    a = x + a |> compute
+    a = a * 0.5 |> compute
+    reduce(a, (+))
+}
+
+let x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let one = step(x)
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: step(x)
+    | prefix :: n -> prefix :: step(x)
+let total = reduce(acc, (+))
+// EXPECT: one = 42.0
+// EXPECT: total = 1680.0

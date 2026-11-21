@@ -1,0 +1,16 @@
+// TEST: Call Argument Force Before If (aborts)
+// ----------------------------------------------------------------------------
+// Gap G77, the eleventh Codex look of W4B-A: a call's arguments run BEFORE
+// the call, so `bump(g(0))` forces g first in its statement and the later
+// arm's read of g is admitted; g's kernel divides by zero there (BL8013 at
+// the kernel's line), before bump runs, in every lane. (The member-ordered
+// tuple after it, whose first leaf reads g, must lower too.)
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let z: Array<Int64 like Row> = [0]
+let g = method_for(z) <@> lambda(v) -> 1 / v
+function bump(k: Int64) -> Int64 = k + 1
+let r = bump(g(0)) + (if z(0) > 0 then g(0) else 0)
+let r2 = (g(0), (if z(0) > 0 then g(0) else 0))
+// ABORT: BL8013
+// ABORT: .blade:10

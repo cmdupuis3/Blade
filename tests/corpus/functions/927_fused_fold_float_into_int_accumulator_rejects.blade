@@ -1,0 +1,10 @@
+// TEST: A Fused Fold Whose Float64 Result Feeds Its Int64 Accumulator Is Refused (rejects)
+// ERROR: BL3020 @ 8:25
+// ERROR-CONTAINS: returns a Float64 value, but its accumulator parameter
+// ============================================================================
+// R11: the fused terminal (a fold over a deferred map). Base: C++ BL9002,
+// LLVM 9007199254740994.
+// ============================================================================
+let xs: Array<Int64 like Idx<3>> = [9007199254740993, 1, 2]
+let k = lambda(a, b) -> Float64(a) + Float64(b)
+let r = reduce(method_for(xs) <@> lambda(x) -> x, k, 0)

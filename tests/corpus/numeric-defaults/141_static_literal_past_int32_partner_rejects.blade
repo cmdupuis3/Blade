@@ -1,0 +1,8 @@
+// TEST: a let static literal past Int32 beside an Int32 static (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let static a: Int32 = 3
+let static b = a + 5000000000
+// ERROR: BL3020 @ 6:20

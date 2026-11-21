@@ -1,0 +1,21 @@
+// TEST: Gram Node Distinct Stays Dense
+// gram(A, B) over two DIFFERENT arrays is the dense m x p product, never the
+// packed-triangle syrk tile, at any size (20 x 8 here, above the tile's
+// crossover): H(i, j) and H(j, i) are different cells.
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every product and partial sum
+/// is an exact integer and ANY association gives the same G -- association-invariant pins
+/// (CLAUDE.md fold policy). The route is pinned by `blade plan` (tests/OptimizeTests.fs
+/// plan_gram_node_syrk_tile*) and the arithmetic bitwise by `blade test syrk-tile`.
+type V = Idx<20>
+type S = Idx<8>
+let (ss, h_2_11, h_11_2, h_19_0) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let y = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 3 + s) % 7) - 3.0 |> compute
+    let h = gram(x, y)
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> h(i, j) * h(i, j), (+)), (+))
+    (total, h(2, 11), h(11, 2), h(19, 0))
+}
+// EXPECT: ss = 19760.0
+// EXPECT: h_2_11 = 5.0
+// EXPECT: h_11_2 = 4.0
+// EXPECT: h_19_0 = -12.0

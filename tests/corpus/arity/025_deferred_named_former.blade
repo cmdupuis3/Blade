@@ -17,7 +17,7 @@ function comoment_prod(a: Poly<T^1>) -> T^1 = {
              (head - mean(head)) * comoment_prod(tail) }
 }
 function comoment(a: Poly<T^1>) -> T^0 = mean(comoment_prod(a))
-let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
+let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
 let comomentLoop = object_for(comoment)
 let result = comomentLoop <@> (data, data) |> compute
 // EXPECT: result = [0.6666666666666666, 1.3333333333333333, 1.3333333333333333, 2.6666666666666665]

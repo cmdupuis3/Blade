@@ -1,0 +1,17 @@
+// TEST: An Outer Array Rebound Inside A Zero-Trip Kernel Loop Keeps Its Value (G204)
+// Gap G204 (Codex diff review): a kernel applied per cell that rebinds an
+// outer `let mut` even to storage that existed before (`out = a`) changed
+// the LLVM lane's binding at EMISSION time, so the reads after a loop that
+// ran ZERO times saw `a` (6.0) instead of `out` (0.0). Every rebinding of an
+// outer array inside a loop body is now refused by name and the C++ lane
+// takes the program (`after` = 0.0 in every lane).
+type C = Idx<3>
+let a: Array<Float64 like C> = [1.0, 2.0, 3.0]
+let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+let got = reduce(method_for(0..0) <@> lambda(t) -> {
+    out = a
+    Float64(t)
+}, (+), 0.0)
+let after = reduce(out, (+))
+// EXPECT: got = 0.0
+// EXPECT: after = 0.0

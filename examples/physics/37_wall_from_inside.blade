@@ -57,7 +57,7 @@
 
 // the visibility grid: below separability, at separability, mid, at the
 // classical wall, in the violating shell, at the Tsirelson point
-let VG = [0.2, 0.333333333333333, 0.5, 0.707106781186548, 0.85, 1.0]
+let VG = Float64([0.2, 0.333333333333333, 0.5, 0.707106781186548, 0.85, 1.0])
 
 // behavior and operator meters along the family: plain arithmetic on the
 // dial, lifted over it (the two kinked meters keep a kernel for their branch)
@@ -77,7 +77,7 @@ let NEG = method_for(VG) <@> lambda(v) -> (if 2.82842712474619 * v > 2.0 then (2
 // at correlation c puts (1 + c B)/16 on each vertex; negative_cells counts
 // the vertices where that cell goes below zero (an indicator fold), one
 // count per dial value
-let SGN = [-1.0, 1.0]
+let SGN = Float64([-1.0, 1.0])
 let BELL = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> {
     let a0 = SGN(g % 2)
     let a1 = SGN((g / 2) % 2)
@@ -86,8 +86,8 @@ let BELL = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> {
     a0 * b0 + a0 * b1 + a1 * b0 - a1 * b1
 } |> compute
 function negative_cells(c: Float64) -> Float64 =
-    reduce(method_for(BELL) <@> lambda(b) -> if (1.0 + c * b) / 16.0 < 0.0 then 1.0 else 0.0, (+))
-let ng1 = negative_cells(0.141421356237310)
+    reduce(method_for(BELL) <@> lambda(b) -> if (1.0 + c * b) / 16.0 < 0.0 then Float64(1.0) else Float64(0.0), (+))
+let ng1 = negative_cells(Float64(0.141421356237310))
 let ng4 = negative_cells(0.5)
 let ng5 = negative_cells(0.601040764008567)
 let ng6 = negative_cells(0.707106781186548)

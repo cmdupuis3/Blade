@@ -5,6 +5,6 @@
 function counter(start: Int64) = {
     let mut n = start
     n = n + 1
-    (lambda(k: Int64) -> n + k, 0)
+    (lambda(k: Int64) -> n + k, Int64(0))
 }
 let t = counter(10)

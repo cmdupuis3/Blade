@@ -1,0 +1,19 @@
+// TEST: A Mut Argument Beside A Closure Mask Predicate Is Refused (rejects)
+// ============================================================================
+// Gap G240 (3-kernel), round 4 wave 9 (lane C, C2): a closure in a MASK
+// predicate slot is a function value the callee runs with unknown reads:
+// refused fail closed beside the `mut` argument (BL4005).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function factory(a: A) -> (Float64 -> Float64) = lambda(t: Float64) -> t * a(0)
+let mut g: A = [2.0, 0.0]
+let kf = factory(g)
+function bump(y: mut A) -> Float64 = {
+    y(0) = 4.0
+    let m = mask(y, kf)
+    y(1)
+}
+let r = bump(g)
+// ERROR: BL4005
+// ERROR-CONTAINS: the callee applies a function value whose reads could not be traced
+// REJECT-AT: lower

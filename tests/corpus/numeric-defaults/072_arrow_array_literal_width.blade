@@ -1,0 +1,13 @@
+// TEST: literal arrays receive widths fixed by generic arrow results
+let k: Float64 = 2.0
+let v = Float64([5.0, 6.0, 7.0])
+let scale = lambda(c) -> c(1) * k + v(0)
+let captured: Float64 = scale([1.0, 2.0])
+function add_cell(c, x) = c(0) + x
+let wide: Float64 = add_cell([1.0, 2.0], Float64(7.0))
+let small: Float32 = add_cell([1.0, 2.0], Float32(7.0))
+let ints: Int64 = add_cell([1, 2], Int64(7))
+// EXPECT: captured = 9.0
+// EXPECT: wide = 8.0
+// EXPECT: small = 8.0
+// EXPECT: ints = 8

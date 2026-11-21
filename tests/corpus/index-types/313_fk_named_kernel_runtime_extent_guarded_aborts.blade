@@ -7,7 +7,7 @@
 // buffer, where the lambda-kernel twin fell back to `extents(A)`. The guard
 // now reads the extent's binding (formalism 3.10: the guarantee does not
 // depend on the extent being static).
-let nr = 3
+let nr: Int64 = 3
 type StationIdx = Idx<4>
 type RegionIdx = Idx<nr>
 let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 5]

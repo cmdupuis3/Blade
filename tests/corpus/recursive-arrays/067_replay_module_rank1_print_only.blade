@@ -1,0 +1,17 @@
+// TEST: Replay Module Rank1 Print Only
+// ============================================================================
+// PRINT REPLAY (rec-window's module arm, round 4 wave 4 B1): a MODULE-level
+// recursion whose only observer is its auto-print. The C++ lane never stores
+// the 6-row trajectory: a 2-row ring sweep runs at its slot and again at its
+// print, printing each row (rule `rec-print-replay` applied); the interpreter
+// and the LLVM lane keep the full buffer. The printed text is the full
+// buffer's. x_n = 0.5 x_{n-1} + 1, x_0 = 1.
+// ============================================================================
+type Step = Idx<6>
+
+let rec x: Array<Float64 like Step> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
+// EXPECT: x = [1.0, 1.5, 1.75, 1.875, 1.9375, 1.96875]

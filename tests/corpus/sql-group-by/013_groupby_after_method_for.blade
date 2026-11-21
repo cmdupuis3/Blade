@@ -5,8 +5,8 @@
 //   method_for(temps) |> compute  →  group_by(_, gk)  →  method_for(grouped)
 // confirming that group_by accepts the materialized output of an upstream
 // combinator as cleanly as a literal input array would.
-let region = [0, 1, 2, 0, 1, 2]
-let temps = [20.0, 25.0, 30.0, 22.0, 27.0, 32.0]
+let region = Int64([0, 1, 2, 0, 1, 2])
+let temps = Float64([20.0, 25.0, 30.0, 22.0, 27.0, 32.0])
 let doubled = method_for(temps) <@> lambda(t) -> t * 2.0 |> compute
 let gk = group_keys(region)
 let grouped = group_by(doubled, gk)

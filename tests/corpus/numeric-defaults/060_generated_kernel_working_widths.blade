@@ -1,0 +1,17 @@
+// TEST: Numeric defaults preserve fixed-width generated kernels
+import math as m
+import spectra as sp
+import ppl as ppl
+// Float32 user defaults must not narrow the libraries' generated state or tables.
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[2.0, 0.0], [0.0, 3.0]]
+let (u, singular, v) = m.svd(A)
+let x: Array<Float64 like Idx<3>> = [1.0, 0.0, 0.0]
+let spectrum: Array<Complex128 like Idx<3>> = sp.fft(x)
+let chain: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let correlation: Array<Float64 like Idx<4>> = ppl.autocorr(chain, 3)
+let g = ppl.gaussian(0.0, 1.0, 2)
+let density: Float64 = ppl.dist_pdf_approx(g, 0.0)
+// EXPECT: singular = [3.0, 2.0]
+// EXPECT: spectrum = [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)]
+// EXPECT: correlation = [1.0, 0.25, -0.3, -0.45]
+// EXPECT: density = 0.398942280401433

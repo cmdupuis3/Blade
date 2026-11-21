@@ -1,0 +1,12 @@
+// TEST: a choice evaluates its left operand before the right operand inputs (aborts)
+// Gap G213 / G236 (round 4 wave 8, Codex review rounds 5-6): storing
+// c = p <|> q copies p, then q; copying q forces its input d. The left copy
+// fails first (BL8013, p's division) in every lane, never d's modulo.
+let mut x: Array<Int64 like Idx<3>> = [1, 0, 3]
+let p = method_for(x) <@> lambda(v) -> 10 / v
+let d = method_for(x) <@> lambda(v) -> 20 % v
+let q = method_for(d) <@> lambda(v) -> v + 1
+let c = p <|> q
+let s = reduce(c, (+), 0)
+x(2) = 4
+// ABORT: integer division by zero

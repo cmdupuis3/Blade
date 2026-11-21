@@ -309,6 +309,53 @@ namespace blade_lapack {
         return (int)info;
     }
 
+    // THE COLUMN-MAJOR COMPANION (gap G109, round 4 wave 4 lane K; plan rule `lu-companion v1`, gate
+    // BLADE_LU_COMPANION). `?getrs` cannot read the row-major factor in place -- viewed column-major that buffer is the
+    // TRANSPOSE of the combined L\U, the reverse of the layout `?getrs` wants -- so `blade_lu_solve_d` above rebuilds
+    // the column-major factor (8 n^2 bytes, an O(n^2) strided transpose) on EVERY right-hand side. When the compiler
+    // proves the factor value is never written (Optimize.planLuCompanion: the never-written closure), the factor keeps
+    // the `?getrf` scratch it already built instead of discarding it, with LAPACK's own pivots, and each admitted
+    // solve hands that SAME buffer to `?getrs`. The factor bits and pivots are exactly the ones the copy rebuilds
+    // (the row-major value is a copy of this buffer and the copy is its exact inverse), so every solve is bitwise
+    // what `blade_lu_solve_d` computes -- and bitwise `m.solve` (`?gesv` = `?getrf` + `?getrs`).
+    //
+    // A RELEASED (or never-built) companion answers through the copying path: the emitter releases it after the
+    // last solve the plan admitted, and a solve emitted later than planned still gets the right value.
+    struct blade_lu_cm {
+        size_t n = 0;
+        std::vector<double> a;            // column-major L\U, exactly ?getrf's output
+        std::vector<lapack_int> ipiv;     // LAPACK's 1-based pivots
+    };
+
+    inline int blade_lu_keep_d(size_t n, double** Arows, double** LUrows, int64_t* piv, blade_lu_cm& cm) {
+        cm.n = n;
+        cm.a.assign(n * n, 0.0);
+        for (size_t i = 0; i < n; i++)
+            for (size_t j = 0; j < n; j++) cm.a[j * n + i] = Arows[i][j];
+        cm.ipiv.assign(n ? n : 1, 0);
+        lapack_int info = LAPACKE_dgetrf(LAPACK_COL_MAJOR, (lapack_int)n, (lapack_int)n,
+                                         cm.a.data(), (lapack_int)n, cm.ipiv.data());
+        for (size_t i = 0; i < n; i++)
+            for (size_t j = 0; j < n; j++) LUrows[i][j] = cm.a[j * n + i];
+        for (size_t k = 0; k < n; k++) piv[k] = (int64_t)cm.ipiv[k] - 1;
+        return (int)info;
+    }
+
+    inline int blade_lu_solve_cm_d(size_t n, const blade_lu_cm& cm, double** LUrows, const int64_t* piv,
+                                   const double* b, double* x, int trans) {
+        if (cm.n != n || cm.a.size() != n * n || n == 0) return blade_lu_solve_d(n, LUrows, piv, b, x, trans);
+        for (size_t i = 0; i < n; i++) x[i] = b[i];
+        lapack_int info = LAPACKE_dgetrs(LAPACK_COL_MAJOR, trans ? 'T' : 'N', (lapack_int)n, 1,
+                                         cm.a.data(), (lapack_int)n, cm.ipiv.data(), x, (lapack_int)n);
+        return (int)info;
+    }
+
+    inline void blade_lu_cm_release(blade_lu_cm& cm) {
+        std::vector<double>().swap(cm.a);
+        std::vector<lapack_int>().swap(cm.ipiv);
+        cm.n = 0;
+    }
+
     // NOT PROVIDED, and why.
     //
     // OTHER PRECISIONS OF `solve` (`sgesv` / `cgesv` / `zgesv`). They exist and

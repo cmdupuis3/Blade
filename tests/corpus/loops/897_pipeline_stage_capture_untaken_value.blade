@@ -1,0 +1,19 @@
+// TEST: A Later Pipeline Stage Capture Read Only In An Untaken Branch
+// ============================================================================
+// Gap G242, round 4 wave 10 (lane C, C4): an APPLIED PIPELINE runs its stages as
+// successive traversals, so a stage kernel's deferred capture is forced at
+// THAT stage's start -- before its first cell, even when only an untaken
+// branch reads it (G115). The interpreter bound the capture cells without the
+// force (no failure); the compiled lanes force it in the capture prelude (the
+// first stage, a block-bodied named function, is total and not fused).
+// ============================================================================
+type A = Array<Int64 like Idx<2>>
+let mut backing: A = [2, 4]
+let delayed = method_for(backing) <@> lambda(e: Int64) -> 8 / e
+function first(v: Int64) -> Int64 = {
+    let q = v + 1
+    q
+}
+let k = object_for(first) >>@ object_for(lambda(v: Int64) -> if v > 100 then delayed(1) else v * 2)
+let ys = k <@> backing |> compute
+// EXPECT: ys = [6, 10]

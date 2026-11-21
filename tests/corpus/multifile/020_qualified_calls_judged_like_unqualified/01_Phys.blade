@@ -4,7 +4,7 @@ module Phys
 Unit seconds
 type Cell = Idx<3>
 let w: Array<Float64 like Cell> = [1.0, 2.0, 3.0]
-function per_sec(t: Float<seconds>) -> Float<seconds> = t * 2.0
+function per_sec(t: Float64<seconds>) -> Float64<seconds> = t * 2.0
 function bump(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
     a(0) = 99.0
     a(0)

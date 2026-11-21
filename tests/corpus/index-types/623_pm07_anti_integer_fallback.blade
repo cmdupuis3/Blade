@@ -1,0 +1,7 @@
+// TEST: PM07 Antisymmetric Integer Fallback
+// Integer payload is deliberately outside the admitted unitless F64 case.
+// Its original initialization/scatter geometry and full output stay required.
+let anti: Array<Int64 like AntisymIdx<2, 3>> = [[1, 2], [3], []]
+let result = decompact(anti, 0)
+// EXPECT: anti = [[1, 2], [3], []]
+// EXPECT: result = [[0, 1, 2], [-1, 0, 3], [-2, -3, 0]]

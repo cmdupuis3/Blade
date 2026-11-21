@@ -23,8 +23,8 @@ import ml as ml
 // ============================================================================
 
 // A = [[1,2,3],[4,5,6],[7,8,9]]   B = [[1,0,2],[0,1,0],[3,0,1]]
-let a3: Array<Float like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-let b3: Array<Float like Idx<9>> = [1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, 0.0, 1.0]
+let a3: Array<Float64 like Idx<9>> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let b3: Array<Float64 like Idx<9>> = [1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, 0.0, 1.0]
 
 // A*B = [[10, 2, 5], [22, 5, 14], [34, 8, 23]] -- by hand, row by row.
 let ab = ml.perm_matmul(3, a3, b3)
@@ -35,7 +35,7 @@ let ba = ml.perm_matmul(3, b3, a3)
 // EXPECT: ba = [15.0, 18.0, 21.0, 4.0, 5.0, 6.0, 10.0, 14.0, 18.0]
 
 // The identity matrix is the unit on both sides -- the loop nest's own sanity.
-let id3: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+let id3: Array<Float64 like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 let la = ml.perm_matmul(3, id3, a3)
 let ra = ml.perm_matmul(3, a3, id3)
 let dl = la - a3
@@ -48,7 +48,7 @@ let sq_id = reduce(dl * dl, (+)) + reduce(dr * dr, (+))
 // (coarsest first), i.e. the trace. tr(A*B) = 10 + 5 + 23 = 38.
 let static TW = ml.perm_weight_dim(2, 0, 3)
 // EXPECT: TW = 2
-let tr = ml.derive_perm_linear(2, 0, 3, ab, [1.0, 0.0])
+let tr = ml.derive_perm_linear(2, 0, 3, ab, Float64([1.0, 0.0]))
 // EXPECT: tr = [38.0]
 
 // ============================================================================
@@ -59,8 +59,8 @@ let tr = ml.derive_perm_linear(2, 0, 3, ab, [1.0, 0.0])
 // matrices, legal here (pointwise maps commute with relabelling) and BL4008
 // under `ml.equiv(O3)`.
 // ============================================================================
-function ppgn(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>)
-              where ml.perm_equiv(3) -> Array<Float like Idx<9>> = {
+function ppgn(a: Array<Float64 like Idx<9>>, b: Array<Float64 like Idx<9>>)
+              where ml.perm_equiv(3) -> Array<Float64 like Idx<9>> = {
     let m = ml.perm_matmul(3, a, b)
     m * a
 }
@@ -74,11 +74,11 @@ let p = ppgn(a3, b3)
 //   A' = [[5,6,4],[8,9,7],[2,3,1]]     B' = [[1,0,0],[0,1,3],[0,2,1]]
 // then ppgn(A', B') must be ppgn(A, B) relabelled the same way:
 //   out' = [[25,84,88],[64,207,238],[4,15,10]]
-let a3p: Array<Float like Idx<9>> = [5.0, 6.0, 4.0, 8.0, 9.0, 7.0, 2.0, 3.0, 1.0]
-let b3p: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 2.0, 1.0]
+let a3p: Array<Float64 like Idx<9>> = [5.0, 6.0, 4.0, 8.0, 9.0, 7.0, 2.0, 3.0, 1.0]
+let b3p: Array<Float64 like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 2.0, 1.0]
 let pp = ppgn(a3p, b3p)
 // EXPECT: pp = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
-let want: Array<Float like Idx<9>> = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
+let want: Array<Float64 like Idx<9>> = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
 let ppd = pp - want
 let sq_equiv = reduce(ppd * ppd, (+))
 // EXPECT: sq_equiv = 0.0
@@ -86,9 +86,9 @@ let sq_equiv = reduce(ppd * ppd, (+))
 // Composing the two node-axis ops inside one certificate: Pow 2 -> Pow 2 ->
 // Pow 0. The readout weight buffer is Bell(2) = 2 slots, not a power of 3, so
 // it is an invariant -- the extent keying doing its job on a weight vector.
-function ppgn_trace(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>,
-                    w: Array<Float like Idx<TW>>)
-                    where ml.perm_equiv(3) -> Array<Float like Idx<1>> = {
+function ppgn_trace(a: Array<Float64 like Idx<9>>, b: Array<Float64 like Idx<9>>,
+                    w: Array<Float64 like Idx<TW>>)
+                    where ml.perm_equiv(3) -> Array<Float64 like Idx<1>> = {
     let m = ml.perm_matmul(3, a, b)
     ml.derive_perm_linear(2, 0, 3, m, w)
 }

@@ -1,0 +1,12 @@
+// TEST: A Kernel-Local Array Rebound After An Element Read Keeps The Read
+// Gap G227 (round 4 wave 8 lane d): `y` is a scalar read of the old cells;
+// the rebinding to a literal then gives `b` new cells (formalism: a
+// rebinding, not a write through b): 1.0 + 24.0 per cell.
+// EXPECT: total = 50.0
+type C = Idx<3>
+let total = reduce(method_for(0..2) <@> lambda(k) -> {
+    let mut b: Array<Float64 like C> = [1.0, 2.0, 3.0]
+    let y = b((0 : C))
+    b = [7.0, 8.0, 9.0]
+    y + reduce(b, (+))
+}, (+))

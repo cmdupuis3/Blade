@@ -10,17 +10,17 @@
 // exercised in the run lane (see report) and in units/040.
 Unit meter
 Unit second
-let a: Float<meter/second^2> = 9.81
-let v: Float<meter/second> = 3.0
-let hz: Float<second^-1> = 2.0
-let e: Float<(meter/second)^2> = 9.0
-let area: Float<meter^2> = 4.0
+let a: Float64<meter/second^2> = 9.81
+let v: Float64<meter/second> = 3.0
+let hz: Float64<second^-1> = 2.0
+let e: Float64<(meter/second)^2> = 9.0
+let area: Float64<meter^2> = 4.0
 let esq = v * v
 let echk = esq + e
-let t: Float<second> = 2.0
+let t: Float64<second> = 2.0
 let dv = a * t
 let vchk = v + dv
-let m: Float<meter> = 2.0
+let m: Float64<meter> = 2.0
 let achk = area + m * m
 // EXPECT: echk = 18.0
 // EXPECT: vchk = 22.62

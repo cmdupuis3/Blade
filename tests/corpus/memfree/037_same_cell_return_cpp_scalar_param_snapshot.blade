@@ -1,0 +1,22 @@
+// TEST: C++ same-cell return fills the donor pool with a scalar-parameter snapshot
+// PM03 (A06): p is a fresh local map of the formal x, a completed sum t and the
+// scalar parameter s are the only snapshots, and the return reads p's own cell;
+// the C++ lane fills the return in p's pool (old cell loaded first), the LLVM
+// lane takes the same certificate (A04). Two live call results.
+type Ix = Idx<9>
+function scale_shift(x: Array<Float64 like Ix>, s: Float64) -> Array<Float64 like Ix> = {
+    let p = x * s - 1.0 |> compute
+    let t = reduce(p, (+))
+    let u = t * 0.25 - s
+    p * u - s
+}
+let x: Array<Float64 like Ix> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+let a = scale_shift(x, 2.0)
+let b = scale_shift(x, 0.5)
+let sa = reduce(a, (+))
+let sb = reduce(b, (+))
+// EXPECT: x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+// EXPECT: a = [16.25, 52.75, 89.25, 125.75, 162.25, 198.75, 235.25, 271.75, 308.25]
+// EXPECT: b = [-1.9375, -0.5, 0.9375, 2.375, 3.8125, 5.25, 6.6875, 8.125, 9.5625]
+// EXPECT: sa = 1460.25
+// EXPECT: sb = 34.3125

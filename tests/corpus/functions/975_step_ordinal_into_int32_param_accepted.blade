@@ -1,0 +1,35 @@
+// TEST: A Let Rec Step Ordinal Into An Int32 Parameter Is Accepted
+// ============================================================================
+// R11's narrowing proof: a `let rec` step ordinal is bounded by the static
+// extent of the recursion's axis, so handing it to an Int32 parameter cannot
+// wrap -- directly, through a `let` alias, and through `+` / `-` of an integer
+// literal (exact interval arithmetic over the literal bounds), on a plain and
+// on a named axis. A `let`-bound Int64 literal that fits is proven too.
+// ============================================================================
+function g(i: Int32) -> Int64 = Int64(i) * 10
+type Step = Idx<4>
+let rec x: Array<Int64 like Step> =
+    match x with
+    | zero -> zero
+    | prefix :: n -> prefix :: g(n)
+let rec y: Array<Int64 like Idx<4>> =
+    match y with
+    | zero -> zero
+    | prefix :: n -> prefix :: g(n + 1) * 100 + g(3 - n)
+function walk(s: Int64) -> Array<Int64 like Idx<3>> = {
+    let rec w: Array<Int64 like Idx<3>> =
+        match w with
+        | zero -> zero
+        | prefix :: n -> prefix :: {
+            let k = n
+            g(k - 1) + s
+        }
+    w
+}
+let z = walk(5)
+let seven: Int64 = 7
+let s7 = g(seven)
+// EXPECT: x = [0, 10, 20, 30]
+// EXPECT: y = [1030, 2020, 3010, 4000]
+// EXPECT: z = [-5, 5, 15]
+// EXPECT: s7 = 70

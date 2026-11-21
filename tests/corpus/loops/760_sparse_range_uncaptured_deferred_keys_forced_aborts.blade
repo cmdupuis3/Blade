@@ -1,0 +1,13 @@
+// TEST: A Sparse Range Map Forces Its Uncaptured Deferred Keys After Its Captures (aborts)
+// Gap G225 (round 4 wave 8 lane d): the KEYS of `range<SparseIdx<keys>>` are
+// a deferred map the kernel does NOT capture. The C++ lane (and the LLVM
+// fallback) read them by name in the index build, undeclared (BL9002); they
+// are now forced before the range driver, after the kernel captures -- the
+// interpreter order (loops/668): `g` first, integer division by zero, ahead
+// of the keys modulo.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 0, 5]
+let keys = method_for(d) <@> lambda(a) -> 200 % a
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(range<SparseIdx<keys>>) <@> lambda(i) -> if i > 4 then g(0) else i |> compute

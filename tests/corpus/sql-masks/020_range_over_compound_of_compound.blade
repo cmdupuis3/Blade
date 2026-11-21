@@ -1,0 +1,18 @@
+// TEST: Range Over Compound Of Compound
+// ----------------------------------------------------------------------------
+// G128 class closure (round 4 wave 4 lane H; Codex review round 1): a range
+// over the compound index of a mask over a COMPOUND iterates the present
+// positions of the selection -- coordinates are positions in the source
+// compound's present cells, in order. The range driver builds its index from
+// the mask's bits (in C++ a rank-1 view of the `Compound<bool, R>`).
+// ----------------------------------------------------------------------------
+type Row = Idx<9>
+let xs: Array<Int64 like Row> = [5, -1, 3, 8, -2, 7, 1, 0, 9]
+let pos = compound(xs, mask(xs, lambda(x) -> x > 0))
+let odd = mask(pos, lambda(v) -> v % 2 == 1)
+let positions = method_for(range<CompoundIdx<odd>>) <@> lambda(i) -> i |> compute
+let spread = reduce(positions, lambda(a, b) -> a * 10 + b)
+// EXPECT: pos = [5, 3, 8, 7, 1, 9]
+// EXPECT: odd = [true, true, false, true, true, true]
+// EXPECT: positions = [0, 1, 3, 4, 5]
+// EXPECT: spread = 1345

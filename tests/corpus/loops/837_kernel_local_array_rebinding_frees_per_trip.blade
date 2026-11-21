@@ -1,0 +1,13 @@
+// TEST: A Kernel-Local Array Rebound To A Literal Frees Its Pools Every Trip
+// Gap G245 (a) (round 4 wave 9 lane d): the block let owns its pool (every use in place), so the
+// rebinding copies the literal into it and frees the literal, and the block frees the pool at its
+// end -- the per-evaluation leak is gone (`blade test owned-move`: ASan outstanding blocks at 40
+// trips equal those at 4).
+// EXPECT: total = 1020.0
+type C = Idx<3>
+type Trips = Idx<40>
+let total = reduce(method_for(range<Trips>) <@> lambda(k) -> {
+    let mut out: Array<Float64 like C> = [0.0, 0.0, 0.0]
+    out = [1.0, 2.0, 3.0]
+    reduce(out, (+)) + Float64(k)
+}, (+))

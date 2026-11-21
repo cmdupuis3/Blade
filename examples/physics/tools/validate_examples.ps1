@@ -54,7 +54,7 @@ foreach ($bfile in $bladeFiles) {
     }
     if ($pins.Count -eq 0) { Write-Host ("{0}: no pins, skipped" -f $bfile.Name); continue }
 
-    $outTxt = & $BladeExe run $bfile.FullName
+    $outTxt = & $BladeExe run $bfile.FullName --print-form test   # the pins' spelling (P3-26)
     if ($LASTEXITCODE -ne 0) {
         Write-Host ("{0}: RUN FAILED (exit {1})" -f $bfile.Name, $LASTEXITCODE)
         $grandFail += $pins.Count; $badFiles++

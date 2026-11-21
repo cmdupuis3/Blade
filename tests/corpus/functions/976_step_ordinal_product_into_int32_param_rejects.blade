@@ -1,0 +1,14 @@
+// TEST: A Product Of A Step Ordinal Into An Int32 Parameter Is Refused (rejects)
+// ERROR: BL3020 @ 13:32
+// ERROR-CONTAINS: wrapping it into the narrower integer
+// ============================================================================
+// R11's narrowing proof exempts a step ordinal, its `let` aliases and `+` /
+// `-` of an integer literal -- nothing else. A product is not exempt even
+// where it would fit: write `Int32(n * 2)` at the call, or declare the
+// parameter Int64.
+// ============================================================================
+function g(i: Int32) -> Int64 = Int64(i) * 10
+let rec x: Array<Int64 like Idx<4>> =
+    match x with
+    | zero -> zero
+    | prefix :: n -> prefix :: g(n * 2)

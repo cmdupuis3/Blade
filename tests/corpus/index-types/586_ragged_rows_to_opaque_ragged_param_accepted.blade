@@ -1,0 +1,19 @@
+// TEST: Ragged and dependent-index rows reach an opaque RaggedIdx parameter
+// ============================================================================
+// Gap G190 (a), the ARGUMENT case (round 4 wave 8, lane C, C3): the opaque
+// `RaggedIdx<_>` is the type of a row PEELED from a ragged parent. A dense
+// array reaching a parameter of that type -- a call argument, a kernel
+// parameter fed a dense slice, an ascription -- has no ragged parent to stand
+// for: the interpreter read it as a plain array and printed a value, the C++
+// lane could not convert it (BL9002 at g++). The accepted twins: a ROW of a ragged parent (a call and a kernel over the parent) and a DepIdx row (IxKDepInner, a real ragged row: Codex design review). Refused elsewhere at lowering in every
+// lane with BL4003, like the literal itself (index-types/579-581).
+// ============================================================================
+function f(a: Array<Float64 like RaggedIdx<_>>) -> Float64 = reduce(a, (+))
+let rr: Array<Float64 like Idx<2>, RaggedIdx<_>> = [[1.0, 2.0], [3.0]]
+let s = f(rr(0))
+let s2 = method_for(rr) <@> f |> compute
+let dd: Array<Float64 like DepIdx<Idx<2>, lambda(i) -> Idx<2 - i>>> = [[1.0, 2.0], [3.0]]
+let s3 = f(dd(1))
+// EXPECT: s = 3.0
+// EXPECT: s2 = [3.0, 3.0]
+// EXPECT: s3 = 3.0

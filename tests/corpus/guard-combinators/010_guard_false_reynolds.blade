@@ -3,7 +3,7 @@
 // Regression test for the IRGuard codegen path silently dropping the
 // guard predicate when the kernel is Reynolds-wrapped (CodeGen.fs site
 // resolveCallable-without-peelReynolds, fixed via mapKernelInner).
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A)
 let g = lambda(x, y) where comm(x, y) -> x * y
 let cond = false

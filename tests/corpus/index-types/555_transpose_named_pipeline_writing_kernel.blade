@@ -1,0 +1,22 @@
+// TEST: Transpose Named Pipeline Writing Kernel
+// A NAMED composition runs its kernels where it is applied: `K`'s first
+// stage writes its row through a `mut` parameter. Applied to an identity
+// transpose chain, or to a plain alias of M, the write must land in the
+// copy, never in M -- the normal form and the read-only alias plan follow
+// the composition's definition and decline (Codex review, finding 3).
+function poke(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a((0 : Idx<3>)) = 99.0
+    a((0 : Idx<3>))
+}
+function identity(x: Float64) -> Float64 = x
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let K = object_for(poke) >>@ object_for(identity)
+let result = K <@> transpose(transpose(M, [0, 1]), [0, 1]) |> compute
+let X = M
+let result2 = K <@> X |> compute
+let observed = M(0, 0)
+// EXPECT: M = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: X = [99.0, 2.0, 3.0, 99.0, 5.0, 6.0]
+// EXPECT: result = [99.0, 99.0]
+// EXPECT: result2 = [99.0, 99.0]
+// EXPECT: observed = 1.0

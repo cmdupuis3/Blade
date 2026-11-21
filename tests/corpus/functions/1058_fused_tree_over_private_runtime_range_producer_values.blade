@@ -1,0 +1,10 @@
+// TEST: A Fused Fold Tree Over A Privately Materialized Run-Time Range Producer
+// Gap G209 (round 4 wave 10 lane d; Codex diff review round 2): the shared producer p over the
+// run-time range 0..n is forced privately (a stored array) before the fused traversal, so no range
+// stays virtual in the traversal: the tree compiles (the first join refusal caught it).
+let n = 4
+let p = method_for(0..n) <@> lambda(k) -> k * 2
+let q = method_for(p) <@> lambda(x) -> x + 1
+let r = method_for(p) <@> lambda(x) -> x + 2
+let result = reduce(q <&!> r, (+), 0)
+// EXPECT: result = (16, 20)

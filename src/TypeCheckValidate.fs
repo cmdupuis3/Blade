@@ -127,8 +127,10 @@ let collectMixedEnumIdxInDecl (decl: Decl) : Expr list =
 /// this one runs pre-typing, directly on the surface AST.
 let rec internal staticValueToImportExpr sp (v: StaticEval.StaticValue) : Expr =
     match v with
-    | StaticEval.SVInt i -> mkExpr sp (ExprLit (LitInt i))
-    | StaticEval.SVFloat f -> mkExpr sp (ExprLit (LitFloat f))
+    | StaticEval.SVInt i -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Int64"), [mkExpr sp (ExprLit (LitInt i))]))
+    | StaticEval.SVInt32 i -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Int32"), [mkExpr sp (ExprLit (LitInt (int64 i)))]))
+    | StaticEval.SVFloat f -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Float64"), [mkExpr sp (ExprLit (LitFloat f))]))
+    | StaticEval.SVFloat32 f -> mkExpr sp (ExprApp (mkExpr sp (ExprVar "Float32"), [mkExpr sp (ExprLit (LitFloat (float f)))]))
     | StaticEval.SVBool b -> mkExpr sp (ExprLit (LitBool b))
     | StaticEval.SVString s -> mkExpr sp (ExprLit (LitString s))
     | StaticEval.SVUnit -> mkExpr sp (ExprLit LitUnit)
@@ -218,6 +220,20 @@ let internal seedImportedStaticsIntoDecls (seed: Map<string, StaticEval.StaticVa
 /// not-yet-checked modules are silently skipped, same as the existing
 /// DeclImport handling in checkDecl.
 let internal importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map<string, StaticEval.StaticValue> =
+    // Exported static values are normalized for structural consumers. Their
+    // checked variable types retain the numeric widths; restore those widths
+    // solely for reifying the expressions fed to the next module's evaluator.
+    let rec atType ty value =
+        match IR.stripUnits (env.Subst.Resolve ty), value with
+        | IRTScalar ETInt32, StaticEval.SVInt n -> StaticEval.SVInt32 (int32 n)
+        | IRTScalar ETFloat32, StaticEval.SVFloat f -> StaticEval.SVFloat32 (float32 f)
+        | IRTTuple ts, StaticEval.SVTuple vs when ts.Length = vs.Length ->
+            StaticEval.SVTuple (List.map2 atType ts vs)
+        | _ -> value
+    let exportValue (exports: TypeModuleExport) name value =
+        match Map.tryFind name exports.Variables with
+        | Some v -> atType v.Type value
+        | None -> value
     decls
     |> List.fold (fun acc locDecl ->
         match locDecl.Value with
@@ -229,11 +245,11 @@ let internal importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map
                 | ImportQualified aliasOpt ->
                     let alias = aliasOpt |> Option.defaultValue (List.last qname)
                     exports.StaticValues
-                    |> Map.fold (fun acc2 k v -> Map.add $"{alias}.{k}" v acc2) acc
+                    |> Map.fold (fun acc2 k v -> Map.add $"{alias}.{k}" (exportValue exports k v) acc2) acc
                 | ImportSelective names ->
                     names |> List.fold (fun acc2 n ->
                         match Map.tryFind n exports.StaticValues with
-                        | Some v -> Map.add n v acc2
+                        | Some v -> Map.add n (exportValue exports n v) acc2
                         | None -> acc2) acc
             | None -> acc
         | _ -> acc) Map.empty
@@ -284,7 +300,7 @@ let rec internal collectAppRankErrors (subst: Subst) (expr: TypedExpr) : Compile
                         match tFunc.Kind with
                         | TExprVar (name, _, _) -> $"'{name}'"
                         | _ -> "this function"
-                    [ { Error = Other (abstractVarConflictMessage subst calleeDesc
+                    [ { Error = GenericVarErr (abstractVarConflictMessage subst calleeDesc
                                                                   firstPos conflictPos firstTy conflictTy)
                         Span = arg.Span
                         Context = []
@@ -545,6 +561,92 @@ let internal declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) 
     | TDeclFunction f -> ofFunc f
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
+/// Does `ty` carry a GROUPED shape (deep review R7)? A group_by result -- and
+/// a per-group map of one -- is an array whose slots hold the group axis
+/// (IxKGroupOuter) and the ragged member axis (IxKGroupMember); one of its
+/// rows holds the member axis alone. `rowsToo` = a member axis alone counts.
+/// A per-group FOLD (`reduce(g, (+))`) keeps only the group axis: an
+/// ordinary array, never matched. Through tuples and nested element types.
+let internal carriesGroupedShape (subst: Subst) (rowsToo: bool) (ty: IRType) : bool =
+    let rec go (fuel: int) (t: IRType) =
+        fuel > 0 &&
+        match subst.Resolve t with
+        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) | IRTComputation inner -> go (fuel - 1) inner
+        | ArrayElem at ->
+            let has k = at.IndexTypes |> List.exists (fun ix -> ix.IxKind = k)
+            (has IxKGroupMember && (rowsToo || has IxKGroupOuter)) || go (fuel - 1) at.ElemType
+        | IRTTuple ts -> ts |> List.exists (go (fuel - 1))
+        | _ -> false
+    go 64 ty
+
+/// POST-ZONK SWEEP FOR GROUPED VALUES LEAVING THEIR GROUPED TYPE (BL3017, R7).
+///
+/// A grouped value's row lengths live in its grouping's side state -- the
+/// `<gk>__ngroups` / `__offsets` / `__perm` locals of the scope that bound
+/// the `group_keys` (or `segments`) -- and its C++ form is a table of row
+/// pointers into that pool, so it exists only under its grouped type. Every
+/// position that converts it to another type passed `check` and broke in
+/// C++:
+///   * a FUNCTION's return value -- whole, a per-group map of one, one of
+///     its rows, or a tuple / branch holding either (BL9002 `Array<double*,1>`
+///     -> `Array<double,2>`), whichever scope bound the grouping;
+///   * a LAMBDA's return value, unless the lambda is a per-group ROW KERNEL:
+///     one whose parameter is itself a member row (`method_for(g) <@>
+///     lambda(r) -> r - mean(r)` returns a row by design, G90). A lambda of
+///     anything else returning a row (`lambda(i) -> g(i)`, called or
+///     returned) or a whole grouped array died the same way;
+///   * an ASSIGNMENT to a plainly typed binding (and a binding ANNOTATED with
+///     a plain array type, `let h: Float64^2 = g`, refused at the ascription
+///     seam in TypeCheckInfer): the grouped slots were erased, so every later
+///     use read the row-pointer table as a dense array (a wrong BL8003, or
+///     BL9002);
+///   * a STRUCT FIELD (`Box { data = g }`): a field's declared type is never
+///     grouped, and the aggregate initialization left the extents null.
+/// Passing a grouped value INTO a function is the back end's existing BL7004.
+/// The error points at the value that leaves its type.
+let internal collectGroupedReturnEscapes (subst: Subst) (decl: TypedDecl) : CompileError list =
+    let errs = ResizeArray<CompileError>()
+    let grouped (t: IRType) = carriesGroupedShape subst true t
+    let rec resultExpr (e: TypedExpr) =
+        match e.Kind with
+        | TExprBlock (_, Some final) -> resultExpr final
+        | _ -> e
+    let refuse (what: string) (body: TypedExpr) =
+        let at = resultExpr body
+        errs.Add { Error = GroupedValueEscapes what; Span = at.Span; Context = []; Code = None }
+    // (A plainly ANNOTATED binding is refused at the ascription seam itself,
+    // TypeCheckInfer's annotated-let check: the annotation replaces the value's
+    // type there, so no zonked type here still shows the grouped slots.)
+    let assignment (l: TypedExpr) (r: TypedExpr) =
+        if grouped r.Type && not (grouped l.Type) then refuse "the assigned value" r
+    let rec walk (e: TypedExpr) =
+        match e.Kind with
+        | TExprLambda li when grouped li.Body.Type && not (li.Params |> List.exists (fun p -> grouped p.Type)) ->
+            refuse "the return value of a lambda that is not a per-group row kernel" li.Body
+        | TExprStruct (_, fields) ->
+            for (fname, fe) in fields do
+                if grouped fe.Type then refuse $"the struct field '{fname}'" fe
+        | TExprAssign (l, r) -> assignment l r
+        | TExprBlock (stmts, _) ->
+            let rec ofStmt (s: TypedStmt) =
+                match s with
+                | TStmtAssign (l, r) -> assignment l r
+                | TStmtForIn (_, _, _, _, body) -> List.iter ofStmt body
+                | _ -> ()
+            List.iter ofStmt stmts
+        | _ -> ()
+        for c in typedExprChildren e do walk c
+    let ofFunc (f: TypedFunctionDecl) =
+        if grouped f.Body.Type then
+            refuse $"the return value of function '{f.SourceName}'" f.Body
+        walk f.Body
+    match decl with
+    | TDeclLet b | TDeclStatic b -> walk b.Value
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.iter ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> ()
+    errs |> Seq.distinctBy (fun e -> e.Span) |> List.ofSeq
 
 /// POST-ZONK SWEEP FOR ESCAPING SHARED-STATE CLOSURES (BL4005).
 ///
@@ -833,6 +935,34 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
         | _ -> []
     here @ (typedExprChildren expr |> List.collect (collectSubscriptErrors env))
 
+/// The first argument of an application whose callee parameter is still an
+/// open MONOMORPHIC variable while the argument is a concrete non-numeric value
+/// (see collectNumericMixErrors' backstop arm).
+let internal defaultedParamArgument (env: TypeEnv) (f: TypedExpr) (args: TypedExpr list) : (TypedExpr * string) option =
+    match IR.stripUnits (env.Subst.Resolve f.Type) with
+    | ArrayElem _ -> None
+    | FuncElem (ps, _) ->
+        let openParam (p: IRType) =
+            match IR.stripUnits (env.Subst.Resolve p) with
+            | IRTInfer v -> not (env.Subst.IsPolymorphicId v) && (env.Subst.GetLiteralDefault v).IsNone
+            | _ -> false
+        let what (a: TypedExpr) =
+            match IR.stripUnits (env.Subst.Resolve a.Type) with
+            | IRTScalar ETBool -> Some "a Bool"
+            | IRTScalar ETString -> Some "a String"
+            | IRTIdxTagged _ -> Some "an index value"
+            | IRTTuple _ -> Some "a tuple"
+            | IRTNamed n ->
+                (match lookupTypeDef n env with
+                 | Some (TDIStruct _) | Some (TDIVariant _) -> Some $"a {Blade.Types.TypeOrigins.sourceName n} value"
+                 | _ -> None)
+            | ArrayElem _ -> None
+            | FuncElem _ -> Some "a function value"
+            | _ -> None
+        List.zip (List.truncate args.Length ps) (List.truncate ps.Length args)
+        |> List.tryPick (fun (p, a) -> if openParam p then what a |> Option.map (fun w -> (a, w)) else None)
+    | _ -> None
+
 /// THE MIXING RULE's post-zonk half (formalism 2.4): every arithmetic
 /// operator and comparison whose operands' elements are now known is judged
 /// by `numericMixOffender` -- the operators whose operand was an open
@@ -841,7 +971,61 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
 /// tree: the innermost offender is the root cause.
 let rec internal collectNumericMixErrors (env: TypeEnv) (expr: TypedExpr) : CompileError list =
     let here =
+        let at (o: TypedExpr) = if o.Span.StartLine > 0 then o.Span else expr.Span
         match expr.Kind with
+        // The numbers-only rule's post-zonk half (formalism 2.4): an operand
+        // that was open when the operator was typed (a kernel parameter, a
+        // let-bound lambda's) is judged now.
+        | TExprBinOp ((Elementwise | Outer), op, l, r) when (judgeNonNumericOperand env op l r).IsSome ->
+            let (leftOff, msg) = (judgeNonNumericOperand env op l r).Value
+            [ { Error = TypeMismatchErr msg; Span = at (if leftOff then l else r); Context = []; Code = None } ]
+        // An operator SECTION applied to values (`(+)(true, false)`, or a
+        // `let add = (+)` applied): judged on the ARGUMENTS, as the operator
+        // written between them would be.
+        | TExprApp (f, [ a; b ]) when
+                (match (resolveTypedExprDeep env f).Kind with
+                 | TExprSection op -> (judgeNonNumericOperand env op a b).IsSome
+                 | _ -> false) ->
+            (match (resolveTypedExprDeep env f).Kind with
+             | TExprSection op ->
+                 let (leftOff, msg) = (judgeNonNumericOperand env op a b).Value
+                 [ { Error = TypeMismatchErr msg; Span = at (if leftOff then a else b); Context = []; Code = None } ]
+             | _ -> [])
+        // A math intrinsic whose operand was open when it was typed (a kernel
+        // parameter): BL3007, as `sin(true)` is.
+        | TExprUnaryOp (OpMath name, x) when (nonNumericOperandOf env x.Type).IsSome ->
+            [ { Error = IntrinsicNeedsNumeric name; Span = at x; Context = []; Code = None } ]
+        | TExprBinOp (_, OpMath2 name, l, r)
+                when (nonNumericOperandOf env l.Type).IsSome || (nonNumericOperandOf env r.Type).IsSome ->
+            [ { Error = IntrinsicNeedsNumeric name
+                Span = at (if (nonNumericOperandOf env l.Type).IsSome then l else r); Context = []; Code = None } ]
+        // prodsum over a row whose element was open when it was typed.
+        | TExprProdSum args when args |> List.exists (fun a -> (nonNumericOperandOf env a.Type).IsSome) ->
+            let a = args |> List.find (fun a -> (nonNumericOperandOf env a.Type).IsSome)
+            let n = (nonNumericOperandOf env a.Type).Value
+            [ { Error = TypeMismatchErr ($"arithmetic is defined on numbers only: prodsum() multiplies and adds the cells "
+                                         + $"of its operands, and this operand is an array of {n.NWhat.Substring(n.NWhat.IndexOf ' ' + 1)} cells, "
+                                         + "which are not numbers -- Blade converts nothing implicitly.")
+                Span = at a; Context = []; Code = None } ]
+        // THE BACKSTOP for an argument the call judgment could not bind because
+        // it was still open there (a kernel parameter typed after its body, R10):
+        // a callee parameter STILL open here falls to zonk's default numeric
+        // type, so a non-numeric argument -- a Bool, a String, an index value, a
+        // struct, a tuple, a function -- would be converted (or reach g++).
+        // Refused at the argument, naming the fix. Judged on the UNZONKED types:
+        // the parameter is still a variable, never mistaken for a numeric demand.
+        | TExprApp (f, args) when (defaultedParamArgument env f args).IsSome ->
+            let (a, what) = (defaultedParamArgument env f args).Value
+            [ { Error = TypeMismatchErr (
+                          $"this argument is {what}, and the called function's parameter is left open by its body: it "
+                          + "would be compiled at a default numeric type and the argument converted, and Blade converts "
+                          + "nothing implicitly. Annotate the parameter with the argument's type -- or, for a Bool meant as "
+                          + "a number, convert it explicitly with a numeric cast (`Int64(b)`).")
+                Span = at a; Context = []; Code = None } ]
+        | TExprUnaryOp (OpNot, x) when (judgeNonBoolNot env x).IsSome ->
+            [ { Error = TypeMismatchErr (judgeNonBoolNot env x).Value; Span = at x; Context = []; Code = None } ]
+        | TExprUnaryOp (OpNeg, x) | TExprArrayNegate x when (judgeNonNumericNegation env x).IsSome ->
+            [ { Error = TypeMismatchErr (judgeNonNumericNegation env x).Value; Span = at x; Context = []; Code = None } ]
         | TExprBinOp ((Elementwise | Outer), op, l, r) ->
             (match judgeNumericMix env op l r with
              | Some (leftOff, msg) ->
@@ -854,6 +1038,87 @@ let rec internal collectNumericMixErrors (env: TypeEnv) (expr: TypedExpr) : Comp
     match typedExprChildren expr |> List.collect (collectNumericMixErrors env) with
     | [] -> here
     | inner -> List.truncate 1 inner
+
+/// A `zero` the checker has typed at a SUM TYPE (or a struct, tuple or array
+/// with a sum-type part) has no value (formalism 10.4: no rule picks a
+/// canonical zero variant). Both back ends refuse it in EXPRESSION position
+/// (IR.zeroHasNoValueMessage), but a binding (`let v: Shape = zero`) reached
+/// C++ emission's binding arms, which have no rule for it (BL7001, "a gap in
+/// the back end"). Refused here, with the back ends' own sentence, wherever
+/// the type is already known; a generic `zero` that only an instance makes a
+/// sum type keeps the back ends' refusal.
+let rec internal collectValuelessZeros (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let rec sumPart (fuel: int) (t: IRType) : bool =
+        fuel > 0
+        && (match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTNamed n ->
+                (match lookupTypeDef n env with
+                 | Some (TDIVariant _) -> true
+                 | Some (TDIStruct (_, _, fields, _)) -> fields |> List.exists (fun (_, ft) -> sumPart (fuel - 1) ft)
+                 | _ -> false)
+            | IRTTuple ts -> ts |> List.exists (sumPart (fuel - 1))
+            | ArrayElem a -> sumPart (fuel - 1) a.ElemType
+            | _ -> false)
+    let here =
+        match expr.Kind with
+        | TExprZero ->
+            let t = env.Subst.Resolve expr.Type
+            if sumPart 32 t then
+                match IR.zeroHasNoValueMessage (IR.stripUnits t) with
+                | Some msg -> [ { Error = BuiltinArgErr msg; Span = expr.Span; Context = []; Code = None } ]
+                | None -> []
+            else []
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectValuelessZeros env))
+
+/// An integer literal typed as an INTEGER EnumIdx `R` is a key; one that is
+/// none of R's keys has no position to be represented as (Zonk.intEnumEdges
+/// leaves it unfolded) -- refused here, BL4003 like an unknown subscript key.
+/// Run on the UNZONKED tree (types through the substitution): zonk folds the
+/// known keys to positions, which would read as keys again.
+let rec internal collectUnknownEnumKeys (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let here =
+        let lit =
+            match expr.Kind with
+            | TExprLit (LitInt v) -> Some v
+            | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt v) }) -> Some (-v)
+            | _ -> None
+        match lit, IR.stripUnits (env.Subst.Resolve expr.Type) with
+        | Some v, IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+            (match intEnumKeysOfTag env tag with
+             | Some keys when not (List.contains v keys) ->
+                 [ { Error = EnumIdxUnknownKey (tag, v, keys |> List.map string); Span = expr.Span; Context = []; Code = None } ]
+             | _ -> [])
+        | _ -> []
+    // R3: a literal PATTERN matched against a value of an integer EnumIdx
+    // names one of its keys too (Zonk.foldEnumKeyPattern folds a known one).
+    let patterns =
+        match expr.Kind with
+        | TExprMatch (scr, cases) ->
+            let keysOf (t: IRType) =
+                match IR.stripUnits (env.Subst.Resolve t) with
+                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+                    intEnumKeysOfTag env tag |> Option.map (fun ks -> (tag, ks))
+                | _ -> None
+            let rec walk (expected: IRType) (p: TypedPattern) : CompileError list =
+                let own = if (keysOf p.Type).IsSome then p.Type else expected
+                match p.Kind with
+                | TPatLit (LitInt v) ->
+                    (match keysOf own with
+                     | Some (tag, keys) when not (List.contains v keys) ->
+                         [ { Error = EnumIdxUnknownKey (tag, v, keys |> List.map string); Span = expr.Span; Context = []; Code = None } ]
+                     | _ -> [])
+                | TPatTuple ps -> ps |> List.collect (fun q -> walk q.Type q)
+                | TPatCons (h, t) -> walk h.Type h @ walk t.Type t
+                | TPatVariant (_, Some q, _) -> walk q.Type q
+                | TPatStruct (_, flds) -> flds |> List.collect (fun (_, q) -> walk q.Type q)
+                | TPatGuarded (q, _) -> walk own q
+                | _ -> []
+            cases |> List.collect (fun c -> walk scr.Type c.Pattern)
+        | _ -> []
+    match expr.Kind with
+    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt _) }) -> here
+    | _ -> here @ patterns @ (typedExprChildren expr |> List.collect (collectUnknownEnumKeys env))
 
 /// Every expression a zonked declaration carries, for the sweep above.
 let internal declExprs (decl: TypedDecl) : TypedExpr list =

@@ -1,0 +1,18 @@
+// TEST: Sort NaN Keys First
+// The key order is a TOTAL preorder (docs/features/sql.md section 9): every
+// NaN key orders before every other key and all NaNs tie (so they keep their
+// input order), -0.0 and +0.0 tie, other keys by `<`. The C++ comparator used
+// to be the bare `<`, which is no strict weak order once a NaN key appears
+// (1 ~ NaN ~ 2 but 1 < 2): its result was unspecified. The interpreter's F#
+// `compare` already ordered NaN first; both lanes now agree. A descending key
+// `-x` keeps NaN first too (a negated NaN is a NaN).
+type R = Idx<7>
+let z: Float64 = 0.0
+let nk: Array<Float64 like R> = [3.0, z / z, 2.0, -0.0, 0.0, z / z, -1.0]
+let ids = method_for(range<R>) <@> lambda(i) -> i |> compute
+let up = sort(ids, lambda(i) -> nk(i))
+let down = sort(ids, lambda(i) -> -nk(i))
+let up_r = sort(range<R>, lambda(i) -> nk(i))
+// EXPECT: up = [1, 5, 6, 3, 4, 2, 0]
+// EXPECT: down = [1, 5, 0, 2, 3, 4, 6]
+// EXPECT: up_r = [1, 5, 6, 3, 4, 2, 0]

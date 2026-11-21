@@ -8,6 +8,12 @@
 #include <utility>
 #include <stdexcept>
 
+/* A read of a tuple outside a hashed index type's key set. Runtime headers
+ * may not call the runtime panic (shadow-frame elision, tests/
+ * Test_Diagnostics.fs), so this throws; the "[BL8006] " prefix tells the
+ * generated main's exception handler (panic_exception) which code to report. */
+#define BLADE_OUT_OF_KEY_SET "[BL8006] index out of bounds: a key outside the sparse key set"
+
 /* array_hasher: a std::hash-style functor for std::array<size_t, RANK>.
  *
  * The standard library provides no hash for std::array, so this supplies the
@@ -113,9 +119,13 @@ struct abstract_hashed_idx_t : abstract_idx_t<RANK> {
 		return this->rank_to_tuple[index];
 	}
 
-	// tuple -> rank. O(1) amortized. Throws if the tuple was never inserted.
+	// tuple -> rank. O(1) amortized. A tuple never inserted is an
+	// out-of-domain read: BL8006, the interpreter's sparseLinearize twin.
 	size_t linearize(const IDX& tuple) const {
-		return this->tuple_to_rank.at(tuple);
+		auto it = this->tuple_to_rank.find(tuple);
+		if (it == this->tuple_to_rank.end())
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return it->second;
 	}
 
 	// Grow-on-insert: returns the rank of `tuple`, assigning the next rank (and
@@ -197,8 +207,14 @@ struct abstract_sorted_hashed_idx_t : abstract_idx_t<RANK> {
 
 	// tuple -> rank. O(1) amortized via the reverse hash. The direction with
 	// no closed form for a tabulated type -- hence the map rather than a formula.
+	// A key outside the set is an out-of-domain read: BL8006, matching the
+	// interpreter (it used to escape as std::out_of_range, BL8005
+	// "unordered_map::at").
 	size_t linearize(const IDX& tuple) const {
-		return this->tuple_to_rank.at(tuple);
+		auto it = this->tuple_to_rank.find(tuple);
+		if (it == this->tuple_to_rank.end())
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return it->second;
 	}
 };
 
@@ -241,12 +257,33 @@ struct compound_index_t : abstract_sorted_hashed_idx_t<RANK> {
 	IDX extents;
 	std::vector<bool> mask;
 
+	/* A CARDINALITY-ONLY index (the hash equijoin, round 3 W3-2,
+	 * Blade.Optimize.planEquiJoin): the compiler's demand census proved no
+	 * consumer reads anything but the compact buffer and the cardinality, so
+	 * no tuple table, reverse hash or mask is built. Extents and cardinality
+	 * are those of every other form; `unhash`, `linearize`, `present`,
+	 * `prefix_range` and `hash` refuse the absent table (BL9002, an internal
+	 * error) -- never a read through it. */
+	bool tuples_elided_ = false;
+	struct cardinality_only_t {};
+	static constexpr cardinality_only_t cardinality_only{};
+	[[noreturn]] static void tuples_absent() {
+		throw std::logic_error("[BL9002] internal codegen invariant violated: a lookup through a cardinality-only compound index (the hash equijoin's demand census missed a consumer)");
+	}
+
 	compound_index_t(std::string name_in, IDX extents_in, std::vector<bool> mask_in)
 		: base(name_in, product(extents_in)), extents(extents_in), mask(std::move(mask_in)) {
 		this->hash();
 	}
 
+	compound_index_t(std::string name_in, IDX extents_in, size_t cardinality_in, cardinality_only_t)
+		: base(name_in, product(extents_in)), extents(extents_in), mask() {
+		this->cardinality = cardinality_in;
+		tuples_elided_ = true;
+	}
+
 	void hash() {
+		if (tuples_elided_) tuples_absent();
 		this->rank_to_tuple.clear();
 		this->tuple_to_rank.clear();
 		IDX idx{};
@@ -254,14 +291,26 @@ struct compound_index_t : abstract_sorted_hashed_idx_t<RANK> {
 		this->cardinality = this->rank_to_tuple.size();
 	}
 
+	IDX unhash(size_t index) {
+		if (tuples_elided_) tuples_absent();
+		return this->rank_to_tuple[index];
+	}
+
+	size_t linearize(const IDX& tuple) const {
+		if (tuples_elided_) tuples_absent();
+		return base::linearize(tuple);
+	}
+
 	// Presence (allocation) query for the <|:> allocated-fallback read: does
 	// this compound hold a cell for the full tuple? The mask bit IS the
 	// allocation record of the compact buffer (absent cells have no storage).
 	bool present(const IDX& t) const {
+		if (tuples_elided_) tuples_absent();
 		return mask[mask_offset(t)];
 	}
 
 	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
+		if (tuples_elided_) tuples_absent();
 		size_t n = this->rank_to_tuple.size();
 		size_t lo, hi;
 		{ size_t a = 0, b = n;
@@ -305,6 +354,186 @@ private:
 			if (t[d] > target[d]) return 1;
 		}
 		return 0;
+	}
+};
+
+/* RANK-1 COMPOUND INDEX: the compaction representation (bench gap G9).
+ *
+ * A rank-1 mask selects cells of ONE dense axis [0, n), so the valid set is a
+ * SORTED list of positions and nothing more: the rank of a present cell is its
+ * position in that list, and the list IS the mask (a cell is present iff its
+ * position is in it). The generic template above materializes a tuple->rank
+ * unordered_map -- one hash node per present cell, ~40 B and ~78 ns each
+ * (bench/notes/gap-register.md G9: 85% of maskagg's time) -- which a rank-1
+ * index never needs. This specialization keeps:
+ *
+ *   - rank_to_tuple : the kept positions, ascending (== lex order), owned raw
+ *       buffer behind a vector-shaped view (operator[], size(), data()). It
+ *       doubles as the mask: present(t) and linearize(t) are a binary search.
+ *   - extents       : the source axis's extent, as the generic type exposes it.
+ *
+ * Construction is a COUNT pass over the bool array (vectorizes) and ONE
+ * branchless fill (`pos[q] = i; q += keep[i]`, one slot of slack): no hash,
+ * no std::vector<bool> bit copy. The legacy (name, extents, vector<bool>)
+ * constructor is kept for the sites that still hand over a bit vector
+ * (cuda range<CompoundIdx>, alloc_layout_tests) and builds the same table.
+ * A key outside the kept set is BL8006, exactly as the generic linearize.
+ * Under compaction fusion the emitter counts in the mask pass and fills the
+ * table in its value-gather pass, and hands it over to the ADOPTING
+ * (name, n, m, pos) constructor: the same table, built without a pass here.
+ *
+ * The data gather is NOT here: codegen reads rank_to_tuple[q][0] and copies
+ * cell q from the dense pool (EmitCpp.compactScatter, Rank1 arm), so the
+ * compact buffer is written exactly once, in kept order, by position.
+ */
+template<>
+struct compound_index_t<1> : abstract_idx_t<1> {
+	using IDX = std::array<size_t, 1>;
+
+	/* A lookup through an ELIDED table (compaction fusion v2, T4b: the
+	 * compiler's demand census proved no consumer reads the positions, and
+	 * built the index cardinality-only). Unreachable by that certificate; if
+	 * it is ever reached it is an internal error, reported as such -- never a
+	 * read through a null pointer. */
+	[[noreturn]] static void positions_absent() {
+		throw std::logic_error("[BL9002] internal codegen invariant violated: a lookup through a compound index whose kept positions were elided (the positions demand census missed a consumer)");
+	}
+
+	/* The kept-position table: a vector-shaped view over an owned raw buffer
+	 * (new IDX[] leaves the cells indeterminate instead of zero-filling them,
+	 * which std::vector::resize would -- one whole write pass of the table).
+	 * Every constructor but the positions-elided one leaves `p` non-null (the
+	 * counting forms allocate m + 1 cells, the adopting form refuses a null
+	 * buffer), so a null `p` means exactly "elided", and every accessor
+	 * refuses it. */
+	struct positions_t {
+		IDX* p = nullptr;
+		size_t n = 0;
+		positions_t() = default;
+		positions_t(const positions_t&) = delete;
+		positions_t& operator=(const positions_t&) = delete;
+		~positions_t() { delete[] p; }
+		void reset(size_t cap) { delete[] p; p = cap ? new IDX[cap] : nullptr; n = 0; }
+		// Take ownership of a caller-built `new IDX[]` buffer holding `count`
+		// table cells (plus whatever slack the caller allocated).
+		void adopt(IDX* buf, size_t count) { delete[] p; p = buf; n = count; }
+		IDX& operator[](size_t i) { if (!p) positions_absent(); return p[i]; }
+		const IDX& operator[](size_t i) const { if (!p) positions_absent(); return p[i]; }
+		size_t size() const { return n; }
+		IDX* data() { if (!p) positions_absent(); return p; }
+		const IDX* data() const { if (!p) positions_absent(); return p; }
+		const IDX* begin() const { if (!p) positions_absent(); return p; }
+		const IDX* end() const { if (!p) positions_absent(); return p + n; }
+	};
+
+	IDX extents;
+	positions_t rank_to_tuple;
+	/* True only for the positions-elided form: cardinality and extent are
+	 * intact (rank_to_tuple.n == cardinality == m), the table is absent. */
+	bool positions_elided_ = false;
+
+	/* The tag selecting the positions-elided constructor. */
+	struct positions_elided_t {};
+	static constexpr positions_elided_t positions_elided{};
+
+	/* The compaction constructor: `keep` is the flat bool array over [0, n). */
+	compound_index_t(std::string name_in, size_t n, const bool* keep)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		size_t m = 0;
+		for (size_t i = 0; i < n; i++) m += (size_t)(!!keep[i]);
+		// The unconditional store below lands one past the last kept slot
+		// after the last kept cell, hence the slack cell (never read).
+		rank_to_tuple.reset(m + 1);
+		size_t q = 0;
+		for (size_t i = 0; i < n; i++) { rank_to_tuple.p[q][0] = i; q += (size_t)(!!keep[i]); }
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+	}
+
+	/* The ADOPTING constructor (compaction fusion, Blade.Optimize
+	 * planCompactionFusion): the caller already counted m (in its mask pass)
+	 * and filled `pos` -- a `new IDX[m + 1]` buffer whose first m cells are
+	 * the ascending kept positions, the last one the branchless fill's slack
+	 * -- in the same pass that gathered the values. No count, no fill here;
+	 * the table is the one the compaction constructor would have built
+	 * (dense extent n, cardinality m, rank_to_tuple.n = m), and it is owned
+	 * and freed exactly as that one is. */
+	compound_index_t(std::string name_in, size_t n, size_t m, IDX* pos)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		// A null table is the elided form's, which has its own constructor:
+		// refusing it here keeps "p == nullptr" meaning exactly "elided".
+		if (!pos) throw std::logic_error("[BL9002] internal codegen invariant violated: the adopting compound-index constructor was handed no position table");
+		rank_to_tuple.adopt(pos, m);
+		this->cardinality = m;
+	}
+
+	/* The POSITIONS-ELIDED constructor (compaction fusion v2, T4b): the
+	 * caller counted m and gathered the values; no consumer reads the kept
+	 * positions (the compiler's demand census certified it), so no table is
+	 * built. Dense extent n and cardinality m are those of every other form
+	 * (rank_to_tuple.n == m: the count is kept, never a 0 meaning "absent");
+	 * `unhash`, `linearize`, `present`, `prefix_range` and every table
+	 * accessor refuse the absent table (positions_absent, BL9002). */
+	compound_index_t(std::string name_in, size_t n, size_t m, positions_elided_t)
+		: abstract_idx_t<1>(std::move(name_in), n), extents{ n } {
+		rank_to_tuple.p = nullptr;
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+		positions_elided_ = true;
+	}
+
+	/* The legacy constructor: the same table from a bit vector. */
+	compound_index_t(std::string name_in, IDX extents_in, std::vector<bool> mask_in)
+		: abstract_idx_t<1>(std::move(name_in), extents_in[0]), extents(extents_in) {
+		const size_t n = extents_in[0];
+		size_t m = 0;
+		for (size_t i = 0; i < n; i++) m += (size_t)(mask_in[i]);
+		rank_to_tuple.reset(m + 1);
+		size_t q = 0;
+		for (size_t i = 0; i < n; i++) { rank_to_tuple.p[q][0] = i; q += (size_t)(mask_in[i]); }
+		rank_to_tuple.n = m;
+		this->cardinality = m;
+	}
+
+	// The table is built at construction; nothing to (re)build.
+	void hash() override {}
+
+	IDX unhash(size_t index) override { if (positions_elided_) positions_absent(); return rank_to_tuple[index]; }
+
+	// Binary search for a position: the first slot >= key (== size when none).
+	size_t lower_bound(size_t key) const {
+		if (positions_elided_) positions_absent();
+		size_t a = 0, b = rank_to_tuple.n;
+		while (a < b) {
+			size_t mid = a + (b - a) / 2;
+			if (rank_to_tuple.p[mid][0] < key) a = mid + 1; else b = mid;
+		}
+		return a;
+	}
+
+	// tuple -> rank. A position that was not kept is an out-of-domain read:
+	// BL8006, the generic type's (and the interpreter's) contract.
+	size_t linearize(const IDX& tuple) const {
+		size_t r = lower_bound(tuple[0]);
+		if (r >= rank_to_tuple.n || rank_to_tuple.p[r][0] != tuple[0])
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return r;
+	}
+
+	// Presence query for the <|:> allocated-fallback read.
+	bool present(const IDX& t) const {
+		size_t r = lower_bound(t[0]);
+		return r < rank_to_tuple.n && rank_to_tuple.p[r][0] == t[0];
+	}
+
+	// The half-open rank range sharing a leading prefix: the whole table for
+	// an empty prefix, the single kept slot (or an empty range) for a full one.
+	std::pair<size_t, size_t> prefix_range(const IDX& prefix, size_t plen) const {
+		if (positions_elided_) positions_absent();
+		if (plen == 0) return { 0, rank_to_tuple.n };
+		size_t r = lower_bound(prefix[0]);
+		if (r < rank_to_tuple.n && rank_to_tuple.p[r][0] == prefix[0]) return { r, r + 1 };
+		return { r, r };
 	}
 };
 

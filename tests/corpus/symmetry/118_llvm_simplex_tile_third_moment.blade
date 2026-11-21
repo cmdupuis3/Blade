@@ -1,0 +1,26 @@
+// TEST: Llvm Simplex Tile Third Moment
+// The third-moment tensor T(i, j, k) = (sum_s X(i,s) X(j,s) X(k,s)) / 4 over
+// `method_for(x, x, x)` with `where comm(a, b, c)`, packed SymIdx<3, p>, at
+// p = 31 (5*6 + 1 prefix rows, 3*8 + 7 k lanes) and n = 203 (one sample block).
+// In both lanes the rank-3 simplex tile: W = X(i) * X(j) formed once per (i, 6-row
+// j block) as the serial chain's own first product, the 6x8 tile over k, the
+// divide once per finished cell (C++: blade_pgemm::dsym3_tri; LLVM: the shared C
+// core blade_dsym3_tri_f64 over the same blade_tiles.h).
+/// X(i, s) = ((7 i + 3 s) mod 5) - 2: small integers, so every triple product and
+/// partial sum is an exact integer and `/ 4.0` is exact -- association-invariant
+/// pins; route by `blade test llvm facts` / `blade test row-tile`, bits across the
+/// lanes by `blade test llvm tiles`.
+type V = Idx<31>
+type S = Idx<203>
+let (ss, t000, t012, t_perm, t_edge, t_last) = {
+    let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 5) - 2.0 |> compute
+    let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>, c: Array<Float64 like S>) where comm(a, b, c) -> prodsum(a, b, c) / 4.0 |> compute
+    let total = reduce(method_for(range<V>) <@> lambda(i) -> reduce(method_for(range<V>) <@> lambda(j) -> reduce(method_for(range<V>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), (+))
+    (total, t(0, 0, 0), t(0, 1, 2), t(2, 1, 0), t(29, 30, 30), t(30, 30, 30))
+}
+// EXPECT: ss = 92242837.75
+// EXPECT: t000 = -2.0
+// EXPECT: t012 = 0.5
+// EXPECT: t_perm = 0.5
+// EXPECT: t_edge = 51.25
+// EXPECT: t_last = -2.0

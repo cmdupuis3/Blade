@@ -1,0 +1,22 @@
+// TEST: Index types declared in a module, used from main
+// MODULE: Main
+// ============================================================================
+// D11: a non-main module's index types are `A.R`, `A.H`, `A.G` (their tags,
+// key tables, typedefs). Main reads them through every path that looks a tag
+// up: an integer EnumIdx's key subscript, its iteration (keys observed), a
+// halo stencil over an imported named axis, and a symmetric (SymIdx<2, A.G>)
+// array declared in A.
+module Main
+import A
+let u = A.w(200)
+// EXPECT: u = 2.0
+let t = method_for(range<A.R>) <@> lambda(r) -> A.w(r) * 10.0 |> compute
+// EXPECT: t = [10.0, 20.0, 30.0]
+let keys = method_for(range<A.R>) <@> lambda(r) -> r |> compute
+// EXPECT: keys = [100, 200, 300]
+let d = method_for(halo<A.H, [-1, 0, 1]>) <@> lambda(wn) -> A.xs(wn(1)) - A.xs(wn(-1)) |> compute
+// EXPECT: d = [4.0, 8.0, 12.0]
+let s12 = A.S(1, 2)
+// EXPECT: s12 = 6.0
+let s21 = A.S(2, 1)
+// EXPECT: s21 = 6.0

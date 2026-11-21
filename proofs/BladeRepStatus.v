@@ -60,7 +60,7 @@
 (*                       row (A3 is "named-not-shipped" per the plan);    *)
 (*                       this is the theorem that row will cite.          *)
 (*                                                                        *)
-(* Coq 8.18, stdlib only.  Self-contained: no BladeDeduce/BladeLowering   *)
+(* Rocq 9.0, stdlib only.  Self-contained: no BladeDeduce/BladeLowering   *)
 (* import.  That tower's `invariant_under`/`antiinvariant_under` model    *)
 (* invariance of a KERNEL under permuting its OWN ARGUMENT LIST (the      *)
 (* comm/antisymm parity table, src/Deduce.fs); this file models           *)
@@ -71,7 +71,7 @@
 (* from that tower.                                                       *)
 (* ===================================================================== *)
 
-Require Import List.
+From Stdlib Require Import List.
 
 (* ---------------------------------------------------------------------- *)
 (* Shared vocabulary.  G acts on X via `act`.  A function f : X -> A is   *)

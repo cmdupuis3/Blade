@@ -1,0 +1,16 @@
+// TEST: Captured Map Forces The Shared Operand
+// Gap G214 (round 4 wave 8, Codex design review): the leaf kernel captures q,
+// a deferred map of the leaf operand d. Forcing q forces its input d under
+// its own name first, so the fold reads the stored d (never a second,
+// private evaluation of it) and w reads that snapshot after the write to x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(d) <@> lambda(v) -> v + 1.0
+let p = method_for(d) <@> lambda(v) -> v + q(0)
+let s = reduce(p, (+), 0.0)
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 21.0
+// EXPECT: w = 2.0
+// EXPECT: q = [3.0, 5.0, 7.0]
+// EXPECT: d = [2.0, 4.0, 6.0]

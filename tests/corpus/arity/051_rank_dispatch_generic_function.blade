@@ -16,9 +16,9 @@ function describe(x: T^r) -> Int64 = match rank(x) with
 
 type I = Idx<3>
 type Y = Idx<2>
-let s = 4.0
-let sp: Float<meters> = 5.0
-let v: Array<Float like I> = [1.0, 2.0, 3.0]
+let s: Float64 = 4.0
+let sp: Float64<meters> = 5.0
+let v: Array<Float64 like I> = [1.0, 2.0, 3.0]
 let m = method_for(range<Y>, range<I>) <@> lambda(y, i) -> Float64(y) + Float64(i) |> compute
 
 let a = describe(s)

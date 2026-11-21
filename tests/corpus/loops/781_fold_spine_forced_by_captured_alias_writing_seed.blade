@@ -1,0 +1,13 @@
+// TEST: Fold Spine Forced By Captured Alias Writing Seed
+// Gap G235 (a), round 4 wave 9: the fold kernel captures p2, a top-level
+// alias of the spine p (one alias class, formalism 10.2). The capture forces
+// the class before the traversal, so the fold reads the snapshot of p after
+// the seed writes x: (2 + 4 + 6) + 3 * 2 = 18.0 (every lane printed 36.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let p2 = p
+let s = reduce(p, lambda(a, b) -> a + b + p2(0), { x(0) = 10.0; Float64(0) })
+let w = p(0)
+// EXPECT: p2 = [2.0, 4.0, 6.0]
+// EXPECT: s = 18.0
+// EXPECT: w = 2.0

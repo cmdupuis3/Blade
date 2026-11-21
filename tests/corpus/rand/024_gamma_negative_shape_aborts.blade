@@ -4,5 +4,5 @@
 // Gamma(shape, rate) needs shape > 0; a negative shape used to return NaN
 // draws silently. Checked before the fill, in both lanes.
 import rand as r
-let sh = 0.0 - 2.0
+let sh: Float64 = 0.0 - 2.0
 let g = r.gamma(7, sh, 1.0, 3)

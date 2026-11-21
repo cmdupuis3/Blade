@@ -1,0 +1,29 @@
+// TEST: Transpose Fold Strict Exact Chain
+// PM25 (round 4 wave 3, B2): a STRICT fold of a transpose -- an unlicensed
+// kernel, a `where repro` body -- no longer materializes the transposed copy:
+// the nest keeps the copy's ascending order (outer over M's columns, inner
+// over its rows) and reads M(b, a) in place, so it applies the kernel to the
+// same terms in the same order. The kernel `acc * 0.5 + b` makes the order
+// observable: the transposed order visits 1, 4, 2, 5, 3, 6 (= 9.28125); M's
+// own source order would visit 1, 2, 3, 4, 5, 6 (= 10.03125, `src`). Each
+// strict fold equals the fold of the NAMED materialized transpose `Mt`.
+// A kernel that writes keeps the copy (the copy shields the fold from a
+// write to its base): `sw` counts its applications in `seen`.
+type R = Idx<2>
+type K = Idx<3>
+function horner(a: Float64, b: Float64) where repro -> Float64 = a * 0.5 + b
+function tot(m: Array<Float64 like R, K>) where repro -> Float64 = reduce(transpose(m, [0, 1]), horner, 0.0, axes = 2)
+let M: Array<Float64 like R, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let st = reduce(transpose(M, [0, 1]), lambda(a, b) -> a * 0.5 + b, 0.0, axes = 2)
+let sr = tot(M)
+let Mt = transpose(M, [0, 1])
+let sm = reduce(Mt, lambda(a, b) -> a * 0.5 + b, 0.0, axes = 2)
+let src = reduce(M, lambda(a, b) -> a * 0.5 + b, 0.0, axes = 2)
+let mut seen: Float64 = 0.0
+let sw = reduce(transpose(M, [0, 1]), lambda(a, b) -> { seen = seen + 1.0; a * 0.5 + b }, 0.0, axes = 2)
+// EXPECT: st = 9.28125
+// EXPECT: sr = 9.28125
+// EXPECT: sm = 9.28125
+// EXPECT: src = 10.03125
+// EXPECT: sw = 9.28125
+// EXPECT: seen = 6.0

@@ -1,0 +1,15 @@
+// TEST: Four statistics of one array take two traversals, split by reorder licence
+// ============================================================================
+// Gap G107 (2): a sum and a sum of squares (builtin (+), licensed) beside a
+// seeded running max and min (unlicensed select kernels) used to DECLINE the
+// whole join in a reordering build ("legs disagree on the reorder licence"):
+// four statistics, four passes. The group is now SPLIT by licence -- the
+// licensed legs share one traversal (their lane / simd form), the strict legs
+// another (each its own ascending chain); `BLADE_SIBLING_FOLDS=strict` joins
+// all four in one strict traversal instead (measured equal at 8,000,003
+// cells). Integer-valued data: the pins are association-invariant.
+// ============================================================================
+type I = Idx<1003>
+let x: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> Float64(i % 17) - 8.0 |> compute
+let stats = (reduce(x, (+)), reduce(method_for(x) <@> lambda(v) -> v * v, (+)), reduce(x, lambda(a, b) -> if a > b then a else b, -1.0e300), reduce(x, lambda(a, b) -> if a < b then a else b, 1.0e300))
+// EXPECT: stats = (0.0, 24072.0, 8.0, -8.0)

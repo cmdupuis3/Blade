@@ -1,0 +1,18 @@
+// TEST: Anonymous read of a call result is checked once (aborts)
+// ============================================================================
+// Gap G192 (1): the array read is an expression with no variable -- a call
+// result `f(a, k)`, an `if` of arrays -- whose extent is only known at run
+// time. It is evaluated ONCE and read through that value, so its extent can
+// be checked without calling `f` again; position 5 of a 3-cell array stops
+// with BL8006 in every lane.
+// ============================================================================
+function f(a: T^1, x: Int64) = a
+function call_read(a: T^1, k: Int64) = f(a, k)(k)
+function choose_read(a: T^1, b: T^1, c: Bool, k: Int64) = (if c then a else b)(k)
+let v: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let w: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
+let r1 = call_read(v, 1)
+let r2 = choose_read(v, w, false, 2)
+let r3 = call_read(v, 5)
+// ABORT: error[BL8006]: index out of bounds: a position outside the array (its extent)
+// ABORT: .blade:9

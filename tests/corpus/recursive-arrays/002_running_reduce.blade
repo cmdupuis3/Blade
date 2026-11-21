@@ -9,7 +9,7 @@
 // sum = 10.03125; last = 1.96875
 // ============================================================================
 type Step = Idx<6>
-let rec x: Array<Float like Step> =
+let rec x: Array<Float64 like Step> =
     match x with
     | zero -> zero
     | zero :: s -> zero :: 1.0

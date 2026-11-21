@@ -37,7 +37,7 @@ import ml as ml
 // relabelling but the identity), and a former result inherits `Pow 0` only
 // from a single source that is itself proven fixed. BL4012.
 // ============================================================================
-function bad(x: Array<Float like Idx<4>>) where ml.perm_equiv(4) -> Array<Float like Idx<4>> = {
+function bad(x: Array<Float64 like Idx<4>>) where ml.perm_equiv(4) -> Array<Float64 like Idx<4>> = {
     let c = method_for(range<Idx<4>>) <@> lambda(i) -> 1.0 * i |> compute
     x + c
 }

@@ -4,7 +4,7 @@
 // ordinary Blade source, so their agreement is checked in-program.
 import ad as ad
 
-function f(x: Float) -> Float = x ^ 3 + 2.0 * x
+function f(x: Float64) -> Float64 = x ^ 3 + 2.0 * x
 
 let (gv, gd) = ad.grad(f)(2.0)
 let (jv, jt) = ad.jvp(f)(2.0, 1.0)

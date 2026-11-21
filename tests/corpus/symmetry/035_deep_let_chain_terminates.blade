@@ -14,7 +14,7 @@
 // suggestion, no claim, dense storage. Giving up is the correct answer for a
 // pathological body; hanging is not. (A future budget increase would only add
 // a warning here, which cannot change the values below.)
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let result = method_for(A, A) <@> lambda(x, y) -> {
     let a0 = x - y
     let a1 = a0 + a0

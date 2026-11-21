@@ -33,8 +33,8 @@
 // curried grouped(i)(j) and tuple-arg grouped(i, j) spellings. Existing
 // group_by tests consume groups only through method_for kernels; this pins
 // the grouped result as an ordinarily-indexable rank-2 value.
-let region = [0, 1, 0, 0, 1]
-let temps = [10.0, 20.0, 30.0, 40.0, 50.0]
+let region = Int64([0, 1, 0, 0, 1])
+let temps = Float64([10.0, 20.0, 30.0, 40.0, 50.0])
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let a = grouped(0)(1)

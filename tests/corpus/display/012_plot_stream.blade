@@ -28,15 +28,15 @@
 import plot
 import display as d
 
-let xs = [0.0, 1.0, 2.0]
-let ys = [0.9, 0.5, 0.3]
+let xs = Float64([0.0, 1.0, 2.0])
+let ys = Float64([0.9, 0.5, 0.3])
 
 // Every slot, out of declaration order: epoch and all three labels.
-let marked = plot.stream("train_loss", xs, ys, "mse": ylabel, 3: epoch, "batch": xlabel, "loss": title)
+let marked = plot.stream("train_loss", xs, ys, "mse": ylabel, Int64(3): epoch, "batch": xlabel, "loss": title)
 
 // The bare call: no epoch (defaults to -1, "unmarked") and no labels, so the
 // payload carries channel/epoch/x/y and nothing else.
-let bare = plot.stream("train_loss", [3.0, 4.0], [0.25, 0.2])
+let bare = plot.stream("train_loss", Float64([3.0, 4.0]), Float64([0.25, 0.2]))
 
 // The primitive, called directly. The id is a runtime String -- here a
 // binding, which is what makes it a runtime value rather than a literal the
@@ -52,7 +52,7 @@ let raw = d.emit_id("application/vnd.blade.plotstream.v1+json", channel,
 // and this is the only pin that drives the compiled lane's copy of it, so a
 // divergence between the two shows up here as a stdout byte diff rather than
 // as a frame the editor silently drops.
-let tricky = plot.stream("a\" b\\c", [0.0], [1.0])
+let tricky = plot.stream("a\" b\\c", Float64([0.0]), Float64([1.0]))
 
 // An ordinary figure frame after all of them: emit_id consumes no ordinal, so
 // this one is still the run's FIRST `<tag><ordinal>` id.

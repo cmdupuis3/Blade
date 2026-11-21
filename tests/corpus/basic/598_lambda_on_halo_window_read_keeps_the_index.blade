@@ -1,0 +1,11 @@
+// TEST: a lambda applied to a halo window read keeps the index value
+// ============================================================================
+// R10 remainder: the window read `w(0)` is decided an index value only when
+// the module's pending arrow applications settle; the link to the lambda's
+// open parameter is settled again after them, so `x` is that index and the
+// cast reads it (the base defaulted `x` to Float64 and refused the cast,
+// BL3019).
+// ============================================================================
+type I = Idx<5>
+let r = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> Int64((lambda(x) -> x)(w(0))) |> compute
+// EXPECT: r = [1, 2, 3]

@@ -1,0 +1,18 @@
+// TEST: Sort String Keys Code Point Order
+// ----------------------------------------------------------------------------
+// String sort keys order by Unicode CODE POINT (the UTF-8 byte order) in every
+// lane (gap G126, round 4 wave 5 lane c; docs/features/sql.md section 9).
+// The C++ lane compared bytes while the interpreter compared UTF-16 code
+// units: they disagreed exactly when a supplementary-plane character (here
+// U+1F600, a surrogate pair in UTF-16) meets one in U+E000..U+FFFF (here
+// U+E000, U+FF21): by code point U+E000 < U+FF21 < U+1F600. The argsort is
+// printed as positions (the names live in a function body), so no exotic text
+// reaches the output.
+// ----------------------------------------------------------------------------
+type R = Idx<5>
+function order() = {
+    let names: Array<String like R> = ["😀", "b", "", "a", "Ａ"]
+    sort(range<R>, lambda(i) -> names(i))
+}
+let perm = order()
+// EXPECT: perm = [3, 1, 2, 4, 0]

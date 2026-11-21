@@ -381,10 +381,25 @@ type private UValue =
 // StaticValue/UValue carry no span; folded ground literals spliced back into
 // the AST take the ambient `synthSpan` (stamped to the enclosing decl's span
 // in unfoldModule). Opaque leaves keep their own original spans.
+/// G275: a folded FLOAT static is a constant of its own width (formalism 2.4,
+/// R28), so its cast is a FIXED value, marked as a cast the user wrote is
+/// (Ast.UserCasts) -- on a fresh span object, never the shared ambient one
+/// (every other node synthesized in the declaration carries that). An
+/// integer static adapts its width like the literal it folds to: unmarked.
+let private fixedFloatCast (head: string) (arg: Expr) : Expr =
+    let s = synthSpan ()
+    let own = { s with StartLine = s.StartLine }
+    UserCasts.recordIfCast head 1 own
+    { Kind = ExprApp (syn (ExprVar head), [arg]); Span = own }
+
 let rec private staticValueToExpr (sv: StaticValue) : Expr =
     match sv with
-    | SVInt n -> syn (ExprLit (LitInt n))
-    | SVFloat f -> syn (ExprLit (LitFloat f))
+    // A folded value already has a width. Re-emitting a bare literal would
+    // default it again (Float64(2.0) became Float32 after static unfolding).
+    | SVInt n -> syn (ExprApp (syn (ExprVar "Int64"), [syn (ExprLit (LitInt n))]))
+    | SVInt32 n -> syn (ExprApp (syn (ExprVar "Int32"), [syn (ExprLit (LitInt (int64 n)))]))
+    | SVFloat f -> fixedFloatCast "Float64" (syn (ExprLit (LitFloat f)))
+    | SVFloat32 f -> fixedFloatCast "Float32" (syn (ExprLit (LitFloat (float f))))
     | SVBool b -> syn (ExprLit (LitBool b))
     | SVString s -> syn (ExprLit (LitString s))
     | SVUnit -> syn (ExprLit LitUnit)
@@ -446,7 +461,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
                       (inInline: bool) (fuel: int) (expr: Expr) : UValue =
     if fuel <= 0 then
         raise (UnfoldError "static unfolding: step limit exceeded (possible unbounded staged recursion)")
-    match evalExpr ctx.Env maxSteps expr with
+    match evalExprNarrow ctx.Env maxSteps expr with
     | Ok sv -> UGround sv
     | Error _ ->
         let recur = ueval ctx staged inInline (fuel - 1)
@@ -529,7 +544,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     for d in m.Decls do
         // Ground literals folded during staged-static classification take this
         // decl's span (staticValueToExpr / uvalueToExpr read the ambient).
-        Blade.Ast.synthSpan <- d.Span
+        Blade.Ast.setSynthSpan (d.Span)
         match d.Value with
         | DeclStatic (({ Pattern = { Kind = PatternKind.PatVar name } } as b))
             when not (Map.containsKey name senv.Values) && not (isLambdaValued b.Value) ->
@@ -571,7 +586,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
     let rewritten =
         m.Decls |> List.map (fun d ->
             // Spliced ground literals in this decl take its span (ambient).
-            Blade.Ast.synthSpan <- d.Span
+            Blade.Ast.setSynthSpan (d.Span)
             let line = d.Span.StartLine
             let value' =
                 match d.Value with
@@ -634,7 +649,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             match d.Value with
             | DeclFunction fd when fd.IsStatic && ctx.Inlined.Contains fd.Name && not (referencedElsewhere fd.Name) -> false
             | _ -> true)
-    Blade.Ast.synthSpan <- noSpan
+    Blade.Ast.setSynthSpan (noSpan)
     { m with Decls = decls' }
 
 /// The pass entry point -- same shape as the other elaborators. Modules
@@ -657,7 +672,7 @@ let private expandStr (program: Program) : Result<Program, string> =
 /// ambient synthSpan -- stamped per-decl by expandStr, so a mid-elaboration
 /// failure points at the offending declaration.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
-    Blade.Ast.synthSpan <- Blade.Ast.noSpan
+    Blade.Ast.setSynthSpan (Blade.Ast.noSpan)
     expandStr program
     |> Result.mapError (fun msg ->
-        [ Blade.Diagnostics.mkError "BL4002" (Blade.Diagnostics.Codes.phaseOfCode "BL4002") Blade.Ast.synthSpan msg ])
+        [ Blade.Diagnostics.mkError "BL4002" (Blade.Diagnostics.Codes.phaseOfCode "BL4002") (Blade.Ast.synthSpan ()) msg ])

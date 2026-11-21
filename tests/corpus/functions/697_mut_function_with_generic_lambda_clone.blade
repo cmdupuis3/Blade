@@ -1,0 +1,16 @@
+// TEST: A Lambda Cloned From A Function With A Mut Parameter Keeps Its Own Parameters
+// ============================================================================
+// Gap G190 (c), round 4 wave 8 (lane C, C4; Codex diff review round 3): a
+// lambda cloned by HM specialization is filed under its ENCLOSING function in
+// DerivedFuncOrigins (for emission order); it is no specialization of it and
+// inherits no `mut` position, so `k(y, y)` (both read-only) is admitted.
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function f(x: T^0, y: mut A) -> Float64 = {
+    let k = lambda(p: A, q: A) -> p(0) + q(0) + Float64(x)
+    y(0) = 4.0
+    k(y, y)
+}
+let mut a: A = [2.0, 3.0]
+let result = f(1, a)
+// EXPECT: result = 9.0

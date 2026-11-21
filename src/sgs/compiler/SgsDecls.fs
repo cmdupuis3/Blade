@@ -28,41 +28,26 @@ let private packPairs = Blade.ML.CartesianBridge.packPairs |> List.toArray
 ///   (u(c, i+1, j, k) - u(c, i-1, j, k)) / (2 dx)   (axis d = 0; etc.)
 /// Mirrors the sgs/ oracle's fdGrad expression exactly.
 let gradDecl (name: string) (n: int) : FunctionDecl =
-    let n3 = n * n * n
-    let nn = n * n
-    // flat offset into the (3, 3, n, n, n) work array
-    let gCell (cE: Expr) (d: int) (iE: Expr) (jE: Expr) (kE: Expr) =
-        add (mul cE (iLit (3 * n3)))
-            (add (iLit (d * n3))
-                 (add (mul iE (iLit nn)) (add (mul jE (iLit n)) kE)))
     let uAt (cE: Expr) (iE: Expr) (jE: Expr) (kE: Expr) = idxN "u" [ cE; iE; jE; kE ]
     let twoDx = mul (fLit 2.0) (v "dx")
-    let body =
-        blockE (
-            [ sLetMut "g" (zerosLit (9 * n3))
-              sFor "c" 0 3
-                [ sFor "i" 0 n
-                    [ sFor "j" 0 n
-                        [ sFor "k" 0 n
-                            [ sLet "ip" (modE (add (v "i") (iLit 1)) (iLit n))
-                              sLet "im" (modE (add (v "i") (iLit (n - 1))) (iLit n))
-                              sLet "jp" (modE (add (v "j") (iLit 1)) (iLit n))
-                              sLet "jm" (modE (add (v "j") (iLit (n - 1))) (iLit n))
-                              sLet "kp" (modE (add (v "k") (iLit 1)) (iLit n))
-                              sLet "km" (modE (add (v "k") (iLit (n - 1))) (iLit n))
-                              sAssign (idx "g" (gCell (v "c") 0 (v "i") (v "j") (v "k")))
-                                      (divE (sub (uAt (v "c") (v "ip") (v "j") (v "k"))
-                                                 (uAt (v "c") (v "im") (v "j") (v "k"))) twoDx)
-                              sAssign (idx "g" (gCell (v "c") 1 (v "i") (v "j") (v "k")))
-                                      (divE (sub (uAt (v "c") (v "i") (v "jp") (v "k"))
-                                                 (uAt (v "c") (v "i") (v "jm") (v "k"))) twoDx)
-                              sAssign (idx "g" (gCell (v "c") 2 (v "i") (v "j") (v "k")))
-                                      (divE (sub (uAt (v "c") (v "i") (v "j") (v "kp"))
-                                                 (uAt (v "c") (v "i") (v "j") (v "km"))) twoDx) ] ] ] ] ],
-            Some (nestedFromFlatN "g" [ 3; 3; n; n; n ] 0))
+    // THE DECLARATIVE FORM (P3-24): G is a map over its own five ranges (c, d, i, j, k); the cell picks its axis by
+    // d. Each cell is the expression the loop nest it replaces stored (the same wrap, difference and division), now
+    // written straight into the rank-5 result -- no flat 9 n^3 work array, no reshape copy.
+    let wrapUp (e: Expr) = modE (add e (iLit 1)) (iLit n)
+    let wrapDn (e: Expr) = modE (add e (iLit (n - 1))) (iLit n)
+    let cv, iv, jv, kv = v "c", v "i", v "j", v "k"
+    let diffAlong (d: int) =
+        match d with
+        | 0 -> divE (sub (uAt cv (wrapUp iv) jv kv) (uAt cv (wrapDn iv) jv kv)) twoDx
+        | 1 -> divE (sub (uAt cv iv (wrapUp jv) kv) (uAt cv iv (wrapDn jv) kv)) twoDx
+        | _ -> divE (sub (uAt cv iv jv (wrapUp kv)) (uAt cv iv jv (wrapDn kv))) twoDx
+    let cell =
+        ifE (cmp OpEq (v "d") (iLit 0), diffAlong 0,
+             ifE (cmp OpEq (v "d") (iLit 1), diffAlong 1, diffAlong 2))
     mkFunc name
         [ ("u", tyFloatTensor [ 3; n; n; n ]); ("dx", tyFloat) ]
-        (tyFloatTensor [ 3; 3; n; n; n ]) body
+        (tyFloatTensor [ 3; 3; n; n; n ])
+        (blockE ([], Some (mapRanges [ 3; 3; n; n; n ] [ "c"; "d"; "i"; "j"; "k" ] cell)))
 
 /// sgs.box_filter for fixed (n, w), m = n/w: per-component tile means.
 /// Accumulate then divide into a SEPARATE buffer (norms' grad-safe shape:

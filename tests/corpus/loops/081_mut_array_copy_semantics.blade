@@ -10,7 +10,7 @@
 // assignments through the copy (the aliasing bug is exposed by writing
 // THROUGH the binding, not by rebuilding it — a former would replace the
 // pointer and never touch Z).
-let Z = method_for(range<Idx<6>>) <@> lambda(i) -> 0.0 |> compute
+let Z = method_for(range<Idx<6>>) <@> lambda(i) -> Float64(0.0) |> compute
 let T = {
     let mut a = Z
     a(0) = 0.0

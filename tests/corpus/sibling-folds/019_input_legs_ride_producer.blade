@@ -1,0 +1,36 @@
+// TEST: Producer-input legs ride the producer's loop across the call that holds it
+// ============================================================================
+// The saxpy shape (bench/kernels/saxpy): the rank-1 producer `y2` and its cell
+// epilogue `s` live in `kernel`, the two input sums in the caller. The sibling
+// pass joins the sums; the epilogue-legs admission (Optimize.
+// producerEpilogueLegAdmission, BLADE_EPILOGUE_LEGS) inlines `kernel(x, y)`
+// one level for them and the legs fold x and y inside y2's producer loop --
+// each its own chain from its own seed (the unseeded `(+)` legs from -0.0),
+// the results bound where the join was. A second region holds the producer
+// itself (no call boundary). Integer-valued data: association-invariant pins.
+// ============================================================================
+type Ix = Idx<1003>
+function inputs(m: Int64) -> Array<Float64 like Ix> = {
+    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute
+}
+function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>) -> Float64 = {
+    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute
+    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)
+    s
+}
+let (checksum, input_checksum) = {
+    let x = inputs(7)
+    let y = inputs(5)
+    (kernel(x, y), reduce(x, (+)) + reduce(y, (+)))
+}
+let (s2, t2) = {
+    let a = inputs(11)
+    let b = inputs(3)
+    let z = method_for(zip(a, b)) <@> lambda(u, v) -> u - v |> compute
+    let s = reduce(method_for(z) <@> lambda(w) -> w, lambda(p, q) -> p + q, 0.0)
+    (s, 10.0 * reduce(a, (+)) + reduce(b, (+)))
+}
+// EXPECT: checksum = 82065.0
+// EXPECT: input_checksum = 5007.0
+// EXPECT: s2 = 4004.0
+// EXPECT: t2 = 51062.0

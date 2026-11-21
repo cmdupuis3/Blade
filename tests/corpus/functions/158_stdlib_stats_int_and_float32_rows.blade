@@ -10,7 +10,7 @@
 // ============================================================================
 from stats import mean, variance, stddev
 
-let xi = [1, 2, 4]
+let xi = Int64([1, 2, 4])
 let mi = mean(xi)
 // EXPECT: mi = 2.33333333333333
 let vi = variance(xi)
@@ -24,12 +24,12 @@ let ms = mean(xs)
 let vs = variance(xs)
 // EXPECT: vs = 1.55555555555556
 
-let xf = [1.0, 2.0, 4.0]
+let xf = Float64([1.0, 2.0, 4.0])
 let mf = mean(xf)
 // EXPECT: mf = 2.33333333333333
 
-let R = [[1, 2, 4], [3, 3, 4]]
+let R = Int64([[1, 2, 4], [3, 3, 4]])
 let rowmeans = method_for(R) <@> mean |> compute
 // EXPECT: rowmeans = [2.33333333333333, 3.33333333333333]
-let again = mean([2, 3])
+let again = mean(Int64([2, 3]))
 // EXPECT: again = 2.5

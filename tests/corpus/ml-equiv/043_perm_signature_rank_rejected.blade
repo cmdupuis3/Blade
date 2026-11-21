@@ -17,9 +17,9 @@ import ml as ml
 // BL4012, at the declaration's span.
 let static W = ml.perm_weight_dim(2, 2, 4)
 
-function bad(x: Array<Float like Idx<4>, Idx<4>>, w: Array<Float like Idx<W>>)
-             where ml.perm_equiv(4) -> Array<Float like Idx<4>, Idx<4>> = x
+function bad(x: Array<Float64 like Idx<4>, Idx<4>>, w: Array<Float64 like Idx<W>>)
+             where ml.perm_equiv(4) -> Array<Float64 like Idx<4>, Idx<4>> = x
 
-let xin: Array<Float like Idx<4>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0],
+let xin: Array<Float64 like Idx<4>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0],
                                              [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]]
 let out = bad(xin, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])

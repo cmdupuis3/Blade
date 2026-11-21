@@ -108,6 +108,10 @@ let isComplexMathIntrinsic (name: string) : bool = Set.contains name complexMath
 // `syn` stamps each node with the ambient `synthSpan` (set to the
 // differentiated decl's span in expand).
 let internal fLit (v: float) = syn (ExprLit (LitFloat v))
+/// AD's materialized cotangents/tangents use Float64, including a zero buffer
+/// with no typed operand from which literal-width inference could learn it.
+/// Keep ordinary fLit flexible for the scalar derivative simplifiers.
+let internal f64Lit (value: float) = syn (ExprTyped (fLit value, TyFloat64))
 let internal iLit (n: int64) = syn (ExprLit (LitInt n))
 let internal v (name: string) = syn (ExprVar name)
 let internal add a b = syn (ExprBinOp (Elementwise, OpAdd, a, b))
@@ -126,6 +130,22 @@ let internal asF64 (e: Expr) =
     | ExprKind.ExprLit (LitFloat _) -> e
     | _ -> syn (ExprApp (syn (ExprVar "Float64"), [e]))
 let internal call name args = syn (ExprApp (v name, args))
+/// `e - 1` in the exponent's OWN numeric type: the power rule's base term
+/// `e * b^(e - 1)` must raise `b` by the same ALGORITHM the primal used, and
+/// `^` is polymorphic in its exponent (formalism 2.4): Float^Int is the
+/// squaring algorithm (`blade_arith::fpowi`), Float^Float is libm pow. The
+/// transform sees UNTYPED syntax, so it cannot pick `k - 1` or `e - 1.0`
+/// itself -- spelling `Float64(k) - 1.0` for an Int `k` (the old rule) sent
+/// every Int-exponent derivative through pow while its primal squared. `e ^ 0`
+/// is the one of e's type -- Int^Int is exact (1), Float^Int is fpowi(e, 0) =
+/// 1.0 for every e -- so `e - e ^ 0` IS `k - 1` (Int) or `e - 1.0` (Float),
+/// decided by the type checker that does know the type. A float literal
+/// keeps the plain `- 1.0` (its type is the spelling). Constant: `^` by the
+/// literal 0 differentiates to nothing, so a re-differentiation adds no term.
+let internal predOf (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprLit (LitFloat _) -> sub e (fLit 1.0)
+    | _ -> sub e (pow e (iLit 0L))
 
 /// d(b^e)/de = b^e * log(b), with the b = 0 case at its limit 0 (for e > 0;
 /// 0^e * log 0 is 0 * -inf = NaN otherwise): guard(b != 0, b^e * log(b)).
@@ -230,6 +250,10 @@ type internal Ctx = {
     /// Module-level value binding names (DeclLet / DeclStatic): reads of these
     /// inside a differentiated body are constant data, not unknown calls.
     ModuleVals: Set<string>
+    /// The module-level `let mut` names: the only module bindings a caller
+    /// may pass as a `mut` gradient buffer (a plain `let` is BL4005 there),
+    /// so the only module storage the reverse sweep can write under a read.
+    ModuleMuts: Set<string>
     /// Module-level single-name bindings visible to the body being
     /// differentiated -- a PREFIX snapshot taken at that body's declaration,
     /// so nothing resolves through a `let` declared below it.
@@ -254,9 +278,49 @@ type internal Ctx = {
     PackMemo: System.Collections.Generic.Dictionary<string * int, Expr>
 }
 
+/// Every identifier the program being synthesized spells (references and
+/// binders, all modules -- NOT the names `fresh` mints: the counters restart per module, so recording them would renumber a second module that spells nothing (Codex 5a8b7b7d)): installed
+/// per program, per flow, by `Grad.fuseProgram` and `Grad.expand`
+/// (`Grad.programIdentifiers`; null = no program installed, the old
+/// numbering). A minted name must never equal one of them, or a
+/// synthesized binding would capture a user binding of the same spelling --
+/// `let __ck4: A = [2.0]` read by a differentiated step was shadowed by the
+/// checkpoint buffer `__ck4` (round 4 wave 9 class-closure review, Codex
+/// continuation 5a8b7b7d: value 15131 full tape, 677 checkpointed).
+/// LAZY: computed on the first `fresh` of the program, so a program that
+/// mints nothing pays nothing.
+let internal mintedTaken : System.Threading.AsyncLocal<Lazy<System.Collections.Generic.HashSet<string>>> =
+    new System.Threading.AsyncLocal<Lazy<System.Collections.Generic.HashSet<string>>>()
+
+/// A fresh synthesized name: `prefix` plus the next counter value, skipping
+/// every value whose spelling the program already uses (hygiene: a name the
+/// user wrote is never minted, so no synthesized binder shadows a user one
+/// and no user binder shadows a synthesized one). A program that uses no
+/// such spelling gets exactly the names it got before (the counter sees the same values).
 let internal fresh (ctx: Ctx) (prefix: string) : string =
+    let taken = match mintedTaken.Value with null -> null | l -> l.Force ()
     ctx.Fresh.Value <- ctx.Fresh.Value + 1
-    $"{prefix}{ctx.Fresh.Value}"
+    if isNull taken then $"{prefix}{ctx.Fresh.Value}"
+    else
+        while taken.Contains $"{prefix}{ctx.Fresh.Value}" do
+            ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        let n = $"{prefix}{ctx.Fresh.Value}"
+        n
+
+/// A fresh TAG that later names extend with `_<suffix>` (the inliner's
+/// `__in<N>_<local>`): like `fresh`, and also skipping every value some
+/// spelled name already extends (`__in5_spare` written by the user keeps the
+/// tag `__in5` from being minted).
+let internal freshTag (ctx: Ctx) (prefix: string) : string =
+    let taken = match mintedTaken.Value with null -> null | l -> l.Force ()
+    if isNull taken then fresh ctx prefix
+    else
+        let clashes (t: string) = taken.Contains t || taken |> Seq.exists (fun n -> n.StartsWith (t + "_"))
+        ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        while clashes $"{prefix}{ctx.Fresh.Value}" do
+            ctx.Fresh.Value <- ctx.Fresh.Value + 1
+        let n = $"{prefix}{ctx.Fresh.Value}"
+        n
 
 /// The VALUES of the visible module bindings (pipeline fusion's environment).
 let internal moduleLetValues (ctx: Ctx) : Map<string, Expr> =
@@ -269,10 +333,30 @@ let internal moduleLetTys (ctx: Ctx) : Map<string, TypeExpr> =
     |> Seq.choose (fun (n, ml) -> ml.Ty |> Option.map (fun t -> (n, t)))
     |> Map.ofSeq
 
+/// PER-PROGRAM synthesis state (gap G193): one value per asynchronous flow,
+/// so two programs synthesized concurrently (a host compiling in parallel,
+/// `BLADE_TEST_FSHARP_PARALLEL`) never read each other's state. A flow that
+/// has not installed one gets a FRESH value of its own on first use (the
+/// `declSpansCell` lesson: a default instance shared by every flow would be
+/// the old process global again); `expand` installs fresh state per program
+/// (installProgramState).
+type internal FlowCell<'T when 'T : not struct>(make: unit -> 'T) =
+    let cell = new System.Threading.AsyncLocal<'T>()
+    member _.Value
+        with get () =
+            match box cell.Value with
+            | null ->
+                let v = make ()
+                cell.Value <- v
+                v
+            | _ -> cell.Value
+        and set (v: 'T) = cell.Value <- v
+    member _.Reset () = cell.Value <- make ()
+
 /// Which transform is currently synthesizing ("grad" | "jvp") -- prefixes
 /// every internal error and selects the diagnostic code at the `expand`
-/// boundary. A module-level ref (like `synthSpan`): the pass is sequential.
-let internal errMode = ref "grad"
+/// boundary. Per program (FlowCell, gap G193).
+let internal errMode = FlowCell<string>(fun () -> "grad")
 
 let internal err (fname: string) (msg: string) : Result<'a, string> =
     Error $"{errMode.Value}({fname}): {msg}"
@@ -285,12 +369,69 @@ let internal err (fname: string) (msg: string) : Result<'a, string> =
 /// harness (tests/AccessTests.fs) runs both and compares the outputs
 /// byte-for-byte. Read per call, never cached, so that toggle works.
 let internal haloGatherEnabled () : bool =
-    match System.Environment.GetEnvironmentVariable "BLADE_AD_HALO_GATHER" with
-    | null | "" -> true
-    | s ->
-        match s.Trim().ToLowerInvariant() with
-        | "0" | "off" | "false" | "no" -> false
-        | _ -> true
+    match Blade.Toolchain.envSwitch "BLADE_AD_HALO_GATHER" with
+    | Blade.Toolchain.SwitchOff -> false
+    // `no` predates the shared grammar and still means off here.
+    | Blade.Toolchain.SwitchOther t when t.ToLowerInvariant() = "no" -> false
+    | _ -> true
+
+/// DESTINATION ACCUMULATION in one pass (PM38, round 4 wave 4 B4; rule
+/// `ad-gather-fuse v1`). The halo gather above runs ONE loop per (array,
+/// offset), each a full read-modify-write pass over the caller's gradient
+/// buffer. ON (the default): the taps of one stencil are ONE loop over the
+/// input ordinal, each cell taking its taps in the same descending-offset
+/// order -- the same parenthesized sum per cell, `((g + a_K1) + a_K0) + ...`,
+/// incoming gradient first, so the value is unchanged; one pass instead of K.
+/// OFF: the K passes. Read per call; an optimizer gate (opt-diff compares).
+let internal adGatherFuseEnabled () : bool =
+    match Blade.Toolchain.envSwitch "BLADE_AD_GATHER_FUSE" with
+    | Blade.Toolchain.SwitchOff -> false
+    | _ -> true
+
+/// CHECKPOINTED recurrence reverse sweep (PM40, round 4 wave 4 J1; rule
+/// `ad-checkpoint v1`, GradSweeps.checkpointCarries). OPT-IN since wave 5
+/// (the stop rule: the second review of the replay-input class found three
+/// more members, each now declined). `1`/`on`/`auto` = on: a differentiated
+/// rank-1 `let rec` whose tape exceeds 4096 cells keeps K = ceil(sqrt(T - 1))
+/// -spaced checkpoints and replays each segment from its checkpoint in the
+/// descending sweep. Unset/`0`/`off` (or any other text) = the full T-cell
+/// tape. An integer k >= 2 = checkpoints every k steps for any tape longer
+/// than k + 1 cells (the A/B and witness arm). Read per call; an optimizer
+/// gate with the mirror `3`.
+type internal AdCheckpointMode =
+    | AdCkUnset
+    | AdCkOff
+    | AdCkAuto
+    | AdCkEvery of int
+
+let internal adCheckpointMode () : AdCheckpointMode =
+    match Blade.Toolchain.envSwitch "BLADE_AD_CHECKPOINT" with
+    | Blade.Toolchain.SwitchOff -> AdCkOff
+    | Blade.Toolchain.SwitchOn -> AdCkAuto
+    | Blade.Toolchain.SwitchUnset -> AdCkUnset
+    | Blade.Toolchain.SwitchOther t ->
+        (match System.Int32.TryParse (t.Trim()) with
+         | true, k when k >= 2 -> AdCkEvery k
+         | _ when t.Trim().ToLowerInvariant() = "auto" -> AdCkAuto
+         | _ -> AdCkOff)
+
+/// DEAD-REPLAY PRUNING in the reverse sweep (PM59, round 4 wave 5 A4; rule
+/// `ad-replay-prune v1`). The generic `NFor` adjoint REPLAYS the whole loop
+/// body before the body adjoints of each iteration; a replayed statement
+/// whose target is a loop-local let or a FRESH function local (a scalar, or
+/// an array built by a literal, a fill or a `compute`) that no kept replayed
+/// statement, cotangent declaration or adjoint of the iteration reads -- a
+/// FIXPOINT over the iterations, so a read in a later iteration's replay
+/// keeps it -- is dead work. OPT-IN (the stop rule: the second review of the
+/// replay-liveness class found three more members, each now kept): only `1`
+/// / `on` prunes; unset / `0` / `off` replays the whole body. Read per call;
+/// an optimizer gate with the mirror `1` (opt-diff compares).
+type internal AdReplayPruneMode = ArpUnset | ArpOff | ArpOn
+let internal adReplayPruneMode () : AdReplayPruneMode =
+    match Blade.Toolchain.envSwitch "BLADE_AD_REPLAY_PRUNE" with
+    | Blade.Toolchain.SwitchOn -> ArpOn
+    | Blade.Toolchain.SwitchUnset -> ArpUnset
+    | _ -> ArpOff
 
 // Kernel-shape refusal wording, spoken by more than one site.
 //
@@ -637,6 +778,45 @@ let internal substParamMany (fname: string) (subs: (string * Expr) list) (body: 
 
 // Body -> NStmt conversion
 
+/// The ARRAY annotations of the user lets of the function being
+/// differentiated (gap G187, round 4 wave 6): `NStmt` has no annotation
+/// field, so `let sin: A = [10, 20, 30]` reached the synthesized derivative
+/// as an ANONYMOUS array -- and a computed read of a NAMED index slot lost
+/// its formalism 3.10 guard (BL8006) in `f__grad` while the primal kept it.
+/// Keyed by the binding NAME (normalization rebuilds the value expressions,
+/// so their identity is no key) and by the differentiated function (`fname`,
+/// which every converted body of one synthesis carries, inlined callees
+/// included, so a nested synthesis neither clears nor feeds this one): every
+/// let a converted body binds is counted, and `toStmts` restores an
+/// annotation only for a name let EXACTLY ONCE across the expansion and
+/// annotated there (a rebinding, or a callee local of the same name, makes
+/// it ambiguous: no annotation). The driver names the owner before it emits.
+/// Per program, like errMode (FlowCell, gap G193): it was a process global
+/// keyed by function NAME, so two concurrent syntheses of same-named
+/// functions could read each other's annotations.
+let internal letAnnotations =
+    FlowCell<System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>>(fun () ->
+        System.Collections.Generic.Dictionary<string * string, TypeExpr option * int>())
+let internal letAnnotationOwner = FlowCell<string>(fun () -> "")
+let internal resetLetAnnotations (fname: string) =
+    let d = letAnnotations.Value
+    for k in List.ofSeq d.Keys do
+        if fst k = fname then d.Remove k |> ignore
+let internal noteLetAnnotation (fname: string) (name: string) (ty: TypeExpr option) =
+    let d = letAnnotations.Value
+    match d.TryGetValue ((fname, name)) with
+    | true, (_, k) -> d.[(fname, name)] <- (None, k + 1)
+    | _ -> d.[(fname, name)] <- (ty, 1)
+let internal restoredLetAnnotation (name: string) : TypeExpr option =
+    match letAnnotations.Value.TryGetValue ((letAnnotationOwner.Value, name)) with
+    | true, (Some ty, 1) -> Some ty
+    | _ -> None
+/// Fresh per-program synthesis state for the current flow (`expand`).
+let internal installProgramState () =
+    errMode.Reset ()
+    letAnnotations.Reset ()
+    letAnnotationOwner.Reset ()
+
 let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt list, string> =
     let one stmt =
         match unwrapStmt stmt with
@@ -645,7 +825,23 @@ let rec internal convertStmts (fname: string) (stmts: Stmt list) : Result<NStmt 
             match binding.Pattern.Kind with
             | PatternKind.PatVar name ->
                 let isMut = (binding.Mutability = BindMut)
-                Ok (NLet (name, isMut, binding.Value))
+                // NStmt has no annotation field. Keep scalar width context
+                // on the value so replaying an explicitly wide literal does
+                // not silently make the primal narrow under smaller defaults.
+                let value =
+                    match binding.Type with
+                    | Some ((TyFloat32 | TyFloat64 | TyInt32 | TyInt64 | TyComplex64 | TyComplex128) as ty)
+                    | Some (TyNamed (("Float32" | "Float64" | "Int32" | "Int64" | "Complex64" | "Complex128"), []) as ty) ->
+                        inheritSpan binding.Value (ExprTyped (binding.Value, ty))
+                    | _ -> binding.Value
+                // an ARRAY annotation (written or through a type alias) is
+                // restored on the emitted let by `toStmts` (G187); scalar
+                // ones ride the value above
+                noteLetAnnotation fname name (match binding.Type with
+                                              | Some (TyArray _ as ty) -> Some ty
+                                              | Some (TyNamed (_, []) as ty) when (match value.Kind with ExprKind.ExprTyped _ -> false | _ -> true) -> Some ty
+                                              | _ -> None)
+                Ok (NLet (name, isMut, value))
             | _ -> err fname "tuple/struct patterns in let are not differentiable (v1); bind names individually"
         | StmtExpr { Kind = ExprKind.ExprAssign (lhs, rhs) } ->
             Ok (NAssign (lhs, rhs))
@@ -687,13 +883,39 @@ let internal convertBody (fname: string) (body: Expr) : Result<NStmt list * Expr
 /// Captures (count expr, fill literal).
 let internal (|ConstFill|_|) (e: Expr) =
     match e.Kind with
-    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprLit lit } }) } -> Some (cnt, lit)
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprLit lit } }) }
+    | ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate (cnt, { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit lit }, TyFloat64) } }) } -> Some (cnt, lit)
     | _ -> None
 
 /// A ConstFill of the same count with the fill value zeroed.
 let internal zeroFill (cnt: Expr) : Expr =
     let re k = inheritSpan cnt k
-    re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (re (ExprLit (LitFloat 0.0))))))))
+    re (ExprCompute (re (ExprReplicate (cnt, re (ExprPure (f64Lit 0.0))))))
+
+/// The constant zero fill the pipeline synthesizes (`zeroFill`, or the tape
+/// start of a recursive array, gap G118), spelled as the zero FORMER
+/// `method_for(range<Idx<n>>) <@> lambda(_) -> 0.0 |> compute` when it is
+/// emitted as a let past 4096 cells. Inside the pipeline the fill stays a
+/// ConstFill (admitted wherever an array literal is; its cotangent and
+/// tangent are `zeroFill` of the same count), but `replicate(n, pure(c))`
+/// LOWERS to an n-element IR array literal, typed and lowered cell by cell:
+/// a 100,001-step recurrence tape and cotangent took minutes to `check`.
+/// The former is O(1) AST, lowered as a dense fill loop -- the spelling
+/// TypeCheckInfer `zerosOver` and `zeroFillOfDims` (G68) already use.
+/// Same values: +0.0 in every cell. Only the pipeline Float64 zero
+/// (`f64Lit 0.0`, an ascribed literal) is matched; a user fill is untouched.
+let internal (|LargeZeroFill|_|) (e: Expr) : int64 option =
+    match e with
+    | { Kind = ExprKind.ExprCompute { Kind = ExprKind.ExprReplicate ({ Kind = ExprKind.ExprLit (LitInt n) },
+                                                                       { Kind = ExprKind.ExprPure { Kind = ExprKind.ExprTyped ({ Kind = ExprKind.ExprLit (LitFloat z) }, TyFloat64) } }) } }
+        when n > 4096L && z = 0.0 && not (System.Double.IsNegative z) -> Some n
+    | _ -> None
+
+let internal zeroFormerOfCount (n: int64) : Expr =
+    let ps : LambdaParam list = [ { Name = "__zfill"; Type = None; Default = None; NameSpan = noSpan } ]
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [ syn (ExprRange [ TyIdx (syn (ExprLit (LitInt n))) ]) ]),
+                                      syn (ExprLambda (ps, None, syn (ExprTyped (syn (ExprLit (LitFloat 0.0)), TyFloat64))))))))
 
 /// The C1 LINEAR CLOSURE: combinator forms that only REINDEX or WRAP, so
 /// their tangent is the same form applied to the tangents of their

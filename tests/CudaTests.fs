@@ -100,6 +100,30 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     checkBnd "complex128" (IRTScalar ETComplex128) true
     checkBnd "complex64" (IRTScalar ETComplex64) true
     checkBnd "string" (IRTScalar ETString) false
+    // F8 review: the CO-FUSED __global__ forwards no captures (its signature is
+    // the shared inputs, the outputs and the cardinality), so a capturing leaf
+    // must be refused with steering, never emitted with an undeclared name.
+    // Codegen only (cuda emission mode), no toolchain.
+    let cofuseCaptureSrc =
+        "let s: Float64 = 3.0\n"
+        + "let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])\n"
+        + "let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * s) <&!> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + 100.0) |> compute\n"
+    let cofuseOutcome =
+        CodeGen.setCudaEmitMode true
+        try
+            try
+                match lower cofuseCaptureSrc with
+                | Error e -> Error ($"lower: {e}")
+                | Ok ir ->
+                    let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "cofuse_capture"
+                    let cu = CodeGen.getCudaFileContent () |> Option.defaultValue ""
+                    Ok (cpp + cu)
+            with ex -> Ok ex.Message
+        finally CodeGen.setCudaEmitMode false
+    match cofuseOutcome with
+    | Ok text when text.Contains "capture-free" -> pass "cofuse_capturing_leaf_refused" "steering names capture-free"
+    | Ok _ -> fail "cofuse_capturing_leaf_refused" "a capturing co-fusion leaf was not refused"
+    | Error e -> fail "cofuse_capturing_leaf_refused" e
     printFooter "Buffer Type" [$"{passed} passed"; $"{failures} failure(s)"]
     { Block = "Buffer Type"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 
@@ -317,80 +341,92 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
         // `let A = ...` inside the string collides with the enclosing block's
         // offside context). Binding them to names first sidesteps that entirely.
         let rank1Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
 let R = method_for(A) <@> lambda(x) -> x * 2.0 + 1.0 |> compute
 """
         let rank1Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
 let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0 |> compute
 """
         // rank-2 outer product: exercises div/mod coordinate recovery AND
         // two-input streaming (the parts rank-1 skips entirely).
         let rank2Host = """
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let R = method_for(A, B) <@> lambda(x, y) -> x * y |> compute
 """
         let rank2Cuda = """
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let R = method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y |> compute
 """
         // multi-block: 8 elements with block size 4 => 2 blocks, so the grid
         // spans multiple blocks (stresses __blade_blocks math + the bound check).
         let mbHost = """
-let A = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+let A = Float64([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
 let R = method_for(A) <@> lambda(x) -> x * 3.0 |> compute
 """
         let mbCuda = """
-let A = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+let A = Float64([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
 let R = method_for(A) <@> lambda(x) where cuda(block: 4) -> x * 3.0 |> compute
 """
         // rank-3 with NON-UNIFORM extents (3x2x3=18): two `/=` steps in the
         // coordinate recovery with DISTINCT moduli per dim — the deepest test of
         // the div/mod unpacking (rank-2 used equal extents, which is more forgiving).
         let rank3Host = """
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0]
-let C = [100.0, 200.0, 300.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([10.0, 20.0])
+let C = Float64([100.0, 200.0, 300.0])
 let R = method_for(A, B, C) <@> lambda(a, b, c) -> a + b + c |> compute
 """
         let rank3Cuda = """
-let A = [1.0, 2.0, 3.0]
-let B = [10.0, 20.0]
-let C = [100.0, 200.0, 300.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([10.0, 20.0])
+let C = Float64([100.0, 200.0, 300.0])
 let R = method_for(A, B, C) <@> lambda(a, b, c) where cuda(block: 64) -> a + b + c |> compute
 """
         // integer element type: exercises int64_t crossing the extern "C"
         // boundary (boundary-safe set includes ETInt64), not just double.
         let intHost = """
-let A = [1, 2, 3, 4, 5, 6]
+let A = Int64([1, 2, 3, 4, 5, 6])
 let R = method_for(A) <@> lambda(x) -> x * 10 |> compute
 """
         let intCuda = """
-let A = [1, 2, 3, 4, 5, 6]
+let A = Int64([1, 2, 3, 4, 5, 6])
 let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 10 |> compute
+"""
+        // Integer `^` on the device: EXACT and WRAPPING like the host's (section
+        // 2.4), not the double `pow` it used to become. 3^41 and 6^41 overflow
+        // Int64 (they wrap) and 4^41 = 2^82 wraps to 0 -- a double pow rounds
+        // all three to something else, so the differential sees the difference.
+        let ipowHost = """
+let A = Int64([1, 2, 3, 4, 5, 6])
+let R = method_for(A) <@> lambda(x) -> x ^ 41 + x ^ 2 |> compute
+"""
+        let ipowCuda = """
+let A = Int64([1, 2, 3, 4, 5, 6])
+let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x ^ 41 + x ^ 2 |> compute
 """
         // non-trivial kernel body: a polynomial in x exercises a deeper
         // exprToCpp expression in the kernel (multiple ops, reuse of the bound
         // element), not just a single multiply.
         let polyHost = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A) <@> lambda(x) -> x * x + x * 2.0 - 1.0 |> compute
 """
         let polyCuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x * x + x * 2.0 - 1.0 |> compute
 """
         // larger grid: 50 elements, block 8 => 7 blocks. Bigger grid than the
         // 2-block mb case; the last block is partial (50 = 6*8 + 2), so the
         // bound check is genuinely exercised at a non-trivial tail.
         let bigHost = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0])
 let R = method_for(A) <@> lambda(x) -> x + 100.0 |> compute
 """
         let bigCuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0])
 let R = method_for(A) <@> lambda(x) where cuda(block: 8) -> x + 100.0 |> compute
 """
         // SYMMETRIC output (host-only; cuda gates reject non-rectangular). The
@@ -401,7 +437,7 @@ let R = method_for(A) <@> lambda(x) where cuda(block: 8) -> x + 100.0 |> compute
         // still compiles under MSVC and produces correct values. method_for(A, A)
         // with distinct... no: SAME array A is required for the comm to fold.
         let symHost = """
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
         // SYMMETRIC rank-2 DIFFERENTIAL case (the first triangular CUDA path):
@@ -420,11 +456,11 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
         // bodies made the same false claim, which the checker does not (yet)
         // refuse at arity > 2.
         let symTriHost = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y + 10.0 * (x + y) |> compute
 """
         let symTriCuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y + 10.0 * (x + y) |> compute
 """
         // ANTISYMMETRIC rank-2 strict-triangular DIFFERENTIAL case. reynolds(g,
@@ -434,12 +470,12 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x
         // + sign on device, and match the host strict-triangular output. Lands on
         // the strict-offset/sign bug class the differential harness guards.
         let antiTriHost = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let g = lambda(x, y) where comm(x, y) -> x * x * y
 let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let antiTriCuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let g = lambda(x, y) where comm(x, y), cuda(block: 32) -> x * x * y
 let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
@@ -449,23 +485,23 @@ let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
         // (genCudaKernelSimplicial fires: single arity-3 symmetric group), run the
         // closed-form outer unrank + rank-2 inner unrank on device, match host.
         let sym3Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x * y * z + 10.0 * (x + y + z) |> compute
 """
         let sym3Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x * y * z + 10.0 * (x + y + z) |> compute
 """
         // ANTISYMMETRIC rank-3 STRICT simplex (i<j<k) DIFFERENTIAL case — the
         // strict higher-rank path (binomial outer start + sign). non-degenerate
         // kernel x*x*y+z (antisymmetrizes to distinct nonzero values).
         let anti3Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let g = lambda(x, y, z) where comm(x, y, z) -> x * x * y + z
 let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let anti3Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let g = lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x * x * y + z
 let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
@@ -473,38 +509,38 @@ let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
         // higher S-group arity (the depths a closed-form would not cover). sym
         // = inclusive simplex, anti = strict simplex. Non-degenerate kernels.
         let sym4Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z) -> w * x * y * z + 10.0 * (w + x + y + z) |> compute
 """
         let sym4Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> w * x * y * z + 10.0 * (w + x + y + z) |> compute
 """
         let anti4Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let g = lambda(w, x, y, z) where comm(w, x, y, z) -> x * y * y * z * z * z
 let R = method_for(A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let anti4Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let g = lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> x * y * y * z * z * z
 let R = method_for(A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let sym5Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a * b * c * d * e + 10.0 * (a + b + c + d + e) |> compute
 """
         let sym5Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> a * b * c * d * e + 10.0 * (a + b + c + d + e) |> compute
 """
         let anti5Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let g = lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> b * c * c * d * d * d * e * e * e * e
 let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let anti5Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 let g = lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> b * c * c * d * d * d * e * e * e * e
 let R = method_for(A, A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
@@ -528,21 +564,21 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x
         // two output buffers. Values must match. rank-1 (flat grid, shared input
         // loaded once) and rank-2 (div/mod recovery shared across both writes).
         let cofuse1Host = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
 let (u, v) = (method_for(A) <@> lambda(x) -> x * 2.0 + 1.0) <&!> (method_for(A) <@> lambda(x) -> x + 100.0) |> compute
 """
         let cofuse1Cuda = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
 let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0 + 1.0) <&!> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + 100.0) |> compute
 """
         let cofuse2Host = """
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let (p, q) = (method_for(A, B) <@> lambda(x, y) -> x * y) <&!> (method_for(A, B) <@> lambda(x, y) -> x + y) |> compute
 """
         let cofuse2Cuda = """
-let A = [1.0, 2.0, 3.0]
-let B = [4.0, 5.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0])
+let B = Float64([4.0, 5.0, 6.0])
 let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) <&!> (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x + y) |> compute
 """
         // <&> SOFT JOIN over independent cuda leaves: leaves that cannot
@@ -552,18 +588,28 @@ let (p, q) = (method_for(A, B) <@> lambda(x, y) where cuda(block: 64) -> x * y) 
         // default stream serializes; more => the begin pass overlaps). The
         // SAME source serves as its own host oracle (clauses inert gate-off).
         let softRect = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-let B = [10.0, 20.0, 30.0, 40.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+let B = Float64([10.0, 20.0, 30.0, 40.0])
 let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 2.0) <&> (method_for(B) <@> lambda(y) where cuda(block: 32) -> y + 100.0) |> compute
 """
         let softSimp = """
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let B = [2.0, 4.0, 6.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
+let B = Float64([2.0, 4.0, 6.0])
 let (m2a, m2b) = (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) <&> (method_for(B, B) <@> lambda(x, y) where comm(x, y), cuda(block: 64) -> x * y + 1.0) |> compute
 """
         let softMixed = """
-let A = [1.0, 2.0, 3.0, 4.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0])
 let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&> (method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y) |> compute
+"""
+        // A <&> soft join whose leaves CAPTURE a scalar: the co-fused kernel
+        // forwards no captures, so its gate declines; the soft join's split
+        // per-leaf kernels do not stage captures either (planCudaDevice's
+        // softSplit refusal), so the leaves run as host loops -- correct, no
+        // .cu, never an undeclared name in device code (F8 review).
+        let softCapture = """
+let s: Float64 = 3.0
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+let (u, v) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * s) <&> (method_for(A) <@> lambda(x) where cuda(block: 64) -> x + s) |> compute
 """
         // COMPLEX cases (thrust device dialect). The differential demands
         // byte-identical stdout, so these use EXACT complex arithmetic only
@@ -571,55 +617,55 @@ let (u, m2) = (method_for(A) <@> lambda(x) where cuda(block: 64) -> x * 3.0) <&>
         // transcendentals differ from the host's by ~1 ulp and get their own
         // structure+run case below instead of a value differential.
         let cxHost = """
-let Z = [complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)]
+let Z = Complex128([complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)])
 let R = method_for(Z) <@> lambda(z) -> z * conj(z) + 2.0 * z |> compute
 """
         let cxCuda = """
-let Z = [complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)]
+let Z = Complex128([complex(1.0, 2.0), complex(-0.5, 0.25), complex(3.0, -1.0), complex(0.0, 1.0)])
 let R = method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * conj(z) + 2.0 * z |> compute
 """
         // MIXED input element types: a complex and a real input in one kernel
         // (rank-2 outer product) — pins the per-position input typing on both
         // sides of the extern "C" boundary.
         let cxMixHost = """
-let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)]
-let X = [2.0, 3.0, 4.0]
+let Z = Complex128([complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)])
+let X = Float64([2.0, 3.0, 4.0])
 let R = method_for(Z, X) <@> lambda(z, x) -> z * x + conj(z) |> compute
 """
         let cxMixCuda = """
-let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)]
-let X = [2.0, 3.0, 4.0]
+let Z = Complex128([complex(1.0, 1.0), complex(2.0, -1.0), complex(-3.0, 0.5)])
+let X = Float64([2.0, 3.0, 4.0])
 let R = method_for(Z, X) <@> lambda(z, x) where cuda(block: 64) -> z * x + conj(z) |> compute
 """
         // complex() constructor + real/imag accessors in the kernel body: the
         // device dialect renders thrust::complex<double>(...) and the member
         // .real()/.imag() forms (thrust has no free real/imag).
         let cxPartsHost = """
-let Z = [complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)]
+let Z = Complex128([complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)])
 let R = method_for(Z) <@> lambda(z) -> complex(imag(z), real(z) * 2.0) |> compute
 """
         let cxPartsCuda = """
-let Z = [complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)]
+let Z = Complex128([complex(1.5, -2.0), complex(0.25, 4.0), complex(-1.0, 3.0)])
 let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> complex(imag(z), real(z) * 2.0) |> compute
 """
         // COMPLEX symmetric triangular (simplicial unrank path with a complex
         // source/output): kernel symmetric under swap, exact products.
         let cxSymHost = """
-let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)]
+let Z = Complex128([complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)])
 let R = method_for(Z, Z) <@> lambda(x, y) where comm(x, y) -> x * y + conj(x) * conj(y) |> compute
 """
         let cxSymCuda = """
-let Z = [complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)]
+let Z = Complex128([complex(1.0, 1.0), complex(2.0, -1.0), complex(0.5, 3.0), complex(-1.0, 2.0)])
 let R = method_for(Z, Z) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y + conj(x) * conj(y) |> compute
 """
         // COMPLEX co-fusion: two complex leaves over the same input, one
         // device launch with two complex output buffers.
         let cxCofuseHost = """
-let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
+let Z = Complex128([complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)])
 let (u, v) = (method_for(Z) <@> lambda(z) -> z * 2.0) <&!> (method_for(Z) <@> lambda(z) -> z + conj(z)) |> compute
 """
         let cxCofuseCuda = """
-let Z = [complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)]
+let Z = Complex128([complex(1.0, 2.0), complex(3.0, -1.0), complex(-2.0, 0.5), complex(0.0, 1.0)])
 let (u, v) = (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * 2.0) <&!> (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z + conj(z)) |> compute
 """
         // CAPTURED ARRAYS in a MATERIALIZING body. `let c = t * w` is a
@@ -635,16 +681,16 @@ let (u, v) = (method_for(Z) <@> lambda(z) where cuda(block: 64) -> z * 2.0) <&!>
         // compilers -- the same reason the complex transcendental case below is
         // structure-only.
         let capHost = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) -> { let c = t * w
                               prodsum(s, c) } |> compute
 """
         let capCuda = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
                                                    prodsum(s, c) } |> compute
 """
@@ -660,9 +706,9 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
         // `captured_arrays`. A join is a TRAVERSAL rewrite, so anything but
         // equality here means the legs stopped folding the same cells.
         let joinHost = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) -> {
     let c = t <@> lambda(x) -> x * w
     let d = t <@> lambda(x) -> x + w
@@ -671,9 +717,9 @@ let R = ws <@> lambda(w) -> {
 } |> compute
 """
         let joinCuda = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> {
     let c = t <@> lambda(x) -> x * w
     let d = t <@> lambda(x) -> x + w
@@ -687,22 +733,22 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> {
         // kernel and seed slots on the device side too; a shared accumulator
         // type or a shared operator could not express it at any width.
         let joinHeteroHost = """
-let a = [1.0, 2.0, 4.0, 0.5]
-let b = [3.0, 1.0, 0.25, 8.0]
-let ws = [1.0, 2.0]
+let a = Float64([1.0, 2.0, 4.0, 0.5])
+let b = Float64([3.0, 1.0, 0.25, 8.0])
+let ws = Float64([1.0, 2.0])
 let R = ws <@> lambda(w) -> {
     let c = a <@> lambda(x) -> x * w
-    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), 1.0), reduce(c, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30))
+    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), Float64(1.0)), reduce(c, lambda(p, q) -> if p > q then p else q, Float64(0.0) - Float64(1.0e30)))
     x + y + z
 } |> compute
 """
         let joinHeteroCuda = """
-let a = [1.0, 2.0, 4.0, 0.5]
-let b = [3.0, 1.0, 0.25, 8.0]
-let ws = [1.0, 2.0]
+let a = Float64([1.0, 2.0, 4.0, 0.5])
+let b = Float64([3.0, 1.0, 0.25, 8.0])
+let ws = Float64([1.0, 2.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> {
     let c = a <@> lambda(x) -> x * w
-    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), 1.0), reduce(c, lambda(p, q) -> if p > q then p else q, 0.0 - 1.0e30))
+    let x, y, z = object_for(<&!>) <@> (prodsum(b, c), reduce(c, (*), Float64(1.0)), reduce(c, lambda(p, q) -> if p > q then p else q, Float64(0.0) - Float64(1.0e30)))
     x + y + z
 } |> compute
 """
@@ -714,9 +760,9 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> {
         // used, which nvcc only reports after the host half has already been
         // told the kernel exists.
         let joinReuseHost = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) -> {
     let c = t <@> lambda(x) -> x * w
     let d = t <@> lambda(x) -> x + w
@@ -727,9 +773,9 @@ let R = ws <@> lambda(w) -> {
 } |> compute
 """
         let joinReuseCuda = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> {
     let c = t <@> lambda(x) -> x * w
     let d = t <@> lambda(x) -> x + w
@@ -745,12 +791,12 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> {
         // `size_t` parameter instead of being baked as a literal.
         let rtHost = """
 function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) -> x * 3.0 + 1.0
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = fscale(A) |> compute
 """
         let rtCuda = """
 function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) where cuda(block: 64) -> x * 3.0 + 1.0
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = fscale(A) |> compute
 """
         // Both at once -- a join inside a generic function, which is the shape
@@ -766,9 +812,9 @@ function stats(xs: T^1, ys: T^1, ws: T^1) -> T^1 =
         let p, q, r = object_for(<&!>) <@> (prodsum(ys, c), prodsum(ys, d), prodsum(c, d))
         p + 2.0 * q - r
     }
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = stats(t, s, ws) |> compute
 """
         let rtJoinCuda = """
@@ -779,9 +825,9 @@ function stats(xs: T^1, ys: T^1, ws: T^1) -> T^1 =
         let p, q, r = object_for(<&!>) <@> (prodsum(ys, c), prodsum(ys, d), prodsum(c, d))
         p + 2.0 * q - r
     }
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = stats(t, s, ws) |> compute
 """
         let cases =
@@ -803,6 +849,7 @@ let R = stats(t, s, ws) |> compute
               ("rank1_multiblock", mbHost, mbCuda)
               ("rank3_nonuniform", rank3Host, rank3Cuda)
               ("int_elem", intHost, intCuda)
+              ("int_pow_wraps", ipowHost, ipowCuda)
               ("poly_body", polyHost, polyCuda)
               ("big_multiblock", bigHost, bigCuda)
               ("sym_triangular", symTriHost, symTriCuda)
@@ -834,6 +881,45 @@ let R = stats(t, s, ws) |> compute
         let symRc = runHostCompileCase "sym_output" symHost "R = ["
         if symRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["sym_output"])
+        // A VARIABLE integer exponent has no device form (its negative-exponent
+        // BL8013 panic cannot be raised on the device): the kernel falls back
+        // to the host loop -- no .cu -- instead of computing a double `pow`.
+        let ipowVarRc =
+            let label = "int_pow_variable_exponent_falls_back"
+            CodeGen.setCudaEmitMode true
+            let outcome =
+                try
+                    match genVariant "cuda_ipow_var"
+                            "let A = Int64([1, 2, 3])\nlet R = method_for(A) <@> lambda(x) where cuda(block: 64) -> x ^ x |> compute\n" with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Ok ()
+                    | Ok (_, Some _) -> Error "a variable integer exponent reached a device kernel"
+                finally CodeGen.setCudaEmitMode false
+            match outcome with
+            | Ok () -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "host fallback, no .cu"; 0
+            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+        let softCapRc =
+            let label = "softjoin_capture_falls_back_to_host"
+            CodeGen.setCudaEmitMode true
+            let outcome =
+                try
+                    match genVariant "cuda_softjoin_capture" softCapture with
+                    | Error e -> Error e
+                    | Ok (_, None) -> Ok ()
+                    | Ok (_, Some cu) ->
+                        // A device path is fine too, as long as the capture
+                        // reached it as a parameter (never a bare `s`).
+                        let text = File.ReadAllText cu
+                        if text.Contains "__blade_cap_s" then Ok ()
+                        else Error "a capturing soft-join leaf reached device code with an unforwarded capture"
+                finally CodeGen.setCudaEmitMode false
+            match outcome with
+            | Ok () -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "capturing leaves stay host loops (or forward the capture)"; 0
+            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
+        if softCapRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["softjoin_capture_falls_back_to_host"])
+        if ipowVarRc = 0 then passed <- passed + 1
+        else (failures <- failures + 1; failedNames <- failedNames @ ["int_pow_variable_exponent_falls_back"])
         // Soft-join STRUCTURE: the .cu must carry per-leaf kernels + split
         // begin/end wrappers with in-wrapper device selection, and the host
         // must sequence EVERY begin before the FIRST end (that ordering is
@@ -918,7 +1004,7 @@ let R = stats(t, s, ws) |> compute
         let cxExpRc =
             let label = "complex_exp_device"
             let src = """
-let Z = [complex(0.1, 0.2), complex(-0.3, 0.4), complex(0.5, -0.5)]
+let Z = Complex128([complex(0.1, 0.2), complex(-0.3, 0.4), complex(0.5, -0.5)])
 let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |> compute
 """
             for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
@@ -968,9 +1054,9 @@ let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |>
         let capStructRc =
             let label = "capture_forward_structure"
             let src = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
                                                    prodsum(s, c) } |> compute
 """
@@ -1021,9 +1107,9 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> { let c = t * w
         let joinStructRc =
             let label = "reduction_join_structure"
             let src = """
-let t = [1.0, 2.0, 3.0, 4.0]
-let s = [0.5, 1.5, 2.5, 3.5]
-let ws = [1.0, 2.0, 3.0]
+let t = Float64([1.0, 2.0, 3.0, 4.0])
+let s = Float64([0.5, 1.5, 2.5, 3.5])
+let ws = Float64([1.0, 2.0, 3.0])
 let R = ws <@> lambda(w) where cuda(block: 32) -> {
     let ct = t <@> lambda(x) -> cos(w * x)
     let st = t <@> lambda(x) -> sin(w * x)
@@ -1089,7 +1175,7 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> {
             let label = "runtime_extent_structure"
             let src = """
 function fscale(xs: T^1) -> T^1 = xs <@> lambda(x) where cuda(block: 64) -> x * 3.0 + 1.0
-let A = [1.0, 2.0, 3.0, 4.0, 5.0]
+let A = Float64([1.0, 2.0, 3.0, 4.0, 5.0])
 let R = fscale(A) |> compute
 """
             for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do

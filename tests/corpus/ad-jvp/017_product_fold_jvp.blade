@@ -4,7 +4,7 @@
 // product rule, locally, no tape. f([2,3,4]) = 24; dw = [12, 8, 6].
 import ad as ad
 
-function f(w: Array<Float like Idx<3>>) -> Float = reduce(w, (*))
+function f(w: Array<Float64 like Idx<3>>) -> Float64 = reduce(w, (*))
 
 let (j0, t0) = ad.jvp(f)([2.0, 3.0, 4.0], [1.0, 0.0, 0.0])
 let (j1, t1) = ad.jvp(f)([2.0, 3.0, 4.0], [0.0, 1.0, 0.0])

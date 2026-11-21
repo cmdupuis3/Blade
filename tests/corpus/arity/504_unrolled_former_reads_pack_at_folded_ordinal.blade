@@ -1,0 +1,9 @@
+// TEST: an unrolled pack former may read the pack at an index that folds to the ordinal
+// Gap G223 (round 4 wave 8 lane d; G206 conservative refusal lifted): in
+// each rewritten copy `args[k + 0]` folds to a literal subscript.
+// EXPECT: result = 60.0
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> args[k + 0] |> compute
+    reduce(terms, (+))
+}
+let result = polySum(10.0, 20.0, 30.0)

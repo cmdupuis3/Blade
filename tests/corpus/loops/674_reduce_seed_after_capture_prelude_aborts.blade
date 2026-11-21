@@ -1,0 +1,13 @@
+// TEST: A Fold Over A Deferred Map Evaluates Its Seed After The Capture Prelude (aborts)
+// Gap G207 (round 4 wave 7 lane d; Codex class review): the compiled lanes
+// initialize a fold's accumulator from its seed AFTER the capture prelude and
+// the deferred operand forcing; the interpreter evaluated the seed first, so
+// the seed's modulo by zero beat the captured map's division by zero. The
+// seed is now evaluated where the compiled lanes initialize it.
+// ABORT: integer division by zero
+type I = Idx<3>
+let d: Array<Int64 like I> = [1, 0, 2]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let z: Int64 = 0
+let p = method_for(d) <@> lambda(a) -> a + g(0)
+let s = reduce(p, (+), 7 % z)

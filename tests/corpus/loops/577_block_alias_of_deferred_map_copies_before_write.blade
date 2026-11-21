@@ -1,0 +1,20 @@
+// TEST: Block Alias Of Deferred Map Copies Before Write
+// ----------------------------------------------------------------------------
+// Gap G60 (c): an assignable alias of a deferred map bound in a TOP-LEVEL
+// BLOCK is a forcing use of its source, the copy made AT the alias
+// (formalism 10.2), so a write to the map's input later in the block is not
+// seen through it: b = [10, 5], r = 15. The force is at module level, so `g`
+// is stored there and prints the same cells. The llvm lane used to keep `b`
+// a producer and read it after the write (r = 7, and g printed [2, 5]).
+// ----------------------------------------------------------------------------
+type Row = Idx<2>
+let mut x: Array<Int64 like Row> = [1, 2]
+let g = method_for(x) <@> lambda(v) -> 10 / v
+let r = {
+    let b = g
+    x(0) = 5
+    b(0) + b(1)
+}
+// EXPECT: x = [5, 2]
+// EXPECT: g = [10, 5]
+// EXPECT: r = 15

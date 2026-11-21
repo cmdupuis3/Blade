@@ -1,0 +1,16 @@
+// TEST: A Function-Body Fold Of A Computed Run-Time-Shaped Zip Checks Its Extents (aborts)
+// Gap G249 (round 4 wave 9 lane d): a and b are dense arrays whose extents (5 and 3) are known only at run
+// time, so the checker cannot refuse their co-iteration; the walk is bounded by the first operand.
+// The computed map inside the body keeps its own guard (pinned so compute elision never drops it).
+// ABORT: BL8011
+type I = Idx<6>
+let x: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let ca = compound(x, mask(x, lambda(v) -> v > 1))
+let cb = compound(x, mask(x, lambda(v) -> v > 3))
+let a = Float64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+function f(u: T^1, w: T^1) = {
+    let m = method_for(zip(u, w)) <@> lambda(p, q) -> p - q |> compute
+    reduce(m, (+))
+}
+let s = f(a, b)

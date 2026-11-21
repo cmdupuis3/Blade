@@ -1,0 +1,13 @@
+// TEST: Map Forces Its Captures Before An Inline Operand Form (aborts)
+// Gap G207 (round 4 wave 7 lane d; Codex class review): the compiled lanes
+// force a map's NAMED deferred operands, then the kernel's deferred captures,
+// and materialize an INLINE operand form (`mask(d, ..)` written in the
+// method_for) inside the map's own emission -- after the captures. The
+// interpreter resolved every operand first, so the inline mask's modulo by
+// zero beat the captured map's division by zero. It now resolves the named
+// operands, then the captures, then the inline forms.
+// ABORT: integer division by zero
+type I = Idx<5>
+let d: Array<Int64 like I> = [1, 2, 3, 0, 5]
+let g = method_for(d) <@> lambda(a) -> 100 / a
+let s = method_for(mask(d, lambda(a) -> 200 % a > 0)) <@> lambda(b) -> if b then g(0) else 0 |> compute

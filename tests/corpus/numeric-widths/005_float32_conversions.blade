@@ -1,0 +1,31 @@
+// TEST: Float32 Conversions
+// ============================================================================
+// Conversions into and out of Float32 and Int32: widening is exact, narrowing
+// rounds once, float -> int truncates.
+// ============================================================================
+let d: Float64 = 0.1
+let f = Float32(d)
+let back = Float64(f)
+let n: Int64 = 16777217
+let fn = Float32(n)
+let k: Int32 = 123456789
+let fk = Float32(k)
+let t: Float32 = -7.75
+let ti = Int32(floor(t))
+let tl = Int64(ceil(t))
+let big: Int64 = 4294967301
+let wrapped = Int32(big)
+let widened = Int64(k) * Int64(100)
+// EXPECT: d = 0.1
+// EXPECT: f = 0.1
+// EXPECT: back = 0.100000001490116
+// EXPECT: n = 16777217
+// EXPECT: fn = 1.67772e+07
+// EXPECT: k = 123456789
+// EXPECT: fk = 1.23457e+08
+// EXPECT: t = -7.75
+// EXPECT: ti = -8
+// EXPECT: tl = -7
+// EXPECT: big = 4294967301
+// EXPECT: wrapped = 5
+// EXPECT: widened = 12345678900

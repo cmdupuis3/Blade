@@ -60,7 +60,7 @@ let runSpanTests () : BlockResult =
             | Ok _ -> None
 
     // Decl-level: the unbound reference is in the decl starting on line 3.
-    let declLevelLine = typeErrLine "let a = 1\n\nlet b = no_such_name\n"
+    let declLevelLine = typeErrLine "let a: Int64 = 1\n\nlet b = no_such_name\n"
     check "type error: decl-level location"
         (declLevelLine = Some 3)
         (sprintf "got %A" declLevelLine)
@@ -133,7 +133,7 @@ let runSpanTests () : BlockResult =
                     (e.Span.StartLine, e.Span.StartCol, TypeEnv.formatTypeError e.Error))
             | Ok _ -> []
     let assertSrc =
-        "let runtime_v = 41\n" +
+        "let runtime_v: Int64 = 41\n" +
         "\n" +
         "let static bad = runtime_v + 1\n" +
         "let r = bad\n"
@@ -210,13 +210,13 @@ let runSpanTests () : BlockResult =
     // Module 1 type-checks clean; its only job is to leave a stamp whose file,
     // line and column all differ from module 2's static decl (3:1).
     let modASrc =
-        "let a = 1 + 2\n" +
+        "let a: Int64 = 1 + 2\n" +
         "let b = a + 40\n"
     let crossModErrs = multiModuleErrs [("mod_a.blade", modASrc); ("mod_b.blade", assertSrc)]
     check "span leak: a later module's static assertion is located in its OWN module"
         (match crossModErrs with
          | [ (Some "mod_b.blade", 3, 1, code, msg) ] ->
-             code = "BL3999"
+             code = "BL4002"
              && msg.Contains "does not evaluate at compile time"
              && msg.Contains "let static bad"
          | _ -> false)
@@ -226,7 +226,7 @@ let runSpanTests () : BlockResult =
     // exempt from the assertion.
     let lambdaSrc =
         "let static twice = lambda(x) -> x * 2.0\n" +
-        "let y = twice(2.0)\n"
+        "let y = twice(Float64(2.0))\n"
     let lambdaErrs = allErrs lambdaSrc
     check "static assertion: lambda static stays legal"
         (List.isEmpty lambdaErrs)
@@ -293,13 +293,13 @@ let runSpanTests () : BlockResult =
         match Parser.parseMultiSource [(fname, src)] with
         | Error _ -> []
         | Ok prog -> [ for m in prog.Modules do for d in m.Decls -> d.Span.File ]
-    let stampedFiles = declFiles "mymod.blade" "let a = 1\nlet b = 2\n"
+    let stampedFiles = declFiles "mymod.blade" "let a: Int64 = 1\nlet b: Int64 = 2\n"
     check "parseMultiSource stamps File onto decl spans"
         (stampedFiles = [ Some "mymod.blade"; Some "mymod.blade" ])
         (sprintf "got %A" stampedFiles)
     // The single-source entry point keeps File = None (unchanged signature).
     check "parseProgram leaves decl-span File unset"
-        (match Parser.parseProgram "let a = 1\n" with
+        (match Parser.parseProgram "let a: Int64 = 1\n" with
          | Ok prog -> prog.Modules |> List.forall (fun m -> m.Decls |> List.forall (fun d -> d.Span.File = None))
          | Error _ -> false)
         ""
@@ -339,6 +339,65 @@ let runSpanTests () : BlockResult =
     check "parse error code: BL1999 (generic)"
         (parseErrCode "let x = )\n" = "BL1999")
         ($"""got {(parseErrCode "let x = )\n")}""")
+
+    // (f) Deep review #48: the span of a type error is frozen against the error
+    //     OBJECT when it is raised (TypeEnv.noteErrorSpan), so every raise must
+    //     be its own object. A union case WITHOUT fields is one shared instance
+    //     for all its raises and can hold no location of its own -- give a new
+    //     case a field (`of unit` if it has nothing to say).
+    let fieldless =
+        Microsoft.FSharp.Reflection.FSharpType.GetUnionCases(typeof<Blade.Unify.TypeError>)
+        |> Array.filter (fun c -> c.GetFields().Length = 0)
+        |> Array.map (fun c -> c.Name)
+    check "no TypeError case is field-less (each raise is its own object)"
+        (fieldless.Length = 0)
+        (sprintf "field-less cases: %s" (String.concat ", " fieldless))
+
+    // (g) R19 (lane a2): the verdict "this float literal's spelling is a value
+    //     its double cannot hold" (`1e-400` parsed to 0.0) lives on the
+    //     PARSER-BUILT span object of that literal (Ast.DegenerateFloatLiterals,
+    //     a ConditionalWeakTable keyed by reference). A later program in the
+    //     same process and flow -- a string-sourced program at the SAME line and
+    //     column, or a literal synthesized at a structurally equal span without
+    //     the parser's literal path -- must not see it.
+    let floatLitOf (p: Program) : Expr =
+        p.Modules |> List.collect (fun m -> m.Decls) |> List.pick (fun d ->
+            match d.Value with
+            | DeclLet b -> (match b.Value.Kind with ExprKind.ExprLit (LitFloat _) -> Some b.Value | _ -> None)
+            | _ -> None)
+    match Parser.parseProgram "let x: Float32 = 1e-400\n" with
+    | Error e -> check "degenerate float: the first program parses" false (sprintf "%A" e)
+    | Ok pa ->
+        let la = floatLitOf pa
+        let firstErr = match TypeCheck.typeCheck pa with Error (e :: _) -> Some e | _ -> None
+        check "degenerate float: 1e-400 under a Float32 annotation is refused"
+            (firstErr.IsSome) (sprintf "%A" (firstErr |> Option.map (fun e -> e.Span)))
+        check "degenerate float: the verdict is on the literal's parser-built span object"
+            (DegenerateFloatLiterals.isDegenerate la.Span) ""
+        let equalSpan = { la.Span with File = la.Span.File }
+        check "degenerate float: a structurally EQUAL span built elsewhere carries no verdict"
+            (equalSpan = la.Span && not (DegenerateFloatLiterals.isDegenerate equalSpan)) ""
+        match Parser.parseProgram "let y: Float32 = 0.0000\n" with
+        | Error e -> check "degenerate float: the second program parses" false (sprintf "%A" e)
+        | Ok pb ->
+            let lb = floatLitOf pb
+            check "degenerate float: a second program's 0.0000 at the SAME span is not degenerate"
+                (lb.Span = la.Span && not (DegenerateFloatLiterals.isDegenerate lb.Span)) (sprintf "%A vs %A" lb.Span la.Span)
+            check "degenerate float: the second program type-checks"
+                (match TypeCheck.typeCheck pb with Ok _ -> true | Error _ -> false) ""
+        // A literal NOT built by the parser's literal path, at the first
+        // literal's span VALUE, in the first program's own AST.
+        let synth = { la with Kind = ExprKind.ExprLit (LitFloat 0.0); Span = equalSpan }
+        let pc =
+            { pa with
+                Modules = pa.Modules |> List.map (fun m ->
+                    { m with
+                        Decls = m.Decls |> List.map (fun d ->
+                            match d.Value with
+                            | DeclLet b when obj.ReferenceEquals (b.Value, la) -> { d with Value = DeclLet { b with Value = synth } }
+                            | _ -> d) }) }
+        check "degenerate float: a synthesized 0.0 at the same span value type-checks"
+            (match TypeCheck.typeCheck pc with Ok _ -> true | Error _ -> false) ""
 
     printFooter "Error Locations" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

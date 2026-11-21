@@ -32,7 +32,7 @@
 (* not.                                                                  *)
 (* ===================================================================== *)
 
-Require Import Reals List Lra Lia.
+From Stdlib Require Import Reals List Lra Lia.
 Import ListNotations.
 Open Scope R_scope.
 

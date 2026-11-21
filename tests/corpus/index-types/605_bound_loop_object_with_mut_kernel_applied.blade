@@ -1,0 +1,19 @@
+// TEST: A Bound Loop Object With A Mut Kernel Applied By Name
+// ============================================================================
+// Gap G250, round 4 wave 9 (lane C; wave-end fable review F5): a `let` whose
+// whole value is a bare loop object `object_for(poke)` (poke writes its row
+// through a `mut` parameter) is a one-stage composition: binding it is no
+// value use, and its application `K <@> m` is the judged map. It used to be
+// refused (the kernel reference read as a mut function used as a value).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+type M = Array<Float64 like Idx<2>, Idx<2>>
+function poke(y: mut A) -> Float64 = {
+    y(0) = 9.0
+    y(0)
+}
+let mut m: M = [[1.0, 2.0], [3.0, 4.0]]
+let K = object_for(poke)
+let r = K <@> m |> compute
+// EXPECT: m = [[9.0, 2.0], [9.0, 4.0]]
+// EXPECT: r = [9.0, 9.0]

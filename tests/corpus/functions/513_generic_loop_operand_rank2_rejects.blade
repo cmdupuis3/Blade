@@ -1,0 +1,10 @@
+// TEST: an unannotated generic loop operand is rank 1, so a rank-2 argument is refused at the call (rejects)
+// `method_for(v)` over an unannotated parameter gives it the rank-1 shape
+// the loop former has always assumed for it (getArrayType's record); the
+// element stays generic, the rank does not. A rank-2 argument used to pass
+// type checking and die in g++ (BL9002, "cannot convert 'double*' to
+// 'double'"); it is now a rank mismatch at the argument. Annotate the
+// parameter `v: T^2` to iterate a rank-2 array.
+function t5(v) = method_for(v) <@> lambda(x) -> x * 2.0 |> compute
+let a = t5([[1.0, 2.0], [3.0, 4.0]])
+// ERROR: BL3001 @ 8:12

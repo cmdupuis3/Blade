@@ -112,7 +112,7 @@
 (* ===================================================================== *)
 
 From Blade Require Import BladeDMWF BladeSymPower.
-Require Import List Arith Lia ZArith.
+From Stdlib Require Import List Arith Lia ZArith.
 Import ListNotations.
 Open Scope nat_scope.
 

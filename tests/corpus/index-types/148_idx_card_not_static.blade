@@ -1,5 +1,5 @@
 // TEST: Idx Card Not Static (rejects)
-// ERROR: BL3999
+// ERROR: BL4002
 // ============================================================================
 // INDEX-ELIGIBILITY IS OPT-IN. A plain `struct` is never index-eligible, no
 // matter how eligible its SHAPE is: `CGm112` below has bounded Int fields and
@@ -37,9 +37,9 @@
 // added.
 // ============================================================================
 struct CGm112 {
-    m1:    Int<min=-1, max=1>,
-    m2:    Int<min=-1, max=1>,
-    m_out: Int<min=-1, max=1>
+    m1:    Int32<min=-1, max=1>,
+    m2:    Int32<min=-1, max=1>,
+    m_out: Int32<min=-1, max=1>
 } where m1 + m2 == m_out
 
 let static CARD = idx_card(CGm112)

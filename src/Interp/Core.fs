@@ -142,6 +142,24 @@ and InterpState = {
     /// auto-prints (mirroring genPrintStatements' forcedDeferredIdsCell); one
     /// that stayed deferred prints nothing. Populated by Loops.force.
     ForcedDeferred: HashSet<IRId>
+    /// How many calls of a capture-free callable (a source-level FUNCTION:
+    /// named functions reach module bindings directly, never through a
+    /// capture) are live. A module-level deferred map forced while it is
+    /// positive is evaluated privately -- not memoized into its root cell,
+    /// not registered in ForcedDeferred -- because the compiled lanes force it
+    /// inside the function body, block-scoped and unprinted (gap G75,
+    /// formalism 10.2). A capturing lambda (a top-level kernel) does not
+    /// count: the compiled lanes force its captures at the enclosing
+    /// statement, which at module level prints.
+    mutable FunctionCallDepth: int
+    /// The PRIVATE operands of the fold being evaluated (gap G243;
+    /// Loops.resolveFusedArraySource), by binding id: a later private operand
+    /// whose map reads an EARLIER one reads its private value -- the C++ lane's
+    /// `<fold>__in<id>` temporary -- so it is neither re-evaluated nor forced
+    /// under its own name (it stays deferred and does not print). Saved and
+    /// cleared per fold. Kernel CAPTURES are unaffected: a capture forces under
+    /// its own name (G214, the user decision of 2026-11-13).
+    mutable PrivateOperandVals: Map<IRId, BladeArray>
 }
 
 /// The header's fixed frame-store size (cpp/blade_runtime.hpp: `Frame stack[64]`).
@@ -176,9 +194,18 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
         // Reference identity, deliberately: the SAME Value node stored into a
         // root VDeferred must hit; a structurally-equal node elsewhere must not.
         let d = Dictionary<IRExpr, IRId>(HashIdentity.Reference)
-        for b in modul.Bindings do d.[b.Value] <- b.Id
+        for b in modul.Bindings do
+            d.[b.Value] <- b.Id
+            // A let-chain binding that defers holds its FINAL value as the
+            // payload (evalBinding's letChainDefers arm), the node
+            // peelLetChain returns by reference -- index that one too.
+            match b.Value with
+            | IRLet _ -> d.TryAdd(snd (peelLetChain b.Value), b.Id) |> ignore
+            | _ -> ()
         d
-      ForcedDeferred = HashSet<IRId>() }
+      ForcedDeferred = HashSet<IRId>()
+      FunctionCallDepth = 0
+      PrivateOperandVals = Map.empty }
 
 // Shadow call stack push/pop + panic-time capture, mirroring blade_runtime.hpp.
 // Push at Blade function-body entry, pop on normal exit. On a panic the frames
@@ -227,6 +254,7 @@ let private valueNonZero (v: Value) : bool =
     | VFloat f -> f <> 0.0
     | VFloat32 f -> f <> 0.0f
     | VComplex (r, i) -> r <> 0.0 || i <> 0.0
+    | VComplex64 (r, i) -> r <> 0.0f || i <> 0.0f
     | _ -> false
 
 /// Integer projection for loop bounds / counters -- C++ `(int64_t)x` truncates
@@ -252,6 +280,7 @@ let private toF64 (v: Value) : float =
     | VChar c -> float (int c)
     | VBool b -> if b then 1.0 else 0.0
     | VComplex (r, _) -> r
+    | VComplex64 (r, _) -> float r
     | _ -> nan
 
 /// The IRExpr union case name (e.g. "IRZip"), for InterpUnsupported messages.
@@ -309,7 +338,11 @@ let private variantResultName (ty: IRType) : string option =
     | FuncElem (_, IRTNamed tn) -> Some tn
     | _ -> None
 
-let private isCtorName (name: string) = not (name.Contains ".")
+// A constructor declared by a non-main module carries the dotted IDENTITY
+// `A.Red` (D11, Types.TypeOrigins), so "no dot" is not the test: a registered
+// constructor identity is one, any other dotted name a qualified value.
+let private isCtorName (name: string) =
+    not (name.Contains ".") || Blade.Types.TypeOrigins.isQualified name
 
 // Pattern literal comparison (IRPatLit): value-level, IEEE/ordinal exact.
 
@@ -339,11 +372,14 @@ let private litMatches (lit: IRLit) (v: Value) : bool =
 /// `isDeferred ids e` (a combinator/compose/parallel/... form, or an IRVar
 /// whose bound cell already holds a VDeferred). By induction over
 /// module-ordered bindings this coincides with `Set.contains id deferredIds`.
-let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
+/// `inner` names the deferred lets of an enclosing let CHAIN that are not yet
+/// bound in `env` (letChainDefers); it is empty for a plain binding.
+let private isDeferredOperandIn (inner: Set<IRId>) (env: Env) (e: IRExpr) : bool =
     match e with
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _
     | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _
     | IRBind _ | IRZip _ | IRSequence _ -> true
+    | IRVar (id, _) when Set.contains id inner -> true
     | IRVar (id, _) ->
         match envTryFind env id with
         | Some cell -> cell.V.IsVDeferred
@@ -355,7 +391,11 @@ let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
 /// `shouldDefer` (CodeGen.fs:9865-9886), so a binding is VDeferred iff Print
 /// would skip it. IRMethodFor/IRObjectFor are NOT deferred here (evalBinding
 /// treats them as loop objects -- VLoopObj -- before consulting this).
-let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
+let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
+    isDeferredOperandIn Set.empty env e
+
+let private shouldDeferBindingIn (inner: Set<IRId>) (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    let isDeferredOperand (env: Env) (e: IRExpr) = isDeferredOperandIn inner env e
     // Mirror computeDeferredIds' resultIsArray rule: an array-typed combinator is a
     // deferred computation whatever its operands (materializes only at |> compute);
     // scalar `<|>` / guard stay eager ternaries.
@@ -383,14 +423,27 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
         resultIsArray || leafIsDeferred body
     | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferredOperand env))
     | IRTuple elems -> elems |> List.forall (isDeferredOperand env)
-    | IRTupleProj (IRVar (pid, _), _, _) ->
-        match envTryFind env pid with
-        | Some cell -> cell.V.IsVDeferred
-        | None -> false
-    | IRVar (srcId, _) ->
-        match envTryFind env srcId with
-        | Some cell -> cell.V.IsVDeferred
-        | None -> false
+    | IRTupleProj ((IRVar _ as parent), _, _) -> isDeferredOperand env parent
+    | IRVar _ -> isDeferredOperand env value
+    | _ -> false
+
+let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    shouldDeferBindingIn Set.empty env ty value
+
+/// A let CHAIN binding value (IRLift hoists an inline operand of a deferred
+/// binding into lets: `method_for(T(0)) <@> k` binds the row first) defers
+/// exactly when its FINAL value does, counting the chain's own deferred lets
+/// -- the twin of CodeGen.computeDeferredIds' IRLet arm, which mirrors
+/// genLetChainBinding (inner lets as temporaries, then the final value under
+/// the binding's name).
+let private letChainDefers (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    match value with
+    | IRLet _ ->
+        let (lets, finalExpr) = peelLetChain value
+        let inner =
+            lets |> List.fold (fun acc (id, lty, v) ->
+                if shouldDeferBindingIn acc env lty v then Set.add id acc else acc) Set.empty
+        shouldDeferBindingIn inner env ty finalExpr
     | _ -> false
 
 /// Route a node Core classifies as loop/array *machinery* (the force, reductions,
@@ -416,7 +469,7 @@ let private forceValue (st: InterpState) (env: Env) (v: Value) : Value =
 /// C++ side's dense-only guard in genVarAliasBinding (plain dense or
 /// symmetric-compact Array<T,N>): ragged-family / dep-idx / compound index
 /// tags -- and any ragged backing store -- keep the historical alias.
-let private isDenseCopyableArray (ba: BladeArray) : bool =
+let isDenseCopyableArray (ba: BladeArray) : bool =
     (match ba.Data with SRagged _ -> false | _ -> true)
     && ba.IndexTypes |> List.forall (fun ix ->
         not (isRaggedRowKind ix.IxKind)
@@ -460,7 +513,48 @@ let private asDeclaredWidth (e: IRExpr) (v: Value) : Value =
          | IRTScalar ETFloat32 -> VFloat32 (float32 f)
          | IRTUnitAnnotated (IRTScalar ETFloat32, _) -> VFloat32 (float32 f)
          | _ -> v)
+    // A Complex64 node computed through the Complex128 path (a complex
+    // intrinsic: the double function, each part rounded once).
+    | VComplex (r, i) ->
+        (match stripUnits (typeOf e) with
+         | IRTScalar ETComplex64 -> VComplex64 (float32 r, float32 i)
+         | _ -> v)
     | _ -> v
+
+/// A scalar value converted to the WIDTH a declared type names, as C++
+/// converts at a typed declaration, a parameter or a return (`int32_t mx =
+/// 2147483647L`, a Float64 passed to a `float`): Int64 -> Int32 wraps, a
+/// double -> float rounds once, a Complex128 -> Complex64 rounds each part;
+/// the widenings are exact. Anything that is not a numeric scalar of another
+/// width passes through.
+let coerceScalarTo (ty: IRType) (v: Value) : Value =
+    let rec elemOf (t: IRType) =
+        match t with
+        | IRTScalar et -> Some et
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> elemOf inner
+        | _ -> None
+    match elemOf ty, v with
+    | Some ETInt32, VInt n -> VInt32 (int32 n)
+    | Some ETInt64, VInt32 n -> VInt (int64 n)
+    | Some ETFloat32, VFloat f -> VFloat32 (float32 f)
+    | Some ETFloat64, VFloat32 f -> VFloat (float f)
+    | Some ETComplex64, VComplex (r, i) -> VComplex64 (float32 r, float32 i)
+    | Some ETComplex128, VComplex64 (r, i) -> VComplex (float r, float i)
+    | _ -> v
+
+/// THE EXTENT OF A DEFERRED ARRAY WITHOUT EVALUATING IT (gap G218, the user
+/// decision of 2026-11-13; formalism 10.2: a deferred value is evaluated where
+/// its CELLS are read). `v` is the operand's unforced value: a VDeferred whose
+/// type carries a static extent at `dim` answers it (the compiled lanes'
+/// renderExtentExpr literal); anything else -- a stored array, a runtime
+/// extent (gap G234) -- answers None and the caller forces as before.
+let deferredStaticExtent (v: Value) (arrExpr: IRExpr) (dim: int) : int64 option =
+    match v with
+    | VDeferred _ ->
+        (match stripUnits (typeOf arrExpr) with
+         | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length -> Blade.IRPrint.tryEvalIntIR at.IndexTypes.[dim].Extent
+         | _ -> None)
+    | _ -> None
 
 // The evaluator.
 
@@ -501,9 +595,14 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | _ -> raise (InterpUnsupported $"IRParam '{name}' (qualified or partially-applied reference)")
 
     | IRComplex (re, im) ->
-        let r = toF64 (evalExpr st env re)
-        let i = toF64 (evalExpr st env im)
-        VComplex (r, i)
+        let rv = asDeclaredWidth re (evalExpr st env re)
+        let iv = asDeclaredWidth im (evalExpr st env im)
+        // Float32 parts build a Complex64 (std::complex<float>), as typeOf says.
+        (match typeOf expr with
+         | IRTScalar ETComplex64 ->
+             let f (v: Value) = match v with VFloat32 x -> x | v -> float32 (toF64 v)
+             VComplex64 (f rv, f iv)
+         | _ -> VComplex (toF64 rv, toF64 iv))
 
     // fma(a, b, c): ONE rounding. Math.FusedMultiplyAdd is the hardware fma
     // where the CPU has it and a correctly-rounded software fma otherwise,
@@ -511,10 +610,43 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // -- so this node is bit-identical across lanes under ANY BLADE_FP_CONTRACT
     // (the one arithmetic node for which that is true by construction).
     | IRFma (a, b, c) ->
-        let x = toF64 (evalExpr st env a)
-        let y = toF64 (evalExpr st env b)
-        let z = toF64 (evalExpr st env c)
-        VFloat (System.Math.FusedMultiplyAdd (x, y, z))
+        let av = evalExpr st env a
+        let bv = evalExpr st env b
+        let cv = evalExpr st env c
+        (match typeOf expr with
+        // Three Float32 operands: fmaf, ONE rounding of the exact a*b+c to
+        // float (std::fma(float, float, float), llvm.fma.f32). Never the
+        // double fma rounded again -- the exact product-sum needs more than
+        // 53 bits, so that would double-round.
+        | IRTScalar ETFloat32 ->
+            let f (v: Value) = match v with VFloat32 x -> x | v -> float32 (toF64 v)
+            VFloat32 (System.MathF.FusedMultiplyAdd (f av, f bv, f cv))
+        | _ -> VFloat (System.Math.FusedMultiplyAdd (toF64 av, toF64 bv, toF64 cv)))
+
+    // ONE ADDRESSED SAMPLE (D13): the fill's own transform at one address --
+    // RandMirror's `_at` draw of a single sample at index `i`, which is the
+    // compiled lane's `blade_rand::<kind>_one` (rand_runtime.hpp: the fill at
+    // n = 1). Operands cast as codegen casts them.
+    | IRRandAt (kind, args, weights) ->
+        let vals = args |> List.map (evalExpr st env)
+        match vals with
+        | key :: stream :: index :: pars ->
+            let key, stream, index = toI64 key, toI64 stream, toI64 index
+            match weights with
+            | Some (wExpr, k) ->
+                let w =
+                    match evalExpr st env wExpr with
+                    | VArray ba ->
+                        (match ba.Data with
+                         | SFloat data when data.Length = k -> data
+                         | _ -> raise (InterpUnsupported "rand.categorical_at weights are not a dense Float64 pool of the pinned extent"))
+                    | _ -> raise (InterpUnsupported "rand.categorical_at weights did not evaluate to an array")
+                VInt (RandMirror.drawsCategoricalAt kind key stream index w 1).[0]
+            | None ->
+                match (if pars.IsEmpty then RandMirror.drawAtOneUnchecked kind key stream index else None) with
+                | Some v -> VFloat v
+                | None -> VFloat (RandMirror.drawsAt kind key stream index (pars |> List.map toF64) 1).[0]
+        | _ -> raise (InterpUnsupported "malformed IRRandAt")
 
     // `&&` / `||` short-circuit exactly like the emitted C++ (CodeGen.fs:782):
     // the right operand is not evaluated when the left decides the result.
@@ -530,17 +662,30 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // operands never reach here: Lowering's lowerArrayBinOpsModule rewrites
         // every array-typed binop into a method_for co-iteration combinator,
         // so this arm only ever sees scalars.
-        let lv = evalExpr st env l
-        let rv = evalExpr st env r
+        // Operands are taken at the width the IR declares (a Float32 read
+        // that reached here double-backed is narrowed), and a bare integer
+        // LITERAL beside an Int32 operand adapts to Int32 (formalism 2.4:
+        // "`i32 + 1` is Int32" -- IR.typeOf's literal rule; the C++ lane
+        // renders it as an int, the LLVM lane as an i32), so the operation
+        // wraps at 32 bits and compares at 32 bits.
+        let lv = asDeclaredWidth l (evalExpr st env l)
+        let rv = asDeclaredWidth r (evalExpr st env r)
+        let lv, rv =
+            match l, lv, r, rv with
+            | IRLit (IRLitInt n), VInt _, _, VInt32 _ when Blade.IR.fitsInt32 n -> VInt32 (int32 n), rv
+            | _, VInt32 _, IRLit (IRLitInt n), VInt _ when Blade.IR.fitsInt32 n -> lv, VInt32 (int32 n)
+            | _ -> lv, rv
+        let res = N.evalBinOpAt loc op lv rv
         (match op with
-         | IRCaret | IRMath2 _ -> N.evalBinOpAt loc op (asDeclaredWidth l lv) (asDeclaredWidth r rv)
-         | _ -> N.evalBinOpAt loc op lv rv)
+         | IRMath2 _ -> asDeclaredWidth expr res
+         | _ -> res)
 
     | IRUnaryOp ((IRMath _) as op, e) ->
-        N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e))
+        asDeclaredWidth expr (N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e)))
     | IRUnaryOp (op, e) ->
         N.evalUnaryOp op (evalExpr st env e)
 
+    | IRBeginPoolScope _ | IRReleasePools _ -> VUnit
     | IRLet (id, value, body) ->
         // SSA ids are globally unique, so binding into the current frame (rather
         // than a child scope) is safe and matches the flat env model.
@@ -568,6 +713,17 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRVar _, VArray ba when Set.contains id st.MutableArrayLets
                                       && isDenseCopyableArray ba ->
                 VArray (copyBladeArray ba)
+            // A block / function-body assignable alias of a DEFERRED array is
+            // a forcing use of its source, the copy made here (CodeGen's
+            // genVarAliasBinding: only a MODULE-LEVEL alias is the same
+            // deferred value, formalism 10.2). A source that is a module
+            // binding is registered as forced exactly when the C++ lane's
+            // force registers it: at module level (not inside a function).
+            | IRVar (_, vty), VDeferred _ when Set.contains id st.MutableArrayLets
+                                               && (match stripUnits vty with ArrayElem _ -> true | _ -> false) ->
+                (match forceValue st env v with
+                 | VArray ba when isDenseCopyableArray ba -> VArray (copyBladeArray ba)
+                 | fv -> fv)
             | _ -> v
         envBind env id v |> ignore
         evalExpr st env body
@@ -585,12 +741,55 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let sv = evalExpr st env scrutinee
         evalMatch st env sv cases
 
+    // A tuple ALL of whose members are deferred computations is itself a
+    // deferred tuple (CodeGen's isWhollyDeferredTuple): its members stay
+    // computations, forced only where a projection reads one. Any other tuple
+    // is a VALUE (formalism 10.2, "Deferred members of a tuple value", gap
+    // G61): each deferred array member is evaluated AT CONSTRUCTION, at its
+    // own position, left to right with the other members, as `|> compute`
+    // evaluates it (a copy; the binding it names is not registered or
+    // memoized) -- and a member naming a deferred TUPLE has its members
+    // evaluated the same way (G58).
     | IRTuple exprs ->
-        VTuple (exprs |> List.map (evalExpr st env) |> Array.ofList)
+        // A deferred VALUE: a suspension, or -- for a tuple bound by a LOCAL
+        // let (a block or body let evaluates `(g, g)` to a VTuple of
+        // suspensions, where a module binding holds one VDeferred) -- a tuple
+        // all of whose members are deferred values, recursively. The twin of
+        // IRLift.isWhollyDeferredTupleOf's deferred NAME (Codex third look of
+        // W4-1, finding 1: `{ let p = (g, g); let q = (p, p); 7 }` forced g
+        // through q's value-tuple arm, which the base never did).
+        let rec isDeferredValue (v: Value) =
+            match v with
+            | VDeferred _ -> true
+            | VTuple vs -> vs.Length > 0 && vs |> Array.forall isDeferredValue
+            | _ -> false
+        let isDeferredMember (e: IRExpr) =
+            match e with
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ -> true
+            | IRVar (id, _) ->
+                (match envTryFind env id with
+                 | Some cell -> isDeferredValue cell.V
+                 | None -> false)
+            | _ -> false
+        if exprs |> List.forall isDeferredMember then
+            VTuple (exprs |> List.map (evalExpr st env) |> Array.ofList)
+        else
+            VTuple (exprs |> List.map (fun e -> forceTupleMember st (evalExpr st env e)) |> Array.ofList)
 
     | IRTupleProj (e, i, isFlat) ->
         let v = evalExpr st env e
-        if isFlat then projectFlat v i else projectStruct v i
+        match v with
+        // A projection of a wholly DEFERRED tuple (a module `let pair =
+        // (delayed, delayed)` read inside a function body: G190 (d), round 4
+        // wave 8) reads ONE member -- that member's own value, still deferred
+        // where it is -- as the compiled lanes resolve it; it used to project
+        // the suspension itself (BL8003 "tuple projection index out of range").
+        | VDeferred (IRTuple es, denv) when not isFlat && i >= 0 && i < es.Length ->
+            evalExpr st denv es.[i]
+        | VDeferred _ ->
+            let v' = forceValue st env v
+            if isFlat then projectFlat v' i else projectStruct v' i
+        | _ -> if isFlat then projectFlat v i else projectStruct v i
 
     | IRTupleCons (head, tail) ->
         let h = evalExpr st env head
@@ -625,6 +824,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     | IRAssign (target, value) ->
         let v = evalExpr st env value
+        // A scalar variable keeps its declared width (C++'s assignment
+        // conversion into `int32_t` / `float`).
+        let v = match target with IRVar (_, ty) -> coerceScalarTo ty v | _ -> v
         evalAssign st env target v
         VUnit
 
@@ -654,6 +856,11 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         if toBoolV (evalExpr st env cond) then raise InterpBreak
         else VUnit
 
+    | IRReplayRow _ ->
+        // Run.fs skips every print-replay binding (IR.isRecReplayBinding):
+        // the interpreter keeps the trajectory whole and prints it as written.
+        failwith "internal: a print-replay row reached the interpreter (its binding is skipped)"
+
     | IRConstraintCheck (cond, code, message, span) ->
         // `if (!(cond)) blade_rt::panic(code, message, file, line)`
         // (CodeGen.fs:7166). File is nullptr when empty, line 0 when unset --
@@ -668,7 +875,12 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // Rank is static in CodeGen (from the type). Scalars are rank 0; a
         // concrete array reports its loop-level count. A deferred input is forced
         // first (via the backend) so an unmaterialized array still ranks.
-        (match forceValue st env (evalExpr st env arr) with
+        // G218: the rank of a DEFERRED array is its type's, nothing evaluated
+        let v0 = evalExpr st env arr
+        match v0, typeOf arr with
+        | VDeferred _, ArrayElem at -> VInt (int64 (at.IndexTypes |> List.sumBy (_.Rank)))
+        | _ ->
+        (match forceValue st env v0 with
          | v when (N.scalarElem v).IsSome -> VInt 0L
          | VArray ba -> VInt (int64 ba.Extents.Length)
          | _ -> raise (InterpUnsupported "IRRank"))
@@ -774,12 +986,15 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
              // Its C++ mirror is blade_display::jsonval.
              let jsonF (x: float) =
                  Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest x) x
+             // A Float32 renders the FLOAT's shortest digits (jsonfloat<float>).
              let jsonF32 (x: float32) =
-                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest (float x)) (float x)
+                 Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32Shortest x) (float x)
              let elemStr (store: Store) (i: int) : string =
                  match store with
                  | SFloat a -> jsonF a.[i]
+                 | SFloat32 a -> jsonF32 a.[i]
                  | SInt a -> string a.[i]
+                 | SInt32 a -> string a.[i]
                  | SObj vs ->
                      (match vs.[i] with
                       | VFloat f -> jsonF f
@@ -827,9 +1042,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
          | _ -> raise (InterpUnsupported "display.json_array: operand did not evaluate to an array"))
 
     | IRDisplayNum dataExpr ->
-        (match forceValue st env (evalExpr st env dataExpr) with
+        (match asDeclaredWidth dataExpr (forceValue st env (evalExpr st env dataExpr)) with
          | VFloat f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest f) f)
-         | VFloat32 f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloatShortest (float f)) (float f))
+         | VFloat32 f -> VString (Blade.Display.Frame.jsonNumber (Blade.Interp.CppFormat.formatFloat32Shortest f) (float f))
          | VInt n -> VString (string n)
          | VInt32 n -> VString (string n)
          | _ -> raise (InterpUnsupported "display.json_num: operand did not evaluate to a numeric scalar"))
@@ -912,7 +1127,25 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //      is the compact index's cardinality (popcount), the `extents(f)`
     //      overload for compounds (genExtentExpr, CodeGen.fs:2127).
     | IRExtent (arrExpr, dim) ->
-        (match forceValue st env (evalExpr st env arrExpr) with
+        // G218 (the user decision of 2026-11-13): an extent read of a DEFERRED
+        // map reads its static shape without evaluating it -- what both
+        // compiled lanes render (renderExtentExpr: a literal from the type);
+        // a runtime-shaped deferred map is still forced (gap G234)
+        // an inline tuple projection (`extents(t[0])` over a wholly deferred
+        // tuple) answers from its type BEFORE projecting: projecting would
+        // force the member (Codex diff review round 1); a projection is pure
+        let projStatic =
+            match arrExpr with
+            | IRTupleProj _ -> deferredStaticExtent (VDeferred (arrExpr, env)) arrExpr dim
+            | _ -> None
+        match projStatic with
+        | Some n -> VInt n
+        | None ->
+        let v0 = evalExpr st env arrExpr
+        match deferredStaticExtent v0 arrExpr dim with
+        | Some n -> VInt n
+        | None ->
+        (match forceValue st env v0 with
          | VArray ba when dim >= 0 && dim < ba.Extents.Length -> VInt ba.Extents.[dim]
          | VCompound cv -> VInt cv.Cardinality
          | VSparse sv -> VInt sv.Cardinality
@@ -973,11 +1206,46 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             match ty with
             | IRTIdxTagged _ -> VInt 0L
             | _ -> VFloat 0.0
+    // Lowering.resolveUnseededSeedsModule replaces every one before the
+    // optimizer (gap G74): reaching the interpreter is an internal error.
+    | IRUnseededSeed _ -> raise (InterpUnsupported "internal: an unresolved unseeded-fold seed (IRUnseededSeed)")
+
+    // The let-rec buffer whose zero fill the desugar proved dead (IR.IRUninit;
+    // formalism 7.5). The compiled lanes leave it unfilled; zeros here are
+    // what the old fill wrote, and no read can tell them apart -- every cell
+    // is written before it is read, which is the license the node carries.
+    | IRUninit (ArrayElem at) ->
+        let extents =
+            at.IndexTypes
+            |> List.map (fun ix ->
+                match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                | Some n -> n
+                | None -> raise (InterpUnsupported "IRUninit over a runtime extent"))
+            |> Array.ofList
+        VArray (ArrayOps.allocDense at.ElemType at.IndexTypes extents)
 
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.
         raise (InterpUnsupported (nodeName other))
+
+/// One member of a tuple VALUE, evaluated (gap G61): a deferred array
+/// member is computed now, through the explicit-compute path (Loops'
+/// IRCompute arm -> forceExpr, which neither memoizes into a root cell nor
+/// registers a module binding as forced -- `(g, 1.0)` is `(g |> compute,
+/// 1.0)`); a nested tuple's deferred members likewise (a deferred tuple
+/// member, G58, forces to a tuple of computations). A function value
+/// (a suspended `f >> g`) and a loop object are values already.
+and private forceTupleMember (st: InterpState) (v: Value) : Value =
+    match v with
+    | VDeferred (IRCompose _, _) -> v
+    | VDeferred (e, denv) ->
+        (match evalArrayNode st denv (IRCompute e) with
+         | VDeferred _ as still -> still   // no force form: leave it (never loop)
+         | r -> forceTupleMember st r)
+    | VTuple vs when vs |> Array.exists (fun x -> x.IsVDeferred || x.IsVTuple) ->
+        VTuple (vs |> Array.map (forceTupleMember st))
+    | v -> v
 
 /// Reify a callable id as a closure value, snapshotting the current frame's
 /// cells for each declared capture (by CaptureInfo.Id -- the free var's original
@@ -1022,7 +1290,20 @@ and evalApp (st: InterpState) (env: Env) (func: IRExpr) (args: IRExpr list) : Va
                                | _ -> false) ->
              raise (InterpUnsupported "a group_by result passed as a function argument (refused by codegen: no function signature carries the group_keys side state)")
          | _ -> ())
-        let argVals = args |> List.map (evalExpr st env)
+        // A deferred ARRAY argument is forced AT THE CALL, before the callee
+        // runs -- the C++ lane's positional-read pre-pass materializes a bare
+        // deferred call argument under its own name at the call statement
+        // (printed at module level). Forcing it later, inside the callee's
+        // body, would count as a function-body force (FunctionCallDepth, gap
+        // G75) and drop the print.
+        let argVals =
+            args |> List.map (fun a ->
+                let v = evalExpr st env a
+                match v with
+                | VDeferred (IRCompose _, _) -> v
+                | VDeferred _ when (match stripUnits (typeOf a) with ArrayElem _ -> true | _ -> false) ->
+                    forceValue st env v
+                | _ -> v)
         applyValue st fv argVals
 
 /// Apply an already-evaluated callee value. A composed function (`f >> g`,
@@ -1044,7 +1325,10 @@ and applyValue (st: InterpState) (fv: Value) (argVals: Value list) : Value =
 /// a callable body reaches only its params, its captures, and other callables
 /// (via the id->callable table), never the caller's locals.
 and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, ValueRef>) (args: Value list) : Value =
-    st.Depth <- st.Depth + 1
+    // A HoistFrame helper (a kernel-invariant hoist, a G239 read helper) is
+    // inline code of its caller: it is not a call level against the depth
+    // budget either (it never recurses).
+    if callable.HoistFrame.IsNone then st.Depth <- st.Depth + 1
     if st.Depth > st.Limits.MaxDepth then
         raise (InterpPanic ("BL8002", $"interpreter call depth budget exceeded ({st.Limits.MaxDepth})", None, 0))
     // Shadow-stack frame at body entry, named by the Blade function -- the SAME
@@ -1055,7 +1339,12 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     // blade_rt::panic reading the stack before exit.
     // The name the program wrote (IRCallable.SourceName): a specialization or
     // an array instance prints as its declaration, as CodeGen's frame does.
-    pushFrame st callable.SourceName
+    // A kernel-invariant hoist helper (IRCallable.HoistFrame) is code the
+    // per-cell evaluation ran INLINE here -- this interpreter's nests push no
+    // kernel frame -- so it pushes none either, and is located as inline code
+    // is (the anonymous rule below; gap G151).
+    let inlineHoist = callable.HoistFrame.IsSome
+    if not inlineHoist then pushFrame st callable.SourceName
     // Chain the frame to the module-global scope: function bodies may read
     // module-level bindings directly (main-local capturing lambdas in C++).
     // Globally-unique IRIds make this exact -- no accidental shadowing.
@@ -1069,11 +1358,53 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
         raise (InterpPanic ("BL8002",
                             $"arity mismatch calling '{callable.Name}' (expected {(List.length ps)}, got {(List.length args)})",
                             None, 0))
-    List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId a |> ignore) ps args
-    let result = evalExpr st frame callable.Body
-    popFrame st
-    st.Depth <- st.Depth - 1
-    result
+    List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId (coerceScalarTo p.Type a) |> ignore) ps args
+    // A capture-free callable is a function body (see FunctionCallDepth). Not
+    // restored on a panic path: an escaping InterpPanic ends the run.
+    let isFunctionBody = List.isEmpty callable.Captures
+    if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth + 1
+    // THE GUARD LOCATION RULE (gap G76), the compiled lanes' `declPanicArgs` /
+    // `declLocArgs`: an unlocated runtime GUARD (empty reduce, key / shape /
+    // extent check, non-exhaustive match) raised in the body of a callable the
+    // PROGRAM NAMED -- a function, or a lambda a `let` binds -- is located at
+    // that name's recorded declaration, the innermost winning; one with NO
+    // recorded declaration (a block-local function or let-bound lambda) is
+    // located nowhere, as the compiled lanes print no `-->` for it (line -1
+    // marks "deliberately unlocated", which Run.fs's binding fallback does not
+    // overwrite); an ANONYMOUS lambda or section (`lambda in s`, `(+) in s`)
+    // leaves it to its enclosing declaration. The frame stays pushed.
+    let anonymous =
+        let n = callable.SourceName
+        // the exact anonymous names Lowering writes (`unboundLambdaWhat`: `lambda`, an operator's
+        // `(+)`, `.. in <scope>`), never a prefix test -- `lambda_guard` is a legal user name
+        // (the second Codex look of W4-3, NEW 4)
+        inlineHoist || System.String.IsNullOrEmpty n || n = "lambda" || n.StartsWith "(" || n.Contains " in "
+    let result =
+        try
+            let r = evalExpr st frame callable.Body
+            // A function body hands its caller a VALUE: a returned deferred
+            // ARRAY (a projected member of a module tuple: G190 (d), round 4
+            // wave 8) is forced HERE, while the force is still private
+            // (FunctionCallDepth > 0), never at the caller as a module force
+            // that would register and print the map (Codex diff review).
+            match r with
+            | VDeferred (e, _) when isFunctionBody && (try (match stripUnits (typeOf e) with ArrayElem _ -> true | _ -> false) with _ -> false) ->
+                forceValue st frame r
+            | r -> r
+        with
+        | InterpPanic (code, msg, None, 0) when not anonymous ->
+            let s = Blade.IR.declSpanOf callable.Name
+            let s = if s.StartLine > 0 then s else Blade.IR.declSpanOf callable.SourceName
+            if s.StartLine > 0 && s.File.IsSome then raise (InterpPanic (code, msg, s.File, s.StartLine))
+            else raise (InterpPanic (code, msg, None, -1))
+    if isFunctionBody then st.FunctionCallDepth <- st.FunctionCallDepth - 1
+    if not inlineHoist then popFrame st
+    if not inlineHoist then st.Depth <- st.Depth - 1
+    // A NAMED function converts at `return` to its declared type's width, as
+    // its C++ declaration does; a lifted lambda (`__lambda_<id>`, a C++
+    // `auto` return) returns its body's own width -- no conversion.
+    if callable.Name.StartsWith "__lambda" then result
+    else coerceScalarTo callable.RetType result
 
 /// First-match with guard fall-through. Each candidate case gets a fresh child
 /// scope so that a pattern which partially binds and then fails (or whose guard
@@ -1177,6 +1508,33 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
          | VArray ba ->
              let coords = indices |> List.map (fun e -> toI64 (evalExpr st env e))
              ArrayOps.writeIndexed ba coords v
+         | VSparse sv ->
+             // Sparse::operator() writes an EXISTING key's compact cell. Keep
+             // the same backing store (formal/ordinary aliases share it), not
+             // sparseToDense's copy; partial reads remain independent gathers.
+             let packed =
+                 match sv.LeadRank, indices with
+                 | 1, first :: rest when (match first with IRTuple _ -> false | _ -> true) -> IRTuple [first] :: rest
+                 | _ -> indices
+             match packed with
+             | IRTuple coords :: trailing when coords.Length = sv.LeadRank ->
+                 match classifyCompoundIndexTuple sv.LeadRank coords with
+                 | CompoundFull ->
+                     if sv.IndexTypes.Length <> 1 || sv.TrailingStride <> 1L || not trailing.IsEmpty then
+                         raise (InterpUnsupported "sparse assignment with trailing axes/indices is not supported")
+                     // evalExpr already evaluated the RHS, then the target
+                     // above; evaluate packed key coordinates once in order,
+                     // before key lookup. No trailing offset is admitted.
+                     let key = coords |> List.map (fun e -> toI64 (evalExpr st env e)) |> Array.ofList
+                     let r = ArrayOps.sparseLinearize sv key
+                     let compact =
+                         { ElemType = sv.ElemType
+                           IndexTypes = []
+                           Extents = [| sv.Cardinality * sv.TrailingStride |]
+                           Data = sv.Data }
+                     ArrayOps.writeCell compact [int64 r] v
+                 | CompoundPartial _ -> raise (InterpUnsupported "partial/wildcard sparse assignment is not supported")
+             | _ -> raise (InterpUnsupported "sparse assignment requires a full packed key")
          | _ -> raise (InterpUnsupported "IRAssign to non-array index target"))
     | LVOther _ -> raise (InterpUnsupported "IRAssign to non-lvalue target")
 
@@ -1301,7 +1659,7 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
 /// Run.execProgram calls this once per binding, in module order, so
 /// shouldDeferBinding sees every earlier binding's cell already populated,
 /// coinciding with computeDeferredIds' fold.
-let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
+let rec evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     match b.Value with
     | IRMethodFor _ | IRObjectFor _ ->
         VLoopObj { Provenance = b.Value; Captured = env }
@@ -1316,6 +1674,13 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     | IRSegmentsGrid bounds -> segmentsGridValue bounds
     | v when shouldDeferBinding env b.Type v ->
         VDeferred (b.Value, env)
+    // A let chain whose final value defers (CodeGen.genLetChainBinding emits
+    // the inner lets, then defers the final value under the binding's name):
+    // bind the inner lets, then classify the final value as the binding.
+    | v when letChainDefers env b.Type v ->
+        let (lets, finalExpr) = peelLetChain v
+        evalExpr st env (wrapLets lets (IRLit IRLitUnit)) |> ignore
+        evalBinding st env { b with Value = finalExpr }
     | _ ->
         // Force after eager evaluation: evalExpr's unconditional-defer arms
         // (e.g. a scalar `<|>` choice) can hand back VDeferred even when the
@@ -1331,10 +1696,11 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
          | IRArrayLit (elements, arrType), VArray arr ->
-             // The C++ lane's own spelling (bindingCppName): a module member
-             // `M.x` is `M__x` there, and the panic text must agree.
-             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else Blade.CodeGenState.sanitizeCppName b.Name
-             checkArrayLitRowExtents cppName elements arrType arr
+             // The BLADE name, as the C++ lane's guard spells it too
+             // (genArrayLiteral's sourceName). It used to go through
+             // sanitizeCppName, which reads whatever rename table this flow
+             // last installed -- a long REPL session could show `a_extents_`.
+             checkArrayLitRowExtents b.Name elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose
         // initializer references an existing array (`let U = Z`) -- the
@@ -1345,7 +1711,9 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         | IRVar _, VArray ba when (b.IsMutable || Set.contains b.Id st.MutableArrayLets)
                                   && isDenseCopyableArray ba ->
             VArray (copyBladeArray ba)
-        | _ -> value
+        // A scalar binding holds its DECLARED width (`int32_t mx =
+        // 2147483647L`, `float a = ...`).
+        | _ -> coerceScalarTo b.Type value
 
 // Public call entry.
 

@@ -1,0 +1,16 @@
+// TEST: Fold Seed Alias Read Of The Operand Snapshot
+// Gap G214 (round 4 wave 8, Codex diff review round 1): the seed reads a cell
+// of e, a deferred ALIAS of the fold operand d. The read forces the alias
+// class under its own names, so d is a snapshot from the fold on and w reads
+// it after the write to x (the C++ lane copied its private temporary into e
+// and left d deferred: w = 20.0).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0
+let p = method_for(d) <@> lambda(v) -> v + 1.0
+let e = d
+let s = reduce(p, (+), e(1))
+x(0) = 10.0
+let w = d(0)
+// EXPECT: s = 19.0
+// EXPECT: w = 2.0
+// EXPECT: e = [2.0, 4.0, 6.0]

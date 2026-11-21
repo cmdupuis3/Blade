@@ -1,0 +1,17 @@
+// TEST: Fold-Map Elision Declines A Write Between The Compute And Its Fold
+// ============================================================================
+// `a(0) = 100.0` runs between `c = a - m` and the fold: c holds the cells
+// computed BEFORE the write, so moving the centering into the fold would read
+// the written cell. The interval audit (the shared write analysis) declines;
+// the value is the stored snapshot's.
+type I = Idx<4>
+function spread(a: mut Array<Float64 like I>) -> Float64 = {
+    let m = reduce(a, (+)) / 4.0
+    let c = a - m
+    a(0) = 100.0
+    reduce(c * c, (+)) / 4.0
+}
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let s = spread(x)
+// EXPECT: s = 1.25
+// EXPECT: x = [100.0, 2.0, 3.0, 4.0]

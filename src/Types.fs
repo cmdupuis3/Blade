@@ -94,20 +94,79 @@ type SymcomState =
 
 // Array Identity Tracking (critical for symmetry exploitation)
 
-/// Tracks the identity of arrays for commutativity detection
+/// Tracks the identity of arrays for commutativity detection.
+///
+/// (docs/plans/plan-identity-transpose-compute.md 2.7.) The former
+/// `AIDDerived of base * op` constructor is RETIRED: nothing ever constructed
+/// it and `sameIdentity` never answered it equal, so it named no identity
+/// (a derived operand -- a transpose, a view -- needs the plan's versioned
+/// operand key with its structural map, section 2 / P2, not a string tag).
+/// `AIDParameter` is KEPT with the definition it has always had (one
+/// parameter slot of one callable, equal by name and position): it is the
+/// constructor reserved for section 2.2's parameter keys and is still never
+/// minted on this branch.
 type ArrayIdentity =
     | AIDLiteral of IRId                    // Literal array with unique ID
     | AIDVariable of name: string           // Named variable
-    | AIDParameter of name: string * idx: int  // Function parameter
-    | AIDDerived of base': ArrayIdentity * op: string  // Derived from another array
+    | AIDParameter of name: string * idx: int  // Function parameter slot (reserved for plan 2.2; not minted yet)
+    /// An IDENTITY-TRANSPARENT alias spelled `name` of the array `root`: a
+    /// member of a top-level pure deferred alias class (formalism 10.2, 8.3;
+    /// docs/plans/plan-identity-transpose-compute.md 2.1), or a top-level
+    /// `let B = A` over a STORED array that nothing in the program can write
+    /// (plan 2.1's second step; TypeCheckSupport.recordStoredAliasMember). It
+    /// IS `root` for every identity question (`sameIdentity` sees through
+    /// it); `name` is kept only so decision records name the operand as
+    /// written. Minted by TypeCheckSupport.loopOperandIdentity alone, which
+    /// fails closed to the operand's own `AIDVariable` whenever the class is
+    /// not proved.
+    | AIDAlias of root: ArrayIdentity * name: string
 
 /// Check if two array identities are the same
-let sameIdentity a b =
+let rec sameIdentity a b =
     match a, b with
+    | AIDAlias (r, _), _ -> sameIdentity r b
+    | _, AIDAlias (r, _) -> sameIdentity a r
     | AIDVariable n1, AIDVariable n2 -> n1 = n2
     | AIDParameter (n1, i1), AIDParameter (n2, i2) -> n1 = n2 && i1 = i2
     | AIDLiteral id1, AIDLiteral id2 -> id1 = id2
     | _ -> false
+
+/// A PROVIDER VARIABLE's array identity (plan-identity-transpose-compute 2.7):
+/// the STORE it belongs to and its name in that store. `storeKey` is minted
+/// ONCE PER LOAD by the provider (`<binding>#<fresh id>`), so two stores that
+/// both hold a variable `A` -- every CSV store's `data` -- can never answer the
+/// same identity, while every read of one store's `A` shares one. Before,
+/// the identity was the bare file variable name.
+let providerVarIdentity (storeKey: string) (varName: string) : ArrayIdentity =
+    AIDVariable $"{storeKey}.{varName}"
+
+/// THE STORED-ALIAS IDENTITY DECISIONS (docs/plans/plan-identity-transpose-
+/// compute.md 2.1, second step): one entry per top-level `let B = A` the
+/// checker judged for identity transparency over a STORED array
+/// (TypeCheckSupport.recordStoredAliasMember), with its verdict -- Ok
+/// evidence (B takes A's identity) or Error first-failed-condition (B keeps
+/// its own). Written at typecheck, read by Lowering, which records each as
+/// `[alias-identity v1]` and cross-checks every applied one against the
+/// read-only alias plan's own admission (Optimize.recordAliasIdentity).
+/// Identity is a LANGUAGE fact: nothing here depends on a knob. Reset by
+/// TypeCheck.checkProgram; without a reset `record` is a no-op.
+module StoredAliasIdentity =
+    type Entry =
+        { AliasId: IRId
+          Alias: string
+          Root: string
+          RootId: IRId
+          Verdict: Result<string list, string> }
+    let private cell = new System.Threading.AsyncLocal<System.Collections.Generic.List<Entry>>()
+    let reset () = cell.Value <- System.Collections.Generic.List<Entry>()
+    let record (e: Entry) =
+        match cell.Value with
+        | null -> ()
+        | l -> if not (l |> Seq.exists (fun x -> x.AliasId = e.AliasId)) then l.Add e
+    let all () : Entry list =
+        match cell.Value with
+        | null -> []
+        | l -> List.ofSeq l
 
 // Index Types with Dependency Tracking
 
@@ -485,19 +544,103 @@ let haloContributors (h: HaloAccess) (outExtent: int64) (j: int64) : (int * int6
     |> List.map (fun o -> (o, j - h.Start - int64 o))
     |> List.filter (fun (_, i) -> 0L <= i && i < outExtent)
 
-/// The run boundaries of every `Chunked` alias registered in the current
+/// The run geometry of every `Chunked` alias registered in the current
 /// compilation, by alias (docs/plans/structural/07): what the stencil
 /// emitter reads to drive a halo map over a streamed segmented source one
 /// run at a time (§2.3). The checker records it beside its own
 /// Segmentations table; AsyncLocal, like the provider registries, so
-/// parallel test compilations do not see each other.
+/// parallel test compilations do not see each other. Uniform aliases retain
+/// only extent/edge; explicit consumers request expansion when needed.
 module SegmentTable =
     open System.Threading
-    let private table = new AsyncLocal<Map<string, int64 list>>()
+    type Runs =
+        | UniformRuns of extent: int64 * edge: int64
+        | ExplicitRuns of offsets: int64 list
+    let private table = new AsyncLocal<Map<string, Runs>>()
     let private entries () = match box table.Value with null -> Map.empty | _ -> table.Value
-    let record (alias: string) (offsets: int64 list) = table.Value <- Map.add alias offsets (entries ())
-    let tryFind (alias: string) : int64 list option = Map.tryFind alias (entries ())
+    let record (alias: string) (offsets: int64 list) = table.Value <- Map.add alias (ExplicitRuns offsets) (entries ())
+    let recordUniform (alias: string) (extent: int64) (edge: int64) =
+        table.Value <- Map.add alias (UniformRuns (extent, edge)) (entries ())
+    let tryFindRuns (alias: string) : Runs option = Map.tryFind alias (entries ())
+    /// Compatibility expansion for consumers that require an explicit table.
+    /// The certified uniform halo path never calls this O(number of runs) API.
+    let toExplicitOffsets (runs: Runs) : int64 list =
+        match runs with
+        | ExplicitRuns offsets -> offsets
+        | UniformRuns (n, k) ->
+            if n < 0L || k <= 0L || (n > 0L && k > n) then
+                invalidArg "runs" "invalid uniform segmentation extent/edge"
+            if n = 0L then [0L; 0L]
+            else
+                let rec loop at acc =
+                    if at = n then List.rev (n :: acc)
+                    else loop (at + min k (n - at)) (at :: acc)
+                loop 0L []
+    let tryFind (alias: string) : int64 list option = tryFindRuns alias |> Option.map toExplicitOffsets
     let reset () = table.Value <- Map.empty
+
+/// WHERE A DECLARED TYPE CAME FROM (D11: module-qualified type identity).
+/// A type, index type or variant constructor declared by a NON-main module
+/// `A` has the IDENTITY `A.P` (A's own `P`, never confused with B's `P` or
+/// main's): what IRTNamed / an index `Tag` / IRefNamed / VariantTags /
+/// IRTypeDef carry from the declaration on. The main module's declarations
+/// keep their bare names (a single-module program is unchanged). This table
+/// maps a qualified identity to its declaring module and SOURCE name, for
+/// every consumer that shows a type to the user (diagnostics, printed struct
+/// and enum values) -- never string surgery on the identity (dotted module
+/// names, provider axes `store.index.y` and synthesized tags all contain
+/// dots). The mapping is a pure function of the declaration (module and
+/// name), so one process-wide table serves every compilation.
+module TypeOrigins =
+    let private table = System.Collections.Concurrent.ConcurrentDictionary<string, string * string>()
+    /// The identity of `source` declared in `moduleName` (None = main).
+    let identityOf (moduleQualifier: string option) (source: string) : string =
+        match moduleQualifier with
+        // A `__`-prefixed (synthetic) name keeps its spelling: the prefix is
+        // what every gate reads to treat it as compiler-made (plot.blade's
+        // `__B16` index aliases), so a qualifier must never hide it.
+        | Some m when m <> "" && not (source.StartsWith "__") -> m + "." + source
+        | _ -> source
+    let record (identity: string) (moduleName: string) (source: string) =
+        if identity <> source then table.[identity] <- (moduleName, source)
+    let tryFind (identity: string) : (string * string) option =
+        match table.TryGetValue identity with
+        | true, v -> Some v
+        | _ -> None
+    /// The name the program wrote: a qualified identity's source name, any
+    /// other string as-is.
+    let sourceName (identity: string) : string =
+        match table.TryGetValue identity with
+        | true, (_, s) -> s
+        | _ -> identity
+    let isQualified (identity: string) : bool = table.ContainsKey identity
+    /// THE MAIN MODULE of a program of `count` modules: the entry, which
+    /// every program-assembling path (ModuleResolve's dependency order, the
+    /// multi-file corpus harness, `ide check`'s dependency prepend) puts LAST.
+    /// Its declarations keep bare names -- the checker's identity rule and
+    /// Lowering.qualifyModuleNames' value rule read this one predicate.
+    let isMainModule (index: int) (count: int) : bool = index = count - 1
+    /// The C++ spelling of a type / constructor identity: the module dots
+    /// become `__` (the binding scheme, `A.x` -> `A__x`); a main-module name
+    /// is unchanged.
+    let cppName (identity: string) : string =
+        if table.ContainsKey identity then identity.Replace(".", "__") else identity
+
+/// Optional private intermediate capability. These are tracked workspace and
+/// serialized disk allowances, NOT a whole-program memory or physical disk cap.
+/// A caller deliberately binding this policy to an artifact authorizes its
+/// persistent scratch behavior. None at existing entry points stays resident.
+/// BlockCells 0 = the certified source's chunk edge (resolved after the
+/// certificate); ResidentBytes = the RETAIN allowance: a certified region
+/// whose resident intermediate (8 N bytes, the logical pool) fits it keeps
+/// the resident two-pass emission (0 = never retain: always spool).
+type PrivateSpoolPolicy = {
+    Root: string
+    TrackedWorkspaceBytes: uint64
+    LogicalDiskBytes: uint64
+    BlockCells: uint64
+    ResidentBytes: uint64
+}
 
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2):
 /// the plan `Blade.Optimize.planPoolReuse` computes per function body and
@@ -527,6 +670,7 @@ module PoolReuseTable =
     let donors () : Map<IRId, IRId> = (get ()).Donors
     let recordReturn (func: IRId) (donor: IRId) = cell.Value <- { get () with ReturnDonors = Map.add func donor (get ()).ReturnDonors }
     let tryReturnDonor (func: IRId) : IRId option = Map.tryFind func (get ()).ReturnDonors
+    let returnDonors () : Map<IRId, IRId> = (get ()).ReturnDonors
     let setCurrentReturnDonor (d: IRId option) = cell.Value <- { get () with CurrentReturnDonor = d }
     let currentReturnDonor () : IRId option = (get ()).CurrentReturnDonor
 
@@ -1111,16 +1255,16 @@ type ElemType =
 
 /// Explicit numeric cast heads: the surface scalar type names accepted in
 /// CALL position (`Float32(x)`, `Int64(floor(x))`), mapped to the target
-/// element type. Deliberately the same aliases as type position
-/// (TypeLower.lowerTypeExpr's scalar arms: "Int" is Int32, "Float"/"Double"
-/// are Float64) so a name means one thing in type and cast position alike.
+/// element type. Only BIT-SIZED names (round 6): the width-less `Int`,
+/// `Float` and `Double` are refused by the parser with a steer (BL1004), in
+/// type and cast position alike.
 /// Narrower than TypeLower.builtinScalarNames on purpose: Nat/Bool/String/
 /// Char/Void/Poly/Array are not value conversions. Keep the three tables'
 /// name sets consistent when adding a scalar.
 let numericCastTargets : Map<string, ElemType> =
     Map.ofList [
-        "Int", ETInt32; "Int32", ETInt32; "Int64", ETInt64
-        "Float", ETFloat64; "Float64", ETFloat64; "Double", ETFloat64
+        "Int32", ETInt32; "Int64", ETInt64
+        "Float64", ETFloat64
         "Float32", ETFloat32
         "Complex64", ETComplex64; "Complex128", ETComplex128 ]
 
@@ -1418,3 +1562,166 @@ let domainCardOf (levels: DomainLevel list) : int64 =
                 v <- v + 1L
             total
     go 0
+
+/// The DIAGONAL schedule of a two-field band: the same cells as the plan, in
+/// (k = i - j, i) order -- k over [KLo, KHi], and for each k the field i over
+/// [max(ILo, JLo + k), min(IHi, JHi + k)] with j = i - k.
+type DomainDiagonal = { KLo: int64; KHi: int64; ILo: int64; IHi: int64; JLo: int64; JHi: int64 }
+
+/// A plan is a BAND when it has two fields, the outer one box-bounded and the
+/// inner one bounded by its box AND by the outer field from both sides with
+/// unit slope (`j >= i + cl`, `j <= i + ch`) -- what `abs(i - j) <= w` (or any
+/// pair of difference conjuncts) projects to. Its cells are then the union of
+/// the diagonals k = i - j in [-ch, -cl], each a contiguous run of i.
+///
+/// A LICENSED fold over a band may walk it diagonal by diagonal: the cells and
+/// each cell's arithmetic are unchanged, only the summation order moves, which
+/// is what the licence permits. It is the order the expert writes for a banded
+/// operator (`do k = -w, w; do i`), and it is faster on its own: the inner run
+/// is ~n long instead of 2w + 1, and a kernel term that depends on the cell
+/// only through i - j (a band's coefficient) is invariant in the inner loop,
+/// so the back end hoists it -- one evaluation per diagonal where the row walk
+/// paid one per cell (bench gap G33, band). The cell count is re-derived from
+/// the diagonals and must equal the plan's, or no diagonal is offered.
+let domainDiagonal (plan: DomainPlan) : DomainDiagonal option =
+    match plan.Levels with
+    | [ l0; l1 ] ->
+        let isConst (f: DomainAffine) = f.Coefs.IsEmpty
+        let unitOnOuter (f: DomainAffine) = f.Coefs = [ (0, 1L) ]
+        let loC, loA = l1.Lo |> List.partition isConst
+        let hiC, hiA = l1.Hi |> List.partition isConst
+        if l0.Lo.IsEmpty || l0.Hi.IsEmpty
+           || not (List.forall isConst l0.Lo && List.forall isConst l0.Hi)
+           || loC.IsEmpty || hiC.IsEmpty || loA.IsEmpty || hiA.IsEmpty
+           || not (List.forall unitOnOuter loA && List.forall unitOnOuter hiA) then None
+        else
+            let iLo = l0.Lo |> List.map _.Const |> List.max
+            let iHi = l0.Hi |> List.map _.Const |> List.min
+            let jLo = loC |> List.map _.Const |> List.max
+            let jHi = hiC |> List.map _.Const |> List.min
+            let cl = loA |> List.map _.Const |> List.max
+            let ch = hiA |> List.map _.Const |> List.min
+            // k = i - j lies in [-ch, -cl]; trimmed to the k whose i run is
+            // non-empty (max(iLo, jLo + k) <= min(iHi, jHi + k)).
+            let kLo = max (-ch) (iLo - jHi)
+            let kHi = min (-cl) (iHi - jLo)
+            if iLo > iHi || kLo > kHi then None
+            else
+                let card =
+                    seq { kLo .. kHi }
+                    |> Seq.sumBy (fun k -> max 0L (min iHi (jHi + k) - max iLo (jLo + k) + 1L))
+                if card <> plan.Card then None
+                else Some { KLo = kLo; KHi = kHi; ILo = iLo; IHi = iHi; JLo = jLo; JHi = jHi }
+    | _ -> None
+
+/// ROUND 6 NUMERIC DEFAULTS (formalism 2.4). The width a numeric literal
+/// takes when NOTHING fixes it -- no operator partner, annotation, parameter,
+/// cast, shared generic variable, branch or array-literal partner, index
+/// position (those adapt it, TypeCheckSupport's literal-only retype):
+/// an integer literal is an Int32 when its value fits Int32, else an Int64;
+/// a float literal is a Float32 unless its magnitude is past Float32's finite
+/// range (then a Float64). The one table every site reads (the checker's
+/// synthesis and literal-variable seeds, StaticEval).
+module LiteralDefaults =
+    /// The integer literal's default under the round-6 rule.
+    let intDefault (n: int64) : ElemType =
+        if n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue then ETInt32 else ETInt64
+
+    /// The float literal's default under the round-6 rule.
+    /// Past Float32's finite range at EITHER end (lead ruling R1): a
+    /// magnitude above FLT_MAX, or a NONZERO value whose Float32 rounding is
+    /// zero or subnormal, is a Float64.
+    let floatDefault (f: float) : ElemType =
+        if not (System.Double.IsFinite f) || f = 0.0 then ETFloat32
+        elif abs f > float System.Single.MaxValue then ETFloat64
+        else
+            let r = float32 f
+            if r = 0.0f || abs r < 1.17549435e-38f then ETFloat64 else ETFloat32
+
+    /// A literal VALUE a width can hold: an integer within the width's range,
+    /// a float within Float32's finite range (Float64 holds every literal).
+    let intFits (et: ElemType) (n: int64) : bool =
+        match et with
+        | ETInt32 -> n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue
+        | ETInt64 -> true
+        | _ -> false
+    let floatFits (et: ElemType) (f: float) : bool =
+        match et with
+        // The ROUNDED value decides at BOTH ends (lead ruling; R19 review): a
+        // literal fits iff its round-to-nearest Float32 is finite and normal.
+        // 3.4028235e38 (FLT_MAX's shortest spelling, a hair above it as a
+        // double) rounds to FLT_MAX and fits; from the halfway point
+        // 3.4028235677973366e38 up it rounds to an infinity; a nonzero value
+        // whose rounding is zero or subnormal does not fit.
+        | ETFloat32 ->
+            if not (System.Double.IsFinite f) || f = 0.0 then true
+            else
+                let r = float32 f
+                not (System.Single.IsInfinity r) && abs r >= 1.17549435e-38f
+        | ETFloat64 -> true
+        | _ -> false
+
+    /// R19, THE LITERAL-FIT REFUSAL: the one sentence every site that gives a
+    /// numeric literal a NARROWER width than its value needs reports (the
+    /// checker's literal arms -- an annotation, a parameter, a struct field, a
+    /// return, an array-literal cell, a default --, the per-instance narrowing
+    /// after monomorphization, static folding). `text` is the literal as
+    /// written (a negated literal is judged as a whole: `-2147483648` fits
+    /// Int32). A literal adapts to the width its context gives it only when
+    /// its value fits (intFits / floatFits); it is never wrapped, nor rounded
+    /// to an infinity, a subnormal or zero.
+    let misfitMessage (et: ElemType) (text: string) : string =
+        match et with
+        | ETInt32 ->
+            $"the integer literal `{text}` does not fit Int32, the width its context gives it (Int32 holds -2147483648 .. 2147483647): "
+            + "a literal takes its context's width only when its value fits, and Blade never wraps it into a narrower integer (formalism 2.4) -- "
+            + $"give the context a wider type (an Int64 annotation or parameter), or convert explicitly (`Int32({text})`) if the wrap is intended"
+        | ETFloat32 | ETComplex64 ->
+            let w = if et = ETFloat32 then "Float32" else "Complex64 (Float32 components)"
+            $"the float literal `{text}` does not round to a finite, normal Float32, and its context gives it {w} (a literal fits when it rounds to a finite, normal Float32: a magnitude from about 1.1754944e-38 to about 3.4028235e38): "
+            + "a literal takes its context's width only when its value fits, and Blade never rounds it to an infinity, a subnormal or zero (formalism 2.4) -- "
+            + "declare it Float64 (a Float64 annotation or parameter), or write a literal that fits"
+        | _ -> $"the literal `{text}` does not fit {et}, the width its context gives it"
+
+    /// The spelling of an integer / float literal in a misfit message.
+    let intText (n: int64) : string = string n
+    let floatText (f: float) : string =
+        let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        let s = s.Replace("E+", "e").Replace("E-", "e-").Replace("E", "e")
+        if s.Contains "." || s.Contains "e" || s.Contains "Infinity" || s.Contains "NaN" then s else s + ".0"
+
+    /// R19 (lane a2), THE SPELLING-AWARE FORMS every literal site reads: a
+    /// float literal at `span` whose SPELLING the lexer's double could not hold
+    /// (Blade.Ast.DegenerateFloatLiterals: `1e400` parsed to an infinity, a
+    /// nonzero `1e-400` to 0.0) denotes a value outside Float32's finite range,
+    /// so it does not fit Float32 and DEFAULTS to Float64 (formalism 2.4, read
+    /// by spelling). A Float64 context keeps the double (inf / 0.0; review
+    /// item R32 is open): refusing it there too is the one-line change of
+    /// dropping `et <> ETFloat64 &&` in floatLiteralFits.
+    let floatLiteralFits (et: ElemType) (f: float) (span: Blade.Ast.Span) : bool =
+        floatFits et f && not (et <> ETFloat64 && Blade.Ast.DegenerateFloatLiterals.isDegenerate span)
+    let floatDefaultAt (f: float) (span: Blade.Ast.Span) : ElemType =
+        if Blade.Ast.DegenerateFloatLiterals.isDegenerate span then ETFloat64 else floatDefault f
+    /// The literal's text in a misfit message: its spelling when its double
+    /// cannot show it, else the double's shortest form.
+    let floatTextAt (f: float) (span: Blade.Ast.Span) : string =
+        match Blade.Ast.DegenerateFloatLiterals.spellingOf span with
+        | Some s -> s
+        | None -> floatText f
+
+
+/// G190 (c), round 4 wave 8: the DECLARED `mut` parameter positions of every
+/// callable the type checker saw (TypeEnv.MutParamPositions, keyed by the
+/// function's binder id -- the IRCallable id lowering gives it), published by
+/// checkProgram for the lowering pass that refuses a `mut` argument sharing
+/// storage with anything the callee reads (Lowering.refuseAliasedMutArguments).
+/// Per flow (AsyncLocal, the house pattern): a host checking two programs at
+/// once keeps two tables. An unpublished flow answers no positions.
+module MutParamTable =
+    let private slot = System.Threading.AsyncLocal<System.Collections.Generic.Dictionary<IRId, int list>>()
+    let publish (d: System.Collections.Generic.Dictionary<IRId, int list>) : unit =
+        slot.Value <- System.Collections.Generic.Dictionary<IRId, int list>(d)
+    let positions (id: IRId) : int list =
+        match slot.Value with
+        | null -> []
+        | d -> match d.TryGetValue id with | true, l -> l | _ -> []

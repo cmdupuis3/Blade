@@ -1,0 +1,7 @@
+// TEST: a negated float literal past -FLT_MAX under a Float32 annotation (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let x: Float32 = -1e40
+// ERROR: BL3020 @ 5:18

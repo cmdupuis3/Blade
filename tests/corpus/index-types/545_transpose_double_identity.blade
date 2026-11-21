@@ -1,0 +1,16 @@
+// TEST: Transpose Double Identity
+// A chain of transposes composes to ONE permutation and an identity
+// permutation disappears (transpose-normal-form v1, BLADE_TRANSPOSE_ELIDE):
+// transpose(transpose(M, [0, 1]), [0, 1]) IS M. Bound by name, the binding
+// keeps the copy-on-bind contract; nothing here writes M or T2, so the
+// read-only alias plan shares M's storage (no transpose copy, no pool copy).
+// Read inside a larger expression, the fold reads M in place. Non-square
+// 2x3 so a forgotten extent swap could not pass.
+let M: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let T2 = transpose(transpose(M, [0, 1]), [0, 1])
+let s = reduce(transpose(transpose(M, [0, 1]), [0, 1]), (+), axes = 2)
+let c = T2(1, 2)
+// EXPECT: M = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: T2 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: s = 21.0
+// EXPECT: c = 6.0

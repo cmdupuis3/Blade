@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "st05_cheap",
+  "group": "M",
+  "title": "ST05 frontier: one cheap producer (2 v + 1), two distant fold consumers",
+  "sizes": {
+    "smoke": {
+      "n": 20011
+    },
+    "full": {
+      "n": 3000017
+    }
+  },
+  "regimes": [
+    "serial-licensed-native"
+  ],
+  "inputonly": true,
+  "hypothesis": {
+    "natural": "n/a (control)",
+    "expert": "n/a (control)"
+  },
+  "notes": "n = 3,000,017 (24 MB per array).",
+  "arms": [
+    "blade-llvm",
+    "blade-cpp",
+    "blade-cpp@share",
+    "blade-cpp@nojoin",
+    "blade-cpp@materialize"
+  ],
+  "source_of_truth": "bench/RESULTS.md section 20 (round 4 wave 5, lane E); pins: bench/validation/ref_controls.py",
+  "variants": {
+    "share": {
+      "compile": {
+        "BLADE_RECOMPUTE": "0"
+      }
+    },
+    "nojoin": {
+      "compile": {
+        "BLADE_SIBLING_FOLDS": "0",
+        "BLADE_JOIN_PRODUCER": "0"
+      }
+    },
+    "materialize": {
+      "compile": {
+        "BLADE_SIBLING_FOLDS": "0",
+        "BLADE_JOIN_PRODUCER": "0",
+        "BLADE_RECOMPUTE": "0"
+      }
+    }
+  }
+}

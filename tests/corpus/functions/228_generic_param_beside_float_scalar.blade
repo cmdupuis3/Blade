@@ -11,31 +11,31 @@
 // to `x` (`-x`, `sqrt(x)`) lift over an array instance the same way.
 // ============================================================================
 function addone(x: T) = x + 1.0
-let a = addone([1.0, 2.0])
-let s = addone(3.0)
+let a = addone(Float64([1.0, 2.0]))
+let s = addone(Float64(3.0))
 // EXPECT: a = [2.0, 3.0]
 // EXPECT: s = 4.0
 
 // The declared spelling, with the scalar on the LEFT, at a rank-2 instance.
 function flip(x: T) -> T = 1.0 - x
-let fm = flip([[1.0, 2.0], [3.0, 4.0]])
-let fs = flip(0.25)
+let fm = flip(Float64([[1.0, 2.0], [3.0, 4.0]]))
+let fs = flip(Float64(0.25))
 // EXPECT: fm = [[0.0, -1.0], [-2.0, -3.0]]
 // EXPECT: fs = 0.75
 
 // Two ops in a row, and a generic caller passing its own `T` on.
 function half_up(x: T) = x / 2.0 + 0.5
 function twice_up(x: T) = addone(x) * 2.0
-let hv = half_up([1.0, 3.0])
-let tv = twice_up([1.0, 2.0])
-let ts = twice_up(0.5)
+let hv = half_up(Float64([1.0, 3.0]))
+let tv = twice_up(Float64([1.0, 2.0]))
+let ts = twice_up(Float64(0.5))
 // EXPECT: hv = [1.0, 2.0]
 // EXPECT: tv = [4.0, 6.0]
 // EXPECT: ts = 3.0
 
 // The partner promotes INTO complex and Float32 (a float literal adapts to
 // the narrow width, as `a32 * 1.0` does), so those instances keep `T` too.
-let z = addone(complex(1.0, 2.0))
+let z = addone(Complex128(complex(1.0, 2.0)))
 let w = addone(Float32(2.5))
 let w1 = twice_up(Float32([1.0, 2.0]))
 // EXPECT: z = (2.0,2.0)
@@ -46,9 +46,9 @@ let w1 = twice_up(Float32([1.0, 2.0]))
 function neg(x: T) = -x
 function root(x: T) = sqrt(x)
 function add(x: T, y: T) = x + y
-let n = neg([1.0, 2.0])
-let r = root([4.0, 9.0])
-let ad = add([1.0, 2.0], [3.0, 4.0])
+let n = neg(Float64([1.0, 2.0]))
+let r = root(Float64([4.0, 9.0]))
+let ad = add(Float64([1.0, 2.0]), Float64([3.0, 4.0]))
 // EXPECT: n = [-1.0, -2.0]
 // EXPECT: r = [2.0, 3.0]
 // EXPECT: ad = [4.0, 6.0]
@@ -56,8 +56,8 @@ let ad = add([1.0, 2.0], [3.0, 4.0])
 // A unit-carrying parameter: the op's unit rides on the `T` result.
 Unit meters
 function dbl(x: T<meters>) = x * 2.0
-let d: Float<meters> = 1.5
-let dd: Float<meters> = dbl(d)
+let d: Float64<meters> = 1.5
+let dd: Float64<meters> = dbl(d)
 // EXPECT: dd = 3.0
 
 // An array's ELEMENT variable is never an array, so it keeps a scalar
@@ -66,5 +66,5 @@ let dd: Float<meters> = dbl(d)
 // the Float64 it always was. (Only a parameter's own variable -- x: T, which
 // is x: T^0, the arity-liftable scalar an array can instantiate -- is typed T.)
 function rowsum_up(row: T^1) = Float64(reduce(row, (+))) + 0.5
-let ri = rowsum_up([1, 2, 3])
+let ri = rowsum_up(Int64([1, 2, 3]))
 // EXPECT: ri = 6.5

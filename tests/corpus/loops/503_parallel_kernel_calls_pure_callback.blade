@@ -1,0 +1,10 @@
+// TEST: Parallel Kernel Calls A Pure Callback
+// Gap G41, Codex review W2F-5 finding 20, the positive control: the `where
+// omp` kernel calls the function-valued parameter `f`; every call site passes
+// the pure `twice`, so the kernel is proved write-free and keeps its team
+// (the omp-pragma block pins the pragma). A writing callback is refused:
+// mutability-errors/029.
+function twice(v: Float64) -> Float64 = v * 2.0
+function launch(f: (Float64) -> Float64) = method_for(0..2) <@> lambda(i) where omp(i: 1) -> f(Float64(i) + 1.0) |> compute
+let r = launch(twice)
+// EXPECT: r = [2.0, 4.0]

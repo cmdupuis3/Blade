@@ -1,0 +1,7 @@
+// TEST: a subnormal-at-Float32 literal in a Float32 array literal, BL9002 on master (rejects)
+// ============================================================================
+// R19: a numeric literal adapts to the width its context fixes only when its
+// value fits (formalism 2.4); master wrapped / overflowed it silently.
+// ============================================================================
+let xs: Array<Float32 like Idx<2>> = [1.0, 1e-40]
+// ERROR: BL3020 @ 5:44

@@ -1,0 +1,12 @@
+// TEST: A Kernel-Local Rank-2 Array Rebound To A Literal Frees Its Pools Every Trip
+// Gap G245 (a, b) (round 4 wave 9 lane d): the rank-2 twin of loops/837, read by full element
+// reads only (no view): 12.0 + 7.0 per trip.
+// EXPECT: total = 760.0
+type R = Idx<2>
+type C = Idx<3>
+type Trips = Idx<40>
+let total = reduce(method_for(range<Trips>) <@> lambda(k) -> {
+    let mut m: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    m = [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]
+    m((1 : R), (2 : C)) + m((0 : R), (0 : C))
+}, (+))

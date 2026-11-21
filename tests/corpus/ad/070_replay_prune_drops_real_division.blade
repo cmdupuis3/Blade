@@ -1,0 +1,25 @@
+// TEST: AD Replay Prune Drops A Dead Real Division And Keeps A Dead Integer Division
+import ad as ad
+// ============================================================================
+// ad-replay-prune v1 (opt-in, round 4 wave 6 typed grammar): a dead
+// `let half = x / 2.0` -- both operands PROVED real scalars (a Float64
+// parameter and a float literal) -- cannot panic (formalism 2.4: a real
+// division is inf / NaN), so the typed grammar admits it; a dead
+// `let q = Int64(3) / d` is an integer division (BL8013 on a zero divisor)
+// and is kept. `blade test access` pins the dropped target (`__in5_half` of
+// the inlined kernel loop) and that `q` stays; the values
+// are the same with the prune on and off (opt-diff). value = 3.0, dx = 3.0.
+// ============================================================================
+function k(x: Float64, d: Int64) -> Float64 = {
+    let half = x / 2.0
+    let q = Int64(3) / d
+    x
+}
+function f(x: Float64) -> Float64 = {
+    let ys = method_for(range<Idx<3>>)
+        <@> lambda(i) -> k(x, Int64(1)) |> compute
+    reduce(ys, (+))
+}
+let (value, dx) = ad.grad(f)(Float64(1.0))
+// EXPECT: value = 3.0
+// EXPECT: dx = 3.0

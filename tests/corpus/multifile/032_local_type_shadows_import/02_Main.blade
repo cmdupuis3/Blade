@@ -1,0 +1,17 @@
+// TEST: A main-module struct shadowing an imported one of the same name
+// MODULE: Main
+// ============================================================================
+// D11: an unqualified type name resolves to the LOCAL declaration first; the
+// imported one stays reachable through its module's API.
+module Main
+import A
+struct P { z: Float64 }
+let mine = P { z = 1.0 }
+// EXPECT: mine = P { z = 1.0 }
+let theirs = A.mk(2.0)
+// EXPECT: theirs = P { x = 2.0 }
+let t = A.fx(theirs)
+// EXPECT: t = 2.0
+function g(p: P) -> Float64 = p.z
+let u = g(mine)
+// EXPECT: u = 1.0

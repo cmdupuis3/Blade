@@ -1,11 +1,13 @@
 // TEST: Two modules declaring one variant constructor (rejects)
 // MODULE: Main
-// ERROR: BL2009
-// ERROR-CONTAINS: duplicate declaration of variant constructor 'Red'
+// ERROR: BL2010 @ 12:9
+// ERROR-CONTAINS: the imported modules declare more than one -- `A.Red`, `B.Red`
 // ============================================================================
-// Constructors are matched by bare name and emitted as global C++ names
-// (enum members, constructor functions), so two sum types of one program
-// cannot share one.
+// Each module's constructors are its own (D11: A's `Red` is `A.Red`, emitted
+// `A__Red`), so A and B may both declare `Red` -- but a bare `Red` in main,
+// which imports both and declares none, cannot say which one it means. The
+// use is refused, naming the qualified spellings (multifile/029 and /033 show
+// the qualified and the type-directed forms).
 module Main
 import A
 import B

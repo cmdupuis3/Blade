@@ -1,0 +1,33 @@
+// TEST: Reduce Dot-Class Threaded Lanes
+// Review item M14 (bench gap G25): a `where omp` fold over a deferred
+// computation is chunked per thread (Path B), and INSIDE each chunk the fold
+// now takes its fast form too -- the explicit K-lane vector tree for a
+// dot-class body (`x * y`, `w * w`), the `omp simd reduction` for any other
+// builtin-`+` body (`(v + 1.0) * v`, the composed-chain shape), while a
+// comm-declared user kernel keeps the serial chain per chunk (its combine is
+// a call). Partition by blade_fold::chunk_lo at every site; partials combined
+// in job order, so a fixed team reproduces bit for bit. The threaded vector
+// arm emits no loop nest at all. Routes are pinned by `blade test optimize`
+// and the emitted text by `blade test omp-reduce`; this file pins the values
+// in the default suite (threads on) and under `blade test interp loops`
+// (serial twin).
+//
+// INTEGER-VALUED data (see 110): exact under every chunking and association.
+// n = 1001 so an 8-thread team's chunks (125 / 126 elements) each walk a full
+// block, a vector remainder and a scalar tail of the tree.
+function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0
+type Ix = Idx<1001>
+let a = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 7 - 3) |> compute
+let b = method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % 5 - 2) |> compute
+let dot_ab = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, 0.0)
+let self_a = reduce(method_for(a) <@> lambda(w) -> w * w, lambda(p, q) where omp -> p + q, 0.0)
+let chain = reduce(method_for(a) <@> lambda(v) -> (v + 1.0) * v, lambda(p, q) where omp -> p + q, 0.0)
+let comm_kernel = reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x * y, myAdd, 0.0)
+let af = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 7 - 3) |> compute
+let bf = method_for(range<Ix>) <@> lambda(i) -> Float32(Int64(i) % 5 - 2) |> compute
+let dot_f32 = reduce(method_for(zip(af, bf)) <@> lambda(x, y) -> x * y, lambda(p, q) where omp -> p + q, Float32(0.0))
+// EXPECT: dot_ab = -1.0
+// EXPECT: self_a = 4004.0
+// EXPECT: chain = 4004.0
+// EXPECT: comm_kernel = -1.0
+// EXPECT: dot_f32 = -1.0

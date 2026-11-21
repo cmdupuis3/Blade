@@ -7,6 +7,6 @@
 //
 // The companion refusal is 042 (group_bucket, inline); a grouping escaping its
 // binding in any other position is BL3017, pinned by 035-039.
-let keys = [0, 1, 0, 1]
+let keys = Int64([0, 1, 0, 1])
 let sizes = extents(group_keys(keys))
 // Bind the keys to a name first, then ask that name for its extents.

@@ -8,7 +8,7 @@ import ad as ad
 
 type I = Idx<4>
 
-function f(a: Array<Float like I>) -> Float = {
+function f(a: Array<Float64 like I>) -> Float64 = {
     let m = method_for(a) <@> lambda(x) -> if x > 0.0 then x * x else 0.0 |> compute
     reduce(m, (+))
 }

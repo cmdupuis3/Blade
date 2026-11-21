@@ -1,0 +1,19 @@
+// TEST: A Function With A Mut Parameter Returned As A Value Is Refused (rejects)
+// ============================================================================
+// Gap G250 (1), round 4 wave 9 (lane C, C2; Codex diff review 5f64f352
+// finding 1): a function body RETURNING a mut-parameter function is a value
+// use like an argument -- `h = get()` does not resolve, so `h(xs, xs)` would
+// write the immutable xs unjudged. Refused (BL4005, every lane).
+// ============================================================================
+type A = Array<Float64 like Idx<2>>
+function bump(a: A, y: mut A) -> Float64 = {
+    y(0) = 9.0
+    a(0) + y(0)
+}
+function get() -> ((A, A) -> Float64) = bump
+let h = get()
+let xs: A = [2.0, 3.0]
+let r = h(xs, xs)
+// ERROR: BL4005
+// ERROR-CONTAINS: has a mut parameter and is used here as a VALUE
+// REJECT-AT: lower

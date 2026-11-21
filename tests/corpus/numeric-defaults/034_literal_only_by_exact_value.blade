@@ -1,0 +1,19 @@
+// TEST: a literal-only expression past Int32 by its exact value is Int64
+// ============================================================================
+// Lead ruling: the by-fit default reads the EXACT value of an expression made
+// only of literals -- `2 ^ 40` and `1000000 * 3000` are Int64, as the literal
+// `3000000000` is, and nothing wraps; `exp(100.0)` is past Float32's range and
+// is a Float64. Both the type and the value are pinned: C++ must emit
+// Int64 literals at their full width, including on Windows.
+// ============================================================================
+let p = 2 ^ 40
+let q: Int64 = p
+let m = 1000000 * 3000
+let m64: Int64 = m
+let e = exp(100.0)
+let e64: Float64 = e
+let big = e64 > 1e43
+// EXPECT: m = 3000000000
+// EXPECT: m64 = 3000000000
+// EXPECT: q = 1099511627776
+// EXPECT: big = true

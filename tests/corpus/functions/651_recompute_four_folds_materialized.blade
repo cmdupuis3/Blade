@@ -1,0 +1,18 @@
+// TEST: Recompute Selection Four Fold Consumers Materialized
+// ============================================================================
+// PM05: the same 1-op producer with FOUR fold consumers. Recomputing would
+// pay the producer three more times (+3 per cell) to save the same two cells
+// of traffic (x's write and the extra reads, -2 per cell): work +9 > traffic
+// -6, so the model keeps x's pool (`materialized -- recompute not
+// dominant`). Values: x = [2, 4, 6], 12 + 56 + 48 + 6 = 122.
+function four(a: T^1) -> T^0 = {
+    let x = method_for(a) <@> lambda(v) -> v * 2.0 |> compute
+    let s1 = reduce(x, (+))
+    let s2 = reduce(x, lambda(p, r) -> p + r * r, 0.0)
+    let s3 = reduce(x, (*))
+    let s4 = reduce(x, lambda(p, r) -> p + r * 0.5, 0.0)
+    s1 + s2 + s3 + s4
+}
+let a = Float64([1.0, 2.0, 3.0])
+let t = four(a)
+// EXPECT: t = 122.0

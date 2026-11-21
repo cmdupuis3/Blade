@@ -1,0 +1,20 @@
+// TEST: A lambda value used as a kernel over R values meets keys
+// ============================================================================
+// R3: `object_for(k) <@> codes` is the map `method_for(codes) <@> k`, typed as
+// that one, so k's arithmetic, negation and orderings read the keys. An
+// identity kernel only moves the values: they stay values of R.
+// ============================================================================
+type R = EnumIdx<[300, 100, 200]>
+let codes: Array<R like Idx<3>> = [100, 200, 300]
+let k = lambda(c) -> c + 1
+let d = object_for(k) <@> codes |> compute
+// EXPECT: d = [101, 201, 301]
+let kn = lambda(c) -> -c
+let e = object_for(kn) <@> codes |> compute
+// EXPECT: e = [-100, -200, -300]
+let kl = lambda(c) -> c < 150
+let f = object_for(kl) <@> codes |> compute
+// EXPECT: f = [true, false, false]
+let ki = lambda(c) -> c
+let g = object_for(ki) <@> codes |> compute
+// EXPECT: g = [100, 200, 300]

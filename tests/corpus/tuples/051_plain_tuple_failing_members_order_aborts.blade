@@ -1,0 +1,18 @@
+// TEST: Plain Tuple Failing Members Order (aborts)
+// ----------------------------------------------------------------------------
+// Gap G62 (round 3, W1-3; pre-existing lane divergence): a plain tuple of two
+// FAILING scalar members and no compute member. g++ evaluates
+// `std::make_tuple`'s arguments right to left, so the C++ lane reported the
+// division (BL8013) where the llvm lane and the interpreter, left to right,
+// report the checked cast (BL8006). More than one member can fail, so the
+// C++ lane now binds each evaluating member to a temporary in source order;
+// a tuple with at most one failing member keeps its single `make_tuple`
+// line (the cli block pins a two-literal tuple's emission).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let z: Array<Int64 like Row> = [0]
+let t = (a((a(0) : Row)), 1 / z(0))
+// ABORT: BL8006
+// ABORT: outside Row
+// ABORT: .blade:14

@@ -1,6 +1,6 @@
 // TEST: Output Type: Three-Way Same
 // Output type for 3-way same array: SymIdx<3, 3>
-let A = [1.0, 2.0, 3.0]
+let A = Float64([1.0, 2.0, 3.0])
 let L = method_for(A, A, A)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let result = L <@> f |> compute

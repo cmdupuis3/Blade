@@ -118,6 +118,16 @@ let dumpAll () =
     let maxim = im6 |> Array.map abs |> Array.max
     printfn "eig vs eigh symmetric 4x4: RE = %s (max |diff| = %s, max |im| = %s)" (fmtArr re6) (fmt maxd) (fmt maxim)
 
+    // --- the stable order on ties (R26; corpus math/121-123): equal values keep extraction order ---
+    let d112 = array2D [ [1.0; 0.0; 0.0]; [0.0; 1.0; 0.0]; [0.0; 0.0; 2.0] ]
+    let (qt, lt) = Jacobi.eigh 10 d112
+    printfn "eigh diag(1, 1, 2): LAM = %s Q = %s" (fmtArr lt) (fmtArr (flat2 qt))
+    let (ut, st, vt) = Jacobi.svd 10 d112
+    printfn "svd diag(1, 1, 2): S = %s U = %s V = %s" (fmtArr st) (fmtArr (flat2 ut)) (fmtArr (flat2 vt))
+    let rot3 = array2D [ [0.0; -1.0; 0.0]; [1.0; 0.0; 0.0]; [0.0; 0.0; 3.0] ]
+    let (ret, imt) = Eig.eig 90 rot3
+    printfn "eig [[0,-1,0],[1,0,0],[0,0,3]]: RE = %s IM = %s (pair +im first)" (fmtArr ret) (fmtArr imt)
+
     // --- hosvd rank-3 fixture (corpus math/04x): 3x3x3 ---
     let dims33 = [3; 3; 3]
     let x33 =

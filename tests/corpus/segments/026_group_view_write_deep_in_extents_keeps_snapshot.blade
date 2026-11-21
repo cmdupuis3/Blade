@@ -1,0 +1,20 @@
+// TEST: A Write Hidden Deep In Nested Extents Keeps The Structural Group's Snapshot
+// The write to the source hides ten extents deep: m's range bound is
+// `extents(0..extents(0..(... bump(a))))`, and `bump` writes `a(0) = 100`
+// through its `mut` parameter. The never-written closure walks embedded
+// extents to completion (gap G89: the collector's own depth bound is not a
+// proof), so the view declines and g keeps the values it grouped.
+function bump(v: mut Array<Int64 like Idx<6>>) -> Int64 = {
+    v(0) = 100
+    3
+}
+type I = Idx<6>
+type CI = Chunked<I, 4>
+let mut a: Array<Int64 like I> = [1, 2, 3, 4, 5, 6]
+let seg = segments(CI)
+let g = group_by(a, seg)
+let m = method_for(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..extents(0..bump(a)))))))))))) <@> lambda(v) -> v + 1 |> compute
+let sums = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [10, 11]
+// EXPECT: a = [100, 2, 3, 4, 5, 6]
+// EXPECT: m = [1, 2, 3]

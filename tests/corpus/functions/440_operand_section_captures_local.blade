@@ -4,7 +4,7 @@
 // escapes its function (returned, stored in an array) keeps the value it was
 // made with. `(- s)` stays negation; `(s -)` is the left section.
 function adder() = {
-    let s = 3.0
+    let s: Float64 = 3.0
     let add_s = (s +)
     add_s
 }
@@ -21,21 +21,21 @@ function count_up(n: Int64) = {
     (base +)
 }
 let f = adder()
-let r1 = f(1.0)
+let r1 = f(Float64(1.0))
 let g = scaler(3.0)
-let r2 = g(2.0)
+let r2 = g(Float64(2.0))
 let fs = pair(10.0, 4.0)
-let r3 = fs[0](1.0)
-let r4 = fs[1](9.0)
+let r3 = fs[0](Float64(1.0))
+let r4 = fs[1](Float64(9.0))
 let c = count_up(4)
-let r5 = c(2)
-let neg = (- 2.0)
+let r5 = c(Int64(2))
+let neg: Float64 = (- 2.0)
 let lt3 = (< 3)
-let r6 = lt3(2)
+let r6 = lt3(Int64(2))
 let pow2 = (^ 2)
-let r7 = pow2(5)
-let m = 10.0
-let mapped = method_for([1.0, 2.0, 3.0]) <@> (m *) |> compute
+let r7 = pow2(Int64(5))
+let m: Float64 = 10.0
+let mapped = method_for(Float64([1.0, 2.0, 3.0])) <@> (m *) |> compute
 // EXPECT: r1 = 4.0
 // EXPECT: r2 = 12.0
 // EXPECT: r3 = 8.0

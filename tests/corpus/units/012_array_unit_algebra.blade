@@ -6,10 +6,10 @@
 Unit meters
 Unit area = meters^2
 type SIdx = Idx<3>
-let A: Array<Float<meters> like SIdx> = [1.0, 2.0, 3.0]
-let B: Array<Float<meters> like SIdx> = [4.0, 5.0, 6.0]
+let A: Array<Float64<meters> like SIdx> = [1.0, 2.0, 3.0]
+let B: Array<Float64<meters> like SIdx> = [4.0, 5.0, 6.0]
 let C = A * B
-let ar: Float<area> = 100.0
+let ar: Float64<area> = 100.0
 let total = C((0 : SIdx)) + C((1 : SIdx)) + C((2 : SIdx)) + ar
 // EXPECT: C = [4.0, 10.0, 18.0]
 // EXPECT: total = 132.0

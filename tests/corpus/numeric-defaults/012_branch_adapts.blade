@@ -1,0 +1,18 @@
+// TEST: a literal branch takes the width of the other branch
+// ============================================================================
+// Lead ruling A2 (if / match branches fix a width): `if c then x64 else 0.1`
+// is a Float64 whose else-branch is the double 0.1; a `match` arm the same,
+// whatever the arm order.
+// ============================================================================
+let c = false
+let x64: Float64 = 2.0
+let r = if c then x64 else 0.1
+let q: Float64 = r
+let z = q - 0.1
+let k = 3
+let m = match k with
+    | 3 -> 0.1
+    | _ -> x64
+let mz = m - 0.1
+// EXPECT: z = 0.0
+// EXPECT: mz = 0.0

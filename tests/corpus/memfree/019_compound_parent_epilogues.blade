@@ -13,17 +13,17 @@
 type Lat = Idx<2>
 type Lon = Idx<3>
 type Steps = Idx<5>
-let DENSE: Array<Float like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let DENSE: Array<Float64 like Lat, Lon> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
 let M: Array<Bool like Lat, Lon> = [[true, false, true], [true, true, false]]
 let B = compound(DENSE, M)
-function vstep(n: Int64) -> Float = {
+function vstep(n: Int64) -> Float64 = {
     let mid = B(0, 0) + B(0, 2)
     let mid1 = B(1, 0) + B(1, 1)
     let late = B(0, 2) + B(1, 0)
     let par = B(1, 1)
     mid * 0.1 + mid1 * 0.01 + late * 0.001 + par * 0.0001 + Float64(n)
 }
-let rec acc: Array<Float like Steps> =
+let rec acc: Array<Float64 like Steps> =
     match acc with
     | zero -> zero
     | zero :: s -> zero :: 0.0

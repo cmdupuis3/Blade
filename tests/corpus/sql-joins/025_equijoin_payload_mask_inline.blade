@@ -1,0 +1,22 @@
+// TEST: Equijoin Payload Mask Inline
+// ----------------------------------------------------------------------------
+// G128 / ST15, the inline spelling: `compound(J, mask(J, p))` over the
+// equijoin compound J. The selected payload cells keep J's lex order; the
+// predicate rejects the first pairs and keeps the tails. A seeded,
+// order-sensitive fold over the selection and the count; the hash join stays
+// planned (its census certifies the inline mask and the compound).
+// ----------------------------------------------------------------------------
+type LeftRow = Idx<4>
+type RightRow = Idx<5>
+let left_key: Array<Int64 like LeftRow> = [4, 5, 4, 6]
+let left_amount: Array<Int64 like LeftRow> = [1, 2, 3, 4]
+let right_key: Array<Int64 like RightRow> = [4, 4, 5, 8, 4]
+let right_amount: Array<Int64 like RightRow> = [7, 8, 9, 10, 11]
+let matched = compound(method_for(left_amount, right_amount) <@> lambda(l, r) -> l * r, mask(method_for(left_key, right_key) <@> lambda(l, r) -> l == r, lambda(e) -> e))
+let sel = compound(matched, mask(matched, lambda(v) -> v > 11))
+let n_sel = extents(sel)
+let fp = reduce(sel, lambda(a, b) -> a * 2 - b, 1)
+// EXPECT: matched = [7, 8, 11, 18, 21, 24, 33]
+// EXPECT: sel = [18, 21, 24, 33]
+// EXPECT: n_sel = 4
+// EXPECT: fp = -293

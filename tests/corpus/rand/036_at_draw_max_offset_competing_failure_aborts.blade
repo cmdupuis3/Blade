@@ -1,0 +1,20 @@
+// TEST: Rand Indexed: a draw at the top of the address range keeps the first failure (aborts)
+// ABORT: error[BL8013]
+// ============================================================================
+// PM47 (round 4 wave 4 B6, Codex review): a two-sample draw starting at
+// Int64.MaxValue is legal (its guard checks the OFFSET), and its second
+// address is sample 2^63 -- unsigned, as the fill computes addresses. The
+// interpreter's single-sample path used to re-check `offset + i` as a signed
+// offset and panic BL8001 there, so fusing the draw into its fold (after
+// `bad`) changed which failure came first. Both lanes now draw the sample,
+// and the first failure is the division by zero, fused or not.
+// ============================================================================
+import rand as r
+
+function f(o: Int64, z: Int64) -> Float64 = {
+    let u = r.uniform_at(5, 1, o, 2)
+    let bad = 1 / z
+    let s = reduce(u, (+))
+    s + Float64(bad)
+}
+let answer = f(9223372036854775807, 0)

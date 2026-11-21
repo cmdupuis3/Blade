@@ -1,6 +1,6 @@
 // TEST: Caret parameter computed read of a named axis is guarded (aborts)
-// `m: T^1` is generic: inside g its axis is anonymous, and an anonymous axis
-// is not guarded (formalism 3.10). The call hands it A, whose axis is the
+// `m: T^1` is generic: inside g its axis is anonymous (checked against its
+// own extent since G192 (1), formalism 3.10). The call hands it A, whose axis is the
 // NAMED L -- and the specialization that gave the axis L's name placed no
 // guard, so `g(A, 5)` read past A and printed garbage. A call passing a named
 // axis to a parameter the body reads at a computed position is the call of an
