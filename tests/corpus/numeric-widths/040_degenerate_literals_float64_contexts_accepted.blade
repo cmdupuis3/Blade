@@ -1,28 +1,40 @@
-// TEST: float literals the double cannot hold keep their Float64 meaning
+// TEST: float literals at the edges of Float64's range keep their meaning
 // ============================================================================
-// R19 (lane a2) refuses a float literal whose spelling its double cannot hold
-// where a Float32 is fixed (033-039). A Float64 context is NOT judged (review
-// item R32 is open): `1e400` is inf and `1e-400` is 0.0 there, as before. An
-// unannotated one DEFAULTS to Float64 (formalism 2.4, read on the spelling: a
-// magnitude past FLT_MAX / a nonzero value whose Float32 rounding is zero),
-// which c64 / d64 pin. A literal SPELLED as zero still fits a Float32.
+// R19 (lane a2) refused a float literal whose spelling its double cannot hold
+// where a Float32 is fixed (033-039); since the floor round's F5 such a
+// literal fits NO width (076-088: `1e400` and a nonzero `1e-400` are refused
+// in Float64 contexts too -- this file pinned them as inf and 0.0 before).
+// What still fits, unchanged: the largest and smallest NORMAL Float64
+// spellings, either sign; a SUBNORMAL Float64 spelling (decision D16, open:
+// `5e-324` is a Float64 value); a literal SPELLED as zero at Float32; the
+// explicit cast of a degenerate literal, which converts the lexer's double
+// (decision D15, open: an infinity or a zero, as on master); and a value
+// computed past the range, which is arithmetic, not a literal.
 // ============================================================================
-let b: Float64 = 1e400
-let a: Float64 = 1e-400
-let c = 1e400
-let d = 1e-400
-let c64: Float64 = c
-let d64: Float64 = d
-let b_is_inf = b > 1.0e308
-let c_is_inf = c64 > 1.0e308
+let big: Float64 = 1.7976931348623157e308
+let nbig: Float64 = -1.7976931348623157e308
+let tiny: Float64 = 2.2250738585072014e-308
+let sub: Float64 = 5e-324
+let big_is_max = big == 1.7976931348623157e308
+let tiny_pos = tiny > 0.0
+let sub_pos = sub > 0.0
+let cast_inf = Float64(1e400)
+let cast_neg = Float64(-1e400)
+let cast_zero = Float64(1e-400)
+let cast_is_inf = cast_inf > 1.0e308
+let neg_is_inf = cast_neg < -1.0e308
+let computed = 1e308 * 10.0
+let computed_is_inf = computed > 1.0e308
 let e: Float32 = 0.0
 let f: Float32 = 0e0
 let g: Float32 = -0.0
-// EXPECT: a = 0.0
-// EXPECT: d = 0.0
-// EXPECT: d64 = 0.0
-// EXPECT: b_is_inf = true
-// EXPECT: c_is_inf = true
+// EXPECT: big_is_max = true
+// EXPECT: tiny_pos = true
+// EXPECT: sub_pos = true
+// EXPECT: cast_zero = 0.0
+// EXPECT: cast_is_inf = true
+// EXPECT: neg_is_inf = true
+// EXPECT: computed_is_inf = true
 // EXPECT: e = 0.0
 // EXPECT: f = 0.0
 // EXPECT: g = -0.0

@@ -5417,6 +5417,41 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
              | _ -> None)
         | _ -> None
     let elemOf (t: IRType) = match stripUnits t with ArrayElem a -> a.ElemType | other -> other
+    // G283: an extent expression whose value cannot change once evaluated --
+    // literals, never-assigned bindings, extent reads and arithmetic over
+    // them, no call.
+    let rec stableExtentExpr (e: IRExpr) : bool =
+        match e with
+        | IRLit _ -> true
+        | IRVar (id, _) -> not (assignedAnywhere id)
+        | IRApp _ -> false
+        // a run-time placeholder (`?`): two of them say nothing about each other
+        | IRParam _ -> false
+        | ExprShape (children, _) -> children |> List.forall stableExtentExpr
+    // G283: the SHAPE ROOT of a stored rank-1 binding -- through POINTWISE maps
+    // (`method_for(ks) <@> f |> compute`, a zip over operands of one root),
+    // whose extents are their operands', down to the first binding that is
+    // not one; every link never assigned. Two sources with one root have one
+    // evaluated shape however their (run-time) extents are spelled.
+    let rec shapeRoot (depth: int) (id: IRId) : IRId =
+        let rec strip (e: IRExpr) = match e with IRCompute x -> strip x | x -> x
+        match indexOf id with
+        | Some i when depth < 32 && not (assignedAnywhere id) ->
+            (match strip arr.[i].Value with
+             | IRApplyCombinator info
+                 when info.KernelInputRanks |> List.forall (fun r -> r = 0)
+                      && info.KernelTDims.IsEmpty && not info.HasReynolds
+                      && ((info.Arrays.Length = 1 && info.SharedIndexTypes.IsEmpty) || info.IsCoIteration) ->
+                 let roots =
+                     info.Arrays |> List.map (fun op ->
+                         match op with
+                         | IRVar (o, _) when not (assignedAnywhere o) -> Some (shapeRoot (depth + 1) o)
+                         | _ -> None)
+                 (match roots with
+                  | Some r :: rest when rest |> List.forall (fun x -> x = Some r) -> r
+                  | _ -> id)
+             | _ -> id)
+        | _ -> id
     // Per mask: None = not a T4c case; Some (Ok (selection, evidence)) or
     // Some (Error why) -- the reason every companion's record carries.
     let groupDecision (kId: IRId) (ms: (IRId * int) list) : Result<SharedSelection * string list, string> option =
@@ -5474,7 +5509,23 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                                 elif (elemBytes (elemOf yb.Type)).IsNone then Some $"`{yb.Name}`'s element has no fixed cell width"
                                 else
                                 match plainAxisOf cb.Type, srcAxis with
-                                | Some a, Some s when a.Extent = s.Extent -> None
+                                // G283: equal extent EXPRESSIONS are equal
+                                // evaluated shapes only when nothing they read
+                                // can change (a literal; never-assigned
+                                // bindings, extent reads and arithmetic, no
+                                // call) or the two sources share a SHAPE ROOT
+                                // (shapeRoot). A run-time extent is often the
+                                // placeholder `?` on both sides, which proves
+                                // nothing (two `Float64(0..n)` with `n` rebound
+                                // in between). The joint pass walks the mask's
+                                // grid and reads every source at each cell, so
+                                // anything else keeps each compound's own
+                                // passes, whose extent guard (BL8011) runs. (The
+                                // mask source itself -- never assigned:
+                                // proveSource -- is its own shape.)
+                                | Some a, Some s when a.Extent = s.Extent && (cj = srcId || stableExtentExpr a.Extent || shapeRoot 0 cj = shapeRoot 0 srcId) -> None
+                                | Some a, Some s when a.Extent = s.Extent ->
+                                    Some $"the source `{cb.Name}` of `{yb.Name}` and the mask source `{xName}` have extents known only at run time and no common shape root (pointwise maps of one never-assigned binding): equal run-time extent expressions are not equal evaluated shapes (G283), so each compound keeps its own passes and its extent check"
                                 | _ -> Some $"the source `{cb.Name}` of `{yb.Name}` is not provably over `{xName}`'s index space (BL3016 territory: never admitted)")
                         | _ -> Some $"the dense operand of `{yb.Name}` is computed in place (T4c gathers stored companions)")
                 let sources = ms |> List.choose (fun (cid, _) -> match dense cid with IRVar (cj, _) -> Some cj | _ -> None) |> List.distinct

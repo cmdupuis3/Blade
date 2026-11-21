@@ -1,0 +1,7 @@
+// TEST: An Overflowing Literal As An Array Cell (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round, the lead's ruling): a float literal whose spelling rounds
+// to an infinity, or to zero while it is not zero, fits NO width and is
+// refused at the literal in every context (formalism 2.4). Master: xs = [1.0, inf].
+let xs = [1.0, 1e400]

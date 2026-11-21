@@ -1,0 +1,11 @@
+// TEST: A Computed Read Through A Struct Field Of Run-Time Extent Is Checked (aborts)
+// Gap G208 (a further member, floor round lane B, F4): the extent of a field receiver
+// `s.v(k)` was not read (no variable to read it off), so the compiled lanes read past the
+// field's array (a garbage cell, exit 0). Reading the field again is a pure read of the same
+// storage, so the position is checked against `extents(s.v)`.
+// ABORT: BL8006
+struct Box { v: Float64^1 }
+let a = Float64(0..4) |> compute
+let s = Box { v = a }
+let k = 7
+let r = s.v(k)

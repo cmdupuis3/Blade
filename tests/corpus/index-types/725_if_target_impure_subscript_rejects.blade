@@ -1,0 +1,13 @@
+// TEST: A Write Through An If Of Run-Time-Shaped Arrays At An Impure Position (rejects)
+// Gap G208 (1): with a subscript that calls a function the selected array's extent cannot be
+// read without evaluating the target again, so the unchecked write is refused at compile time.
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+function pick(n: Int64) -> Int64 = n - 1
+let mut a = Float64(0..extents(c5)) |> compute
+let mut b = Float64(0..extents(c3)) |> compute
+let c = extents(a) > 2
+(if c then a else b)(pick(extents(a))) = 99.0
+// ERROR: BL4003

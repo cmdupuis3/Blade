@@ -234,6 +234,45 @@ let private kernelOwnedLet (id: IRId) (value: IRExpr) (body: IRExpr) : IRId list
     for x in Blade.Optimize.embeddedExtentExprs body do walk x
     if ok then Some (List.ofSeq admitted) else None
 
+/// LEFT-TO-RIGHT COMPONENTS (gap G300, formalism 10.2: a tuple evaluates its
+/// members at construction, left to right). `std::make_tuple(a, b)`,
+/// `std::complex<T>(re, im)` and `std::fma(a, b, c)` are function calls, whose
+/// argument order C++ leaves unspecified (g++ evaluates right to left), so a
+/// returned `(reduce(x, (+), { x(0) = ..; .. }), reduce(x, (+)))` read the
+/// second component before the first one's write. A component that is not an
+/// atom (`orderFreeComponent`: no call, block or assignment, and nothing in it
+/// that may abort -- literals, names, arithmetic, nested tuples of those) is evaluated into an ordered temporary first, all components in
+/// written order, when two or more components are not literals; a tuple of
+/// atoms keeps its one-call spelling.
+let rec private orderFreeComponent (e: IRExpr) : bool =
+    match e with
+    // a call may write (a `mut` argument, a captured `let mut`), a let chain
+    // is a block's statements: never order-free
+    | IRApp _ | IRAppAt _ | IRAssign _ | IRLet _ | IRSequence _ -> false
+    // an integer cast of an integer / Bool operand cannot fail (BL8014 is a
+    // float operand's): irNodeMayAbort judges the node without its type
+    | IRUnaryOp (IRCast ((ETInt64 | ETInt32), _), x)
+        when (match scalarElemOf (inferExprType x) with Some (ETInt64 | ETInt32 | ETBool) -> true | _ -> false) ->
+        orderFreeComponent x
+    // anything else is order-free when neither it nor a child may abort
+    // (IR.irNodeMayAbort: a checked subscript, an integer division, a float
+    // -> int cast, a fold ...): two such components fail in written order
+    | ExprShape (children, _) -> not (irNodeMayAbort e) && List.forall orderFreeComponent children
+
+let private componentsNeedOrder (parts: IRExpr list) : bool =
+    (parts |> List.filter (function IRLit _ -> false | _ -> true) |> List.length) >= 2
+    && not (parts |> List.forall orderFreeComponent)
+
+/// Render `call(c0, .., cn)` with the components evaluated left to right: an
+/// IIFE binding each rendered component to an ordered temporary when
+/// componentsNeedOrder, the plain call otherwise.
+let private renderOrderedCall (parts: IRExpr list) (rendered: string list) (call: string list -> string) : string =
+    if not (componentsNeedOrder parts) then call rendered
+    else
+        let tmps = rendered |> List.mapi (fun i _ -> $"__ord{i}")
+        let decls = List.map2 (fun t r -> $"auto {t} = {r};") tmps rendered |> String.concat " "
+        $"([&]() {{ {decls} return {call tmps}; }}())"
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -370,13 +409,15 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRIf (cond, thenBr, elseBr) ->
         $"({(exprToCppCore subst names cond)} ? {(exprToCppCore subst names thenBr)} : {(exprToCppCore subst names elseBr)})"
     | IRTuple exprs ->
-        $"""std::make_tuple({(exprs |> List.map (exprToCppCore subst names) |> String.concat ", ")})"""
+        renderOrderedCall exprs (exprs |> List.map (exprToCppCore subst names))
+            (fun parts -> $"""std::make_tuple({(parts |> String.concat ", ")})""")
     | IRFma (a, b, c) ->
         // std::fma is correctly rounded on every libm Blade links (and a
         // single vfmadd on any -march with FMA), so it is bit-identical to
         // the interpreter's Math.FusedMultiplyAdd under any -ffp-contract --
         // contraction only ever fuses SEPARATE nodes, never unfuses this one.
-        $"std::fma({(exprToCppCore subst names a)}, {(exprToCppCore subst names b)}, {(exprToCppCore subst names c)})"
+        renderOrderedCall [ a; b; c ] ([ a; b; c ] |> List.map (exprToCppCore subst names))
+            (fun ps -> $"std::fma({ps.[0]}, {ps.[1]}, {ps.[2]})")
     | IRRandAt (kind, args, weights) ->
         renderRandAt kind (args |> List.map (exprToCppCore subst names))
                      (weights |> Option.map (fun (w, n) -> (exprToCppCore subst names w, n)))
@@ -389,7 +430,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match scalarElemOf (inferExprType re) with
             | Some ETFloat32 -> complexCppTypeName ETComplex64
             | _ -> complexCppTypeName ETComplex128  // Float64 default
-        $"{cppType}({(exprToCppCore subst names re)}, {(exprToCppCore subst names im)})"
+        renderOrderedCall [ re; im ] ([ re; im ] |> List.map (exprToCppCore subst names))
+            (fun ps -> $"{cppType}({ps.[0]}, {ps.[1]})")
     | IRTupleProj _ when (flatTupleProjection expr).IsSome ->
         // Gap G42: the chain is rooted at a binding held as a FLAT C++ tuple
         // under a left-nested IR type. Render by flat leaf position.
@@ -845,7 +887,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRCurry (arr, idx, resultRank) ->
         $"{(exprToCppCore subst names arr)}[{(exprToCppCore subst names idx)}]"
     | IRTupleCons (head, tail) ->
-        $"std::tuple_cat(std::make_tuple({(exprToCppCore subst names head)}), {(exprToCppCore subst names tail)})"
+        renderOrderedCall [ head; tail ] ([ head; tail ] |> List.map (exprToCppCore subst names))
+            (fun ps -> $"std::tuple_cat(std::make_tuple({ps.[0]}), {ps.[1]})")
     | IRTupleDecons tuple ->
         exprToCppCore subst names tuple  // Decons is handled by projection
     | IRMatch (scrutinee, cases) ->
@@ -2307,7 +2350,12 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             elif isRank1Compound && dim = 0 then
                 $"(int64_t)({arrName}.idx->cardinality)"
             else
-                $"(int64_t)({arrName}.extents[{dim}])"
+                // G295: `dim` is a RECORD position, the stored extents table
+                // is by PHYSICAL axis (a compact group before it spans
+                // several): `extents(Q)` over (SymIdx<2, 3>, Idx<n>) read the
+                // group's second axis for n
+                let axis = recordPhysicalAxis at.IndexTypes dim |> Option.defaultValue dim
+                $"(int64_t)({arrName}.extents[{axis}])"
     | _ ->
         // `extents(range<T>)`: a virtual range has no materialized C++ object
         // to read `.extents[]` off, but its slot extents are part of the IR --

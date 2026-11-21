@@ -1,0 +1,11 @@
+// TEST: A Section Called Through An Alias Decides Nothing (rejects)
+// ERROR: BL3020
+// G288 (a), floor round: a section bound to a name is a lambda value; a call
+// THROUGH a value use (an alias) is monomorphic at the binding and decides
+// nothing (formalism 4.3), so its open parameters take their default and a
+// Float32 argument meets a Float64 parameter. Master: y = 2.0, computed in
+// Float64 (the Float32 converted).
+let a: Float32 = 1.0
+let op = (+)
+let saved = op
+let y = saved(a, a)

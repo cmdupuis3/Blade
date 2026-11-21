@@ -1,0 +1,21 @@
+// TEST: An Aggregate-Only Grouping Over Run-Time-Shaped Keys And Values Of Equal Extent
+// Gap G283: the accepted twin of sql-group-by/123 and 126.
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+let a = Float64(0..extents(c5)) |> compute
+let b = Float64(0..extents(c3)) |> compute
+function agg(k: Int64^1, v: Int64^1) -> Int64^1 = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r) -> reduce(r, (+), 0) |> compute
+    s
+}
+let ka = Int64(0..extents(c5)) % 2 |> compute
+let kv = Int64(0..extents(c5)) * 10 |> compute
+let r = agg(ka, kv)
+let b2 = Float64(0..extents(c5)) |> compute
+let gk2 = group_keys(ka)
+let g2 = group_by(b2, gk2)
+// EXPECT: r = [60, 40]

@@ -1,0 +1,14 @@
+// TEST: A Write Through An If Of Mut Array Parameters Checks Its Position (aborts)
+// Gap G208 (1): the function-body form of index-types/722 (`T^1` parameters: no static extent).
+// ABORT: BL8006
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+function f(c: Bool, k: Int64, a: mut Float64^1, b: mut Float64^1) -> Float64 = {
+    (if c then a else b)(k) = 99.0
+    a(0)
+}
+let mut a = Float64(0..extents(c5)) |> compute
+let mut b = Float64(0..extents(c3)) |> compute
+let r = f(false, extents(b), a, b)

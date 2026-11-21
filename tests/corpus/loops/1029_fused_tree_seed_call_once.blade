@@ -1,0 +1,12 @@
+// TEST: a fused tree's seed that calls a writing function runs it once
+// Gap G277: bump writes its mut argument and returns the new count; the seed
+// 1.0 is handed to both leaves (the compiled lanes used to call it twice:
+// cnt = [2.0], s = (7.0, 7.0)).
+let mut cnt: Array<Float64 like Idx<1>> = [0.0]
+function bump(c: mut Array<Float64 like Idx<1>>) -> Float64 = { c(0) = c(0) + 1.0; c(0) }
+let x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + 1.0
+let s = reduce(p <&!> q, (+), bump(cnt))
+// EXPECT: cnt = [1.0]
+// EXPECT: s = (7.0, 6.0)

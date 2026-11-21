@@ -1,0 +1,15 @@
+// TEST: a parallel tree over an applied composition forces its stage capture
+// Gap G190 (b) / G242's last open member (floor round, lane c, F9): the leaf p
+// applies a composition whose first stage captures the deferred map delayed;
+// the tree forces it under its own name before the traversal (the capture
+// prelude a lone `p |> compute` already had). It was a C++ BL9002.
+type A = Array<Float64 like Idx<3>>
+let mut backing: A = [1.0, 2.0, 4.0]
+let delayed = method_for(backing) <@> lambda(e) -> 8.0 / e
+let pc = object_for(lambda(v: Float64) -> v * delayed(0)) >>@ object_for(lambda(v: Float64) -> v + 1.0)
+let p = pc <@> backing
+let q = method_for(backing) <@> lambda(v) -> v * 3.0
+let (a, b) = p <&> q |> compute
+// EXPECT: delayed = [8.0, 4.0, 2.0]
+// EXPECT: a = [9.0, 17.0, 33.0]
+// EXPECT: b = [3.0, 6.0, 12.0]

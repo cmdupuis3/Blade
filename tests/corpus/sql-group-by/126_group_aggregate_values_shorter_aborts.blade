@@ -1,0 +1,21 @@
+// TEST: An Aggregate-Only Grouping Over Values Shorter Than Its Keys Checks Its Extents (aborts)
+// Gap G283: inside a function body the grouping can take the aggregate-only pass
+// (group-aggregate v1, an exact Int64 fold), which reads the values AT the grouping. The pass now
+// advances its states only when every source is as long as the keys, and the group_by statement
+// raises BL8011 where the as-written CSR form raises it.
+// ABORT: BL8011
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+let a = Float64(0..extents(c5)) |> compute
+let b = Float64(0..extents(c3)) |> compute
+function agg(k: Int64^1, v: Int64^1) -> Int64^1 = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let s = method_for(g) <@> lambda(r) -> reduce(r, (+), 0) |> compute
+    s
+}
+let ka = Int64(0..extents(c5)) |> compute
+let kb = Int64(0..extents(c3)) |> compute
+let r = agg(ka, kb)

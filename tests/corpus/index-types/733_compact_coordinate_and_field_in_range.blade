@@ -1,0 +1,21 @@
+// TEST: In-Range Computed Compact Coordinates And Field Reads
+// The accepted twin of index-types/731-732: in-range computed positions read the right cells
+// (a mirrored compact coordinate reads its canonical cell).
+struct Box { v: Float64^1 }
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let a = Float64(0..4) * 2.0 |> compute
+let s = Box { v = a }
+let n = 3
+let i = n - 1
+let k = n
+let r1 = M(i, 0)
+let r2 = M(0, i)
+let r3 = s.v(k)
+let r4 = reduce(method_for(range<J>) <@> lambda(j) -> M(j, i), (+))
+// EXPECT: r1 = 3.0
+// EXPECT: r2 = 3.0
+// EXPECT: r3 = 6.0
+// EXPECT: r4 = 18.0
+// WARN: BL4003

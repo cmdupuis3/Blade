@@ -1,11 +1,13 @@
 // TEST: A Stored Section Over Generic Float32 Cells Is Refused With A Span (rejects)
-// ERROR: BL3020 @ 11:36
-// ERROR-CONTAINS: the map's cells are Float32, but its kernel returns a Float64 value
+// ERROR: BL3020 @ 13:36
+// ERROR-CONTAINS: argument 1 of this call is a Float32 value, but parameter `x` of the called 'f' is Float64
 // ============================================================================
 // R11: a section bound as a value is lifted over Float64 parameters, so the
 // kernel returned a double into a Float32 map and g++ refused the narrowing
 // (BL9002). Refused at the kernel's call instead. (functions/913 is the
-// Float64 twin.)
+// Float64 twin.) Since G288 (a) (floor round) the section IS its lambda,
+// `lambda(x, y) -> x + y`, whose parameters keep their Float64 default in
+// the Float32 instance: refused at the same call as that lambda twin is.
 // ============================================================================
 function outer(b) = {
     let f = (+)

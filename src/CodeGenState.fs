@@ -1742,7 +1742,18 @@ let private asyncCell (storage: System.Threading.AsyncLocal<'T ref>) (empty: 'T)
 let private streamedBindingsCell () = asyncCell streamedBindingsStorage Map.empty
 let private streamedMaskCell () = asyncCell streamedMaskStorage Set.empty
 let private streamedLeaksCell () = asyncCell streamedLeaksStorage []
-
+/// DEFERRED VALUES NEVER REACH C++ EITHER (floor round F9, gap G279): a `let`
+/// of a map with no `|> compute` emits only a comment, so nothing named after
+/// it exists until a consumer forces it under its own name
+/// (CodeGenBinding.forceDeferredArrayInput). id -> emitted name of every such
+/// binding not yet forced anywhere in the program; the forwarded-capture
+/// renderer (CodeGenExprSupport.captureForwardArgs) answers a capture of one
+/// with a refusal sentinel settled exactly like a streamed leak. Removal on ANY
+/// force keeps the check conservative (no refusal of a name some scope stores).
+let internal deferredUnstoredStorage = System.Threading.AsyncLocal<Map<IRId, string> ref>()
+let internal deferredMaskStorage = System.Threading.AsyncLocal<Set<string> ref>()
+let private deferredUnstoredCell () = asyncCell deferredUnstoredStorage Map.empty
+let private deferredMaskCell () = asyncCell deferredMaskStorage Set.empty
 /// PRINT REPLAY (rec-print-replay v1, round 4 wave 4 B1). An ADMITTED plan
 /// (CodeGenBinding.planRecPrintReplays): x is never stored; its ring sweep
 /// (the `__replay_<x>` binding) is one C++ lambda `Sweep` run through
@@ -1784,6 +1795,8 @@ let resetStreamedValueState () : unit =
     freshCell streamedBindingsStorage Map.empty
     freshCell streamedMaskStorage Set.empty
     freshCell streamedLeaksStorage []
+    freshCell deferredUnstoredStorage Map.empty
+    freshCell deferredMaskStorage Set.empty
     freshCell recReplayPlansStorage []
     freshCell recReplayActiveStorage None
 
@@ -1859,6 +1872,45 @@ let streamedValueSentinel (id: IRId) (resolved: string) : string option =
             + "streamed variable is read only by top-level consumers: fold it (`let t = reduce(x, (+))`), "
             + "group it by a structural grouping (`let g = group_by(x, segments(...))`), or map or "
             + "stencil it at top level, and use that result -- or bind it with `.read` to load it"
+        let entry = (token, msg, (currentDeclCell ()).Value)
+        let cell = streamedLeaksCell ()
+        if not (List.contains entry cell.Value) then cell.Value <- cell.Value @ [entry]
+        Some token
+    | _ -> None
+
+/// A binding was DEFERRED under C++ name `name` (only its comment is emitted).
+let noteDeferredUnstored (id: IRId) (name: string) : unit =
+    let cell = deferredUnstoredCell ()
+    cell.Value <- Map.add id name cell.Value
+
+/// A deferred binding was materialized (in any scope): it is no longer a leak.
+let noteDeferredStored (id: IRId) : unit =
+    let cell = deferredUnstoredCell ()
+    if Map.containsKey id cell.Value then cell.Value <- Map.remove id cell.Value
+
+/// Treat `names` as declared until the handle is disposed: a lifted function
+/// receives each capture as a parameter of that name.
+let maskDeferredNames (names: string list) : System.IDisposable =
+    let cell = deferredMaskCell ()
+    let saved = cell.Value
+    cell.Value <- Set.union saved (Set.ofList names)
+    { new System.IDisposable with member _.Dispose () = cell.Value <- saved }
+
+/// The sentinel to forward instead of `resolved` when capture `id` is a
+/// deferred binding that nothing has stored and no scope declares; None
+/// otherwise (gap G279: `function mk() = lambda(i: Int64) -> d(i)` over a
+/// deferred module map `d` forwarded an undeclared `d`, a g++ rejection).
+let deferredCaptureSentinel (id: IRId) (resolved: string) : string option =
+    match Map.tryFind id (deferredUnstoredCell ()).Value with
+    | Some emitted when emitted = resolved && not (Set.contains emitted (deferredMaskCell ()).Value) ->
+        let token =
+            "BLADE_CODEGEN_ERROR_DEFERRED_CAPTURE_"
+            + System.String(emitted |> Seq.map (fun c -> if System.Char.IsLetterOrDigit c || c = '_' then c else '_') |> Array.ofSeq)
+        let msg =
+            $"'{emitted}' is a deferred map (a `let` of a map with no `|> compute`), so no array named '{emitted}' "
+            + "is stored where this callable is formed, and the callable captures it: a closure value that "
+            + "escapes, or is formed before anything forces the map, would have to evaluate it at each read "
+            + $"inside the closure, which the C++ lane does not build (gap G279) -- bind `|> compute` first (`let {emitted} = ... |> compute`)"
         let entry = (token, msg, (currentDeclCell ()).Value)
         let cell = streamedLeaksCell ()
         if not (List.contains entry cell.Value) then cell.Value <- cell.Value @ [entry]

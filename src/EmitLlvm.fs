@@ -810,6 +810,16 @@ let private grpAxes (g: Grp) : int64 list = List.replicate (grpRank g) (grpExten
 
 let private axisExtents (gs: Grp list) : int64 list = gs |> List.collect grpAxes
 
+/// G295: `extents(A)` lowers to one IRExtent per RECORD (one group each),
+/// and axisExtents is per PHYSICAL axis (a compact group spans several): the
+/// physical axis of record `dim` when every group up to it is dense or a
+/// compact simplex; else `dim` as given (an extent read past the records --
+/// a physical axis named directly -- keeps its meaning).
+let private recordAxis (gs: Grp list) (dim: int) : int =
+    if dim >= 0 && dim < gs.Length
+       && gs |> List.truncate (dim + 1) |> List.forall (function GDense _ | GSym _ | GAnti _ -> true | _ -> false) then
+        gs |> List.truncate dim |> List.sumBy (fun g -> List.length (grpAxes g))
+    else dim
 /// Stored cells in one group -- the cardinality the pool is allocated at.
 let private grpCells (g: Grp) : int64 =
     match g with
@@ -3503,6 +3513,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
         (match arrayShapeOf (typeOf arrExpr) with
          | Some (_, groups) ->
              let extents = axisExtents groups
+             let dim = recordAxis groups dim
              if dim < 0 || dim >= List.length extents then
                  refuse ($"extents(_, {dim}) outside the array's rank")
              { Reg = string extents.[dim]; Ty = ScI64 }
@@ -3514,6 +3525,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
               | [ GDynDense len ], 0 | [ GCompact (len, _) ], 0 -> { Reg = len; Ty = ScI64 }
               | groups, d ->
                   let extents = axisExtents groups
+                  let d = recordAxis groups d
                   if d < 0 || d >= List.length extents then
                       refuse ($"extents(_, {d}) outside the array's rank")
                   { Reg = string extents.[d]; Ty = ScI64 }))
@@ -6663,6 +6675,11 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
         let gk = gkOf c grouping
         let vals = consumeArrOperandAnyOrderTotal c values
         (match vals.Groups with
+         | [ GDense n ] when n <> gk.NSrc ->
+             // G283: the values against the grouping's source rows. Both are
+             // baked here, so a disagreement is known now: the C++ lane's
+             // run-time check (BL8011) reports it
+             refuse $"group_by over {n} values with a grouping of {gk.NSrc} source rows (the C++ lane raises BL8011)"
          | [ GDense _ ] -> ()
          | _ -> refuse "group_by over a values operand that is not a dense rank-1 axis")
         let table = RtDynamic gk.Offsets
@@ -10464,6 +10481,16 @@ and private emitReduceComputeBody (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
     if kernels.Length <> legs.Length || seeds.Length <> legs.Length then
         refuse "a fused reduction whose kernel/seed pack does not match its leaf count"
     let arrs = legs |> List.map (emitArr c)
+    // THE SHARED SEED, ONCE (gap G277): a fused tree's one seed (initExpr not
+    // a per-leg tuple) is evaluated at the first leg's slot -- after every
+    // leg's operands, where the per-leg spelling evaluated it first -- and
+    // each further leg reuses that value. An atom (IR.fusedSeedRepeatable)
+    // keeps its per-leg emission, as the C++ lane does.
+    let sharedSeed =
+        match initExpr with
+        | IRTuple _ -> None
+        | s when fusedSeedRepeatable s || legs.Length < 2 -> None
+        | s -> Some (lazy (emitExpr c s))
     let domainShape =
         match (List.head arrs).Groups with
         | [ GDomain plan ] -> Some plan
@@ -10471,8 +10498,8 @@ and private emitReduceComputeBody (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
     let shape = (List.head arrs).Groups
     for a in arrs do
         if a.Groups <> shape then refuse "a fused reduction over legs of different shapes"
-    let plans =
-        List.map3 (fun (a: ArrVal) k s ->
+    let legKernels =
+        List.map2 (fun (a: ArrVal) k ->
             let cl =
                 match resolveCallable k with
                 | Some cl when cl.Params.Length = 2 -> cl
@@ -10482,23 +10509,31 @@ and private emitReduceComputeBody (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExp
                 match scalarTyOf cl.RetType with
                 | Some t when t <> ScVoid -> t
                 | _ -> a.Elem
-            let slot = allocaOf c (llTy ty)
-            let seed = coerce c ty (emitExpr c s)
-            ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
-            // PER LEG: one leg of a join may be a `comm`-declared kernel and
-            // its neighbour an arbitrary one, and they share a nest without
-            // sharing a license.
-            (a, cl, ty, slot, foldFmfDecorable c cl)) arrs kernels seeds
+            (cl, ty)) arrs kernels
     // A COMPACT domain goes through the blocked-simplex fold, one leg at a
     // time: a fused join shares ONE nest by construction, and the bricked nest
     // is a different nest per leg's licence, so mixing them would either
     // license the unlicensed leg or serialize the licensed one. One leg is the
-    // shape every reachable program has anyway.
+    // shape every reachable program has anyway. Decided BEFORE any seed is
+    // evaluated: the compact fold evaluates its seed itself, once (G277: the
+    // per-leg slots below used to evaluate it a second time first).
     if shape |> List.exists grpCompact then
-        match plans with
-        | [ (a, cl, ty, _, _) ] -> [ emitCompactFold c a cl ty (Some (List.head seeds)) ]
+        match arrs, legKernels with
+        | [ a ], [ (cl, ty) ] -> [ emitCompactFold c a cl ty (Some (List.head seeds)) ]
         | _ -> refuse "a fused reduction join over compact (symmetric/antisymmetric) storage"
     else
+    let plans =
+        List.map3 (fun (a: ArrVal) (cl: IRCallable, ty) s ->
+            let slot = allocaOf c (llTy ty)
+            let seed =
+                match sharedSeed with
+                | Some once -> coerce c ty once.Value
+                | None -> coerce c ty (emitExpr c s)
+            ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
+            // PER LEG: one leg of a join may be a `comm`-declared kernel and
+            // its neighbour an arbitrary one, and they share a nest without
+            // sharing a license.
+            (a, cl, ty, slot, foldFmfDecorable c cl)) arrs legKernels seeds
     // THE ORDER: the C++ lane's decision (CodeGenExprSupport.domainFoldOrder).
     // ONE leg only, as there: a fused join of several folds keeps the lex nest
     // (lade plan says so), so the lanes never walk different orders.
@@ -10775,6 +10810,24 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     // the independent one only in how many traversals the C++ lane runs, not
     // in what the legs answer, so both land here.
     | IRCompute inner ->
+        // A materialized TREE's leaves force their deferred inputs as a map's
+        // force does (markForcedChildren: operands, then captures), before the
+        // tree -- the C++ lane's treeLeafInputForces and the interpreter's print
+        // set (floor round F9, gap G284: `q` over a deferred `dd` printed dd in
+        // the other lanes only)
+        (match inner with
+         | IRParallel _ | IRFusion _ when not c.InFunction ->
+             let rec leafIds (e: IRExpr) =
+                 match e with
+                 | IRParallel (l, r, _) | IRFusion (l, r) -> leafIds l @ leafIds r
+                 | IRVar (id, _) ->
+                     (match Map.tryFind id c.BindingValues with
+                      | Some (IRParallel _ | IRFusion _ as t) -> leafIds t
+                      | Some (IRApplyCombinator _ | IRComposeApply _) -> [ id ]
+                      | _ -> [])
+                 | _ -> []
+             for id in leafIds inner do markForcedChildren c id
+         | _ -> ())
         emitTupleParts c inner
         |> List.map (fun p -> match p with VArray a -> VArray (materialize c a) | other -> other)
     | IRPure inner -> emitTupleParts c inner

@@ -1,0 +1,8 @@
+// TEST: fma(a, b, c) evaluates its operands left to right
+// Gap G300 (floor round, lane c): ma rendered as one std::fma call, whose
+// argument order C++ leaves unspecified -- the C++ lane printed s = 43.0.
+function f(x: mut Array<Float64 like Idx<2>>) -> Float64 = fma(reduce(x, (+), { x(0) = x(0) + 1.0; Float64(0) }), 10.0, reduce(x, (+)))
+let mut y: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let s = f(y)
+// EXPECT: y = [2.0, 2.0]
+// EXPECT: s = 44.0

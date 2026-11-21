@@ -1,0 +1,6 @@
+// TEST: A False-Zero Literal As A Bound In A Binding Annotation (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round), the member found at review: a bound in a let
+// annotation is a literal like any other.
+let x: Float64<min=1e-400, max=1.0> = 0.5

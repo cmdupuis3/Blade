@@ -1,0 +1,25 @@
+// TEST: In-Range Reads And Writes Of A Run-Time Plain Slot Beside A Compact Group
+// Gap G208 (2): the accepted twin of index-types/726 and 728, a computed and a literal
+// position into the run-time plain slot before the group.
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let v = Float64(0..extents(c5)) * 2.0 |> compute
+let mut P = method_for(v, M) <@> lambda(x, m) -> x * m |> compute
+let i = extents(v) - 1
+P(i, 0, 1) = 5.0
+let r1 = P(i, 0, 1)
+let r2 = P(1, 2, 2)
+let r3 = P(4, 1, 0)
+let Q = method_for(M, v) <@> lambda(m, x) -> x * m |> compute
+let r4 = Q(1, 2, i)
+let r5 = Q(0, 0, 4)
+// EXPECT: r1 = 5.0
+// EXPECT: r2 = 18.0
+// EXPECT: r3 = 5.0
+// EXPECT: r4 = 48.0
+// EXPECT: r5 = 8.0

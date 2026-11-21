@@ -1,0 +1,8 @@
+// TEST: An Overflowing Literal As A Parameter Default (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round, the lead's ruling): a float literal whose spelling rounds
+// to an infinity, or to zero while it is not zero, fits NO width and is
+// refused at the literal in every context (formalism 2.4). Master: r = inf.
+function f(x: Float64, s: Float64 = 1e400) -> Float64 = x * s
+let r = f(2.0)

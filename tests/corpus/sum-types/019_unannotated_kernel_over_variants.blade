@@ -1,0 +1,22 @@
+// TEST: Unannotated Kernels Over Sum-Type Cells
+// F2 (floor round), the sum-type member of the class: a lambda whose
+// parameter is unannotated, applied to an array of sum-type values, takes the
+// cell type and matches on it (map, sort key, mask predicate, a fused fold
+// over a map, a let-bound lambda called directly). Pinned beside the struct
+// and tuple members (structs/059-060, tuples/089-090), which master refused.
+type Shape = Circle : Float64 | Square : Float64 | Empty
+let shapes = [Circle(1.5), Empty, Square(2.0)]
+let sizes = (method_for(shapes) <@> lambda(s) -> match s with | Circle(r) -> r | Square(w) -> w | Empty -> 0.0) |> compute
+let total = reduce(method_for(shapes) <@> lambda(s) -> match s with | Circle(r) -> r | Square(w) -> w * w | Empty -> 0.0, (+))
+let byside = sort(shapes, lambda(s) -> match s with | Circle(r) -> r | Square(w) -> w | Empty -> 9.0)
+let firstsize = match byside(0) with | Circle(r) -> r | Square(w) -> w | Empty -> 9.0
+let keep = mask(shapes, lambda(s) -> match s with | Empty -> false | _ -> true)
+let kept = compound(shapes, keep)
+let nkept = extents(kept)
+let isEmpty = lambda(s) -> match s with | Empty -> true | _ -> false
+let e1 = isEmpty(shapes(1))
+// EXPECT: sizes = [1.5, 0.0, 2.0]
+// EXPECT: total = 5.5
+// EXPECT: firstsize = 1.5
+// EXPECT: nkept = 2
+// EXPECT: e1 = true

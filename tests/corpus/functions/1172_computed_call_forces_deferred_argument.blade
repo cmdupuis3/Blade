@@ -1,0 +1,11 @@
+// TEST: a computed call forces its deferred argument first
+// Gap G88 (floor round, lane c, F9): `group_h(jd) |> compute` reads the
+// deferred map jd by name; it is forced under its own name before the call,
+// as the bare `let h = group_h(jd)` does (the C++ lane left it undeclared).
+type P = Idx<3>
+type S = Idx<2>
+function group_h(j: Array<Float64 like P, S>) -> Array<Float64 like P, S> = j + 1.0
+let jd = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a) + Float64(s)
+let h = group_h(jd) |> compute
+// EXPECT: jd = [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
+// EXPECT: h = [[1.0, 2.0], [2.0, 3.0], [3.0, 4.0]]

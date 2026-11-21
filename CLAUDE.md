@@ -91,6 +91,7 @@ blade run prog.blade          # compile and run (--verbose, --mpi N, --memcheck,
 blade plan prog.blade         # optimization decisions + the input manifest (--json)
 blade test                    # full default suite
 blade test docs               # every `blade` code block in CLAUDE.md + docs/ (tests/DocTests.fs)
+blade test smoke              # a fixed ~370-program corpus sample, every directory (the CI push lane)
 ```
 
 Bare `blade` (no verb) prints the usage, which lists every `blade test` key. `blade run` /
@@ -129,6 +130,9 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
   `opt-diff` -- pin `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` for their own compiles
   (policy (b): twins stay byte-honest, no tolerance). `test llvm` compares the two
   lanes' fast defaults with its 1e-9 token rule.
+- `blade test smoke` is the corpus slice CI runs on EVERY push and pull request (the `smoke` job in
+  `.github/workflows/ci.yml`): from every single-file directory its first file and every file numbered a
+  multiple of `Corpus.smokeStride` (15), on the default lane; corpus-wiring fails if a directory is missing.
 - Missing toolchain pieces make tests **skip, not fail**, and skips don't affect the exit
   code — always check the `, N skipped` suffix in the totals before trusting a green run.
 - Two different category namespaces:
@@ -141,6 +145,10 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
   `blade test opt-diff` (standalone, whole corpus; `tests/OptDiff.fs`) emits every program with
   all optimizer gates OFF and ON and compiles + runs only the pairs whose C++ differs, comparing
   normalized output. Run it after touching any pass; a new pass's gate goes in `optimizerGates`.
+  It pins the reproducible build (`BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off`), so a plan that fires only
+  in the licensed build is not compared there: `blade test opt-diff-licensed [<dir>]` (standalone, same
+  structure and gate mirrors) runs the DEFAULT FP policy and compares the two runs with `blade test llvm`'s
+  token rule (1e-9 relative per number, exact otherwise; the exit code exact). Not in any CI lane.
 - `blade test interp` (no category) walks EVERY corpus directory — single-file and
   `multifile`, discovered from disk — minus the named exclusions in
   `tests/InterpDiff.fs` (`interpExcluded`: only `memfree-stress`). `blade test --interp` is
@@ -362,7 +370,9 @@ type EarthArray = Array<Float64 like LatIdx, LonIdx>
   elements, an index position (Int64). A literal-only expression adapts as a whole
   (`let c: Float64 = 1.0 / 3.0`), and only when every literal FITS the width: `5000000000` where
   an Int32 is fixed, or `1e40` / `1e-40` where a Float32 is, is BL3020, never wrapped or rounded
-  to inf / zero (an explicit cast, `Int32(5000000000)`, still converts). With nothing fixing it the DEFAULT is the smaller width: Int32
+  to inf / zero (an explicit cast, `Int32(5000000000)`, still converts); a float literal whose
+  spelling rounds to an infinity or a false zero at Float64 too (`1e400`, `1e-400`) fits NO width
+  and is BL3020 in every context. With nothing fixing it the DEFAULT is the smaller width: Int32
   (Int64 only past Int32's range), Float32 (Float64 only outside Float32's finite range),
   Complex64 for `complex` of defaulted floats. So `let x = 0.5` is a Float32 VARIABLE: spell
   `let x: Float64 = 0.5` when you mean a Float64.
@@ -514,7 +524,9 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   A whole `v = e` rebinds and writes no storage: after it, `v` holds only `e` on that path.
 - **A block-bound lambda is monomorphic when the block checks that way**; otherwise it is
   generic in exactly the types it is applied at (unannotated, applied at two or more sites,
-  never used as a value; formalism 4.3).
+  never used as a value; formalism 4.3). An operator section bound to a name (`let op = (+)`)
+  IS that lambda, `lambda(x, y) -> x + y` (`op(a, b)` and `a :op: b` are direct calls); a
+  section in a kernel slot (`reduce(A, (+))`, or `reduce(A, op)` with that name) is the slot's operator.
 - **Don't hand-optimize.** No manual triangular index math, no hand-placed OpenMP pragmas,
   no manual BLAS calls. Declare `comm`/`anticomm`/`omp` and use array identity at the call
   site; the compiler derives triangular storage/iteration (r! savings), pragma placement,

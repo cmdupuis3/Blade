@@ -6,8 +6,10 @@
 // lambda called by its own name; the body's arithmetic is then refused. Here: `let op = (+)` in a
 // block, applied to two Bools.
 // ============================================================================
+// Since G288 (a) (floor round) the section IS `lambda(x, y) -> x + y`: the
+// call binds its parameters to Bool and the lambda's `+` is refused, at the section.
 let r = {
     let op = (+)
     op(true, false)
 }
-// ERROR: BL3001 @ 10:8
+// ERROR: BL3001 @ 11:14

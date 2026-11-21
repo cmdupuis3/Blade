@@ -1,0 +1,11 @@
+// TEST: An Unannotated Field Read Keeps Its Width In The Mixing Rule (rejects)
+// ERROR: BL3020
+// F2 (floor round): once the field read `q.f` has the field's own type, a
+// Float32 field beside a Float64 capture is the mixing rule's refusal
+// (formalism 2.4), exactly as with `lambda(q: R)`. Master typed the read as
+// a variable the `*` unified with Float64, accepted the program and widened
+// every Float32 cell silently.
+struct R { f: Float32 }
+let w: Float64 = 2.0
+let rs = [R { f = 1.5 }, R { f = 2.5 }]
+let r = (method_for(rs) <@> lambda(q) -> q.f * w) |> compute

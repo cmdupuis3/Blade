@@ -1,0 +1,28 @@
+// TEST: Unannotated Kernels Read Struct Fields At The Field's Type
+// F2 (floor round): a lambda whose parameter is unannotated, applied to an
+// array of structs, takes the CELL type, and a field read `q.x` in its body
+// is the field's type. Master typed the read as a fresh variable, so a map's
+// output cells fell back to the struct (`Array<Point>`) and R11's
+// kernel-result judgment refused every spelling below (BL3001, "the value
+// would be converted") although nothing converts: the output cells ARE the
+// field values. Map, co-iteration, outer product, a fused fold over a map,
+// a nested field, an Int64 and a Float32 field (each keeps its width).
+struct Point { x: Float64, y: Float64 }
+struct Rec { n: Int64, f: Float32, at: Point }
+let ps = [Point { x = 1.0, y = 2.0 }, Point { x = 3.0, y = 4.0 }]
+let ws = Float64([10.0, 20.0])
+let rs = [Rec { n = 7, f = 1.5, at = Point { x = 0.5, y = 0.25 } }, Rec { n = 9, f = 2.5, at = Point { x = 1.5, y = 1.25 } }]
+let xs = (method_for(ps) <@> lambda(q) -> q.x) |> compute
+let zs = (method_for(zip(ps, ws)) <@> lambda(q, w) -> q.y + w) |> compute
+let os = (method_for(ps, ws) <@> lambda(q, w) -> q.x * w) |> compute
+let dot = reduce(method_for(ps) <@> lambda(q) -> q.x * q.y, (+))
+let nested = (method_for(rs) <@> lambda(r) -> r.at.y) |> compute
+let ns = (method_for(rs) <@> lambda(r) -> r.n + 1) |> compute
+let fs = (method_for(rs) <@> lambda(r) -> r.f * 2.0) |> compute
+// EXPECT: xs = [1.0, 3.0]
+// EXPECT: zs = [12.0, 24.0]
+// EXPECT: os = [[10.0, 20.0], [30.0, 60.0]]
+// EXPECT: dot = 14.0
+// EXPECT: nested = [0.25, 1.25]
+// EXPECT: ns = [8, 10]
+// EXPECT: fs = [3.0, 5.0]

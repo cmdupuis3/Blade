@@ -1,0 +1,15 @@
+// TEST: A Destructured Local Shadowing A Section Name Folds The Local
+// F6 follow-up (floor round, the lead's review): a name bound to a section is
+// that section in a fold's kernel slot only when NO other binder of the name
+// exists; a tuple destructure is a binder, so `reduce(xs, op)` below folds the
+// LOCAL lambda (`((10 - 1) - 2) - 3`), never the outer `(+)` (a draft gave 16).
+let op = (+)
+let z = op(1, 2)
+function f(xs: Int64^1) -> Int64 = {
+    let (op, y) = (lambda(a: Int64, b: Int64) -> a - b, 1)
+    reduce(xs, op)
+}
+let xs: Array<Int64 like Idx<4>> = [10, 1, 2, 3]
+let r = f(xs)
+// EXPECT: r = 4
+// EXPECT: z = 3

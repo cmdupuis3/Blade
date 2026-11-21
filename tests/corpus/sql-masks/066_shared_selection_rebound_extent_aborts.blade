@@ -1,0 +1,20 @@
+// TEST: A Shared Selection Over Sources Of Equal Extent Expressions But Unequal Shapes Checks Its Extents (aborts)
+// Gap G283: p and q are both `Float64(0..n)`, but n is rebound between them, so equal extent
+// EXPRESSIONS are not equal evaluated shapes. The compaction-fusion shared selection admitted q
+// beside p by expression and gathered q past its end; it now admits a run-time extent only for the
+// mask source itself, so each compound keeps its own passes and q's compound raises BL8011.
+// ABORT: BL8011
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+let a = Float64(0..extents(c5)) |> compute
+let b = Float64(0..extents(c3)) |> compute
+let mut n = extents(a)
+let p = Float64(0..n) |> compute
+n = extents(c3)
+let q = Float64(0..n) |> compute
+let keep = mask(p, lambda(v) -> v > 0.5)
+let yp = compound(p, keep)
+let yq = compound(q, keep)
+let s = reduce(yq, (+))

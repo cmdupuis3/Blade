@@ -1,0 +1,13 @@
+// TEST: Extents Of An Array With A Static Plain Slot After A Compact Group
+// Gap G295: the static twin of index-types/734 -- the C++ lane answers a static record from the
+// type, the interpreter and the LLVM lane read the physical extents and now map the record.
+type J = Idx<3>
+type V = Idx<5>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let v: Array<Float64 like V> = [0.0, 2.0, 4.0, 6.0, 8.0]
+let Q = method_for(M, v) <@> lambda(m, x) -> x * m |> compute
+let f = extents(Q)
+let q = Q(1, 2, 4)
+// EXPECT: f = (3, 5)
+// EXPECT: q = 48.0

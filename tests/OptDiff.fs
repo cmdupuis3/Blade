@@ -120,10 +120,22 @@ let private compileAndRun (dir: string) (stem: string) (cpp: string) : Result<in
 /// predecessor as well as against no optimizer at all.
 type private Pending = { Name: string; Stem: string; Program: Program; On: string; Off: string; Ref: string; Culprits: string list option }
 
-let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockResult =
-    printHeader "Optimizer Differential (all gates OFF vs ON)"
-    let blockName = "Opt Diff"
-    let outDir = Path.Combine("generated_cpp_tests", "opt_diff")
+/// THE LICENSED ARM (`blade test opt-diff-licensed [<dir>]`, floor round F7):
+/// the same structure under the DEFAULT floating-point policy -- licensed folds
+/// reassociated, contraction on (`BLADE_FP_REPRO` / `BLADE_FP_CONTRACT`
+/// unset), the arithmetic users run -- so a plan that fires only in the
+/// licensed build is compared gates-off against gates-on too. Byte identity is
+/// not the contract there (a fused chain may contract or reassociate what the
+/// unfused one rounds), so two runs agree under `blade test llvm`'s token rule
+/// (LlvmTests.compareRunsLabeled: every non-numeric token exact, a finite
+/// number within 1e-9 relative, 1e-12 absolute below 1e-9, the int / float
+/// spelling and signed zero exact). The exit code must still match exactly. A
+/// disagreement is a FINDING of the arm (a licensed association change whose
+/// value moves past the rule, or a bug), not a tolerance to widen.
+let runOptDiffTestsWith (licensed: bool) (categories: string list) (includeMultiFile: bool) : BlockResult =
+    printHeader (if licensed then "Optimizer Differential, licensed FP (all gates OFF vs ON, 1e-9 token rule)" else "Optimizer Differential (all gates OFF vs ON)")
+    let blockName = if licensed then "Opt Diff Licensed" else "Opt Diff"
+    let outDir = Path.Combine("generated_cpp_tests", (if licensed then "opt_diff_licensed" else "opt_diff"))
     Directory.CreateDirectory outDir |> ignore
     CodeGen.deployRuntimeHeaders outDir
     printfn "gates: %s" (String.concat ", " Optimize.optimizerGates)
@@ -139,7 +151,11 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
     let sw = System.Diagnostics.Stopwatch.StartNew()
     // The whole block runs with contraction off (see the header) and with
     // the gates at their defaults on the ON side, whatever the shell carries.
-    withEnv [ ("BLADE_FP_CONTRACT", Some "off"); ("BLADE_FP_REPRO", Some "1") ] (fun () ->
+    // The licensed arm runs the DEFAULT policy instead: both FP knobs unset.
+    let fpPins =
+        if licensed then [ ("BLADE_FP_CONTRACT", None); ("BLADE_FP_REPRO", None) ]
+        else [ ("BLADE_FP_CONTRACT", Some "off"); ("BLADE_FP_REPRO", Some "1") ]
+    withEnv fpPins (fun () ->
         let programs =
             [ for cat in categories do
                 for (name, src) in category cat do
@@ -190,7 +206,12 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
         printfn "emitted %d programs in %.1fs: %d with identical C++ (optimizer inert), %d to compile and run both ways"
             programs.Length sw.Elapsed.TotalSeconds inert.Value pending.Count
         // Which gates move a program's emission, by switching each off
-        // alone (emission only -- cheap). Sequential, like phase 1.
+        // alone. LAZY: only a FAILURE is attributed. Every gate is one more
+        // sequential emission, so the eager form (51 gates x ~1000 pending
+        // programs over the whole corpus) ran for over an hour on one core
+        // before the first compile; a pass or skip names no gate (a mirror
+        // keeps its known label). Called from the sequential result loop below,
+        // after phase 2, where `withEnv` is safe.
         let culpritsOf (p: Pending) =
             match p.Culprits with
             | Some known -> known
@@ -200,7 +221,6 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 match withEnv (gatesDefault @ gatesOff [ g ]) (fun () -> emit p.Name p.Program) with
                 | Emitted c -> c <> p.On
                 | Refused _ -> true)
-        let attributions = pending |> Seq.map (fun p -> (p.Stem, culpritsOf p)) |> Map.ofSeq
         if not capabilities.Value.HasGpp then
             for p in pending do
                 skip p.Name "C++ differs; requires g++ to compare outputs"
@@ -210,7 +230,12 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 pending.ToArray()
                 |> Array.Parallel.map (fun p -> (p, compileAndRun outDir (p.Stem + "_on") p.On, compileAndRun outDir (p.Stem + "_off") p.Off))
             for (p, on, off) in results do
-                let who = attributions.[p.Stem] |> String.concat "+"
+                // the culprits are computed only when a failure prints them
+                let who () = culpritsOf p |> String.concat "+"
+                let known =
+                    match p.Culprits with
+                    | Some k -> " (" + String.concat "+" k + ")"
+                    | None -> ""
                 let pointerIn (r: Result<int * string, string>) =
                     match r with
                     | Ok (_, out) -> Blade.Tests.Expect.rawPointerLine out
@@ -218,11 +243,17 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 match on, off with
                 | _ when (pointerIn on).IsSome || (pointerIn off).IsSome ->
                     let line = defaultArg (pointerIn on) (defaultArg (pointerIn off) "")
-                    fail p.Name $"output prints a raw pointer ({who}): {line}"
+                    fail p.Name $"output prints a raw pointer ({who ()}): {line}"
                 | Ok (ca, oa), Ok (cb, ob) when ca = cb && oa = ob ->
-                    pass p.Name $"C++ differs ({who}), output identical"
+                    pass p.Name $"C++ differs{known}, output identical"
+                | Ok (ca, oa), Ok (cb, ob) when licensed && ca = cb ->
+                    (match Blade.Tests.LlvmTests.compareRunsLabeled "ON" p.Ref 3 oa ob with
+                     | Ok () -> pass p.Name $"C++ differs{known}, output within the 1e-9 token rule"
+                     | Error diffs ->
+                         let shown = String.concat "; " diffs
+                         fail p.Name $"OUTPUT DIVERGES past the 1e-9 token rule ({who ()}): {shown}")
                 | Ok (ca, oa), Ok (cb, ob) ->
-                    fail p.Name $"OUTPUT DIVERGES ({who}): exit {ca} ON vs {cb} {p.Ref}"
+                    fail p.Name $"OUTPUT DIVERGES ({who ()}): exit {ca} ON vs {cb} {p.Ref}"
                     let la = oa.Split('\n')
                     let lb = ob.Split('\n')
                     let firstDiff =
@@ -236,14 +267,18 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 | Error ea, Error _ when p.On.Contains "#error" && p.Off.Contains "#error" ->
                     // both refused by a codegen `#error` guard (a codegen-
                     // stage probe): the lanes agree on the refusal
-                    pass p.Name $"C++ differs ({who}); both refused by a codegen #error ({firstLine ea})"
+                    pass p.Name $"C++ differs{known}; both refused by a codegen #error ({firstLine ea})"
                 | Error ea, Error _ ->
                     // both failed to compile for some other reason (a
                     // missing header, a toolchain gap): nothing was observed
-                    skip p.Name $"C++ differs ({who}); neither side compiled ({firstLine ea})"
-                | Error e, Ok _ -> fail p.Name $"only the {p.Ref} side compiled ({who}): {firstLine e}"
-                | Ok _, Error e -> fail p.Name $"only the ON side compiled ({who}): {firstLine e}")
+                    skip p.Name $"C++ differs{known}; neither side compiled ({firstLine ea})"
+                | Error e, Ok _ -> fail p.Name $"only the {p.Ref} side compiled ({who ()}): {firstLine e}"
+                | Ok _, Error e -> fail p.Name $"only the ON side compiled ({who ()}): {firstLine e}")
     printFooter blockName
         [ $"{passed.Value} passed ({inert.Value} optimizer-inert)"; $"{failed.Value} failed"; $"{skipped.Value} skipped"
           $"{sw.Elapsed.TotalSeconds:F0}s" ]
     { Block = blockName; Passed = passed.Value; Failed = failed.Value; Skipped = skipped.Value; FailedNames = failedNames.Value }
+
+/// The reproducible-build arm (`blade test opt-diff`): byte identity.
+let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockResult =
+    runOptDiffTestsWith false categories includeMultiFile

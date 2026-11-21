@@ -1,0 +1,9 @@
+// TEST: a returned tuple of writing calls evaluates them left to right
+// Gap G300: each bump(d) writes d and returns the new count; the components
+// read 1.0 then 2.0 (the C++ lane printed t = (2.0, 1.0)).
+function bump(c: mut Array<Float64 like Idx<1>>) -> Float64 = { c(0) = c(0) + 1.0; c(0) }
+function g(d: mut Array<Float64 like Idx<1>>) -> (Float64, Float64) = (bump(d), bump(d))
+let mut c: Array<Float64 like Idx<1>> = [0.0]
+let t = g(c)
+// EXPECT: c = [2.0]
+// EXPECT: t = (1.0, 2.0)

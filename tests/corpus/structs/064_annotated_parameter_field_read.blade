@@ -1,0 +1,11 @@
+// TEST: An Annotated Parameter's Field Read Keeps The Field's Type
+// G290 (floor round), the accepted twin of structs/062-063: annotating the
+// parameter with the struct gives the read the field's own type; a block-bound
+// lambda is decided by its call and needs no annotation.
+struct Rec { n: Int64 }
+let rs = [Rec { n = 9007199254740993 }]
+function getn(r: Rec) -> Int64 = r.n
+let y = getn(rs(0))
+let z = { let get = lambda(r) -> r.n; get(rs(0)) }
+// EXPECT: y = 9007199254740993
+// EXPECT: z = 9007199254740993

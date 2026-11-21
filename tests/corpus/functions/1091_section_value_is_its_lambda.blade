@@ -1,0 +1,35 @@
+// TEST: An Operator Section Bound To A Name Is The Lambda It Abbreviates
+// G288 (a), floor round (the lead's ruling, reading 1): `let op = (+)` is
+// `lambda(x, y) -> x + y`, so a direct call by its name decides its types
+// (formalism 4.3): integers stay integers, a Float32 pair stays Float32,
+// comparison and logical sections answer Bools, and in a block the first use
+// decides. Master lifted every section over Float64 parameters: op(1, 2) was
+// 3.0 and an Int64 product 25.0 -- the Int64 converted. A section in a
+// KERNEL slot (`reduce(xs, (+))`) is unaffected.
+let op = (+)
+let times = (*)
+let less = (<)
+let both = (&&)
+let a: Int64 = 5
+let big: Int64 = 9007199254740993
+let f: Float32 = 1.5
+let s1 = op(1, 2)
+let s2 = times(a, a)
+let s3 = op(big, 0)
+let s4 = times(f, f)
+let s5 = less(a, 7)
+let s6 = both(true, false)
+let s7 = {
+    let sub = (-)
+    sub(a, Int64(2))
+}
+let xs = [Int64(1), Int64(2), Int64(3)]
+let k = reduce(xs, (+))
+// EXPECT: s1 = 3
+// EXPECT: s2 = 25
+// EXPECT: s3 = 9007199254740993
+// EXPECT: s4 = 2.25
+// EXPECT: s5 = true
+// EXPECT: s6 = false
+// EXPECT: s7 = 3
+// EXPECT: k = 6

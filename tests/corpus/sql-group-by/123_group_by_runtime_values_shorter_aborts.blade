@@ -1,0 +1,12 @@
+// TEST: Group By With Values Shorter Than The Keys At Run Time Checks Its Extents (aborts)
+// Gap G283 (floor round, lane B): ka (5 rows) and b (3 cells) are shaped at run time. The resident
+// gather read b at the key array's rows, past its end (a garbage row, exit 0); every lane now
+// compares the values' extent with the grouping's source rows before the gather.
+// ABORT: BL8011
+let src: Array<Int64 like Idx<8>> = [1, 2, 3, 4, 5, -1, -2, -3]
+let ca = compound(src, mask(src, lambda(v) -> v > 0))
+let cb = compound(src, mask(src, lambda(v) -> v > 2))
+let ka = Int64(0..extents(ca)) |> compute
+let b = Float64(0..extents(cb)) |> compute
+let gk = group_keys(ka)
+let g = group_by(b, gk)

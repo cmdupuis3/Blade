@@ -1,0 +1,8 @@
+// TEST: A False-Zero Literal In An Uncalled Function (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round, the lead's ruling): a float literal whose spelling rounds
+// to an infinity, or to zero while it is not zero, fits NO width and is
+// refused at the literal in every context (formalism 2.4). A literal fits no width wherever it is written, so even a body nothing calls is refused.
+function unused(x: Float64) -> Float64 = x + 1e-500
+let y = 1.0

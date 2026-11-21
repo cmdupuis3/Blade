@@ -2146,6 +2146,12 @@ and materializeCompoundBinding
     | ArrayElem arrTy ->
         let dense = forceArr denseExpr "dense"
         let mask = forceArr maskExpr "mask"
+        // G283: the constructor's extent guard (BL8011), the compiled lanes'
+        // check before the index build -- the mask's leading extents against
+        // the dense operand's (the scatter walks the mask's grid)
+        for d in 0 .. mask.Extents.Length - 1 do
+            if d >= dense.Extents.Length || dense.Extents.[d] <> mask.Extents.[d] then
+                raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
         let cv = A.buildCompound arrTy dense mask
         st.Cells <- st.Cells + cv.Cardinality * cv.TrailingStride
         VCompound cv
@@ -3353,6 +3359,11 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | VGroupKeys g -> g
             | _ -> raise (InterpUnsupported "group_by: grouping operand is not a group_keys value")
         let vals = forceInputArray st env valsExpr
+        // G283: the values against the grouping's source rows (BL8011), the
+        // compiled lanes' check before the gather (a tile grouping addresses
+        // the rank-2 values by coordinates over type-checked static axes)
+        if gk.Coords.IsNone && (vals.Extents.Length = 0 || vals.Extents.[0] <> int64 gk.Members.Length) then
+            raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
         let idxTys = match typeOf expr with ArrayElem at -> at.IndexTypes | _ -> []
         VArray (A.buildGroupBy idxTys gk vals)
 
@@ -3458,7 +3469,12 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | Some n -> VInt n
         | None ->
         (match force st env v0 with
-         | VArray a -> VInt (A.extent a dim)
+         | VArray a ->
+             // G295: a RECORD position read off the PHYSICAL extents (Core's rule)
+             let axis =
+                 if a.Extents.Length > a.IndexTypes.Length then recordPhysicalAxis a.IndexTypes dim |> Option.defaultValue dim
+                 else dim
+             VInt (A.extent a axis)
          | _ -> raise (InterpUnsupported "extent of non-array"))
     | IRPolyIndex (packExpr, idxExpr) ->
         A.polyIndex (force st env (Core.evalExpr st env packExpr)) (toI64 (Core.evalExpr st env idxExpr))

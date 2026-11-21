@@ -1,0 +1,18 @@
+// TEST: a block lambda whose open parameter is given a closed tuple takes it
+// ============================================================================
+// R10 remainder (the numbers-only rule, formalism 2.4): a block lambda's
+// parameter its body leaves open is BOUND by a direct call's argument -- a Bool,
+// a String, a struct, a sum-type value, an index value. A tuple argument was
+// refused here (BL3001, "it would be compiled at a default numeric type"); since
+// the floor round's F2 a CLOSED tuple (every component decided) binds the
+// parameter as a struct does, and the body's projections take the components'
+// types. A body that treats the tuple as a number is refused by the
+// numbers-only rule (basic/600).
+// ============================================================================
+let r = {
+    let idl = lambda(x) -> x
+    idl((true, 1))
+}
+let p = r[1] + 1
+// EXPECT: r = (true, 1)
+// EXPECT: p = 2

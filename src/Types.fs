@@ -1695,9 +1695,10 @@ module LiteralDefaults =
     /// (Blade.Ast.DegenerateFloatLiterals: `1e400` parsed to an infinity, a
     /// nonzero `1e-400` to 0.0) denotes a value outside Float32's finite range,
     /// so it does not fit Float32 and DEFAULTS to Float64 (formalism 2.4, read
-    /// by spelling). A Float64 context keeps the double (inf / 0.0; review
-    /// item R32 is open): refusing it there too is the one-line change of
-    /// dropping `et <> ETFloat64 &&` in floatLiteralFits.
+    /// by spelling). Since the floor round's F5 such a literal fits no width
+    /// at all and is refused before inference (TypeCheck.degenerateFloatLiteralErrors);
+    /// the one that still reaches these sites is the operand of a user's cast
+    /// (`Float64(1e400)`, decision D15), which converts the double.
     let floatLiteralFits (et: ElemType) (f: float) (span: Blade.Ast.Span) : bool =
         floatFits et f && not (et <> ETFloat64 && Blade.Ast.DegenerateFloatLiterals.isDegenerate span)
     let floatDefaultAt (f: float) (span: Blade.Ast.Span) : ElemType =

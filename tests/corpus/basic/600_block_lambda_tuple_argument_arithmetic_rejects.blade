@@ -1,0 +1,9 @@
+// TEST: a block lambda doing arithmetic on a tuple argument (rejects)
+// ERROR: BL3001 @ 6:28
+// ERROR-CONTAINS: meets a tuple, which is not a number
+// F2 (floor round): a closed tuple binds a block lambda's open parameter
+// (basic/583); a body that adds the tuple is the numbers-only refusal.
+let s = {
+    let dbl = lambda(x) -> x + x
+    dbl((true, 1))
+}

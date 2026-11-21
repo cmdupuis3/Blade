@@ -1,10 +1,14 @@
 // TEST: A Stored Section Applied To Generic Bool Cells Is Refused (rejects)
-// ERROR: BL3001 @ 10:36
-// ERROR-CONTAINS: the section `(+)` is applied to a Bool value
+// ERROR: BL3001 @ 16:15
+// ERROR-CONTAINS: applies `+` to a value of its generic parameter type, and this call makes that type Bool
 // ============================================================================
 // R11: `let f = (+)` is lifted over Float64 parameters whatever it is
 // applied to; applied to the cells of outer's generic array, instantiated at
 // Bool, it computed Bool arithmetic. Judged against the operator at the call.
+// ============================================================================
+// Since G288 (a) (floor round) a section bound to a name IS its lambda,
+// lambda(x, y) -> x + y, so the generic call judgment refuses the Bool
+// (struct) instance at the call.
 // ============================================================================
 function outer(b) = {
     let f = (+)

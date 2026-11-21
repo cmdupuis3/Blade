@@ -1,0 +1,6 @@
+// TEST: A section value reached from another module is its lambda
+// MODULE: Main
+module Main
+import Lib
+let z = Lib.op(1, 2)
+// EXPECT: z = 3

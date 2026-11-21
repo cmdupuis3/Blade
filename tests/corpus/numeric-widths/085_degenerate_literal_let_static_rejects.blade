@@ -1,0 +1,8 @@
+// TEST: An Overflowing Literal In A Let Static (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round, the lead's ruling): a float literal whose spelling rounds
+// to an infinity, or to zero while it is not zero, fits NO width and is
+// refused at the literal in every context (formalism 2.4). Master: big = inf.
+let static big = 1e400
+let y = big * 2.0

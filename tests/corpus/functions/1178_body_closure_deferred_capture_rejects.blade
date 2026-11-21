@@ -1,0 +1,14 @@
+// TEST: a function-body closure capturing a deferred module map is refused (rejects)
+// Gap G279: h is formed before anything forces d in f0's body, so the C++
+// lane cannot forward d to it; refused (BL7004) instead of a BL9002.
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [1.0]
+let d = method_for(backing) <@> lambda(e) -> e * 2.0
+function f0() -> Float64 = {
+    let h = lambda(i: Int64) -> d(i)
+    h(0)
+}
+let r1 = f0()
+// REJECT-AT: codegen
+// ERROR-CONTAINS: 'd' is a deferred map (a `let` of a map with no `|> compute`)
+// (BL7004 at the driver; the harness pins the #error text: loops/190's note)

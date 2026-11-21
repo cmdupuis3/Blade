@@ -1734,6 +1734,27 @@ let (|IxSymmetryLike|IxCompound|IxDep|IxRagged|IxTree|IxDense|) (ix: IRIndexType
          | IxKErrorRaggedNoPrior | IxKErrorIrrepsBadSpec
          | IxKErrorPgIrrepsBadSpec | IxKErrorTreeBadShape -> IxDense)
 
+/// G295: the PHYSICAL axis of RECORD r of a dense array whose records are
+/// plain one-axis slots and compact groups (Symmetric / Antisymmetric /
+/// Hermitian, rank k >= 2, which span k physical axes). `extents(A)` lowers to
+/// one IRExtent per RECORD; a run-time read of the stored extents table
+/// (`.extents[]` in the C++ lane, `Extents` in the interpreter) is by PHYSICAL
+/// axis, so record r after a compact group reads axis r + (k - 1) per group
+/// before it. Some p for such a layout, None for anything else (compound,
+/// sparse, ragged, wreath, a record past the end): those keep the record
+/// position, as before.
+let recordPhysicalAxis (ixs: IRIndexType list) (r: int) : int option =
+    let width (ix: IRIndexType) =
+        match ix.Symmetry with
+        | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 && ix.IxKind = IxKPlain -> Some ix.Rank
+        | SymNone when ix.IxKind = IxKPlain && ix.Rank <= 1 -> Some 1
+        | _ -> None
+    if r < 0 || r >= ixs.Length then None
+    else
+        let before = ixs |> List.truncate r |> List.map width
+        if before |> List.forall Option.isSome then Some (before |> List.sumBy Option.get)
+        else None
+
 
 // IR Declarations
 
@@ -2806,6 +2827,33 @@ let irNodeMayAbort (e: IRExpr) : bool =
     | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _
     | IRUngroup _ | IRUngroupGrid _ | IRUngroupRows _ -> true
     | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRFunctorMap _ | IRReplicate _ -> true
+
+/// THE SHARED SEED OF A FUSED FOLD (gap G277): `reduce(t1 <&!> t2, k, s)` has
+/// ONE seed and k leaf accumulators, and the seed is evaluated ONCE, before the
+/// legs, its value handed to every leaf (the interpreter's contract). A compiled
+/// lane may still spell the seed once per accumulator when doing so cannot be
+/// told apart from one evaluation: a literal, a name, a parameter, and unary /
+/// binary scalar arithmetic over those (nothing writes, nothing draws, and a
+/// failing operator fails at its first spelling exactly as at its only one).
+/// Everything else -- a block, a call, a subscript, an `if`, a tuple -- is bound
+/// once and the accumulators copy it. The two compiled lanes ask this one
+/// predicate, so a pure atom emits as it always did in both.
+let rec fusedSeedRepeatable (e: IRExpr) : bool =
+    match e with
+    | IRLit _ | IRVar _ | IRParam _ -> true
+    | IRUnaryOp (_, x) -> fusedSeedRepeatable x
+    | IRBinOp (_, _, a, b, _) -> fusedSeedRepeatable a && fusedSeedRepeatable b
+    | _ -> false
+
+/// THE SEED PACK OF A REDUCTION JOIN (gap G274): the per-leg seeds of the join
+/// encoding (a tuple kernel beside a tuple seed), seen through the let chain
+/// IRLift wraps around the pack when a leg seed is a block. None when the seed
+/// is not a pack.
+let rec joinSeedsOf (e: IRExpr) : IRExpr list option =
+    match e with
+    | IRTuple ss -> Some ss
+    | IRLet (_, _, b) -> joinSeedsOf b
+    | _ -> None
 
 /// Does this value OWN a freshly allocated pool that nothing else can reach?
 /// THE one definition, shared by codegen's escape analysis

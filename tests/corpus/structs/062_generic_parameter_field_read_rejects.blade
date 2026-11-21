@@ -1,0 +1,12 @@
+// TEST: A Generic Declaration Reading A Field Of Its Parameter (rejects)
+// ERROR: BL3024
+// ERROR-CONTAINS: reads the field `n` of a value whose type is one of its GENERIC parameters
+// G290 (floor round): `r.n` over a parameter whose type is the declaration's
+// generic variable had no type to read -- every instance computed the field
+// at the zonk default and CONVERTED it: master printed 9.00719925474099e+15
+// for the Int64 field 9007199254740993. Refused at the read, naming the
+// remedy (annotate the parameter: structs/064).
+struct Rec { n: Int64 }
+let rs = [Rec { n = 9007199254740993 }]
+function getn(r) = r.n
+let y = getn(rs(0))

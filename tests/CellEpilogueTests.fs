@@ -1026,11 +1026,10 @@ let runCellEpilogueTests () : BlockResult =
     // `at <frame>` lines -- are the
     // SAME for every spelling in each lane, and the same in the C++ lane, the
     // NATIVE llvm lane (`tryEmitProgramNamed` must succeed) and the
-    // interpreter. ONE named exception (gap G88, pre-existing, not the
-    // zero-level rewrite): the C++ lane refuses `f(op) |> compute` over a
-    // DEFERRED operand at g++ (`'<op>' was not declared`, BL9002) for the
-    // direct call and the application alike, so there both spellings are
-    // asserted refused with the same text and the C++ value is not compared.
+    // interpreter. (Gap G88 used to be a named exception here: the C++ lane
+    // refused `f(op) |> compute` over a DEFERRED operand at g++ for the direct
+    // call and the application alike. Floor round F9 forces the operand first,
+    // so every spelling is now compared in every lane.)
     (let pre =
          "type P = Idx<3>\ntype S = Idx<4>\nlet x0 = Float64(0..3) |> compute\nlet zz = extents(x0) - 3\n"
          + "let c0 = method_for(range<P, S>) <@> lambda(a, s) -> Float64(a + s) |> compute\n"
@@ -1139,20 +1138,14 @@ let runCellEpilogueTests () : BlockResult =
              [ for lane in [ "C++"; "llvm"; "interpreter" ] do
                  for (a, b) in [ ("direct", "bare"); ("dircomp", "comp") ] do
                      if get a lane <> get b lane then yield $"{lane}: {a} {get a lane} vs {b} {get b lane}" ]
-         // (2) across lanes, per spelling (G88: the C++ `|> compute` over a deferred operand is a g++ refusal)
-         let g88 (sp: string) = deferred && (sp = "dircomp" || sp = "comp")
+         // (2) across lanes, per spelling (G88 fixed: a `|> compute` over a
+         // deferred operand forces it first in the C++ lane too)
          let laneBad =
              [ for (sp, _) in spellings do
                  let l, i = get sp "llvm", get sp "interpreter"
                  if l <> i then yield $"{sp}: llvm {l} vs interpreter {i}"
                  let c = get sp "C++"
-                 if g88 sp then
-                     let refusedOk =
-                         match c with
-                         | (true, [ r ]) -> r.StartsWith "C++ COMPILE REFUSED: error: '" && r.Contains "was not declared"
-                         | _ -> false
-                     if not refusedOk then yield $"{sp}: C++ {c}, want the G88 g++ refusal"
-                 elif c <> i then yield $"{sp}: C++ {c} vs interpreter {i}" ]
+                 if c <> i then yield $"{sp}: C++ {c} vs interpreter {i}" ]
          // (3) the expected first failure (or success) itself
          let (failed0, lines0) = get "direct" "interpreter"
          let wantBad =
@@ -1166,7 +1159,7 @@ let runCellEpilogueTests () : BlockResult =
                  then [] else [ $"values {lines0}" ]
          match twinBad @ laneBad @ wantBad with
          | [] ->
-             let g88Note = if deferred then "; C++ `|> compute` over the deferred operand: the G88 g++ refusal for the direct call and the application alike" else ""
+             let g88Note = if deferred then "; C++ `|> compute` over the deferred operand forces it first (G88 fixed)" else ""
              pass name ($"""{(if failed0 then "fails" else "runs")}: {String.concat " | " lines0}; native llvm + interpreter + C++ agree{g88Note}""")
          | bad -> fail name (String.concat " ;; " bad)
      // EXPLICIT-WRAPPER CONTROLS (the second Codex look, finding 2): only the

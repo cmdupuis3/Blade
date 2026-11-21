@@ -1,0 +1,14 @@
+// TEST: a returned closure capturing a deferred map is refused (rejects)
+// Gap G279 (floor round, lane c, F9): mk returns a closure over the deferred
+// module map d; the force would have to happen inside the closure at each
+// read, which the C++ lane does not build, so it is refused (BL7004, bind
+// `|> compute` first) instead of reaching g++ with d undeclared (BL9002).
+type A = Array<Float64 like Idx<1>>
+let mut backing: A = [1.0]
+let d = method_for(backing) <@> lambda(e) -> e * 2.0
+function mk() -> ((Int64) -> Float64) = lambda(i: Int64) -> d(i)
+let g = mk()
+let r1 = g(0)
+// REJECT-AT: codegen
+// ERROR-CONTAINS: 'd' is a deferred map (a `let` of a map with no `|> compute`)
+// (BL7004 at the driver; the harness pins the #error text: loops/190's note)

@@ -8,10 +8,11 @@
 # The cheap default gate runs on Linux; the `build` job says why.
 #
 # WHAT RUNS BY DEFAULT IS DELIBERATELY SMALL. Every push and pull request gets
-# the `build` job and nothing else: `dotnet build`, then the byte-pinned LLVM
-# emission goldens, which take about a second and need no native toolchain at
-# all. That is the whole of the default cost -- no g++, no MSYS2, no MS-MPI, no
-# OpenBLAS download, no thousands of compiled corpus programs.
+# the `build` job -- `dotnet build`, then the byte-pinned LLVM emission
+# goldens, about a second, no native toolchain -- and the `smoke` job: a fixed
+# sample of about 370 corpus programs (every directory represented) compiled
+# and run on the C++ lane, so a push cannot break a whole category and stay
+# green until the nightly. No thousands of compiled corpus programs.
 #
 # The heavy lanes are opt-in, and there are three ways in:
 #
@@ -177,6 +178,79 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ------------------------------------------------------------------------
+  # THE SMOKE LANE: corpus programs on every push and pull request.
+  #
+  # The `build` gate above compiles no corpus program, and every corpus lane
+  # below is nightly or opt-in, so a push that broke the compiled path for a
+  # whole category stayed green until the next nightly. `blade test smoke`
+  # runs a fixed sample of the single-file corpus on the default (C++) lane --
+  # from EVERY directory its first file and every file whose number is a
+  # multiple of 15 (tests/Corpus.fs smokeSample; about 370 programs, reject
+  # probes included), and the corpus-wiring block fails if a directory is
+  # left out. Same Windows toolchain as the heavy lanes (the `test` job
+  # below); not part of the plan matrix because it is not opt-in.
+  #
+  # Not on `labeled` pull_request events: a label changes no code, and the
+  # `ci:full` opt-in it triggers has its own lanes.
+  # ------------------------------------------------------------------------
+  smoke:
+    name: corpus smoke sample (C++ lane)
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'labeled')
+    runs-on: windows-latest
+    # The whole job: checkout, SDK, build and the toolchain install come first.
+    timeout-minutes: 60
+    env:
+      BLADE_EXE_CACHE: ${{ github.workspace }}\.blade-exe-cache
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build Blade.fsproj -c Release
+
+      - name: Native toolchain
+        uses: ./.github/actions/setup-blade-toolchain
+
+      - uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}\.blade-exe-cache
+          key: blade-exe-smoke-${{ github.sha }}
+          restore-keys: |
+            blade-exe-smoke-
+
+      # The same assertion as every heavy lane: a missing dependency makes
+      # the harness SKIP rather than fail, and a skip is a green that proved
+      # nothing.
+      - name: Assert the toolchain is complete
+        shell: pwsh
+        run: >
+          .\.github\scripts\Assert-Toolchain.ps1
+          -Blade .\bin\Release\net10.0\Blade.exe
+          -Require gpp,llvm,blas,lapack,netcdf,mpi
+
+      # Measured locally (16 logical cores, executable cache partly warm): 85 s wall,
+      # 131 g++ compiles (525 s summed) and 145 cache hits for 373 programs; a
+      # cold cache is about 5 minutes here. Three times that, rounded up.
+      - name: Corpus smoke sample
+        timeout-minutes: 20
+        shell: pwsh
+        run: >
+          .\.github\scripts\Invoke-BladeTest.ps1
+          -Blade .\bin\Release\net10.0\Blade.exe
+          -Name 'blade test smoke'
+          -BladeArgs 'test','smoke'
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: logs-smoke
+          path: ci-logs
+          retention-days: 7
+          if-no-files-found: ignore
   # ------------------------------------------------------------------------
   # Decide which heavy lanes this event asks for, and emit the matrix. Runs on
   # Linux because it is pure arithmetic over the event payload -- no checkout,

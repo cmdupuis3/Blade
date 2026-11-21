@@ -1,0 +1,13 @@
+// TEST: A Computed Coordinate Of A Compact Group Is Checked (aborts)
+// The F4 neighbour audit (floor round, lane B): a computed coordinate of a SymIdx<2, J> read
+// was only warned about (BL4003, untagged integer) and never checked, so `M(6, 0)`
+// canonicalized to a cell past its packed row and returned 0.0. It is now checked against the
+// group's base extent.
+// ABORT: BL8006
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let n = 3
+let i = n * 2
+let r = M(i, 0)
+// WARN: BL4003

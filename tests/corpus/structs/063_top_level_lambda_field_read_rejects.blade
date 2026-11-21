@@ -1,0 +1,11 @@
+// TEST: A Top-Level Lambda Declaration Reading A Field Of Its Parameter (rejects)
+// ERROR: BL3024
+// ERROR-CONTAINS: reads the field `n` of a value whose type is one of its GENERIC parameters
+// G290 (floor round): a top-level `let` of a lambda that is only applied IS a
+// generic declaration (formalism 4.3), so `lambda(r) -> r.n` is structs/062's
+// case (master: 9.00719925474099e+15). A block-bound one is decided by its
+// call and reads the field at its own type (structs/060).
+struct Rec { n: Int64 }
+let rs = [Rec { n = 9007199254740993 }]
+let getn = lambda(r) -> r.n
+let y = getn(rs(0))

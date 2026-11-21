@@ -1039,6 +1039,41 @@ let rec internal collectNumericMixErrors (env: TypeEnv) (expr: TypedExpr) : Comp
     | [] -> here
     | inner -> List.truncate 1 inner
 
+/// G290 (floor round): a field read `r.n` or a literal tuple projection `r[k]`
+/// whose OBJECT is still a value of a GENERIC variable when its declaration is
+/// checked -- `function getn(r) = r.n`, a top-level `let getn = lambda(r) -> r.n`
+/// that IS that declaration (formalism 4.3), a kernel over a generic array's
+/// cells -- was typed as a variable nothing links to the parameter, so every
+/// instance computed the field at the zonk default and CONVERTED it
+/// (`getn(rs(0))` over an Int64 field 9007199254740993 printed
+/// 9.00719925474099e+15). Refused at the read, BL3024, naming the remedy: the
+/// type system has no field obligation on a type variable (no row typing), so
+/// the declaration must say which type it reads. Judged on the UNZONKED tree,
+/// where a generic variable is still open; a read whose object a kernel slot or
+/// a call already decided (F2's settleOpenProjections) never reaches here.
+let rec internal collectGenericProjectionErrors (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let genericObj (t: TypedExpr) =
+        match IR.stripUnits (env.Subst.Resolve t.Type) with
+        | IRTInfer v -> env.Subst.IsPolymorphicId v
+        | _ -> false
+    let here =
+        let at = expr.Span
+        match expr.Kind with
+        | TExprField (obj, field, _) when genericObj obj ->
+            [ { Error = GenericVarErr ($"this declaration reads the field `{field}` of a value whose type is one of its GENERIC parameters' -- "
+                                       + "no instance would know the field's type, so each one would compute it at a default numeric type and convert the field "
+                                       + "(Blade converts nothing implicitly, formalism 2.4). Annotate the parameter with the struct it reads (`r: Rec`)")
+                Span = at; Context = []; Code = None } ]
+        | TExprTupleIndex (t, { Kind = TExprLit (LitInt k) }) when genericObj t ->
+            [ { Error = GenericVarErr ($"this declaration reads component {k} (`[{k}]`) of a value whose type is one of its GENERIC parameters' -- "
+                                       + "no instance would know the component's type, so each one would compute it at a default numeric type and convert it "
+                                       + "(Blade converts nothing implicitly, formalism 2.4). Annotate the parameter with the tuple type it reads")
+                Span = at; Context = []; Code = None } ]
+        | _ -> []
+    match typedExprChildren expr |> List.collect (collectGenericProjectionErrors env) with
+    | [] -> here
+    | inner -> List.truncate 1 inner
+
 /// A `zero` the checker has typed at a SUM TYPE (or a struct, tuple or array
 /// with a sum-type part) has no value (formalism 10.4: no rule picks a
 /// canonical zero variant). Both back ends refuse it in EXPRESSION position

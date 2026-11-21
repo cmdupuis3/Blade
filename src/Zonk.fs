@@ -789,6 +789,9 @@ let private arrayExtentExpr (arr: TypedExpr) (span: Blade.Ast.Span) (k: int) : T
         match arr.Kind with
         | TExprVar _
         | TExprTupleIndex ({ Kind = TExprVar _ }, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+        // G208 (floor round): a FIELD of a named struct value (`s.f(k)`) --
+        // reading the field again is a pure read of the same storage
+        | TExprField ({ Kind = TExprVar _ }, _, _) -> true
         | _ -> false
     match arr.Kind, arr.Type with
     | _, ArrayElem at when directArray ->
@@ -800,17 +803,87 @@ let private arrayExtentExpr (arr: TypedExpr) (span: Blade.Ast.Span) (k: int) : T
         | Some (b, brank, consumed) -> Some (extOf b brank (consumed + k))
         | None -> None
 
+/// A subscript that is a COORDINATE THE COMPILER MINTS over the group it
+/// reads -- `p0 + p1 + 1` over the `__sg<uid>_<m>` parameters of the gather
+/// an elementwise sign rule builds over `range<AntisymIdx<2, n>>` -- is proven
+/// by its construction. Exactly the coordinate set the plain-slot stand-down
+/// trusts (mentionsReservedName, G192 (2)): every variable in
+/// `SubscriptGuardContext.CoordVars` (`__`-named TStmtForIn loop variables and
+/// `__`-named lambda parameters, recorded at their binders: never a let --
+/// a hoisted call, a reduction result, a user `let __k` -- and never a user
+/// binder a pass renamed) and none in `DataVars` (kernel parameters bound to
+/// elements of a data array), combined only by literals, `+ - *` and
+/// negation. Anything else -- a user-written position, a let-bound value --
+/// is checked.
+let private isMintedCoordinate (e: TypedExpr) : bool =
+    match subscriptGuardCtx.Value with
+    | None -> false
+    | Some ctx ->
+        let mutable sawVar = false
+        let rec go (x: TypedExpr) =
+            match x.Kind with
+            | TExprVar (name, vid, _) ->
+                sawVar <- true
+                name.StartsWith "__" && not (isUserProvenanceName name)
+                && ctx.CoordVars.Contains vid && not (ctx.DataVars.Contains vid)
+            | TExprLit (Blade.Ast.LitInt _) -> true
+            | TExprBinOp (Blade.Ast.Elementwise, (Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul), l, r) -> go l && go r
+            | TExprUnaryOp (Blade.Ast.OpNeg, y) -> go y
+            | TExprBlock ([], Some v) -> go v
+            | _ -> false
+        go e && sawVar
+/// G208 (1): a Boolean condition that evaluating twice cannot change -- a
+/// pure index expression (variables, literals, `+ - *`), or comparisons and
+/// logic over such.
+let rec private isPureCondExpr (e: TypedExpr) : bool =
+    isPureIndexExpr e
+    || (match e.Kind with
+        | TExprBinOp (_, op, l, r) when (match op with Blade.Ast.OpEq | Blade.Ast.OpNeq | Blade.Ast.OpLt | Blade.Ast.OpLe | Blade.Ast.OpGt | Blade.Ast.OpGe | Blade.Ast.OpAnd | Blade.Ast.OpOr | Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul -> true | _ -> false) ->
+            isPureCondExpr l && isPureCondExpr r
+        | TExprUnaryOp ((Blade.Ast.OpNot | Blade.Ast.OpNeg), x) -> isPureCondExpr x
+        // an extent read of a named array (nothing between two reads with no
+        // call in between can change its shape)
+        | TExprExtents { Kind = TExprVar _ } -> true
+        | TExprTupleIndex ({ Kind = TExprExtents { Kind = TExprVar _ } }, { Kind = TExprLit _ }) -> true
+        | _ -> false)
+
+/// G208 (1): the extent of slot k of an assignment TARGET's array expression
+/// that is a SELECTION TREE -- array variables chosen by `if`s over pure
+/// conditions (`(if c then a else b)(k) = v`). A target is no lvalue once
+/// bound to a temporary, so the selected array's extent is read by the same
+/// selection: `if c then extents(a) else extents(b)`. Sound because nothing
+/// between the selection and the check can change a pure condition: every
+/// lane evaluates the right-hand side before the target (C++17's assignment
+/// order, the interpreter) or the whole target before it (the LLVM lane), and
+/// the target's subscripts are pure too (the caller requires it). None for
+/// any other expression (a call result, a block).
+let rec private pureSelectionExtent (arr: TypedExpr) (span: Blade.Ast.Span) (k: int) : TypedExpr option =
+    match arr.Kind with
+    | TExprVar _ -> arrayExtentExpr arr span k
+    | TExprIf (c, t, f) when isPureCondExpr c ->
+        match pureSelectionExtent t span k, pureSelectionExtent f span k with
+        | Some et, Some ef -> Some (mkTypedSpan (TExprIf (c, et, ef)) (IRTScalar ETInt64) span)
+        | _ -> None
+    | _ -> None
+
 /// Wrap the unproven subscripts of one (zonked) read in their guards.
 /// `boundTemp`: `arr` is the `__arr` binding zonkExpr made of an array
 /// expression (a user read, not a compiler buffer).
-let private guardSubscriptsPlainAt (boundTemp: bool) (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+let rec private guardSubscriptsPlainAt (boundTemp: bool) (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    guardSubscriptsPlainAtWith (fun span k -> arrayExtentExpr arr span k) boundTemp arr idxs
+
+/// guardSubscriptsPlainAt with the RUN-TIME extent of slot k supplied by
+/// `extentOf` (an assignment target's selection tree reads it through the
+/// selection: pureSelectionExtent).
+and private guardSubscriptsPlainAtWith (extentOf: Blade.Ast.Span -> int -> TypedExpr option)
+                                       (boundTemp: bool) (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
     let synthetic = not boundTemp && (match arr.Kind with TExprVar (n, _, _) -> isCompilerArrayName n | _ -> false)
     match arr.Type with
     | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length
                         && not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple)) ->
         let rank = at.IndexTypes.Length
         // The extent of slot k read off the array itself (arrayExtentExpr).
-        let runtimeExtent (a: TypedExpr) (k: int) : TypedExpr option = arrayExtentExpr arr a.Span k
+        let runtimeExtent (a: TypedExpr) (k: int) : TypedExpr option = extentOf a.Span k
         // A RAGGED row's own length, for its inner coordinate, checked in ONE
         // short-circuit condition that first checks the OUTER coordinate
         // (when its row count is static) -- `0 <= i < rows && 0 <= j <
@@ -1001,23 +1074,108 @@ let private guardSubscriptsPlainAt (boundTemp: bool) (arr: TypedExpr) (idxs: Typ
         // STATIC extent (G192 (1); the structured coordinates keep their own
         // disciplines).
         let slots = subscriptSlots at idxs
-        List.map2 (fun (a: TypedExpr) (slot: IRIndexType option) ->
+        // G208 (2): a plain slot with a RUN-TIME extent beside a compact group
+        // (`Array<Float64 like Idx<n>, SymIdx<2, 3>>` read flat, `A(i, 0, 1)`).
+        // A record position is no extent accessor here: `extents` lowers to
+        // the PHYSICAL axes (a rank-r compact group spans r of them), and a
+        // flat read's subscript s addresses physical axis s. So the extent is
+        // read off a directly named array as physical axis s -- an extents
+        // tuple typed with one entry per physical axis (Lowering honours the
+        // node's own tuple length). Compound / sparse storage has no such
+        // axes (a trailing stride, gap G208's remainder): not placed here.
+        let isCompactRec (ix: IRIndexType) =
+            ix.Rank >= 2 && (match ix.Symmetry with SymSymmetric | SymAntisymmetric | SymHermitian -> true | _ -> false)
+        let physCount =
+            at.IndexTypes |> List.sumBy (fun ix -> if isCompactRec ix then ix.Rank else 1)
+        let physicalExtent (a: TypedExpr) (s: int) : TypedExpr option =
+            let flat = idxs.Length > at.IndexTypes.Length
+            let simpleRecords =
+                at.IndexTypes |> List.forall (fun ix ->
+                    isCompactRec ix || (ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1))
+            // the record subscript s lands in, and whether a compact group
+            // precedes it (then its physical axis is not its record position)
+            let recordOf =
+                let mutable acc = 0
+                let mutable found = None
+                at.IndexTypes |> List.iteri (fun r ix ->
+                    let w = if isCompactRec ix then ix.Rank else 1
+                    if found.IsNone && s < acc + w then found <- Some r
+                    acc <- acc + w)
+                found
+            match arr.Kind, recordOf with
+            | TExprVar _, Some r when flat && simpleRecords && s < physCount ->
+                // `extents(arr)` at the slot's RECORD position: every lane maps
+                // a record to its physical axis (IR.recordPhysicalAxis, G295),
+                // before a compact group or after one
+                let intTy = IRTScalar ETInt64
+                let mk k ty = mkTypedSpan k ty a.Span
+                Some (mk (TExprTupleIndex (mk (TExprExtents arr) (IRTTuple (List.replicate at.IndexTypes.Length intTy)),
+                                           mk (TExprLit (Blade.Ast.LitInt (int64 r))) intTy)) intTy)
+            | _ -> None
+        // A flat mixed access whose array is an EXPRESSION (an `if` of arrays,
+        // a call result) at an unproven run-time plain position: its extent
+        // cannot be read without evaluating the array again, so the access is
+        // REFUSED here, never read unchecked (gap G208).
+        let refuseAfterGroup (a: TypedExpr) =
+            match subscriptGuardCtx.Value with
+            | Some ctx ->
+                ctx.EnumKeyErrors.Add((a.Span, "a position into a plain slot whose extent is known only at run time, of an array EXPRESSION (an `if` of arrays, a call result) whose type also holds a compact group (SymIdx / AntisymIdx / HermitianIdx), read flat: its bounds check needs the array's extent, which cannot be read without evaluating the expression again (gap G208), so the access is refused rather than read unchecked. Bind the array to a name first."))
+            | None -> ()
+            a
+        List.mapi2 (fun (s: int) (a: TypedExpr) (slot: IRIndexType option) ->
             match slot with
             | Some ix when ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
                            && isPositionType a.Type
                            && not a.Kind.IsTExprWildcard && not a.Kind.IsTExprTuple
-                           && not (isLiteralIndex a) && not (mentionsReservedName a) ->
+                           && (not (isLiteralIndex a) || (Blade.IRPrint.tryEvalIntIR ix.Extent).IsNone)
+                           && not (mentionsReservedName a) ->
                 let userTag = ix.Tag |> Option.filter (fun t -> not (t.StartsWith "__"))
                 let proven =
                     match userTag with
                     | Some tag -> isProvenIndex (Some tag) a
                     | None -> not (isAnonSlotTag ix) || provenForAnonSlot (Blade.IRPrint.tryEvalIntIR ix.Extent) a
+                let shown = match userTag with Some t -> t | None -> "the array"
                 match Blade.IRPrint.tryEvalIntIR ix.Extent with
                 | Some n when not proven ->
-                    let shown = match userTag with Some t -> t | None -> "the array"
                     guardIndex a (mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) (IRTScalar ETInt64) a.Span)
                         $"a position outside {shown} (0 .. {n - 1L})"
+                // G208 (2): a run-time extent -- a computed position, or a
+                // literal (formalism 3.10 rule 3: no static extent to judge
+                // it against) -- checked against the array's physical axis
+                | None when isLiteralIndex a || not proven ->
+                    (match physicalExtent a s with
+                     | Some ext ->
+                         let what = if isLiteralIndex a then $"a literal position outside {shown} (its extent)" else $"a position outside {shown} (its extent)"
+                         guardIndex a ext what
+                     | None when idxs.Length > at.IndexTypes.Length
+                                 && at.IndexTypes |> List.forall (fun ix -> isCompactRec ix || (ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1)) ->
+                         refuseAfterGroup a
+                     | None -> a)
                 | _ -> a
+            // A COORDINATE of a compact group read flat (`M(i, j)`, M over
+            // SymIdx<2, J>): each coordinate lies in 0 .. n - 1 of the group's
+            // base extent. A literal is judged at type checking (the compact
+            // literal rule); a COMPUTED coordinate was checked nowhere, and
+            // `M(6, 0)` canonicalized to a cell past its row (floor round,
+            // the F4 neighbour audit). Proven by the group's index tag or a
+            // coordinate the anonymous rule proves, checked otherwise.
+            | Some ix when isCompactRec ix && ix.IxKind = IxKPlain
+                           && isPositionType a.Type && not (isMintedCoordinate a)
+                           && not a.Kind.IsTExprWildcard && not a.Kind.IsTExprTuple
+                           && not (isLiteralIndex a) && not (mentionsReservedName a) ->
+                (match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                 | Some n ->
+                     let userTag = ix.Tag |> Option.filter (fun t -> not (t.StartsWith "__"))
+                     let proven =
+                         match userTag with
+                         | Some tag -> isProvenIndex (Some tag) a || boundsProve (Some n) a
+                         | None -> provenForAnonSlot (Some n) a
+                     if proven then a
+                     else
+                         let shown = match userTag with Some t -> $"the coordinates of {t}" | None -> "the group's coordinates"
+                         guardIndex a (mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) (IRTScalar ETInt64) a.Span)
+                             $"a position outside {shown} (0 .. {n - 1L})"
+                 | None -> a)
             | _ -> a) idxs slots
     | _ -> idxs
 
@@ -1221,6 +1379,24 @@ let private boundArrayRead (arr: TypedExpr) (idxs: TypedExpr list) (nodeTy: IRTy
         mkTypedSpan (TExprBlock ([ TStmtLet tb ], Some read)) nodeTy arr.Span
     | None -> mkTypedSpan (mkRead arr (guardSubscripts arr idxs)) nodeTy arr.Span
 
+/// G208 (1): the subscripts of an ASSIGNMENT TARGET whose array is an
+/// expression needsBoundArray would bind for a read (`(if c then a else b)(k)
+/// = v`, a call result). A bound temporary is no lvalue, so a SELECTION TREE
+/// with pure subscripts is checked against the selected array's own extent,
+/// read through the same selection (pureSelectionExtent); anything else --
+/// an impure subscript, a call result, an impure condition -- cannot be
+/// checked without evaluating the target twice and is REFUSED here (BL4003,
+/// the subscript family), never written unchecked: assign in each branch.
+let private guardTargetSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    let pureIdx (a: TypedExpr) = isPureIndexExpr a || isLiteralIndex a || a.Kind.IsTExprWildcard
+    if idxs |> List.forall pureIdx && (pureSelectionExtent arr arr.Span 0).IsSome then
+        guardSubscriptsPlainAtWith (fun span k -> pureSelectionExtent arr span k) false arr idxs
+    else
+        (match subscriptGuardCtx.Value with
+         | Some ctx ->
+             ctx.EnumKeyErrors.Add((arr.Span, "an element assignment through an array EXPRESSION (an `if` of arrays, a call result) into a slot whose extent is known only at run time, at a position the compiler cannot prove: the bounds check needs the selected array's extent, which cannot be read without evaluating the target again (its condition, its call, or the subscript itself may change in between; gap G208). Assign in each branch instead -- `if c then a(k) = v else b(k) = v` -- or give the subscript a pure form (variables, literals, `+ - *`) and the condition a pure one."))
+         | None -> ())
+        guardSubscripts arr idxs
 /// The same guard on an argument meeting a `Nat<I>` PARAMETER of a direct
 /// call, when it is not proven (the call judgment coerces a CLOSED plain
 /// integer eagerly -- this catches what was open there: a function's calls to
@@ -1568,6 +1744,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                 let args'' = foldProductSubscripts f' args'
                 if not isTarget && needsBoundArray f' args'' then
                     (boundArrayRead f' args'' (zt expr.Type) (fun a xs -> TExprApp (a, xs))).Kind
+                elif isTarget && needsBoundArray f' args'' then
+                    TExprApp (f', guardTargetSubscripts f' args'')
                 else TExprApp (f', guardSubscripts f' args'')
             | fty ->
                 // G190 (a), the ARGUMENT case: a parameter whose leading slot
@@ -1626,6 +1804,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
             let idxs' = foldProductSubscripts arr' (zs idxs)
             if not isTarget && needsBoundArray arr' idxs' then
                 (boundArrayRead arr' idxs' (zt expr.Type) (fun a xs -> TExprIndex (a, xs, id))).Kind
+            elif isTarget && needsBoundArray arr' idxs' then
+                TExprIndex (arr', guardTargetSubscripts arr' idxs', id)
             else TExprIndex (arr', guardSubscripts arr' idxs', id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections

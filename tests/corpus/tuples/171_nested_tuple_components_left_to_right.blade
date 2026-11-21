@@ -1,0 +1,11 @@
+// TEST: a nested returned tuple evaluates its components left to right
+// Gap G300 (floor round, lane c): formalism 10.2 -- a tuple evaluates its
+// members at construction, LEFT TO RIGHT. The first component's seed writes
+// x(0) before the second component reads x; the C++ lane rendered the tuple
+// as one std::make_tuple call, whose argument order C++ leaves unspecified
+// (g++ ran the second first: s = (4.0, 3.0)).
+function f(x: mut Array<Float64 like Idx<2>>) -> ((Float64, Float64), Float64) = ((reduce(x, (+), { x(0) = x(0) + 1.0; Float64(0) }), reduce(x, (+))), reduce(x, (+)))
+let mut y: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let s = f(y)
+// EXPECT: y = [2.0, 2.0]
+// EXPECT: s = ((4.0, 4.0), 4.0)

@@ -193,3 +193,32 @@ let asRejectProbes (tests: (string * string) list) : (string * string) list =
 let categoryTests (dirName: string) : (string * string) list =
     let tests = category dirName
     if rejectOnlyCategories.Contains dirName then asRejectProbes tests else tests
+
+/// THE SMOKE SAMPLE (`blade test smoke`; the CI `smoke` lane runs it on every
+/// push and pull request). A DETERMINISTIC slice of the single-file corpus on
+/// the default lane, the reject probes included: from every single-file
+/// directory, its FIRST file (ordinal filename order) and every file whose
+/// number is a multiple of `smokeStride`. The rule reads only file names, so
+/// the sample is the same on every machine and moves only when the corpus
+/// does; a new directory is represented the moment it exists (its first
+/// file), and the corpus-wiring block fails if one is not. About 370 programs
+/// of the corpus's ~4750 at stride 15.
+let smokeStride = 15
+
+/// The sample, per directory in discovery order: (directory, tests), each
+/// directory's tests classified as its consumers classify them
+/// (categoryTests: a reject-only directory comes back marked "(rejects)").
+let smokeSample () : (string * (string * string) list) list =
+    singleFileCategories ()
+    |> List.map (fun dir ->
+        let files = bladeFiles (Path.Combine(corpusRoot.Value, dir))
+        let numberOf (f: string) =
+            let m = System.Text.RegularExpressions.Regex.Match(Path.GetFileName f, @"^(\d+)_")
+            if m.Success then Some (int m.Groups.[1].Value) else None
+        let tests =
+            files
+            |> Array.mapi (fun i f -> (i, f))
+            |> Array.filter (fun (i, f) -> i = 0 || (match numberOf f with Some n -> n % smokeStride = 0 | None -> false))
+            |> Array.map (fun (_, f) -> let (name, _, source) = parseBladeFile f in (name, source))
+            |> Array.toList
+        (dir, if rejectOnlyCategories.Contains dir then asRejectProbes tests else tests))

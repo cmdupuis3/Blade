@@ -1,6 +1,7 @@
 // TEST: Named Infix
 // Test named infix operator PARSING: a :name: b -> name(a, b)
-// Note: Full runtime requires lambda variable calling which is a separate feature
+// The applied forms -- a function, a lambda value, a section value, over
+// scalars and arrays -- are bracketed/018 (and the refused twin 019).
 
 // Verify the lexer recognizes :name: tokens
 // and the parser desugars to function application
@@ -10,8 +11,7 @@ let a: Float64 = 3.0
 let b: Float64 = 4.0
 let c = a + b
 
-// The :name: syntax works at parse level but full test 
-// needs lambda-in-variable calling support (future work)
+// (bracketed/018 calls named operators; this file pins the parse only)
 // EXPECT: a = 3.0
 // EXPECT: b = 4.0
 // EXPECT: c = 7.0

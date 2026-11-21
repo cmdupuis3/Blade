@@ -5104,6 +5104,44 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]
 
+/// F2 (floor round, 2026-11-19): a FIELD read `q.x` or a literal TUPLE
+/// projection `p[k]` of a value whose type was still OPEN when the read was
+/// typed -- an unannotated kernel parameter, typed before its slot unified it
+/// with the operand's cells -- answered a FRESH variable (ExprField,
+/// inferTupleIndex: nothing more was known then), and nothing ever linked it
+/// to the field. A map's output cells then fell back to the INPUT cell type
+/// (`method_for(ps) <@> lambda(q) -> q.x` was typed `Array<Point>`) while every
+/// lane computes the field (IR typeOf reconstructs it), and R11's kernel-result
+/// judgment refused the program for a conversion nobody wrote. Once the
+/// object's type is known, the read's type IS the field's / the component's:
+/// called at every seam that has just unified a kernel's parameters (and at a
+/// direct application), it binds each such read whose own variable is still
+/// unresolved, innermost first (`q.a.b`). Nothing is converted and nothing is
+/// refused here: a read whose variable another constraint already resolved
+/// keeps it (the class judgments downstream see the reconstructed types).
+let rec internal settleOpenProjections (env: TypeEnv) (expr: TypedExpr) : unit =
+    for child in typedExprChildren expr do settleOpenProjections env child
+    let openVar (t: IRType) =
+        match env.Subst.Resolve t with
+        | IRTInfer v -> not (env.Subst.IsPolymorphicId v)
+        | _ -> false
+    match expr.Kind with
+    | TExprField (obj, field, _) when openVar expr.Type ->
+        (match IR.stripUnits (env.Subst.Resolve obj.Type) with
+         | IRTNamed typeName ->
+             (match lookupTypeDef typeName env with
+              | Some (TDIStruct (_, _, fields, _)) ->
+                  (match fields |> List.tryFind (fun (n, _) -> n = field) with
+                   | Some (_, fieldTy) -> unify env.Subst expr.Type fieldTy |> ignore
+                   | None -> ())
+              | _ -> ())
+         | _ -> ())
+    | TExprTupleIndex (tuple, { Kind = TExprLit (LitInt k) }) when openVar expr.Type ->
+        (match IR.stripUnits (env.Subst.Resolve tuple.Type) with
+         | IRTTuple ts when k >= 0L && int k < ts.Length -> unify env.Subst expr.Type ts.[int k] |> ignore
+         | _ -> ())
+    | _ -> ()
+
 /// The LAMBDA an argument is -- a literal, or a `let`-bound one named by the
 /// argument (the binding the name RESOLVES to) -- if it is one.
 let internal argLambdaInfo (env: TypeEnv) (arg: TypedExpr) : TypedLambdaInfo option =
@@ -7727,6 +7765,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         && not (env.Subst.IsIndexDefault pid)
                         && (env.Subst.GetArityConstraint pid).IsNone
                         && (env.Subst.GetRankLowerBound pid).IsNone
+                    // A tuple with no open component anywhere: a value of one type.
+                    let rec closedTuple (t: IRType) =
+                        match IR.stripUnits (env.Subst.Resolve t) with
+                        | IRTTuple ts -> ts |> List.forall closedTuple
+                        | IRTInfer _ | FuncElem _ | IRTArrow _ -> false
+                        | ArrayElem a -> closedTuple a.ElemType
+                        | _ -> true
                     if lambdaishHead then
                         for (i, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
                             match IR.stripUnits (env.Subst.Resolve pTy), IR.stripUnits (env.Subst.Resolve aTy) with
@@ -7753,6 +7798,10 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             match IR.stripUnits (env.Subst.Resolve pTy), IR.stripUnits (env.Subst.Resolve aTy) with
                             | IRTInfer pid, ((IRTTuple _ | FuncElem _) as a)
                                     when openParamRefusal.Value.IsNone
+                                         // (F2: a CLOSED tuple decides the parameter like a
+                                         // struct below; only one with an open component, or
+                                         // a function value, still meets the refusal)
+                                         && not (closedTuple a)
                                          && not (match a with ArrayElem _ -> true | _ -> false)
                                          && not (env.Subst.IsPolymorphicId pid)
                                          && (env.Subst.GetLiteralDefault pid).IsNone
@@ -7827,6 +7876,10 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                               | Some (TDIStruct _) | Some (TDIVariant _) -> true
                                               | _ -> false) ->
                                      bindOrRefuse s $"a {Blade.Types.TypeOrigins.sourceName n} value"
+                                 // F2: a tuple whose every component is decided (an array
+                                 // of tuples' cell, say) is the parameter's type as a
+                                 // struct is: its projections (`p[0]`) settle from it.
+                                 | IRTTuple _ as s when closedTuple s -> bindOrRefuse s "a tuple"
                                  | IRTInfer aid when (env.Subst.GetLiteralDefault aid).IsSome ->
                                      if lambdaHead then unify env.Subst (IRTInfer pid) (IRTInfer aid) |> ignore
                                      elif not (env.NumericMetOpenParams.ContainsKey pid) then env.NumericMetOpenParams.[pid] <- (List.item i tArgs).Span
@@ -7867,6 +7920,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                          | _ -> ()
                                  | _ -> ())
                             | _ -> ()
+                        // F2: the parameters this call just decided reach the
+                        // callee's field reads and tuple projections (the call's
+                        // result is often one: (lambda(q) -> q.x)(p)).
+                        (match tFunc.Kind with
+                         | TExprLambda _ -> settleOpenProjections env tFunc
+                         | TExprVar (n, vid, _) -> chaseValue 64 n vid |> Option.iter (settleOpenProjections env)
+                         | _ -> ())
                     // A FUNCTION ARGUMENT'S OPEN PARAMETER MEETS ITS DECLARED
                     // SLOT -- `let g = lambda(v) -> v(0) * 2.0; ap(g, xs)` with
                     // `ap(f: (Float64^1) -> Float64, ..)`. A lambda literal
@@ -10739,7 +10799,6 @@ let internal structFieldAccess (env: TypeEnv) (typeName: string) (field: string)
                                        fields |> List.map fst,
                                        providerSectionSteering env typeName field))
     | _ -> Ok None
-
 
 // Recursive-array windowing (docs/plans/plan-rec-array-windowing.md, P1;
 // bench/notes/peakmem-microkernel-plan.md PM33/PM34)

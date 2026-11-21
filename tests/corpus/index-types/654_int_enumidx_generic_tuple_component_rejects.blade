@@ -1,6 +1,6 @@
 // TEST: A generic body computing on an R component of a tuple is refused (rejects)
-// ERROR: BL4003
-// ERROR-CONTAINS: POSITIONS
+// ERROR: BL3024
+// ERROR-CONTAINS: reads component 0
 // ============================================================================
 // R3, a defect closed: the base computed `t[0] + 1` on the POSITION of the
 // tuple's R component (and typed it Float64). The call observes a value of
@@ -8,6 +8,8 @@
 // judged by the whitelist backstop, where arithmetic on a value of R is
 // refused.
 // ============================================================================
+// Since G290 (floor round) a tuple projection of a generic parameter is
+// refused at the declaration itself (BL3024): no instance knows its type.
 type R = EnumIdx<[300, 100, 200]>
 let codes: Array<R like Idx<3>> = [100, 200, 300]
 function f(t: T) = t[0] + 1

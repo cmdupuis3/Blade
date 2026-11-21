@@ -1,0 +1,10 @@
+// TEST: A Section Used Infix Meets Two Widths (rejects)
+// ERROR-CONTAINS: disagree
+// G288 (a), floor round: a section bound to a name is the lambda
+// `lambda(x, y) -> x + y`, whose two parameters the body makes one type, so a
+// Float32 and a Float64 operand disagree exactly as for that lambda (its
+// twin) -- nothing converts. Master lifted the section over Float64.
+let a: Float32 = 7.5
+let b: Float64 = 2.0
+let op = (+)
+let r = a :op: b

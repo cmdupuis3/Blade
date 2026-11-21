@@ -1,0 +1,8 @@
+// TEST: A Generic Declaration Projecting A Tuple Parameter (rejects)
+// ERROR: BL3024
+// ERROR-CONTAINS: reads component 0
+// G290 (floor round): `t[0]` over a generic parameter had no type to read;
+// master printed 9.00719925474099e+15 for the Int64 component.
+let ts = [(Int64(9007199254740993), 1.5)]
+function first(t) = t[0]
+let y = first(ts(0))

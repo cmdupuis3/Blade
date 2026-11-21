@@ -1,0 +1,19 @@
+// TEST: Two Compounds Over One Mask And Run-Time-Shaped Sources Of Equal Extent
+// Gap G283: the accepted twin of sql-masks/066 (n is not rebound): the values each compound's own
+// passes build.
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+let a = Float64(0..extents(c5)) |> compute
+let b = Float64(0..extents(c3)) |> compute
+let n = extents(a)
+let p = Float64(0..n) |> compute
+let q = Float64(0..n) * 2.0 |> compute
+let keep = mask(p, lambda(v) -> v > 0.5)
+let yp = compound(p, keep)
+let yq = compound(q, keep)
+let s = reduce(yq, (+))
+// EXPECT: yp = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: yq = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: s = 20.0

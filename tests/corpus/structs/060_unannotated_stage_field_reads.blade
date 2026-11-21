@@ -1,0 +1,32 @@
+// TEST: Unannotated Stages And Calls Read Struct Fields At The Field's Type
+// F2 (floor round): the stage kernels -- a `<$>` wrapper, an `@>>` stage, an
+// `object_for(..) >>@ object_for(..)` pipeline -- and the per-element kernels
+// (a sort key, a mask predicate) and a directly applied or let-bound lambda
+// read a struct cell's fields at the field's type. A sort key over an Int64
+// field orders by the INTEGER (9007199254740993 and 9007199254740992 tie as
+// doubles, so a key that fell to a Float64 default kept them in input order),
+// and a block-bound lambda called directly returns the Int64 field (master:
+// 9.00719925474099e+15, the field converted to a Float64 default).
+struct Point { x: Float64, y: Float64 }
+struct Rec { n: Int64, ok: Bool, f: Float32 }
+let ps = [Point { x = 1.0, y = 2.0 }, Point { x = 3.0, y = 4.0 }]
+let rs = [Rec { n = 9007199254740993, ok = true, f = 1.5 }, Rec { n = 9007199254740992, ok = false, f = 2.5 }]
+let wrapped = ((lambda(q) -> q.y) <$> ps) |> compute
+let L = method_for(ps)
+let staged = ((L <@> lambda(q) -> q) @>> (L <@> lambda(q) -> q.x + q.y)) |> compute
+let o = object_for(lambda(q) -> q) >>@ object_for(lambda(q) -> q.y * 10.0)
+let piped = (o <@> ps) |> compute
+let sorted = sort(rs, lambda(r) -> r.n)
+let firstf = sorted(0).f
+let keep = mask(rs, lambda(r) -> r.ok)
+let kept = compound(rs, keep)
+let nkept = extents(kept)
+let direct = (lambda(q) -> q.x)(ps(1))
+let n0 = { let getn = lambda(r) -> r.n; getn(rs(0)) }
+// EXPECT: wrapped = [2.0, 4.0]
+// EXPECT: staged = [3.0, 7.0]
+// EXPECT: piped = [20.0, 40.0]
+// EXPECT: firstf = 2.5
+// EXPECT: nkept = 1
+// EXPECT: direct = 3.0
+// EXPECT: n0 = 9007199254740993

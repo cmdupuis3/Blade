@@ -1,0 +1,16 @@
+// TEST: A Computed Read Of A Run-Time Plain Slot After A Compact Group Is Checked (aborts)
+// Gap G208 (2) / G295: the plain slot FOLLOWS the SymIdx<2, 3> group, so its record position (1)
+// is not its physical axis (2). Once extents maps a record to its physical axis in every lane
+// (G295), the read is checked like the before-group case (it was refused, BL4003, in between).
+// ABORT: BL8006
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let v = Float64(0..extents(c5)) |> compute
+let Q = method_for(M, v) <@> lambda(m, x) -> x * m |> compute
+let j = extents(v)
+let r = Q(1, 2, j)

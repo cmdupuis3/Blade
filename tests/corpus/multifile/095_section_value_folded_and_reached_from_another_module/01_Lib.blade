@@ -1,0 +1,10 @@
+// TEST: A section value folded in its module and called from another
+// MODULE: Lib
+// G288 (a) / F6 follow-up (floor round): the fold's kernel slot takes the
+// section (s = 6 over Int64, as `reduce(xs, (+))`), the call from Main the
+// lambda (z = 3).
+module Lib
+let op = (+)
+let xs: Array<Int64 like Idx<3>> = [1, 2, 3]
+let s = reduce(xs, op)
+// EXPECT: Lib.s = 6

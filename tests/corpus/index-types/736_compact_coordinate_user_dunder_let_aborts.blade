@@ -1,0 +1,12 @@
+// TEST: A User Let Named With A Double Underscore Is No Minted Coordinate (aborts)
+// Gap G208 (F4b): the compact-coordinate check exempted ANY subscript mentioning a `__` name,
+// so a user data binding spelled `__k` read past the packed row (v = 0.0). The exemption is now
+// the compiler's own coordinates only (loop variables and lambda parameters it mints, never a
+// let, never a data parameter).
+// ABORT: BL8006
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let ks: Array<Int64 like Idx<2>> = [6, 0]
+let __k = ks(0)
+let v = M(__k, 0)

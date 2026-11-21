@@ -2063,6 +2063,9 @@ and private genFuncDefCore (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: 
     // streamed halo stencil) is dead code and costs nothing.
     let streamedCaptureNames = funcDef.Captures |> List.choose (fun c -> streamedBindingName c.Id)
     use _captureMask = maskStreamedNames streamedCaptureNames
+    // every capture is a PARAMETER of this body: a deferred map it captures is
+    // declared here under its forwarded name (gap G279's sentinel must not fire)
+    use _deferredMask = maskDeferredNames (funcDef.Captures |> List.collect (fun cap -> [ captureForwardName ctx.VarNames cap; cap.Name ]))
     let bodyCtx =
         { bodyCtx with
             StreamedArrays = streamedCaptureNames |> List.fold (fun m n -> Map.remove n m) bodyCtx.StreamedArrays }

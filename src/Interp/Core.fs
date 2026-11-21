@@ -1146,7 +1146,14 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | Some n -> VInt n
         | None ->
         (match forceValue st env v0 with
-         | VArray ba when dim >= 0 && dim < ba.Extents.Length -> VInt ba.Extents.[dim]
+         | VArray ba when dim >= 0 && dim < ba.Extents.Length ->
+             // G295: `dim` is a RECORD position; Extents is by PHYSICAL axis
+             // (a compact group spans several) -- the compiled lanes' rule
+             let axis =
+                 if ba.Extents.Length > ba.IndexTypes.Length then
+                     recordPhysicalAxis ba.IndexTypes dim |> Option.defaultValue dim
+                 else dim
+             VInt ba.Extents.[if axis < ba.Extents.Length then axis else dim]
          | VCompound cv -> VInt cv.Cardinality
          | VSparse sv -> VInt sv.Cardinality
          | _ -> raise (InterpUnsupported "IRExtent"))
@@ -1583,6 +1590,15 @@ and private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list)
             // `__ki < keys.idx->cardinality` (sql-group-by/027).
             | VCompound cv -> ArrayOps.compoundToDense cv
             | _ -> raise (InterpUnsupported "group_keys: key operand is not an array"))
+    // G283: every key component as long as the first (BL8011), the compiled
+    // lanes' check before the key passes
+    (match keyArrs with
+     | k0 :: rest ->
+         let n0 = if k0.Extents.Length = 0 then 0L else k0.Extents.[0]
+         for k in rest do
+             if k.Extents.Length = 0 || k.Extents.[0] <> n0 then
+                 raise (InterpPanic ("BL8011", "co-iteration extent mismatch", None, 0))
+     | [] -> ())
     let gkCase =
         if List.length keys > 1 then ArrayOps.GKDynamic
         else

@@ -1,0 +1,10 @@
+// TEST: a three-leaf fused tree evaluates its shared seed once
+// Gap G277: the nested tree (p <&!> q) <&!> r keeps ONE seed for its three
+// accumulators (the compiled lanes used to run it three times: x = [4.0, 2.0]).
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + 1.0
+let r = method_for(x) <@> lambda(v) -> v - 1.0
+let s = reduce(p <&!> q <&!> r, lambda(a, b) -> a + b, { x(0) = x(0) + 1.0; Float64(0) })
+// EXPECT: x = [2.0, 2.0]
+// EXPECT: s = ((8.0, 6.0), 2.0)

@@ -1286,7 +1286,15 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                        Span = kv.Value; Context = []; Code = None } : CompileError)))
             |> Seq.truncate 1 |> List.ofSeq
         else []
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ groupedReturnErrors @ mutCaptureErrors @ numericMetErrors)
+    // G290: a field read / tuple projection of a value of a GENERIC variable
+    // (TypeCheckValidate.collectGenericProjectionErrors), on the unzonked tree.
+    let genericProjectionErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors && List.isEmpty mixErrors then
+            typedModule.Decls |> List.collect declExprs
+                              |> List.collect (collectGenericProjectionErrors currentEnv)
+                              |> List.truncate 1
+        else []
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ enumKeyErrors @ zeroErrors @ writeErrors @ groupKeysErrors @ groupedReturnErrors @ mutCaptureErrors @ numericMetErrors @ genericProjectionErrors)
 
 /// BL2009 for a C++ GLOBAL TYPE name two origins define (deep review R1, a
 /// D11 leftover). A provider load's generated types (`<b>__vars`, `<b>__dims`,
@@ -1485,6 +1493,273 @@ let private unreadableStoreErrors (program: Program) : CompileError list =
                     | None -> ()
                 | _ -> () ]
 
+/// F5 (floor round, the lead's ruling of 2026-11-19): a float literal whose
+/// SPELLING rounds to an infinity (`1e400`), or to zero while it is not zero
+/// (`1e-400`), FITS NO WIDTH -- not Float32 (R19 already refused it there)
+/// and not Float64, whose double is exactly that infinity or zero (formalism
+/// 2.4: a literal is never rounded to an infinity or to zero). Refused at the
+/// literal, BL3020, in every context: one walk over the program AS PARSED,
+/// before any elaboration or inference, so every position a literal can be
+/// written in reaches it -- bindings, `let static`, function and lambda bodies
+/// and parameter defaults, struct field defaults, bounds and conjuncts, impl
+/// methods, generic bodies whatever their instances. The parser marks exactly
+/// these literals (Ast.DegenerateFloatLiterals, on the literal's own span
+/// object), so a synthesized literal is never judged. Left exactly as on
+/// master (open decisions): a SUBNORMAL spelling (`5e-324` is a Float64
+/// value; D16), and the explicit cast of such a literal (`Float64(1e400)`,
+/// `Float32(-1e400)`, `1e400 |> Float64`: the cast converts the lexer's
+/// double, an infinity or a zero; D15) -- only a literal, or a negated one,
+/// that is the cast's whole operand.
+let private degenerateFloatLiteralErrors (program: Program) : CompileError list =
+    let found = ResizeArray<Span * string>()
+    let rec castOperandLiteral (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprLit (LitFloat _) -> true
+        | ExprKind.ExprUnaryOp (OpNeg, x) -> castOperandLiteral x
+        | _ -> false
+    // (types too -- the review's member of the class: a literal inside a TYPE,
+    // a bound `Float64<min=0.0, max=1e400>`, an extent, an offset set, in an
+    // alias, an annotation, a parameter, a return, a typed expression, a range)
+    let rec walkTy (ty: TypeExpr) : unit =
+        match ty with
+        | TyNamed (_, args) -> args |> List.iter walkTy
+        | TyBounded (b, lo, hi) -> walkTy b; lo |> Option.iter walk; hi |> Option.iter walk
+        | TyArray (el, ixs) -> walkTy el; ixs |> List.iter walkTy
+        | TyDist (o, el, axes) -> walk o; walkTy el; axes |> List.iter walkTy
+        | TyAbstractArray (el, r, _) -> walkTy el; walk r
+        | TyFunc (args, ret) -> args |> List.iter walkTy; walkTy ret
+        | TyTuple ts -> ts |> List.iter walkTy
+        | TyIdx e | TyCompoundIdx e | TySparseIdx e | TyHermitianIdx e | TyEnumIdx e
+        | TyRaggedIdx e | TyIrrepsIdx e | TyTreeIdx e | TyLeafIdx e | TyNodeIdx e -> walk e
+        | TyPgIrrepsIdx (_, e) -> walk e
+        | TySymIdx (_, b) | TyAntisymIdx (_, b) | TyOrbIdx (_, b) ->
+            (match b with
+             | SymBaseExtent e -> walk e
+             | SymBaseIndex t -> walkTy t
+             | SymBaseProduct ts -> ts |> List.iter walkTy)
+        | TyBoundedIdx (lo, hi) -> walk lo; walk hi
+        | TyChunked (inner, spec) -> walkTy inner; walk spec
+        | TyEquivIdx (d, g, r) -> walk d; walkTy g; walkTy r
+        | TyDepIdx (o, _, body) -> walkTy o; walkTy body
+        | TyHalo (inner, offs) -> walkTy inner; walk offs
+        | TyConstrained (t, _) | TyPoly t -> walkTy t
+        | _ -> ()
+    and walkBinding (b: Binding) = b.Type |> Option.iter walkTy
+    and walk (e: Expr) : unit =
+        Blade.Unfold.mapExprPre (fun x ->
+            match x.Kind with
+            | ExprKind.ExprLit (LitFloat _) ->
+                (match DegenerateFloatLiterals.spellingOf x.Span with
+                 | Some text -> found.Add((x.Span, text))
+                 | None -> ())
+                None
+            // D15: the user's cast of the literal keeps master's conversion
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar _ }, [ arg ])
+                    when UserCasts.isUserCast x.Span && castOperandLiteral arg -> Some x
+            // (the walk does not enter parameter lists or types: here)
+            | ExprKind.ExprLambda (ps, _, _) ->
+                for p in ps do
+                    p.Default |> Option.iter walk
+                    p.Type |> Option.iter walkTy
+                None
+            | ExprKind.ExprTyped (_, ty) -> walkTy ty; None
+            | ExprKind.ExprRange tys -> tys |> List.iter walkTy; None
+            | ExprKind.ExprReverse ty -> walkTy ty; None
+            | ExprKind.ExprHalo (ty, offs) -> walkTy ty; walk offs; None
+            | ExprKind.ExprLet (b, _) -> walkBinding b; None
+            | ExprKind.ExprBlock (stmts, _) ->
+                let rec st (s: Stmt) =
+                    match s with
+                    | StmtLet b -> walkBinding b
+                    | StmtSpanned (inner, _) -> st inner
+                    | _ -> ()
+                stmts |> List.iter st
+                None
+            | _ -> None) e |> ignore
+    let walkParams (ps: ParamDecl list) =
+        for p in ps do
+            p.Default |> Option.iter walk
+            p.Type |> Option.iter walkTy
+    let walkFn (f: FunctionDecl) =
+        walkParams f.Params
+        f.ReturnType |> Option.iter walkTy
+        walk f.Body
+    for m in program.Modules do
+        for d in m.Decls do
+            match d.Value with
+            | DeclFunction f -> walkFn f
+            | DeclLet b | DeclStatic b -> walkBinding b; walk b.Value
+            | DeclImpl impl -> walkTy impl.ForType; impl.Methods |> List.iter walkFn
+            | DeclInterface i -> for s in i.Methods do walkParams s.Params; walkTy s.ReturnType
+            | DeclType (TyDeclStruct (_, _, fields, constraints, _)) ->
+                for fd in fields do
+                    walkTy fd.Type
+                    fd.Default |> Option.iter walk
+                    fd.Bound |> Option.iter (fun b -> b.Lo |> Option.iter walk; b.Hi |> Option.iter walk)
+                constraints |> List.iter walk
+            | DeclType (TyDeclMutualGroup (members, constraints)) ->
+                for (_, ty) in members do walkTy ty
+                constraints |> List.iter walk
+            | DeclType (TyDeclAlias (_, _, body)) -> walkTy body
+            | DeclType (TyDeclSum (_, _, variants)) -> for v in variants do v.Data |> Option.iter walkTy
+            | DeclUnit _ | DeclImport _ -> ()
+    found
+    |> Seq.distinctBy fst
+    |> Seq.map (fun (sp, text) ->
+        let digits = text.TrimStart('-', '+')
+        let v = match System.Double.TryParse(digits, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
+                | true, v -> v
+                | _ -> 0.0
+        let what =
+            if System.Double.IsInfinity v then
+                "rounds to an infinity at every width: its magnitude lies beyond Float64's finite range (the largest Float64 is about 1.7976931348623157e308)"
+            else
+                "rounds to zero at every width, but it is not zero: its magnitude lies below the smallest Float64 (about 4.9406564584124654e-324)"
+        let msg =
+            $"the float literal `{text}` {what}, so it fits no float type -- Blade never rounds a literal to an infinity or to zero (formalism 2.4). "
+            + "Write a literal that fits (`0.0` if zero is meant), or produce the value by arithmetic"
+        ({ Error = ImplicitNumericMix msg; Span = sp; Context = []; Code = None } : CompileError))
+    |> List.ofSeq
+
+/// G288 (a), floor round (the lead's ruling, reading 1, accepted by the
+/// user): an operator SECTION bound to a name (`let op = (+)`) IS the lambda
+/// it abbreviates, `lambda(x, y) -> x + y`, so formalism 4.3 applies to it
+/// unchanged -- a direct call by its name (`op(a, b)`, the named infix
+/// `a :op: b`) decides its types like any let-bound lambda's, and a call
+/// through a value use (an alias, a tuple member, an argument) decides
+/// nothing (BL3020 on a width it does not have). It was lifted over Float64
+/// parameters whatever it met: `op(1, 2)` was 3.0, an Int64 product a
+/// double. Rewritten on the program as written, before any elaboration, so
+/// every later stage sees an ordinary lambda. A section in a KERNEL slot
+/// (`reduce(A, (+))`, `method_for(A, B) <@> (*)`) is not a binding and is
+/// untouched, and so is a `let mut` one (it may be reassigned another
+/// callable) and every non-operator section (`(<&!>)` and the combinators).
+let private sectionValuesAsLambdas (program: Program) : Program =
+    let valueOp (op: BinOp) =
+        match op with
+        | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+        | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> true
+        | _ -> false
+    let lambdaOf (at: Expr) (op: BinOp) : Expr =
+        let p (n: string) : LambdaParam = { Name = n; Type = None; Default = None; NameSpan = noSpan }
+        let v (n: string) = inheritSpan at (ExprKind.ExprVar n)
+        inheritSpan at (ExprKind.ExprLambda ([ p "x"; p "y" ], None, inheritSpan at (ExprKind.ExprBinOp (Elementwise, op, v "x", v "y"))))
+    // A NAME bound to a section and used DIRECTLY as the kernel of a `reduce` is
+    // that section there (an apply slot keeps the lambda twin: the lead's ruling), as
+    // on master (the lead's follow-up: `let op = (+); reduce(codes, op)` folds
+    // EnumIdx keys as `reduce(codes, (+))` does). Only a name bound exactly ONCE
+    // in the program (not shadowed anywhere, no parameter of that name) and never
+    // assigned; every other use keeps the lambda.
+    let binders = System.Collections.Generic.Dictionary<string, int>()
+    let assigned = System.Collections.Generic.HashSet<string>()
+    let sectionOf = System.Collections.Generic.Dictionary<string, BinOp>()
+    let uses = System.Collections.Generic.Dictionary<string, int>()
+    let kernelUses = System.Collections.Generic.Dictionary<string, int>()
+    let count (d: System.Collections.Generic.Dictionary<string, int>) (n: string) = d.[n] <- (match d.TryGetValue n with | true, c -> c + 1 | _ -> 1)
+    let bind (n: string) = binders.[n] <- (match binders.TryGetValue n with | true, c -> c + 1 | _ -> 1)
+    let rec rootName (e: Expr) =
+        match e.Kind with
+        | ExprKind.ExprVar n -> Some n
+        | ExprKind.ExprApp (b, _) | ExprKind.ExprField (b, _) | ExprKind.ExprTupleIndex (b, _) -> rootName b
+        | _ -> None
+    // EVERY name a pattern can introduce is a binder (fail closed: a shadowing
+    // destructure or match arm makes the name ineligible).
+    let rec patBinders (pat: Pattern) : string list =
+        match pat.Kind with
+        | PatternKind.PatVar n -> [ n ]
+        | PatternKind.PatWildcard | PatternKind.PatLit _ -> []
+        | PatternKind.PatTuple ps -> ps |> List.collect patBinders
+        | PatternKind.PatCons (h, tl) -> patBinders h @ patBinders tl
+        | PatternKind.PatStruct (_, fs) -> fs |> List.collect (snd >> patBinders)
+        | PatternKind.PatVariant (_, po) -> po |> Option.map patBinders |> Option.defaultValue []
+        | PatternKind.PatGuarded (q, _) | PatternKind.PatTyped (q, _) -> patBinders q
+    let scanBinding (b: Binding) =
+        patBinders b.Pattern |> List.iter bind
+        match b.Pattern.Kind, b.Mutability, b.Value.Kind with
+        | PatternKind.PatVar n, (BindLet | BindConst), ExprKind.ExprSection op when valueOp op -> sectionOf.[n] <- op
+        | _ -> ()
+    let rec scanStmt (s: Stmt) =
+        match s with
+        | StmtLet b -> scanBinding b
+        | StmtAssign (l, _, _) -> rootName l |> Option.iter (assigned.Add >> ignore)
+        | StmtSpanned (inner, _) -> scanStmt inner
+        | StmtForIn (v, _, body) -> bind v; body |> List.iter scanStmt
+        | StmtExpr _ -> ()
+    let scan (e: Expr) =
+        Blade.Unfold.mapExprPre (fun x ->
+            (match x.Kind with
+             | ExprKind.ExprBlock (stmts, _) -> stmts |> List.iter scanStmt
+             | ExprKind.ExprLet (b, _) -> scanBinding b
+             | ExprKind.ExprLambda (ps, _, _) -> for p in ps do bind p.Name
+             | ExprKind.ExprMatch (_, cases) -> for c in cases do patBinders c.Pattern |> List.iter bind
+             | ExprKind.ExprRecArray def ->
+                 bind def.Name; bind def.PrefixVar; bind def.StepVar
+                 def.SeedArm |> Option.iter (fst >> bind)
+             | ExprKind.ExprAssign (l, _) -> rootName l |> Option.iter (assigned.Add >> ignore)
+             | ExprKind.ExprVar n -> count uses n
+             | ExprKind.ExprReduce (_, { Kind = ExprKind.ExprVar n }, _, _) -> count kernelUses n
+             | _ -> ())
+            None) e |> ignore
+    let scanFn (f: FunctionDecl) = bind f.Name; (for p in f.Params do bind p.Name); scan f.Body
+    for m in program.Modules do
+        for d in m.Decls do
+            match d.Value with
+            | DeclLet b | DeclStatic b -> scanBinding b; scan b.Value
+            | DeclFunction f -> scanFn f
+            | DeclImpl impl -> impl.Methods |> List.iter scanFn
+            | _ -> ()
+    // (a section name used ONLY in kernel slots stays the section binding it was
+    // on master, untouched: nothing calls it, so it needs no lambda and no rewrite)
+    // FAIL CLOSED across modules (the lead's review): another module may reach the
+    // binding (`Lib.op`, `from Lib import op`), so only a SINGLE-module program
+    // keeps a fold-only section binding raw; it needs at least one fold use.
+    let onlyKernel (n: string) =
+        program.Modules.Length = 1
+        && (match kernelUses.TryGetValue n with | true, k -> k > 0 | _ -> false)
+        && binders.[n] = 1 && not (assigned.Contains n)
+        && (match uses.TryGetValue n with | true, u -> u | _ -> 0) = (match kernelUses.TryGetValue n with | true, k -> k | _ -> 0)
+    let kernelSection (e: Expr) : Expr option =
+        match e.Kind with
+        | ExprKind.ExprVar n when sectionOf.ContainsKey n && binders.[n] = 1 && not (assigned.Contains n) && not (onlyKernel n) ->
+            Some (inheritSpan e (ExprKind.ExprSection sectionOf.[n]))
+        | _ -> None
+    let rec rw (e: Expr) : Expr = Blade.Unfold.mapExprPre visit e
+    and visit (x: Expr) : Expr option =
+        match x.Kind with
+        | ExprKind.ExprReduce (a, k, init, ax) when (kernelSection k).IsSome ->
+            Some (inheritSpan x (ExprKind.ExprReduce (rw a, (kernelSection k).Value, Option.map rw init, ax)))
+        | ExprKind.ExprBlock (stmts, fin) -> Some (inheritSpan x (ExprKind.ExprBlock (stmts |> List.map rwStmt, Option.map rw fin)))
+        | ExprKind.ExprLet (b, body) -> Some (inheritSpan x (ExprKind.ExprLet (rwBinding b, rw body)))
+        | _ -> None
+    and rwStmt (s: Stmt) : Stmt =
+        match s with
+        | StmtLet b -> StmtLet (rwBinding b)
+        | StmtSpanned (inner, sp) -> StmtSpanned (rwStmt inner, sp)
+        | other -> Blade.Unfold.mapStmtPre visit other
+    and rwBinding (b: Binding) : Binding =
+        match b.Mutability, b.Pattern.Kind, b.Value.Kind with
+        | (BindLet | BindConst), PatternKind.PatVar n, ExprKind.ExprSection op when valueOp op && onlyKernel n -> b
+        | (BindLet | BindConst), PatternKind.PatVar _, ExprKind.ExprSection op when valueOp op ->
+            { b with Value = lambdaOf b.Value op }
+        | _ -> { b with Value = rw b.Value }
+    let rwFn (f: FunctionDecl) =
+        { f with Body = rw f.Body
+                 Params = f.Params |> List.map (fun p -> { p with Default = Option.map rw p.Default }) }
+    { program with
+        Modules =
+            program.Modules |> List.map (fun m ->
+                { m with
+                    Decls =
+                        m.Decls |> List.map (fun d ->
+                            let v =
+                                match d.Value with
+                                | DeclLet b -> DeclLet (rwBinding b)
+                                | DeclStatic b -> DeclStatic { b with Value = rw b.Value }
+                                | DeclFunction f -> DeclFunction (rwFn f)
+                                | DeclImpl impl -> DeclImpl { impl with Methods = impl.Methods |> List.map rwFn }
+                                | other -> other
+                            { d with Value = v }) }) }
+
 let rec typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
     match typeCheckStages program with
     | Ok _ as ok -> ok
@@ -1573,6 +1848,13 @@ and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder
             Some (Blade.DeduceRep.EngineRefutes
                     $"the Lie-discharge post-accept guard tripped while validating this body: {msg}"))
     IdeDeductions.reset ()
+    // F5: a float literal that rounds to an infinity or a false zero fits no
+    // width -- judged on the program as written, before anything rewrites it.
+    match degenerateFloatLiteralErrors program with
+    | _ :: _ as errs -> Error errs
+    | [] ->
+    // G288 (a): a section bound to a name is the lambda it abbreviates.
+    let program = sectionValuesAsLambdas program
     // Provider checkout desugar BEFORE EVERYTHING: `repo.checkout("v1.0",
     // ic.tag)` becomes the ordinary load shape `ic.load("path@tag:v1.0")`,
     // so typecheck, every elaborator's own `resolveStatics`, and

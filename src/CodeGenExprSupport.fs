@@ -995,6 +995,10 @@ let captureForwardArgs (names: Map<IRId, string>) (caps: CaptureInfo list) : str
         let n = captureForwardName names c
         match streamedValueSentinel c.Id n with
         | Some sentinel -> sentinel
+        | None ->
+        // ... and a capture of a DEFERRED map nothing stored (gap G279)
+        match deferredCaptureSentinel c.Id n with
+        | Some sentinel -> sentinel
         | None -> n))
     @ (groupedCaptureGks caps
        |> List.collect (fun gkId ->
@@ -1401,6 +1405,27 @@ let freshReturnFactsCell () : Map<IRId, FreshReturn> ref =
         fresh
     else v
 
+/// G283: a grouping's SOURCE ROW COUNT when it is a literal the emitter can
+/// trust (group_keys over a non-parameter array of literal extent, a
+/// structural `segments` / `files` grouping), by the grouping binding's id.
+/// group_by compares its values' extent with the grouping's `__nsrc` before
+/// the gather (BL8011); two equal literals fold that comparison away. Reset
+/// per assembly.
+let internal groupingStaticRowsStorage =
+    System.Threading.AsyncLocal<Map<IRId, int64> ref>()
+
+let groupingStaticRowsCell () : Map<IRId, int64> ref =
+    let v = groupingStaticRowsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupingStaticRowsStorage.Value <- fresh
+        fresh
+    else v
+
+let noteGroupingStaticRows (id: IRId) (n: int64) : unit =
+    let cell = groupingStaticRowsCell ()
+    cell.Value <- Map.add id n cell.Value
+
 /// This file's per-program cells, reset by installing fresh refs in the
 /// current flow (CodeGenState.freshCell explains why a reset must never
 /// mutate the ref it finds). Called at every program-assembly entry.
@@ -1412,6 +1437,7 @@ let resetExprSupportCells () : unit =
     freshCell groupedBindingsStorage Map.empty
     freshCell groupRowMapsStorage Map.empty
     freshCell freshReturnFactsStorage Map.empty
+    freshCell groupingStaticRowsStorage Map.empty
 
 /// The fresh-return fact for whatever callable an expression in callee position
 /// resolves to (module function or synthetic). Unresolvable => NotFresh.

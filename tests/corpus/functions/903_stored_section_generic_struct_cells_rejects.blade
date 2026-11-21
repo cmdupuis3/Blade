@@ -1,8 +1,12 @@
 // TEST: A Stored Section Applied To Generic Struct Cells Is Refused (rejects)
-// ERROR: BL3001 @ 9:36
-// ERROR-CONTAINS: the section `(+)` is applied to a P value
+// ERROR: BL3001 @ 15:15
+// ERROR-CONTAINS: applies `+` to a value of its generic parameter type, and this call makes that type P
 // ============================================================================
 // R11: functions/901 instantiated at a struct (it died in g++ before).
+// ============================================================================
+// Since G288 (a) (floor round) a section bound to a name IS its lambda,
+// lambda(x, y) -> x + y, so the generic call judgment refuses the Bool
+// (struct) instance at the call.
 // ============================================================================
 struct P { x: Float64 }
 function outer(b) = {

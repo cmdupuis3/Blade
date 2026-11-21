@@ -1,0 +1,10 @@
+// TEST: a computed guard forces its map's deferred operand first
+// Floor round, lane c (F9, the call-site sweep): `guard(c, method_for(dd) <@>
+// k) |> compute` reads dd by name in the guarded nest; it is forced under its
+// own name first, as a plain map's operand is (it was a C++ BL9002).
+let a: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let dd = method_for(a) <@> lambda(v) -> v + 10.0
+let flag = true
+let g = guard(flag, method_for(dd) <@> lambda(v) -> v * 2.0) |> compute
+// EXPECT: dd = [11.0, 12.0, 13.0]
+// EXPECT: g = [22.0, 24.0, 26.0]

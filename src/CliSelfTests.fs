@@ -5669,7 +5669,7 @@ let internal resolveCategoryKey (cat: string) : (string * (string * string) list
 let private corpusCategoryExists (lane: string) (cat: string) : bool =
     let extras () =
         match lane with
-        | "opt-diff" | "optdiff" -> [ "multifile" ]
+        | "opt-diff" | "optdiff" | "opt-diff-licensed" -> [ "multifile" ]
         | "interp" -> (try Blade.Tests.Corpus.multiFileCategories () with _ -> [])
         | _ -> []
     List.contains cat (extras ())
@@ -5741,6 +5741,17 @@ let internal runCorpusWiringTests () : TH.BlockResult =
                 (tests |> List.map fst) <> want)
     record "every single-file directory answers to blade test <its-name>" misKeyed.IsEmpty
         (if misKeyed.IsEmpty then "" else $"unresolved or mis-wired: {listed misKeyed}")
+    // The smoke sample (`blade test smoke`, the CI lane on every push) takes
+    // at least one file from EVERY single-file directory: a directory it
+    // skipped would be one a push never compiles.
+    let smoke = Blade.Tests.Corpus.smokeSample ()
+    let unsampled =
+        single |> List.filter (fun d ->
+            match smoke |> List.tryFind (fun (sd, _) -> sd = d) with
+            | Some (_, tests) -> tests.IsEmpty
+            | None -> true)
+    record "every single-file directory is in the smoke sample" unsampled.IsEmpty
+        (if unsampled.IsEmpty then $"{smoke |> List.sumBy (snd >> List.length)} programs from {smoke.Length} directories (stride {Blade.Tests.Corpus.smokeStride})" else $"not sampled: {listed unsampled}")
     // Every diagnostic CODE a pin names is one the registry knows. A pin is
     // matched against what the compiler EMITS, so a code can be raised, pinned
     // and green for months while Diagnostics.Codes -- and with it `ide
@@ -5890,6 +5901,18 @@ and internal dispatchTestClean (rest: string list) : int =
         // no toolchain; also part of the full suite.
         let failed = (runValidationCodeTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "smoke" ] ->
+        // THE SMOKE SAMPLE (Corpus.smokeSample): from every single-file corpus
+        // directory its first file and every file numbered a multiple of
+        // Corpus.smokeStride, reject probes included, on the default lane --
+        // the corpus programs the CI `smoke` lane compiles and runs on every
+        // push and pull request (the whole corpus is nightly).
+        let sample = Blade.Tests.Corpus.smokeSample ()
+        let tests = sample |> List.collect snd
+        printfn "Smoke sample: %d programs from %d corpus directories (first file + every number divisible by %d)"
+            tests.Length sample.Length Blade.Tests.Corpus.smokeStride
+        let r = runTestCategoryFull "Smoke" tests "./generated_cpp_tests"
+        if r.Failed = 0 then 0 else 1
     | [ "corpus-wiring" ] | [ "corpuswiring" ] ->
         // Every tests/corpus directory is consumed by the default suite, the
         // interpreter differential and a `blade test <dir>` key. In-process,
@@ -6115,7 +6138,7 @@ and internal dispatchTestClean (rest: string list) : int =
     // a name that is no such directory is a usage error, reported as one --
     // it used to escape as an exception from the corpus loader and surface as
     // BL9001, an "internal compiler error" for a typo.
-    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "llvm") as lane; cat ]
+    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "opt-diff-licensed" | "llvm") as lane; cat ]
             when not (corpusCategoryExists lane cat) ->
         let known =
             try Blade.Tests.Corpus.singleFileCategories () |> String.concat ", "
@@ -6138,6 +6161,18 @@ and internal dispatchTestClean (rest: string list) : int =
         let failed =
             if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTests [] true).Failed
             else (Blade.Tests.OptDiff.runOptDiffTests [ cat ] false).Failed
+        if failed = 0 then 0 else 1
+    | [ "opt-diff-licensed" ] ->
+        // The optimizer differential under the DEFAULT floating-point policy
+        // (licensed folds, contraction on), compared with the `test llvm`
+        // token rule (tests/OptDiff.fs runOptDiffTestsWith). Standalone only;
+        // the `opt-diff` lane's own time is unchanged.
+        let failed = (Blade.Tests.OptDiff.runOptDiffTestsWith true (Blade.Tests.Corpus.singleFileCategories ()) true).Failed
+        if failed = 0 then 0 else 1
+    | [ "opt-diff-licensed"; cat ] ->
+        let failed =
+            if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTestsWith true [] true).Failed
+            else (Blade.Tests.OptDiff.runOptDiffTestsWith true [ cat ] false).Failed
         if failed = 0 then 0 else 1
     | [ "interp" ] ->
         // Interpreter differential gate: tree-walking IR interpreter vs the

@@ -1,0 +1,7 @@
+// TEST: A section value reached from another module is its lambda
+// MODULE: Lib
+// G288 (a) / F6 follow-up (floor round): `let op = (+)` is `lambda(x, y) -> x + y`;
+// a call from another module (`Lib.op(1, 2)`) decides it like any direct call:
+// z = 3 (master 3.0; a draft kept the raw section when no unqualified use existed).
+module Lib
+let op = (+)

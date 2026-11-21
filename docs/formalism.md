@@ -328,7 +328,8 @@ literal is an Int32 when its value fits Int32 (the test reads a negated
 literal's value, so `-2147483648` is an Int32) and an Int64 otherwise; a float
 literal is a Float32 unless its value lies outside Float32's finite range at
 either end -- a magnitude above FLT_MAX, or a nonzero value whose Float32
-rounding is zero or subnormal -- and then a Float64; `complex(re, im)` of two
+rounding is zero or subnormal -- and then a Float64 (one that Float64 cannot
+hold either fits no width and is refused, below); `complex(re, im)` of two
 defaulted float literals is a Complex64. A Float32 literal's value is the
 float32 nearest the double nearest the source text (the lexer reads a double,
 and every lane and the compile-time evaluator derive from it). A literal
@@ -351,11 +352,18 @@ expression leaf by leaf: `2147483647 + 1` at Int32 has two fitting literals and
 wraps by the integer contract, while `5000000000 - 4000000000` at Int32 is
 refused for its first leaf. A float literal is judged by what its SPELLING
 denotes, not by the double the lexer read: `1e400` (whose double is an
-infinity) and a nonzero `1e-400` (whose double is 0.0) fit no Float32, and
-their default is a Float64 by the rule above; a Float64 context keeps the
-double (inf, 0.0). An explicit cast is a conversion, not an
+infinity) and a nonzero `1e-400` (whose double is 0.0) fit NO width -- not
+Float32, and not Float64, whose double would be exactly that infinity or
+zero -- so they are refused (BL3020, at the literal) in every context: an
+annotation at any width, an unannotated binding, an operator partner, an
+array cell, a seed, a default, a field, a `let static`, a generic instance.
+A subnormal spelling that Float64 holds (`5e-324`) is a Float64 value (and,
+as above, fits no Float32). An explicit cast is a conversion, not an
 adaptation: `Int32(5000000000)` wraps and `Float32(1e40)` is an infinity, as
-the same casts of a run-time value.
+the same casts of a run-time value; the cast of a degenerate literal itself
+(`Float64(1e400)`, `Float64(-1e400)`) converts the lexer's double, an infinity
+or a zero (decision D15, open). A value computed past the range is not a
+literal: `1e308 * 10.0` is an infinity by the arithmetic contract.
 An expression made ONLY of literals (literals, unary minus, `+ - * / % ^`, the
 math intrinsics, `complex`) adapts as a whole: `let c: Float64 = 1.0 / 3.0`
 divides in Float64, and the same expression unannotated is a Float32. A
@@ -1672,7 +1680,13 @@ grants a reassociated fold (§2.4, fold association) — not a deviation from th
 takes on its own.
 
 Sections and partial application: operator sections `(+)`, `(*)`, ... as
-kernels; operand sections `(s +)` and `(* s)`, which ARE the lambdas
+kernels; an operator section bound to a NAME (`let op = (+)`, outside a kernel slot)
+IS the lambda it abbreviates, `lambda(x, y) -> x + y`, so section 4.3 applies to it
+unchanged (a direct call by its name -- `op(a, b)`, `a :op: b` -- decides its types; a
+call through an alias, a tuple member or an argument decides nothing), while a section
+in a kernel slot -- written there (`reduce(A, (+))`, `method_for(A, B) <@> (*)`), or a
+name bound once to it and passed directly as a fold's kernel (`let op = (+); reduce(A, op)`)
+-- is that slot's operator, as before (in an apply slot, `<@> op` is the lambda); operand sections `(s +)` and `(* s)`, which ARE the lambdas
 `lambda(x) -> s + x` and `lambda(x) -> x * s` (the operand captured as that
 lambda captures it, the escape rule above included; `(- s)` stays negation); and
 single-wildcard `f(_, y, z)` (multiple wildcards rejected — use a lambda). A function applied to fewer arguments than it declares is curried
@@ -3416,13 +3430,16 @@ call-shaped special forms; semantics in [features/sql.md](features/sql.md).
 
 `a :name: b` parses as `name(a, b)`; uniformly lowest precedence;
 left-associative; parenthesize when mixing with native operators. Domain
-notation without operator extension.
+notation without operator extension. The name may be a function, a lambda value or a
+section value (`let op = (+)`, the lambda it abbreviates, section 5.2), and the infix use
+is a DIRECT call by that name: it decides an open lambda's types as `name(a, b)` does.
 
 ### 15.9 Assorted
 
 Boolean ops `&& || !` (short-circuit; no keywords, no bitwise); fused
 assignment `+= -= *= /=` including array elements; single-wildcard partial
-application; sectioned operators `(+)`, `(*)`, ... in kernel position.
+application; sectioned operators `(+)`, `(*)`, ... in kernel position, and as values
+bound to a name, where each is the lambda it abbreviates (section 5.2).
 
 ---
 

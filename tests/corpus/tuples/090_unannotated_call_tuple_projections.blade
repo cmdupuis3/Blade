@@ -1,0 +1,21 @@
+// TEST: A Lambda Applied To A Closed Tuple Takes Its Type
+// F2 (floor round): a directly applied lambda, or a block-bound one called
+// directly, whose parameter is unannotated takes a CLOSED tuple argument's
+// type (every component decided -- an array of tuples' cell), as it takes a
+// struct's; its projections are the components' types. Master refused the
+// direct application (BL3001, "it would be compiled at a default numeric
+// type"). A sort key and a mask predicate over tuple cells read their
+// components at their own types (the Int64 key orders 9007199254740992
+// before 9007199254740993, which tie as doubles).
+let ts = [(Int64(9007199254740993), Float32(1.5), true), (Int64(9007199254740992), Float32(2.5), false)]
+let direct = (lambda(p) -> p[0])(ts(1))
+let f0 = { let second = lambda(p) -> p[1]; second(ts(0)) }
+let sorted = sort(ts, lambda(p) -> p[0])
+let first = sorted(0)
+let keep = mask(ts, lambda(p) -> p[2])
+let kept = compound(ts, keep)
+let nkept = extents(kept)
+// EXPECT: direct = 9007199254740992
+// EXPECT: f0 = 1.5
+// EXPECT: first = (9007199254740992, 2.5, false)
+// EXPECT: nkept = 1

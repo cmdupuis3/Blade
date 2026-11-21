@@ -4,12 +4,12 @@
 // compares two such tuples of one type with == / !=, does not observe the
 // value (equal positions are equal keys), so the instance at the tuple keeps
 // it as R. (The first R3 round-2 backstop refused both: Codex review round 3.)
+// Since G290 (floor round) a generic body that PROJECTS its parameter is
+// refused at the declaration (no instance knows the component's type; tuples/092),
+// so only the comparison half stays here.
 // ============================================================================
 type R = EnumIdx<[300, 100, 200]>
 let codes: Array<R like Idx<3>> = [100, 200, 300]
-function second(t: T) -> Float64 = t[1]
-let s = second((codes(0), Float64(1.5)))
-// EXPECT: s = 1.5
 function e(t: T, u: T) -> Bool = t == u
 let a = e((codes(0), 1.0), (codes(1), 1.0))
 // EXPECT: a = false

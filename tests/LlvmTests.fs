@@ -138,9 +138,12 @@ let private stripTiming (s: string) : string =
 /// Compare two runs. Ok () or the first `maxDiffs` differing token positions,
 /// rendered as `#<idx> cpp=<tok> llvm=<tok>`. A length difference is reported
 /// at the position where one side ran out, with `<end>` for the missing token.
-let private compareRuns (maxDiffs: int) (cppOut: string) (llvmOut: string) : Result<unit, string list> =
-    let a = tokenize (stripTiming cppOut)
-    let b = tokenize (stripTiming llvmOut)
+/// The same rule over two runs labelled by the caller (`blade test
+/// opt-diff-licensed` compares the optimizer-ON run against the gates-OFF run
+/// with it: tests/OptDiff.fs).
+let compareRunsLabeled (labelA: string) (labelB: string) (maxDiffs: int) (aOut: string) (bOut: string) : Result<unit, string list> =
+    let a = tokenize (stripTiming aOut)
+    let b = tokenize (stripTiming bOut)
     let n = max a.Length b.Length
     let diffs = ResizeArray<string>()
     let mutable i = 0
@@ -148,9 +151,12 @@ let private compareRuns (maxDiffs: int) (cppOut: string) (llvmOut: string) : Res
         let ta = if i < a.Length then a.[i] else "<end>"
         let tb = if i < b.Length then b.[i] else "<end>"
         if ta = "<end>" || tb = "<end>" || not (tokenEq ta tb) then
-            diffs.Add($"#{i} cpp={ta} llvm={tb}")
+            diffs.Add($"#{i} {labelA}={ta} {labelB}={tb}")
         i <- i + 1
     if diffs.Count = 0 then Ok () else Error (List.ofSeq diffs)
+
+let private compareRuns (maxDiffs: int) (cppOut: string) (llvmOut: string) : Result<unit, string list> =
+    compareRunsLabeled "cpp" "llvm" maxDiffs cppOut llvmOut
 
 // ---------------------------------------------------------------------------
 // Block 0: the comparator's own rules

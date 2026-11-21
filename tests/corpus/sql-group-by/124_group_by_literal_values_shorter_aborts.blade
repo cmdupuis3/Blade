@@ -1,0 +1,12 @@
+// TEST: Group By With Values Of Another Literal Length Than The Keys Checks Its Extents (aborts)
+// Gap G283: two literal row counts that differ were accepted and gathered garbage in both compiled
+// lanes. The checker does not compare them (a group_keys value carries its source index, not its
+// length, and the streamed path pins the run-time BL8011 for this shape), so every lane compares
+// them before the gather: the C++ lane and the interpreter raise BL8011, the LLVM lane refuses the
+// baked disagreement and the C++ fallback raises it.
+// ABORT: BL8011
+let a: Array<Float64 like Idx<5>> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let ka: Array<Int64 like Idx<5>> = [0, 1, 0, 1, 0]
+let b: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let gk = group_keys(ka)
+let g = group_by(b, gk)

@@ -1,0 +1,8 @@
+// TEST: An Unannotated Tuple Projection Keeps Its Width In The Mixing Rule (rejects)
+// ERROR: BL3020
+// F2 (floor round): the projection `p[0]` of a (Float32, Int32) argument is a
+// Float32, so beside a Float64 capture it is the mixing rule's refusal
+// (formalism 2.4). Master refused the application itself (BL3001) instead.
+let w: Float64 = 2.0
+let ts = [(Float32(1.5), 1), (Float32(2.5), 2)]
+let r = (lambda(p) -> p[0] * w)(ts(0))

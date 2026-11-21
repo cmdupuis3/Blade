@@ -2638,7 +2638,12 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             if ok ret then Ok ()
                             else Error (NotYetSupportedErr $"sort(A, key): the key must return a real, integer, Bool or String scalar -- the types sort's order is defined for (NaN first, signed zeros tied; strings by code point) -- but this key returns {ppIRType (env.Subst.Resolve ret)}. A complex value has no order, and a tuple or array key is not supported: sort by one scalar key, or compose the key into one (`k1 * scale + k2`).")
                         | _ -> Ok ()
-                    unifyKeyParam |> Result.bind keyResultOk |> Result.bind (fun () ->
+                    // (F2: the key's field reads / tuple projections of its
+                    // now-known parameter take their types before its result
+                    // is judged -- else an Int64 field key fell to a Float64
+                    // default)
+                    unifyKeyParam |> Result.map (fun () -> settleOpenProjections env tKey)
+                    |> Result.bind keyResultOk |> Result.bind (fun () ->
                         // R3: a key that is a value of a GENERIC variable
                         // orders that variable's values; at an integer EnumIdx
                         // instance they are keys (GOKeyObserve -- the call hands
@@ -3332,6 +3337,8 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 paramTys |> List.fold (fun acc pTy ->
                     acc |> Result.bind (fun () -> unify env.Subst pTy elem0)) (Ok ())
              | _ -> Ok ())
+            // (F2: projections of the now-known parameters, as the array form)
+            |> Result.map (fun () -> settleOpenProjections env tKernel)
             |> Result.bind (fun () ->
             (match tInitOpt with
              | Some tInit -> unify env.Subst tInit.Type elem0
@@ -3606,6 +3613,7 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
          | FuncElem (paramTys, _) ->
             paramTys |> List.fold (fun acc pTy -> acc |> Result.bind (fun () -> unify env.Subst pTy elem)) (Ok ())
          | _ -> Ok ())
+        |> Result.map (fun () -> settleOpenProjections env tK)
         |> Result.bind (fun () ->
         match tInits.[i] with
         | Some tInit -> unify env.Subst tInit.Type elem |> Result.map (fun () -> tInit)
@@ -4877,6 +4885,10 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     | Some tInit -> unify env.Subst tInit.Type arrTy.ElemType
                     | None -> Ok ()
                 kernelUnify |> Result.bind (fun () ->
+                // (F2: the kernel's field reads / tuple projections of its
+                // now-known parameters take their types: `lambda(a, b) ->
+                // (a[0] + b[0], b[1])` over an array of tuples)
+                settleOpenProjections env tKernel
                 initUnify |> Result.bind (fun () ->
                 reduceKernelUnitCheck env tKernel arrTy.ElemType |> Result.bind (fun () ->
                     // arrTy.ElemType is IRType post-B2; return directly.
@@ -6846,6 +6858,9 @@ and inferMask (env: TypeEnv) array pred : TypeResult<TypedExpr> =
                     unify env.Subst info.Params.[0].Type arrTy.ElemType
                 | _ -> callableRefParamMeetsCells env tPred arrTy.ElemType
             unifyPredParam |> Result.bind (fun () ->
+                // (F2: and its field reads / tuple projections of that
+                // parameter take their types: `lambda(q) -> q.ok`)
+                settleOpenProjections env tPred
                 let resultType = mkArrayArrow arrTy.IndexTypes (IRTScalar ETBool) None
                 Ok (mkTyped (TExprMask (tArr, tPred)) resultType)))))
 
@@ -8099,6 +8114,9 @@ and inferBinOpCore env mode op left right : TypeResult<TypedExpr> =
                 let gIn = match gArgs with [gArg] -> gArg | _ -> IRTTuple gArgs
                 match unify env.Subst fRet gIn with
                 | Ok () ->
+                    // (F2: g's projections of the value f hands it)
+                    settleOpenProjections env tL
+                    settleOpenProjections env tR
                     // The use fixes each operand's instance: judge a generic
                     // operand's casts there (genericValueObligationClash).
                     let obligation =
@@ -10640,6 +10658,9 @@ and functorMapOutputType (env: TypeEnv) (tF: TypedExpr) (tC: TypedExpr) : IRType
           | IRTInfer _ -> unify env.Subst p arr.ElemType |> ignore
           | _ -> ())
      | _ -> ())
+    // (F2: the wrapper's field reads / tuple projections of its now-known
+    // parameter take their types before its return is read)
+    settleOpenProjections env tF
     match env.Subst.Resolve tF.Type, env.Subst.Resolve tC.Type with
     | FuncElem (_, retTy), ArrayElem arr ->
         match env.Subst.Resolve retTy with
@@ -13486,6 +13507,10 @@ and buildApplyInfo (env: TypeEnv)
         // check across the body so cross-tag indexing through kernel
         // parameters surfaces as a real type error rather than silently
         // typechecking. See revalidateBodyTagChecks for rationale.
+        // (F2: and a field read / tuple projection of a parameter the body
+        // typed while it was open takes the field's type now, before the
+        // output cells are read off the kernel's return.)
+        settleOpenProjections env lambdaInfo.Body
         revalidateBodyTagChecks env lambdaInfo.Body
         |> Result.bind (fun () ->
         // Unit-only second pass over the kernel body, now that the params
@@ -19277,6 +19302,8 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
                         match paramUnifyResult with
                         | Error e -> Error e
                         | Ok () ->
+                        // (F2: projections of the now-bound parameters)
+                        settleOpenProjections env lambdaInfo.Body
                         // Extended operand lists: the virtual source appended
                         // LAST so the real arrays keep their param positions.
                         let (exArrays, exIdentities, exTypes) =

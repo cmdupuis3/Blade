@@ -1,0 +1,14 @@
+// TEST: A Literal Past A Run-Time Plain Slot Beside A Compact Group Is Checked (aborts)
+// Gap G208 (2) (and its LITERAL member): formalism 3.10 rule 3 -- a literal position into a
+// slot with no static extent is checked at run time. The mixed read skipped every literal.
+// ABORT: BL8006
+type S = Idx<5>
+let src: Array<Float64 like S> = [0.1, 0.9, 0.2, 0.8, 0.7]
+let c5 = compound(src, mask(src, lambda(v) -> v > 0.0))
+let c3 = compound(src, mask(src, lambda(v) -> v > 0.5))
+type J = Idx<3>
+let base: Array<Float64 like J> = [1.0, 2.0, 3.0]
+let M = method_for(base, base) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let v = Float64(0..extents(c3)) |> compute
+let P = method_for(v, M) <@> lambda(x, m) -> x * m |> compute
+let r = P(3, 0, 0)

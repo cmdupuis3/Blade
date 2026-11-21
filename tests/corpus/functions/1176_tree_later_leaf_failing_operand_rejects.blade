@@ -1,0 +1,15 @@
+// TEST: a later leaf's failing deferred operand behind a failing leaf is refused (rejects)
+// Gap G284: p may fail and q's deferred operand dd may fail too; forcing dd
+// before the tree would put dd's failure ahead of p's cells, an order the
+// leaves' one-after-another evaluation does not have, so the C++ lane refuses
+// with the steer to bind `|> compute` first.
+let x: Array<Int64 like Idx<3>> = [1, 2, 4]
+let z: Array<Int64 like Idx<3>> = [1, 2, 3]
+let dd = method_for(z) <@> lambda(v) -> 6 / v
+let p = method_for(x) <@> lambda(v) -> 8 / v
+let q = method_for(zip(z, dd)) <@> lambda(u, v) -> u * v
+let (s, t) = p <&> q |> compute
+// REJECT-AT: codegen
+// ERROR-CONTAINS: a computation tree's later leaf reads the deferred map(s) dd
+// WARN-CODEGEN: a computation tree's later leaf reads the deferred map(s) dd
+// (BL7004 at the driver; the harness pins the #error text: loops/190's note)

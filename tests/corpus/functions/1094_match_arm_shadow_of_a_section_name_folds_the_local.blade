@@ -1,0 +1,11 @@
+// TEST: A Match-Arm Binder Shadowing A Section Name Folds The Local
+// F6 follow-up (floor round, the lead's review): a match-arm pattern is a
+// binder too, so `reduce(xs, op)` folds the arm's lambda, not the outer section.
+let op = (+)
+let z = op(1, 2)
+let xs: Array<Int64 like Idx<4>> = [10, 1, 2, 3]
+let pair = (lambda(a: Int64, b: Int64) -> a - b, 1)
+let r = match pair with
+    | (op, y) -> reduce(xs, op)
+// EXPECT: r = 4
+// EXPECT: z = 3

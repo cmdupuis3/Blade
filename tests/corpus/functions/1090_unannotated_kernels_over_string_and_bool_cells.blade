@@ -1,0 +1,30 @@
+// TEST: Unannotated Kernels Over String And Bool Cells
+// F2 (floor round), the String and Bool members of the class: an
+// unannotated kernel parameter over an array of non-numeric scalars takes the
+// cell type in every slot (map, outer product, `<$>`, sort key, mask
+// predicate, a directly applied lambda); its result is whatever its body
+// computes, never the cell type nor a numeric default. Pinned beside the
+// struct and tuple members (structs/059-060, tuples/089-090).
+let names = ["bb", "a", "ccc"]
+let flags = [true, false, true]
+let ws = Float64([1.0, 2.0])
+let isA = (method_for(names) <@> lambda(s) -> s == "a") |> compute
+let tagged = (method_for(names) <@> lambda(s) -> s + "!") |> compute
+let weights = (method_for(flags, ws) <@> lambda(b, w) -> if b then w else 0.0) |> compute
+let inverted = ((lambda(b) -> !b) <$> flags) |> compute
+let ordered = sort(names, lambda(s) -> s)
+let tagged0 = tagged(0) == "bb!"
+let ordered0 = ordered(0) == "a"
+let ordered2 = ordered(2) == "ccc"
+let keep = mask(flags, lambda(b) -> b)
+let kept = compound(flags, keep)
+let nkept = extents(kept)
+let one = (lambda(b) -> if b then 1 else 0)(flags(0))
+// EXPECT: isA = [false, true, false]
+// EXPECT: tagged0 = true
+// EXPECT: weights = [[1.0, 2.0], [0.0, 0.0], [1.0, 2.0]]
+// EXPECT: inverted = [false, true, false]
+// EXPECT: ordered0 = true
+// EXPECT: ordered2 = true
+// EXPECT: nkept = 2
+// EXPECT: one = 1

@@ -1,0 +1,14 @@
+// TEST: a fused tree in a function body evaluates its shared seed once
+// Gap G277: the same contract inside a callable; the seed writes the caller's
+// array through the mut parameter once.
+function f(x: mut Array<Float64 like Idx<2>>) -> (Float64, Float64) = {
+    let p = method_for(x) <@> lambda(v) -> v * 2.0
+    let q = method_for(x) <@> lambda(v) -> v + 1.0
+    reduce(p <&!> q, (+), { x(0) = x(0) + 1.0; Float64(0) })
+}
+let mut y: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let s = f(y)
+let yy = y |> compute
+// EXPECT: y = [2.0, 2.0]
+// EXPECT: s = (8.0, 6.0)
+// EXPECT: yy = [2.0, 2.0]

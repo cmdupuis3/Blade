@@ -1,0 +1,13 @@
+// TEST: a later leaf's total deferred operand is forced ahead of a failing leaf
+// Gap G284: p may fail (integer division), and the later leaf q reads the
+// deferred map dd -- forcing dd before the tree's nest is unobservable because
+// dd's kernel cannot fail, so the tree is accepted.
+let x: Array<Int64 like Idx<3>> = [1, 2, 4]
+let y: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let dd = method_for(y) <@> lambda(v) -> v + 1.0
+let p = method_for(x) <@> lambda(v) -> 8 / v
+let q = method_for(zip(y, dd)) <@> lambda(u, v) -> u * v
+let (s, t) = p <&> q |> compute
+// EXPECT: dd = [2.0, 3.0, 4.0]
+// EXPECT: s = [8, 4, 2]
+// EXPECT: t = [2.0, 6.0, 12.0]

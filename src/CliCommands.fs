@@ -21,7 +21,7 @@ let internal usageTestBlockKeys =
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"; "print-form"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"; "rec-step"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"
-      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
+      "setup"; "shape"; "shapespec"; "smoke"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"; "syrk-tile"; "fold-lanes"
       "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
       "validate-arrow"; "validation-codes"; "zarr" ]
 
@@ -104,9 +104,12 @@ let printUsage () =
     printfn "                                    binary (<dir> = a literal tests/corpus/<dir> name)"
     printfn "  test diff-oracle [<dir>]          Diff printed values against the pinned ./oracle build"
     printfn "  test opt-diff [<dir>]             Diff every program with all optimizer gates OFF vs ON"
+    printfn "  test opt-diff-licensed [<dir>]    ... the same under the default (licensed) FP policy, 1e-9 token rule"
     printfn "  test llvm [<dir>|all]             The BLADE_LLVM lane vs the C++ lane (standalone only)"
     printfn "  test docs [<page>]                Check every ```blade block in CLAUDE.md and docs/"
     printfn "                                    (run it when it pins values; <page> filters by path)"
+    printfn "  test smoke                        A fixed sample of the corpus (every directory's first file"
+    printfn "                                    and every number divisible by 15; the CI push lane)"
     printfn "  test --llvm-backend               The ordinary suite driven through the LLVM lane"
     printfn "  Test-block keys:"
     wrap "    " 96 usageTestBlockKeys

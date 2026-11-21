@@ -1,0 +1,12 @@
+// TEST: a reduction join whose leg seed is a block
+// Gap G274 (floor round, lane c, F9): IRLift wraps the block's statements
+// around the seed pack, which used to hide the join encoding from the C++
+// lane (an internal-looking BL7004). The pack is evaluated once, after the
+// capture prelude, and each leg seeds from its projection.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + 1.0
+let (s1, s2) = object_for(<&!>) <@> (reduce(p, (+), { x(0) = 10.0; Float64(0) }), reduce(q, (+)))
+// EXPECT: x = [10.0, 2.0]
+// EXPECT: s1 = 24.0
+// EXPECT: s2 = 14.0

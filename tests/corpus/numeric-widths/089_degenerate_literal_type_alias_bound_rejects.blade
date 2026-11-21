@@ -1,0 +1,7 @@
+// TEST: An Overflowing Literal As A Bound In A Type Alias (rejects)
+// ERROR: BL3020
+// ERROR-CONTAINS: so it fits no float type
+// F5 (floor round), the member found at review: a literal inside a TYPE
+// expression fits no width either (master and the first F5 build: accepted).
+type B = Float64<min=0.0, max=1e400>
+let x: B = 0.5

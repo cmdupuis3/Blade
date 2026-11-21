@@ -1,0 +1,39 @@
+// TEST: Named Infix Operators Call A Function, A Lambda Value Or A Section Value
+// `a :name: b` is `name(a, b)` (formalism 15.8): a DIRECT call by the name, so
+// it decides an open lambda's types as `name(a, b)` does. The name may be a
+// function, a lambda value or an operator section bound to a name, which IS
+// the lambda it abbreviates (G288 (a), floor round): `let op = (+)` is
+// `lambda(x, y) -> x + y`. Master lifted a section over Float64 parameters:
+// `i :op: j` over Int64 was 10.0, `1 :op: 2` 3.0, and an array operand was
+// BL3001 ("the parameter expects a scalar (Float64)").
+function addf(p: Int64, q: Int64) -> Int64 = p + q
+let addl = lambda(p, q) -> p + q
+let op = (+)
+let mul = (*)
+let lt = (<)
+let i: Int64 = 7
+let j: Int64 = 3
+let u: Array<Int64 like Idx<3>> = [1, 2, 3]
+let v: Array<Int64 like Idx<3>> = [10, 20, 30]
+let x32: Float32 = 1.5
+let y32: Float32 = 2.25
+let f1 = i :addf: j
+let l1 = i :addl: j
+let l2 = u :addl: v
+let s1 = i :op: j
+let s2 = 1 :op: 2
+let s3 = u :op: v
+let s4 = x32 :mul: y32
+let s5 = i :op: j :op: j
+let s6 = i :lt: j
+let s7 = op(i, j)
+// EXPECT: f1 = 10
+// EXPECT: l1 = 10
+// EXPECT: l2 = [11, 22, 33]
+// EXPECT: s1 = 10
+// EXPECT: s2 = 3
+// EXPECT: s3 = [11, 22, 33]
+// EXPECT: s4 = 3.375
+// EXPECT: s5 = 13
+// EXPECT: s6 = false
+// EXPECT: s7 = 10

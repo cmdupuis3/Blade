@@ -1,0 +1,9 @@
+// TEST: complex(re, im) evaluates re before im
+// Gap G300 (floor round, lane c): the C++ lane rendered complex(re, im) as one
+// constructor call, whose argument order C++ leaves unspecified (it printed
+// t = (2.0,1.0)); the parts are evaluated left to right, as in every lane.
+function bump(c: mut Array<Float64 like Idx<1>>) -> Float64 = { c(0) = c(0) + 1.0; c(0) }
+let mut c: Array<Float64 like Idx<1>> = [0.0]
+let t = complex(bump(c), bump(c))
+// EXPECT: c = [2.0]
+// EXPECT: t = (1.0,2.0)
