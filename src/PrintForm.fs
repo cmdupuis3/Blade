@@ -38,8 +38,7 @@ type Form =
 let cliDefault : Form = Display
 
 /// The environment variable (and toolchain-file key) that carries the form.
-[<Literal>]
-let envVar = "BLADE_PRINT_FORM"
+let envVar = Blade.Knobs.printForm.Name
 
 let name (f: Form) : string =
     match f with
@@ -57,7 +56,7 @@ let parse (s: string) : Form option =
 /// like every env gate; unset (or unparsable -- the CLI refuses that before
 /// any emission) = the test form.
 let current () : Form =
-    match System.Environment.GetEnvironmentVariable envVar with
+    match Blade.Knobs.raw Blade.Knobs.printForm with
     | null | "" -> Test
     | s -> defaultArg (parse s) Test
 
@@ -70,7 +69,7 @@ let describe () : string =
     let src =
         match resolvedSource with
         | "" ->
-            match System.Environment.GetEnvironmentVariable envVar with
+            match Blade.Knobs.raw Blade.Knobs.printForm with
             | null | "" -> "unset: the in-process default"
             | _ -> envVar
         | s -> s
@@ -84,7 +83,7 @@ let describe () : string =
 let applyCliDefault (fromFlag: bool) : Result<Form, string> =
     let bad (v: string) (where: string) =
         Error $"{where}: '{v}' is not a print form (expected test or display)"
-    match System.Environment.GetEnvironmentVariable envVar with
+    match Blade.Knobs.raw Blade.Knobs.printForm with
     | null | "" ->
         match Blade.Toolchain.getWithOrigin envVar with
         | Some (v, _) ->

@@ -608,7 +608,7 @@ let private recordSegmentStreaming (modul: IRModule) : unit =
                   Outcome = outcome; Evidence = evidence }
         for b in modul.Bindings do
             match b.Value with
-            | IRReduce (IRVar (vid, _), _, _) when Map.containsKey vid streamed ->
+            | ReduceOfNamed (vid, _, _, _) when Map.containsKey vid streamed ->
                 let s = streamed.[vid]
                 decide b.Name Blade.Effects.Applied
                     [ $"fold over the streamed variable '{s.VarName}' walks the store one block at a time, in storage order: the same operation sequence as the flat fold, so the answer is bitwise the materialized one"
@@ -1035,7 +1035,7 @@ let planPoolReuse (mayRetain: Set<IRId> -> Set<IRId> -> IRExpr -> bool) (modul: 
                 for root in v :: embeddedExtentExprs v do
                     iterIRExpr (fun e ->
                         match e with
-                        | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs -> found <- true
+                        | CallOfNamed (fid, _, _, _) when Map.containsKey fid funcs -> found <- true
                         | _ -> ()) root
                 found
             let unaliased (k: int) (a: IRId) =
@@ -1284,7 +1284,7 @@ let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
             | IRParam (_, _, t) when isFunctionTyped t ->
                 mayWrite <- true
                 repeatable <- false
-            | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs -> ()
+            | CallOfNamed (fid, _, _, _) when Map.containsKey fid funcs -> ()
             // A head this module cannot resolve -- a lambda-valued variable,
             // a higher-order parameter, another module's function -- may do
             // anything.
@@ -2009,7 +2009,7 @@ let private retentionAnalyzer (facts: WriteFacts) =
                     (match target with
                      | IRVar (id, _) when locals.Contains id -> ()
                      | IRParam (nm, _, _) when outerNames.Contains nm -> ()
-                     | IRIndex (IRVar (id, _), _, _) when privateRoot id -> ()
+                     | IndexOfNamed (id, _, _, _) when privateRoot id -> ()
                      | _ -> if carries value then found <- true)
                     visitChildren target
                     visit value
@@ -2716,7 +2716,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     | _, IRCompute _ ->
                         checks.Add((i, d))
                         if not (unnamed.Contains i) then unnamed.Add i
-                    | _, IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs ->
+                    | _, CallOfNamed (fid, _, _, _) when Map.containsKey fid funcs ->
                         checks.Add((i, d))
                         if not (unnamed.Contains i) then unnamed.Add i
                     | _ -> unknown <- true))
@@ -2777,7 +2777,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
     // pass hoists (its arguments' invariance is `closedOver`'s judgment).
     let isInvariantArrayCall (e: IRExpr) : bool =
         match e with
-        | IRApp (IRVar (fid, _), _, retTy) when Map.containsKey fid funcs ->
+        | CallOfNamed (fid, _, _, retTy) when Map.containsKey fid funcs ->
             (match stripUnits retTy with
              | ArrayElem at ->
                 not at.IsVirtual
@@ -2793,7 +2793,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
         | IRUnaryOp (_, x) -> inlineSafe x
         | IRFma (a, b, c) -> inlineSafe a && inlineSafe b && inlineSafe c
         | IRComplex (re, im) -> inlineSafe re && inlineSafe im
-        | IRApp (IRVar (fid, _), args, _) when Map.containsKey fid funcs -> args |> List.forall inlineSafe
+        | CallOfNamed (fid, _, args, _) when Map.containsKey fid funcs -> args |> List.forall inlineSafe
         | IRExtent (IRVar _, _) -> true
         | _ -> false
 
@@ -3670,7 +3670,7 @@ module CallSpanTable =
     /// The call's span: its exact key's one span, else the callee's only span.
     let tryFind (call: IRExpr) : Blade.Ast.Span option =
         match call with
-        | IRApp (IRVar (fid, _), args, _) ->
+        | CallOfNamed (fid, _, args, _) ->
             let m = get ()
             let one (l: Blade.Ast.Span list) = match List.distinct l with [ s ] -> Some s | _ -> None
             match Map.tryFind (fid, args |> List.map argKey) m |> Option.bind one with
@@ -4119,7 +4119,7 @@ let planHotRowFolds (builder: IRBuilder) (programFuncs: IRCallable list) (modul:
                         let rowKernelTotal =
                             totalCallable ck
                             || (match ck.Params, ck.Body with
-                                | [ rp ], IRReduce (IRVar (rv, _), rk, Some rseed) when rv = rp.VarId ->
+                                | [ rp ], ReduceOfNamed (rv, _, rk, Some rseed) when rv = rp.VarId ->
                                     (match resolveF rk with
                                      | Some rkc when rkc.Params.Length = 2 -> totalCallable rkc && totalExpr rseed
                                      | _ -> false)
@@ -4816,9 +4816,9 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                 let terminals =
                     arr |> Array.mapi (fun hi b -> hi, b) |> Array.choose (fun (hi, b) ->
                         match b.Value with
-                        | IRReduce (IRVar (id, _), fk, Some seed) when id = yid && hi > yi ->
+                        | ReduceOfNamed (id, _, fk, Some seed) when id = yid && hi > yi ->
                             Some (hi, b, [ fk, seed ], false)
-                        | IRTuple [ IRReduce (IRVar (a, _), k1, Some s1); IRReduce (IRVar (bId, _), k2, Some s2) ]
+                        | IRTuple [ ReduceOfNamed (a, _, k1, Some s1); ReduceOfNamed (bId, _, k2, Some s2) ]
                             when a = yid && bId = yid && hi > yi -> Some (hi, b, [ k1, s1; k2, s2 ], true)
                         | _ -> None)
                 let decline why = decide y.Name (Blade.Effects.Declined why) []
@@ -4873,7 +4873,7 @@ let fuseSelectedTerminalModule (builder: IRBuilder) (programFuncs: IRCallable li
                         | _ -> false
                     let inputs =
                         match host.Value with
-                        | IRTuple [ IRReduce (IRVar (_, t1), _, _); IRReduce (IRVar (_, t2), _, _) ] -> t1 = y.Type && t2 = y.Type
+                        | IRTuple [ ReduceOfNamed (_, t1, _, _); ReduceOfNamed (_, t2, _, _) ] -> t1 = y.Type && t2 = y.Type
                         | _ -> false
                     let producerInputs =
                         match k.Value, mask with
@@ -5153,7 +5153,7 @@ let planCompactionFusion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>
                 iterIRExpr (fun m ->
                     match m with
                     | IRVar (v, _) when v = mid -> count <- count + 1
-                    | IRReduce (IRVar (v, _), k, init) when v = mid -> site <- Some (k, init)
+                    | ReduceOfNamed (v, _, k, init) when v = mid -> site <- Some (k, init)
                     | _ -> ()) body
                 (match site with
                  | Some (k, init) when count = 1 -> found.Add((mid, info, k, init))
@@ -7937,7 +7937,7 @@ let planGroupAggregate (programFuncs: IRCallable list) (modul: IRModule) : unit 
         let vetoed =
             c.IsRepro
             || (match c.Body with
-                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid callableById with Some g -> g.IsRepro | None -> false)
+                | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid callableById with Some g -> g.IsRepro | None -> false)
                 | _ -> false)
         not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
     // A lifted peel kernel is named after its binding (`lambda in s`); a
@@ -8068,7 +8068,7 @@ let planGroupAggregate (programFuncs: IRCallable list) (modul: IRModule) : unit 
                     let scan (e: IRExpr) =
                         iterIRExpr (fun n ->
                             match n with
-                            | IRApp (IRVar (fid, _), args, _) when fid = f.Id -> acc.Add args
+                            | CallOfNamed (fid, _, args, _) when fid = f.Id -> acc.Add args
                             | _ -> ()) e
                     for b in modul.Bindings do
                         for e in bindingPayload modul b do scan e
@@ -8192,7 +8192,7 @@ let planGroupAggregate (programFuncs: IRCallable list) (modul: IRModule) : unit 
                 let pIds = kc.Params |> List.map (fun p -> p.VarId)
                 let operandOfParam (vid: IRId) = List.findIndex ((=) vid) pIds |> fun k -> srcOf info.Arrays.[k]
                 match kc.Params, kc.Body with
-                | [ r ], IRReduce (IRVar (rv, _), fk, init) when rv = r.VarId ->
+                | [ r ], ReduceOfNamed (rv, _, fk, init) when rv = r.VarId ->
                     (match resolve fk with
                      | Some fkc when fkc.Params.Length = 2 ->
                          let src = operandOfParam rv
@@ -8544,7 +8544,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                     fail "an elementwise kernel may abort (fusion never moves an evaluation that may abort)"
                  | Some _ -> fail "an elementwise kernel is not a plain pure scalar kernel over rows of the loop's extent"
                  | None -> fail "an elementwise kernel is not a resolvable callable")
-            | IRApp (IRVar (fid, _), args, retT) when localFuncs.Contains fid && not (visiting.Contains fid) && rowOfExtent ext retT ->
+            | CallOfNamed (fid, _, args, retT) when localFuncs.Contains fid && not (visiting.Contains fid) && rowOfExtent ext retT ->
                 (match callables.TryGetValue fid with
                  | true, f when not f.IsStatic && f.Captures.IsEmpty && not f.IsArityPoly
                                 && not f.IsOmpParallel && not f.IsCudaKernel && not f.IsMpiParallel
@@ -8598,7 +8598,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     let rowCopy (sId: IRId) (loop: IRExpr) =
         match loop with
         | IRForRange (kId, IRLit (IRLitInt 0L), IRLit (IRLitInt ext),
-                      IRLet (aId, IRAssign (IRIndex (IRVar (bufId, bufT), idxs, ident), IRIndex (IRVar (s, _), [ IRVar (k1, kT) ], _)), tail))
+                      IRLet (aId, IRAssign (IndexOfNamed (bufId, bufT, idxs, ident), IndexOfNamed (s, _, [ IRVar (k1, kT) ], _)), tail))
                 when s = sId && k1 = kId && not idxs.IsEmpty
                      && (match List.last idxs with IRVar (k2, _) -> k2 = kId | _ -> false)
                      && not (idxs |> List.take (idxs.Length - 1) |> List.exists (fun i -> mentions kId i || mentions sId i))
@@ -8662,7 +8662,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
     let rec stripCompute (e: IRExpr) = match e with IRCompute inner -> stripCompute inner | _ -> e
     let foldStateCall (accId: IRId) (jId: IRId) (nxtV: IRExpr) =
         match stripCompute nxtV with
-        | IRApp (IRVar (fid, ft), [ IRVar (a, _); (IRIndex (IRVar (g, _), [ IRVar (j2, _) ], _) as rowE) ], retT)
+        | CallOfNamed (fid, ft, [ IRVar (a, _); (IndexOfNamed (g, _, [ IRVar (j2, _) ], _) as rowE) ], retT)
             when a = accId && j2 = jId && g <> accId ->
             Some (fid, ft, g, rowE, retT)
         | _ -> None
@@ -8762,7 +8762,7 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                     // without a copy).
                     | Some (IRVar (y, _)) -> y <> x && outsideOk y
                     | Some v when not (mentions bufId v) && not (mentionsAlias v) -> not (isDeferredForm v)
-                    | Some (IRIndex (IRVar (b, _), rowIdx, _)) when b = bufId ->
+                    | Some (IndexOfNamed (b, _, rowIdx, _)) when b = bufId ->
                         // A row view BUF(i): cell k is BUF(i, k).
                         (match bufT with
                          | ArrayElem at when rowIdx.Length = at.IndexTypes.Length - 1 ->
@@ -8797,11 +8797,11 @@ let fuseSliceWritesModule (modul: IRModule) (builder: IRBuilder) (programFuncs: 
                         let mutable ok = true
                         let rec walk (x: IRExpr) =
                             match x with
-                            | IRAssign (IRIndex (IRVar (b, _), i0 :: rest, _), v) when b = bufId ->
+                            | IRAssign (IndexOfNamed (b, _, i0 :: rest, _), v) when b = bufId ->
                                 if not (isN i0) then ok <- false
                                 rest |> List.iter walk
                                 walk v
-                            | IRIndex (IRVar (b, _), i0 :: rest, _) when b = bufId ->
+                            | IndexOfNamed (b, _, i0 :: rest, _) when b = bufId ->
                                 if not (earlierRow i0) then ok <- false
                                 rest |> List.iter walk
                             | IRVar (b, _) when b = bufId -> ok <- false
@@ -9000,7 +9000,7 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
         let mutable ok = true
         iterIRExpr (fun n ->
             match n with
-            | IRApp (IRVar (fid, _), _, _) ->
+            | CallOfNamed (fid, _, _, _) ->
                 (match callables.TryGetValue fid with
                  | true, c ->
                     if c.IsStatic then ok <- false
@@ -9017,12 +9017,12 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
         let mutable ok = true
         let rec walk (x: IRExpr) =
             match x with
-            | IRAssign (IRIndex (IRVar (b, _), i0 :: rest, _), v) when b = bufId ->
+            | IRAssign (IndexOfNamed (b, _, i0 :: rest, _), v) when b = bufId ->
                 if not (rowOk i0) then ok <- false
                 rest |> List.iter walk
                 walk v
             | IRAssign (IRVar (b, _), _) when b = bufId -> ok <- false
-            | IRIndex (IRVar (b, _), idxs, _) when b = bufId -> idxs |> List.iter walk
+            | IndexOfNamed (b, _, idxs, _) when b = bufId -> idxs |> List.iter walk
             | IRVar (b, _) when b = bufId -> ok <- false
             | ExprShape (children, _) -> children |> List.iter walk
         walk e
@@ -9128,7 +9128,7 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                         | [ (_, IRForRange (kv, IRLit (IRLitInt 0L), IRLit (IRLitInt _), cb)) ] ->
                             let cstmts, cfin = chainOf cb
                             (match List.tryLast cstmts, cfin with
-                             | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+                             | Some (_, IRAssign (IndexOfNamed (b, _, [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
                                 when b = bufId && isN i0 && k2 = kv
                                      && cstmts |> List.exists (fun (id, _) -> id = sv) ->
                                 Ok (kv, sv)
@@ -9149,7 +9149,7 @@ let fuseRowFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRC
                     let reproCallee (c: IRCallable) =
                         c.IsRepro
                         || (match c.Body with
-                            | IRApp (IRVar (fid, _), _, _) -> (match callables.TryGetValue fid with | true, g -> g.IsRepro | _ -> false)
+                            | CallOfNamed (fid, _, _, _) -> (match callables.TryGetValue fid with | true, g -> g.IsRepro | _ -> false)
                             | _ -> false)
                     // A `where omp` on the OUTER fold kernel F is admitted only
                     // behind a threaded step, where it is the request the
@@ -9935,9 +9935,9 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         let rec walk (phase: int) (ctx: IRExpr list) (raws: Map<IRId, IRExpr list>) (e: IRExpr) : unit =
             if bad.IsSome then () else
             match e with
-            | IRAssign (IRIndex (IRVar (b, _), _, _), _) when b = bufId -> fail "a second store into the trajectory"
+            | IRAssign (IndexOfNamed (b, _, _, _), _) when b = bufId -> fail "a second store into the trajectory"
             | IRAssign (IRVar (b, _), _) when b = bufId -> fail "a whole-array assignment of the trajectory"
-            | IRIndex (IRVar (b, _), i0 :: rest, _) when b = bufId ->
+            | IndexOfNamed (b, _, i0 :: rest, _) when b = bufId ->
                 rest |> List.iter (walk phase ctx raws)
                 (match i0 with
                  | IRLit (IRLitInt r) when phase = 2 && r >= 0L && r < lo -> ()
@@ -9957,7 +9957,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
             | IRVar (r, _) when raws.ContainsKey r ->
                 if not (raws.[r] |> List.forall (fun c -> List.contains c ctx)) then
                     fail "a guarded row view used outside its guard (the clamp's slot could hold another row)"
-            | IRLet (id, (IRIndex (IRVar (b, _), (IRIf _ as i0) :: rest, _) as v), body) when b = bufId ->
+            | IRLet (id, (IndexOfNamed (b, _, (IRIf _ as i0) :: rest, _) as v), body) when b = bufId ->
                 // A hoisted guarded row view: forming it is safe (an in-range
                 // slot); every USE must sit under the guard.
                 rest |> List.iter (walk phase ctx raws)
@@ -9982,11 +9982,11 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
         // The seed: lo = 1 needs exactly one writer of row 0, complete.
         let isRowWriter (rowIdx: IRExpr -> bool) (v: IRExpr) =
             match v with
-            | IRAssign (IRIndex (IRVar (b, _), [ i0 ], _), _) when b = bufId && trailing.IsEmpty -> rowIdx i0
+            | IRAssign (IndexOfNamed (b, _, [ i0 ], _), _) when b = bufId && trailing.IsEmpty -> rowIdx i0
             | IRForRange (k, IRLit (IRLitInt 0L), IRLit (IRLitInt m), cellBody) when Some m = cells && trailing.Length = 1 ->
                 let cs, cfin = chainOf cellBody
                 (match List.tryLast cs, cfin with
-                 | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), _)), IRLit IRLitUnit ->
+                 | Some (_, IRAssign (IndexOfNamed (b, _, [ i0; IRVar (k2, _) ], _), _)), IRLit IRLitUnit ->
                     b = bufId && k2 = k && rowIdx i0
                  | _ -> false)
             | _ -> false
@@ -10042,7 +10042,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                     phase <- 1
                 else
                     match v with
-                    | IRIndex (IRVar (b, _), (IRIf _ as i0) :: rest, _) when b = bufId ->
+                    | IndexOfNamed (b, _, (IRIf _ as i0) :: rest, _) when b = bufId ->
                         rest |> List.iter (walk phase [] raws)
                         (match clampOf n hi i0 with
                          | Ok (lag, conds) ->
@@ -10106,7 +10106,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                              // coordinate, so the moved combine is closed
                              && (let isRead (r: IRExpr) =
                                      match r with
-                                     | IRIndex (IRVar (t, _), [ IRVar (ia, _); IRVar (ib, _) ], _) -> t = tId && ia = a && ib = bv
+                                     | IndexOfNamed (t, _, [ IRVar (ia, _); IRVar (ib, _) ], _) -> t = tId && ia = a && ib = bv
                                      | _ -> false
                                  match comb with
                                  | IRBinOp (_, _, IRVar (a2, _), rd, _) -> a2 = acc && isRead rd
@@ -10312,7 +10312,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                         (match t with IRTScalar _ -> true | _ -> false) && not (boundInBlock block id)
                     mapIRExpr (fun x ->
                         match x with
-                        | IRAssign (IRIndex (IRVar (b, _), _, _), v) when b = bufId -> v
+                        | IRAssign (IndexOfNamed (b, _, _, _), v) when b = bufId -> v
                         | IRAssign (IRVar (id, t), v) when outsideScalar id t -> v
                         | _ -> x) chain
                 // Effects hidden in type-carried expressions (a range bound
@@ -10433,7 +10433,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                                 let comb' =
                                     mapIRExpr (fun x ->
                                         match x with
-                                        | IRIndex (IRVar (t, _), [ _; IRVar (ib, _) ], _) when t = tId && ib = bv -> IRIndex (bufV, [ row; jV ], None)
+                                        | IndexOfNamed (t, _, [ _; IRVar (ib, _) ], _) when t = tId && ib = bv -> IRIndex (bufV, [ row; jV ], None)
                                         | _ -> x) comb
                                 IRForRange (j, IRLit (IRLitInt 0L), IRLit (IRLitInt rowCells),
                                             unitLet (IRAssign (IRVar (accId, accT), comb')) (IRLit IRLitUnit))
@@ -10453,7 +10453,7 @@ let windowRecFoldsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: I
                 let ringed =
                     mapIRExpr (fun x ->
                         match x with
-                        | IRIndex (IRVar (b, _), i0 :: rest, ident) when b = bufId -> IRIndex (IRVar (bufId, ringT), recRingIndex r i0 :: rest, ident)
+                        | IndexOfNamed (b, _, i0 :: rest, ident) when b = bufId -> IRIndex (IRVar (bufId, ringT), recRingIndex r i0 :: rest, ident)
                         | IRVar (b, _) when b = bufId -> IRVar (bufId, ringT)
                         | _ -> x) chain'
                 let block' = IRLet (bufId, IRUninit ringT, ringed)
@@ -10920,7 +10920,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         // classifier -- the CLOSED one answers deferred for an id this module
         // and its callables do not bind)
         | IRExtent (IRVar (id, _), _) -> not (deferred.Contains id) && not (classifiedDeferred id) && not (regionClosed.Value id)
-        | IRApp (IRVar (fid, _), args, _) ->
+        | CallOfNamed (fid, _, args, _) ->
             args |> List.forall tot
             && (match Map.tryFind fid funcs with
                 | Some c when not (Set.contains fid visited) && not c.IsStatic && not c.IsCudaKernel
@@ -10947,7 +10947,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
         let vetoed =
             c.IsRepro
             || (match c.Body with
-                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+                | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
                 | _ -> false)
         not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
     let plainAxis (at: IRArrayType) : (int64 * IRIndexType) option =
@@ -10996,7 +10996,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     // A streamed provider read is neither stored nor pure (see isStreamed).
     let foldTotal (e: IRExpr) : bool =
         match e with
-        | IRReduce (IRVar (aid, ArrayElem at), k, init) when not (isStreamed aid) ->
+        | ReduceOfNamed (aid, ArrayElem at, k, init) when not (isStreamed aid) ->
             (match plainAxis at, kernelOf k with
              | Some (n, _), Some c ->
                 kernelTotal c 2 && (match init with Some s -> sfTotal Set.empty s | None -> n >= 1)
@@ -11042,7 +11042,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     let isOwnCall (e: IRExpr) =
         match e with
         | IRApp _ when topLevel.Value -> false
-        | IRApp (IRVar (fid, _), _, _) ->
+        | CallOfNamed (fid, _, _, _) ->
             (match Map.tryFind fid own with
              | Some c -> not (c.Name.StartsWith "__lambda_")
              | None -> false)
@@ -11071,7 +11071,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
     /// Ok (lets, result atom, display) or Error why.
     let inlineJudge (call: IRExpr) : Result<(IRId * IRExpr) list * IRExpr * string, string> =
         match call with
-        | IRApp (IRVar (fid, _), args, retTy) ->
+        | CallOfNamed (fid, _, args, retTy) ->
             let c = own.[fid]
             let disp = $"""{c.SourceName}({args |> List.map showAtom |> String.concat ", "})"""
             let refused why = Error $"{disp} not inlined: {why}"
@@ -11159,7 +11159,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                     | Ok _ when stmtWrites.[i] ->
                         let disp =
                             match call with
-                            | IRApp (IRVar (fid, _), args, _) -> $"""{own.[fid].SourceName}({args |> List.map showAtom |> String.concat ", "})"""
+                            | CallOfNamed (fid, _, args, _) -> $"""{own.[fid].SourceName}({args |> List.map showAtom |> String.concat ", "})"""
                             | _ -> "the call"
                         Error $"{disp} not inlined: its statement may write (inlining moves the call's body ahead of the whole statement, across that write)"
                     | r -> r
@@ -11179,7 +11179,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                         | Ok _ -> call
                         | Error _ ->
                             (match call with
-                             | IRApp (IRVar (fid, _), _, _) -> refusedCallFolds.[(i, ord)] <- countFolds own.[fid].Body
+                             | CallOfNamed (fid, _, _, _) -> refusedCallFolds.[(i, ord)] <- countFolds own.[fid].Body
                              | _ -> ())
                             call) v
                 for (ord, lets) in here do
@@ -11589,7 +11589,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                 iterIRExpr (fun x ->
                                     match x with
                                     | IRVar (y, _) when y = jid -> all <- all + 1
-                                    | IRTupleProj (IRVar (y, _), k, isFlat) when y = jid ->
+                                    | ProjOfNamed (y, _, k, isFlat) when y = jid ->
                                         proj <- proj + 1
                                         // (two leaves: the pair IS the flat tuple)
                                         if (not isFlat && leaves.Length > 2) || k >= leaves.Length then structural <- structural + 1
@@ -11894,9 +11894,9 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                       let fresh (v: IRExpr) =
                           match v with
                           | IRCompute _ | IRArrayLit _ -> None
-                          | IRApp (IRVar (f, _), _, _) when Map.containsKey f funcs -> None
+                          | CallOfNamed (f, _, _, _) when Map.containsKey f funcs -> None
                           | IRVar (y, _) -> Some $"an alias of `{nameOf y}`"
-                          | IRApp (IRVar (y, _), _, _) -> Some $"a named view into `{nameOf y}`"
+                          | CallOfNamed (y, _, _, _) -> Some $"a named view into `{nameOf y}`"
                           | _ -> Some "bound to a value that is not fresh storage of its own"
                       match boundAt.TryGetValue id with
                       | true, ui -> fresh tentative.[ui].Value
@@ -12119,7 +12119,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
                                                     // Builtins are IR operators (arithmetic, libm, casts,
                                                     // extents, folds / maps), not calls.
                                                     (match n with
-                                                     | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs ->
+                                                     | CallOfNamed (fid, _, _, _) when Map.containsKey fid funcs ->
                                                         let fnm = (Map.find fid funcs).SourceName
                                                         bad <- Some $"callee let `{nm}` calls {fnm}: a call's expansion may allocate outside the owned pools"
                                                      | IRApp _ ->
@@ -12261,7 +12261,7 @@ let shareSiblingFoldsModule (builder: IRBuilder) (programFuncs: IRCallable list)
             else
                 mapIRExpr (fun n ->
                     match n with
-                    | IRTupleProj (IRVar (jid, _), k, _) when projOf.ContainsKey jid ->
+                    | ProjOfNamed (jid, _, k, _) when projOf.ContainsKey jid ->
                         let (ps, ts) = projOf.[jid]
                         if k < ps.Length then IRVar (ps.[k], ts.[k]) else n
                     | _ -> n) e
@@ -12475,7 +12475,7 @@ let internal fusePartialRowTerminalsWithCensusModule (builder: IRBuilder) (progr
         match resolve info.Kernel with
         | Some row when row.Params.Length = 1 && row.RetType = scalar64 && row.Captures.IsEmpty && unstrategized row ->
             match row.Params.Head.Type, row.Body with
-            | ArrayElem at, IRReduce (IRVar (id, ty), k, Some seed)
+            | ArrayElem at, ReduceOfNamed (id, ty, k, Some seed)
                 when id = row.Params.Head.VarId && ty = row.Params.Head.Type
                      && at.ElemType = scalar64 && not at.IsVirtual && at.IndexTypes.Length = 1
                      && at.IndexTypes.Head.Rank = 1 && at.IndexTypes.Head.IxKind = IxKPlain
@@ -12799,7 +12799,7 @@ let internal fusePartialRowTerminalsWithCensusModule (builder: IRBuilder) (progr
             let int64Type = IRTScalar ETInt64
             let step acc r c = function
                 | IRLet (u, IRAssign (IRVar (target, tt),
-                    IRApp (fold, [IRVar (a, at); IRIndex (IRVar (p, pt), [IRVar (ri, rt); IRVar (ci, ct)], _)], ret)), IRLit IRLitUnit)
+                    IRApp (fold, [IRVar (a, at); IndexOfNamed (p, pt, [IRVar (ri, rt); IRVar (ci, ct)], _)], ret)), IRLit IRLitUnit)
                     when target = acc && a = acc && p = pid && ri = r && ci = c
                          && tt = scalar64 && at = scalar64 && ret = scalar64 && rt = int64Type && ct = int64Type -> Some (u, fold, pt)
                 | _ -> None
@@ -12990,7 +12990,7 @@ let certifySparseWildcardFold (wholeProgram: IRModule option) (binding: IRBindin
         && ix.Kind = SDimension && ix.Dependencies.IsEmpty
     let candidate =
         match operand with
-        | IRIndex (IRVar (_, ArrayElem at), [IRTuple _], _) ->
+        | IndexOfNamed (_, ArrayElem at, [IRTuple _], _) ->
             at.IndexTypes.Length = 1 && at.IndexTypes.Head.IxKind = IxKSparse && at.IndexTypes.Head.Rank = 2
         | _ -> false
     match wholeProgram with
@@ -13054,7 +13054,7 @@ let certifySparseWildcardFold (wholeProgram: IRModule option) (binding: IRBindin
             Error "additional execution/ownership side payloads"
         else
         match operand, resolve kernel, seed with
-        | IRIndex (IRVar (sid, sty), [IRTuple coords], _), Some fold, Some init when literal init ->
+        | IndexOfNamed (sid, sty, [IRTuple coords], _), Some fold, Some init when literal init ->
             let parent = m.Bindings |> List.tryFind (fun b -> b.Id = sid)
             let pin =
                 match classifyCompoundIndexTuple 2 coords with
@@ -13115,7 +13115,7 @@ let certifySparseWildcardFold (wholeProgram: IRModule option) (binding: IRBindin
                 let demand e =
                     let mutable found = false
                     iterIRExpr (function
-                        | IRIndex (IRVar (id, _), (IRTuple cs) :: _, _) when id = sid ->
+                        | IndexOfNamed (id, _, (IRTuple cs) :: _, _) when id = sid ->
                             match classifyCompoundIndexTuple 2 cs with CompoundPartial _ -> found <- true | _ -> ()
                         | IRCompoundProject (IRVar (id, _), _) when id = sid -> found <- true
                         | IRLet (_, IRVar (id, _), _) when id = sid -> found <- true
@@ -13353,7 +13353,7 @@ let gatherTerminalCertificate (resolve: IRExpr -> IRCallable option) (isDeferred
     let candidates =
         sites pkc.Body |> List.choose (fun site ->
             match site with
-            | IRIndex (IRVar (a, aty), idxs, _) when not (isDeferred a) && checkedDense aty idxs.Length ->
+            | IndexOfNamed (a, aty, idxs, _) when not (isDeferred a) && checkedDense aty idxs.Length ->
                 (match placeholder site with
                  | Some ph when indexOk idxs
                                 && (audit (replaceOnce site ph pkc.Body)) = Ok () ->
@@ -13578,7 +13578,7 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
                          | IRMethodFor mf -> (match mf.Arrays with [ IRVar (v, _) ] -> v = a | _ -> false)
                          | _ -> false) ->
                 (match row.Body with
-                 | IRReduce (IRVar (rp, _), kExpr, init)
+                 | ReduceOfNamed (rp, _, kExpr, init)
                      when rp = row.Params.Head.VarId
                           && not ((collectVarRefsIR kExpr).Contains rp)
                           && not (init |> Option.exists (fun s -> (collectVarRefsIR s).Contains rp)) ->
@@ -13626,7 +13626,7 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
         | None ->
         let inner =
             match inner with
-            | IRLet (pid, (IRDecompact _ as dc), IRReduce (IRVar (p, _), kExpr, init))
+            | IRLet (pid, (IRDecompact _ as dc), ReduceOfNamed (p, _, kExpr, init))
                 when p = pid && not ((collectVarRefsIR kExpr).Contains pid)
                      && not (init |> Option.exists (fun s -> (collectVarRefsIR s).Contains pid)) ->
                 IRReduce (dc, kExpr, init)
@@ -13768,7 +13768,7 @@ let decompactRowFoldModule (builder: IRBuilder) (programFuncs: IRCallable list) 
     let countRefs (e: IRExpr) =
         iterIRExpr (fun n ->
             match n with
-            | IRApp (IRVar (g, _), _, _) -> bump callHeads g
+            | CallOfNamed (g, _, _, _) -> bump callHeads g
             | IRVar (g, _) -> bump varRefs g
             | _ -> ()) e
     for g in (programFuncs @ modul.Functions) |> List.distinctBy (fun g -> g.Id) do countRefs g.Body
@@ -14246,7 +14246,7 @@ let elideSingleConsumerComputesModule (builder: IRBuilder) (programFuncs: IRCall
                 let consumer =
                     match sv with
                     | _ when here <> total -> Error $"`{xn}` has more than one reader ({total} references; a single consumer is required)"
-                    | IRReduce (IRVar (y, _), k, init) when y = xid ->
+                    | ReduceOfNamed (y, _, k, init) when y = xid ->
                         // the fold's OWN operand is its one read: another in the
                         // kernel or the seed would outlive the dropped let
                         if refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) > 0 then
@@ -14741,7 +14741,7 @@ let programValueRefs (modules: IRModule list) : Set<IRId> =
     let countOne (e: IRExpr) =
         iterIRExpr (fun n ->
             match n with
-            | IRApp (IRVar (f, _), _, _) -> bump heads f
+            | CallOfNamed (f, _, _, _) -> bump heads f
             | IRVar (f, _) when fids.Contains f -> bump vars f
             | _ -> ()) e
     let count (e: IRExpr) =
@@ -14813,7 +14813,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
     let countRefs (e: IRExpr) =
         iterIRExpr (fun n ->
             match n with
-            | IRApp (IRVar (f, _), _, _) -> bump callHeads f
+            | CallOfNamed (f, _, _, _) -> bump callHeads f
             | IRVar (f, _) when Map.containsKey f funcs -> bump varRefs f
             | _ -> ()) e
     for KeyValue (_, f) in funcs do countRefs f.Body
@@ -14881,7 +14881,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
         | _ -> false
     let userCall (e: IRExpr) =
         match e with
-        | IRApp (IRVar (fid, _), args, _) ->
+        | CallOfNamed (fid, _, args, _) ->
             (match Map.tryFind fid funcs with
              | Some c when not (c.Name.StartsWith "__lambda_") -> Some (c, args)
              | _ -> None)
@@ -15266,7 +15266,7 @@ let elideCallsModule (builder: IRBuilder) (programFuncs: IRCallable list) (modul
                 | Some (at, sv) ->
                     let consumerShape =
                         match sv with
-                        | IRReduce (IRVar (y, _), k, init) when y = xid ->
+                        | ReduceOfNamed (y, _, k, init) when y = xid ->
                             refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) = 0
                         | IRCompute (IRApplyCombinator h) ->
                             (h.Arrays |> List.filter (isX xid) |> List.length) = 1 && refsOf xid h.Kernel = 0
@@ -15950,7 +15950,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     let reproVetoed (c: IRCallable) =
         c.IsRepro
         || (match c.Body with
-            | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+            | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
             | _ -> false)
     let licenceText (c: IRCallable) =
         match builtinOp c with
@@ -16061,7 +16061,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
             when acc = acc2 && acc = acc3 ->
             let readOf (e: IRExpr) =
                 match e with
-                | IRIndex (IRVar (s, _), [ IRVar (ia, ta); IRVar (ib, tb) ], _) when s = src && ia = a && ib = b -> Some (ta, tb)
+                | IndexOfNamed (s, _, [ IRVar (ia, ta); IRVar (ib, tb) ], _) when s = src && ia = a && ib = b -> Some (ta, tb)
                 | _ -> None
             let shape =
                 match comb with
@@ -16738,7 +16738,7 @@ let private aliasPlanChain (programFuncs: IRCallable list) (modul: IRModule) : I
                  && not (modul.CompoundInits.ContainsKey b.Id || modul.SparseInits.ContainsKey b.Id || modul.RandomInits.ContainsKey b.Id) ->
             let how =
                 match v with
-                | IRApp (IRVar (fid, _), _, _) when funcsById.ContainsKey fid ->
+                | CallOfNamed (fid, _, _, _) when funcsById.ContainsKey fid ->
                     Some $"a call of `{funcsById.[fid].SourceName}` (its reach is never written either)"
                 // A `|> compute` that is no fresh pool (freshStoredChain
                 // declined it): it may be the identity on what it names.
@@ -16911,7 +16911,7 @@ let planLuCompanion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (mo
     // `let (LU, piv) = m.lu(A)`).
     let rec projRoot (k: int) (e: IRExpr) : IRId option =
         match e with
-        | IRTupleProj (IRVar (fid, _), k', _) when k' = k -> Some fid
+        | ProjOfNamed (fid, _, k', _) when k' = k -> Some fid
         | IRVar (id, _) ->
             (match Map.tryFind id byId with
              // An ordinary top-level `let` is ASSIGNABLE (Blade lets may be
@@ -16920,7 +16920,7 @@ let planLuCompanion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (mo
              // name, its payload naming the factor) refuses an actual write.
              | Some b ->
                 (match b.Value with
-                 | IRTupleProj (IRVar (fid, _), k', _) when k' = k -> Some fid
+                 | ProjOfNamed (fid, _, k', _) when k' = k -> Some fid
                  | _ -> None)
              | _ -> None)
         | _ -> None
@@ -17835,7 +17835,7 @@ let planKeyedCellProjection (foreignRefs: Set<IRId>) (singleModule: bool) (modul
             let scan (e: IRExpr) =
                 iterIRExpr (fun m ->
                     match m with
-                    | IRIndex (IRVar (id, _), [ IRLit (IRLitInt k) ], _) when id = b.Id -> keyed.Add k
+                    | IndexOfNamed (id, _, [ IRLit (IRLitInt k) ], _) when id = b.Id -> keyed.Add k
                     | IRVar (id, _) when id = b.Id -> others <- others + 1
                     | IRAssign (t, _) ->
                         let rec root (x: IRExpr) =
@@ -18815,7 +18815,7 @@ let selectRecomputeModule (programFuncs: IRCallable list) (modul: IRModule) : IR
                 // ---- the consumers -----------------------------------------
                 let classify (sv: IRExpr) : Result<Choice<IRExpr * IRExpr option, ApplyInfo>, string> =
                     match sv with
-                    | IRReduce (IRVar (y, _), k, init) when y = xid ->
+                    | ReduceOfNamed (y, _, k, init) when y = xid ->
                         if refsOf xid k + (init |> Option.map (refsOf xid) |> Option.defaultValue 0) > 0 then
                             Error $"`{xn}` is read again by a fold's kernel or seed"
                         else Ok (Choice1Of2 (k, init))
@@ -19203,7 +19203,7 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                               r.Rank = 1 && r.Dim = 0 && not (deferred.Contains r.ArrayId)
                               && (match r.Offset with Some o -> Blade.Types.haloOffsetInReach h o | None -> false)
                               && (match r.Node with
-                                  | IRIndex (IRVar (_, aty), _, _) ->
+                                  | IndexOfNamed (_, aty, _, _) ->
                                       (match stripUnits aty with
                                        | ArrayElem at -> denseLiteral at && staticExtents at = [ Some baseN ]
                                        | _ -> false)
@@ -19221,7 +19221,7 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                           // of the body must pass the closed totality whitelist.
                           let isRead (n: IRExpr) =
                               match n with
-                              | IRIndex (IRVar (aid, _), [ IRBinOp (IRElementwise, IRAdd, wv, _, _) ], _) when isWin wv ->
+                              | IndexOfNamed (aid, _, [ IRBinOp (IRElementwise, IRAdd, wv, _, _) ], _) when isWin wv ->
                                   reads |> List.exists (fun r -> r.ArrayId = aid)
                               | _ -> false
                           // a certified read becomes an OPAQUE immutable scalar of the
@@ -19232,7 +19232,7 @@ let planSiblingMaps (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (si
                           let opaqueOf (n: IRExpr) =
                               opaqueSeq.Value <- opaqueSeq.Value + 1
                               match n with
-                              | IRIndex (IRVar (_, aty), _, _) ->
+                              | IndexOfNamed (_, aty, _, _) ->
                                   (match stripUnits aty with
                                    | ArrayElem at -> IRVar (-1000000 - opaqueSeq.Value, at.ElemType)
                                    | _ -> IRVar (-1000000 - opaqueSeq.Value, IRTScalar ETFloat64))
@@ -19641,7 +19641,7 @@ let spliceDeferredFoldChainsModule (programFuncs: IRCallable list) (modul: IRMod
     let rewriteFold (subject: string) (hostName: string) (hostId: IRId) (v: IRExpr) : IRExpr =
         let candidate =
             match v with
-            | IRReduce (IRVar (q, _), k, init) when deferredValue.ContainsKey q -> Some (deferredValue.[q], k, init)
+            | ReduceOfNamed (q, _, k, init) when deferredValue.ContainsKey q -> Some (deferredValue.[q], k, init)
             | IRReduceCompute (IRVar (q, _), (IRVar _ as k), s) when deferredValue.ContainsKey q -> Some (deferredValue.[q], k, Some s)
             // Lowering's spelling: the fused terminal over the deferred map's
             // own apply (its seed already the lowered one), named after the

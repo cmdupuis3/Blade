@@ -478,7 +478,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         $$"""{{(Blade.Types.TypeOrigins.cppName typeName)}} { {{fieldInits}} }"""
     // PM44 (keyed-cell projection): a literal keyed read of a projected
     // `.read` renders as the cell its sweep retained.
-    | IRIndex (IRVar (aid, _), [ IRLit (IRLitInt k) ], _) when (Blade.Optimize.KeyedProjectionTable.tryCell aid k).IsSome ->
+    | IndexOfNamed (aid, _, [ IRLit (IRLitInt k) ], _) when (Blade.Optimize.KeyedProjectionTable.tryCell aid k).IsSome ->
         (Blade.Optimize.KeyedProjectionTable.tryCell aid k).Value
     | IRIndex (arr, indices, _) ->
         // Carousel substitution (reference equality, see SubstMap): a dense
@@ -2083,7 +2083,7 @@ and kernelLetCopy (subst: SubstMap) (names: Map<IRId, string>) (id: IRId) (value
                         // every use a FULL element access or an extent
                         let rec elementOnly (e: IRExpr) =
                             match e with
-                            | IRIndex (IRVar (j, _), ix, _) when j = id -> noStorage e && ix |> List.forall elementOnly
+                            | IndexOfNamed (j, _, ix, _) when j = id -> noStorage e && ix |> List.forall elementOnly
                             | IRExtent (IRVar (j, _), _) when j = id -> true
                             | IRVar (j, _) when j = id -> false
                             | ExprShape (children, _) -> children |> List.forall elementOnly

@@ -639,10 +639,11 @@ and SparseKeysSource =
 let IRApp (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
     IRAppAt (func, args, retType, SrcLoc.Nowhere)
 /// The location-free view of a call: matches every IRAppAt.
-let (|IRApp|_|) (e: IRExpr) : (IRExpr * IRExpr list * IRTypeG<IRExpr>) option =
+[<return: Struct>]
+let (|IRApp|_|) (e: IRExpr) : (IRExpr * IRExpr list * IRTypeG<IRExpr>) voption =
     match e with
-    | IRAppAt (f, args, rt, _) -> Some (f, args, rt)
-    | _ -> None
+    | IRAppAt (f, args, rt, _) -> ValueSome (f, args, rt)
+    | _ -> ValueNone
 /// The same call with new parts, keeping its location.
 let withAppParts (call: IRExpr) (func: IRExpr, args: IRExpr list, retType: IRTypeG<IRExpr>) : IRExpr =
     match call with
@@ -655,6 +656,56 @@ type IRArrayType = IRArrayTypeG<IRExpr>
 type IdxRef = IdxRefG<IRExpr>
 type IRArrowSlot = IRArrowSlotG<IRExpr>
 type LoopType = LoopTypeG<IRExpr>
+
+// Named shapes that recur across the passes (cleanup K11). Each matches
+// EXACTLY the inline spelling it names, nothing wider.
+
+/// A call whose callee is a NAMED value, `f(args)` with f an IRVar:
+/// (callee id, callee type, arguments, return type). Does NOT match a call of
+/// any other callee expression (an object_for, a projection, a nested call).
+[<return: Struct>]
+let (|CallOfNamed|_|) (e: IRExpr) : (IRId * IRType * IRExpr list * IRType) voption =
+    match e with
+    | IRAppAt (IRVar (id, fty), args, rt, _) -> ValueSome (id, fty, args, rt)
+    | _ -> ValueNone
+
+/// A subscript of a NAMED array, `a(i, ..)` with a an IRVar: (array id, array
+/// type, index list, identity). Does NOT match a subscript of any other array
+/// expression (a curried `A(i)(j)`, a view, a call result).
+[<return: Struct>]
+let (|IndexOfNamed|_|) (e: IRExpr) : (IRId * IRType * IRExpr list * ArrayIdentity option) voption =
+    match e with
+    | IRIndex (IRVar (id, ty), idxs, ident) -> ValueSome (id, ty, idxs, ident)
+    | _ -> ValueNone
+
+/// A fold of a NAMED array, `reduce(a, k[, s])` with a an IRVar: (array id,
+/// array type, kernel, seed). Does NOT match a fold of any other operand, nor
+/// the fused terminal IRReduceCompute.
+[<return: Struct>]
+let (|ReduceOfNamed|_|) (e: IRExpr) : (IRId * IRType * IRExpr * IRExpr option) voption =
+    match e with
+    | IRReduce (IRVar (id, ty), kernel, init) -> ValueSome (id, ty, kernel, init)
+    | _ -> ValueNone
+
+/// A projection of a NAMED tuple, `t[k]` with t an IRVar: (tuple id, tuple
+/// type, index, isFlat). Does NOT match a projection of any other expression.
+[<return: Struct>]
+let (|ProjOfNamed|_|) (e: IRExpr) : (IRId * IRType * int * bool) voption =
+    match e with
+    | IRTupleProj (IRVar (id, ty), k, flat) -> ValueSome (id, ty, k, flat)
+    | _ -> ValueNone
+
+/// A negative integer literal as the IR spells it, a negation of an IRLitInt:
+/// the literal under the negation (n, not -n). Does NOT match an IRLitInt that
+/// is already negative, nor a negation of anything else.
+[<return: Struct>]
+let (|NegIntLit|_|) (e: IRExpr) : int64 voption =
+    match e with
+    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> ValueSome n
+    | _ -> ValueNone
+
+// The two TYPE shapes, Tagged and IntTaggedIndex, live beside IRTypeG in
+// Types.fs, generic over the extent type.
 
 // OrbIdx (iterated-wreath) accessors. The level list rides the Extent slot as
 // an IROrbitClass marker (see that case), so every consumer reads it through
@@ -936,22 +987,24 @@ let (|LVVar|LVIndex|LVField|LVOther|) = function
 // values.
 
 /// Strict primitive element. Doesn't match through unit annotation.
+[<return: Struct>]
 let (|PrimElem|_|) (ty: IRType) =
     match ty with
-    | IRTScalar et -> Some et
-    | _ -> None
+    | IRTScalar et -> ValueSome et
+    | _ -> ValueNone
 
 /// Primitive element, optionally unit-annotated or index-tagged. Workhorse
 /// for read sites that just want the primitive and don't care whether
 /// wrappers are attached. Matches through both IRTUnitAnnotated (physical
 /// units) and IRTIdxTagged (nominal index tags) -- both preserve their
 /// inner type and erase at codegen.
+[<return: Struct>]
 let (|AnyPrimElem|_|) (ty: IRType) =
     match ty with
-    | IRTScalar et -> Some et
-    | IRTUnitAnnotated (IRTScalar et, _) -> Some et
-    | IRTIdxTagged (IRTScalar et, _) -> Some et
-    | _ -> None
+    | IRTScalar et -> ValueSome et
+    | IRTUnitAnnotated (IRTScalar et, _) -> ValueSome et
+    | IRTIdxTagged (IRTScalar et, _) -> ValueSome et
+    | _ -> ValueNone
 
 /// The literal `zero` denotes at a scalar type, read through a unit
 /// annotation or index tag (both erase): `0` for an integer, `0.0f` / `0.0`
@@ -988,25 +1041,28 @@ let addIdentityLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
 
 /// Unit-annotated primitive: returns both the elem type and the unit
 /// signature. For unit-aware sites that need to track or propagate units.
+[<return: Struct>]
 let (|UnitPrimElem|_|) (ty: IRType) =
     match ty with
-    | IRTUnitAnnotated (IRTScalar et, units) -> Some (et, units)
-    | _ -> None
+    | IRTUnitAnnotated (IRTScalar et, units) -> ValueSome (et, units)
+    | _ -> ValueNone
 
 /// Inference variable in element position: the natural representation for
 /// "kernel param's elem type, deferred until <@> unifies it with the
 /// source array's per-row type."
+[<return: Struct>]
 let (|InferElem|_|) (ty: IRType) =
     match ty with
-    | IRTInfer id -> Some id
-    | _ -> None
+    | IRTInfer id -> ValueSome id
+    | _ -> ValueNone
 
 /// Named (struct or sum) elem type: the dispatch site for eventual codegen
 /// support of arrays of user-defined types.
+[<return: Struct>]
 let (|NamedElem|_|) (ty: IRType) =
     match ty with
-    | IRTNamed name -> Some name
-    | _ -> None
+    | IRTNamed name -> ValueSome name
+    | _ -> ValueNone
 
 /// Function-valued elem type: reflects the array-function duality
 /// (Array<T like Idx<n>> is conceptually `Idx<n> -> T`). Matches `IRTArrow`
@@ -1015,12 +1071,13 @@ let (|NamedElem|_|) (ty: IRType) =
 /// (`IRTArrow ([], ret, None)`, a nullary function) -- the symmetric
 /// counterpart to ArrayElem's empty-slot rejection. `identity` is ignored:
 /// functions don't carry array identity.
+[<return: Struct>]
 let (|FuncElem|_|) (ty: IRType) =
     match ty with
     | IRTArrow (slots, ret, _) when slots |> List.forall (function SVal _ -> true | _ -> false) ->
         let args = slots |> List.map (function SVal t -> t | _ -> failwith "unreachable")
-        Some (args, ret)
-    | _ -> None
+        ValueSome (args, ret)
+    | _ -> ValueNone
 
 /// Smart constructor: build an arrow-shaped type from a parameter type
 /// list and return type. Produces an `IRTArrow` with all-`SVal` slots
@@ -1066,9 +1123,10 @@ let rec validateArrowShape (slots: IRArrowSlot list) (result: IRType) : string l
 /// arrows do NOT match (nullary functions, per `mkFuncArrow []`); rank-0
 /// arrays don't exist as a type form (`mkArrayLike` collapses them to
 /// their element type at the producer side).
+[<return: Struct>]
 let (|ArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function, not an array -- see docstring
+    | IRTArrow ([], _, _) -> ValueNone  // nullary function, not an array -- see docstring
     | IRTArrow (slots, result, identity) ->
         let allStored = slots |> List.forall (function SIdx _ -> true | _ -> false)
         let allVirtual = slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
@@ -1078,15 +1136,15 @@ let (|ArrayElem|_|) (ty: IRType) =
                     | SIdx i -> i
                     | SIdxVirt i -> i
                     | _ -> failwith "unreachable -- checked by guards above")
-            Some {
+            ValueSome {
                 ElemType = result
                 IndexTypes = indexTypes
                 IsVirtual = allVirtual
                 Identity = identity
             }
         else
-            None
-    | _ -> None
+            ValueNone
+    | _ -> ValueNone
 
 /// Largest number of cells `zeroValueOf` spells out for an array-typed
 /// component (a struct field, a tuple component, an array element of a zero):
@@ -1114,7 +1172,7 @@ let zeroValueOf (structFields: string -> (string * IRType) list option) (ty: IRT
         | Some lit -> Some lit
         | None ->
             match t with
-            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> go (fuel - 1) inner
+            | Tagged inner -> go (fuel - 1) inner
             | IRTNamed n ->
                 structFields n |> Option.bind (fun fields ->
                     let zs = fields |> List.map (fun (f, fty) -> go (fuel - 1) fty |> Option.map (fun z -> (f, z)))
@@ -1165,36 +1223,38 @@ let zeroHasNoValueMessage (ty: IRTypeG<IRExpr>) : string option =
 /// Stored-array variant of ArrayElem. Matches IRTArrow with all-SIdx slots
 /// (non-empty). Useful for codegen paths that need to allocate / read
 /// storage and want to reject virtual sources at the type-match level.
+[<return: Struct>]
 let (|StoredArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function -- see ArrayElem
+    | IRTArrow ([], _, _) -> ValueNone  // nullary function -- see ArrayElem
     | IRTArrow (slots, result, identity)
         when slots |> List.forall (function SIdx _ -> true | _ -> false) ->
         let indexTypes = slots |> List.map (function SIdx i -> i | _ -> failwith "unreachable")
-        Some {
+        ValueSome {
             ElemType = result
             IndexTypes = indexTypes
             IsVirtual = false
             Identity = identity
         }
-    | _ -> None
+    | _ -> ValueNone
 
 /// Virtual-array variant of ArrayElem. Matches IRTArrow with all-SIdxVirt
 /// slots (non-empty). Useful for iteration codegen and range/reverse/blocked
 /// dispatch.
+[<return: Struct>]
 let (|VirtualArrayElem|_|) (ty: IRType) =
     match ty with
-    | IRTArrow ([], _, _) -> None  // nullary function -- see ArrayElem
+    | IRTArrow ([], _, _) -> ValueNone  // nullary function -- see ArrayElem
     | IRTArrow (slots, result, _identity)
         when slots |> List.forall (function SIdxVirt _ -> true | _ -> false) ->
         let indexTypes = slots |> List.map (function SIdxVirt i -> i | _ -> failwith "unreachable")
-        Some {
+        ValueSome {
             ElemType = result
             IndexTypes = indexTypes
             IsVirtual = true
             Identity = None  // Virtual arrays don't carry identity
         }
-    | _ -> None
+    | _ -> ValueNone
 
 /// Smart constructor for a stored array arrow. The slot list is the
 /// array's index types each wrapped as `SIdx`, the result is the
@@ -1557,10 +1617,11 @@ let irTypeEquiv (t1: IRType) (t2: IRType) : bool =
 
 /// Tuple elem type. Arrays of tuples. Useful for structured records that
 /// don't have a named type definition.
+[<return: Struct>]
 let (|TupleElem|_|) (ty: IRType) =
     match ty with
-    | IRTTuple ts -> Some ts
-    | _ -> None
+    | IRTTuple ts -> ValueSome ts
+    | _ -> ValueNone
 
 /// Pre-specialization parameter-pack type (`Poly<T^r>`): a base type + arity
 /// variable that `specializeFunction` expands into `r` individual params at
@@ -1571,10 +1632,11 @@ let (|TupleElem|_|) (ty: IRType) =
 /// semantics (packs resolve at specialization time, array elements at
 /// runtime); sites matching `PolyElem` should emit an explicit "not
 /// implemented" error rather than silently doing the wrong thing.
+[<return: Struct>]
 let (|PolyElem|_|) (ty: IRType) =
     match ty with
-    | IRTPoly (inner, var) -> Some (inner, var)
-    | _ -> None
+    | IRTPoly (inner, var) -> ValueSome (inner, var)
+    | _ -> ValueNone
 
 /// Elem types that aren't valid as array elements. These represent
 /// runtime structures or compile-time-only constructs that have no
@@ -2433,7 +2495,7 @@ let composeFunctorWrappers (freshId: unit -> IRId) (kernel: IRExpr) (outputType:
     let rec isCell (t: IRType) =
         match t with
         | IRTScalar _ -> true
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> isCell inner
+        | Tagged inner -> isCell inner
         | _ -> false
     let outTy =
         match outputType, cellTy with
@@ -2462,7 +2524,37 @@ let composeFunctorWrappers (freshId: unit -> IRId) (kernel: IRExpr) (outputType:
 // versions can disagree about this without the canonical shape).
 //
 // `rebuild` requires exactly the children it handed out (same count, same
-// order); anything else is a hard failure, never a silent drop.
+// order); anything else is a hard failure, never a silent drop -- except the
+// IRProdSum, IRSegments and IRSegmentsGrid rebuilds, which do not check the
+// count (IRProdSum takes any list; the two segment forms ignore theirs).
+//
+// WHAT THE GENERIC TRAVERSAL VISITS, AND WHAT IT SKIPS (cleanup K10). Every
+// walker built on ExprShape -- childrenOf, rebuildWith, mapIRExpr, iterIRExpr,
+// existsIRExpr, visitTopDown, rewriteTopDown, collectVarRefsIR, exprAttrs --
+// sees exactly this, so an analysis that needs anything in the SKIPS list must
+// reach it itself; that list is where missed channels have been found.
+//   VISITS every IRExpr a node holds by value, in field order: the operands,
+//     lists, options and tuples of them; a BndPad pad (IRShift, IRAlign);
+//     IRRange's offset; IROrbitClass's base extent; IRSparseKeys' runtime
+//     keys; IRDisplayEmit's id; IRRandAt's weights; IRReleasePools' scope and
+//     pools; IRUnseededSeed's base seed; an info record's Loop / Kernel /
+//     Arrays (ApplyInfo), Arrays (MethodForInfo), Kernel (ObjectForInfo),
+//     Composition / InputArrays (ComposeApplyInfo); a match's scrutinee, then
+//     each case's guard (when present) and body.
+//   SKIPS
+//     * every TYPE, and so every extent a type carries: IRVar / IRParam /
+//       IRApp / IRZero / IRUninit / IRUnseededSeed types, an info record's
+//       ArrayTypes / SharedIndexTypes / KernelTDims / OutputType, the index
+//       types of IRRange / IRVirtualReverse / IRUngroup / IRUngroupGrid /
+//       IRUngroupRows (an extent is reached by the dedicated extent paths);
+//     * CALLABLE BODIES: a kernel or callee is an IRVar naming a callable in
+//       module.Functions, whose body is a separate root;
+//     * the MODULE SIDE TABLES (CompoundInits, SparseInits, RandomInits,
+//       ProviderReads, ProviderWrites), which are roots of their own;
+//     * MATCH PATTERNS (they hold no expression) and the compile-time data of
+//       IRSparseKeys SkStatic / SkDomain, IRSegments and IRSegmentsGrid.
+// `blade test ir-traversal` (tests/IRTraversalTests.fs) checks the VISITS
+// list against a reflection oracle over IRExpr's declaration.
 
 /// Child-list mismatch in a rebuild -- always a walker bug, never recoverable.
 let private badChildren (ctor: string) : 'a =
@@ -2688,17 +2780,45 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
 /// Immediate expression children of a node, in canonical order.
 let childrenOf (ExprShape (children, _)) : IRExpr list = children
 
+/// Does `expr` or any expression under it satisfy `p`? PRE-order -- the node
+/// first, then its children left to right -- stopping at the first hit: the
+/// order of every hand-written `match e with <arm> -> true | _ -> childrenOf e
+/// |> List.exists go` walker, whose special arms become `p`. A walker that
+/// STOPS at a node with `false` (does not look under it) is not this shape.
+let rec existsIRExpr (p: IRExpr -> bool) (expr: IRExpr) : bool =
+    p expr || (childrenOf expr |> List.exists (existsIRExpr p))
+
+/// Visit TOP-DOWN: `f` sees a node first, and its children are visited left
+/// to right only when `f` answers true -- a collector that stops at the nodes
+/// it takes (pre-order, like `existsIRExpr`).
+let rec visitTopDown (f: IRExpr -> bool) (expr: IRExpr) : unit =
+    if f expr then childrenOf expr |> List.iter (visitTopDown f)
+
+/// Rewrite TOP-DOWN: where `f` answers ValueSome r the node becomes r and is
+/// NOT looked under; elsewhere a leaf stays itself and any other node is
+/// rebuilt around its children, rewritten left to right. `f` runs in
+/// pre-order. The twin of the bottom-up `mapIRExpr` (below), for the
+/// substitutions that must see a node before its children are changed.
+let rec rewriteTopDown (f: IRExpr -> IRExpr voption) (expr: IRExpr) : IRExpr =
+    match f expr with
+    | ValueSome r -> r
+    | ValueNone ->
+        match expr with
+        | ExprShape ([], _) -> expr
+        | ExprShape (children, rebuild) -> rebuild (children |> List.map (rewriteTopDown f))
+
 /// Does `e` subscript an array with two or more indices anywhere? The guard a
 /// band fold's diagonal walk (Types.domainDiagonal) takes: along a diagonal a
 /// rank-1 read `x(i)` / `x(j)` stays unit-stride, a matrix read `A(i, j)`
 /// strides by a row, so a kernel that reads one keeps the row walk. Reads
 /// inside a called function are not followed -- the walk is a cost choice,
 /// never a correctness one.
-let rec kernelSubscriptsRank2 (e: IRExpr) : bool =
-    match e with
-    | IRIndex (_, idxs, _) when idxs.Length >= 2 -> true
-    | IRIndex (IRIndex _, _, _) -> true   // curried A(i)(j)
-    | _ -> childrenOf e |> List.exists kernelSubscriptsRank2
+let kernelSubscriptsRank2 (e: IRExpr) : bool =
+    e |> existsIRExpr (fun n ->
+        match n with
+        | IRIndex (_, idxs, _) when idxs.Length >= 2 -> true
+        | IRIndex (IRIndex _, _, _) -> true   // curried A(i)(j)
+        | _ -> false)
 
 /// Rebuild a node around replacement children (same count/order as
 /// childrenOf handed out).
@@ -2740,21 +2860,22 @@ let rec patternBoundIds (pat: IRPattern) : Set<IRId> =
 /// None and fall through to the generic ExprShape arm of whichever
 /// dispatcher is asking -- so a new binding variant needs exactly one case
 /// here to get correct scoping everywhere.
-let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) list) option =
+[<return: Struct>]
+let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) list) voption =
     match expr with
     | IRLet (id, value, body) ->
         // `value` is deliberately OUTSIDE the scope: a reference to `id`
         // inside its own value is ill-formed IR, and leaving it unscoped
         // keeps such a bug visible as a free var at the outer level.
-        Some ([value], [Set.singleton id, [body]])
+        ValueSome ([value], [Set.singleton id, [body]])
     | IRForRange (vid, lo, hi, body) ->
-        Some ([lo; hi], [Set.singleton vid, [body]])
+        ValueSome ([lo; hi], [Set.singleton vid, [body]])
     | IRMatch (scrut, cases) ->
         // Pattern bindings are visible in both the guard and the body.
-        Some ([scrut],
+        ValueSome ([scrut],
               cases |> List.map (fun c ->
                   (patternBoundIds c.Pattern, Option.toList c.Guard @ [c.Body])))
-    | _ -> None
+    | _ -> ValueNone
 
 // Node classification predicates -- EXHAUSTIVE (no `| _ ->` arm)
 //
@@ -3072,25 +3193,26 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
 /// Types carried directly on a node -- no reconstruction, no environment.
 /// The shared first tier of the canonical typing (audit section 2.2): the first
 /// arm of typeOf, and the base case every arm of exprTypeIfKnown bottoms out in.
-let (|CarriedType|_|) (expr: IRExpr) : IRType option =
+[<return: Struct>]
+let (|CarriedType|_|) (expr: IRExpr) : IRType voption =
     match expr with
-    | IRVar (_, ty) -> Some ty
-    | IRParam (_, _, ty) -> Some ty
-    | IRApp (_, _, retType) -> Some retType
-    | IRArrayLit (_, aty) -> Some (mkArrayLike aty)
-    | IRStructLit (typeName, _) -> Some (IRTNamed typeName)
-    | IRApplyCombinator info -> Some info.OutputType
-    | IRComposeApply info -> Some info.OutputType
-    | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
-    | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
-    | IRLit (IRLitFloat32 _) -> Some (IRTScalar ETFloat32)
-    | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
-    | IRLit (IRLitString _) -> Some (IRTScalar ETString)
-    | IRLit IRLitUnit -> Some IRTUnit
-    | IRZero ty -> Some ty
-    | IRUnseededSeed (_, ty, _) -> Some ty
-    | IRUninit ty -> Some ty
-    | _ -> None
+    | IRVar (_, ty) -> ValueSome ty
+    | IRParam (_, _, ty) -> ValueSome ty
+    | IRApp (_, _, retType) -> ValueSome retType
+    | IRArrayLit (_, aty) -> ValueSome (mkArrayLike aty)
+    | IRStructLit (typeName, _) -> ValueSome (IRTNamed typeName)
+    | IRApplyCombinator info -> ValueSome info.OutputType
+    | IRComposeApply info -> ValueSome info.OutputType
+    | IRLit (IRLitInt _) -> ValueSome (IRTScalar ETInt64)
+    | IRLit (IRLitFloat _) -> ValueSome (IRTScalar ETFloat64)
+    | IRLit (IRLitFloat32 _) -> ValueSome (IRTScalar ETFloat32)
+    | IRLit (IRLitBool _) -> ValueSome (IRTScalar ETBool)
+    | IRLit (IRLitString _) -> ValueSome (IRTScalar ETString)
+    | IRLit IRLitUnit -> ValueSome IRTUnit
+    | IRZero ty -> ValueSome ty
+    | IRUnseededSeed (_, ty, _) -> ValueSome ty
+    | IRUninit ty -> ValueSome ty
+    | _ -> ValueNone
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
 /// resolution. Built at liftInlineFormsModule entry, used throughout the
@@ -3267,7 +3389,8 @@ let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
 /// Variants whose type equals one distinguished child's type. The returned
 /// expression is the child whose type to take -- not necessarily the first
 /// child (e.g. `IRComposeMeth (_, right)` types as `right`).
-let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
+[<return: Struct>]
+let (|TypeVia|_|) (expr: IRExpr) : IRExpr voption =
     match expr with
     // Shape- and element-preserving array transforms.
     | IRSort (a, _) | IRArrayNegate a | IRArrayConjugate a
@@ -3283,9 +3406,9 @@ let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
     | IRFallback (_, a)
     // @>> composition: the right side's type.
     | IRComposeMeth (_, a) ->
-        Some a
-    | IRMatch (_, c :: _) -> Some c.Body
-    | _ -> None
+        ValueSome a
+    | IRMatch (_, c :: _) -> ValueSome c.Body
+    | _ -> ValueNone
 
 /// Index-space arithmetic markers: always Int64 scalars.
 let (|IntValued|_|) (expr: IRExpr) : bool =

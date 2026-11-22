@@ -239,17 +239,17 @@ let private invariantOffsets (g: Group) (r: RepSpec) : Set<int> =
     | (O3 | SO3), O3Spec s ->
         let starts = blockStarts s
         [ for b in 0 .. s.Length - 1 do
-            let e = s.[b]
+            let e = s[b]
             if e.L = 0 && (g = SO3 || e.Parity = 0) then
-                yield! [ starts.[b] .. starts.[b] + e.Mult - 1 ] ]
+                yield! [ starts[b] .. starts[b] + e.Mult - 1 ] ]
         |> Set.ofList
     | Point gn, PgSpec (gn2, s) when gn = gn2 ->
         let grp = Blade.ML.PointSpec.pointGroup gn
         let starts = Blade.ML.PointSpec.pgBlockStarts grp s
         [ for b in 0 .. s.Length - 1 do
-            let (label, mult) = s.[b]
+            let (label, mult) = s[b]
             if isTrivialLabel grp label then
-                yield! [ starts.[b] .. starts.[b] + mult - 1 ] ]
+                yield! [ starts[b] .. starts[b] + mult - 1 ] ]
         |> Set.ofList
     // A payload from the other member cannot arise (statusOfType admits only
     // the certificate group's index family); if it ever did, NO offset reads.
@@ -727,7 +727,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) 
     |> Result.bind (fun srcSts ->
         match srcSts |> List.tryFindIndex _.IsRep with
         | Some i ->
-            Error (bl4008 sources.[i].Span
+            Error (bl4008 sources[i].Span
                        ($"function '{ctx.FuncName}': the kernel of this former would receive COMPONENTS of a representation-typed source, which are basis-dependent numbers -- extract invariants with ml.scalars/ml.norms, or contract with ml.tensor_product"))
         | None ->
             // What the KERNEL captures, which judging the sources says nothing
@@ -1083,13 +1083,13 @@ and private judgeApp (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr) (f: Expr
                             | _ -> InvShapeUnknown
                         Ok (Inv sh)
                     | Some i ->
-                        let argE = args.[i]
+                        let argE = args[i]
                         // `isInv >> not` catches BOTH failing statuses:
                         // `Rep` is established, so it keeps the escape
                         // messages verbatim; `Opaque` establishes NOTHING,
                         // so it gets requireRep/requireInv's vocabulary
                         // instead of naming a fact never proved.
-                        match sts.[i] with
+                        match sts[i] with
                         | Opaque when isKnownScalarBuiltin fn ->
                             Error (bl4008 argE.Span $"function '{ctx.FuncName}': cannot classify the argument to '{fn}' inside an equiv-certified body -- the judgment cannot rule out that it carries representation structure, and a nonlinearity may be applied only to invariants (ml.gated gates reps; ml.scalars/ml.norms extract invariants)")
                         | Opaque ->

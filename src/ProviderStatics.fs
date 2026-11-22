@@ -151,11 +151,11 @@ let private readAndFoldUncached (provider: string) (path: string) (varName: stri
             | None ->
                 let h = spec.Fingerprint path
                 provenance.Add((path, varName, h))
-                foldHashes.[key] <- h
+                foldHashes[key] <- h
                 eprintfn "[provenance] folded %s from %s@%s" varName path (h.Substring(0, min 12 h.Length))
                 match data.Payload with
-                | Blade.ProviderRegistry.PFloats xs -> Ok (shapeValue data.DimLengths (fun i -> SVFloat xs.[i]))
-                | Blade.ProviderRegistry.PInts xs -> Ok (shapeValue data.DimLengths (fun i -> SVInt xs.[i]))
+                | Blade.ProviderRegistry.PFloats xs -> Ok (shapeValue data.DimLengths (fun i -> SVFloat xs[i]))
+                | Blade.ProviderRegistry.PInts xs -> Ok (shapeValue data.DimLengths (fun i -> SVInt xs[i]))
 
 let private readAndFold (provider: string) (path: string) (varName: string) : Result<StaticValue, string> =
     let stamp =

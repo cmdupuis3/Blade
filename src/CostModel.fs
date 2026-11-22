@@ -91,7 +91,7 @@ module Poly =
     /// The value when the polynomial is a constant.
     let tryConst (a: Poly) : int64 option =
         if a.Terms.IsEmpty then Some 0L
-        elif a.Terms.Count = 1 && a.Terms.ContainsKey [] then Some a.Terms.[[]]
+        elif a.Terms.Count = 1 && a.Terms.ContainsKey [] then Some a.Terms[[]]
         else None
     /// a <= b for EVERY assignment of naturals to the symbols, proved
     /// coefficient-wise (sufficient; false means "not proved").

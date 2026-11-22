@@ -455,7 +455,7 @@ with a compile-time shape are forwarded to the device)" hostName)
     and resolveJoinProjs (e: IRExpr) : IRExpr =
         mapIRExpr (fun x ->
             match x with
-            | IRTupleProj (IRVar (tid, _), i, _) when err.IsNone ->
+            | ProjOfNamed (tid, _, i, _) when err.IsNone ->
                 match Map.tryFind tid joinLegs with
                 | Some legIds when i >= 0 && i < List.length legIds ->
                     let (vid, ty) = List.item i legIds
@@ -3073,7 +3073,7 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                         // in practice; kept for defense in depth.
                         let rewriter e =
                             match e with
-                            | IRApp (IRVar (id, ty), args, _) when id = param.VarId ->
+                            | CallOfNamed (id, ty, args, _) when id = param.VarId ->
                                 IRIndex (IRVar (id, ty), args, None)
                             | _ -> e
                         let body = mapIRExpr rewriter callable.Body

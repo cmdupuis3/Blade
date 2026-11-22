@@ -198,7 +198,7 @@ let rec internal surfaceBoundNames (ss: Stmt list) : Set<string> =
 ///
 /// `preBound` is every name the SURFACE body binds, so a re-entered body
 /// (composition) is told from a genuine user collision.
-let internal expandSort (fname: string) (ctx: Ctx)
+let internal expandSort (fname: string) (_ctx: Ctx)
                        (idxTys: Map<string, TypeExpr>) (preBound: Set<string>)
                        (name: string) (operand: Expr) (key: Expr)
     : Result<Stmt list * SortPlan, string> =
@@ -368,7 +368,7 @@ let internal (|MapApply|_|) (e: Expr) : MapApplyView option = (|MapApplyWith|_|)
 let internal literalOffsetOf (e: Expr) : int option =
     match e.Kind with
     | ExprKind.ExprLit (LitInt k) -> Some (int k)
-    | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt k) }) -> Some (int -k)
+    | AstNegIntLit k -> Some (int -k)
     | _ -> None
 
 /// The access record and the inner extent N of a surface `halo<I, [offs]>`
@@ -1212,14 +1212,6 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
         // AD-able-subset walk regardless.
         let subst (nm: string) (repl: Expr) (x: Expr) : Expr =
             substKern nm repl x |> Option.defaultValue x
-        // `x` is exactly the immediate-predecessor read `prefix(stepVar - 1)`?
-        let isPrevPrefixRead (x: Expr) =
-            match x.Kind with
-            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar p }, [idx]) when p = prefixVar ->
-                (match idx.Kind with
-                 | ExprKind.ExprBinOp (_, OpSub, { Kind = ExprKind.ExprVar s }, { Kind = ExprKind.ExprLit (LitInt 1L) }) -> s = stepVar
-                 | _ -> false)
-            | _ -> false
         let hasPrefix (e: Expr) = mentionsVar prefixVar e
         if hasPrefix def.SliceExpr then
             // A genuine recurrence lowers to the DIRECT element-write loop in
@@ -1508,7 +1500,7 @@ let rec internal staticDimsOf (ctx: Ctx) (denv: Map<string, int list>) (e: Expr)
     | ExprKind.ExprTranspose (a, d1, d2) ->
         staticDimsOf ctx denv a |> Option.map (fun ds ->
             if d1 < ds.Length && d2 < ds.Length then
-                ds |> List.mapi (fun i d -> if i = d1 then ds.[d2] elif i = d2 then ds.[d1] else d)
+                ds |> List.mapi (fun i d -> if i = d1 then ds[d2] elif i = d2 then ds[d1] else d)
             else ds)
     // `sequence` and `stack` are the same shape -- a leading axis of N over
     // the member shape -- and lower identically; only the spelling differs.

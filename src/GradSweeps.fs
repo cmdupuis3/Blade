@@ -88,7 +88,7 @@ type internal RevCtx = {
 /// function it is -- so this rewrite cannot change what the primal computes.
 let internal kernelCallBody (rc: RevCtx) (f: string) (args: Expr list)
     : Result<Expr * RevCtx, string> =
-    let fd = rc.Ctx.Decls.[f]
+    let fd = rc.Ctx.Decls[f]
     // An arity-polymorphic callee is expanded rather than substituted: its
     // ONE pack parameter stands for all `args`, so the parameter-count and
     // self-recursion gates below both read it wrong. Route A owns it.
@@ -454,7 +454,7 @@ let internal adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: st
             flow false (fun idx -> syn (ExprIf (c, cotAt idx, f64Lit 0.0))) dims inner
         | ExprKind.ExprTranspose (inner, d1, d2) ->
             let swap (xs: 'a list) =
-                xs |> List.mapi (fun i x -> if i = d1 then xs.[d2] elif i = d2 then xs.[d1] else x)
+                xs |> List.mapi (fun i x -> if i = d1 then xs[d2] elif i = d2 then xs[d1] else x)
             flow false (fun idx -> cotAt (swap idx)) (swap dims) inner
         // `sequence` is `stack` under another name -- same leading axis, same
         // lowering -- so the member peel is the same rule.
@@ -826,7 +826,7 @@ let internal pruneReplay (decls: Set<string>) (values: Set<string>) (fresh: Set<
     let letCounts = body |> List.choose (function NLet (n, _, _) -> Some n | _ -> None) |> List.countBy id |> Map.ofList
     for st in body do
         match st with
-        | NLet (n, _, v) when letCounts.[n] = 1 ->
+        | NLet (n, _, v) when letCounts[n] = 1 ->
             if realScalar v then realLets.Add n |> ignore
             if provedScalar v then scalarLets.Add n |> ignore
         | _ -> ()
@@ -1359,8 +1359,8 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
     let paramRanks =
         match kern.Kind with
         | ExprKind.ExprVar f when Map.containsKey f rc.Ctx.Decls
-                                  && (rc.Ctx.Decls.[f].Params.Length = ps.Length) ->
-            rc.Ctx.Decls.[f].Params |> List.map (fun p -> rankOfTy p.Type)
+                                  && (rc.Ctx.Decls[f].Params.Length = ps.Length) ->
+            rc.Ctx.Decls[f].Params |> List.map (fun p -> rankOfTy p.Type)
         | _ -> ps |> List.map (fun p -> rankOfTy p.Type)
     let allRank0 = paramRanks |> List.forall (fun k -> k = 0)
     // -- operand classification ---------------------------------------------
@@ -1495,14 +1495,14 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
                     let mutable inv = 0
                     for i in 0 .. arr.Length - 2 do
                         for j in i + 1 .. arr.Length - 1 do
-                            if arr.[i] > arr.[j] then inv <- inv + 1
+                            if arr[i] > arr[j] then inv <- inv + 1
                     inv % 2 = 0
                 let termsR =
                     perms [0 .. reads.Length - 1]
                     |> traverseR (fun perm ->
                         List.zip ps perm
                         |> List.fold (fun accE (p, srcSlot) ->
-                            accE |> Result.bind (substParam rc.Fname p.Name reads.[srcSlot]))
+                            accE |> Result.bind (substParam rc.Fname p.Name reads[srcSlot]))
                             (Ok body)
                         |> Result.map (fun t -> (parity perm, t)))
                 termsR |> Result.map (fun terms ->
@@ -1808,6 +1808,7 @@ let rec private stmtsMention (names: Set<string>) (ss: NStmt list) : bool =
         | NFor (var, lo, hi, body) ->
             Set.contains var names || mentionsDeep names lo || mentionsDeep names hi || stmtsMention names body)
 
+[<TailCall>]
 let rec private litOf (e: Expr) : int64 option =
     match e.Kind with
     | ExprKind.ExprLit (LitInt p) -> Some p
@@ -1873,7 +1874,7 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
     let triple =
         if iLoop < 2 then None
         else
-            match fwd.[iLoop - 2], fwd.[iLoop - 1] with
+            match fwd[iLoop - 2], fwd[iLoop - 1] with
             | NLet (b, true, fill), NAssign ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar b2 }, [ i0 ]) }, seed)
                 when b = s && b2 = s && litOf i0 = Some 0L && isZeroTapeOf tN fill && not (mentionsDeep (Set.singleton s) seed) ->
                 Some seed
@@ -1902,13 +1903,6 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
         |> List.fold (fun acc x -> Set.union acc (allVarsDeep x)) Set.empty
         |> fun xs -> Set.difference xs (Set.union localLets (Set.ofList [ s; t ]))
     let assigned = Blade.GradNormalize.assignedNames fwd
-    let rec letNames (ss: NStmt list) : Set<string> =
-        ss |> List.fold (fun acc st ->
-            match st with
-            | NLet (n, _, _) -> Set.add n acc
-            | NFor (var, _, _, b) -> Set.union (Set.add var acc) (letNames b)
-            | NAssign _ -> acc) Set.empty
-    let fwdLocals = letNames fwd
     let rec loopVarsOf (ss: NStmt list) : Set<string> =
         ss |> List.fold (fun acc st ->
             match st with
@@ -1973,7 +1967,7 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
         elif Set.contains x arrayParams then Error x
         elif Set.contains x loopVars && not (Map.containsKey x fwdValues) then Ok ()
         elif Map.containsKey x fwdValues then
-            fwdValues.[x] |> List.fold (fun acc e ->
+            fwdValues[x] |> List.fold (fun acc e ->
                 acc |> Result.bind (fun () ->
                     allVarsDeep e |> Seq.fold (fun acc r ->
                         acc |> Result.bind (fun () -> judge (seen.Add x) r)) (Ok ()))) (Ok ())
@@ -2026,13 +2020,13 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
             | _ -> Error $"the array parameter '{x}' is not a plain dense array (its copy could share storage)"
         elif Set.contains x scalarParams then Ok false
         elif Map.containsKey x fwdValues then
-            match fwdValues.[x] with
+            match fwdValues[x] with
             | [ e ] -> formOf (seen.Add x) e
             | _ -> Error $"the forward local '{x}' is bound more than once"
         elif Set.contains x allParams then
             Error $"the parameter '{x}' is neither a scalar nor a plain array (a tuple or a callable may carry an aliased array)"
         elif Map.containsKey x rc.Ctx.ModuleLets then
-            let ml = rc.Ctx.ModuleLets.[x]
+            let ml = rc.Ctx.ModuleLets[x]
             match ml.Ty with
             | Some ty when plainDenseTy ty -> formOf (seen.Add x) ml.Value |> Result.map (fun _ -> true)
             | Some ty when scalarElemTy (resolveTy rc.Ctx ty) -> formOf (seen.Add x) ml.Value
@@ -2083,7 +2077,7 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
             else Error "an ascription that is not a plain dense array or a scalar"
         | ExprKind.ExprVar y -> storedDense seen y
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Map.containsKey f rc.Ctx.Decls ->
-            (match rc.Ctx.Decls.[f].ReturnType with
+            (match rc.Ctx.Decls[f].ReturnType with
              | Some rt when plainDenseTy rt -> Ok true
              | _ -> Error $"the call of '{f}' does not return a plain dense array (a closure or a ragged array keeps shared storage)")
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, [ a ])
@@ -2182,8 +2176,8 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
         elif p = tN - 1L then Some (cell ck (iLit nC))
         elif p % kS = 0L then Some (cell ck (iLit (p / kS)))
         else
-            if not (snaps.ContainsKey p) then snaps.[p] <- fresh rc.Ctx "__snap"
-            Some (v snaps.[p])
+            if not (snaps.ContainsKey p) then snaps[p] <- fresh rc.Ctx "__snap"
+            Some (v snaps[p])
     let outerPrimal (a: string) (args: Expr list) : Expr option =
         match args with
         | [ i ] when a = s -> litOf i |> Option.bind valueAt
@@ -2207,7 +2201,7 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
     let revBefore = List.take jLoop rev
     let revAfter = List.skip (jLoop + 1) rev
     let tail =
-        match rev.[jLoop] with
+        match rev[jLoop] with
         | NFor (_, _, _, _ :: rest) -> List.skip body.Length rest
         | _ -> []
     let deposit (a: string) (args: Expr list) : Expr option =
@@ -2216,15 +2210,15 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
             litOf i |> Option.bind (fun p ->
                 if p < 0L || p >= tN then None
                 else
-                    if not (deps.ContainsKey p) then deps.[p] <- fresh rc.Ctx "__dep"
-                    Some (v deps.[p]))
+                    if not (deps.ContainsKey p) then deps[p] <- fresh rc.Ctx "__dep"
+                    Some (v deps[p]))
         | _ -> outerPrimal a args
     let rowZero (a: string) (args: Expr list) : Expr option =
         match args with
         | [ i ] when a = gs -> if litOf i = Some 0L then Some (cell gseg (iLit 0L)) else None
         | _ -> outerPrimal a args
     let cotIdx = cotDecls |> List.tryFindIndex (function NLet (n, true, _) -> n = gs | _ -> false)
-    let elemOpt = cotIdx |> Option.bind (fun i -> match cotDecls.[i] with NLet (_, _, z) -> cotDeclElem tN z | _ -> None)
+    let elemOpt = cotIdx |> Option.bind (fun i -> match cotDecls[i] with NLet (_, _, z) -> cotDeclElem tN z | _ -> None)
     match rewriteNamedAppsStmts names deposit revBefore, rewriteNamedAppsStmts names rowZero revAfter, cotIdx, elemOpt with
     | None, _, _, _ -> fail "the cotangent is touched before the descending sweep other than at a literal row"
     | _, None, _, _ -> fail "the cotangent is touched after the descending sweep other than at row 0"
@@ -2266,9 +2260,9 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
     let replay = replayOf stepSeg
     let replaySnap = replayOf stepSegSnap
     // forward
-    let snapDecls = snaps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, f64Lit 0.0)) |> List.ofSeq
+    let snapDecls = snaps |> Seq.sortBy (_.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, f64Lit 0.0)) |> List.ofSeq
     let snapTakes =
-        snaps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv ->
+        snaps |> Seq.sortBy (_.Key) |> Seq.map (fun kv ->
             let p = kv.Key
             NAssign (v kv.Value, syn (ExprIf (eq (v c) (iLit (p / kS)), cell seg (iLit (p % kS)), v kv.Value))))
         |> List.ofSeq
@@ -2286,14 +2280,14 @@ let private checkpointOne (rc: RevCtx) (hasGradBuffers: bool) (arrayParams: Set<
     let z = fresh rc.Ctx "__z"
     let carry = fresh rc.Ctx "__carry"
     let depZero = match elemOpt with Some ty -> syn (ExprTyped (fLit 0.0, ty)) | None -> f64Lit 0.0
-    let depDecls = deps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, depZero)) |> List.ofSeq
+    let depDecls = deps |> Seq.sortBy (_.Key) |> Seq.map (fun kv -> NLet (kv.Value, true, depZero)) |> List.ofSeq
     let gsegDecl =
         let zs = zerosOfCount (kS + 1L)
         match elemOpt with
         | Some ty -> NLet (gseg, true, syn (ExprTyped (zs, TyArray (ty, [ TyIdx (iLit (kS + 1L)) ]))))
         | None -> NLet (gseg, true, zs)
     let seeds =
-        deps |> Seq.sortBy (fun kv -> kv.Key) |> Seq.map (fun kv ->
+        deps |> Seq.sortBy (_.Key) |> Seq.map (fun kv ->
             let p = kv.Key
             let cp = min (p / kS) (nC - 1L)
             let idx = p - cp * kS
@@ -2457,14 +2451,14 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
                 match Map.tryFind n ctx.Decls with
                 | Some d ->
                     let rs =
-                        (d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body))
+                        (d.Params |> List.choose (_.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body))
                     close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
                 | None -> close (seen.Add n) rest acc
         close Set.empty (Set.toList direct) direct
     // the SURFACE body's reads (before any expansion binds plumbing), closed
     // over the user functions it names the same way
     let surfaceReads =
-        let direct = fd.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep fd.Body)
+        let direct = fd.Params |> List.choose (_.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep fd.Body)
         let rec close (seen: Set<string>) (frontier: string list) (acc: Set<string>) =
             match frontier with
             | [] -> acc
@@ -2472,7 +2466,7 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
             | n :: rest ->
                 match Map.tryFind n ctx.Decls with
                 | Some d ->
-                    let rs = d.Params |> List.choose (fun q -> q.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body)
+                    let rs = d.Params |> List.choose (_.Default) |> List.fold (fun a e -> Set.union a (allVarsDeep e)) (allVarsDeep d.Body)
                     close (seen.Add n) (rest @ Set.toList rs) (Set.union acc rs)
                 | None -> close (seen.Add n) rest acc
         close Set.empty (Set.toList direct) direct

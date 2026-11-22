@@ -366,7 +366,7 @@ let private registry =
 /// registry convention. The stored spec resolves relative store paths for its
 /// compile-time readers (`resolving`).
 let register (spec: ProviderSpec) : unit =
-    registry.[spec.Name] <- resolving spec
+    registry[spec.Name] <- resolving spec
 
 let tryFind (name: string) : ProviderSpec option =
     match registry.TryGetValue name with
@@ -394,7 +394,7 @@ module DimChunks =
 
     /// A provider's reader: store path -> (dimension -> chunk edge).
     let registerReader (provider: string) (f: string -> Map<string, int64>) =
-        readers.[provider] <- f
+        readers[provider] <- f
 
     let reset () = table.Value <- Map.empty
 

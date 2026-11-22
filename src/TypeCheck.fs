@@ -117,7 +117,7 @@ and rangeFedLambdaParamsWithBounds (modul: TypedModule)
     let litInt (e: TypedExpr) =
         match e.Kind with
         | TExprLit (Blade.Ast.LitInt v) -> Some v
-        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+        | TNegIntLit v -> Some (-v)
         | _ -> None
     let staticBounds (a: TypedExpr) (slot: int) =
         match a.Kind with
@@ -316,8 +316,8 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
             match b.Pattern.Kind, b.Value.Kind with
             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, None, body)
                     when not parms.IsEmpty
-                         && parms |> List.forall (fun p -> p.Default.IsNone)
-                         && parms |> List.exists (fun p -> p.Type.IsNone) ->
+                         && parms |> List.forall (_.Default.IsNone)
+                         && parms |> List.exists (_.Type.IsNone) ->
                 let captured = collectFreeVars (parms |> List.map (_.Name) |> Set.ofList) body
                 let later = arr |> Array.skip (i + 1)
                 let ok =
@@ -470,10 +470,10 @@ let private instantiateLetLambdaKernels (imports: ImportDecl list) (decls: Locat
     let withDefaults =
         decls |> List.choose (fun ld ->
             match ld.Value with
-            | DeclFunction f when f.Params |> List.exists (fun p -> p.Default.IsSome) -> Some f.Name
+            | DeclFunction f when f.Params |> List.exists (_.Default.IsSome) -> Some f.Name
             | DeclLet b | DeclStatic b ->
                 (match b.Pattern.Kind, b.Value.Kind with
-                 | PatternKind.PatVar n, ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Default.IsSome) -> Some n
+                 | PatternKind.PatVar n, ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (_.Default.IsSome) -> Some n
                  | _ -> None)
             | _ -> None)
         |> Set.ofList
@@ -1228,7 +1228,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                                |> List.collect (collectUnknownEnumKeys currentEnv))
             @ (enumKeyErrorSink |> Seq.map (fun (sp, msg) ->
                    ({ Error = EnumKeyObserved msg; Span = sp; Context = []; Code = None } : CompileError))
-               |> Seq.distinctBy (fun e -> e.Span) |> List.ofSeq)
+               |> Seq.distinctBy (_.Span) |> List.ofSeq)
         else []
     // A `zero` at a sum type (collectValuelessZeros): judged on the zonked
     // types, with the same cascade suppression as the subscript sweep.

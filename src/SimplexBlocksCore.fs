@@ -52,10 +52,10 @@ let rankOfCoords (strict: bool) (n: int64) (coords: int64[]) : int64 =
     let mutable lo = 0L
     for k in 0 .. r - 1 do
         let mutable v = lo
-        while v < coords.[k] do
+        while v < coords[k] do
             rank <- rank + completions v (r - k - 1)
             v <- v + 1L
-        lo <- coords.[k] + (if strict then 1L else 0L)
+        lo <- coords[k] + (if strict then 1L else 0L)
     rank
 
 /// Inverse of `rankOfCoords`.
@@ -73,7 +73,7 @@ let unrankToCoords (strict: bool) (n: int64) (r: int) (rank: int64) : int64[] =
             rest <- rest - c
             v <- v + 1L
             c <- completions v (r - k - 1)
-        coords.[k] <- v
+        coords[k] <- v
         lo <- v + (if strict then 1L else 0L)
     coords
 
@@ -114,11 +114,11 @@ let enumBlockCells (strict: bool) (n: int64) (B: int64) (tiles: int64[]) : seq<i
             if k = r then
                 yield (List.rev acc |> Array.ofList)
             else
-                let tileLo = tiles.[k] * B
+                let tileLo = tiles[k] * B
                 let lo =
                     if k = 0 then tileLo
                     else max tileLo (prev + (if strict then 1L else 0L))
-                let hi = min ((tiles.[k] + 1L) * B) n
+                let hi = min ((tiles[k] + 1L) * B) n
                 for i in lo .. hi - 1L do
                     yield! go (k + 1) i (i :: acc)
         }
@@ -219,8 +219,8 @@ let packedOffsetR (strict: bool) (n: int64) (coords: int64[]) : int64 =
     let mutable acc = 0L
     let mutable lo = 0L
     for k in 0 .. r - 1 do
-        acc <- acc + prefixTerm strict n r k lo coords.[k]
-        lo <- coords.[k] + s
+        acc <- acc + prefixTerm strict n r k lo coords[k]
+        lo <- coords[k] + s
     acc
 
 /// THE PER-COORDINATE SPLIT of `packedOffsetR` (bench G34). Level k's term
@@ -252,9 +252,9 @@ let coordTerm (strict: bool) (n: int64) (r: int) (k: int) (x: int64) : int64 =
 /// `packedOffsetR` through `coordTerm` (the regrouped sum above).
 let packedOffsetSplit (strict: bool) (n: int64) (coords: int64[]) : int64 =
     let r = coords.Length
-    let mutable acc = coords.[r - 1]
+    let mutable acc = coords[r - 1]
     for k in 0 .. r - 2 do
-        acc <- acc + coordTerm strict n r k coords.[k]
+        acc <- acc + coordTerm strict n r k coords[k]
     acc
 
 /// Cells in a whole rank-r pool: C(n+r-1, r) symmetric, C(n, r) antisymmetric.

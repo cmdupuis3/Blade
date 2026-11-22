@@ -84,13 +84,13 @@ let stirling2 (m: int) (j: int) : int64 =
     elif j > m then 0L
     else
         let mutable prev : int64[] = Array.zeroCreate (j + 1)
-        prev.[0] <- 1L // S(0, 0) = 1
+        prev[0] <- 1L // S(0, 0) = 1
         for a in 1 .. m do
             let cur : int64[] = Array.zeroCreate (j + 1)
             for b in 1 .. min a j do
-                cur.[b] <- int64 b * prev.[b] + prev.[b - 1]
+                cur[b] <- int64 b * prev[b] + prev[b - 1]
             prev <- cur
-        prev.[j]
+        prev[j]
 
 /// The REFERENCE count of partitions of [m] into at most n blocks:
 /// sum_{j=0..min(n,m)} S(m, j); at n >= m this is the Bell number B(m). The
@@ -117,7 +117,7 @@ let coarsens (gCoarse: int[]) (gFine: int[]) : bool =
     let mutable ok = true
     for i in 0 .. m - 1 do
         for j in i + 1 .. m - 1 do
-            if gFine.[i] = gFine.[j] && gCoarse.[i] <> gCoarse.[j] then ok <- false
+            if gFine[i] = gFine[j] && gCoarse[i] <> gCoarse[j] then ok <- false
     ok
 
 /// Every RGS of length m, LEX ASCENDING: the odometer, generated directly
@@ -130,7 +130,7 @@ let private rgsOdometer (m: int) : int[] list =
         if i = m then acc.Add(Array.copy buf)
         else
             for v in 0 .. mx + 1 do
-                buf.[i] <- v
+                buf[i] <- v
                 go (i + 1) (max mx v)
     go 0 -1
     List.ofSeq acc
@@ -159,13 +159,13 @@ let private certify (m: int) (maxBlocks: int) (parts: int[] list) : unit =
     //     below it (a basis function is 1 at a LATER witness only).
     let arr = List.toArray parts
     for a in 0 .. arr.Length - 1 do
-        if not (coarsens arr.[a] arr.[a]) then
+        if not (coarsens arr[a] arr[a]) then
             failwithf "internal: the coarsening order is not reflexive at partition %d (%A) of [%d]"
-                a arr.[a] m
+                a arr[a] m
         for b in 0 .. a - 1 do
-            if coarsens arr.[a] arr.[b] then
+            if coarsens arr[a] arr[b] then
                 failwithf "internal: the witness-evaluation matrix of [%d] is NOT unitriangular -- partition %d (%A) is coarser than the EARLIER partition %d (%A), so the emission order is not a linear extension of refinement (the rgs_lex_extends_refinement keystone; see the order-convention block in MLPermSpec.fs)"
-                    m a arr.[a] b arr.[b]
+                    m a arr[a] b arr[b]
 
 /// The weight basis of the Sn index-action surface: every partition of the
 /// m positions into at most `maxBlocks` blocks, in canonical emission

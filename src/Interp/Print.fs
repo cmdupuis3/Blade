@@ -252,7 +252,7 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
             match Map.tryFind b.Id irModule.ProviderReads with
             | Some spec -> not spec.AllowMissing
             | None -> true)
-        |> List.map (fun b -> b.Name) |> Set.ofList
+        |> List.map (_.Name) |> Set.ofList
         |> Set.union irModule.FunctionAliasNames
     let unknown = Set.difference names declared
     if not unknown.IsEmpty then
@@ -264,7 +264,7 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
     let silent =
         irModule.Bindings
         |> List.filter (fun b -> Set.contains b.Name names && not (isPrintable b))
-        |> List.map (fun b -> b.Name)
+        |> List.map (_.Name)
     if not silent.IsEmpty then
         let ns = String.concat ", " silent
         raise (PrintUnsupported $"--print: {ns} never materialized (deferred loop value)")
@@ -273,7 +273,7 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
         |> List.filter (fun b ->
             Set.contains b.Name names && isPrintable b && Blade.CodeGen.hasNoPrintedForm irModule b
             && not (List.contains b.Name functions))
-        |> List.map (fun b -> b.Name) |> List.distinct
+        |> List.map (_.Name) |> List.distinct
     if not formless.IsEmpty then
         raise (PrintUnsupported (Blade.CodeGen.formlessPrintRefusal irModule formless))
 
@@ -309,7 +309,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
     let lookup =
         let keysOf (t: IRType) =
             match stripUnits t with
-            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+            | IntTaggedIndex tag ->
                 Blade.CodeGen.intEnumKeysOfModule irModule.Types tag |> Option.map List.toArray
             | _ -> None
         let structFieldsOf (n: string) =

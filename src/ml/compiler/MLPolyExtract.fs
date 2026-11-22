@@ -462,7 +462,7 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             match Map.tryFind n env with
             | Some (VVec ps) ->
                 match staticIndex ctx idxE with
-                | Some i when i >= 0 && i < ps.Length -> Ok (VScalar ps.[i])
+                | Some i when i >= 0 && i < ps.Length -> Ok (VScalar ps[i])
                 | Some i -> outside $"index {i} is outside '{n}' ({ps.Length} components)" e.Span
                 | None -> outside $"indexing '{n}' needs a static offset" e.Span
             | Some (VInvArr name) ->
@@ -603,7 +603,7 @@ let discharge (form: PolyForm) (elements: ElementAction list) : Result<unit, Dis
                     Seq.fold (fun acc2 i ->
                         let img =
                             Seq.fold (fun p j ->
-                                let c = m.[i].[j]
+                                let c = m[i][j]
                                 if c = 0 then p
                                 else Poly.addTerm (Mono.repVar pname j) (Rat.ofInt c) p)
                                 Poly.zero (seq { 0 .. dim - 1 })
@@ -611,13 +611,13 @@ let discharge (form: PolyForm) (elements: ElementAction list) : Result<unit, Dis
             let rec comps i =
                 if i >= n then loop rest
                 else
-                    match substitute budget images form.Components.[i] with
+                    match substitute budget images form.Components[i] with
                     | Error e -> Error e
                     | Ok lhs ->
                         let rhs =
                             Seq.fold (fun p j ->
-                                let c = el.OutMat.[i].[j]
-                                if c = 0 then p else Poly.add p (Poly.scale (Rat.ofInt c) form.Components.[j]))
+                                let c = el.OutMat[i][j]
+                                if c = 0 then p else Poly.add p (Poly.scale (Rat.ofInt c) form.Components[j]))
                                 Poly.zero (seq { 0 .. n - 1 })
                         let offending =
                             Poly.unionMonos lhs rhs

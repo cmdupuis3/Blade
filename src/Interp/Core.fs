@@ -531,7 +531,7 @@ let coerceScalarTo (ty: IRType) (v: Value) : Value =
     let rec elemOf (t: IRType) =
         match t with
         | IRTScalar et -> Some et
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> elemOf inner
+        | Tagged inner -> elemOf inner
         | _ -> None
     match elemOf ty, v with
     | Some ETInt32, VInt n -> VInt32 (int32 n)

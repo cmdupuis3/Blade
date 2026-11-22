@@ -1297,7 +1297,7 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
     let rec exactScalar (t: IRType) =
         match t with
         | IRTScalar (ETInt32 | ETInt64 | ETBool) -> true
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> exactScalar inner
+        | Tagged inner -> exactScalar inner
         | _ -> false
     let chainExact (e: IRExpr) =
         reassoc
@@ -1308,7 +1308,7 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
         let rec isComplex (t: IRType) =
             match t with
             | IRTScalar (ETComplex64 | ETComplex128) -> true
-            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> isComplex inner
+            | Tagged inner -> isComplex inner
             | ArrayElem at -> isComplex at.ElemType
             | _ -> false
         match e with
@@ -1560,7 +1560,7 @@ let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
     let scalar ty =
         let rec go = function
             | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32 | ETBool) -> true
-            | IRTIdxTagged (t, _) | IRTUnitAnnotated (t, _) -> go t
+            | Tagged t -> go t
             | _ -> false
         go ty
     let literal = function IRLit (IRLitInt n) -> n >= 0L | _ -> false
@@ -1649,7 +1649,7 @@ let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
     // deliberately NOT used as evidence for a potentially huge literal.
     let signedOffset = function
         | IRLit (IRLitInt n) -> Some n
-        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) when n <> System.Int64.MinValue -> Some (-n)
+        | NegIntLit n when n <> System.Int64.MinValue -> Some (-n)
         | _ -> None
     let windowMatches w =
         match level, cg.KernelParams with
@@ -1672,7 +1672,7 @@ let internal certifyRank1WindowReads (cg: LoopNestCodeGen) (kind: string)
         | IRUnaryOp (_, a) -> go a
         | IRIf (c, a, b) -> go c && go a && go b
         | IRLet (id, v, b) -> go v && body (ids.Add id) paramNames visiting b
-        | IRIndex (IRVar (aid, ty), [IRBinOp (IRElementwise, IRAdd, w, off, _)], _)
+        | IndexOfNamed (aid, ty, [IRBinOp (IRElementwise, IRAdd, w, off, _)], _)
             when kind = "stencil" && sourceIds.Contains aid && windowMatches w && literalExtents ty ->
             match signedOffset off, sources |> List.tryFind (fun (id, _, _, _) -> id = aid) with
             | Some o, Some (_, _, _, win) when o >= reachLo && o <= reachHi ->
@@ -3917,7 +3917,7 @@ let tryGenRowFoldJamNest
         //  prelude, needs the empty-row panic, head operand)
         let fold : (IRType * (int -> string) * string * (int -> string -> string) * string list * bool * Choice<ElementBinding * IRArrayType, string * IRArrayType>) option =
             match codeGen.KernelExpr with
-            | IRReduce (IRVar (rid, _), kernelExpr, initOpt) when (rowOf rid).IsSome ->
+            | ReduceOfNamed (rid, _, kernelExpr, initOpt) when (rowOf rid).IsSome ->
                 let (re, rat) = (rowOf rid).Value
                 (match resolveCallable kernelExpr with
                  | Some callable when callable.Params.Length = 2 && (foldKernelBuiltinOp callable).IsSome ->
@@ -4881,7 +4881,7 @@ let rec extractLiteralValues (expr: IRExpr) : LiteralLeaf list =
     | IRUnaryOp (IRNeg, IRLit (IRLitFloat f)) -> [LeafFloat -f]
     | IRUnaryOp (IRNeg, IRLit (IRLitFloat32 f)) -> [LeafFloat (float -f)]
     // Two's-complement negation: wraps at INT64_MIN like every integer op.
-    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> [LeafInt (0L - n)]
+    | NegIntLit n -> [LeafInt (0L - n)]
     | IRArrayLit (elements, _) -> elements |> List.collect extractLiteralValues
     | _ -> []
 
@@ -5092,7 +5092,7 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
                     let cellAccesses =
                         subs |> List.sumBy (fun e ->
                             match e with
-                            | IRIndex (IRVar (i, _), _, _) when i = rid ->
+                            | IndexOfNamed (i, _, _, _) when i = rid ->
                                 (match inferExprType e with
                                  | IRTScalar _ | IRTUnitAnnotated (IRTScalar _, _) -> 1
                                  | _ -> 0)

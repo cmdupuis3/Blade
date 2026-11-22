@@ -364,7 +364,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             // be discharged there, so the pair refuses rather than silently
             // meaning less than it says. Checked here (order-independent),
             // like the comm/anticomm overlap above.
-            if repro && (par |> List.exists (fun s -> s.IsCuda)) then
+            if repro && (par |> List.exists (_.IsCuda)) then
                 error "`repro` cannot be combined with `cuda`: a device kernel's contraction and rounding are the GPU's own, so the reproducibility demand (the interpreter's operation sequence) cannot be discharged there" line col
             else
             success {

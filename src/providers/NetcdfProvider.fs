@@ -255,7 +255,7 @@ let load (path: string) : NcFile =
     try
         let dimIds = NcQuery.getDimIds fileId
         let dims = dimIds |> Array.map (NcQuery.getDim fileId) |> Array.toList
-        let dimLookup = dimIds |> Array.mapi (fun i id -> (id, dims.[i])) |> Map.ofArray
+        let dimLookup = dimIds |> Array.mapi (fun i id -> (id, dims[i])) |> Map.ofArray
         let varIds = NcQuery.getVarIds fileId
         let vars = varIds |> Array.map (fun vid -> NcQuery.getVar fileId vid dimLookup) |> Array.toList
         { Path = path; Dims = dims; Vars = vars }
@@ -283,7 +283,7 @@ let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
         try
             let dimIds = NcQuery.getDimIds fileId
             let dims = dimIds |> Array.map (NcQuery.getDim fileId) |> Array.toList
-            let dimLookup = dimIds |> Array.mapi (fun i id -> (id, dims.[i])) |> Map.ofArray
+            let dimLookup = dimIds |> Array.mapi (fun i id -> (id, dims[i])) |> Map.ofArray
             let hit =
                 NcQuery.getVarIds fileId
                 |> Array.tryPick (fun vid ->
@@ -540,7 +540,7 @@ let ncFileToModule
     // dims struct: coordinate arrays (one per dimension)
     let dimsFields =
         file.Dims |> List.map (fun dim ->
-            let idx = dimMap.[dim.Name]
+            let idx = dimMap[dim.Name]
             let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (providerVarIdentity storeKey ("dims." + dim.Name)))
             (dim.Name, arrType))
 
@@ -551,7 +551,7 @@ let ncFileToModule
     let isCoordinateVar (v: NcVar) =
         dimNames.Contains v.Name
         && v.Dims.Length = 1
-        && v.Dims.[0].Name = v.Name
+        && v.Dims[0].Name = v.Name
 
     let varsFields =
         file.Vars
@@ -642,8 +642,8 @@ module CppNetcdf =
                     yield $"size_t {v}_{tag}_dimlen_{d};"
                     yield! ncChecked v $"querying dimension {d} of '{humanName}' in '{filePath}'"
                               $"nc_inq_dimlen({v}_ncid, {v}_{tag}_dimids[{d}], &{v}_{tag}_dimlen_{d})"
-                    yield $"if ({v}_{tag}_dimlen_{d} != (size_t)({expected.[d]})) {{"
-                    yield! mismatch $"has dimension {d} of length \" << {v}_{tag}_dimlen_{d} << \" at run time; the program was compiled against \" << {expected.[d]}"
+                    yield $"if ({v}_{tag}_dimlen_{d} != (size_t)({expected[d]})) {{"
+                    yield! mismatch $"has dimension {d} of length \" << {v}_{tag}_dimlen_{d} << \" at run time; the program was compiled against \" << {expected[d]}"
                     yield "}" ])
 
     /// The provider bakes every extent as a literal read from the store at compile
@@ -743,14 +743,14 @@ module CppNetcdf =
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
                 let ind = String.replicate d "    "
-                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames[d]}; {iv}++) {{")
         let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
         // Row-major flat index (Horner): (((i0)*ext1 + i1)*ext2 + i2)... matches
         // NetCDF's contiguous storage order.
         let flatIdx =
-            let mutable acc = idxVars.[0]
+            let mutable acc = idxVars[0]
             for i in 1 .. rank - 1 do
-                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
+                acc <- $"({acc}) * {extentNames[i]} + {idxVars[i]}"
             acc
         let bodyInd = String.replicate rank "    "
         let materialize =
@@ -901,13 +901,6 @@ module CppNetcdf =
             match arrType.ElemType with
             | IRTScalar et -> et
             | _ -> ETFloat64  // NetCDF compound types unsupported.
-        let elemCpp =
-            match primElem with
-            | ETFloat32 -> "float"
-            | ETFloat64 -> "double"
-            | ETInt32   -> "int"
-            | ETInt64   -> "long long"
-            | _         -> "double"
 
         let ncType = elemTypeToNcMacro primElem
         let rank = arrType.IndexTypes.Length
@@ -916,7 +909,7 @@ module CppNetcdf =
             arrType.IndexTypes
             |> List.mapi (fun i idx ->
                 let dimName =
-                    if i < dimNames.Length then dimNames.[i]
+                    if i < dimNames.Length then dimNames[i]
                     else $"dim{i}"
                 let extent =
                     match idx.Extent with
@@ -1012,7 +1005,7 @@ module CppNetcdf =
             match (List.last arrType.IndexTypes).Extent with
             | IRLit (IRLitInt n) -> string n
             | _ -> $"{v}_fiber_ext[0]"
-        [ for d in 0 .. siteExprs.Length - 1 -> $"{v}_start[{d}] = (size_t)({siteExprs.[d]});" ]
+        [ for d in 0 .. siteExprs.Length - 1 -> $"{v}_start[{d}] = (size_t)({siteExprs[d]});" ]
         @ ncChecked v $"streaming a fiber of '{varName}' from '{filePath}'"
             $"nc_get_vara_{suffix}({v}_ncid, {v}_varid, {v}_start, {v}_count, {destBuf})"
         @ Blade.ProviderRegistry.refuseScanCpp (missingRuleOf filePath varName) varName filePath

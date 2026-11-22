@@ -1000,7 +1000,7 @@ let buildLoopNestCodeGen
     (info: ApplyInfo) 
     (arrayNames: string list)
     (outputName: string)
-    (builder: IRBuilder) : LoopNestCodeGen =
+    (_builder: IRBuilder) : LoopNestCodeGen =
     
     // Use explicit array info from ApplyInfo (not extracted from Loop)
     let arrays = info.Arrays
@@ -1065,10 +1065,10 @@ let buildLoopNestCodeGen
     // mapping degenerates to one-param-per-position.
     let isVirtualSrc pos =
         pos < arrays.Length &&
-        (match arrays.[pos] with IRRange _ | IRVirtualReverse _ -> true | _ -> false)
+        (match arrays[pos] with IRRange _ | IRVirtualReverse _ -> true | _ -> false)
     let paramSpan pos =
         if isVirtualSrc pos && pos < arrayTypes.Length then
-            max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy _.Rank)
+            max 1 (arrayTypes[pos].IndexTypes |> List.sumBy _.Rank)
         else 1
     let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
 
@@ -1103,8 +1103,8 @@ let buildLoopNestCodeGen
 
     // Helper: create an ElementBinding for an array at a given arity component
     let mkElement (arrayPos: int) (rankComponent: int) (dimIndex: int) =
-        let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else $"arr{arrayPos}"
-        let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
+        let arrName = if arrayPos < arrayNames.Length then arrayNames[arrayPos] else $"arr{arrayPos}"
+        let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes[arrayPos] else None
         let elemType = arrType |> Option.map _.ElemType |> Option.defaultValue (IRTScalar ETFloat64)
         // ArrayRank counts LOOP LEVELS, not total index rank: a compound slot is
         // ONE level (the cardinality axis) regardless of mask rank, matching
@@ -1129,7 +1129,7 @@ let buildLoopNestCodeGen
             |> Option.bind _.Tag
         let virtualKind =
             if arrayPos < arrays.Length then
-                match arrays.[arrayPos] with
+                match arrays[arrayPos] with
                 | IRRange (_, offset) ->
                     // Halo slot: the center's start offset rides the slot's
                     // "__halowin|" TAG (per-slot -- IRRange's single offset is
@@ -1153,7 +1153,7 @@ let buildLoopNestCodeGen
         let flatParamIdx =
             if isVirtualSrc arrayPos then paramStart arrayPos + rankComponent
             else paramStart arrayPos
-        let param = if flatParamIdx >= 0 && flatParamIdx < kernelParams.Length then Some kernelParams.[flatParamIdx] else None
+        let param = if flatParamIdx >= 0 && flatParamIdx < kernelParams.Length then Some kernelParams[flatParamIdx] else None
         let paramName = param |> Option.map _.Name |> Option.defaultValue $"p{arrayPos}"
         let paramVarId = param |> Option.map _.VarId |> Option.defaultValue -1
         {
@@ -1183,7 +1183,7 @@ let buildLoopNestCodeGen
             // correctly -- a single-record shortcut hardcoding dim 0 would not.
             let sharedRecords = info.SharedIndexTypes
             // Reference first real array for extent lookups
-            let refArrayName = if not (List.isEmpty arrayNames) then arrayNames.[0] else "arr0"
+            let refArrayName = if not (List.isEmpty arrayNames) then arrayNames[0] else "arr0"
             // Base dim in refArray's extents for each record = cumulative prior
             // rank; also equals the record's base global loop level.
             let baseDims =
@@ -1258,7 +1258,7 @@ let buildLoopNestCodeGen
             // for one group, never across arrays via shared index types
             // (docs/formalism.md section 12.4).
             let axisGroupIds = computeAxisGroups identities arrayTypes commGroups sDimsPerArray
-            let groupAt i = if i < axisGroupIds.Length then axisGroupIds.[i] else -1
+            let groupAt i = if i < axisGroupIds.Length then axisGroupIds[i] else -1
             let iminMap = 
                 loopLevels |> List.mapi (fun globalIdx _level ->
                     let g = groupAt globalIdx
@@ -1272,8 +1272,8 @@ let buildLoopNestCodeGen
             // Compute dependency path for each level
             let rec dependencyPath (level: int) : int list =
                 if level < 0 || level >= iminMap.Length then []
-                elif iminMap.[level] = level then []
-                else iminMap.[level] :: dependencyPath iminMap.[level]
+                elif iminMap[level] = level then []
+                else iminMap[level] :: dependencyPath iminMap[level]
             
             let boundDependencies = loopLevels |> List.mapi (fun i _ -> dependencyPath i)
             
@@ -1281,11 +1281,11 @@ let buildLoopNestCodeGen
                 let level = levelInfo.GlobalLevelIndex
                 let indexName = $"__i{level}"
                 let arrayPos = levelInfo.ArrayIndex
-                let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else $"arr{arrayPos}"
+                let arrName = if arrayPos < arrayNames.Length then arrayNames[arrayPos] else $"arr{arrayPos}"
                 
-                let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
-                let isTriangular = level < triangularLevels.Length && triangularLevels.[level]
-                let state = if level < symcomStates.Length then symcomStates.[level] else SCNeither
+                let deps = if level < boundDependencies.Length then boundDependencies[level] else []
+                let isTriangular = level < triangularLevels.Length && triangularLevels[level]
+                let state = if level < symcomStates.Length then symcomStates[level] else SCNeither
                 // Which levels the `omp(...)` clause licenses (see the
                 // shared-index path note above). OUTER PRODUCT: each level is
                 // owned by exactly one source, so the licence is checked against
@@ -1353,7 +1353,7 @@ let buildLoopNestCodeGen
                         match levelInfo.IndexSpace.Extent with IRCompoundMask _ | IRSparseKeys _ -> true | _ -> false
                     let isVirtualSource =
                         arrayPos < arrays.Length &&
-                        (match arrays.[arrayPos] with IRRange _ -> true | _ -> false)
+                        (match arrays[arrayPos] with IRRange _ -> true | _ -> false)
                     match levelInfo.FusedFactors with
                     | Some factors ->
                         // Fused JOINT level: one element per source dim;
@@ -1429,7 +1429,7 @@ let storedLeafTraversal (builder: IRBuilder) (leaf: IRExpr) : IRExpr option =
                              && not at.IndexTypes.IsEmpty
                              && at.IndexTypes |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
                              && (match stripUnits at.ElemType with IRTScalar _ -> true | _ -> false) ->
-            let sd = at.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let sd = at.IndexTypes |> List.sumBy (_.Rank)
             let pid = builder.FreshId ()
             let p : IRParam = { Name = $"__sl_{pid}"; VarId = pid; Index = 0; Type = at.ElemType }
             let k = mkCallable builder defaultLambdaOptions [ p ] (IRVar (pid, at.ElemType)) at.ElemType [] false [] [] false false 256 false

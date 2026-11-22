@@ -38,7 +38,7 @@ let private dispatchInner (args: string[]) : int =
     // any position; left in place for every other verb (unknown argument there).
     let strictPinVerb =
         args.Length >= 1 &&
-        (match args.[0] with
+        (match args[0] with
          | "check" | "compile" | "emit" | "run" -> true
          | _ -> false)
     let strictPins = strictPinVerb && Array.contains "--strict-pins" args
@@ -52,7 +52,7 @@ let private dispatchInner (args: string[]) : int =
     // accepts it in any position.
     let noCacheVerb =
         args.Length >= 1 &&
-        (match args.[0] with
+        (match args[0] with
          | "compile" | "run" | "test" -> true
          | _ -> false)
     if noCacheVerb && Array.contains "--no-cache" args then
@@ -72,15 +72,15 @@ let private dispatchInner (args: string[]) : int =
         match args |> Array.tryFindIndex (fun a -> a = "--print") with
         | None -> None
         | Some i ->
-            if i + 1 >= args.Length || args.[i + 1].StartsWith "--" then
+            if i + 1 >= args.Length || args[i + 1].StartsWith "--" then
                 Some "--print requires a comma-separated list of top-level binding names (e.g. run prog.blade --print total)"
             else
-                System.Environment.SetEnvironmentVariable("BLADE_PRINT", args.[i + 1])
+                System.Environment.SetEnvironmentVariable("BLADE_PRINT", args[i + 1])
                 None
     let args =
         match args |> Array.tryFindIndex (fun a -> a = "--print") with
-        | Some i when i + 1 < args.Length && not (args.[i + 1].StartsWith "--") ->
-            Array.append args.[.. i - 1] args.[i + 2 ..]
+        | Some i when i + 1 < args.Length && not (args[i + 1].StartsWith "--") ->
+            Array.append args[.. i - 1] args[i + 2 ..]
         | _ -> args
     // `--print-form test|display` (P3-26, Blade.PrintForm): WHICH spelling the
     // program's prints use. A MODE like `--print`: pinned as BLADE_PRINT_FORM
@@ -92,18 +92,18 @@ let private dispatchInner (args: string[]) : int =
         match printFormFlagIdx with
         | None -> None
         | Some i ->
-            if i + 1 >= args.Length || args.[i + 1].StartsWith "--" then
+            if i + 1 >= args.Length || args[i + 1].StartsWith "--" then
                 Some "--print-form requires test or display (e.g. run prog.blade --print-form test)"
             else
-                match Blade.PrintForm.parse args.[i + 1] with
+                match Blade.PrintForm.parse args[i + 1] with
                 | Some form ->
                     System.Environment.SetEnvironmentVariable(Blade.PrintForm.envVar, Blade.PrintForm.name form)
                     None
-                | None -> Some $"--print-form: '{args.[i + 1]}' is not a print form (expected test or display)"
+                | None -> Some $"--print-form: '{args[i + 1]}' is not a print form (expected test or display)"
     let args =
         match printFormFlagIdx with
-        | Some i when i + 1 < args.Length && not (args.[i + 1].StartsWith "--") && args.[0] <> "test" ->
-            Array.append args.[.. i - 1] args.[i + 2 ..]
+        | Some i when i + 1 < args.Length && not (args[i + 1].StartsWith "--") && args[0] <> "test" ->
+            Array.append args[.. i - 1] args[i + 2 ..]
         | _ -> args
     match printFlagErr |> Option.orElse printFormFlagErr with
     | Some msg -> eprintfn "Error: %s" msg; 1
@@ -121,9 +121,9 @@ let private dispatchInner (args: string[]) : int =
     // order around the file, each verb accepting exactly the flags it has a
     // meaning for, and an unknown flag named as such -- where it used to fall
     // through to "unrecognized command" for every verb but `run`.
-    | _ when args.Length >= 1 && (args.[0] = "run" || args.[0] = "compile" || args.[0] = "emit"
-                                  || args.[0] = "check" || args.[0] = "plan") ->
-        let verb = args.[0]
+    | _ when args.Length >= 1 && (args[0] = "run" || args[0] = "compile" || args[0] = "emit"
+                                  || args[0] = "check" || args[0] = "plan") ->
+        let verb = args[0]
         // The print form of the human-facing verbs: the flag or the
         // environment, else the toolchain file, else Blade.PrintForm.cliDefault
         // -- the one place the default lives. `check` prints nothing.
@@ -136,7 +136,7 @@ let private dispatchInner (args: string[]) : int =
         match formErr with
         | Some why -> usageFailure why
         | None ->
-        match parseVerbArgs verb (args.[1..] |> Array.toList) with
+        match parseVerbArgs verb (args[1..] |> Array.toList) with
         | Error msg -> usageFailure msg
         | Ok o ->
             // Build.fs's executable cache reports `[cache] hit/store <hash8>`
@@ -203,15 +203,15 @@ let private dispatchInner (args: string[]) : int =
     | [| "doctor"; "--json" |] -> Blade.Doctor.runDoctor true
 
     // Environment bootstrap: verify-then-persist configuration modes.
-    | _ when args.Length >= 1 && args.[0] = "setup" ->
-        Blade.Setup.runSetup (args.[1..] |> Array.toList)
+    | _ when args.Length >= 1 && args[0] = "setup" ->
+        Blade.Setup.runSetup (args[1..] |> Array.toList)
 
     | [| "repl" |] -> replLoop ()
 
     // Editor tooling (JSON on stdout; see Ide.fs). `--json` is accepted in any
     // position for compatibility (the payload is always JSON).
-    | _ when args.Length >= 2 && args.[0] = "ide" && args.[1] = "check" ->
-        match parseVerbArgs "ide check" (args.[2..] |> Array.toList) with
+    | _ when args.Length >= 2 && args[0] = "ide" && args[1] = "check" ->
+        match parseVerbArgs "ide check" (args[2..] |> Array.toList) with
         | Error msg -> usageFailure msg
         | Ok { File = None } -> usageFailure "ide check needs a source file (e.g. ide check --json prog.blade)"
         | Ok { File = Some f } -> Blade.Ide.ideCheck f
@@ -225,8 +225,8 @@ let private dispatchInner (args: string[]) : int =
     // live render.
     | [| "ide"; "surface" |] -> printfn "%s" (Blade.Ide.renderSurface compilerVersion); 0
 
-    | _ when args.Length >= 1 && args.[0] = "test" ->
-        dispatchTest (args.[1..] |> Array.toList)
+    | _ when args.Length >= 1 && args[0] = "test" ->
+        dispatchTest (args[1..] |> Array.toList)
 
     | _ -> usageFailure ($"""unrecognized command: {(String.Join(" ", args))}""")
 

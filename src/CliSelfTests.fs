@@ -134,13 +134,121 @@ let internal withSuiteEnvironment (quiet: bool) (f: unit -> 'a) : 'a =
     finally
         for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
 
-let runCliSmokeTests () : TH.BlockResult =
-    let blockName = "CLI Smoke"
-    TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
-    let results = ResizeArray<string * TH.Outcome>()
-    let record name outcome detail =
-        TH.resultLine outcome name detail
-        results.Add((name, outcome))
+// --- `blade` CLI cases as data (K18) ---
+//
+// A case of the CLI smoke block that is ONE child `blade` run -- files written
+// into the block's directory, one argument list, a child-only environment, and
+// checks on the exit code and the output -- is a `CliCase` row, run by
+// `runCliCases`. A case that compares two runs, parses its output or works in
+// process stays code in `runCliSmokeTests`.
+
+/// One check on a child run. A `Line*` check reads the FIRST stdout line
+/// (CRLF normalized) that starts with its prefix, `<none>` when there is none.
+type internal CliExpect =
+    | ExitIs of int
+    | ExitIsNot of int
+    | OutHas of string
+    | OutLacks of string
+    | ErrHas of string
+    | ErrLacks of string
+    /// stdout + stderr
+    | AnyHas of string
+    | AnyLacks of string
+    | LineIs of prefix: string * exact: string
+    | LineStarts of prefix: string * start: string
+    | LineHas of prefix: string * part: string
+    | LineLacks of prefix: string * part: string
+    /// At least one stdout line, trimmed, starts with the prefix, and every
+    /// such line contains every part.
+    | LinesAll of prefix: string * parts: string list
+    /// No directory of this name in the case's working directory after the run.
+    | DirLacks of string
+
+/// The detail text of a case's result line.
+type internal CliDetail =
+    | OutErr
+    | ErrText
+    /// The first stdout line starting with the prefix (as `Line*`), then stderr.
+    | LineErr of prefix: string
+    /// The first n characters of stdout.
+    | OutHead of int
+    /// The inner detail on a failure, nothing on a pass.
+    | OnFail of CliDetail
+
+type internal CliCase =
+    { /// The result-line name.
+      Name: string
+      /// Relative path -> text, written into the working directory before the run.
+      Files: (string * string) list
+      /// The verb and its arguments.
+      Args: string list
+      /// The CHILD environment, in `spawnWith`'s convention: a null value unsets.
+      Env: (string * string) list
+      /// Every check must hold for a pass.
+      Expect: CliExpect list
+      Detail: CliDetail }
+
+/// The default row: rows are written `{ cliCase with ... }` and name only what differs from it
+/// (no files, no arguments, the inherited environment, out + err as the detail).
+let internal cliCase = { Name = ""; Files = []; Args = []; Env = []; Expect = []; Detail = OutErr }
+
+/// The first stdout line (CRLF normalized) that starts with `prefix`, `<none>` when there is none.
+let internal cliLineStarting (prefix: string) (out: string) : string =
+    out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith prefix) |> Option.defaultValue "<none>"
+
+let private cliExpectHolds (dir: string) (code: int, out: string, err: string) (expect: CliExpect) : bool =
+    match expect with
+    | ExitIs n -> code = n
+    | ExitIsNot n -> code <> n
+    | OutHas s -> out.Contains s
+    | OutLacks s -> not (out.Contains s)
+    | ErrHas s -> err.Contains s
+    | ErrLacks s -> not (err.Contains s)
+    | AnyHas s -> (out + err).Contains s
+    | AnyLacks s -> not ((out + err).Contains s)
+    | LineIs (prefix, exact) -> cliLineStarting prefix out = exact
+    | LineStarts (prefix, start) -> (cliLineStarting prefix out).StartsWith start
+    | LineHas (prefix, part) -> (cliLineStarting prefix out).Contains part
+    | LineLacks (prefix, part) -> not ((cliLineStarting prefix out).Contains part)
+    | LinesAll (prefix, parts) ->
+        let lines = out.Split('\n') |> Array.map (_.Trim()) |> Array.filter (fun (l: string) -> l.StartsWith prefix)
+        lines.Length > 0 && lines |> Array.forall (fun l -> parts |> List.forall (fun (p: string) -> l.Contains p))
+    | DirLacks name -> not (Directory.Exists(Path.Combine(dir, name)))
+
+let rec private cliDetailText (detail: CliDetail) (passed: bool) (out: string, err: string) : string =
+    match detail with
+    | OutErr -> out + err
+    | ErrText -> err
+    | LineErr prefix -> cliLineStarting prefix out + err
+    | OutHead n -> out.Substring(0, min n out.Length)
+    | OnFail inner -> if passed then "" else cliDetailText inner passed (out, err)
+
+/// Run `cases` in order in `dir`: write each case's files, run `blade` through
+/// `spawnWith` (environment, working directory, arguments), check, and record
+/// one result line per case under the case's name.
+let internal runCliCases
+        (spawnWith: (string * string) list -> string -> string list -> int * string * string)
+        (record: string -> TH.Outcome -> string -> unit)
+        (dir: string) (cases: CliCase list) : unit =
+    for cliCase in cases do
+        for (path, text) in cliCase.Files do File.WriteAllText(Path.Combine(dir, path), text)
+        let (code, out, err) = spawnWith cliCase.Env dir cliCase.Args
+        let passed = cliCase.Expect |> List.forall (cliExpectHolds dir (code, out, err))
+        record cliCase.Name (if passed then TH.Pass else TH.Fail) (cliDetailText cliCase.Detail passed (out, err))
+
+/// What every block of the CLI smoke tests shares: `runCliSmokeTests`' result recorder and its
+/// child-run helpers (built once, after the helpers).
+[<NoEquality; NoComparison>]
+type internal CliSmokeContext =
+    { Record: string -> TH.Outcome -> string -> unit
+      RecordCase: string -> bool -> string -> unit
+      Spawn: string -> string list -> int * string * string
+      SpawnWith: (string * string) list -> string -> string list -> int * string * string
+      Beside: string -> string list
+      SelfExe: string option }
+
+let private cliSmokeCompileRun (ctx: CliSmokeContext) : unit =
+    let { Record = record } = ctx
     let runTest = "compile+run one-liner from fresh temp dir"
     if not capabilities.Value.HasGpp then
         record runTest TH.Skip "requires g++, not found"
@@ -173,6 +281,8 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(tmpDir, true) with _ -> ()
 
+let private cliSmokeSuiteEnvironment (ctx: CliSmokeContext) : unit =
+    let { Record = record } = ctx
     // --- the suite environment: BLAS stays off whatever the shell or the
     // toolchain file says. Clearing alone left two ways in: the explicit
     // tier's own keys (BLADE_BLAS_LINK selects it) and blade.toolchain.json,
@@ -200,6 +310,8 @@ let runCliSmokeTests () : TH.BlockResult =
         (try File.Delete tcFile with _ -> ())
         Blade.Toolchain.refresh ())
 
+let private cliSmokePrintSelection (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase } = ctx
     // --- `--print <names>`: which top-level bindings the program prints ---
     //
     // The CLI has always printed EVERY top-level binding, which is what makes
@@ -222,7 +334,6 @@ let runCliSmokeTests () : TH.BlockResult =
         match Blade.Lowering.lower src with
         | Error e -> Error e
         | Ok ir -> Ok (fst (Blade.CodeGen.genSelfContainedProgramFromIR ir label))
-    let recordCase name cond detail = record name (if cond then TH.Pass else TH.Fail) detail
     (match cppOf "print_all" printSrc with
      | Error e -> record "print: default emission" TH.Fail e
      | Ok all ->
@@ -374,6 +485,8 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(pDir, true) with _ -> ()
 
+let private cliSmokeFlagsHelpIce (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase } = ctx
     // --- One flag parser for every file verb ---
     //
     // Only `run` used to parse its flags; every other verb matched an exact
@@ -441,98 +554,444 @@ let runCliSmokeTests () : TH.BlockResult =
      finally
          try Directory.Delete(dir, true) with _ -> ())
 
-    // --- Builds happen in a private scratch directory, never beside the source ---
-    //
-    // `blade run` wrote the .cpp, ~15 runtime headers and the executable
-    // beside the source and deleted "the headers it created" afterwards, so two
-    // runs in one directory deleted each other's headers mid-compile, and every
-    // run left an executable behind.
-    let selfExe =
-        [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
-        |> List.tryFind File.Exists
-    let rec spawn (cwd: string) (args: string list) : int * string * string = spawnWith [] cwd args
-    /// `spawn` with extra environment for the CHILD only (null unsets), so a
-    /// knob a case needs never leaks into this process's other blocks.
-    and spawnWith (env: (string * string) list) (cwd: string) (args: string list) : int * string * string =
-        match selfExe with
-        | None -> (-1, "", "no Blade executable beside the test assembly")
-        | Some exe ->
-            let psi = System.Diagnostics.ProcessStartInfo(exe)
-            for (k, v) in env do
-                if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
-            for a in args do psi.ArgumentList.Add a
-            psi.WorkingDirectory <- cwd
-            psi.RedirectStandardOutput <- true
-            psi.RedirectStandardError <- true
-            psi.UseShellExecute <- false
-            psi.CreateNoWindow <- true
-            use p = System.Diagnostics.Process.Start psi
-            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
-            let e = Blade.Runtime.readToEndOffPool p.StandardError
-            if p.WaitForExit 180000 then (p.ExitCode, o.Result, e.Result)
-            else
-                (try p.Kill() with _ -> ())
-                (-1, o.Result, "timed out")
-    let beside (dir: string) =
-        Directory.GetFiles dir |> Array.map Path.GetFileName |> Array.sort |> List.ofArray
+let private cliVerbsUsageCases : CliCase list =
+    // A bare `blade` STARTED THE FULL SUITE in the current directory.
+    [ { cliCase with
+          Name = "cli: bare `blade` prints usage (and does not start the suite)"
+          Expect = [ ExitIs 0; OutHas "Usage:"; DirLacks "generated_cpp_tests" ]
+          Detail = OnFail (OutHead 200) }
+      { cliCase with
+          Name = "cli: `check f --verbose` is a check, not an unrecognized command"
+          Files = [ "v.blade", "let x: Int64 = 1 + 2 * 3\n" ]
+          Args = [ "check"; "v.blade"; "--verbose" ]
+          Expect = [ ExitIs 0; OutHas "OK" ] }
+      { cliCase with
+          Name = "cli: `test interp <typo>` is a clean usage error, not BL9001"
+          Args = [ "test"; "interp"; "no-such-category" ]
+          Expect = [ ExitIs 1; ErrHas "unknown corpus category 'no-such-category'"; ErrLacks "BL9001" ]
+          Detail = OnFail ErrText }
+      // ...but the guard must not refuse a lane's RESERVED words: it once
+      // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
+      // step died on it. The goldens themselves are CI's step; this pins
+      // only that the word gets past the guard.
+      { cliCase with
+          Name = "cli: `test llvm goldens` is not refused as an unknown category"
+          Args = [ "test"; "llvm"; "goldens" ]
+          Expect = [ ErrLacks "unknown corpus category" ]
+          Detail = ErrText }
+      // `check` LOWERS: a construct that typechecks but has no lowering
+      // rule where it sits is refused by check itself -- coded BL6002 and
+      // spanned at the expression -- not first by `emit`, spanless.
+      { cliCase with
+          Name = "cli: `check` reports a lowering refusal as spanned BL6002"
+          Files =
+            [ "cf.blade",
+              "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
+              + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
+              + "    let c = compound(x, m)\n"
+              + "    reduce(c, (+))\n"
+              + "}\n"
+              + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
+              + "let s = f(a)\n" ]
+          Args = [ "check"; "cf.blade" ]
+          Expect = [ ExitIsNot 0; ErrHas "BL6002"; ErrHas "cf.blade:3:13"; OutLacks "OK" ] }
+      // `plan` records the decisions only code generation makes (here the
+      // packed storage and triangular nest `comm` buys for one array),
+      // in the text form and in the JSON, whose field set is unchanged.
+      { cliCase with
+          Name = "cli: `plan` lists the storage and iteration decisions codegen makes"
+          Files =
+            [ "cov.blade",
+              "type TimeIdx = Idx<2>\n"
+              + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+              + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+              + "let r = method_for(A, A) <@> k |> compute\n" ]
+          Args = [ "plan"; "cov.blade" ]
+          Expect =
+            [ ExitIs 0; OutHas "[symmetric-storage v1] r"; OutHas "[triangular-iteration v1] r"
+              OutLacks "0 optimization decision(s)" ] }
+      { cliCase with
+          Name = "cli: `plan --json` carries them in the unchanged decision schema"
+          Args = [ "plan"; "cov.blade"; "--json" ]
+          Expect =
+            [ ExitIs 0; OutHas "\"rule\":\"symmetric-storage\""; OutHas "\"outcome\":\"applied\""
+              OutHas "\"version\":1"; OutHas "\"evidence\":["; OutHas "\"inputs\":" ] } ]
+
+let private cliVerbsPoolCases (poolEnv: string -> string -> (string * string) list) (emptyToolchain: string) (armToolchain: string) (defaultLine: string) : CliCase list =
+    // round 4 wave 6 (G185 (a)): `off` / `0` is the PRE-WAVE-6 limits,
+    // a non-default arm restated as defines
+    [ { cliCase with
+          Name = "cli: `plan` build line names `off` as the pre-wave-6 4 MB / 8 MB limits"
+          Args = [ "plan"; "cov.blade" ]
+          Env = poolEnv emptyToolchain "off"
+          Expect =
+            [ ExitIs 0
+              LineIs ("build: ", "build: pool retention: BLADE_POOL_RETAIN=0 (env BLADE_POOL_RETAIN) -> 4 MB / 8 MB per thread (the pre-wave-6 limits, C++ lane blade_pool, restated as defines; the default since round 4 wave 6 is 32 MB / 64 MB per thread; the run record's policy.pool says which arm ran)") ]
+          Detail = LineErr "build: " }
+      { cliCase with
+          Name = "cli: `plan` build line names the BLADE_POOL_RETAIN=1 arm in the C++ lane, per thread"
+          Args = [ "plan"; "cov.blade" ]
+          Env = poolEnv emptyToolchain "1"
+          Expect =
+            [ ExitIs 0
+              LineIs ("build: ", "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per thread (opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. 64 MB stays committed until reuse, eviction, flush or thread exit, so T threads may retain T x 96 MB and the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; the run record's policy.pool says which arm ran)") ]
+          Detail = LineErr "build: " }
+      { cliCase with
+          Name = "cli: `plan` reads the arm from the toolchain file when the variable is unset"
+          Args = [ "plan"; "cov.blade" ]
+          Env = poolEnv armToolchain null
+          Expect =
+            [ ExitIs 0
+              LineStarts ("build: ", "build: pool retention: BLADE_POOL_RETAIN=1 (blade.toolchain.json) -> 64 MB / 96 MB per thread") ]
+          Detail = LineErr "build: " }
+      { cliCase with
+          Name = "cli: `plan` lets env `default` override a toolchain file's arm"
+          Args = [ "plan"; "cov.blade" ]
+          Env = poolEnv armToolchain "default"
+          Expect = [ ExitIs 0; LineIs ("build: ", defaultLine) ]
+          Detail = LineErr "build: " }
+      { cliCase with
+          Name = "cli: `plan --json` carries an explicit retention pair, per-thread in the C++ lane"
+          Args = [ "plan"; "cov.blade"; "--json" ]
+          Env = poolEnv emptyToolchain "16:48"
+          Expect =
+            [ ExitIs 0
+              OutHas "\"build\":{\"pool_retain\":{\"arm\":\"pair\",\"setting\":\"16:48\""
+              OutHas "\"max_block\":16777216,\"budget\":50331648,\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\"" ] }
+      { cliCase with
+          Name = "cli: `plan` reads a malformed retention pair (max > budget) as the default, with a warning"
+          Args = [ "plan"; "cov.blade" ]
+          Env = poolEnv emptyToolchain "96:64"
+          Expect =
+            [ ExitIs 0
+              LineStarts ("build: ", "build: pool retention: default (32 MB / 64 MB per thread) -- BLADE_POOL_RETAIN='96:64'")
+              ErrHas "warning: BLADE_POOL_RETAIN='96:64'" ] } ]
+
+let private cliVerbsLlvmPoolCases (llvmEnv: string -> (string * string) list) : CliCase list =
+    [ { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 scopes the arm to the shim's ONE process budget, no run record"
+          Args = [ "plan"; "cov.blade" ]
+          Env = llvmEnv "1"
+          Expect =
+            [ ExitIs 0; OutHas "lane: LLVM"
+              LineStarts ("build: ", "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per process (opt-in arm, LLVM lane shim allocator: ONE 96 MB budget for the process")
+              LineHas ("build: ", "atexit flush"); LineHas ("build: ", "writes NO run record")
+              LineLacks ("build: ", "per thread"); LineLacks ("build: ", "T threads") ] }
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 names the default as the shim's process budget"
+          Args = [ "plan"; "cov.blade" ]
+          Env = llvmEnv "default"
+          Expect =
+            [ ExitIs 0; OutHas "lane: LLVM"
+              LineIs ("build: ", "build: pool retention: default (32 MB / 64 MB per process, the LLVM lane's shim allocator)") ]
+          Detail = LineErr "build: " }
+      { cliCase with
+          Name = "cli: `plan --json` under BLADE_LLVM=1 says budget_scope process"
+          Args = [ "plan"; "cov.blade"; "--json" ]
+          Env = llvmEnv "16:48"
+          Expect =
+            [ ExitIs 0; OutHas "\"lane\":\"llvm\""
+              OutHas "\"budget_scope\":\"process\",\"runtime\":\"llvm-shim\""; OutLacks "per-thread" ] } ]
+
+let private cliVerbsLaneCppCases (laneEnv: string -> (string * string) list) : CliCase list =
+    [ { cliCase with
+          Name = "cli: `plan` (C++ lane) reports the BLAS route and the thread pragma applied"
+          Files =
+            [ "lane.blade",
+              "type V = Idx<7>\ntype S = Idx<11>\n"
+              + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) where omp(i: 1) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+              + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n" ]
+          Args = [ "plan"; "lane.blade" ]
+          Env = laneEnv null
+          Expect =
+            [ ExitIs 0; OutHas "[blas-routing v1] g"; OutHas ": applied [Syrk"; OutLacks "lane: "
+              OutHas "[omp v1] x"; OutLacks "the LLVM lane" ] } ]
+
+let private cliVerbsLaneLlvmCases (laneEnv: string -> (string * string) list) : CliCase list =
+    [ { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions"
+          Args = [ "plan"; "lane.blade" ]
+          Env = laneEnv "1"
+          Expect =
+            [ ExitIs 0; OutHas "lane: LLVM (BLADE_LLVM=1)"
+              LinesAll ("[blas-routing v1]", [ "declined -- the LLVM lane has no BLAS/LAPACK route" ])
+              LinesAll ("[omp v1]", [ "declined -- the LLVM lane has no thread-level form"; "[omp] requested but emitted serial" ]) ] }
+      { cliCase with
+          Name = "cli: `plan --json` under BLADE_LLVM=1 names the lane"
+          Args = [ "plan"; "lane.blade"; "--json" ]
+          Env = laneEnv "1"
+          Expect = [ ExitIs 0; OutHas "\"lane\":\"llvm\"" ] } ]
+
+let private cliVerbsFoldFormCases (rowslotsSrc: string) (slotEnvKnob: string -> string -> (string * string) list) (slotEnv: string -> (string * string) list) (pullEnv: string -> string -> (string * string) list) (tileEnv: string -> (string * string) list) : CliCase list =
+    // THE PRECEDENCE (round 3, W2-0a): this walk is one BOTH the row
+    // slots and the ordered orbit scatter admit; by default the
+    // scatter is taken and the row-slot record says it yielded.
+    [ { cliCase with
+          Name = "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the ordered orbit scatter taken over the admitted row-slot form"
+          Files = [ "rowslots.blade", rowslotsSrc ]
+          Args = [ "plan"; "rowslots.blade" ]
+          Env = slotEnv null
+          Expect =
+            [ ExitIs 0
+              OutHas "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+              OutHas ("declined -- row-slot form: " + Blade.OrbitFold.rowSlotsYieldedToScatter + " [" + Blade.OrbitFold.rowSlotsYieldedForm)
+              OutHas "the ordered orbit scatter runs serially (its chains thread only as a wavefront; the threaded complete-row form admitted but yielded"
+              OutLacks "fold form: threaded complete rows (repro): 521" ] }
+      // BLADE_FOLD_ROW_SLOTS=prefer: the round-2 order and its records.
+      { cliCase with
+          Name = "cli: `plan` (C++ lane, BLADE_FP_REPRO=1, BLADE_FOLD_ROW_SLOTS=prefer) reports the threaded complete-row form applied"
+          Args = [ "plan"; "rowslots.blade" ]
+          Env = slotEnvKnob null "prefer"
+          Expect =
+            [ ExitIs 0
+              OutHas ": applied [fold form: threaded complete rows (repro): 521 row folds"
+              // G35 PRECEDENCE under prefer: the scatter the same walk admits is recorded as yielded
+              OutHas "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request (BLADE_FOLD_ROW_SLOTS=prefer" ] }
+      // The LLVM lane (no threads, no row slots) is unchanged: its
+      // emitter's own record says it scatters, and the C++ lane's
+      // yielded row-slot record is restated in this lane's words.
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 restates the yielded row-slot form, and the LLVM emitter's own record says it scatters"
+          Args = [ "plan"; "rowslots.blade" ]
+          Env = slotEnv "1"
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs"
+              OutHas "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+              OutHas "(recorded by the LLVM lane's emitter); C++ lane: applied"
+              OutLacks "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: ordered orbit scatter (repro" ] }
+      // ...and under prefer the C++ lane's row slots are restated as
+      // the serial walk the LLVM lane scatters (both records say so).
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1, BLADE_FOLD_ROW_SLOTS=prefer restates the row-slot form, and the LLVM emitter's own record says it scatters"
+          Args = [ "plan"; "rowslots.blade" ]
+          Env = slotEnvKnob "1" "prefer"
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- the LLVM lane has no thread runtime: it runs this walk serially in the same association"
+              OutHas "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
+              OutHas "(recorded by the LLVM lane's emitter); C++ lane: declined -- ordered orbit scatter not taken: the threaded complete-row form (G35)"
+              OutHas "C++ lane: applied"
+              OutLacks "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows" ] }
+      // A walk the scatter declines (the body reads the mirror cell
+      // too): the row slots are the C++ form by default, and the LLVM
+      // lane's form is the serial walk.
+      { cliCase with
+          Name = "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) keeps the threaded complete-row form where the scatter declines"
+          Files = [ "rowslots_walk.blade", rowslotsSrc.Replace("g(i, j) * g(i, j)", "g(i, j) * g(j, i)") ]
+          Args = [ "plan"; "rowslots_walk.blade" ]
+          Env = slotEnv null
+          Expect =
+            [ ExitIs 0
+              OutHas ": applied [fold form: threaded complete rows (repro): 521 row folds"
+              OutLacks "admitted but yielded" ] }
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk (scatter declined)"
+          Args = [ "plan"; "rowslots_walk.blade" ]
+          Env = slotEnv "1"
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
+              OutHas "C++ lane: applied"
+              OutLacks "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows" ] }
+      // THE ROW-OWNED PULL (round 3, D-P3) is the C++ lane's thread
+      // team over the rank-3 scatter's leaf chains: the C++ plan
+      // says applied (form + omp record); under BLADE_LLVM=1 the
+      // record is the LLVM emitter's own serial scatter (the C++
+      // verdict trailing) and the team's omp record is declined;
+      // the pull's decline (knob off) is restated as this lane's.
+      { cliCase with
+          Name = "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the row-owned pull applied with its team"
+          Files =
+            [ "pull3.blade",
+              "type Var = Idx<13>\ntype Obs = Idx<2>\n"
+              + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
+              + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
+              + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n" ]
+          Args = [ "plan"; "pull3.blade" ]
+          Env = pullEnv null null
+          Expect =
+            [ ExitIs 0
+              OutHas "row-owned pull on a thread team"
+              OutHas "applied [omp parallel num_threads(T) + ascending row claims + team-completion barrier" ] }
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 restates the pull as the LLVM emitter's serial scatter, its team declined"
+          Args = [ "plan"; "pull3.blade" ]
+          Env = pullEnv "1" null
+          Expect =
+            [ ExitIs 0
+              OutHas "lane: LLVM"
+              OutHas "applied [fold form: ordered orbit scatter (rank 3, extent 13, row groups of 4, shared pair chains 91 of 169): one pass"
+              OutHas "(recorded by the LLVM lane's emitter); C++ lane: applied"
+              OutLacks "row-owned pull on a thread team; "
+              OutHas "declined -- the LLVM lane has no thread-level form"
+              OutLacks "applied [omp parallel num_threads(T) + ascending row claims" ] }
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 restates the pull's decline in this lane's words"
+          Args = [ "plan"; "pull3.blade" ]
+          Env = pullEnv "1" "0"
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- the LLVM lane has no thread runtime (no row-owned pull form)"
+              OutHas "C++ lane: declined -- row-owned pull scatter not taken: disabled by BLADE_ORBIT_PULL=0"
+              OutLacks "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: row-owned pull" ] }
+      // THE LLVM SCATTER RECORD IS THE EMITTER'S OWN: an unforced map
+      // over a stored pool (C++: a deferred computation; LLVM: a
+      // producer it would have to execute) is declined by each lane
+      // in its own words, never translated into a taken scatter; a
+      // Float32 strict walk the C++ lane scatters is not claimed for
+      // a lane that cannot emit it.
+      //
+      // Round 4 wave 7 (lane B, G199): the kernel CAPTURES the
+      // deferred h, and a kernel capture of a deferred module map is
+      // forced (stored) before the fold in the LLVM lane too, as the
+      // C++ lane forces it (collectDeferredKernelCaptures): the walk
+      // then reads a stored pool and BOTH lanes take the scatter (it
+      // used to stay a producer in this lane only, which declined)
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 scatters a captured deferred source once it is forced, as the C++ lane does"
+          Files =
+            [ "scatter_unforced.blade",
+              "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+              + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
+              + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
+              + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+              + "let h = method_for(g) <@> lambda(v: Float64) -> v * 0.25 + 1.0\n"
+              + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> h(i, j), radd, 0.5), radd, 0.0)\n" ]
+          Args = [ "plan"; "scatter_unforced.blade" ]
+          Env = [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ]
+          Expect =
+            [ ExitIs 0
+              OutHas "lane: LLVM"
+              OutHas "applied [fold form: ordered orbit scatter (rank 2, extent 5"
+              OutLacks "the compact array is an unforced computation, not a stored pool (LLVM lane" ] }
+      { cliCase with
+          Name = "cli: `plan` (C++ lane) scatters a Float32 strict walk"
+          Files =
+            [ "scatter_f32.blade",
+              "type Var = Idx<5>\ntype Obs = Idx<3>\n"
+              + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float32(Float64((i * 7 + s * 3) % 11) * 0.37) |> compute\n"
+              + "let g = method_for(x, x) <@> lambda(a: Array<Float32 like Obs>, b: Array<Float32 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
+              + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))\n" ]
+          Args = [ "plan"; "scatter_f32.blade" ]
+          Env = [ ("BLADE_LLVM", null); ("BLADE_FP_REPRO", "1") ]
+          Expect = [ ExitIs 0; OutHas "applied [fold form: ordered orbit scatter (rank 2, extent 5" ] }
+      // Since round 6 the LLVM lane EMITS this Float32 program; its own
+      // scatter is Float64 / Int64 only, so its emitter declines it
+      // (the walk, bitwise the scatter under repro) and the record
+      // says so beside the C++ lane's applied scatter.
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 does not claim a Float32 scatter for the LLVM lane"
+          Args = [ "plan"; "scatter_f32.blade" ]
+          Env = [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ]
+          Expect =
+            [ ExitIs 0
+              OutHas "lane: LLVM"
+              OutHas "declined -- ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)"
+              OutLacks "applied [fold form: ordered orbit scatter" ] }
+      // THE TILE CORE (M6): a gram above the crossover, BLAS off,
+      // materializes through the shared C core in the LLVM lane, and
+      // the plan says so in this lane's words (not the C++ lane's
+      // dsyrk_tri, which this executable does not contain).
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1 reports the syrk tile through the shared C core"
+          Files =
+            [ "tile.blade",
+              "type V = Idx<61>\ntype S = Idx<31>\n"
+              + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i * 11 + s) * 0.25 |> compute\n"
+              + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n" ]
+          Args = [ "plan"; "tile.blade" ]
+          Env = tileEnv null
+          Expect =
+            [ ExitIs 0
+              OutHas "fold form: syrk tile (shared C core) 6x8, KC=31"
+              OutHas "[microkernel v1] g @ "
+              OutHas ": applied [packed syrk tile (shared C core" ] }
+      { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1, BLADE_SYRK_TILE=0 reports the tile declined"
+          Args = [ "plan"; "tile.blade" ]
+          Env = tileEnv "0"
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- BLADE_SYRK_TILE=0/off: the brick nest"
+              OutLacks "fold form: syrk tile (shared C core)" ] } ]
+
+let private cliVerbsRowTileCases (rowEnv: string -> string -> string -> (string * string) list) : CliCase list =
+    [ for repro in [ null; "1" ] do
+          let build = if isNull repro then "default" else "BLADE_FP_REPRO=1"
+          yield
+              { cliCase with
+                  Name = $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
+                  Args = [ "plan"; "anti.blade" ]
+                  Env = rowEnv "BLADE_ANTISYM_TILE" null repro
+                  Expect =
+                    [ ExitIs 0
+                      OutHas "fold form: antisym tile (shared C core) sequential 6x8"
+                      // the LLVM lane is the serial regime: anti_g's default is 1 there
+                      OutHas ("whole chain per tile, " + Blade.CodeGenExprSupport.antisymSerialDefaultNote Blade.CodeGenExprSupport.antisymNoTeamRequested)
+                      OutHas "[microkernel v1] l @ "
+                      OutHas ": applied [antisym tile (shared C core" ] }
+          yield
+              { cliCase with
+                  Name = $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the simplex tile through the shared C core"
+                  Args = [ "plan"; "sym3.blade" ]
+                  Env = rowEnv "BLADE_SIMPLEX_TILE" null repro
+                  Expect =
+                    [ ExitIs 0
+                      OutHas "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, live-accumulator edges, then / d per cell"
+                      OutHas "[microkernel v1] t @ "
+                      OutHas ": applied [simplex tile (shared C core" ] }
+      yield
+          { cliCase with
+              Name = "cli: `plan` under BLADE_LLVM=1, BLADE_ANTISYM_TILE=0 reports the tile declined"
+              Args = [ "plan"; "anti.blade" ]
+              Env = rowEnv "BLADE_ANTISYM_TILE" "0" null
+              Expect =
+                [ ExitIs 0
+                  OutHas "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
+                  OutLacks "fold form: antisym tile (shared C core)" ] } ]
+
+let private cliVerbsSimplexDeclineCases (rowEnv: string -> string -> string -> (string * string) list) : CliCase list =
+    [ { cliCase with
+          Name = "cli: `plan` under BLADE_LLVM=1, BLADE_SIMPLEX_TILE=0 reports the tile declined"
+          Args = [ "plan"; "sym3.blade" ]
+          Env = rowEnv "BLADE_SIMPLEX_TILE" "0" null
+          Expect =
+            [ ExitIs 0
+              OutHas "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
+              OutLacks "fold form: simplex tile (shared C core)" ] } ]
+
+let private cliVerbsCompoundCases (compoundEnv: string -> (string * string) list) (compactionLine: string) (hashedLine: string) : CliCase list =
+    [ for llvm in [ null; "1" ] do
+          let lane = if isNull llvm then "C++ lane" else "BLADE_LLVM=1"
+          yield
+              { cliCase with
+                  Name = $"cli: `plan` ({lane}) reports the rank-1 compound as the compaction"
+                  Args = [ "plan"; "compound1.blade" ]
+                  Env = compoundEnv llvm
+                  Expect =
+                    [ ExitIs 0; OutHas "[compound v1] y @ "; OutHas compactionLine ]
+                    @ (if isNull llvm then [] else [ OutHas "lane: LLVM (BLADE_LLVM=1)" ]) }
+          // The rank-2 compound stays hashed; under BLADE_LLVM=1 the
+          // lane refuses the program (the plan is the C++ lane's,
+          // which is the executable that will run).
+          yield
+              { cliCase with
+                  Name = $"cli: `plan` ({lane}) reports the rank-2 compound as the hashed index"
+                  Args = [ "plan"; "compound2.blade" ]
+                  Env = compoundEnv llvm
+                  Expect = [ ExitIs 0; OutHas "[compound v1] h @ "; OutHas hashedLine; OutLacks compactionLine ] } ]
+
+let private cliSmokeVerbs (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe } = ctx
     if selfExe.IsNone then
         record "cli: bare `blade` prints usage" TH.Skip "no Blade executable beside the test assembly"
     else
         let dir = Path.Combine(Path.GetTempPath(), "blade_cli_verbs_" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory dir |> ignore
         try
-            // A bare `blade` STARTED THE FULL SUITE in the current directory.
-            let (code, out, _) = spawn dir []
-            let ok = code = 0 && out.Contains "Usage:" && not (Directory.Exists(Path.Combine(dir, "generated_cpp_tests")))
-            recordCase "cli: bare `blade` prints usage (and does not start the suite)" ok
-                (if ok then "" else out.Substring(0, min 200 out.Length))
-            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x: Int64 = 1 + 2 * 3\n")
-            let (code, out, err) = spawn dir [ "check"; "v.blade"; "--verbose" ]
-            recordCase "cli: `check f --verbose` is a check, not an unrecognized command"
-                (code = 0 && out.Contains "OK") (out + err)
-            let (code, _, err) = spawn dir [ "test"; "interp"; "no-such-category" ]
-            let ok = code = 1 && err.Contains "unknown corpus category 'no-such-category'" && not (err.Contains "BL9001")
-            recordCase "cli: `test interp <typo>` is a clean usage error, not BL9001" ok (if ok then "" else err)
-            // ...but the guard must not refuse a lane's RESERVED words: it once
-            // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
-            // step died on it. The goldens themselves are CI's step; this pins
-            // only that the word gets past the guard.
-            let (_, _, err) = spawn dir [ "test"; "llvm"; "goldens" ]
-            recordCase "cli: `test llvm goldens` is not refused as an unknown category"
-                (not (err.Contains "unknown corpus category")) err
-            // `check` LOWERS: a construct that typechecks but has no lowering
-            // rule where it sits is refused by check itself -- coded BL6002 and
-            // spanned at the expression -- not first by `emit`, spanless.
-            File.WriteAllText(Path.Combine(dir, "cf.blade"),
-                "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
-                + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
-                + "    let c = compound(x, m)\n"
-                + "    reduce(c, (+))\n"
-                + "}\n"
-                + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
-                + "let s = f(a)\n")
-            let (code, out, err) = spawn dir [ "check"; "cf.blade" ]
-            recordCase "cli: `check` reports a lowering refusal as spanned BL6002"
-                (code <> 0 && err.Contains "BL6002" && err.Contains "cf.blade:3:13" && not (out.Contains "OK"))
-                (out + err)
-            // `plan` records the decisions only code generation makes (here the
-            // packed storage and triangular nest `comm` buys for one array),
-            // in the text form and in the JSON, whose field set is unchanged.
-            File.WriteAllText(Path.Combine(dir, "cov.blade"),
-                "type TimeIdx = Idx<2>\n"
-                + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
-                + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
-                + "let r = method_for(A, A) <@> k |> compute\n")
-            let (code, out, err) = spawn dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` lists the storage and iteration decisions codegen makes"
-                (code = 0 && out.Contains "[symmetric-storage v1] r" && out.Contains "[triangular-iteration v1] r"
-                 && not (out.Contains "0 optimization decision(s)"))
-                (out + err)
-            let (code, out, err) = spawn dir [ "plan"; "cov.blade"; "--json" ]
-            recordCase "cli: `plan --json` carries them in the unchanged decision schema"
-                (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
-                 && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
-                (out + err)
+            let runCases = runCliCases spawnWith record dir
+            runCases cliVerbsUsageCases
             // BLADE_POOL_RETAIN (round-3 A4, gap G52): the plan's build line
             // names the runtime pool-retention policy -- the default, the
             // opt-in arm with its per-thread honesty, a malformed value read
@@ -545,41 +1004,14 @@ let runCliSmokeTests () : TH.BlockResult =
             let armToolchain = Path.Combine(dir, "pool_tc_retain1.json")
             File.WriteAllText(armToolchain, "{\"BLADE_POOL_RETAIN\": \"1\"}")
             let poolEnv (file: string) (v: string) = [ ("BLADE_TOOLCHAIN_FILE", file); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", null) ]
-            let buildLine (out: string) =
-                out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "build: ") |> Option.defaultValue "<none>"
+            let buildLine (out: string) = cliLineStarting "build: " out
             let defaultLine = "build: pool retention: default (32 MB / 64 MB per thread)"
             let (codeU, outU, errU) = spawnWith (poolEnv emptyToolchain null) dir [ "plan"; "cov.blade" ]
             let (codeO, outO, errO) = spawnWith (poolEnv emptyToolchain "default") dir [ "plan"; "cov.blade" ]
             recordCase "cli: `plan` build line for an unset and a `default` default is exactly the plain default line (no provenance)"
                 (codeU = 0 && codeO = 0 && buildLine outU = defaultLine && buildLine outO = defaultLine)
                 ($"unset: '{buildLine outU}' / default: '{buildLine outO}' {errU}{errO}")
-            // round 4 wave 6 (G185 (a)): `off` / `0` is the PRE-WAVE-6 limits,
-            // a non-default arm restated as defines
-            let (code, out, err) = spawnWith (poolEnv emptyToolchain "off") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` build line names `off` as the pre-wave-6 4 MB / 8 MB limits"
-                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=0 (env BLADE_POOL_RETAIN) -> 4 MB / 8 MB per thread (the pre-wave-6 limits, C++ lane blade_pool, restated as defines; the default since round 4 wave 6 is 32 MB / 64 MB per thread; the run record's policy.pool says which arm ran)")
-                (buildLine out + err)
-            let (code, out, err) = spawnWith (poolEnv emptyToolchain "1") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` build line names the BLADE_POOL_RETAIN=1 arm in the C++ lane, per thread"
-                (code = 0 && buildLine out = "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per thread (opt-in arm, C++ lane blade_pool; a released pool of 16 KB .. 64 MB stays committed until reuse, eviction, flush or thread exit, so T threads may retain T x 96 MB and the peak working set can rise without any reuse; it moves the release out of the timed region, it is not less work; the run record's policy.pool says which arm ran)")
-                (buildLine out + err)
-            let (code, out, err) = spawnWith (poolEnv armToolchain null) dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` reads the arm from the toolchain file when the variable is unset"
-                (code = 0 && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (blade.toolchain.json) -> 64 MB / 96 MB per thread")
-                (buildLine out + err)
-            let (code, out, err) = spawnWith (poolEnv armToolchain "default") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` lets env `default` override a toolchain file's arm"
-                (code = 0 && buildLine out = defaultLine) (buildLine out + err)
-            let (code, out, err) = spawnWith (poolEnv emptyToolchain "16:48") dir [ "plan"; "cov.blade"; "--json" ]
-            recordCase "cli: `plan --json` carries an explicit retention pair, per-thread in the C++ lane"
-                (code = 0 && out.Contains "\"build\":{\"pool_retain\":{\"arm\":\"pair\",\"setting\":\"16:48\""
-                 && out.Contains "\"max_block\":16777216,\"budget\":50331648,\"budget_scope\":\"per-thread\",\"runtime\":\"cpp-blade_pool\"")
-                (out + err)
-            let (code, out, err) = spawnWith (poolEnv emptyToolchain "96:64") dir [ "plan"; "cov.blade" ]
-            recordCase "cli: `plan` reads a malformed retention pair (max > budget) as the default, with a warning"
-                (code = 0 && (buildLine out).StartsWith "build: pool retention: default (32 MB / 64 MB per thread) -- BLADE_POOL_RETAIN='96:64'"
-                 && err.Contains "warning: BLADE_POOL_RETAIN='96:64'")
-                (out + err)
+            runCases (cliVerbsPoolCases poolEnv emptyToolchain armToolchain defaultLine)
             // The LLVM lane holds its pools in the shim allocator: ONE process
             // budget, an atexit flush, and no run record. The scope follows
             // the lane that BUILDS the program -- an LLVM refusal falls back to
@@ -588,23 +1020,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 record "cli: `plan` under BLADE_LLVM=1 scopes the pool budget per process" TH.Skip "no clang (the LLVM lane is unavailable)"
             else
                 let llvmEnv (v: string) = [ ("BLADE_TOOLCHAIN_FILE", emptyToolchain); ("BLADE_POOL_RETAIN", v); ("BLADE_LLVM", "1") ]
-                let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "cov.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 scopes the arm to the shim's ONE process budget, no run record"
-                    (code = 0 && out.Contains "lane: LLVM"
-                     && (buildLine out).StartsWith "build: pool retention: BLADE_POOL_RETAIN=1 (env BLADE_POOL_RETAIN) -> 64 MB / 96 MB per process (opt-in arm, LLVM lane shim allocator: ONE 96 MB budget for the process"
-                     && (buildLine out).Contains "atexit flush" && (buildLine out).Contains "writes NO run record"
-                     && not ((buildLine out).Contains "per thread") && not ((buildLine out).Contains "T threads"))
-                    (out + err)
-                let (code, out, err) = spawnWith (llvmEnv "default") dir [ "plan"; "cov.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 names the default as the shim's process budget"
-                    (code = 0 && out.Contains "lane: LLVM"
-                     && buildLine out = "build: pool retention: default (32 MB / 64 MB per process, the LLVM lane's shim allocator)")
-                    (buildLine out + err)
-                let (code, out, err) = spawnWith (llvmEnv "16:48") dir [ "plan"; "cov.blade"; "--json" ]
-                recordCase "cli: `plan --json` under BLADE_LLVM=1 says budget_scope process"
-                    (code = 0 && out.Contains "\"lane\":\"llvm\""
-                     && out.Contains "\"budget_scope\":\"process\",\"runtime\":\"llvm-shim\"" && not (out.Contains "per-thread"))
-                    (out + err)
+                runCases (cliVerbsLlvmPoolCases llvmEnv)
                 File.WriteAllText(Path.Combine(dir, "pool_fallback.blade"), poolFallbackSource)
                 let (code, out, err) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade"; "--json" ]
                 let (code2, out2, err2) = spawnWith (llvmEnv "1") dir [ "plan"; "pool_fallback.blade" ]
@@ -618,194 +1034,26 @@ let runCliSmokeTests () : TH.BlockResult =
             // and opens no thread team, so the plan must say declined for both
             // -- never `[blas-routing v1] ...: applied`. The C++ twin (same
             // knobs minus BLADE_LLVM) is the control that keeps it non-vacuous.
-            File.WriteAllText(Path.Combine(dir, "lane.blade"),
-                "type V = Idx<7>\ntype S = Idx<11>\n"
-                + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) where omp(i: 1) -> Float64(i * 11 + s) * 0.25 |> compute\n"
-                + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
             let laneEnv llvm = [ ("BLADE_BLAS", "1"); ("BLADE_LLVM", llvm); ("BLADE_OMP_THREADS", null); ("BLADE_FP_REPRO", null) ]
-            let (code, out, err) = spawnWith (laneEnv null) dir [ "plan"; "lane.blade" ]
-            recordCase "cli: `plan` (C++ lane) reports the BLAS route and the thread pragma applied"
-                (code = 0 && out.Contains "[blas-routing v1] g" && out.Contains ": applied [Syrk" && not (out.Contains "lane: ")
-                 && out.Contains "[omp v1] x" && not (out.Contains "the LLVM lane"))
-                (out + err)
+            runCases (cliVerbsLaneCppCases laneEnv)
             if (Blade.Build.resolveClang ()).IsNone then
                 record "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions" TH.Skip "no clang (the LLVM lane is unavailable)"
             else
-                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade" ]
-                let lines = out.Split('\n') |> Array.map (_.Trim())
-                let routeLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[blas-routing v1]")
-                let ompLines = lines |> Array.filter (fun (l: string) -> l.StartsWith "[omp v1]")
-                recordCase "cli: `plan` under BLADE_LLVM=1 reports the LLVM lane's decisions"
-                    (code = 0 && out.Contains "lane: LLVM (BLADE_LLVM=1)"
-                     && routeLines.Length > 0
-                     && routeLines |> Array.forall (fun l -> l.Contains "declined -- the LLVM lane has no BLAS/LAPACK route")
-                     && ompLines.Length > 0
-                     && ompLines |> Array.forall (fun l ->
-                            l.Contains "declined -- the LLVM lane has no thread-level form"
-                            && l.Contains "[omp] requested but emitted serial"))
-                    (out + err)
-                let (code, out, err) = spawnWith (laneEnv "1") dir [ "plan"; "lane.blade"; "--json" ]
-                recordCase "cli: `plan --json` under BLADE_LLVM=1 names the lane"
-                    (code = 0 && out.Contains "\"lane\":\"llvm\"") (out + err)
+                runCases (cliVerbsLaneLlvmCases laneEnv)
                 // THE ROW-SLOT FORM (G35) is the C++ lane's thread team; the
                 // LLVM lane runs the same rows serially, and its plan says so
                 // in its own words -- never the generic `reassoc nsz` line a
                 // fold form it does not know would get. C++ twin as control.
-                File.WriteAllText(Path.Combine(dir, "rowslots.blade"),
+                let rowslotsSrc =
                     "type Var = Idx<521>\ntype Obs = Idx<3>\n"
                     + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
                     + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
-                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
+                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), lambda(u, v) where omp -> u + v, 0.0)\n"
                 let slotEnvKnob llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_FOLD_ROW_SLOTS", knob) ]
                 let slotEnv llvm = slotEnvKnob llvm null
-                // THE PRECEDENCE (round 3, W2-0a): this walk is one BOTH the row
-                // slots and the ordered orbit scatter admit; by default the
-                // scatter is taken and the row-slot record says it yielded.
-                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots.blade" ]
-                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the ordered orbit scatter taken over the admitted row-slot form"
-                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
-                     && out.Contains ("declined -- row-slot form: " + Blade.OrbitFold.rowSlotsYieldedToScatter + " [" + Blade.OrbitFold.rowSlotsYieldedForm)
-                     && out.Contains "the ordered orbit scatter runs serially (its chains thread only as a wavefront; the threaded complete-row form admitted but yielded"
-                     && not (out.Contains "fold form: threaded complete rows (repro): 521"))
-                    (out + err)
-                // BLADE_FOLD_ROW_SLOTS=prefer: the round-2 order and its records.
-                let (code, out, err) = spawnWith (slotEnvKnob null "prefer") dir [ "plan"; "rowslots.blade" ]
-                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1, BLADE_FOLD_ROW_SLOTS=prefer) reports the threaded complete-row form applied"
-                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
-                     // G35 PRECEDENCE under prefer: the scatter the same walk admits is recorded as yielded
-                     && out.Contains "declined -- ordered orbit scatter not taken: the threaded complete-row form (G35) is taken under the omp request (BLADE_FOLD_ROW_SLOTS=prefer")
-                    (out + err)
-                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots.blade" ]
-                // The LLVM lane (no threads, no row slots) is unchanged: its
-                // emitter's own record says it scatters, and the C++ lane's
-                // yielded row-slot record is restated in this lane's words.
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the yielded row-slot form, and the LLVM emitter's own record says it scatters"
-                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no threaded complete-row form); this lane's scatter record for the walk says which form it runs"
-                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
-                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
-                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: ordered orbit scatter (repro"))
-                    (out + err)
-                let (code, out, err) = spawnWith (slotEnvKnob "1" "prefer") dir [ "plan"; "rowslots.blade" ]
-                // ...and under prefer the C++ lane's row slots are restated as
-                // the serial walk the LLVM lane scatters (both records say so).
-                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_FOLD_ROW_SLOTS=prefer restates the row-slot form, and the LLVM emitter's own record says it scatters"
-                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs this walk serially in the same association"
-                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 521, row groups of 4)"
-                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: declined -- ordered orbit scatter not taken: the threaded complete-row form (G35)"
-                     && out.Contains "C++ lane: applied"
-                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
-                    (out + err)
-                // A walk the scatter declines (the body reads the mirror cell
-                // too): the row slots are the C++ form by default, and the LLVM
-                // lane's form is the serial walk.
-                File.WriteAllText(Path.Combine(dir, "rowslots_walk.blade"),
-                    File.ReadAllText(Path.Combine(dir, "rowslots.blade")).Replace("g(i, j) * g(i, j)", "g(i, j) * g(j, i)"))
-                let (code, out, err) = spawnWith (slotEnv null) dir [ "plan"; "rowslots_walk.blade" ]
-                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) keeps the threaded complete-row form where the scatter declines"
-                    (code = 0 && out.Contains ": applied [fold form: threaded complete rows (repro): 521 row folds"
-                     && not (out.Contains "admitted but yielded"))
-                    (out + err)
-                let (code, out, err) = spawnWith (slotEnv "1") dir [ "plan"; "rowslots_walk.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the row-slot form as the LLVM lane's serial walk (scatter declined)"
-                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime: it runs the serial walk"
-                     && out.Contains "C++ lane: applied"
-                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: threaded complete rows"))
-                    (out + err)
-                // THE ROW-OWNED PULL (round 3, D-P3) is the C++ lane's thread
-                // team over the rank-3 scatter's leaf chains: the C++ plan
-                // says applied (form + omp record); under BLADE_LLVM=1 the
-                // record is the LLVM emitter's own serial scatter (the C++
-                // verdict trailing) and the team's omp record is declined;
-                // the pull's decline (knob off) is restated as this lane's.
-                File.WriteAllText(Path.Combine(dir, "pull3.blade"),
-                    "type Var = Idx<13>\ntype Obs = Idx<2>\n"
-                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 3 + s * 5) % 7) - 2.0 |> compute\n"
-                    + "let t = method_for(x, x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>, c: Array<Float64 like Obs>) where comm(a, b, c) -> prodsum(a, b, c) |> compute\n"
-                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> reduce(method_for(range<Var>) <@> lambda(k) -> t(i, j, k) * t(i, j, k), (+)), (+)), lambda(u, v) where omp -> u + v, 0.0)\n")
                 let pullEnv llvm knob = [ ("BLADE_LLVM", llvm); ("BLADE_FP_REPRO", "1"); ("BLADE_OMP_THREADS", null); ("BLADE_TILE_TUNE", "pull_min=0"); ("BLADE_ORBIT_PULL", knob) ]
-                let (code, out, err) = spawnWith (pullEnv null null) dir [ "plan"; "pull3.blade" ]
-                recordCase "cli: `plan` (C++ lane, BLADE_FP_REPRO=1) reports the row-owned pull applied with its team"
-                    (code = 0 && out.Contains "row-owned pull on a thread team" && out.Contains "applied [omp parallel num_threads(T) + ascending row claims + team-completion barrier")
-                    (out + err)
-                let (code, out, err) = spawnWith (pullEnv "1" null) dir [ "plan"; "pull3.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull as the LLVM emitter's serial scatter, its team declined"
-                    (code = 0 && out.Contains "lane: LLVM"
-                     && out.Contains "applied [fold form: ordered orbit scatter (rank 3, extent 13, row groups of 4, shared pair chains 91 of 169): one pass"
-                     && out.Contains "(recorded by the LLVM lane's emitter); C++ lane: applied"
-                     && not (out.Contains "row-owned pull on a thread team; ")
-                     && out.Contains "declined -- the LLVM lane has no thread-level form"
-                     && not (out.Contains "applied [omp parallel num_threads(T) + ascending row claims"))
-                    (out + err)
-                let (code, out, err) = spawnWith (pullEnv "1" "0") dir [ "plan"; "pull3.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 restates the pull's decline in this lane's words"
-                    (code = 0 && out.Contains "declined -- the LLVM lane has no thread runtime (no row-owned pull form)"
-                     && out.Contains "C++ lane: declined -- row-owned pull scatter not taken: disabled by BLADE_ORBIT_PULL=0"
-                     && not (out.Contains "fold form: one accumulator chain with `reassoc nsz` (LLVM lane; the vectorizer picks the lanes); C++ lane fold form: row-owned pull"))
-                    (out + err)
-                // THE LLVM SCATTER RECORD IS THE EMITTER'S OWN: an unforced map
-                // over a stored pool (C++: a deferred computation; LLVM: a
-                // producer it would have to execute) is declined by each lane
-                // in its own words, never translated into a taken scatter; a
-                // Float32 strict walk the C++ lane scatters is not claimed for
-                // a lane that cannot emit it.
-                File.WriteAllText(Path.Combine(dir, "scatter_unforced.blade"),
-                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
-                    + "function radd(a: Float64, b: Float64) where repro -> Float64 = a + b\n"
-                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float64((i * 7 + s * 3) % 11) * 0.37 |> compute\n"
-                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like Obs>, b: Array<Float64 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
-                    + "let h = method_for(g) <@> lambda(v: Float64) -> v * 0.25 + 1.0\n"
-                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> h(i, j), radd, 0.5), radd, 0.0)\n")
-                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_unforced.blade" ]
-                // Round 4 wave 7 (lane B, G199): the kernel CAPTURES the
-                // deferred h, and a kernel capture of a deferred module map is
-                // forced (stored) before the fold in the LLVM lane too, as the
-                // C++ lane forces it (collectDeferredKernelCaptures): the walk
-                // then reads a stored pool and BOTH lanes take the scatter (it
-                // used to stay a producer in this lane only, which declined)
-                recordCase "cli: `plan` under BLADE_LLVM=1 scatters a captured deferred source once it is forced, as the C++ lane does"
-                    (code = 0 && out.Contains "lane: LLVM"
-                     && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5"
-                     && not (out.Contains "the compact array is an unforced computation, not a stored pool (LLVM lane"))
-                    (out + err)
-                File.WriteAllText(Path.Combine(dir, "scatter_f32.blade"),
-                    "type Var = Idx<5>\ntype Obs = Idx<3>\n"
-                    + "let x = method_for(range<Var>, range<Obs>) <@> lambda(i, s) -> Float32(Float64((i * 7 + s * 3) % 11) * 0.37) |> compute\n"
-                    + "let g = method_for(x, x) <@> lambda(a: Array<Float32 like Obs>, b: Array<Float32 like Obs>) where comm(a, b) -> prodsum(a, b) |> compute\n"
-                    + "let s = reduce(method_for(range<Var>) <@> lambda(i) -> reduce(method_for(range<Var>) <@> lambda(j) -> g(i, j) * g(i, j), (+)), (+))\n")
-                let (code, out, err) = spawnWith [ ("BLADE_LLVM", null); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
-                recordCase "cli: `plan` (C++ lane) scatters a Float32 strict walk"
-                    (code = 0 && out.Contains "applied [fold form: ordered orbit scatter (rank 2, extent 5") (out + err)
-                let (code, out, err) = spawnWith [ ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", "1") ] dir [ "plan"; "scatter_f32.blade" ]
-                // Since round 6 the LLVM lane EMITS this Float32 program; its own
-                // scatter is Float64 / Int64 only, so its emitter declines it
-                // (the walk, bitwise the scatter under repro) and the record
-                // says so beside the C++ lane's applied scatter.
-                recordCase "cli: `plan` under BLADE_LLVM=1 does not claim a Float32 scatter for the LLVM lane"
-                    (code = 0
-                     && out.Contains "lane: LLVM"
-                     && out.Contains "declined -- ordered orbit scatter not taken: the accumulator or element type is not Float64 / Int64 (LLVM lane)"
-                     && not (out.Contains "applied [fold form: ordered orbit scatter"))
-                    (out + err)
-                // THE TILE CORE (M6): a gram above the crossover, BLAS off,
-                // materializes through the shared C core in the LLVM lane, and
-                // the plan says so in this lane's words (not the C++ lane's
-                // dsyrk_tri, which this executable does not contain).
-                File.WriteAllText(Path.Combine(dir, "tile.blade"),
-                    "type V = Idx<61>\ntype S = Idx<31>\n"
-                    + "let x = method_for(range<V>, range<S>) <@> lambda(i, s) -> Float64(i * 11 + s) * 0.25 |> compute\n"
-                    + "let g = method_for(x, x) <@> lambda(a: Array<Float64 like S>, b: Array<Float64 like S>) where comm(a, b) -> prodsum(a, b) |> compute\n")
                 let tileEnv knob = [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_SYRK_TILE", knob); ("BLADE_FP_REPRO", null) ]
-                let (code, out, err) = spawnWith (tileEnv null) dir [ "plan"; "tile.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1 reports the syrk tile through the shared C core"
-                    (code = 0 && out.Contains "fold form: syrk tile (shared C core) 6x8, KC=31"
-                     && out.Contains "[microkernel v1] g @ "
-                     && out.Contains ": applied [packed syrk tile (shared C core")
-                    (out + err)
-                let (code, out, err) = spawnWith (tileEnv "0") dir [ "plan"; "tile.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SYRK_TILE=0 reports the tile declined"
-                    (code = 0 && out.Contains "declined -- BLADE_SYRK_TILE=0/off: the brick nest"
-                     && not (out.Contains "fold form: syrk tile (shared C core)"))
-                    (out + err)
+                runCases (cliVerbsFoldFormCases rowslotsSrc slotEnvKnob slotEnv pullEnv tileEnv)
                 // THE ROW-CONTRACTION TILE CORES (M7 / M8): the antisym pair
                 // and the rank-3 simplex through the same shared C core, in
                 // the default AND the repro build (no reorder licence used),
@@ -821,27 +1069,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 let rowEnv (knob: string) (value: string) (repro: string) =
                     [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", "1"); ("BLADE_FP_REPRO", repro)
                       ("BLADE_ANTISYM_TILE", null); ("BLADE_SIMPLEX_TILE", null); (knob, value) ]
-                for repro in [ null; "1" ] do
-                    let build = if isNull repro then "default" else "BLADE_FP_REPRO=1"
-                    let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" null repro) dir [ "plan"; "anti.blade" ]
-                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the antisym tile through the shared C core"
-                        (code = 0 && out.Contains "fold form: antisym tile (shared C core) sequential 6x8"
-                         // the LLVM lane is the serial regime: anti_g's default is 1 there
-                         && out.Contains ("whole chain per tile, " + Blade.CodeGenExprSupport.antisymSerialDefaultNote Blade.CodeGenExprSupport.antisymNoTeamRequested)
-                         && out.Contains "[microkernel v1] l @ "
-                         && out.Contains ": applied [antisym tile (shared C core")
-                        (out + err)
-                    let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" null repro) dir [ "plan"; "sym3.blade" ]
-                    recordCase $"cli: `plan` under BLADE_LLVM=1 ({build}) reports the simplex tile through the shared C core"
-                        (code = 0 && out.Contains "fold form: simplex tile (shared C core) 6x8 with W panel, KC=67, live-accumulator edges, then / d per cell"
-                         && out.Contains "[microkernel v1] t @ "
-                         && out.Contains ": applied [simplex tile (shared C core")
-                        (out + err)
-                let (code, out, err) = spawnWith (rowEnv "BLADE_ANTISYM_TILE" "0" null) dir [ "plan"; "anti.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_ANTISYM_TILE=0 reports the tile declined"
-                    (code = 0 && out.Contains "declined -- BLADE_ANTISYM_TILE=0/off: the plain per-cell nest"
-                     && not (out.Contains "fold form: antisym tile (shared C core)"))
-                    (out + err)
+                runCases (cliVerbsRowTileCases rowEnv)
                 // THE ANTISYM ROW GROUPS, EXECUTED (corpus symmetry/173's
                 // program -- which the corpus runs under the default G = 1 --
                 // under the cache-budget policy, anti_g=0: row groups of 4, 4
@@ -870,11 +1098,7 @@ let runCliSmokeTests () : TH.BlockResult =
                          && v1.Contains "ss = 598045803.5" && v1.Contains "l02 = -600.5" && v1.Contains "l0_last = 202.5"
                          && v1.Contains "l_g0_cross = -199.0" && v1.Contains "l_g1_mid = 604.0" && v1.Contains "l_g2_far = 597.0")
                         ($"default: {v0} | anti_g=0: {v1} | " + e0 + e1)
-                let (code, out, err) = spawnWith (rowEnv "BLADE_SIMPLEX_TILE" "0" null) dir [ "plan"; "sym3.blade" ]
-                recordCase "cli: `plan` under BLADE_LLVM=1, BLADE_SIMPLEX_TILE=0 reports the tile declined"
-                    (code = 0 && out.Contains "declined -- BLADE_SIMPLEX_TILE=0/off: the plain per-cell nest"
-                     && not (out.Contains "fold form: simplex tile (shared C core)"))
-                    (out + err)
+                runCases (cliVerbsSimplexDeclineCases rowEnv)
                 // THE COMPOUND REPRESENTATION (G9): a rank-1 `compound(dense,
                 // mask)` is the compaction in both lanes (the plan line passes
                 // through unchanged under BLADE_LLVM=1, which emits exactly
@@ -899,23 +1123,12 @@ let runCliSmokeTests () : TH.BlockResult =
                     ": applied [representation: rank-1 compaction (counted in the mask pass, gathered in one pass -- compaction fusion; no hash table; positions elided: the demand census found no consumer that reads them)"
                 let hashedLine =
                     "declined -- hashed SparseIdx: a rank-2 mask has no closed-form rank, so compound_index_t<2> keeps one tuple->rank hash entry per present cell"
-                for llvm in [ null; "1" ] do
-                    let lane = if isNull llvm then "C++ lane" else "BLADE_LLVM=1"
-                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound1.blade" ]
-                    recordCase $"cli: `plan` ({lane}) reports the rank-1 compound as the compaction"
-                        (code = 0 && out.Contains "[compound v1] y @ " && out.Contains compactionLine
-                         && (isNull llvm || out.Contains "lane: LLVM (BLADE_LLVM=1)"))
-                        (out + err)
-                    // The rank-2 compound stays hashed; under BLADE_LLVM=1 the
-                    // lane refuses the program (the plan is the C++ lane's,
-                    // which is the executable that will run).
-                    let (code, out, err) = spawnWith (compoundEnv llvm) dir [ "plan"; "compound2.blade" ]
-                    recordCase $"cli: `plan` ({lane}) reports the rank-2 compound as the hashed index"
-                        (code = 0 && out.Contains "[compound v1] h @ " && out.Contains hashedLine
-                         && not (out.Contains compactionLine))
-                        (out + err)
+                runCases (cliVerbsCompoundCases compoundEnv compactionLine hashedLine)
         finally
             try Directory.Delete(dir, true) with _ -> ()
+
+let private cliSmokeCompactionFusion (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe } = ctx
     // --- COMPACTION FUSION, run (Blade.Optimize.planCompactionFusion) ---
     // The licensed fold form and the LLVM lane's arithmetic are invisible to
     // the repro-pinned differentials, so the knob is compared here, at run
@@ -1344,6 +1557,9 @@ let runCliSmokeTests () : TH.BlockResult =
                 (eOn = 0 && eOff = 0 && bare llOn && not (bare llOff)) ""
         finally
             try Directory.Delete(dir, true) with _ -> ()
+
+let private cliSmokeGroupAggregate (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; SelfExe = selfExe } = ctx
     // --- AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, round 3 W3-1, gap G71) ---
     // (1) The key -> group map (blade_member.h, the C core both lanes run): a
     // g++-built driver streams keys of several shapes (few / many distinct,
@@ -1948,6 +2164,9 @@ let runCliSmokeTests () : TH.BlockResult =
                         ($"exit {c}; plan {p}; got {got}")
         finally
             try Directory.Delete(dir, true) with _ -> ()
+
+let private cliSmokeMembershipHoist (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; SelfExe = selfExe } = ctx
     // --- MEMBERSHIP HOISTING (Blade.Optimize.planMembershipHoist, round 3 B-T1) ---
     // (1) The C core itself (blade_member.h, the one text both lanes run): a
     // g++-built driver builds 220 sets -- empty, tiny, at the linear
@@ -2256,6 +2475,9 @@ let runCliSmokeTests () : TH.BlockResult =
                     (c = 0 && o.Contains "[member-hoist v1] k_even" && o.Contains $"preferred representation: {rep} (span 61, M 20) -- forced by BLADE_MEMBER_HOIST={knob}") ""
         finally
             try Directory.Delete(dir, true) with _ -> ()
+
+let private cliSmokeHashJoin (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; SelfExe = selfExe } = ctx
     // --- HASH EQUIJOIN (Blade.Optimize.planEquiJoin, round 3 W3-2, item T2) ---
     // (1) The join's C core (blade_join_* in blade_member.h): a g++-built
     // driver builds the CSR over right-key sets of several shapes -- empty,
@@ -2518,6 +2740,9 @@ let runCliSmokeTests () : TH.BlockResult =
                     recordCase $"hash join: {nm} -- compile-time report gate" false why
         finally
             try Directory.Delete(dir, true) with _ -> ()
+
+let private cliSmokeBuildDir (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; Spawn = spawn; Beside = beside; SelfExe = selfExe } = ctx
     if not capabilities.Value.HasGpp || selfExe.IsNone then
         record "build dir: run writes nothing beside the source" TH.Skip "requires g++ and the Blade executable"
     else
@@ -2557,6 +2782,40 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(dir, true) with _ -> ()
 
+let private cliProviderRelativeCases : CliCase list =
+    // From the PARENT directory: the relative store is found beside the source.
+    [ { cliCase with
+          Name = "provider paths: `check` resolves a relative store against the source directory"
+          Args = [ "check"; Path.Combine("sub", "p.blade") ]
+          Expect = [ ExitIs 0; OutHas "OK"; ErrLacks "BL2008" ] }
+      { cliCase with
+          Name = "provider paths: `plan` resolves it too"
+          Args = [ "plan"; Path.Combine("sub", "p.blade") ]
+          Expect = [ ExitIs 0; ErrLacks "BL2008" ] } ]
+
+let private cliProviderStoreCases (sub: string) : CliCase list =
+    // An absolute store path is untouched.
+    [ { cliCase with
+          Name = "provider paths: an absolute store path still resolves"
+          Args = [ "check"; Path.Combine("sub", "r.blade") ]
+          Expect = [ ExitIs 0; OutHas "OK" ] }
+      // A store that is not there is still BL2008 at the load site, and
+      // the message names where it was looked for.
+      { cliCase with
+          Name = "provider paths: a missing store is still BL2008, naming the resolved path"
+          Args = [ "check"; Path.Combine("sub", "q.blade") ]
+          Expect =
+            [ ExitIsNot 0; ErrHas "BL2008"; ErrHas "no_such_store.csv"
+              ErrHas (Path.Combine(Path.GetFullPath sub, "no_such_store.csv")) ] } ]
+
+let private cliProviderRunCases : CliCase list =
+    [ { cliCase with
+          Name = "provider paths: `run` from another directory folds and runs"
+          Args = [ "run"; Path.Combine("sub", "p.blade") ]
+          Expect = [ ExitIs 0; OutHas "s = 10.0" ] } ]
+
+let private cliSmokeProviderPaths (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; Spawn = spawn; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe } = ctx
     // --- Provider store paths resolve against the SOURCE directory ---
     //
     // `blade run` executes the program with the source file's directory as its
@@ -2582,12 +2841,8 @@ let runCliSmokeTests () : TH.BlockResult =
             File.WriteAllText(Path.Combine(sub, "p.blade"), prog "data.csv")
             File.WriteAllText(Path.Combine(sub, "q.blade"), prog "no_such_store.csv")
             File.WriteAllText(Path.Combine(sub, "r.blade"), prog (Path.Combine(sub, "data.csv").Replace('\\', '/')))
-            // From the PARENT directory: the relative store is found beside the source.
-            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "p.blade") ]
-            recordCase "provider paths: `check` resolves a relative store against the source directory"
-                (code = 0 && out.Contains "OK" && not (err.Contains "BL2008")) (out + err)
-            let (code, out, err) = spawn dir [ "plan"; Path.Combine("sub", "p.blade") ]
-            recordCase "provider paths: `plan` resolves it too" (code = 0 && not (err.Contains "BL2008")) (out + err)
+            let runCases = runCliCases spawnWith record dir
+            runCases cliProviderRelativeCases
             // The C++ names the store exactly as written: run time resolves it
             // against the executable's working directory, as it always did.
             let (code, out, err) = spawn dir [ "emit"; Path.Combine("sub", "p.blade") ]
@@ -2597,16 +2852,7 @@ let runCliSmokeTests () : TH.BlockResult =
             recordCase "provider paths: `emit` compiles and bakes the path as written"
                 (code = 0 && asWritten)
                 (if code <> 0 then out + err elif not asWritten then "the C++ does not name the store as written" else "")
-            // An absolute store path is untouched.
-            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "r.blade") ]
-            recordCase "provider paths: an absolute store path still resolves" (code = 0 && out.Contains "OK") (out + err)
-            // A store that is not there is still BL2008 at the load site, and
-            // the message names where it was looked for.
-            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "q.blade") ]
-            recordCase "provider paths: a missing store is still BL2008, naming the resolved path"
-                (code <> 0 && err.Contains "BL2008" && err.Contains "no_such_store.csv"
-                 && err.Contains (Path.Combine(Path.GetFullPath sub, "no_such_store.csv")))
-                (out + err)
+            runCases (cliProviderStoreCases sub)
             // With no source scope (the harness compiling a string), resolution
             // is the process working directory, as before.
             recordCase "provider paths: no scope leaves a relative path untouched"
@@ -2617,12 +2863,12 @@ let runCliSmokeTests () : TH.BlockResult =
                  && Blade.ProviderRegistry.SourceBase.current () = None)
                 ""
             if capabilities.Value.HasGpp then
-                let (code, out, err) = spawn dir [ "run"; Path.Combine("sub", "p.blade") ]
-                recordCase "provider paths: `run` from another directory folds and runs"
-                    (code = 0 && out.Contains "s = 10.0") (out + err)
+                runCases cliProviderRunCases
         finally
             try Directory.Delete(dir, true) with _ -> ()
 
+let private cliSmokeReplAndModules (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase } = ctx
     // --- REPL / notebook: re-running a declaration cell replaces it ---
     //
     // The rebind key had no `struct` / `interface` / `impl` arm, so re-running
@@ -2658,6 +2904,97 @@ let runCliSmokeTests () : TH.BlockResult =
                 | Ok () -> record label TH.Fail "no pins found"
                 | Error errs -> record label TH.Fail (String.concat "; " errs + " | " + r.Stdout)
 
+/// What an internal name the program never wrote contains: an arrow parameter's array instance
+/// (`__arrow`), a generic specialization (`_HM_`), a lifted lambda, a call-site wrapper or a
+/// partial-application parameter (`__lambda`, `__wrap`, `__pa`).
+let private cliInternalNameMarks = [ "__arrow"; "_HM_"; "__lambda"; "__wrap"; "__pa" ]
+
+let private cliNamesPlanCases : CliCase list =
+    [ { cliCase with
+          Name = "names: a plan decision inside an array instance names the declaration"
+          Files =
+            [ "p.blade",
+              "type L = Idx<3>\n"
+              + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
+              + "function centered(c) = {\n"
+              + "    let m = (c(0) + c(1) + c(2)) / 3.0\n"
+              + "    let m2 = (c(0) + c(1) + c(2)) / 3.0\n"
+              + "    method_for(range<L>) <@> lambda(j) -> c(j) - m - m2\n"
+              + "}\n"
+              + "let r = centered(A) |> compute\n" ]
+          Args = [ "plan"; "p.blade" ]
+          Expect = [ ExitIs 0; OutHas "[cse v2] centered:" ] @ List.map AnyLacks cliInternalNameMarks
+          Detail = OnFail OutErr }
+      // Lambdas: a let-bound one is its binding (`k`), an unbound one
+      // `lambda in e`, the checker's operator lifting of `a - mymean(a)`
+      // the operator's function `(-) in c`; the hoist evidence names
+      // the callee as written (`mymean`, not its specialization).
+      { cliCase with
+          Name = "names: plan subjects name a lambda by its binding, its scope, or its operator"
+          Files =
+            [ "l.blade",
+              "function mymean(row: Float64^1) -> Float64 = reduce(row, (+)) / Float64(extents(row))\n"
+              + "let a = Float64([1.0, 2.0, 3.0, 4.0])\n"
+              + "let c = a - mymean(a)\n"
+              + "let e = method_for(a) <@> lambda(x) -> x - mymean(a) |> compute\n"
+              + "let k = lambda(x: Float64) -> {\n"
+              + "    let p = x * 2.0 + 1.0\n"
+              + "    let q = x * 2.0 + 1.0\n"
+              + "    p + q\n"
+              + "}\n"
+              + "let kk = k(1.0)\n" ]
+          Args = [ "plan"; "l.blade" ]
+          Expect =
+            [ ExitIs 0
+              OutHas "[invariant-hoist v1] (-) in c: applied [`mymean(a)` does not read the element"
+              OutHas "[invariant-hoist v1] lambda in e: applied [`mymean(a)` does not read the element"
+              OutHas "[cse v2] k: applied" ]
+            @ List.map AnyLacks cliInternalNameMarks
+          Detail = OnFail OutErr }
+      // Closed-form enumerable domains (docs/plans/structural/06, bench
+      // G4): `plan` names the ENUMERATION FORM per consumer -- the affine
+      // nest's bounds in the struct's own field names, and whether the
+      // consumer streams it (a fold) or fills an array (a map).
+      { cliCase with
+          Name = "domains: plan names the closed-form affine nest and its consumer"
+          Files =
+            [ "d.blade",
+              "let static n: Int64 = 13\n"
+              + "let static w: Int64 = 3\n"
+              + "static struct Band {\n"
+              + "    i: Int32<min=0, max=n-1>,\n"
+              + "    j: Int32<min=0, max=n-1>\n"
+              + "} where abs(i - j) <= w\n"
+              + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * j, (+))\n"
+              + "let R = method_for(range<Band>) <@> lambda(i, j) -> i + j |> compute\n" ]
+          Args = [ "plan"; "d.blade" ]
+          Expect =
+            [ ExitIs 0
+              OutHas "[domain-enum v1] s @ 7:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 12], j in [max(0, i - 3), min(12, i + 3)]), 79 cell(s); consumer: streamed fold"
+              OutHas "[domain-enum v1] R @ 8:1: applied [enumeration of Band: closed-form affine nest"
+              OutHas "consumer: map (the fill streams the nest" ]
+          Detail = OnFail OutErr } ]
+
+let private cliNamesAliasCases : CliCase list =
+    // Gap G60: a fold through an alias of a deferred map fuses and
+    // forces nothing, so neither name is materialized -- asked for by
+    // name, `--print` refuses them (the absence the corpus pins cannot
+    // state; loops/541).
+    [ { cliCase with
+          Name = "deferred alias: a fold through it forces neither name, so `--print g,g2` is refused (G60)"
+          Files =
+            [ "alias.blade",
+              "type Row = Idx<3>\n"
+              + "let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]\n"
+              + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
+              + "let g2 = g\n"
+              + "let s = reduce(g2, (+))\n" ]
+          Args = [ "run"; "alias.blade"; "--print"; "g,g2" ]
+          Expect = [ ExitIsNot 0; AnyHas "never materialized" ]
+          Detail = OnFail OutErr } ]
+
+let private cliSmokeNames (ctx: CliSmokeContext) : unit =
+    let { Record = record; RecordCase = recordCase; Spawn = spawn; SpawnWith = spawnWith; SelfExe = selfExe } = ctx
     // --- An arrow parameter's array instance prints as its declaration ---
     //
     // A call handing an arrow parameter an array calls the declaration's ARRAY
@@ -2675,8 +3012,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // the program wrote either: a lambda prints as the `let` binding it is
     // bound to, else `lambda in <scope>`; an operator function as its
     // section, `(/) in <scope>` (IR.anonymousCallableName).
-    let internalName (s: string) =
-        s.Contains "__arrow" || s.Contains "_HM_" || s.Contains "__lambda" || s.Contains "__wrap" || s.Contains "__pa"
+    let internalName (s: string) = cliInternalNameMarks |> List.exists (fun (m: string) -> s.Contains m)
     let frameLines (s: string) =
         s.Replace("\r\n", "\n").Split('\n')
         |> Array.filter (fun l -> l.StartsWith "  at ")
@@ -2772,59 +3108,8 @@ let runCliSmokeTests () : TH.BlockResult =
         let dir = Path.Combine(Path.GetTempPath(), "blade_cli_names_plan_" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory dir |> ignore
         try
-            File.WriteAllText(Path.Combine(dir, "p.blade"),
-                "type L = Idx<3>\n"
-                + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
-                + "function centered(c) = {\n"
-                + "    let m = (c(0) + c(1) + c(2)) / 3.0\n"
-                + "    let m2 = (c(0) + c(1) + c(2)) / 3.0\n"
-                + "    method_for(range<L>) <@> lambda(j) -> c(j) - m - m2\n"
-                + "}\n"
-                + "let r = centered(A) |> compute\n")
-            let (code, out, err) = spawn dir [ "plan"; "p.blade" ]
-            expectCase "names: a plan decision inside an array instance names the declaration"
-                (code = 0 && out.Contains "[cse v2] centered:" && not (internalName (out + err))) (out + err)
-            // Lambdas: a let-bound one is its binding (`k`), an unbound one
-            // `lambda in e`, the checker's operator lifting of `a - mymean(a)`
-            // the operator's function `(-) in c`; the hoist evidence names
-            // the callee as written (`mymean`, not its specialization).
-            File.WriteAllText(Path.Combine(dir, "l.blade"),
-                "function mymean(row: Float64^1) -> Float64 = reduce(row, (+)) / Float64(extents(row))\n"
-                + "let a = Float64([1.0, 2.0, 3.0, 4.0])\n"
-                + "let c = a - mymean(a)\n"
-                + "let e = method_for(a) <@> lambda(x) -> x - mymean(a) |> compute\n"
-                + "let k = lambda(x: Float64) -> {\n"
-                + "    let p = x * 2.0 + 1.0\n"
-                + "    let q = x * 2.0 + 1.0\n"
-                + "    p + q\n"
-                + "}\n"
-                + "let kk = k(1.0)\n")
-            let (code, out, err) = spawn dir [ "plan"; "l.blade" ]
-            expectCase "names: plan subjects name a lambda by its binding, its scope, or its operator"
-                (code = 0
-                 && out.Contains "[invariant-hoist v1] (-) in c: applied [`mymean(a)` does not read the element"
-                 && out.Contains "[invariant-hoist v1] lambda in e: applied [`mymean(a)` does not read the element"
-                 && out.Contains "[cse v2] k: applied"
-                 && not (internalName (out + err))) (out + err)
-            // Closed-form enumerable domains (docs/plans/structural/06, bench
-            // G4): `plan` names the ENUMERATION FORM per consumer -- the affine
-            // nest's bounds in the struct's own field names, and whether the
-            // consumer streams it (a fold) or fills an array (a map).
-            File.WriteAllText(Path.Combine(dir, "d.blade"),
-                "let static n: Int64 = 13\n"
-                + "let static w: Int64 = 3\n"
-                + "static struct Band {\n"
-                + "    i: Int32<min=0, max=n-1>,\n"
-                + "    j: Int32<min=0, max=n-1>\n"
-                + "} where abs(i - j) <= w\n"
-                + "let s = reduce(method_for(range<Band>) <@> lambda(i, j) -> i * j, (+))\n"
-                + "let R = method_for(range<Band>) <@> lambda(i, j) -> i + j |> compute\n")
-            let (code, out, err) = spawn dir [ "plan"; "d.blade" ]
-            expectCase "domains: plan names the closed-form affine nest and its consumer"
-                (code = 0
-                 && out.Contains "[domain-enum v1] s @ 7:1: applied [enumeration of Band: closed-form affine nest (2 level(s): i in [0, 12], j in [max(0, i - 3), min(12, i + 3)]), 79 cell(s); consumer: streamed fold"
-                 && out.Contains "[domain-enum v1] R @ 8:1: applied [enumeration of Band: closed-form affine nest"
-                 && out.Contains "consumer: map (the fill streams the nest") (out + err)
+            let runCases = runCliCases spawnWith record dir
+            runCases cliNamesPlanCases
             // WHERE `Float64(x)` of an Int64 takes the split (CodeGenExprSupport):
             // only the closed-form domain's cell code -- the band kernel's callee
             // `phi` -- gets the vectorizable split; the scalar generator `gen`
@@ -2893,19 +3178,7 @@ let runCliSmokeTests () : TH.BlockResult =
                  && not (out.Contains "t__m0") && not (out.Contains "p__m0")
                  && i0 >= 0 && i1 > i0
                  && out.Contains "std::make_tuple(u__m0, u__m1)") (out + err)
-            // Gap G60: a fold through an alias of a deferred map fuses and
-            // forces nothing, so neither name is materialized -- asked for by
-            // name, `--print` refuses them (the absence the corpus pins cannot
-            // state; loops/541).
-            File.WriteAllText(Path.Combine(dir, "alias.blade"),
-                "type Row = Idx<3>\n"
-                + "let x: Array<Float64 like Row> = [1.0, 2.0, 3.0]\n"
-                + "let g = method_for(x) <@> lambda(v) -> v * 2.0\n"
-                + "let g2 = g\n"
-                + "let s = reduce(g2, (+))\n")
-            let (code, out, err) = spawn dir [ "run"; "alias.blade"; "--print"; "g,g2" ]
-            expectCase "deferred alias: a fold through it forces neither name, so `--print g,g2` is refused (G60)"
-                (code <> 0 && (out + err).Contains "never materialized") (out + err)
+            runCases cliNamesAliasCases
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,
@@ -2965,6 +3238,62 @@ let runCliSmokeTests () : TH.BlockResult =
           && not (session |> Map.exists (fun k _ -> internalName k)))
          (session |> Map.toList |> List.map fst |> String.concat ", "))
 
+let runCliSmokeTests () : TH.BlockResult =
+    let blockName = "CLI Smoke"
+    TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let recordCase name cond detail = record name (if cond then TH.Pass else TH.Fail) detail
+    // --- Builds happen in a private scratch directory, never beside the source ---
+    //
+    // `blade run` wrote the .cpp, ~15 runtime headers and the executable
+    // beside the source and deleted "the headers it created" afterwards, so two
+    // runs in one directory deleted each other's headers mid-compile, and every
+    // run left an executable behind.
+    let selfExe =
+        [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
+        |> List.tryFind File.Exists
+    let rec spawn (cwd: string) (args: string list) : int * string * string = spawnWith [] cwd args
+    /// `spawn` with extra environment for the CHILD only (null unsets), so a
+    /// knob a case needs never leaks into this process's other blocks.
+    and spawnWith (env: (string * string) list) (cwd: string) (args: string list) : int * string * string =
+        match selfExe with
+        | None -> (-1, "", "no Blade executable beside the test assembly")
+        | Some exe ->
+            let psi = System.Diagnostics.ProcessStartInfo(exe)
+            for (k, v) in env do
+                if isNull v then psi.Environment.Remove k |> ignore else psi.Environment.[k] <- v
+            for a in args do psi.ArgumentList.Add a
+            psi.WorkingDirectory <- cwd
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use p = System.Diagnostics.Process.Start psi
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit 180000 then (p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill() with _ -> ())
+                (-1, o.Result, "timed out")
+    let beside (dir: string) =
+        Directory.GetFiles dir |> Array.map Path.GetFileName |> Array.sort |> List.ofArray
+    let ctx = { Record = record; RecordCase = recordCase; Spawn = spawn; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe }
+    cliSmokeCompileRun ctx
+    cliSmokeSuiteEnvironment ctx
+    cliSmokePrintSelection ctx
+    cliSmokeFlagsHelpIce ctx
+    cliSmokeVerbs ctx
+    cliSmokeCompactionFusion ctx
+    cliSmokeGroupAggregate ctx
+    cliSmokeMembershipHoist ctx
+    cliSmokeHashJoin ctx
+    cliSmokeBuildDir ctx
+    cliSmokeProviderPaths ctx
+    cliSmokeReplAndModules ctx
+    cliSmokeNames ctx
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
@@ -5832,6 +6161,8 @@ let internal runFullSuite opts =
     runAllTestsFullWith
         [runCliSmokeTests; runStrictPinTests; runValidationCodeTests; runSurfacingTests; runSurfaceTests
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
+         (fun () -> Blade.Tests.KnobsTests.runKnobsSyncTests suiteClearedKnobs suitePinnedKnobs)
+         Blade.Tests.IRTraversalTests.runIrTraversalFastTests
          runCorpusWiringTests] opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
@@ -5913,6 +6244,8 @@ and internal dispatchTestClean (rest: string list) : int =
             tests.Length sample.Length Blade.Tests.Corpus.smokeStride
         let r = runTestCategoryFull "Smoke" tests "./generated_cpp_tests"
         if r.Failed = 0 then 0 else 1
+    | "knobs" :: kargs -> if (Blade.Tests.KnobsTests.runKnobsTests suiteClearedKnobs suitePinnedKnobs kargs).Failed = 0 then 0 else 1
+    | [ "ir-traversal" ] | [ "irtraversal" ] -> if (Blade.Tests.IRTraversalTests.runIrTraversalTests ()).Failed = 0 then 0 else 1
     | [ "corpus-wiring" ] | [ "corpuswiring" ] ->
         // Every tests/corpus directory is consumed by the default suite, the
         // interpreter differential and a `blade test <dir>` key. In-process,

@@ -453,8 +453,8 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         |> Result.bind (fun srcSts ->
             match srcSts |> List.tryFindIndex (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some i ->
-                Error (bl4012 sources.[i].Span
-                           ($"function '{ctx.FuncName}': the kernel of this former would receive COMPONENTS of a source that is {(statusStr srcSts.[i])}; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"))
+                Error (bl4012 sources[i].Span
+                           ($"function '{ctx.FuncName}': the kernel of this former would receive COMPONENTS of a source that is {(statusStr srcSts[i])}; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"))
             | None ->
                 let covariant =
                     freeVars Set.empty e |> Set.toList |> List.tryFind (fun n ->
@@ -739,7 +739,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                             combinePointwise sts
                             |> Result.mapError (fun m -> bl4012 e.Span $"function '{ctx.FuncName}': {m}")
                         else
-                            Error (bl4012 args.[i].Span
+                            Error (bl4012 args[i].Span
                                        ($"function '{ctx.FuncName}': a node-covariant value escapes to '{fn}', which carries no perm certificate -- certify it with `where ml.perm_equiv({ctx.N})` or pass only invariants")))
     | _ ->
         judgeAll args |> Result.bind (fun sts ->

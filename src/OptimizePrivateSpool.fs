@@ -157,7 +157,7 @@ let tryPlan (policy: PrivateSpoolPolicy) (printDemand: Set<string> option) (prog
             m.Bindings |> List.windowed 4 |> List.choose (function
                 | [p;t;b;r] ->
                     match p.Value, t.Value, b.Value, r.Value with
-                    | IRCompute (IRApplyCombinator pi), IRReduce (IRVar (pid, pt), fk, Some fs),
+                    | IRCompute (IRApplyCombinator pi), ReduceOfNamed (pid, pt, fk, Some fs),
                       IRBinOp (IRElementwise, IRDiv, IRVar (tid, tt), IRUnaryOp (IRCast (ETFloat64, _), IRExtent (IRVar (ep, ept), 0)), _),
                       IRReduceCompute (IRApplyCombinator ri, sk, ss)
                         when pid = p.Id && tid = t.Id && ep = p.Id && literal64 fs && literal64 ss

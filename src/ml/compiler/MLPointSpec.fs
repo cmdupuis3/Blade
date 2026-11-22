@@ -103,12 +103,12 @@ let matMul (a: int[][]) (b: int[][]) : int[][] =
     Array.init n (fun i ->
         Array.init n (fun j ->
             let mutable acc = 0
-            for k in 0 .. n - 1 do acc <- acc + a.[i].[k] * b.[k].[j]
+            for k in 0 .. n - 1 do acc <- acc + a[i][k] * b[k][j]
             acc))
 
 let matTranspose (a: int[][]) : int[][] =
     let n = a.Length
-    Array.init n (fun i -> Array.init n (fun j -> a.[j].[i]))
+    Array.init n (fun i -> Array.init n (fun j -> a[j][i]))
 
 let matNeg (a: int[][]) : int[][] =
     a |> Array.map (Array.map (fun v -> -v))
@@ -118,7 +118,7 @@ let matEq (a: int[][]) (b: int[][]) : bool =
 
 let matTrace (a: int[][]) : int =
     let mutable acc = 0
-    for i in 0 .. a.Length - 1 do acc <- acc + a.[i].[i]
+    for i in 0 .. a.Length - 1 do acc <- acc + a[i][i]
     acc
 
 /// A stable textual key for a tuple of matrices -- the element identity used
@@ -399,7 +399,7 @@ let pointGroup (name: string) : PointGroup =
             failwith $"""internal: unknown point group '{name}' -- the registry is {{{(String.concat ", " pointGroupNames)}}}"""
         | Some g ->
             certifyPointGroup g |> ignore
-            certified.[name] <- g
+            certified[name] <- g
             g
 
 /// Look a label up in a group. This is the unknown-label failure point of
@@ -498,8 +498,8 @@ let genericHomBlocks (alg: BlockAlgebra<'K>) (specIn: ('K * int) list) (specOut:
     let sOut = List.toArray specOut
     [ for bo in 0 .. sOut.Length - 1 do
         for bi in 0 .. sIn.Length - 1 do
-          if fst sIn.[bi] = fst sOut.[bo] then
-            yield (bi, bo, sOut.[bo], sIn.[bi]) ]
+          if fst sIn[bi] = fst sOut[bo] then
+            yield (bi, bo, sOut[bo], sIn[bi]) ]
 
 /// A point-group spec: (LABEL_NAME, multiplicity) entries against a group,
 /// in block order. Names rather than indices because `SVString` is already
@@ -572,7 +572,7 @@ let pgElementMatrix (grp: PointGroup) (spec: PgSpec) (el: PgElement) : int[][] =
             let off = List.item b starts + c * d
             for i in 0 .. d - 1 do
                 for j in 0 .. d - 1 do
-                    out.[off + i].[off + j] <- m.[i].[j])
+                    out[off + i][off + j] <- m[i][j])
     out
 
 // RESTRICTION FROM O(3) -- THE BRANCHING RULES, shipped as a TABLE.
@@ -650,9 +650,9 @@ let pgEmbedding (name: string) : PgEmbedding =
 
 /// det of a 3x3 integer matrix.
 let private det3 (m: int[][]) : int =
-    m.[0].[0] * (m.[1].[1] * m.[2].[2] - m.[1].[2] * m.[2].[1])
-    - m.[0].[1] * (m.[1].[0] * m.[2].[2] - m.[1].[2] * m.[2].[0])
-    + m.[0].[2] * (m.[1].[0] * m.[2].[1] - m.[1].[1] * m.[2].[0])
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+    - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+    + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 
 let private geoCache = Dictionary<string, (PgElement * int[][]) list>()
 
@@ -684,7 +684,7 @@ let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
         let pairs = els |> List.map (fun el -> (el, geoOf el.Word))
         // (2) MULTIPLICATIVITY
         let byAbs = Dictionary<string, int[][]>()
-        for (el, g) in pairs do byAbs.[tupleKey el.Mats] <- g
+        for (el, g) in pairs do byAbs[tupleKey el.Mats] <- g
         for (a, ga) in pairs do
             for (b, gb) in pairs do
                 let prodKey = tupleKey (List.map2 matMul a.Mats b.Mats)
@@ -698,7 +698,7 @@ let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
         let images = pairs |> List.map (fun (_, g) -> tupleKey [ g ]) |> List.distinct
         if List.length images <> grp.Order then
             failwith $"internal: the O(3) embedding of {grp.Name} has image of size {(List.length images)} but |G| = {grp.Order} -- it embeds a QUOTIENT, and restricting along it would decompose the wrong group"
-        geoCache.[grp.Name] <- pairs
+        geoCache[grp.Name] <- pairs
         pairs
 
 /// chi_l of a PROPER rotation whose 3x3 trace is t, by the Clebsch-Gordan
@@ -779,7 +779,7 @@ let restrictIrrep (grp: PointGroup) (l: int) (parity: int) : PgSpec =
             let got = matTrace (pgElementMatrix grp spec el)
             if got <> want then
                 failwith $"internal: the restriction of D^(l={l}, parity={parity}) to {grp.Name} reconstructs character {got} at element {(wordName grp el.Word)}, but the O(3) character there is {want} -- the branching table and the element action disagree"
-        restrictCache.[(grp.Name, l, parity)] <- spec
+        restrictCache[(grp.Name, l, parity)] <- spec
         spec
 
 /// THE BRANCHING RULE for a whole O(3) spec, given as raw (l, parity, mult)

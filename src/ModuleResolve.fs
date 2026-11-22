@@ -300,12 +300,12 @@ let resolveEntryWith (preScanned: Map<string, string * ModuleDecl>)
             // again makes the loop visible in the message.
             let names =
                 match stack |> Seq.tryFindIndex (fun (p, _) -> p = path) with
-                | Some i -> [ for k in i .. stack.Count - 1 -> snd stack.[k] ] @ [ label ]
+                | Some i -> [ for k in i .. stack.Count - 1 -> snd stack[k] ] @ [ label ]
                 | None -> [ label; label ]
             errors.Add(cycleDiag names via)
         | true, _ -> ()   // black: already visited, already in `ordered`
         | _ ->
-            state.[path] <- 1
+            state[path] <- 1
             stack.Add((path, label))
             let source =
                 try readSource path
@@ -319,11 +319,11 @@ let resolveEntryWith (preScanned: Map<string, string * ModuleDecl>)
                 | None ->
                     let (declared, imports, parsed) = scanFile path source
                     (path, declared, imports, parsed)
-            declaredIn.[path] <- declared
+            declaredIn[path] <- declared
             if declared <> "" then
                 match declaredBy.TryGetValue declared with
                 | true, other when other <> path -> errors.Add(duplicateDiag declared other path via)
-                | _ -> declaredBy.[declared] <- path
+                | _ -> declaredBy[declared] <- path
             let importerDir = dirOf path
             for (qname, span) in imports do
                 if not (isBuiltinModule qname) then
@@ -340,7 +340,7 @@ let resolveEntryWith (preScanned: Map<string, string * ModuleDecl>)
                             errors.Add(mismatchDiag dotted declaredThere full span)
                         | _ -> ()
             stack.RemoveAt(stack.Count - 1)
-            state.[path] <- 2
+            state[path] <- 2
             ordered.Add { Path = path; Stamp = stamp; Source = source
                           Declared = declared; Parsed = parsed }
 

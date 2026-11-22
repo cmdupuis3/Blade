@@ -276,7 +276,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
         let vetoed =
             c.IsRepro
             || (match c.Body with
-                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+                | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
                 | _ -> false)
         not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
     let isFloat (t: IRType) = match stripUnits t with IRTScalar (ETFloat64 | ETFloat32) -> true | _ -> false
@@ -316,7 +316,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
                     let fold =
                         arr |> Array.tryFind (fun b ->
                             who = $"`{b.Name}`"
-                            && (match b.Value with IRReduce (IRVar (v, _), _, _) -> v = sb.Id | _ -> false))
+                            && (match b.Value with ReduceOfNamed (v, _, _, _) -> v = sb.Id | _ -> false))
                     (match fold with
                      | None -> Error $"`{sb.Name}`'s one reader ({who}) is not a top-level binding whose whole value is `reduce({sb.Name}, k[, seed])`"
                      | Some fb ->

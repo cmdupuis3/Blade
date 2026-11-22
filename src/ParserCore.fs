@@ -549,96 +549,124 @@ let parseBody tokens = !parseBodyRef tokens
 
 // Active Patterns for Token Classification (sorted by precedence). The
 // (mode, op) pair returned by most of these is (Elementwise | Outer, BinOp).
-let (|LiteralTok|_|) = function
-    | TokInt v -> Some (LitInt v)
-    | TokFloat (v, _) -> Some (LitFloat v)
-    | TokBool v -> Some (LitBool v)
-    | TokString v -> Some (LitString v)
-    | TokChar v -> Some (LitChar v)
-    | _ -> None
+[<return: Struct>]
+let (|LiteralTok|_|) tok =
+    match tok with
+    | TokInt v -> ValueSome (LitInt v)
+    | TokFloat (v, _) -> ValueSome (LitFloat v)
+    | TokBool v -> ValueSome (LitBool v)
+    | TokString v -> ValueSome (LitString v)
+    | TokChar v -> ValueSome (LitChar v)
+    | _ -> ValueNone
 
 let (|PipelineOp|_|) = function
     | TokOp "|>" -> true
     | _ -> false
 
-let (|ChoiceOp|_|) = function
-    | TokOp "<|>" -> Some OpChoice
-    | TokOp "<|:>" -> Some OpFallback
-    | _ -> None
+[<return: Struct>]
+let (|ChoiceOp|_|) tok =
+    match tok with
+    | TokOp "<|>" -> ValueSome OpChoice
+    | TokOp "<|:>" -> ValueSome OpFallback
+    | _ -> ValueNone
 
-let (|ParallelOp|_|) = function
-    | TokOp "<&>" -> Some OpParallel
-    | TokOp "<&!>" -> Some OpFusion
-    | _ -> None
+[<return: Struct>]
+let (|ParallelOp|_|) tok =
+    match tok with
+    | TokOp "<&>" -> ValueSome OpParallel
+    | TokOp "<&!>" -> ValueSome OpFusion
+    | _ -> ValueNone
 
-let (|BindOp|_|) = function
-    | TokOp ">>=" -> Some OpBind
-    | TokOp ">>@" -> Some OpComposeObj
-    | TokOp "@>>" -> Some OpComposeMeth
-    | _ -> None
+[<return: Struct>]
+let (|BindOp|_|) tok =
+    match tok with
+    | TokOp ">>=" -> ValueSome OpBind
+    | TokOp ">>@" -> ValueSome OpComposeObj
+    | TokOp "@>>" -> ValueSome OpComposeMeth
+    | _ -> ValueNone
 
-let (|ApplyOp|_|) = function
-    | TokOp "<@>" -> Some OpApply
-    | TokOp "<$>" -> Some OpFunctor
-    | _ -> None
+[<return: Struct>]
+let (|ApplyOp|_|) tok =
+    match tok with
+    | TokOp "<@>" -> ValueSome OpApply
+    | TokOp "<$>" -> ValueSome OpFunctor
+    | _ -> ValueNone
 
-let (|ArrayProductOp|_|) = function
-    | TokOp "<*>" -> Some OpArrayProd
-    | _ -> None
+[<return: Struct>]
+let (|ArrayProductOp|_|) tok =
+    match tok with
+    | TokOp "<*>" -> ValueSome OpArrayProd
+    | _ -> ValueNone
 
-let (|OrOp|_|) = function
-    | TokOp "||" -> Some (Elementwise, OpOr)
-    | TokOp "[||]" -> Some (Outer, OpOr)
-    | _ -> None
+[<return: Struct>]
+let (|OrOp|_|) tok =
+    match tok with
+    | TokOp "||" -> ValueSome (Elementwise, OpOr)
+    | TokOp "[||]" -> ValueSome (Outer, OpOr)
+    | _ -> ValueNone
 
-let (|AndOp|_|) = function
-    | TokOp "&&" -> Some (Elementwise, OpAnd)
-    | TokOp "[&&]" -> Some (Outer, OpAnd)
-    | _ -> None
+[<return: Struct>]
+let (|AndOp|_|) tok =
+    match tok with
+    | TokOp "&&" -> ValueSome (Elementwise, OpAnd)
+    | TokOp "[&&]" -> ValueSome (Outer, OpAnd)
+    | _ -> ValueNone
 
-let (|EqualityOp|_|) = function
-    | TokOp "==" -> Some (Elementwise, OpEq)
-    | TokOp "!=" -> Some (Elementwise, OpNeq)
-    | TokOp "[==]" -> Some (Outer, OpEq)
-    | TokOp "[!=]" -> Some (Outer, OpNeq)
-    | _ -> None
+[<return: Struct>]
+let (|EqualityOp|_|) tok =
+    match tok with
+    | TokOp "==" -> ValueSome (Elementwise, OpEq)
+    | TokOp "!=" -> ValueSome (Elementwise, OpNeq)
+    | TokOp "[==]" -> ValueSome (Outer, OpEq)
+    | TokOp "[!=]" -> ValueSome (Outer, OpNeq)
+    | _ -> ValueNone
 
-let (|ComparisonOp|_|) = function
-    | TokOp "<" -> Some (Elementwise, OpLt)
-    | TokOp "<=" -> Some (Elementwise, OpLe)
-    | TokOp ">" -> Some (Elementwise, OpGt)
-    | TokOp ">=" -> Some (Elementwise, OpGe)
-    | TokOp "[<]" -> Some (Outer, OpLt)
-    | TokOp "[<=]" -> Some (Outer, OpLe)
-    | TokOp "[>]" -> Some (Outer, OpGt)
-    | TokOp "[>=]" -> Some (Outer, OpGe)
-    | _ -> None
+[<return: Struct>]
+let (|ComparisonOp|_|) tok =
+    match tok with
+    | TokOp "<" -> ValueSome (Elementwise, OpLt)
+    | TokOp "<=" -> ValueSome (Elementwise, OpLe)
+    | TokOp ">" -> ValueSome (Elementwise, OpGt)
+    | TokOp ">=" -> ValueSome (Elementwise, OpGe)
+    | TokOp "[<]" -> ValueSome (Outer, OpLt)
+    | TokOp "[<=]" -> ValueSome (Outer, OpLe)
+    | TokOp "[>]" -> ValueSome (Outer, OpGt)
+    | TokOp "[>=]" -> ValueSome (Outer, OpGe)
+    | _ -> ValueNone
 
-let (|AdditiveOp|_|) = function
-    | TokOp "+" -> Some (Elementwise, OpAdd)
-    | TokOp "-" -> Some (Elementwise, OpSub)
-    | TokOp "[+]" -> Some (Outer, OpAdd)
-    | TokOp "[-]" -> Some (Outer, OpSub)
-    | _ -> None
+[<return: Struct>]
+let (|AdditiveOp|_|) tok =
+    match tok with
+    | TokOp "+" -> ValueSome (Elementwise, OpAdd)
+    | TokOp "-" -> ValueSome (Elementwise, OpSub)
+    | TokOp "[+]" -> ValueSome (Outer, OpAdd)
+    | TokOp "[-]" -> ValueSome (Outer, OpSub)
+    | _ -> ValueNone
 
-let (|MultiplicativeOp|_|) = function
-    | TokOp "*" -> Some (Elementwise, OpMul)
-    | TokOp "/" -> Some (Elementwise, OpDiv)
-    | TokOp "%" -> Some (Elementwise, OpMod)
-    | TokOp "[*]" -> Some (Outer, OpMul)
-    | TokOp "[/]" -> Some (Outer, OpDiv)
-    | TokOp "[%]" -> Some (Outer, OpMod)
-    | _ -> None
+[<return: Struct>]
+let (|MultiplicativeOp|_|) tok =
+    match tok with
+    | TokOp "*" -> ValueSome (Elementwise, OpMul)
+    | TokOp "/" -> ValueSome (Elementwise, OpDiv)
+    | TokOp "%" -> ValueSome (Elementwise, OpMod)
+    | TokOp "[*]" -> ValueSome (Outer, OpMul)
+    | TokOp "[/]" -> ValueSome (Outer, OpDiv)
+    | TokOp "[%]" -> ValueSome (Outer, OpMod)
+    | _ -> ValueNone
 
-let (|PowerOp|_|) = function
-    | TokOp "^" -> Some (Elementwise, OpCaret)
-    | TokOp "[^]" -> Some (Outer, OpCaret)
-    | _ -> None
+[<return: Struct>]
+let (|PowerOp|_|) tok =
+    match tok with
+    | TokOp "^" -> ValueSome (Elementwise, OpCaret)
+    | TokOp "[^]" -> ValueSome (Outer, OpCaret)
+    | _ -> ValueNone
 
-let (|UnaryOp|_|) = function
-    | TokOp "-" -> Some OpNeg
-    | TokOp "!" -> Some OpNot
-    | _ -> None
+[<return: Struct>]
+let (|UnaryOp|_|) tok =
+    match tok with
+    | TokOp "-" -> ValueSome OpNeg
+    | TokOp "!" -> ValueSome OpNot
+    | _ -> ValueNone
 
 // Helper Combinators
 

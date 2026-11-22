@@ -668,18 +668,18 @@ let eigDecl (name: string) (n: int) (maxIter: int) : FunctionDecl =
 /// with J_k = Prod_{m<k, m<>mode} I_m. Rows = I_mode, cols = Prod_{k<>mode} I_k.
 let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let nRank = dims.Length
-    let rows = dims.[mode]
+    let rows = dims[mode]
     let cols = prodInts dims / rows
     let jw =
         [ for k in 0 .. nRank - 1 ->
             if k = mode then 0
-            else prodInts [ for mm in 0 .. k - 1 do if mm <> mode then yield dims.[mm] ] ]
+            else prodInts [ for mm in 0 .. k - 1 do if mm <> mode then yield dims[mm] ] ]
     let ivars = [ for k in 0 .. nRank - 1 -> $"i{k}" ]
     let colIdx =
         [ for k in 0 .. nRank - 1 do
-            if k <> mode then yield mul (v ivars.[k]) (iLit jw.[k]) ]
+            if k <> mode then yield mul (v ivars[k]) (iLit jw[k]) ]
         |> List.reduce add
-    let flatIdx = add (mul (v ivars.[mode]) (iLit cols)) colIdx
+    let flatIdx = add (mul (v ivars[mode]) (iLit cols)) colIdx
     let inner = [ sAssign (idx "o" flatIdx) (syn (ExprApp (v "x", ivars |> List.map v))) ]
     let body =
         blockE (
@@ -736,15 +736,15 @@ let zerosN (dims: int list) : Expr =
 /// Output shape = dims with dims[mode] := jOut. The nest runs over the OUTPUT multi-index; `acc` is hoisted.
 let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : FunctionDecl =
     let nRank = dims.Length
-    let iMode = dims.[mode]
+    let iMode = dims[mode]
     let outDims = dims |> List.mapi (fun k d -> if k = mode then jOut else d)
     let outStrides = [ for k in 0 .. nRank - 1 -> prodInts (List.skip (k + 1) outDims) ]
     let ovars = [ for k in 0 .. nRank - 1 -> $"o{k}" ]
     let flatOut =
-        [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
+        [ for k in 0 .. nRank - 1 -> mul (v ovars[k]) (iLit outStrides[k]) ]
         |> List.reduce add
     let readX =
-        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ]))
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars[k] ]))
     // DESTINATION FORM (PM31, round 4 wave 4 lane F item F3; BLADE_MODE_PRODUCT_DEST,
     // rule `mode-product-dest v1`): the product used to fill a FLAT work array and
     // return its rank-N reshape -- a second tensor-sized pool and a copy pass. It now
@@ -755,7 +755,7 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
     recordModeProductDest name dest dims mode jOut
     let inner =
         [ sAssign (v "acc") (fLit 0.0)
-          sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "u" (v ovars.[mode]) (v "t")) readX) ]
+          sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "u" (v ovars[mode]) (v "t")) readX) ]
           (if dest then sAssign (syn (ExprApp (v "o", ovars |> List.map v))) (v "acc")
            else sAssign (idx "o" flatOut) (v "acc")) ]
     let body =
@@ -773,9 +773,9 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
 /// identity), formed directly by a loop nest without materializing the unfolding.
 let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let nRank = dims.Length
-    let g = dims.[mode]
+    let g = dims[mode]
     let otherVars = [ for k in 0 .. nRank - 1 do if k <> mode then yield $"i{k}" ]
-    let otherExts = [ for k in 0 .. nRank - 1 do if k <> mode then yield dims.[k] ]
+    let otherExts = [ for k in 0 .. nRank - 1 do if k <> mode then yield dims[k] ]
     let readAt (modeVar: string) =
         syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v modeVar else v $"i{k}" ]))
     let othersNest = loopNest otherVars otherExts [ sAccum (v "acc") (mul (readAt "a") (readAt "b")) ]
@@ -796,18 +796,18 @@ let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
 /// either the transpose or the column slice.
 let modeProdTDecl (name: string) (dims: int list) (mode: int) (rOut: int) : FunctionDecl =
     let nRank = dims.Length
-    let iMode = dims.[mode]
+    let iMode = dims[mode]
     let outDims = dims |> List.mapi (fun k d -> if k = mode then rOut else d)
     let outStrides = [ for k in 0 .. nRank - 1 -> prodInts (List.skip (k + 1) outDims) ]
     let ovars = [ for k in 0 .. nRank - 1 -> $"o{k}" ]
     let flatOut =
-        [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
+        [ for k in 0 .. nRank - 1 -> mul (v ovars[k]) (iLit outStrides[k]) ]
         |> List.reduce add
     let readX =
-        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars.[k] ]))
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v "t" else v ovars[k] ]))
     let inner =
         [ sAssign (v "acc") (fLit 0.0)
-          sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "q" (v "t") (v ovars.[mode])) readX) ]
+          sFor "t" 0 iMode [ sAccum (v "acc") (mul (idx2 "q" (v "t") (v ovars[mode])) readX) ]
           sAssign (idx "o" flatOut) (v "acc") ]
     let body =
         blockE (
@@ -830,24 +830,24 @@ let hosvdDecl (name: string) (dims: int list) (ranks: int list)
     let nRank = dims.Length
     let stmts =
         [ for mode in 0 .. nRank - 1 do
-            yield sLet $"g{mode}" (syn (ExprApp (v gramNames.[mode], [ v "x" ])))
+            yield sLet $"g{mode}" (syn (ExprApp (v gramNames[mode], [ v "x" ])))
             yield StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar $"q{mode}"); synPat (PatVar $"l{mode}") ])
                             Type = None
-                            Value = syn (ExprApp (v eighNames.[mode], [ v $"g{mode}" ]))
+                            Value = syn (ExprApp (v eighNames[mode], [ v $"g{mode}" ]))
                             Mutability = BindLet } ]
         @ [ for mode in 0 .. nRank - 1 ->
               let src = if mode = 0 then "x" else $"c{mode - 1}"
-              sLet $"c{mode}" (syn (ExprApp (v mptNames.[mode], [ v src; v $"q{mode}" ]))) ]
+              sLet $"c{mode}" (syn (ExprApp (v mptNames[mode], [ v src; v $"q{mode}" ]))) ]
         @ [ for mode in 0 .. nRank - 1 ->
               // U_mode = leading ranks[mode] columns of q_mode (literal-index reads; bound to a let, tuple-of-variables boundary)
               sLet $"u{mode}"
                    (syn (ExprArrayLit
-                        [ for i in 0 .. dims.[mode] - 1 ->
+                        [ for i in 0 .. dims[mode] - 1 ->
                             syn (ExprArrayLit
-                                [ for r in 0 .. ranks.[mode] - 1 ->
+                                [ for r in 0 .. ranks[mode] - 1 ->
                                     idx2 $"q{mode}" (iLit i) (iLit r) ]) ])) ]
     let retTuple =
         tupleE(v $"c{nRank - 1}" :: [ for mode in 0 .. nRank - 1 -> v $"u{mode}" ])
     let retTy =
-        TyTuple (tyFloatTensor ranks :: [ for mode in 0 .. nRank - 1 -> tyFloatMat dims.[mode] ranks.[mode] ])
+        TyTuple (tyFloatTensor ranks :: [ for mode in 0 .. nRank - 1 -> tyFloatMat dims[mode] ranks[mode] ])
     mkFunc name [ ("x", tyFloatTensor dims) ] retTy (blockE (stmts, Some retTuple))

@@ -38,7 +38,7 @@ let private handlers =
 
 /// Register (or re-register -- idempotent) a constraint keyword.
 let registerConstraint (name: string) (handler: ConstraintHandler) : unit =
-    handlers.[name] <- handler
+    handlers[name] <- handler
 
 let lookupConstraint (name: string) : ConstraintHandler option =
     match handlers.TryGetValue name with

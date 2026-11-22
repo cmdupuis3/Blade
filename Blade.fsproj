@@ -24,6 +24,10 @@
 
   <ItemGroup>
     <Compile Include="src/Runtime.fs" />
+    <!-- The knob registry (deep review 2, K16): every environment variable the
+         compiler, its programs and the harness read, with the shared parsers.
+         First of the files that read a knob, so each can name its entry. -->
+    <Compile Include="src/Knobs.fs" />
     <!-- Platform abstraction: the one module that knows how the host OS
          spells toolchain artifacts (exe/obj/shared-lib extensions, the MPI
          link line, libm's name, install-prefix library search). Dependency-
@@ -384,6 +388,8 @@
     <Compile Include="src/sgs/compiler/SgsElaborate.fs" />
     <Compile Include="src/IndexTypeValidator.fs" />
     <Compile Include="src/Unify.fs" />
+    <!-- TypedBuilder.fs: the `typed { }` error-or-continue builder over Unify's TypeResult (opened by the type checker). -->
+    <Compile Include="src/TypedBuilder.fs" />
     <Compile Include="src/TypeEnv.fs" />
     <Compile Include="src/Zonk.fs" />
     <!-- The type checker, six layers in dependency order. TypeCheckIde.fs
@@ -627,6 +633,10 @@
          (NEW vs BLADE_CELL_EPILOGUE=0), plus the LLVM lane's parity. g++. -->
     <Compile Include="tests/CellEpilogueTests.fs" />
     <Compile Include="tests/OwnedMoveTests.fs" />
+    <!-- Cleanup K10: IR.(|ExprShape|) checked against a reflection oracle over
+         IRExpr's fields, over every single-file corpus program that lowers
+         (`blade test ir-traversal`). In-process, no toolchain; standalone only. -->
+    <Compile Include="tests/IRTraversalTests.fs" />
     <Compile Include="tests/PchTests.fs" />
     <!-- Wave 3 (E-G5) threaded let-rec step: the threaded build vs the
          threads-off build by raw bits at fixed team sizes. g++. -->
@@ -669,6 +679,7 @@
     <!-- `blade test docs`: every ```blade block in CLAUDE.md and docs/ checked
          (and run, when it pins values) through the corpus pipeline (Runner). -->
     <Compile Include="tests/DocTests.fs" />
+    <Compile Include="tests/KnobsTests.fs" />
     <Compile Include="tests/RunAll.fs" />
     <!-- The CLI, three layers in dependency order: CliCommands.fs (compile/run/
          check/emit + the REPL loop), CliSelfTests.fs (the `blade test` blocks

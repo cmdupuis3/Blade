@@ -27,9 +27,9 @@ type CGEntry = { C1: int; C2: int; C3: int; Coef: float }
 /// formula's worst index is j1+j2+j3+1.
 let private factorial : float[] =
     let f = Array.zeroCreate 171
-    f.[0] <- 1.0
+    f[0] <- 1.0
     for n in 1 .. 170 do
-        f.[n] <- f.[n - 1] * float n
+        f[n] <- f[n - 1] * float n
     f
 
 let private paritySign (k: int) : float =
@@ -43,20 +43,20 @@ let wigner3j (j1: int) (j2: int) (j3: int) (m1: int) (m2: int) (m3: int) : float
     elif abs m1 > j1 || abs m2 > j2 || abs m3 > j3 then 0.0
     else
         let delta =
-            sqrt (factorial.[j1 + j2 - j3] * factorial.[j1 - j2 + j3]
-                  * factorial.[-j1 + j2 + j3] / factorial.[j1 + j2 + j3 + 1])
+            sqrt (factorial[j1 + j2 - j3] * factorial[j1 - j2 + j3]
+                  * factorial[-j1 + j2 + j3] / factorial[j1 + j2 + j3 + 1])
         let pre =
-            sqrt (factorial.[j1 + m1] * factorial.[j1 - m1]
-                  * factorial.[j2 + m2] * factorial.[j2 - m2]
-                  * factorial.[j3 + m3] * factorial.[j3 - m3])
+            sqrt (factorial[j1 + m1] * factorial[j1 - m1]
+                  * factorial[j2 + m2] * factorial[j2 - m2]
+                  * factorial[j3 + m3] * factorial[j3 - m3])
         let kmin = max 0 (max (j2 - j3 - m1) (j1 - j3 + m2))
         let kmax = min (j1 + j2 - j3) (min (j1 - m1) (j2 + m2))
         let mutable s = 0.0
         for k in kmin .. kmax do
             let denom =
-                factorial.[k] * factorial.[j1 + j2 - j3 - k]
-                * factorial.[j1 - m1 - k] * factorial.[j2 + m2 - k]
-                * factorial.[j3 - j2 + m1 + k] * factorial.[j3 - j1 - m2 + k]
+                factorial[k] * factorial[j1 + j2 - j3 - k]
+                * factorial[j1 - m1 - k] * factorial[j2 + m2 - k]
+                * factorial[j3 - j2 + m1 + k] * factorial[j3 - j1 - m2 + k]
             s <- s + paritySign k / denom
         paritySign (j1 - j2 - m3) * delta * pre * s
 
@@ -82,13 +82,13 @@ let uMatrix (l: int) : Complex[][] =
     let d = 2 * l + 1
     let u = Array.init d (fun _ -> Array.zeroCreate<Complex> d)
     let s = 1.0 / sqrt 2.0
-    u.[l].[l] <- Complex.One
+    u[l][l] <- Complex.One
     for m in 1 .. l do
         let ph = paritySign m
-        u.[l + m].[l - m] <- Complex(s, 0.0)
-        u.[l + m].[l + m] <- Complex(ph * s, 0.0)
-        u.[l - m].[l - m] <- Complex(0.0, s)
-        u.[l - m].[l + m] <- Complex(0.0, -ph * s)
+        u[l + m][l - m] <- Complex(s, 0.0)
+        u[l + m][l + m] <- Complex(ph * s, 0.0)
+        u[l - m][l - m] <- Complex(0.0, s)
+        u[l - m][l + m] <- Complex(0.0, -ph * s)
     u
 
 // Plain static caches: contents are pure functions of (l1, l2, l3), so
@@ -125,7 +125,7 @@ let realCGDense (l1: int) (l2: int) (l3: int) : float[][][] =
                                         if cgv <> 0.0 then
                                             let ab = a * b * Complex(cgv, 0.0)
                                             for c3 in 0 .. d3 - 1 do
-                                                let w = u3.[c3].[mu3 + l3]
+                                                let w = u3[c3][mu3 + l3]
                                                 if w <> Complex.Zero then
                                                     t.[c1].[c2].[c3] <- t.[c1].[c2].[c3] + ab * w
         let mutable maxRe = 0.0
@@ -148,7 +148,7 @@ let realCGDense (l1: int) (l2: int) (l3: int) : float[][][] =
         if residual > 1e-10 * max 1.0 (max maxRe maxIm) then
             failwithf "realCGDense(%d,%d,%d): tensor not real after phase fix (residual %g)"
                 l1 l2 l3 residual
-        denseCache.[(l1, l2, l3)] <- res
+        denseCache[(l1, l2, l3)] <- res
         res
 
 /// Sparse nonzero support of the real coupling tensor, in lexicographic
@@ -160,10 +160,10 @@ let realCGSparse (l1: int) (l2: int) (l3: int) : CGEntry[] =
         let dense = realCGDense l1 l2 l3
         let entries =
             [| for c1 in 0 .. dense.Length - 1 do
-                 for c2 in 0 .. dense.[c1].Length - 1 do
+                 for c2 in 0 .. dense[c1].Length - 1 do
                    for c3 in 0 .. dense.[c1].[c2].Length - 1 do
                      let v = dense.[c1].[c2].[c3]
                      if abs v > 1e-12 then
                        yield { C1 = c1; C2 = c2; C3 = c3; Coef = v } |]
-        sparseCache.[(l1, l2, l3)] <- entries
+        sparseCache[(l1, l2, l3)] <- entries
         entries

@@ -246,7 +246,7 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
     let results = System.Collections.Generic.List<_>()
     let walk e =
         match e with
-        | IRApp (IRVar (funcId, _), args, _) when hmFuncMap.ContainsKey funcId ->
+        | CallOfNamed (funcId, _, args, _) when hmFuncMap.ContainsKey funcId ->
             let func = hmFuncMap.[funcId]
             // Pair each param with its corresponding arg, unifying types
             let bindings =
@@ -292,7 +292,7 @@ let collectHMCallSiteReturnBindings
     let results = System.Collections.Generic.List<_>()
     let walk e =
         match e with
-        | IRApp (IRVar (funcId, _), args, retTy) when hmFuncMap.ContainsKey funcId ->
+        | CallOfNamed (funcId, _, args, retTy) when hmFuncMap.ContainsKey funcId ->
             let func = hmFuncMap.[funcId]
             if args.Length = func.Params.Length then
                 let calleeBindings =
@@ -626,7 +626,7 @@ let rec private learnFromInnerCallsAt (memo: System.Collections.Generic.Dictiona
         iterIRExpr (fun e ->
             learnArrowApp e
             match e with
-            | IRApp (IRVar (fid, _), args, retTy) when fid <> func.Id ->
+            | CallOfNamed (fid, _, args, retTy) when fid <> func.Id ->
                 (match Map.tryFind fid callables with
                  | Some callee when (hasTypeVarsInParams callee || not (concrete retTy))
                                     && callee.Params.Length = args.Length ->
@@ -778,7 +778,7 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
 let internal refuseArrayApps (funcName: string) (e: IRExpr) : unit =
     iterIRExpr (fun e ->
         match e with
-        | IRApp (IRVar (_, ArrayElem _), _, _) ->
+        | CallOfNamed (_, ArrayElem _, _, _) ->
             raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.ice (
                 $"'{funcName}': a specialization applies an array as a function -- an arrow parameter's array instance was not made at type checking (TypeEnv.ArrowVariant)")))
         | _ -> ()) e
@@ -822,7 +822,7 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
         let acc = System.Collections.Generic.HashSet<IRId>()
         iterIRExpr (fun e ->
             match e with
-            | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+            | CallOfNamed (id, _, _, _) -> acc.Add id |> ignore
             | _ -> ()) body
         acc
     // Ids passed as a direct ARGUMENT or composed (`applyG(toint, x)`, `f >>
@@ -1207,7 +1207,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     //    Same logic as before, but operating against a complete spec map.
     let rewriteCallSite e =
         match e with
-        | IRApp (IRVar (funcId, _), args, _) when hmFuncMap.ContainsKey funcId ->
+        | CallOfNamed (funcId, _, args, _) when hmFuncMap.ContainsKey funcId ->
             let func = hmFuncMap.[funcId]
             let bindings =
                 if args.Length <> func.Params.Length then Map.empty
@@ -1258,7 +1258,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let acc = System.Collections.Generic.List<int * IRType>()
             iterIRExpr (fun e ->
                 match e with
-                | IRApp (IRVar (funcId, _), args, retTy) when hmFuncMap.ContainsKey funcId ->
+                | CallOfNamed (funcId, _, args, retTy) when hmFuncMap.ContainsKey funcId ->
                     let func = hmFuncMap.[funcId]
                     if args.Length = func.Params.Length then
                         let b =
@@ -1389,14 +1389,14 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         let holders =
             newBindings |> List.choose (fun b ->
                 match b.Value with
-                | IRApp (IRVar (sid, _), _, _) when decidedSpecs.ContainsKey sid -> Some (b.Id, (b.Name, decidedSpecs.[sid]))
+                | CallOfNamed (sid, _, _, _) when decidedSpecs.ContainsKey sid -> Some (b.Id, (b.Name, decidedSpecs.[sid]))
                 | _ -> None)
             |> Map.ofList
         if not holders.IsEmpty then
             let check (e: IRExpr) =
                 iterIRExpr (fun n ->
                     match n with
-                    | IRApp (IRVar (id, ArrayElem _), _, _) when holders.ContainsKey id ->
+                    | CallOfNamed (id, ArrayElem _, _, _) when holders.ContainsKey id ->
                         let (name, f) = holders.[id]
                         raise (Blade.Diagnostics.BladeDiagnosticException (
                                 Blade.Diagnostics.mkError "BL3009" Blade.Diagnostics.PhTypes (IR.declSpanOf name)
@@ -1775,7 +1775,7 @@ let refuseEnumKeyArithModule (programTypes: IRTypeDef list) (modul: IRModule) : 
         let isKey (e: IRExpr) =
             let elem (t: IRType) =
                 match IR.stripUnits t with
-                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumTags.Contains tag
+                | IntTaggedIndex tag -> intEnumTags.Contains tag
                 | _ -> false
             match exprTypeIfKnown e with
             | Some (ArrayElem at) -> elem at.ElemType
@@ -1830,7 +1830,7 @@ let refuseEnumKeyArithModule (programTypes: IRTypeDef list) (modul: IRModule) : 
         // display -- would read the positions and is refused, BL4003.
         let tagOf (t: IRType) =
             match IR.stripUnits t with
-            | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when intEnumTags.Contains tag -> Some tag
+            | IntTaggedIndex tag when intEnumTags.Contains tag -> Some tag
             | _ -> None
         let structFields =
             allTypes |> List.choose (function IRTDStruct (n, fs) -> Some (n, fs) | _ -> None) |> List.distinctBy fst |> Map.ofList
@@ -1985,7 +1985,7 @@ let refuseEnumKeyArithModule (programTypes: IRTypeDef list) (modul: IRModule) : 
                             | _ -> false
                         let slots =
                             match exprTypeIfKnown arr with
-                            | Some (ArrayElem at) -> at.IndexTypes |> List.map (fun ix -> ix.Tag)
+                            | Some (ArrayElem at) -> at.IndexTypes |> List.map (_.Tag)
                             | _ -> []
                         idxs |> List.iteri (fun k ix ->
                             match keyTag ix with
@@ -2076,7 +2076,7 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
         let at32 x = IRUnaryOp (IRCast (ETInt32, SrcLoc.Nowhere), x)
         match e with
         | IRLit (IRLitInt n) when n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue -> Some (at32 e)
-        | IRUnaryOp (IRNeg, IRLit (IRLitInt 2147483648L)) -> Some (at32 (IRLit (IRLitInt -2147483648L)))
+        | NegIntLit 2147483648L -> Some (at32 (IRLit (IRLitInt -2147483648L)))
         | IRUnaryOp (IRNeg, x) -> narrowInt x |> Option.map (fun x' -> IRUnaryOp (IRNeg, x'))
         | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod | IRCaret as op), l, r, loc) ->
             match narrowInt l, narrowInt r with
@@ -2098,7 +2098,7 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
     let rec intMisfit (e: IRExpr) : string option =
         match e with
         | IRLit (IRLitInt n) when not (LiteralDefaults.intFits ETInt32 n) -> Some (LiteralDefaults.intText n)
-        | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) ->
+        | NegIntLit n ->
             if LiteralDefaults.intFits ETInt32 (-n) then None else Some ("-" + LiteralDefaults.intText n)
         | IRUnaryOp (IRNeg, x) -> intMisfit x
         | IRBinOp (IRElementwise, _, l, r, _) -> intMisfit l |> Option.orElseWith (fun () -> intMisfit r)
@@ -3037,7 +3037,7 @@ let rec internal tilePureBody (callables: System.Collections.Generic.Dictionary<
             match n with
             | IRDisplayEmit _ -> ok <- false
             | IRAssign _ -> ok <- false
-            | IRApp (IRVar (fid, _), _, _) ->
+            | CallOfNamed (fid, _, _, _) ->
                 if not (Set.contains fid visited) then
                     match callables.TryGetValue fid with
                     | true, callee ->
@@ -3072,7 +3072,7 @@ let rec internal tileMayAbort (callables: System.Collections.Generic.Dictionary<
                          elif tileMayAbort callables (Set.add fid visited) callee.Body then
                              fails <- true
                      | _ -> ())
-                | IRApp (IRVar (fid, _), _, _) when callables.ContainsKey fid || Set.contains fid visited -> ()
+                | CallOfNamed (fid, _, _, _) when callables.ContainsKey fid || Set.contains fid visited -> ()
                 | IRApp _ -> fails <- true
                 | _ -> ()) e
     fails
@@ -3691,7 +3691,7 @@ let collectPolyCallSites (polyFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (I
     let results = System.Collections.Generic.List<_>()
     let walk e =
         match e with
-        | IRApp (IRVar (funcId, _), args, _) when Map.containsKey funcId polyFuncMap ->
+        | CallOfNamed (funcId, _, args, _) when Map.containsKey funcId polyFuncMap ->
             let func = polyFuncMap.[funcId]
             match computePolyArity func args with
             | Some arities -> results.Add((funcId, arities))
@@ -3799,18 +3799,19 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                 slotInfo
                 |> List.mapi (fun slotIdx (_, polyParam, _, _) -> (polyParam.VarId, (slotIdx, 0)))
                 |> Map.ofList
-            let rec walk expr =
-                match expr with
-                | IRLet (id, value, body) ->
-                    (match value with
-                     | IRVar (srcId, _) when Map.containsKey srcId info ->
-                         info <- Map.add id info.[srcId] info
-                     | IRPolyTail (IRVar (srcId, _), drop) when Map.containsKey srcId info ->
-                         let (slot, off) = info.[srcId]
-                         info <- Map.add id (slot, off + drop) info
-                     | _ -> ())
-                    walk value; walk body
-                | ExprShape (children, _) -> children |> List.iter walk
+            let walk expr =
+                expr |> visitTopDown (fun e ->
+                    match e with
+                    | IRLet (id, value, _) ->
+                        (match value with
+                         | IRVar (srcId, _) when Map.containsKey srcId info ->
+                             info <- Map.add id info.[srcId] info
+                         | IRPolyTail (IRVar (srcId, _), drop) when Map.containsKey srcId info ->
+                             let (slot, off) = info.[srcId]
+                             info <- Map.add id (slot, off + drop) info
+                         | _ -> ())
+                        true
+                    | _ -> true)
             walk func.Body
             info
         // Slot-only view, for the pack-former unroller's membership test.
@@ -3926,9 +3927,10 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // themselves reference the pre-expansion pack (a dangling VarId) or an
         // IRPolyTail marker (no codegen), so they must not survive.
         let rec dropAliasLets expr =
-            match expr with
-            | IRLet (id, _, rest) when Map.containsKey id aliasInfo -> dropAliasLets rest
-            | ExprShape (children, rebuild) -> rebuild (children |> List.map dropAliasLets)
+            expr |> rewriteTopDown (fun e ->
+                match e with
+                | IRLet (id, _, rest) when Map.containsKey id aliasInfo -> ValueSome (dropAliasLets rest)
+                | _ -> ValueNone)
         let newBody = dropAliasLets newBody
 
         // A LIVE read of a pack element past the pack's end survives the
@@ -3957,10 +3959,8 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // function) must NOT unroll: the unrolled copies have no loop to
         // break out of, so the early exit would silently vanish and every
         // iteration would run.
-        let rec containsBreakIf e =
-            match e with
-            | IRBreakIf _ | IRReplayRow _ -> true
-            | ExprShape (children, _) -> children |> List.exists containsBreakIf
+        let containsBreakIf e =
+            e |> existsIRExpr (function IRBreakIf _ | IRReplayRow _ -> true | _ -> false)
         // G95 (round 4 wave 4 lane A; G93's class): the unroll substitutes the
         // loop variable by a literal in the BODY only. A callable reachable
         // from the body (transitively) that CAPTURES the loop variable keeps
@@ -4757,7 +4757,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | _ -> false
     let rewriteCallSiteWith (keepOpenCallerType: bool) e =
         match e with
-        | IRApp (IRVar (funcId, fty), args, origRetTy) when polyFuncIds.Contains funcId ->
+        | CallOfNamed (funcId, fty, args, origRetTy) when polyFuncIds.Contains funcId ->
             let func = polyFuncMap.[funcId]
             match computePolyArity func args with
             | Some arity ->
@@ -4846,7 +4846,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             let mutable cm = (newFunctions @ specFuncs) |> List.map (fun f -> (f.Id, f)) |> Map.ofList
             let learnedById =
                 decided
-                |> List.sortBy (fun s -> s.Params.Length)
+                |> List.sortBy (_.Params.Length)
                 |> List.map (fun s ->
                     let s = cm.[s.Id]
                     let b = learnFromInnerCalls s cm Map.empty
@@ -4858,7 +4858,7 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let mutable acc : Map<int, IRType> = Map.empty
                 iterIRExpr (fun n ->
                     match n with
-                    | IRApp (IRVar (sid, fty), _, retTy) when learnedById.ContainsKey sid ->
+                    | CallOfNamed (sid, fty, _, retTy) when learnedById.ContainsKey sid ->
                         let spec = learnedById.[sid]
                         arityResultClash Blade.Ast.noSpan (decided |> List.find (fun d -> d.Id = sid)) spec retTy
                         // ...and the head's arrow, which still names the
@@ -5089,7 +5089,7 @@ let internal shapeSymbolicOccurrences (paramTys: IRType list) : Map<string, int>
                 | SVal t -> goTy t)
             goTy result
         | IRTTuple ts -> ts |> List.iter goTy
-        | IRTComputation t | IRTPoly (t, _) | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> goTy t
+        | IRTComputation t | IRTPoly (t, _) | Tagged t -> goTy t
         | IRTDist (_, elem, axes) -> goTy elem; axes |> List.iter goIx
         | IRTGroupKeys (a, b, _) -> goIx a; goIx b
         | IRTLoop lt -> lt.ArrayTypes |> List.iter goTy; lt.KernelType |> Option.iter goTy
@@ -5220,7 +5220,7 @@ let internal shapeSpecNamesAreOwn
     let mutable ok = true
     mapIRExpr (fun e ->
         (match e with
-         | IRApp (IRVar (fid, _), args, retTy) ->
+         | CallOfNamed (fid, _, args, retTy) ->
              let intro = Set.intersect dom (shapeSymbolicNames retTy)
              if not (Set.isEmpty intro) then
                  // The call site is read with the ENCLOSING substitution
@@ -5278,7 +5278,7 @@ let internal shapeCallSitesIn (body: IRExpr) : (IRId * IRExpr list) list =
     let mutable acc = []
     iterIRExpr (fun e ->
         match e with
-        | IRApp (IRVar (fid, _), args, _) -> acc <- (fid, args) :: acc
+        | CallOfNamed (fid, _, args, _) -> acc <- (fid, args) :: acc
         | _ -> ()) body
     acc
 
@@ -5480,7 +5480,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         let scan (b: IRExpr) =
             iterIRExpr (fun e ->
                 match e with
-                | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
+                | CallOfNamed (id, _, _, _) -> acc.Add id |> ignore
                 | _ -> ()) b
         allFuncs |> List.iter (fun f -> scan f.Body)
         modules |> List.iter (fun m -> m.Bindings |> List.iter (fun b -> scan b.Value))
@@ -5572,7 +5572,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     let rewriteCallSites (expr: IRExpr) : IRExpr =
         mapIRExpr (fun e ->
             match e with
-            | IRApp (IRVar (fid, fty), args, retTy) when candMap.ContainsKey fid ->
+            | CallOfNamed (fid, fty, args, retTy) when candMap.ContainsKey fid ->
                 let sign = shapeSignatureAt candMap.[fid] args
                 if List.isEmpty sign then e
                 else
@@ -5686,7 +5686,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                 let mutable found = []
                 iterIRExpr (fun e ->
                     match e with
-                    | IRApp (IRVar (fid, _), args, _) when candMap.ContainsKey fid ->
+                    | CallOfNamed (fid, _, args, _) when candMap.ContainsKey fid ->
                         let sign = shapeSignatureAt candMap.[fid] args
                         if not (List.isEmpty sign) then found <- (fid, sign) :: found
                     | _ -> ()) (rewriteCallSites b)

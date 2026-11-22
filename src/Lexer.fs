@@ -312,13 +312,13 @@ let isWhitespace c = c = ' ' || c = '\t' || c = '\r'
 
 let peek (state: LexerState) =
     if state.Pos < state.Source.Length then
-        Some state.Source.[state.Pos]
+        Some state.Source[state.Pos]
     else
         None
 
 let peekN (state: LexerState) n =
     if state.Pos + n < state.Source.Length then
-        Some state.Source.[state.Pos + n]
+        Some state.Source[state.Pos + n]
     else
         None
 
@@ -330,7 +330,7 @@ let peekStr (state: LexerState) len =
 
 let advance (state: LexerState) =
     if state.Pos < state.Source.Length then
-        let c = state.Source.[state.Pos]
+        let c = state.Source[state.Pos]
         state.Pos <- state.Pos + 1
         if c = '\n' then
             state.Line <- state.Line + 1
@@ -464,7 +464,7 @@ let scanNumber (state: LexerState) =
         if isFloat then
             match Double.TryParse(text) with
             | true, v ->
-                let mantissa = text.Split([| 'e'; 'E' |]).[0]
+                let mantissa = text.Split([| 'e'; 'E' |])[0]
                 let spelledNonzero = mantissa |> Seq.exists (fun c -> c >= '1' && c <= '9')
                 let degenerate = not (Double.IsFinite v) || (v = 0.0 && spelledNonzero)
                 TokFloat (v, (if degenerate then Some text else None))
@@ -491,7 +491,7 @@ let scanNumber (state: LexerState) =
                 TokError $"Invalid numeric literal: `{lit}` -- a `_` digit separator must sit between two digits (`1_000`)"
             elif radix <> 10 then
                 let radixName = if radix = 16 then "hex" else "binary"
-                TokError $"Invalid numeric literal: `{lit}` -- `{tail.[0]}` is not a {radixName} digit"
+                TokError $"Invalid numeric literal: `{lit}` -- `{tail[0]}` is not a {radixName} digit"
             else
                 TokError $"Invalid numeric literal: `{lit}` -- a number cannot be followed directly by a name; Blade has no implicit multiplication, so write `{numPart} * {tail}`"
         | _ -> kind
@@ -743,7 +743,7 @@ let scanToken (state: LexerState) =
             let nameStart = state.Pos
             let colAfterColon = state.Col  // identifiers contain no newlines, so Line is unchanged
             while state.Pos < state.Source.Length &&
-                  (let ch = state.Source.[state.Pos] in Char.IsLetterOrDigit(ch) || ch = '_') do
+                  (let ch = state.Source[state.Pos] in Char.IsLetterOrDigit(ch) || ch = '_') do
                 advance state |> ignore
             let name = state.Source.Substring(nameStart, state.Pos - nameStart)
             match peek state with

@@ -89,7 +89,7 @@ let private rowViewFoldOf (rowBody: IRExpr) : (IRId * IRType * IRExpr * IRExpr o
         | IRLet (_, _, b) -> spine b
         | other -> other
     match spine rowBody with
-    | IRReduce (IRIndex (IRVar (u, uty), [ _ ], _), k, s) -> Some (u, uty, k, s)
+    | IRReduce (IndexOfNamed (u, uty, [ _ ], _), k, s) -> Some (u, uty, k, s)
     | _ -> None
 
 /// G51, the licensed arm: the row-view fold a Path B chunk folds with
@@ -577,7 +577,7 @@ let planRecPrintReplays (modul: IRModule) : unit =
             // Every other reader of x must be a snapshot binding `x(p)`.
             let snapOf (b: IRBinding) =
                 match b.Value with
-                | IRIndex (IRVar (v, _), [ IRLit (IRLitInt p) ], _) when v = xb.Id && p >= 0L && p < extents.Head -> Some p
+                | IndexOfNamed (v, _, [ IRLit (IRLitInt p) ], _) when v = xb.Id && p >= 0L && p < extents.Head -> Some p
                 | _ -> None
             let others =
                 modul.Bindings |> List.filter (fun b -> b.Id <> xb.Id && b.Id <> rb.Id)
@@ -7515,7 +7515,7 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
                     match e with
                     | IRLit _ -> true
                     | IRExtent (IRVar _, _) -> true
-                    | IRIndex (IRVar (g, gty), idxs, _) when forced.Contains g ->
+                    | IndexOfNamed (g, gty, idxs, _) when forced.Contains g ->
                         (match gty with
                          | ArrayElem at when at.IndexTypes.Length = idxs.Length ->
                              List.zip idxs [ 0 .. idxs.Length - 1 ] |> List.forall (fun (ix, d) ->
@@ -10416,7 +10416,7 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 declined (Blade.Optimize.cellEpilogueLicensedRowDecline "the finished row")
             else
                 match List.tryLast bodyLets, _bodyFinal with
-                | Some (_, IRAssign (IRIndex (IRVar (b, bufT), [ _; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+                | Some (_, IRAssign (IndexOfNamed (b, bufT, [ _; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
                     when b = entry.BufferId && k2 = vid && sv = entry.StoredVar ->
                     (match bufT with
                      | ArrayElem at -> Some (entry, elemTypeToCpp at.ElemType)
@@ -10543,7 +10543,7 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // trajectory row views, the cell loop, then the fold triple or nothing.
     let isRowView (v: IRExpr) =
         match v with
-        | IRIndex (IRVar (b, _), [ _ ], _) when b = entry.BufferId -> true
+        | IndexOfNamed (b, _, [ _ ], _) when b = entry.BufferId -> true
         | _ -> false
     let rec splitLags acc (ls: (IRId * IRExpr) list) =
         match ls with
@@ -10555,7 +10555,7 @@ and genRecStepTimeLoop (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let cellBodyOk (cellBody: IRExpr) =
         let (lets, fin) = unrollLetChain cellBody
         match List.tryLast lets, fin with
-        | Some (_, IRAssign (IRIndex (IRVar (b, _), [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
+        | Some (_, IRAssign (IndexOfNamed (b, _, [ i0; IRVar (k2, _) ], _), IRVar (sv, _))), IRLit IRLitUnit
             when b = entry.BufferId && k2 = entry.CellLoopVar && lets |> List.exists (fun (id, _) -> id = sv)
                  && (match i0 with
                      | IRVar (n, _) -> n = vid

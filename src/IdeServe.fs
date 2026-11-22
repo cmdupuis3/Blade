@@ -178,9 +178,9 @@ let private decodeJsonStringLenient (raw: string) : string =
     let body = if raw.Length >= 2 then raw.Substring(1, raw.Length - 2) else ""
     let mutable i = 0
     while i < body.Length do
-        let c = body.[i]
+        let c = body[i]
         if c = '\\' && i + 1 < body.Length then
-            let e = body.[i + 1]
+            let e = body[i + 1]
             i <- i + 2
             match e with
             | 'n' -> sb.Append('\n') |> ignore
@@ -204,9 +204,9 @@ let private decodeJsonStringLenient (raw: string) : string =
     let fixedUp = StringBuilder(s.Length)
     let mutable j = 0
     while j < s.Length do
-        let c = s.[j]
-        if Char.IsHighSurrogate c && j + 1 < s.Length && Char.IsLowSurrogate s.[j + 1] then
-            fixedUp.Append(c).Append(s.[j + 1]) |> ignore
+        let c = s[j]
+        if Char.IsHighSurrogate c && j + 1 < s.Length && Char.IsLowSurrogate s[j + 1] then
+            fixedUp.Append(c).Append(s[j + 1]) |> ignore
             j <- j + 2
         else
             fixedUp.Append(if Char.IsSurrogate c then '�' else c) |> ignore
@@ -439,7 +439,7 @@ let installRenderLane (compile: RenderCompile) (run: RenderRun) =
 /// the value the client chose is the value the picture is computed from.
 let cameraCsvText (values: float list) : string =
     (values
-     |> List.map (fun v -> v.ToString("R", Globalization.CultureInfo.InvariantCulture))
+     |> List.map (_.ToString("R", Globalization.CultureInfo.InvariantCulture))
      |> String.concat ",") + "\n"
 
 /// Rewrite `source` so each binding in `names` reads its value out of the CSV at
@@ -491,10 +491,10 @@ let cameraErasedSource (source: string) (names: string list) (csvPath: string)
         let lineStarts =
             [| yield 0
                for i = 0 to source.Length - 1 do
-                   if source.[i] = '\n' then yield i + 1 |]
+                   if source[i] = '\n' then yield i + 1 |]
         let offset line col =
             if line > 0 && line <= lineStarts.Length && col > 0 then
-                let i = lineStarts.[line - 1] + col - 1
+                let i = lineStarts[line - 1] + col - 1
                 if i <= source.Length then Some i else None
             else None
         let located =
@@ -545,7 +545,7 @@ let cameraErasedSource (source: string) (names: string list) (csvPath: string)
 /// anything past the end of `previous` counts as changed.
 let changedFrameIndices (previous: string[]) (digests: string[]) : int[] =
     [| for i in 0 .. digests.Length - 1 do
-         if i >= previous.Length || previous.[i] <> digests.[i] then yield i |]
+         if i >= previous.Length || previous[i] <> digests[i] then yield i |]
 
 /// SHA256 of the erased source, hex -- the render cache key. Same bytes means
 /// the executable already on disk still computes this program.
@@ -636,7 +636,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
             | true, s -> s
             | _ ->
                 let s = Blade.ReplSession.ReplSession(Directory.GetCurrentDirectory())
-                sessions.[key] <- s
+                sessions[key] <- s
                 s
         // Only the g++ lane reads this, and only to run the built executable.
         session.RunCwd <- Directory.GetCurrentDirectory()
@@ -756,7 +756,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                                     match compile srcPath with
                                     | Error e -> Error e
                                     | Ok exe ->
-                                        renderCache.[key] <- (digest, exe, csvPath)
+                                        renderCache[key] <- (digest, exe, csvPath)
                                         // A different program may emit a
                                         // different sequence, so position no
                                         // longer identifies anything: start the
@@ -801,9 +801,9 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
             let digests = produced |> Array.map sourceDigest
             let send = changedFrameIndices previous digests
             for i in send do
-                respond (sprintf "{\"event\":\"display\",\"id\":%d,\"frame\":%s}" id produced.[i])
+                respond (sprintf "{\"event\":\"display\",\"id\":%d,\"frame\":%s}" id produced[i])
             let frames = send.Length
-            renderFrames.[key] <- digests
+            renderFrames[key] <- digests
             respond (sprintf
                         "{\"id\":%d,\"ok\":%b,\"cached\":%b,\"frames\":%d,\"unchanged\":%d,\"elapsedMs\":%d,\"exitCode\":%d,\"stderr\":\"%s\"}"
                         id (code = 0) wasCached frames (produced.Length - frames)

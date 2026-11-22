@@ -142,10 +142,10 @@ module SimplexBlocks =
         let mutable lo = 0L
         for k in 0 .. r - 1 do
             let mutable v = lo
-            while v < coords.[k] do
+            while v < coords[k] do
                 rank <- rank + completions v (r - k - 1)
                 v <- v + 1L
-            lo <- coords.[k] + (if strict then 1L else 0L)
+            lo <- coords[k] + (if strict then 1L else 0L)
         rank
 
     /// Inverse of rankOfCoords.
@@ -163,7 +163,7 @@ module SimplexBlocks =
                 rest <- rest - c
                 v <- v + 1L
                 c <- completions v (r - k - 1)
-            coords.[k] <- v
+            coords[k] <- v
             lo <- v + (if strict then 1L else 0L)
         coords
 
@@ -196,11 +196,11 @@ module SimplexBlocks =
                 if k = r then
                     yield (List.rev acc |> Array.ofList)
                 else
-                    let tileLo = tiles.[k] * B
+                    let tileLo = tiles[k] * B
                     let lo =
                         if k = 0 then tileLo
                         else max tileLo (prev + (if strict then 1L else 0L))
-                    let hi = min ((tiles.[k] + 1L) * B) n
+                    let hi = min ((tiles[k] + 1L) * B) n
                     for i in lo .. hi - 1L do
                         yield! go (k + 1) i (i :: acc)
             }
@@ -230,7 +230,7 @@ module SimplexBlocks =
         let rows = Array.zeroCreate (int (blockCount r T))
         pathMultisets 0L T r
         |> Seq.iteri (fun i ms ->
-            rows.[int (rankOfCoords false T (Array.ofList ms))] <- int64 i)
+            rows[int (rankOfCoords false T (Array.ofList ms))] <- int64 i)
         rows
 
     /// (physical padded cell count, canonical pool cell count): the padding overhead report for a configuration.
@@ -253,7 +253,7 @@ module SimplexBlocks =
             | OrderLex -> fun (b: int64) -> b
             | OrderPath ->
                 let rows = pathRows r T
-                fun (b: int64) -> rows.[int b]
+                fun (b: int64) -> rows[int b]
         let map = Array.create (int (nBlocks * rowW)) -1
         for b in 0L .. nBlocks - 1L do
             let tiles = unrankToCoords false T r b
@@ -261,7 +261,7 @@ module SimplexBlocks =
             let mutable local = 0L
             for cell in enumBlockCells strict n B tiles do
                 let pool = rankOfCoords strict n cell
-                map.[int (row * rowW + local)] <- int pool
+                map[int (row * rowW + local)] <- int pool
                 local <- local + 1L
         map
 
@@ -327,7 +327,7 @@ let zarrDtypeV2 (dtype: string) : Result<ZarrDtype, string> =
     if String.IsNullOrEmpty dtype || dtype.Length < 2 then
         Error $"malformed v2 dtype '{dtype}'"
     else
-        match dtype.[0] with
+        match dtype[0] with
         | '<' | '|' -> dtypeOfCode (dtype.Substring 1)
         | '>' -> Error $"big-endian dtype '{dtype}' is not supported (little-endian stores only)"
         | _ -> Error $"malformed v2 dtype '{dtype}' (expected a byte-order prefix '<', '|' or '>')"
@@ -355,10 +355,10 @@ let private tryProp (el: JsonElement) (name: string) : JsonElement option =
     | _ -> None
 
 let private jsonInt64List (el: JsonElement) : int64 list =
-    el.EnumerateArray() |> Seq.map (fun e -> e.GetInt64()) |> List.ofSeq
+    el.EnumerateArray() |> Seq.map (_.GetInt64()) |> List.ofSeq
 
 let private jsonStringList (el: JsonElement) : string list =
-    el.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+    el.EnumerateArray() |> Seq.map (_.GetString()) |> List.ofSeq
 
 /// fill_value: number, "NaN"/"Infinity"/"-Infinity" strings, or null.
 let private parseFill (where_: string) (isFloat: bool) (el: JsonElement option) : Result<ZarrFill, string> =
@@ -446,8 +446,8 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                             Error $"{where_}: blade.index_types[{i}].levels[{j}]: each level is a two-element array [rank, \"+\"|\"-\"]"
                         else
                             let items = le.EnumerateArray() |> Array.ofSeq
-                            let r = if items.[0].ValueKind = JsonValueKind.Number then items.[0].GetInt32() else -1
-                            let s = if items.[1].ValueKind = JsonValueKind.String then items.[1].GetString() else ""
+                            let r = if items[0].ValueKind = JsonValueKind.Number then items[0].GetInt32() else -1
+                            let s = if items[1].ValueKind = JsonValueKind.String then items[1].GetString() else ""
                             if r < 2 then
                                 // A rank-1 level is the trivial group and normalizes
                                 // away (OrbRank.normalizeLevels), so admitting it
@@ -462,7 +462,7 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                             let items = ls.EnumerateArray() |> Array.ofSeq
                             if j >= items.Length then Ok (List.rev acc)
                             else
-                                match parseLevel j items.[j] with
+                                match parseLevel j items[j] with
                                 | Ok lv -> collectLevels (j + 1) (lv :: acc)
                                 | Error err -> Error err
                         (match collectLevels 0 [] with
@@ -487,7 +487,7 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             let rec collect i acc =
                 if i >= entries.Length then Ok (List.rev acc)
                 else
-                    match parseEntry i entries.[i] with
+                    match parseEntry i entries[i] with
                     | Ok c -> collect (i + 1) (c :: acc)
                     | Error e -> Error e
             match collect 0 [] with
@@ -720,9 +720,9 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                     | [] -> None
                     | ["bytes"] ->
                         let endian =
-                            tryProp arr.[0] "configuration"
+                            tryProp arr[0] "configuration"
                             |> Option.bind (fun cfg -> tryProp cfg "endian")
-                            |> Option.map (fun e -> e.GetString())
+                            |> Option.map (_.GetString())
                             |> Option.defaultValue "little"
                         if endian = "little" then None
                         else Some $"{where_}: big-endian bytes codec is not supported (little-endian stores only)"
@@ -756,7 +756,7 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                     let csep dflt =
                         tryProp cke "configuration"
                         |> Option.bind (fun c -> tryProp c "separator")
-                        |> Option.map (fun s -> s.GetString())
+                        |> Option.map (_.GetString())
                         |> Option.defaultValue dflt
                     match ename with
                     | "default" -> ("c", csep "/")
@@ -787,7 +787,7 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
 
 let private isValidIdent (s: string) =
     s.Length > 0
-    && (Char.IsLetter s.[0] || s.[0] = '_')
+    && (Char.IsLetter s[0] || s[0] = '_')
     && s |> Seq.forall (fun ch -> Char.IsLetterOrDigit ch || ch = '_')
 
 let private readTextOpt (path: string) : string option =
@@ -916,8 +916,8 @@ let private decodeIntCell (code: string) (b: byte[]) (off: int) : int64 =
     | "i8" -> BitConverter.ToInt64(b, off)
     | "i4" -> int64 (BitConverter.ToInt32(b, off))
     | "i2" -> int64 (BitConverter.ToInt16(b, off))
-    | "i1" -> int64 (sbyte b.[off])
-    | "u1" -> int64 b.[off]
+    | "i1" -> int64 (sbyte b[off])
+    | "u1" -> int64 b[off]
     | "u2" -> int64 (BitConverter.ToUInt16(b, off))
     | "u4" -> int64 (BitConverter.ToUInt32(b, off))
     | "u8" -> int64 (BitConverter.ToUInt64(b, off))
@@ -980,20 +980,20 @@ let readArrayDataFrom (src: ChunkSource) (meta: ZarrArrayMeta) : Result<ZarrVarD
                 if d = rank then
                     match chunkBytes with
                     | Some raw ->
-                        if meta.Dtype.IsFloat then outF.[gBase] <- decodeFloatCell meta.Dtype.Code raw (cBase * bs)
-                        else outI.[gBase] <- decodeIntCell meta.Dtype.Code raw (cBase * bs)
+                        if meta.Dtype.IsFloat then outF[gBase] <- decodeFloatCell meta.Dtype.Code raw (cBase * bs)
+                        else outI[gBase] <- decodeIntCell meta.Dtype.Code raw (cBase * bs)
                     | None ->
                         (match meta.FillValue with
-                         | FillFloat f when meta.Dtype.IsFloat -> outF.[gBase] <- f
-                         | FillInt n when not meta.Dtype.IsFloat -> outI.[gBase] <- n
-                         | FillFloat f -> outI.[gBase] <- int64 f
-                         | FillInt n -> outF.[gBase] <- float n
+                         | FillFloat f when meta.Dtype.IsFloat -> outF[gBase] <- f
+                         | FillInt n when not meta.Dtype.IsFloat -> outI[gBase] <- n
+                         | FillFloat f -> outI[gBase] <- int64 f
+                         | FillInt n -> outF[gBase] <- float n
                          | FillNone -> ())
                 else
-                    let basePos = coordsArr.[d] * chunksArr.[d]
-                    let lim = min chunksArr.[d] (shapeArr.[d] - basePos)
+                    let basePos = coordsArr[d] * chunksArr[d]
+                    let lim = min chunksArr[d] (shapeArr[d] - basePos)
                     for l in 0 .. lim - 1 do
-                        copy (d + 1) (gBase + (basePos + l) * gStrArr.[d]) (cBase + l * cStrArr.[d])
+                        copy (d + 1) (gBase + (basePos + l) * gStrArr[d]) (cBase + l * cStrArr[d])
             if total > 0 then copy 0 0 0
         Ok { DimLengths = shape
              Payload = if meta.Dtype.IsFloat then ZFloats outF else ZInts outI }
@@ -1038,10 +1038,10 @@ let readPackedPoolFrom (src: ChunkSource) (meta: ZarrArrayMeta) : Result<ZarrVar
                 let remap (src: 'a[]) (zero: 'a) : 'a[] =
                     let out = Array.create (max (card * trail) 1) zero
                     for p in 0 .. cellMap.Length - 1 do
-                        let pool = cellMap.[p]
+                        let pool = cellMap[p]
                         if pool >= 0 then
                             for t in 0 .. trail - 1 do
-                                out.[pool * trail + t] <- src.[p * trail + t]
+                                out[pool * trail + t] <- src[p * trail + t]
                     out
                 match phys.Payload with
                 | ZFloats xs -> Ok { DimLengths = dims; Payload = ZFloats (remap xs 0.0) }
@@ -1086,9 +1086,9 @@ let dimChunkEdges (storePath: string) : Map<string, int64> =
         if a.Blade.IsNone && a.Chunks.Length = a.Shape.Length then
             for (dn, edge) in List.zip (resolvedDimNames a) a.Chunks do
                 match seen.TryGetValue dn with
-                | true, Some prev when prev <> edge -> seen.[dn] <- None
+                | true, Some prev when prev <> edge -> seen[dn] <- None
                 | true, _ -> ()
-                | _ -> seen.[dn] <- Some edge
+                | _ -> seen[dn] <- Some edge
     seen |> Seq.choose (fun kv -> kv.Value |> Option.map (fun e -> (kv.Key, e))) |> Map.ofSeq
 
 /// Converts a ZarrStore into an IRModule using structs for dims/vars, the
@@ -1151,7 +1151,7 @@ let zarrStoreToModuleWith
                 failwith $"Zarr store '{store.Path}': dimension '{dn}' has conflicting extents {prev} and {ext} across arrays"
             | true, _ -> ()
             | _ ->
-                dimExtents.[dn] <- ext
+                dimExtents[dn] <- ext
                 dimOrder.Add dn
 
     // Named index types.
@@ -1161,7 +1161,7 @@ let zarrStoreToModuleWith
         | None ->
             let pairs =
                 dimOrder |> List.ofSeq
-                |> List.map (fun dn -> zarrDimToNamedIndexType builder (dn, dimExtents.[dn]))
+                |> List.map (fun dn -> zarrDimToNamedIndexType builder (dn, dimExtents[dn]))
             let typeDefs = pairs |> List.map (fun (name, idx) -> IRTDIndexType(name, idx))
             (typeDefs, Map.ofList pairs)
 
@@ -1177,7 +1177,7 @@ let zarrStoreToModuleWith
     // dims struct: one coordinate array per dimension.
     let dimsFields =
         dimOrder |> List.ofSeq |> List.map (fun dn ->
-            let idx = dimMap.[dn]
+            let idx = dimMap[dn]
             let arrType = mkArrayArrow [idx] (IRTScalar (coordElem dn)) (Some (providerVarIdentity storeKey ("dims." + dn)))
             (dn, arrType))
     let dimsStruct = IRTDStruct($"{moduleName}__dims", dimsFields)
@@ -1509,7 +1509,7 @@ module CppZarr =
         let gridLoops =
             [ for d in 0 .. rank - 1 ->
                 let ind = String.replicate d "    "
-                $"{ind}for (size_t {v}_c{d} = 0; {v}_c{d} < {grid.[d]}; {v}_c{d}++) {{" ]
+                $"{ind}for (size_t {v}_c{d} = 0; {v}_c{d} < {grid[d]}; {v}_c{d}++) {{" ]
         let gInd0 = String.replicate rank "    "
         // Under a mask the chunk body sits one level deeper, inside the
         // need / not-done test.
@@ -1519,8 +1519,8 @@ module CppZarr =
         // intersection only).
         let limDecls =
             [ for d in 0 .. rank - 1 do
-                yield $"{gInd}size_t {v}_lim{d} = {shape.[d]} - {v}_c{d} * {chunks.[d]};"
-                yield $"{gInd}if ({v}_lim{d} > {chunks.[d]}) {v}_lim{d} = {chunks.[d]};" ]
+                yield $"{gInd}size_t {v}_lim{d} = {shape[d]} - {v}_c{d} * {chunks[d]};"
+                yield $"{gInd}if ({v}_lim{d} > {chunks[d]}) {v}_lim{d} = {chunks[d]};" ]
 
         // Copy loops (shared shape by both branches): global index from
         // (chunkCoord*chunk + local) with row-major strides.
@@ -1531,10 +1531,10 @@ module CppZarr =
             @ [ gInd + String.replicate (rank + 1) "    " + assign ]
             @ [ for d in rank - 1 .. -1 .. 0 -> gInd + String.replicate (d + 1) "    " + "}" ]
         let gIdx =
-            [ for d in 0 .. rank - 1 -> $"({v}_c{d} * {chunks.[d]} + {v}_l{d}) * {gStr.[d]}" ]
+            [ for d in 0 .. rank - 1 -> $"({v}_c{d} * {chunks[d]} + {v}_l{d}) * {gStr[d]}" ]
             |> String.concat " + "
         let cIdx =
-            [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr.[d]}" ]
+            [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr[d]}" ]
             |> String.concat " + "
         // The boundary rule's per-cell note and its report (both empty when
         // the variable has no rule).
@@ -1598,7 +1598,7 @@ module CppZarr =
             // Phase 1 reads the NEEDED chunks (the compute phase's) and keeps the
             // chunk buffer; phase 2 reads what is not yet done and releases it.
             let cidx =
-                [ for d in 0 .. rank - 1 -> $"{v}_c{d} * {gridStr.[d]}" ] |> String.concat " + "
+                [ for d in 0 .. rank - 1 -> $"{v}_c{d} * {gridStr[d]}" ] |> String.concat " + "
             let test = if phase = 1 then $"{needName}[{v}_cidx]" else $"!{doneName}[{v}_cidx]"
             (if phase = 1 then header else [])
             @ gridLoops
@@ -1659,12 +1659,12 @@ module CppZarr =
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
                 let ind = String.replicate d "    "
-                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames[d]}; {iv}++) {{")
         let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
         let flatIdx =
-            let mutable acc = idxVars.[0]
+            let mutable acc = idxVars[0]
             for i in 1 .. rank - 1 do
-                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
+                acc <- $"({acc}) * {extentNames[i]} + {idxVars[i]}"
             acc
         let bodyInd = String.replicate rank "    "
         let materialize =
@@ -1875,15 +1875,15 @@ module CppZarr =
         let guardInd = if distribute then "    " else ""
         let trailOpen =
             trailVars |> List.mapi (fun i tv ->
-                $"""{(bodyInd + guardInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts.[i]}; {tv}++) {{""")
+                $"""{(bodyInd + guardInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts[i]}; {tv}++) {{""")
         let trailClose =
             [ for i in trailVars.Length - 1 .. -1 .. 0 -> bodyInd + guardInd + String.replicate i "    " + "}" ]
         let trailIdx =
             if trailVars.IsEmpty then "0"
             else
-                let mutable acc = trailVars.[0]
+                let mutable acc = trailVars[0]
                 for i in 1 .. trailVars.Length - 1 do
-                    acc <- $"({acc}) * {trailExts.[i]} + {trailVars.[i]}"
+                    acc <- $"({acc}) * {trailExts[i]} + {trailVars[i]}"
                 acc
         let valueExpr =
             match meta.FillValue with
@@ -2050,15 +2050,15 @@ module CppZarr =
                 let trailVars = trailExts |> List.mapi (fun i _ -> $"{v}_wt{i}")
                 let trailOpen =
                     trailVars |> List.mapi (fun i tv ->
-                        $"""{(bodyInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts.[i]}; {tv}++) {{""")
+                        $"""{(bodyInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts[i]}; {tv}++) {{""")
                 let trailClose =
                     [ for i in trailVars.Length - 1 .. -1 .. 0 -> bodyInd + String.replicate i "    " + "}" ]
                 let trailIdx =
                     if trailVars.IsEmpty then "0"
                     else
-                        let mutable acc = trailVars.[0]
+                        let mutable acc = trailVars[0]
                         for i in 1 .. trailVars.Length - 1 do
-                            acc <- $"({acc}) * {trailExts.[i]} + {trailVars.[i]}"
+                            acc <- $"({acc}) * {trailExts[i]} + {trailVars[i]}"
                         acc
                 let wClose = [ for k in r - 1 .. -1 .. 0 -> String.replicate (k + 1) "    " + "}" ]
                 assemble
@@ -2178,23 +2178,23 @@ module CppZarr =
         // window bounds and row-major strides of the window's shape
         let boundDecls =
             [ for d in 0 .. rank - 1 do
-                let (lo, hi) = ranges.[d]
-                yield $"size_t {v}_wlo{d} = (size_t)({lo}); size_t {v}_whi{d} = (size_t)({hi}); if ({v}_whi{d} > {shape.[d]}UL) {v}_whi{d} = {shape.[d]}UL;" ]
+                let (lo, hi) = ranges[d]
+                yield $"size_t {v}_wlo{d} = (size_t)({lo}); size_t {v}_whi{d} = (size_t)({hi}); if ({v}_whi{d} > {shape[d]}UL) {v}_whi{d} = {shape[d]}UL;" ]
             @ [ for d in rank - 1 .. -1 .. 0 do
                   if d = rank - 1 then yield $"size_t {v}_wst{d} = 1;"
                   else yield $"size_t {v}_wst{d} = {v}_wst{d + 1} * ({v}_whi{d + 1} - {v}_wlo{d + 1});" ]
         let gridLoops =
             [ for d in 0 .. rank - 1 ->
                 let ind = String.replicate d "    "
-                $"{ind}for (size_t {v}_c{d} = {v}_wlo{d} / {chunks.[d]}; {v}_c{d} * {chunks.[d]} < {v}_whi{d}; {v}_c{d}++) {{" ]
+                $"{ind}for (size_t {v}_c{d} = {v}_wlo{d} / {chunks[d]}; {v}_c{d} * {chunks[d]} < {v}_whi{d}; {v}_c{d}++) {{" ]
         let gInd = String.replicate rank "    "
         let limDecls =
             [ for d in 0 .. rank - 1 do
-                yield $"{gInd}size_t {v}_lim{d} = {shape.[d]} - {v}_c{d} * {chunks.[d]};"
-                yield $"{gInd}if ({v}_lim{d} > {chunks.[d]}) {v}_lim{d} = {chunks.[d]};"
+                yield $"{gInd}size_t {v}_lim{d} = {shape[d]} - {v}_c{d} * {chunks[d]};"
+                yield $"{gInd}if ({v}_lim{d} > {chunks[d]}) {v}_lim{d} = {chunks[d]};"
                 // clip the copy to the window: local range [from, to) within the chunk
-                yield $"{gInd}size_t {v}_from{d} = {v}_c{d} * {chunks.[d]} < {v}_wlo{d} ? {v}_wlo{d} - {v}_c{d} * {chunks.[d]} : 0;"
-                yield $"{gInd}size_t {v}_to{d} = {v}_whi{d} - {v}_c{d} * {chunks.[d]}; if ({v}_to{d} > {v}_lim{d}) {v}_to{d} = {v}_lim{d};" ]
+                yield $"{gInd}size_t {v}_from{d} = {v}_c{d} * {chunks[d]} < {v}_wlo{d} ? {v}_wlo{d} - {v}_c{d} * {chunks[d]} : 0;"
+                yield $"{gInd}size_t {v}_to{d} = {v}_whi{d} - {v}_c{d} * {chunks[d]}; if ({v}_to{d} > {v}_lim{d}) {v}_to{d} = {v}_lim{d};" ]
         let copyLoops (assign: string) =
             [ for d in 0 .. rank - 1 ->
                 let ind = gInd + String.replicate (d + 1) "    "
@@ -2202,10 +2202,10 @@ module CppZarr =
             @ [ gInd + String.replicate (rank + 1) "    " + assign ]
             @ [ for d in rank - 1 .. -1 .. 0 -> gInd + String.replicate (d + 1) "    " + "}" ]
         let dIdx =
-            [ for d in 0 .. rank - 1 -> $"({v}_c{d} * {chunks.[d]} + {v}_l{d} - {v}_wlo{d}) * {v}_wst{d}" ]
+            [ for d in 0 .. rank - 1 -> $"({v}_c{d} * {chunks[d]} + {v}_l{d} - {v}_wlo{d}) * {v}_wst{d}" ]
             |> String.concat " + "
         let cIdx =
-            [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr.[d]}" ]
+            [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr[d]}" ]
             |> String.concat " + "
         let count (ind: string) (line: string) =
             match io with
@@ -2406,7 +2406,7 @@ module CppZarr =
         // Chunk key from site-chunk coords + the t-chunk counter.
         let sep = meta.ChunkKeySep
         let coordParts =
-            [ for k in 0 .. d - 1 -> $"std::to_string((size_t)({siteExprs.[k]}) / {chunks.[k]})" ]
+            [ for k in 0 .. d - 1 -> $"std::to_string((size_t)({siteExprs[k]}) / {chunks[k]})" ]
             @ [ $"std::to_string({v}_tc)" ]
         let joined = String.concat $" + \"{sep}\" + " coordParts
         let keyExpr =
@@ -2415,9 +2415,9 @@ module CppZarr =
         // Within-chunk fiber start (elements): Horner over chunk-local site
         // coords with chunk-internal strides, times the t-chunk extent.
         let offExpr =
-            let mutable acc = sprintf "((size_t)(%s) %% %d)" siteExprs.[0] chunks.[0]
+            let mutable acc = sprintf "((size_t)(%s) %% %d)" siteExprs[0] chunks[0]
             for k in 1 .. d - 1 do
-                acc <- sprintf "(%s * %d + (size_t)(%s) %% %d)" acc chunks.[k] siteExprs.[k] chunks.[k]
+                acc <- sprintf "(%s * %d + (size_t)(%s) %% %d)" acc chunks[k] siteExprs[k] chunks[k]
             $"{acc} * {ctT}"
         let missingBranch =
             match meta.FillValue with
@@ -2625,10 +2625,10 @@ module ZarrWrite =
 
     let private cellBytes (p: WritePayload) (idx: int) : byte[] =
         match p with
-        | WF32 xs -> BitConverter.GetBytes xs.[idx]
-        | WF64 xs -> BitConverter.GetBytes xs.[idx]
-        | WI32 xs -> BitConverter.GetBytes xs.[idx]
-        | WI64 xs -> BitConverter.GetBytes xs.[idx]
+        | WF32 xs -> BitConverter.GetBytes xs[idx]
+        | WF64 xs -> BitConverter.GetBytes xs[idx]
+        | WI32 xs -> BitConverter.GetBytes xs[idx]
+        | WI64 xs -> BitConverter.GetBytes xs[idx]
 
     let private fillBytes (p: WritePayload) (fill: ZarrFill) : byte[] =
         match p, fill with
@@ -2701,10 +2701,10 @@ module ZarrWrite =
             let inline remap (src: 'a[]) (pad: 'a) : 'a[] =
                 let out = Array.create (physCells * trail) pad
                 for p in 0 .. physCells - 1 do
-                    let pool = cellMap.[p]
+                    let pool = cellMap[p]
                     if pool >= 0 then
                         for t in 0 .. trail - 1 do
-                            out.[p * trail + t] <- src.[pool * trail + t]
+                            out[p * trail + t] <- src[pool * trail + t]
                 out
             let padAsFloat =
                 match var.FillValue with
@@ -2751,10 +2751,10 @@ module ZarrWrite =
             if d = rank then
                 Array.blit (cellBytes var.Data gBase) 0 out (cBase * bs) bs
             else
-                let basePos = coordsArr.[d] * chunksArr.[d]
-                let lim = min chunksArr.[d] (shapeArr.[d] - basePos)
+                let basePos = coordsArr[d] * chunksArr[d]
+                let lim = min chunksArr[d] (shapeArr[d] - basePos)
                 for l in 0 .. lim - 1 do
-                    go (d + 1) (gBase + (basePos + l) * gStrArr.[d]) (cBase + l * cStrArr.[d])
+                    go (d + 1) (gBase + (basePos + l) * gStrArr[d]) (cBase + l * cStrArr[d])
         if chunkCount > 0 && (shape |> List.fold (*) 1) > 0 then go 0 0 0
         out
 

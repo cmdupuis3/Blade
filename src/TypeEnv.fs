@@ -1770,20 +1770,20 @@ let humanizeTypeText (msg: string) : string =
                     | true, k -> k
                     | _ ->
                         let k = extentOrder.Count
-                        extentOrder.[m.Value] <- k
+                        extentOrder[m.Value] <- k
                         k
                 if k = 0 then "n" else $"n{k + 1}")
     let order = System.Collections.Generic.Dictionary<string, int>()
     System.Text.RegularExpressions.Regex.Replace(
         withExtents, @"T\?(\d+)",
         fun (m: System.Text.RegularExpressions.Match) ->
-            let id = m.Groups.[1].Value
+            let id = m.Groups[1].Value
             let k =
                 match order.TryGetValue id with
                 | true, k -> k
                 | _ ->
                     let k = order.Count
-                    order.[id] <- k
+                    order[id] <- k
                     k
             if k < 26 then "'" + string (char (int 'a' + k)) else $"'t{k}")
 
@@ -2330,7 +2330,7 @@ let unitSpellingCandidates (units: Map<string, UnitSig>) (name: string) : string
             |> List.exists (fun i -> long.Remove(i, 1) = short)
     let lowered = name.ToLowerInvariant()
     Map.toList units
-    |> List.filter (fun (n, s) -> s.Nominal.IsNone)
+    |> List.filter (fun (_, s) -> s.Nominal.IsNone)
     |> List.map fst
     |> List.append (Map.toList unitScaleConstants |> List.map fst)
     |> List.filter (fun n -> n <> name && (n.ToLowerInvariant() = lowered || close n name))

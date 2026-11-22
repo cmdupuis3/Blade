@@ -104,7 +104,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
         let vetoed =
             c.IsRepro
             || (match c.Body with
-                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+                | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
                 | _ -> false)
         not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
     let enabled = joinAggEnabled ()
@@ -151,11 +151,11 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
             Blade.Optimize.bindingPayload modul b |> List.filter (fun e -> not (obj.ReferenceEquals(e, b.Value)))
         let foldOnly (b: IRBinding) =
             match b.Value with
-            | IRReduce (IRVar (id, _), k, seed) when id = jid ->
+            | ReduceOfNamed (id, _, k, seed) when id = jid ->
                 extentOnly k && (seed |> Option.forall extentOnly)
                 && not (refsDerived k) && not (seed |> Option.exists refsDerived)
                 && (sidePayload b |> List.forall (fun e -> extentOnly e && not (refsDerived e)))
-            | IRReduce (IRVar (id, _), k, seed) when selections.ContainsKey id ->
+            | ReduceOfNamed (id, _, k, seed) when selections.ContainsKey id ->
                 not (refsFamily k) && not (seed |> Option.exists refsFamily)
                 && (sidePayload b |> List.forall (refsFamily >> not))
             | _ -> false
@@ -194,7 +194,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
                 else
                 let payloadTypes =
                     match b.Value with
-                    | IRReduce (IRVar (id, _), k, seed) when selections.ContainsKey id ->
+                    | ReduceOfNamed (id, _, k, seed) when selections.ContainsKey id ->
                         (k :: Option.toList seed @ sidePayload b) |> List.collect Blade.Optimize.embeddedExtentExprs
                     | _ -> Blade.Optimize.bindingPayload modul b |> List.collect Blade.Optimize.embeddedExtentExprs
                 (Blade.Optimize.irTypeExtentExprs b.Type @ payloadTypes)
@@ -275,7 +275,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
             let filtered =
                 folds |> List.choose (fun b ->
                     match b.Value with
-                    | IRReduce (IRVar (id, _), _, _) when selections.ContainsKey id -> Some (b.Id, selections.[id])
+                    | ReduceOfNamed (id, _, _, _) when selections.ContainsKey id -> Some (b.Id, selections.[id])
                     | _ -> None) |> Map.ofList
             JoinAggTable.record { JoinId = jid; JoinName = jname; Folds = folds |> List.map (fun b -> b.Id)
                                   Filtered = filtered; Elided = Set.toList derived }

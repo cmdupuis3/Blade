@@ -238,7 +238,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
 /// `loop <@> kernel` under the galilean judgment: source statuses bind to the
 /// kernel's leading params (one per source array; remaining params are the
 /// co-iteration ordinals, boost-invariant). Non-former applies stay opaque.
-and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (loop: Expr) (kern: Expr)
+and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (_e: Expr) (loop: Expr) (kern: Expr)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
     let srcsOf (l: Expr) =
         match l.Kind with
@@ -253,7 +253,7 @@ and private judgeFormerApply (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr
             let env' =
                 ps |> List.mapi (fun i p -> (i, p.Name))
                    |> List.fold (fun m (i, name) ->
-                        let st = if i < srcSts.Length then srcSts.[i] else BInv
+                        let st = if i < srcSts.Length then srcSts[i] else BInv
                         Map.add name st m) env
             judge ctx env' body)
     | _ -> Ok BOpaque
@@ -383,12 +383,12 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                         // argument is a real ESCAPE (the callee carries no
                         // theorem about it), while BOpaque is the judgment's
                         // OWN blind spot -- it must not be reported as variant.
-                        match sts.[i] with
+                        match sts[i] with
                         | BVar ->
-                            Error (bl4009 args.[i].Span
+                            Error (bl4009 args[i].Span
                                        $"function '{ctx.FuncName}': a boost-variant value escapes to '{fn}', which carries no galilean certificate -- certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)")
                         | _ ->
-                            Error (bl4009 args.[i].Span
+                            Error (bl4009 args[i].Span
                                        $"function '{ctx.FuncName}': an argument to '{fn}' cannot be classified as boost-invariant or boost-variant -- a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)"))
             | Some BOpaque -> reject $"cannot classify the callee '{fn}'"
     | _ ->

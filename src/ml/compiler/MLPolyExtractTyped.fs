@@ -86,6 +86,7 @@ let private constPoly (ctx: Ctx) (c: PX.Rat) =
 /// expression, a fold this walker cannot see) is not a literal and the
 /// caller declines -- by typecheck the `let static` folds have already
 /// happened, so a surviving non-literal offset is genuinely dynamic.
+[<TailCall>]
 let rec private staticOffset (e: TypedExpr) : int option =
     match e.Kind with
     | TExprLit (LitInt n) -> Some (int n)
@@ -205,7 +206,7 @@ and private extractIndex (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
             match v with
             | PX.VVec ps ->
                 (match staticOffset idxE with
-                 | Some i when i >= 0 && i < ps.Length -> Ok (PX.VScalar ps.[i])
+                 | Some i when i >= 0 && i < ps.Length -> Ok (PX.VScalar ps[i])
                  | Some i -> outside $"index {i} is outside a {ps.Length}-component value" e.Span
                  | None -> outside "indexing a representation-typed value needs a static offset" e.Span)
             | PX.VInvArr name ->
@@ -277,7 +278,7 @@ and private extractApply (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
                         let kEnv =
                             List.zip lam.Params srcs
                             |> List.fold (fun m ((p: TypedParam), (s: PX.Poly [])) ->
-                                Map.add p.VarId (PX.VScalar s.[i]) m) env
+                                Map.add p.VarId (PX.VScalar s[i]) m) env
                         extractVal ctx resolve kEnv lam.Body |> Result.bind (fun v ->
                             match v with
                             | PX.VScalar p -> Ok (out @ [ p ])

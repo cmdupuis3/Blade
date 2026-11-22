@@ -37,12 +37,12 @@ let computeSDimsPerArray (arrayTypes: IRArrayType list) : int list =
 /// structure; product-symmetry reordering is applied separately by
 /// buildLoopLevelStructure so the grouping rule lives in one place
 /// (rawAxisGroups) and the reorder cannot drift from it.
-let buildRawLoopLevels (arrayTypes: IRArrayType list) (sDimsPerArray: int list) : LoopLevelInfo list =
+let buildRawLoopLevels (arrayTypes: IRArrayType list) (_sDimsPerArray: int list) : LoopLevelInfo list =
     let mutable levels = []
     let mutable globalIdx = 0
     
     for arrIdx in 0 .. arrayTypes.Length - 1 do
-        let arr = arrayTypes.[arrIdx]
+        let arr = arrayTypes[arrIdx]
         let mutable localDimIdx = 0
         // Cumulative depth of levels emitted for THIS array so far. RankIndex
         // must be this cumulative depth, not the per-record arity position --
@@ -127,7 +127,7 @@ let fuseJointSLevels
             List.contains k cg &&
             cg |> List.exists (fun q ->
                 (q = k + 1 || q + 1 = k) && q < identities.Length && k < identities.Length &&
-                sameIdentity identities.[k] identities.[q]))
+                sameIdentity identities[k] identities[q]))
     let sRecordsByArray =
         arrayTypes |> List.map (fun arr ->
             arr.IndexTypes |> List.filter (fun idx -> idx.Kind = SDimension))
@@ -140,8 +140,8 @@ let fuseJointSLevels
         rawLevels
         |> List.groupBy _.ArrayIndex
         |> List.collect (fun (arrIdx, lvls) ->
-            let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
-            let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
+            let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray[arrIdx] else []
+            let isVirtual = arrIdx < arrayTypes.Length && arrayTypes[arrIdx].IsVirtual
             // Dense rank-1 factors only: IxKPlain/IxKIrreps are the two kinds
             // whose extent IS their cardinality -- everything else compacts,
             // varies per row, or is synthetic, none of which decode as a
@@ -202,7 +202,7 @@ let rawAxisGroups
         commGroups |> List.exists (fun cg -> List.contains i cg && List.contains j cg)
     let sameArrayIdentity i j =
         i < identities.Length && j < identities.Length &&
-        sameIdentity identities.[i] identities.[j]
+        sameIdentity identities[i] identities[j]
     let sLevelCount =
         let counts = rawLevels |> List.countBy _.ArrayIndex |> Map.ofList
         fun arrIdx -> match counts.TryFind arrIdx with Some c -> c | None -> 0
@@ -247,11 +247,11 @@ let rawAxisGroups
     let groupOf = Array.create arr.Length -1
     let mutable nextGroup = 0
     for gi in 0 .. arr.Length - 1 do
-        let prior = [ gi - 1 .. -1 .. 0 ] |> List.tryFind (fun j -> mergesWith arr.[gi] arr.[j])
+        let prior = [ gi - 1 .. -1 .. 0 ] |> List.tryFind (fun j -> mergesWith arr[gi] arr[j])
         match prior with
-        | Some j -> groupOf.[gi] <- groupOf.[j]
+        | Some j -> groupOf[gi] <- groupOf[j]
         | None ->
-            groupOf.[gi] <- nextGroup
+            groupOf[gi] <- nextGroup
             nextGroup <- nextGroup + 1
     List.ofArray groupOf
 
@@ -339,7 +339,7 @@ let computeAllSymcomStates
 
         let sameArrayIdentity i j =
             i < identities.Length && j < identities.Length &&
-            sameIdentity identities.[i] identities.[j]
+            sameIdentity identities[i] identities[j]
 
         // Commutative licensing: identity required (shared index spaces
         // license nothing -- shared_units_insufficient), and each
@@ -355,10 +355,10 @@ let computeAllSymcomStates
                 let mutable count = 1
                 let mutable idx = level.GlobalLevelIndex - 1
                 while idx >= 0 do
-                    let priorLevel = levels.[idx]
+                    let priorLevel = levels[idx]
                     if priorLevel.ArrayIndex = level.ArrayIndex &&
                        priorLevel.LocalDimIndex = level.LocalDimIndex &&
-                       priorLevel.RankIndex = levels.[idx + 1].RankIndex - 1 then
+                       priorLevel.RankIndex = levels[idx + 1].RankIndex - 1 then
                         count <- count + 1
                         idx <- idx - 1
                     else
@@ -369,8 +369,8 @@ let computeAllSymcomStates
             let mutable count = 1
             let mutable idx = level.GlobalLevelIndex - 1
             while idx >= 0 do
-                let priorLevel = levels.[idx]
-                let thisLevel = if idx = level.GlobalLevelIndex - 1 then level else levels.[idx + 1]
+                let priorLevel = levels[idx]
+                let thisLevel = if idx = level.GlobalLevelIndex - 1 then level else levels[idx + 1]
                 let canContinue =
                     inSameCommGroup thisLevel.ArrayIndex priorLevel.ArrayIndex &&
                     sameArrayIdentity thisLevel.ArrayIndex priorLevel.ArrayIndex &&
@@ -386,7 +386,7 @@ let computeAllSymcomStates
         levels |> List.mapi (fun globalIdx level ->
             if globalIdx = 0 then SCNeither
             else
-                let priorLevel = levels.[globalIdx - 1]
+                let priorLevel = levels[globalIdx - 1]
                 
                 let isSymmetric =
                     level.ArrayIndex = priorLevel.ArrayIndex &&
@@ -480,9 +480,9 @@ let computePartialProductSpeedup
 
 /// Compute the lower bound for triangular iteration
 let computeTriangularBound 
-    (loopIndex: int) 
+    (_loopIndex: int) 
     (priorIndices: IRId list) 
-    (extent: IRExpr) 
+    (_extent: IRExpr) 
     (state: SymcomState) : IRExpr =
     
     match state with
@@ -730,8 +730,8 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                 arr.IndexTypes |> List.filter (fun idx -> idx.Kind = SDimension))
         let sourceRecord (lv: LoopLevelInfo) : IRIndexType option =
             if lv.ArrayIndex < sDimRecordsByArray.Length then
-                let recs = sDimRecordsByArray.[lv.ArrayIndex]
-                if lv.LocalDimIndex < recs.Length then Some recs.[lv.LocalDimIndex] else None
+                let recs = sDimRecordsByArray[lv.ArrayIndex]
+                if lv.LocalDimIndex < recs.Length then Some recs[lv.LocalDimIndex] else None
             else None
         let outputSDims =
             // Group ids in reordered level order; emit one index per group, in
@@ -748,19 +748,19 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                 if List.isEmpty antisymGroups then false
                 else
                     let arrIdxs =
-                        memberIdxs |> List.map (fun k -> levelArr.[k].ArrayIndex) |> List.distinct
+                        memberIdxs |> List.map (fun k -> levelArr[k].ArrayIndex) |> List.distinct
                     List.length arrIdxs > 1
                     && antisymGroups |> List.exists (fun g ->
                            arrIdxs |> List.forall (fun a -> List.contains a g))
             let mutable emittedGroups = []
             let mutable result = []
             for gi in 0 .. levelArr.Length - 1 do
-                let g = groupArr.[gi]
+                let g = groupArr[gi]
                 if not (List.contains g emittedGroups) then
                     emittedGroups <- emittedGroups @ [g]
-                    let memberIdxs = [ for k in 0 .. levelArr.Length - 1 do if groupArr.[k] = g then yield k ]
+                    let memberIdxs = [ for k in 0 .. levelArr.Length - 1 do if groupArr[k] = g then yield k ]
                     let groupRank = List.length memberIdxs
-                    let repLevel = levelArr.[List.head memberIdxs]
+                    let repLevel = levelArr[List.head memberIdxs]
                     match repLevel.FusedFactors with
                     | Some factors when not factors.IsEmpty && groupRank > 1 ->
                         // JOINT output record: one symmetric index of rank

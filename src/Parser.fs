@@ -19,8 +19,8 @@ open Blade.ParserGrammar
 // (BL9001 in every consumer). Each public entry point therefore installs the
 // grammar explicitly; the assignment is idempotent and costs two writes.
 let internal installGrammar () =
-    parseExprRef := parseExprImpl
-    parseBodyRef := parseInlineOrBlock
+    parseExprRef.Value <- parseExprImpl
+    parseBodyRef.Value <- parseInlineOrBlock
 
 // Declaration Parsing
 
@@ -592,6 +592,7 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
 
 /// Skip tokens until we find a declaration-starting keyword or EOF.
 /// Used for parser error recovery.
+[<TailCall>]
 let rec skipToNextDecl (tokens: Token list) : Token list =
     let tokens = skipNL tokens
     match peek tokens with
@@ -605,6 +606,7 @@ let rec skipToNextDecl (tokens: Token list) : Token list =
 
 /// Newlines and `;` between top-level declarations. `;` is the optional
 /// same-line separator (formalism §15.1), accepted here exactly as in blocks.
+[<TailCall>]
 let rec skipSeparators (tokens: Token list) : Token list =
     match tokens with
     | t :: rest when t.Kind = TokNewline || t.Kind = TokSemi -> skipSeparators rest

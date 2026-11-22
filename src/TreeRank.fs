@@ -107,12 +107,12 @@ let validateDegrees (deg: int list) : Result<unit, string> =
         let mutable pending = 1L
         let mutable i = 0
         while err.IsNone && i < n do
-            if a.[i] < 0 then
-                err <- Some $"node {i}: degree {a.[i]} must be >= 0"
+            if a[i] < 0 then
+                err <- Some $"node {i}: degree {a[i]} must be >= 0"
             elif pending < 1L then
                 err <- Some $"node {i}: the degree sequence closes early -- the tree is complete after {i} node(s), but {n} were given"
             else
-                pending <- pending - 1L + int64 a.[i]
+                pending <- pending - 1L + int64 a[i]
                 i <- i + 1
         match err with
         | Some e -> Error e
@@ -169,29 +169,29 @@ let nodeCount (t: TreeTables) = t.Deg.Length
 
 /// CARDINALITY: the number of cells a `TreeIdx<s>` array holds = the leaf count
 /// = the number of complete root-to-leaf paths. NOT the node count.
-let cardinality (t: TreeTables) = t.LeafCount.[0]
+let cardinality (t: TreeTables) = t.LeafCount[0]
 
 /// The deepest leaf's depth (0 for the single-leaf shape).
 let maxDepth (t: TreeTables) = Array.max t.Depth
 
 /// Is node i a leaf -- i.e. does a complete path end there?
-let isLeaf (t: TreeTables) (node: int) = t.Deg.[node] = 0
+let isLeaf (t: TreeTables) (node: int) = t.Deg[node] = 0
 
 /// Node i's child count (its arity).
-let degreeOf (t: TreeTables) (node: int) = t.Deg.[node]
+let degreeOf (t: TreeTables) (node: int) = t.Deg[node]
 
 /// The node id of node's k-th child. Guard-free: the caller warrants
 /// `0 <= k < deg[node]`. The CSR this reads was built by exactly the walk the
 /// feature doc states -- children of i start at i+1 and each next child is the
 /// previous one plus its subtree size -- so this is that walk, precomputed.
-let treeChild (t: TreeTables) (node: int) (k: int) = t.Children.[t.ChildOff.[node] + k]
+let treeChild (t: TreeTables) (node: int) (k: int) = t.Children[t.ChildOff[node] + k]
 
 /// Domain-checked `treeChild`.
 let treeChildChecked (t: TreeTables) (node: int) (k: int) : Result<int, string> =
     if node < 0 || node >= t.Deg.Length then
         Error $"treeChild: node {node} outside [0,{t.Deg.Length})"
-    elif k < 0 || k >= t.Deg.[node] then
-        Error $"treeChild: child {k} outside [0,{t.Deg.[node]}) at node {node}"
+    elif k < 0 || k >= t.Deg[node] then
+        Error $"treeChild: child {k} outside [0,{t.Deg[node]}) at node {node}"
     else Ok(treeChild t node k)
 
 /// Build every derived table from a degree sequence. This is the checked door:
@@ -213,41 +213,41 @@ let treeTables (deg: int list) : Result<TreeTables, string> =
         // (1) the child CSR's offsets.
         let childOff = Array.zeroCreate (n + 1)
         for i in 0 .. n - 1 do
-            childOff.[i + 1] <- childOff.[i] + d.[i]
+            childOff[i + 1] <- childOff[i] + d[i]
         // (2) subtree node counts and leaf counts, innermost first.
         let sizes = Array.create n 1
         let leafCount = Array.create n 1
         for i in n - 1 .. -1 .. 0 do
-            if d.[i] > 0 then
+            if d[i] > 0 then
                 let mutable c = i + 1
                 let mutable nodes = 1
                 let mutable leaves = 0
-                for _ in 1 .. d.[i] do
-                    nodes <- nodes + sizes.[c]
-                    leaves <- leaves + leafCount.[c]
-                    c <- c + sizes.[c]
-                sizes.[i] <- nodes
-                leafCount.[i] <- leaves
+                for _ in 1 .. d[i] do
+                    nodes <- nodes + sizes[c]
+                    leaves <- leaves + leafCount[c]
+                    c <- c + sizes[c]
+                sizes[i] <- nodes
+                leafCount[i] <- leaves
         // (3) the parent/depth/offset pass, plus the child and leaf tables.
         let parent = Array.create n (-1)
         let childIndex = Array.zeroCreate n
         let depth = Array.zeroCreate n
         let leafStart = Array.zeroCreate n
         let children = Array.zeroCreate (max 0 (n - 1))
-        let leafNodes = Array.zeroCreate leafCount.[0]
+        let leafNodes = Array.zeroCreate leafCount[0]
         for i in 0 .. n - 1 do
-            if d.[i] = 0 then leafNodes.[leafStart.[i]] <- i
+            if d[i] = 0 then leafNodes[leafStart[i]] <- i
             else
                 let mutable c = i + 1
-                let mutable off = leafStart.[i]
-                for k in 0 .. d.[i] - 1 do
-                    parent.[c] <- i
-                    childIndex.[c] <- k
-                    depth.[c] <- depth.[i] + 1
-                    leafStart.[c] <- off
-                    children.[childOff.[i] + k] <- c
-                    off <- off + leafCount.[c]
-                    c <- c + sizes.[c]
+                let mutable off = leafStart[i]
+                for k in 0 .. d[i] - 1 do
+                    parent[c] <- i
+                    childIndex[c] <- k
+                    depth[c] <- depth[i] + 1
+                    leafStart[c] <- off
+                    children[childOff[i] + k] <- c
+                    off <- off + leafCount[c]
+                    c <- c + sizes[c]
         Ok { Deg = d
              Sizes = sizes
              LeafCount = leafCount
@@ -276,7 +276,7 @@ let treeTablesUnchecked (deg: int list) : TreeTables =
 let private descend (t: TreeTables) (path: int list) : int =
     let mutable node = 0
     for c in path do
-        node <- t.Children.[t.ChildOff.[node] + c]
+        node <- t.Children[t.ChildOff[node] + c]
     node
 
 /// Leaf offset of a COMPLETE root-to-leaf path. Guard-free: the caller warrants
@@ -286,7 +286,7 @@ let private descend (t: TreeTables) (path: int list) : int =
 /// leaf's own preorder index -- so this is O(|path|) table steps and one final
 /// load, the "O(k) arithmetic + 1 access" of the feature doc's cost table.
 let treeForward (t: TreeTables) (path: int list) : int =
-    t.LeafStart.[descend t path]
+    t.LeafStart[descend t path]
 
 /// Domain-checked `treeForward`: names the failing STEP, so a path that goes
 /// wrong three levels down does not report as a bare out-of-range offset.
@@ -299,7 +299,7 @@ let treeForwardChecked (t: TreeTables) (path: int list) : Result<int, string> =
     let mutable step = 0
     for c in path do
         if err.IsNone then
-            let deg = t.Deg.[node]
+            let deg = t.Deg[node]
             if c < 0 || c >= deg then
                 err <-
                     Some $"treeForward: path {showPath path} step {step}: child {c} outside [0,{deg}) at node {node}"
@@ -309,9 +309,9 @@ let treeForwardChecked (t: TreeTables) (path: int list) : Result<int, string> =
     match err with
     | Some e -> Error e
     | None ->
-        if t.Deg.[node] <> 0 then
-            Error $"treeForward: path {showPath path} ends at internal node {node} with {t.Deg.[node]} child(ren) -- a complete path must end at a leaf"
-        else Ok t.LeafStart.[node]
+        if t.Deg[node] <> 0 then
+            Error $"treeForward: path {showPath path} ends at internal node {node} with {t.Deg[node]} child(ren) -- a complete path must end at a leaf"
+        else Ok t.LeafStart[node]
 
 // ---------------------------------------------------------------------------
 // backward : Offset -> Path
@@ -324,11 +324,11 @@ let treeForwardChecked (t: TreeTables) (path: int list) : Result<int, string> =
 /// the `Parent`/`ChildIndex` chain reads the path off backwards -- so the
 /// inverse needs no search and no descent by leaf counts.
 let treeBackward (t: TreeTables) (off: int) : int list =
-    let mutable node = t.LeafNodes.[off]
+    let mutable node = t.LeafNodes[off]
     let acc = ResizeArray<int>()
-    while t.Parent.[node] >= 0 do
-        acc.Add t.ChildIndex.[node]
-        node <- t.Parent.[node]
+    while t.Parent[node] >= 0 do
+        acc.Add t.ChildIndex[node]
+        node <- t.Parent[node]
     acc.Reverse()
     List.ofSeq acc
 
@@ -355,7 +355,7 @@ type TreeSubtree =
 /// root, i.e. the whole array.
 let treeSubtree (t: TreeTables) (prefix: int list) : TreeSubtree =
     let node = descend t prefix
-    { Node = node; LeafStart = t.LeafStart.[node]; LeafCount = t.LeafCount.[node] }
+    { Node = node; LeafStart = t.LeafStart[node]; LeafCount = t.LeafCount[node] }
 
 /// Domain-checked `treeSubtree`, naming the failing step exactly as
 /// `treeForwardChecked` does. Note there is no leaf/internal requirement here:
@@ -367,7 +367,7 @@ let treeSubtreeChecked (t: TreeTables) (prefix: int list) : Result<TreeSubtree, 
     let mutable step = 0
     for c in prefix do
         if err.IsNone then
-            let deg = t.Deg.[node]
+            let deg = t.Deg[node]
             if c < 0 || c >= deg then
                 err <-
                     Some $"treeSubtree: prefix {showPath prefix} step {step}: child {c} outside [0,{deg}) at node {node}"
@@ -376,7 +376,7 @@ let treeSubtreeChecked (t: TreeTables) (prefix: int list) : Result<TreeSubtree, 
                 step <- step + 1
     match err with
     | Some e -> Error e
-    | None -> Ok { Node = node; LeafStart = t.LeafStart.[node]; LeafCount = t.LeafCount.[node] }
+    | None -> Ok { Node = node; LeafStart = t.LeafStart[node]; LeafCount = t.LeafCount[node] }
 
 // ---------------------------------------------------------------------------
 // The enumeration
@@ -387,11 +387,11 @@ let treeSubtreeChecked (t: TreeTables) (prefix: int list) : Result<TreeSubtree, 
 /// touches `LeafStart` or `LeafNodes`, so the enumeration and the bijection are
 /// two mechanisms and their agreement is a real pin, not a tautology.
 let rec private pathsUnder (t: TreeTables) (node: int) (rev: int list) : seq<int list> =
-    if t.Deg.[node] = 0 then Seq.singleton (List.rev rev)
+    if t.Deg[node] = 0 then Seq.singleton (List.rev rev)
     else
         seq {
-            for k in 0 .. t.Deg.[node] - 1 do
-                yield! pathsUnder t (t.Children.[t.ChildOff.[node] + k]) (k :: rev)
+            for k in 0 .. t.Deg[node] - 1 do
+                yield! pathsUnder t (t.Children[t.ChildOff[node] + k]) (k :: rev)
         }
 
 /// EVERY complete path, in leaf-offset order. Lazy.

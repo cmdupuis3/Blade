@@ -350,40 +350,40 @@ let joinDeferrableIdsMany (exprs: IRExpr list) : Set<IRId> =
     let allRefs = System.Collections.Generic.Dictionary<IRId, int>()
     let bump (d: System.Collections.Generic.Dictionary<IRId, int>) id =
         d.[id] <- (match d.TryGetValue id with | true, n -> n + 1 | _ -> 0) + 1
-    let rec walk (e: IRExpr) =
-        (match e with
-         | IRVar (id, _) -> bump allRefs id
-         | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
-            let rec leavesOf x =
-                match x with
-                | IRFusion (l, r) -> leavesOf l @ leavesOf r
-                | other -> [other]
-            // The OPERAND slots -- `Arrays`, plus the `Loop` provenance that
-            // repeats them (`method_for(zip(s, ct))` names `ct` twice, and an
-            // accounting that saw only one of the two could never balance).
-            // Deliberately NOT the kernel bodies: an operand a leg's kernel
-            // reads as a whole ARRAY is a capture the join cannot inline.
-            let rec bumpVars x =
-                match x with
-                | IRVar (id, _) -> bump joinRefs id
-                | ExprShape (children, _) -> children |> List.iter bumpVars
-            for leaf in leavesOf comp do
-                match leaf with
-                | IRApplyCombinator info ->
-                    bumpVars info.Loop
-                    for a in info.Arrays do
-                        match a with
-                        | IRVar (id, _) -> bump joinRefs id
-                        | _ -> ()
-                // A leg whose LEAF is the named map itself (`reduce(<name>,
-                // op)` beside `prodsum(<name>, v)`): the typechecker keeps
-                // the name so the emitter binds the share once and this leg
-                // reads it. That read is a join reference like the slot's.
-                | IRVar (id, _) -> bump joinRefs id
-                | _ -> ()
-         | _ -> ())
-        match e with
-        | ExprShape (children, _) -> children |> List.iter walk
+    let walk (e: IRExpr) =
+        e |> visitTopDown (fun e ->
+            (match e with
+             | IRVar (id, _) -> bump allRefs id
+             | IRReduceCompute (comp, IRTuple ks, IRTuple ss) when ks.Length = ss.Length && ks.Length >= 2 ->
+                let rec leavesOf x =
+                    match x with
+                    | IRFusion (l, r) -> leavesOf l @ leavesOf r
+                    | other -> [other]
+                // The OPERAND slots -- `Arrays`, plus the `Loop` provenance that
+                // repeats them (`method_for(zip(s, ct))` names `ct` twice, and an
+                // accounting that saw only one of the two could never balance).
+                // Deliberately NOT the kernel bodies: an operand a leg's kernel
+                // reads as a whole ARRAY is a capture the join cannot inline.
+                let bumpVars x =
+                    x |> visitTopDown (fun n ->
+                        (match n with IRVar (id, _) -> bump joinRefs id | _ -> ())
+                        true)
+                for leaf in leavesOf comp do
+                    match leaf with
+                    | IRApplyCombinator info ->
+                        bumpVars info.Loop
+                        for a in info.Arrays do
+                            match a with
+                            | IRVar (id, _) -> bump joinRefs id
+                            | _ -> ()
+                    // A leg whose LEAF is the named map itself (`reduce(<name>,
+                    // op)` beside `prodsum(<name>, v)`): the typechecker keeps
+                    // the name so the emitter binds the share once and this leg
+                    // reads it. That read is a join reference like the slot's.
+                    | IRVar (id, _) -> bump joinRefs id
+                    | _ -> ()
+             | _ -> ())
+            true)
     exprs |> List.iter walk
     joinRefs
     |> Seq.filter (fun kv ->
@@ -708,7 +708,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             let staticOff =
                 match offArg.Kind with
                 | TExprLit (LitInt n) -> Some n
-                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt n) }) -> Some (-n)
+                | TNegIntLit n -> Some (-n)
                 | _ -> None
             match staticOff with
             | Some o -> IRHaloUnhash (f, o)
@@ -3361,14 +3361,14 @@ let resolveDeferredExtentsModule (modul: IRModule) : IRModule =
                  | _ -> None)
              | _ -> None)
         | _ -> None
-    let rec rewrite (e: IRExpr) : IRExpr =
-        match e with
-        | IRExtent ((IRVar _ as a), dim) when not (staticAt a dim) ->
-            (match source Set.empty a with
-             | Some o -> IRExtent (o, dim)
-             | None -> e)
-        | ExprShape ([], _) -> e
-        | ExprShape (children, rebuild) -> rebuild (children |> List.map rewrite)
+    let rewrite (e: IRExpr) : IRExpr =
+        e |> rewriteTopDown (fun e ->
+            match e with
+            | IRExtent ((IRVar _ as a), dim) when not (staticAt a dim) ->
+                ValueSome (match source Set.empty a with
+                           | Some o -> IRExtent (o, dim)
+                           | None -> e)
+            | _ -> ValueNone)
     { modul with Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
 
 /// THE UNSEEDED-SEED RESOLUTION (gap G74): every `IRUnseededSeed` of the
@@ -3431,7 +3431,7 @@ let resolveUnseededSeedsModule (programFuncs: IRCallable list) (modul: IRModule)
              | Some c ->
                  c.IsRepro
                  || (match c.Body with
-                     | IRApp (IRVar (g, _), _, _) -> (match Map.tryFind g funcs with Some cg -> cg.IsRepro | None -> false)
+                     | CallOfNamed (g, _, _, _) -> (match Map.tryFind g funcs with Some cg -> cg.IsRepro | None -> false)
                      | _ -> false)
              | None -> false)
         | _ -> false
@@ -3511,7 +3511,7 @@ let private refuseWritingJoinLegs (modules: IRModule list) : unit =
         modules |> List.collect (fun m -> m.Bindings)
         |> List.choose (fun b ->
             match b.Value with
-            | IRTupleProj (IRVar (src, _), _, _) -> Some (src, b.Name)
+            | ProjOfNamed (src, _, _, _) -> Some (src, b.Name)
             | _ -> None)
     let spanOf (owner: string) (ownerId: IRId option) =
         let s = IR.declSpanOf owner
@@ -3970,7 +3970,7 @@ let private refuseArgumentConversions (modules: IRModule list) : unit =
     let staticInt (e: IRExpr) : bigint option =
         match e with
         | IRLit (IRLitInt v) -> Some (bigint v)
-        | IRUnaryOp (IRNeg, IRLit (IRLitInt v)) -> Some (-(bigint v))
+        | NegIntLit v -> Some (-(bigint v))
         | _ -> None
     // A body's loop bounds and let values, each id bound exactly ONCE in it
     // (a binder seen twice -- a cloned body -- proves nothing).
@@ -5289,7 +5289,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
                 iterIRExpr (fun n ->
                     match n with
                     | IRVar (id, _) when Map.containsKey id funcs -> bump all id
-                    | IRApp (IRVar (id, _), _, _) when Map.containsKey id funcs -> bump heads id
+                    | CallOfNamed (id, _, _, _) when Map.containsKey id funcs -> bump heads id
                     | _ -> ()) r
         for b in allBindings do scan b.Value
         for f in allFuncs do scan f.Body
@@ -5326,7 +5326,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         for r in withExtents e do
             iterIRExpr (fun n ->
                 match n with
-                | IRApp (IRVar (id, _), args, _) when Map.containsKey id funcs ->
+                | CallOfNamed (id, _, args, _) when Map.containsKey id funcs ->
                     (match directCalls.TryGetValue id with
                      | true, l -> l.Add((owner, args))
                      | _ -> directCalls.[id] <- ResizeArray [ (owner, args) ])
@@ -5422,7 +5422,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     // NOT a copy: only a proved copy or fresh storage ends the walk.
     let rec holdsStorage (t: IRType) =
         match t with
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> holdsStorage inner
+        | Tagged inner -> holdsStorage inner
         | IRTTuple ts -> ts |> List.exists holdsStorage
         | IRTNamed _ | IRTComputation _ -> true
         | t -> isArrayTy t
@@ -6243,7 +6243,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
         let rec peelScalar (ty: IRType) =
             match ty with
             | IRTScalar et -> Some et
-            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> peelScalar inner
+            | Tagged inner -> peelScalar inner
             | _ -> None
         let elemOf (x: IRExpr) = try peelScalar (typeOf x) with _ -> None
         let isScalarExpr (x: IRExpr) = (elemOf x).IsSome
@@ -6290,7 +6290,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
             // computation (it may fail), never a stored force
             | IRVar (id, _) -> if deferred.Contains id then barrier else None
             // reads of the binder itself: its force
-            | IRIndex (IRVar (id, _), _, _) | IRCurry (IRVar (id, _), _, _) | IRSlice (IRVar (id, _), _, _, _)
+            | IndexOfNamed (id, _, _, _) | IRCurry (IRVar (id, _), _, _) | IRSlice (IRVar (id, _), _, _, _)
             | IRSubset (IRVar (id, _), _, _, _) | IRContains (IRVar (id, _), _) when deferred.Contains id -> Some (Some id)
             // checked reads: operands, then the read (a checked subscript) may fail
             | IRIndex (a, idxs, _) -> seq (a :: idxs) barrier
@@ -6658,7 +6658,7 @@ exception private BodyReadsCannotSplit
 let rec private bodyReadsScalarType (t: IRType) =
     match t with
     | IRTScalar _ -> true
-    | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> bodyReadsScalarType inner
+    | Tagged inner -> bodyReadsScalarType inner
     | _ -> false
 
 let private bodyReadsUnitType (t: IRType) =
@@ -6705,7 +6705,7 @@ let splitDeferredBodyReadsModule (builder: IRBuilder) (allModules: IRModule list
             | _ -> false
     let isRead (e: IRExpr) =
         match e with
-        | IRIndex (IRVar (d, _), (_ :: _), _) when maps.ContainsKey d -> bodyReadsScalarType (typeOf e)
+        | IndexOfNamed (d, _, (_ :: _), _) when maps.ContainsKey d -> bodyReadsScalarType (typeOf e)
         | _ -> false
     let rec hasRead (e: IRExpr) = isRead e || (childrenOf e |> List.exists hasRead)
     let staticExtent (ty: IRType) (dim: int) =
@@ -6740,7 +6740,7 @@ let splitDeferredBodyReadsModule (builder: IRBuilder) (allModules: IRModule list
         | _ -> childrenOf e |> List.exists readOffSpine
     let readMaps (e: IRExpr) =
         let acc = System.Collections.Generic.HashSet<IRId>()
-        iterIRExpr (fun n -> match n with IRIndex (IRVar (d, _), _, _) when isRead n -> acc.Add d |> ignore | _ -> ()) e
+        iterIRExpr (fun n -> match n with IndexOfNamed (d, _, _, _) when isRead n -> acc.Add d |> ignore | _ -> ()) e
         acc.Count
     // The statement with each read replaced by a plain value of its type: does
     // anything else in it act (fail, call, write)?
@@ -6835,7 +6835,7 @@ let splitDeferredBodyReadsModule (builder: IRBuilder) (allModules: IRModule list
         let helperFor = System.Collections.Generic.Dictionary<IRId * IRType list, IRCallable>(HashIdentity.Structural)
         let helperCall (read: IRExpr) : IRExpr =
             match read with
-            | IRIndex (IRVar (d, dty), idxs, ident) ->
+            | IndexOfNamed (d, dty, idxs, ident) ->
                 let idxTys = idxs |> List.map typeOf
                 let h =
                     match helperFor.TryGetValue ((d, idxTys)) with
@@ -7067,7 +7067,7 @@ let splitDeferredBodyReadsModule (builder: IRBuilder) (allModules: IRModule list
         let rec walk (e: IRExpr) =
             match e with
             | IRLet (k, IRVar (id, _), b) when id = lid || aliases.Contains id -> aliases.Add k |> ignore; walk b
-            | IRApp (IRVar (id, _), args, _) when id = lid || aliases.Contains id -> List.iter walk args
+            | CallOfNamed (id, _, args, _) when id = lid || aliases.Contains id -> List.iter walk args
             | IRVar (id, _) when id = lid || aliases.Contains id -> ok.Value <- false
             | _ -> childrenOf e |> List.iter walk
         for f in namedFns do walk f.Body

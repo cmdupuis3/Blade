@@ -90,7 +90,7 @@ let private tryParseIntCell (s: string) : int64 option =
     let s = trimCell s
     if s.Length = 0 then None
     else
-        let body = if s.[0] = '+' || s.[0] = '-' then s.Substring 1 else s
+        let body = if s[0] = '+' || s[0] = '-' then s.Substring 1 else s
         if body.Length > 0 && body |> Seq.forall Char.IsAsciiDigit then
             match Int64.TryParse(s, Globalization.NumberStyles.AllowLeadingSign, Globalization.CultureInfo.InvariantCulture) with
             | true, n -> Some n
@@ -118,12 +118,12 @@ let private isNumericCell (s: string) = (tryParseFloat s).IsSome
 /// error names its 1-based line (BOM stripped, lone trailing blank dropped).
 let parseCells (path: string) (text: string) : Result<string[][], string> =
     // NB: the char literal below is U+FEFF (the BOM) -- invisible in most editors.
-    let text = if text.Length > 0 && text.[0] = '\uFEFF' then text.Substring 1 else text
+    let text = if text.Length > 0 && text[0] = '\uFEFF' then text.Substring 1 else text
     let rawLines = text.Split '\n' |> Array.map (fun l -> if l.EndsWith "\r" then l.Substring(0, l.Length - 1) else l)
     // One trailing newline => one trailing "" entry; tolerate exactly that.
     let lines =
-        if rawLines.Length > 0 && rawLines.[rawLines.Length - 1] = "" then
-            rawLines.[.. rawLines.Length - 2]
+        if rawLines.Length > 0 && rawLines[rawLines.Length - 1] = "" then
+            rawLines[.. rawLines.Length - 2]
         else rawLines
     if lines.Length = 0 then Error $"'{path}' is empty"
     else
@@ -145,10 +145,10 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
         match err with
         | Some e -> Error e
         | None ->
-            let width = cells.[0].Length
+            let width = cells[0].Length
             match cells |> Array.tryFindIndex (fun r -> r.Length <> width) with
             | Some i ->
-                Error $"ragged row in '{path}' at line {i + 1}: {cells.[i].Length} cells where line 1 has {width}"
+                Error $"ragged row in '{path}' at line {i + 1}: {cells[i].Length} cells where line 1 has {width}"
             | None -> Ok cells
 
 /// Parse + classify: sniffing rule, label validation, dtype inference.
@@ -165,8 +165,8 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
                else $"CSV file not found: '{full}' (written as '{given}')")
     else
     parseCells path (File.ReadAllText path) |> Result.bind (fun cells ->
-        let headered = not (cells.[0] |> Array.forall isNumericCell)
-        let dataRows = if headered then cells.[1..] else cells
+        let headered = not (cells[0] |> Array.forall isNumericCell)
+        let dataRows = if headered then cells[1..] else cells
         if dataRows.Length = 0 then
             Error $"'{path}' has a header row but no data rows"
         else
@@ -174,24 +174,24 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
             let mutable bad = None
             for i in 0 .. dataRows.Length - 1 do
                 if bad.IsNone then
-                    match dataRows.[i] |> Array.tryFindIndex (not << isNumericCell) with
+                    match dataRows[i] |> Array.tryFindIndex (not << isNumericCell) with
                     | Some ci ->
                         let lineNo = (if headered then i + 2 else i + 1)
-                        bad <- Some $"non-numeric cell '{dataRows.[i].[ci]}' (column {ci + 1}) in '{path}' at line {lineNo} -- string columns are not supported (v1)"
+                        bad <- Some $"non-numeric cell '{dataRows[i][ci]}' (column {ci + 1}) in '{path}' at line {lineNo} -- string columns are not supported (v1)"
                     | None -> ()
             match bad with
             | Some e -> Error e
             | None ->
                 let shapeResult =
                     if headered then
-                        let labels = cells.[0] |> List.ofArray
+                        let labels = cells[0] |> List.ofArray
                         let dup =
                             labels |> List.countBy id |> List.tryFind (fun (_, n) -> n > 1)
                         match dup with
                         | Some (l, _) -> Error $"duplicate column label '{l}' in '{path}'"
                         | None -> Ok (CsvTable (labels, dataRows.Length))
                     else
-                        Ok (CsvMatrix (dataRows.Length, cells.[0].Length))
+                        Ok (CsvMatrix (dataRows.Length, cells[0].Length))
                 shapeResult |> Result.map (fun shape ->
                     let elem =
                         if dataRows |> Array.forall (Array.forall isIntCell) then ETInt64 else ETFloat64
@@ -218,7 +218,7 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
     else
         parseFile path |> Result.bind (fun (f, cells) ->
             let headered = match f.Shape with CsvTable _ -> true | CsvMatrix _ -> false
-            let dataRows = if headered then cells.[1..] else cells
+            let dataRows = if headered then cells[1..] else cells
             let rows = dataRows.Length
             let cols = colCount f
             let payload =
@@ -227,7 +227,7 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
                     let xs = Array.zeroCreate<int64> (rows * cols)
                     for r in 0 .. rows - 1 do
                         for c in 0 .. cols - 1 do
-                            xs.[r * cols + c] <-
+                            xs[r * cols + c] <-
                                 match tryParseIntCell dataRows.[r].[c] with
                                 | Some n -> n
                                 | None -> failwith "unreachable: an Int64 table's cells were classified by tryParseIntCell"
@@ -236,7 +236,7 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
                     let xs = Array.zeroCreate<float> (rows * cols)
                     for r in 0 .. rows - 1 do
                         for c in 0 .. cols - 1 do
-                            xs.[r * cols + c] <-
+                            xs[r * cols + c] <-
                                 match tryParseFloat dataRows.[r].[c] with
                                 | Some v -> v
                                 | None -> failwith "unreachable: cells validated numeric by parseFile"
@@ -346,7 +346,7 @@ module CppCsv =
     /// C++ string literal for a path (forward slashes; backslashes normalized).
     let private cppPath (p: string) = p.Replace("\\", "/")
 
-    let private csvExit (v: string) (msg: string) =
+    let private csvExit (_v: string) (msg: string) =
         $"{{ std::cerr << \"CSV error: {msg}\" << std::endl; std::exit(1); }}"
 
     /// Emits the parse-and-fill block: opens the file, re-applies the format

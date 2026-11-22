@@ -639,7 +639,7 @@ let rec internal substKernMany (subs: Map<string, Expr>) (e: Expr) : Expr option
         | None -> Some None
         | Some a -> s a |> Option.map Some
     match e.Kind with
-    | ExprKind.ExprVar n when Map.containsKey n subs -> Some subs.[n]
+    | ExprKind.ExprVar n when Map.containsKey n subs -> Some subs[n]
     // leaves: nothing to rewrite, nothing to miss
     | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
     | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
@@ -805,8 +805,8 @@ let internal resetLetAnnotations (fname: string) =
 let internal noteLetAnnotation (fname: string) (name: string) (ty: TypeExpr option) =
     let d = letAnnotations.Value
     match d.TryGetValue ((fname, name)) with
-    | true, (_, k) -> d.[(fname, name)] <- (None, k + 1)
-    | _ -> d.[(fname, name)] <- (ty, 1)
+    | true, (_, k) -> d[(fname, name)] <- (None, k + 1)
+    | _ -> d[(fname, name)] <- (ty, 1)
 let internal restoredLetAnnotation (name: string) : TypeExpr option =
     match letAnnotations.Value.TryGetValue ((letAnnotationOwner.Value, name)) with
     | true, (Some ty, 1) -> Some ty
@@ -944,7 +944,7 @@ let internal (|LinearForm|_|) (e: Expr) : (Expr list * (Expr list -> Expr)) opti
     | ExprKind.ExprCompound (dense, mask) -> Some ([dense], fun ts -> re (ExprCompound (List.head ts, mask)))
     | ExprKind.ExprGroupBy (vals, gk) -> Some ([vals], fun ts -> re (ExprGroupBy (List.head ts, gk)))
     | ExprKind.ExprBinOp (m, OpFallback, l, r) ->
-        Some ([l; r], fun ts -> re (ExprBinOp (m, OpFallback, ts.[0], ts.[1])))
+        Some ([l; r], fun ts -> re (ExprBinOp (m, OpFallback, ts[0], ts[1])))
     | _ -> None
 
 /// Structural array-ness, used by the taint pass so a local bound to a

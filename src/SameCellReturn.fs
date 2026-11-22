@@ -42,7 +42,7 @@ let reachesSelf (callables: Map<IRId, IRCallable>) (id: IRId) : bool =
         iterIRExpr
             (fun n ->
                 match n with
-                | IRApp (IRVar (fid, _), _, _) ->
+                | CallOfNamed (fid, _, _, _) ->
                     (match Map.tryFind fid callables with
                      | Some target -> outs.Add target.Id |> ignore
                      | None -> ())
@@ -101,7 +101,7 @@ let certify (callables: Map<IRId, IRCallable>) (selfRecursive: IRId -> bool) (cl
     let kernel arity snapshots expr =
         match expr with
         | IRVar (kid, _) when callables.ContainsKey kid ->
-            let k = callables.[kid]
+            let k = callables[kid]
             let vars = Set.ofList ((k.Params |> List.map (_.VarId)) @ (k.Captures |> List.map (_.Id)))
             ordinary k && typeOf expr = IRTArrow (List.replicate arity (SVal (IRTScalar ETFloat64)), IRTScalar ETFloat64, None) &&
             k.Params.Length = arity && k.RetType = IRTScalar ETFloat64 &&
@@ -192,7 +192,7 @@ let certify (callables: Map<IRId, IRCallable>) (selfRecursive: IRId -> bool) (cl
         for sid, value in scalars do
             let sum =
                 match value with
-                | IRReduce (IRVar (input, ty), fold, None) when input = id && sameShape ty ->
+                | ReduceOfNamed (input, ty, fold, None) when input = id && sameShape ty ->
                     // Positive literal extent discharges unseeded-empty failure;
                     // preserve the existing fold order and exact kernel body.
                     kernel 2 snapshots fold

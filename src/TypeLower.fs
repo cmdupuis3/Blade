@@ -420,7 +420,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                         IRTIdxTagged (IRTScalar (EnumValue.underlyingElemType values),
                                       IRefNamed ident)
                     | None when env.AmbiguousTypes.ContainsKey argName ->
-                        raise (TypeErrorRaised (AmbiguousImport ("type", argName, env.AmbiguousTypes.[argName]), None))
+                        raise (TypeErrorRaised (AmbiguousImport ("type", argName, env.AmbiguousTypes[argName]), None))
                     | _ -> baseType
                 | None -> baseType  // not a unit, ignore
             | [TyUnitExpr ue] ->
@@ -506,7 +506,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                 IRTIdxTagged (IRTScalar underlying, IRefNamed ident)
             | None when env.AmbiguousTypes.ContainsKey name ->
                 // Two imports declare it and this module does not (D11).
-                raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
+                raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes[name]), None))
             | None ->
                 // If this name is in the type variable scope (introduced by T^k
                 // elsewhere in this declaration), bare T means T^0 (scalar).
@@ -1247,7 +1247,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                    Kind = SDimension; Dependencies = [] }
              | Error why -> raise (TypeErrorRaised (ConstrainedDomainRefused (name, why), None)))
         | None when env.AmbiguousTypes.ContainsKey name ->
-            raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes.[name]), None))
+            raise (TypeErrorRaised (AmbiguousImport ("type", name, env.AmbiguousTypes[name]), None))
         | _ ->
             { Id = id; Rank = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; IxKind = ixKindOfTag (Some name); Kind = SDimension; Dependencies = [] }
@@ -1410,7 +1410,7 @@ and lowerIndexTypeList (env: TypeEnv) (position: int) (ty: TypeExpr) : IRIndexTy
                     // Peel a trivial block wrapper so `function f(x) = { e }`
                     // (parses to ExprBlock([], Some e)) reduces the same as
                     // the inline form `function f(x) = e`.
-                    let funcParamName = funcDecl.Params.[0].Name
+                    let funcParamName = funcDecl.Params[0].Name
                     let bodyExpr =
                         match funcDecl.Body.Kind with
                         | ExprKind.ExprBlock ([], Some e) -> e
@@ -1785,7 +1785,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
                 let hi = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = maxRank)
                 let lo = arrayTypes |> List.findIndex (fun at -> at.IndexTypes.Length = minRank)
                 let (a, b) = (min hi lo, max hi lo)
-                let at (i: int) = arrayTypes.[i]
+                let at (i: int) = arrayTypes[i]
                 Error (IndexSpaceErr
                     ($"co-iteration operands must have the SAME rank: operand {a + 1} is over ({shapeOf (at a)}) (rank {(at a).IndexTypes.Length}) "
                      + $"and operand {b + 1} over ({shapeOf (at b)}) (rank {(at b).IndexTypes.Length}). A zip walks every axis of its operands as ONE index space, "
@@ -1959,7 +1959,7 @@ let resolveRaggedLensSource (env: TypeEnv) (lengths: IRExpr) : RaggedLensSource 
             |> List.map (fun e ->
                 match e.Kind with
                 | TExprLit (LitInt v) -> Some v
-                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt v) }) -> Some (-v)
+                | TNegIntLit v -> Some (-v)
                 | _ -> None)
             |> allInts
         | _ -> None

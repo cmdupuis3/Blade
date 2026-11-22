@@ -435,7 +435,7 @@ let emitBinOpWithComplexCoercion
 let private intLiteralOf (e: IRExpr) : int64 option =
     match e with
     | IRLit (IRLitInt n) -> Some n
-    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> Some (0L - n)
+    | NegIntLit n -> Some (0L - n)
     | _ -> None
 
 /// Render `/`, `%` and `^` under the ARITHMETIC CONTRACT (docs/formalism.md

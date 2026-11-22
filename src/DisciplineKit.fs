@@ -53,6 +53,7 @@ open Blade.TypedAst
 /// boundary and is peeled; anything else (a variable, an arithmetic
 /// expression, a folded static this walker cannot see) is NOT a literal, and
 /// the caller declines.
+[<TailCall>]
 let rec staticIntOf (e: TypedExpr) : int option =
     match e.Kind with
     | TExprLit (LitInt n) -> Some (int n)

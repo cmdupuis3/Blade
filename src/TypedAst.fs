@@ -598,8 +598,19 @@ let withoutArrayInstances (tp: TypedProgram) : TypedProgram =
                             | TDeclFunction f -> not (isArrayInstance f)
                             | _ -> true) }) }
 
+/// A negative integer literal as the typed AST spells it: a negation whose
+/// operand is an integer literal; answers n, the literal UNDER the negation
+/// (cleanup K11). Does NOT match a negation of any other operand nor a bare
+/// integer literal. The parser's spelling is Ast.(|AstNegIntLit|_|), the IR's
+/// IR.(|NegIntLit|_|).
+[<return: Struct>]
+let (|TNegIntLit|_|) (kind: TypedExprKind) : int64 voption =
+    match kind with
+    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt n) }) -> ValueSome n
+    | _ -> ValueNone
+
 /// Create a typed expression with a given kind and type
-let mkTyped kind ty : TypedExpr = 
+let mkTyped kind ty : TypedExpr =
     { Kind = kind; Type = ty; Span = noSpan }
 
 /// Create a typed expression with span

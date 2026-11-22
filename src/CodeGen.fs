@@ -3232,7 +3232,7 @@ let structFieldPrint (ftype: IRType) : StructFieldPrint =
     let rec scalarElem (t: IRType) =
         match t with
         | IRTScalar et -> (match et with ETUnit -> false | _ -> true)
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> scalarElem inner
+        | Tagged inner -> scalarElem inner
         | _ -> false
     match IR.stripUnits ftype with
     | ArrayElem at ->
@@ -3362,7 +3362,7 @@ let aggregatePrintOfIn (variants: bool) (types: IRTypeDef list) (t: IRType) : Ag
             if xs |> List.forall Option.isSome then Some (List.map Option.get xs) else None
         match IR.stripUnits t with
         | IRTScalar ETUnit -> None
-        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) when (intEnumKeysOfModule types tag).IsSome ->
+        | IntTaggedIndex tag when (intEnumKeysOfModule types tag).IsSome ->
             Some (APKeyed (intEnumKeysOfModule types tag).Value)
         | IRTScalar _ | IRTIdxTagged _ | IRTNat _ -> Some APScalar
         | ArrayElem _ as at ->
@@ -3370,7 +3370,7 @@ let aggregatePrintOfIn (variants: bool) (types: IRTypeDef list) (t: IRType) : Ag
                 match at with
                 | ArrayElem a ->
                     (match IR.stripUnits a.ElemType with
-                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> intEnumKeysOfModule types tag
+                     | IntTaggedIndex tag -> intEnumKeysOfModule types tag
                      | _ -> None)
                 | _ -> None
             (match structFieldPrint at, keyedElem with
@@ -3740,7 +3740,7 @@ let formlessPrintRefusal (modul: IRModule) (names: string list) : string =
 let intEnumKeysOfBindingType (modul: IRModule) (ty: IRType) : int64 list option =
     let elemTag (t: IRType) =
         match IR.stripUnits t with
-        | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) -> Some tag
+        | IntTaggedIndex tag -> Some tag
         | _ -> None
     match IR.stripUnits ty with
     | ArrayElem at -> elemTag at.ElemType

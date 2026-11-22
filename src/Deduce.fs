@@ -966,6 +966,7 @@ let private renderWitnessVal (v: WitnessVal) : string =
     | WBool b -> if b then "true" else "false"
 
 /// The scalar kind a node's type pins, if it is concrete.
+[<TailCall>]
 let rec private witnessKindOf (t: IRType) : ElemType option =
     match stripUnits t with
     | IRTIdxTagged (inner, _) -> witnessKindOf inner
@@ -996,8 +997,8 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
     let othersPoolInt = [ 3L; 5L; -2L; 7L; 4L; 6L; -3L; 8L ]
     let othersPoolFloat = [ 0.75; 1.25; -0.5; 2.5; 3.25; -1.75; 1.5; 4.5 ]
     let otherVal (k: int) (asInt: bool) =
-        if asInt then WInt (othersPoolInt.[k % othersPoolInt.Length] + int64 (k / othersPoolInt.Length))
-        else WFloat (othersPoolFloat.[k % othersPoolFloat.Length] + float (k / othersPoolFloat.Length))
+        if asInt then WInt (othersPoolInt[k % othersPoolInt.Length] + int64 (k / othersPoolInt.Length))
+        else WFloat (othersPoolFloat[k % othersPoolFloat.Length] + float (k / othersPoolFloat.Length))
     let fixedIdx = others |> List.mapi (fun k id -> (id, k)) |> Map.ofList
     let fixedSeen = System.Collections.Generic.Dictionary<IRId, WitnessVal>()
     // Captured scalars: sampled from pools disjoint from the parameter
@@ -1014,10 +1015,10 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
             let k = captured.Count
             let v =
                 match witnessKindOf e.Type with
-                | Some (ETInt32 | ETInt64) -> Some (WInt capPoolInt.[k % capPoolInt.Length])
-                | Some (ETFloat32 | ETFloat64) -> Some (WFloat capPoolFloat.[k % capPoolFloat.Length])
+                | Some (ETInt32 | ETInt64) -> Some (WInt capPoolInt[k % capPoolInt.Length])
+                | Some (ETFloat32 | ETFloat64) -> Some (WFloat capPoolFloat[k % capPoolFloat.Length])
                 | _ -> None   // bool, aggregate, function, unresolved: no evaluation
-            v |> Option.iter (fun v -> captured.[id] <- v; capturedOrder.Add((name, id)))
+            v |> Option.iter (fun v -> captured[id] <- v; capturedOrder.Add((name, id)))
             v
     // Captured ARRAY cells (D12): a read `w(i, j)` of a captured array at
     // integer coordinates evaluates to a sampled value, per cell -- the law
@@ -1065,7 +1066,7 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                                 let mutable inv = 0
                                 for a in 0 .. arr.Length - 1 do
                                     for b in a + 1 .. arr.Length - 1 do
-                                        if arr.[a] > arr.[b] then inv <- inv + 1
+                                        if arr[a] > arr[b] then inv <- inv + 1
                                 let s' = if inv % 2 = 0 then sign else -sign
                                 walk rest tail (List.rev (List.sort mine) @ acc) s'
                         | _ -> None
@@ -1094,11 +1095,11 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
             let k = cells.Count
             let v =
                 match witnessKindOf e.Type with
-                | Some (ETInt32 | ETInt64) -> Some (WInt (cellPoolInt.[k % cellPoolInt.Length] + int64 (k / cellPoolInt.Length)))
-                | Some (ETFloat32 | ETFloat64) -> Some (WFloat (cellPoolFloat.[k % cellPoolFloat.Length] + float (k / cellPoolFloat.Length)))
+                | Some (ETInt32 | ETInt64) -> Some (WInt (cellPoolInt[k % cellPoolInt.Length] + int64 (k / cellPoolInt.Length)))
+                | Some (ETFloat32 | ETFloat64) -> Some (WFloat (cellPoolFloat[k % cellPoolFloat.Length] + float (k / cellPoolFloat.Length)))
                 | _ -> None
             v |> Option.iter (fun v ->
-                cells.[key] <- v
+                cells[key] <- v
                 let label = name + "(" + (canon |> List.map string |> String.concat ", ") + ")"
                 cellOrder.Add((label, key)))
             v |> Option.map negIf
@@ -1174,8 +1175,8 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                      | Some (ETInt32 | ETInt64) -> true
                      | Some (ETFloat32 | ETFloat64) -> false
                      | _ -> isInt
-                 let v = otherVal fixedIdx.[id] asInt
-                 fixedSeen.[id] <- v
+                 let v = otherVal fixedIdx[id] asInt
+                 fixedSeen[id] <- v
                  Some v)
         // Every other variable the evaluator can reach is FREE in the body:
         // it descends into no binding form (a surviving `let`, a block with
@@ -1344,8 +1345,8 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                       | true, v -> Some (id, render v)
                       | _ -> None)
           Captured =
-              (capturedOrder |> Seq.map (fun (n, id) -> (n, render captured.[id])) |> List.ofSeq)
-              @ (cellOrder |> Seq.map (fun (label, key) -> (label, render cells.[key])) |> List.ofSeq) }
+              (capturedOrder |> Seq.map (fun (n, id) -> (n, render captured[id])) |> List.ofSeq)
+              @ (cellOrder |> Seq.map (fun (label, key) -> (label, render cells[key])) |> List.ofSeq) }
     let samples =
         if isInt then [ (2.0, 1.0); (1.0, 3.0); (3.0, 5.0); (-2.0, 7.0); (4.0, 9.0) ]
         else [ (2.0, 1.0); (1.0, 3.0); (0.5, 4.0); (-1.5, 2.5); (3.0, 5.0) ]
@@ -1398,6 +1399,7 @@ let witnessSwapLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
 // compositionally: invariant iff every pack-touching part whole-pack-calls an invariant function.
 
 /// Unwrap a trivial block (`{ e }` with no statements) around an expression.
+[<TailCall>]
 let rec private unwrapBlock (e: TypedExpr) : TypedExpr =
     match e.Kind with
     | TExprBlock ([], Some inner) -> unwrapBlock inner
@@ -1552,7 +1554,7 @@ let rec private unrollPackBody (fname: string) (declPackId: IRId) (declPackName:
     | TExprVar (_, vid, _) when Map.containsKey vid views -> None   // a bare pack: not unrollable here
     | TExprTupleIndex (p, { Kind = TExprLit (LitInt k) }) when (viewOf p).IsSome ->
         let elems = (viewOf p).Value
-        if k >= 0L && k < int64 elems.Length then Some elems.[int k] else None
+        if k >= 0L && k < int64 elems.Length then Some elems[int k] else None
     | TExprApp ({ Kind = TExprVar (n, _, _) }, [arg]) when n = fname && (viewOf arg).IsSome ->
         budget.Value <- budget.Value - 1
         let elems = (viewOf arg).Value
@@ -1565,7 +1567,7 @@ let rec private unrollPackBody (fname: string) (declPackId: IRId) (declPackName:
     | TExprMatch (scrut, cases) ->
         (match (unwrapBlock scrut).Kind with
          | TExprArity name when Map.containsKey name viewNames ->
-             let k = int64 viewNames.[name].Length
+             let k = int64 viewNames[name].Length
              // The first arm that matches the literal arity, as the primal's
              // specialization reduces it; a guard or any other pattern is
              // outside the world (None), never skipped.
@@ -1598,7 +1600,7 @@ let rec private unrollPackBody (fname: string) (declPackId: IRId) (declPackName:
             | TStmtLet b :: rest ->
                 (match b.Destructure, b.SubBindings, (unwrapBlock b.Value).Kind with
                  | DSConsRest, [ (_, headId, _); (tailName, tailId, _) ], TExprVar (_, vid, _) when Map.containsKey vid vs ->
-                     (match vs.[vid] with
+                     (match vs[vid] with
                       | h :: t -> walk (Map.add tailId t vs) (Map.add tailName t vns) rest acc ((headId, h) :: substs)
                       | [] -> None)
                  | DSPositional, [], _ when List.isEmpty b.PostChecks ->
@@ -1663,8 +1665,8 @@ let witnessPackLawFailure (inlineFn: IRId -> (IRId list * TypedExpr) option)
                 |> List.tryPick (fun (p, q) ->
                     if p < 0 || q >= expanded.Length || p = q then None
                     else
-                        let pi = expanded.[p]
-                        let pj = expanded.[q]
+                        let pi = expanded[p]
+                        let pj = expanded[q]
                         let others = expanded |> List.filter (fun id -> id <> pi && id <> pj)
                         // A pack kernel's body: binder keys (as a declared
                         // function's body; the alias rule is module-level).

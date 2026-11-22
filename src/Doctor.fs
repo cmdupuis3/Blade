@@ -171,12 +171,16 @@ let private checkGpp () : CheckResult * bool =
 /// smallest thing that exercises the whole path the lane uses -- a module with
 /// no target triple (so `-Wno-override-module` gets exercised too), an
 /// external C declaration, and a `main` whose output is checked.
+/// The llvm row's provenance: BLADE_LLVM_CLANG when it is set (env only),
+/// else BLADE_LLVM's.
+let internal llvmRowOrigin () : string =
+    match Knobs.raw Knobs.llvmClang with
+    | null | "" -> originOf Knobs.llvm.Name
+    | _ -> "BLADE_LLVM_CLANG [env]"
+
 let private checkLlvm () : CheckResult =
     let gate = if Build.llvmEnabled () then "; BLADE_LLVM on" else "; off by default (set BLADE_LLVM=1)"
-    let origin =
-        match Environment.GetEnvironmentVariable "BLADE_LLVM_CLANG" with
-        | null | "" -> originOf "BLADE_LLVM"
-        | _ -> "BLADE_LLVM_CLANG [env]"
+    let origin = llvmRowOrigin ()
     let row status detail =
         // Title fits renderText's 14-column pad; "g++ / OpenMP" is the sibling.
         { Key = "llvm"; Title = "clang / LLVM"; Status = status; Detail = detail; Origin = origin }
@@ -215,10 +219,10 @@ let private tierName = function
     | LinAlgPatterns.TierSystem -> "system (-lopenblas)"
 
 let private tierOrigin = function
-    | LinAlgPatterns.TierOff -> originOf "BLADE_BLAS"
-    | LinAlgPatterns.TierExplicit -> originOf "BLADE_BLAS_LINK"
-    | LinAlgPatterns.TierOpenBlasDir -> originOf "OPENBLAS_DIR"
-    | LinAlgPatterns.TierSystem -> originOf "BLADE_BLAS"
+    | LinAlgPatterns.TierOff -> originOf Knobs.blas.Name
+    | LinAlgPatterns.TierExplicit -> originOf Knobs.blasLink.Name
+    | LinAlgPatterns.TierOpenBlasDir -> originOf Knobs.openblasDir.Name
+    | LinAlgPatterns.TierSystem -> originOf Knobs.blas.Name
 
 /// The "links but does not run" PATH hint for prefix-configured libraries:
 /// the runnable shared libraries live under the prefix's runtime dirs, which
@@ -273,7 +277,7 @@ let private checkBlas (gppOk: bool) : CheckResult =
             | Ok (0, out) when out.Contains "blade-doctor-blas 6" ->
                 row StatusOk $"tier {tierName tier}, flavor {flavor} -- links and runs (cblas_dgemm verified)"
             | _ ->
-                row StatusWarn ($"""tier {(tierName tier)} links but does not run{(runtimeDirHint "OPENBLAS_DIR")}""")
+                row StatusWarn ($"""tier {(tierName tier)} links but does not run{(runtimeDirHint Knobs.openblasDir.Name)}""")
 
 let private checkLapack (gppOk: bool) : CheckResult =
     let tier = LinAlgPatterns.resolveBlasTier ()
@@ -282,7 +286,7 @@ let private checkLapack (gppOk: bool) : CheckResult =
     if not (LinAlgPatterns.lapackAvailable ()) then
         match tier with
         | LinAlgPatterns.TierExplicit ->
-            row StatusOff "off -- BLADE_LAPACK_LINK unset on the explicit tier; eigh/solve use the synthesized Jacobi path" (originOf "BLADE_BLAS_LINK")
+            row StatusOff "off -- BLADE_LAPACK_LINK unset on the explicit tier; eigh/solve use the synthesized Jacobi path" (originOf Knobs.blasLink.Name)
         | _ ->
             row StatusOff "off (BLAS off) -- eigh/solve use the synthesized Jacobi path" ""
     elif not gppOk then
@@ -303,7 +307,7 @@ let private checkLapack (gppOk: bool) : CheckResult =
             + "}\n")
         let origin =
             match tier with
-            | LinAlgPatterns.TierExplicit -> originOf "BLADE_LAPACK_LINK"
+            | LinAlgPatterns.TierExplicit -> originOf Knobs.lapackLink.Name
             | _ -> tierOrigin tier
         match gppCompile compileHalf linkHalf src exe with
         | Error e -> row StatusError $"gate on but does not link: {e}" origin
@@ -312,11 +316,11 @@ let private checkLapack (gppOk: bool) : CheckResult =
             | Ok (0, out) when out.Contains "blade-doctor-lapack info=0" ->
                 row StatusOk "links and runs (LAPACKE_dsyev verified)" origin
             | _ ->
-                row StatusWarn ($"""links but does not run{(runtimeDirHint "OPENBLAS_DIR")}""") origin
+                row StatusWarn ($"""links but does not run{(runtimeDirHint Knobs.openblasDir.Name)}""") origin
 
 let private checkNetcdf (gppOk: bool) : CheckResult =
-    let configured = (Toolchain.get "NETCDF_DIR").IsSome
-    let origin = originOf "NETCDF_DIR"
+    let configured = (Toolchain.get Knobs.netcdfDir.Name).IsSome
+    let origin = originOf Knobs.netcdfDir.Name
     let row status detail =
         { Key = "netcdf"; Title = "NetCDF"; Status = status; Detail = detail; Origin = origin }
     if not gppOk then
@@ -350,7 +354,7 @@ let private checkNetcdf (gppOk: bool) : CheckResult =
                         | Some why -> $"exit {code}: {why}"
                         | None -> $"exit {code}"
                     | Error e -> e.Split('\n').[0].Trim()
-                row StatusWarn ($"""links but does not run ({how}){(runtimeDirHint "NETCDF_DIR")}""")
+                row StatusWarn ($"""links but does not run ({how}){(runtimeDirHint Knobs.netcdfDir.Name)}""")
 
 let private checkMpi (gppOk: bool) : CheckResult =
     let row status detail origin =
@@ -359,7 +363,7 @@ let private checkMpi (gppOk: bool) : CheckResult =
     else
         let linkOk = Build.hasMpiLink.Value
         let execPath = Build.mpiexecPath.Value
-        let origin = originOf "MSMPI_BIN"
+        let origin = originOf Knobs.msmpiBin.Name
         match linkOk, execPath with
         | true, Some p -> row StatusOk $"links ({Platforms.mpiLinkFlag}); mpiexec: {p}" origin
         | true, None -> row StatusWarn $"links ({Platforms.mpiLinkFlag}) but mpiexec not found -- {Platforms.mpiRuntimeHint}" origin
@@ -371,7 +375,7 @@ let private checkCuda () : CheckResult =
     let gate = if LinAlgPatterns.cublasAvailable () then "; BLADE_CUBLAS on" else ""
     let gpu = if caps.HasGpu then "GPU detected" else "no GPU detected"
     let row status detail =
-        { Key = "cuda"; Title = "CUDA"; Status = status; Detail = detail; Origin = originOf "BLADE_CUBLAS" }
+        { Key = "cuda"; Title = "CUDA"; Status = status; Detail = detail; Origin = originOf Knobs.cublas.Name }
     if not caps.HasNvcc then
         row StatusMissing "optional -- nvcc not on PATH"
     elif Platforms.os = Platforms.Windows && not caps.HasCl then
@@ -403,12 +407,15 @@ let private checkTool (key: string) (exe: string) (purpose: string) : CheckResul
 ///
 /// A pure filesystem read, so unlike the probes below it needs no toolchain and
 /// never gates on gppOk.
+/// The stdlib row's provenance: BLADE_STDLIB when it is set (env only).
+let internal stdlibRowOrigin () : string =
+    match Knobs.raw Knobs.stdlib with
+    | null | "" -> ""
+    | _ -> "BLADE_STDLIB [env]"
+
 let private checkStdlib () : CheckResult =
     let row status detail =
-        let origin =
-            match Environment.GetEnvironmentVariable "BLADE_STDLIB" with
-            | null | "" -> ""
-            | _ -> "BLADE_STDLIB [env]"
+        let origin = stdlibRowOrigin ()
         { Key = "stdlib"; Title = "stdlib"; Status = status; Detail = detail; Origin = origin }
     match ModuleResolve.stdlibRoots () with
     | [] ->
@@ -417,8 +424,7 @@ let private checkStdlib () : CheckResult =
         let relativeModules (root: string) =
             try
                 Directory.GetFiles(root, "*.blade", SearchOption.AllDirectories)
-                |> Array.map (fun f ->
-                    f.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                |> Array.map (_.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
                 |> Array.sort
             with _ -> [||]
         // Line endings normalized before comparing: the source can arrive CRLF

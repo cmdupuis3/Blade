@@ -116,6 +116,11 @@ let mutable renderTimeoutMs = 30000
 /// going to render anything either.
 let mutable pingTimeoutMs = 10000
 
+/// BLADE_GR_RENDER, trimmed, when it is not blank.
+let internal explicitHelperPath () : string option =
+    let explicitPath = Blade.Knobs.raw Blade.Knobs.grRender
+    if not (String.IsNullOrWhiteSpace explicitPath) then Some (explicitPath.Trim()) else None
+
 /// Where the helper is, or why it isn't. The order is: an explicit
 /// BLADE_GR_RENDER (a wrong explicit setting is an ERROR, never a silent
 /// fallthrough; unchanged by the platform-stamped naming below -- an explicit
@@ -129,12 +134,11 @@ let mutable pingTimeoutMs = 10000
 /// so tests can drive the walk-up logic against a scratch directory tree
 /// without needing to relocate the running process.
 let resolveHelperFrom (baseDir: string) : Result<string, string> =
-    let explicitPath = Environment.GetEnvironmentVariable "BLADE_GR_RENDER"
-    if not (String.IsNullOrWhiteSpace explicitPath) then
-        let p = explicitPath.Trim()
+    match explicitHelperPath () with
+    | Some p ->
         if File.Exists p then Ok (Path.GetFullPath p)
         else Error $"gr-render helper not found: BLADE_GR_RENDER points at '{p}', which does not exist"
-    else
+    | None ->
         let besideMatch =
             candidateLeaves
             |> List.map (fun leaf -> Path.Combine(baseDir, leaf))

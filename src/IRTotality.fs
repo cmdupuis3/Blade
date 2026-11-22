@@ -177,8 +177,8 @@ let rec walk (resolve: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr 
              match walk resolve deferredOf isDeferred levels levelNames (bound.Add id) boundNames visiting body with
              | Ok m -> Ok (addSat n m)
              | Error why -> Error why)
-    | IRIndex (IRVar (g, _), _, _) when isDeferred g -> Error "the body reads a deferred computation (its evaluation is not audited)"
-    | IRIndex (IRVar (g, gty), idxs, _) when not (isDeferred g) ->
+    | IndexOfNamed (g, _, _, _) when isDeferred g -> Error "the body reads a deferred computation (its evaluation is not audited)"
+    | IndexOfNamed (g, gty, idxs, _) when not (isDeferred g) ->
         let proven =
             match gty with
             | ArrayElem at when not at.IsVirtual ->
@@ -251,9 +251,9 @@ let rec walk (resolve: IRExpr -> IRCallable option) (deferredOf: IRId -> IRExpr 
         let plainDense (ix: IRIndexType) = ix.Rank = 1 && ix.Symmetry = SymNone && ix.IxKind = IxKPlain
         let rowCells =
             match view with
-            | IRIndex (IRVar (g, _), _, _) when isDeferred g ->
+            | IndexOfNamed (g, _, _, _) when isDeferred g ->
                 Error "the body reads a deferred computation (its evaluation is not audited)"
-            | IRIndex (IRVar (_, gty), [ x ], _) ->
+            | IndexOfNamed (_, gty, [ x ], _) ->
                 (match gty with
                  | ArrayElem at when not at.IsVirtual ->
                      (match at.IndexTypes with

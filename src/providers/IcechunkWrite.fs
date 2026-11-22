@@ -131,9 +131,9 @@ let base32Encode (bytes: byte[]) : string =
         bits <- bits + 8
         while bits >= 5 do
             bits <- bits - 5
-            sb.Append(base32Alphabet.[(acc >>> bits) &&& 31]) |> ignore
+            sb.Append(base32Alphabet[(acc >>> bits) &&& 31]) |> ignore
     if bits > 0 then
-        sb.Append(base32Alphabet.[(acc <<< (5 - bits)) &&& 31]) |> ignore
+        sb.Append(base32Alphabet[(acc <<< (5 - bits)) &&& 31]) |> ignore
     sb.ToString()
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ let utf8Compare (a: string) (b: string) : int =
     let mutable i = 0
     let mutable r = 0
     while r = 0 && i < n do
-        r <- compare xa.[i] xb.[i]
+        r <- compare xa[i] xb[i]
         i <- i + 1
     if r <> 0 then r else compare xa.Length xb.Length
 
@@ -161,7 +161,7 @@ let byteCompare (a: byte[]) (b: byte[]) : int =
     let mutable i = 0
     let mutable r = 0
     while r = 0 && i < n do
-        r <- compare a.[i] b.[i]
+        r <- compare a[i] b[i]
         i <- i + 1
     if r <> 0 then r else compare a.Length b.Length
 
@@ -368,8 +368,8 @@ let private rowMajorStrides (dims: int list) : int[] =
     let out = Array.zeroCreate arr.Length
     let mutable acc = 1
     for i in arr.Length - 1 .. -1 .. 0 do
-        out.[i] <- acc
-        acc <- acc * arr.[i]
+        out[i] <- acc
+        acc <- acc * arr[i]
     out
 
 let private dataTypeName (d: IceData) : string =
@@ -398,10 +398,10 @@ let private dataLength (d: IceData) : int =
 // accepts little-endian only.
 let private cellBytes (d: IceData) (i: int) : byte[] =
     match d with
-    | IceF32 a -> BitConverter.GetBytes a.[i]
-    | IceF64 a -> BitConverter.GetBytes a.[i]
-    | IceI32 a -> BitConverter.GetBytes a.[i]
-    | IceI64 a -> BitConverter.GetBytes a.[i]
+    | IceF32 a -> BitConverter.GetBytes a[i]
+    | IceF64 a -> BitConverter.GetBytes a[i]
+    | IceI32 a -> BitConverter.GetBytes a[i]
+    | IceI64 a -> BitConverter.GetBytes a[i]
 
 let private fillBytes (d: IceData) (f: IceFill) : byte[] =
     match d, f with
@@ -445,10 +445,10 @@ let chunkBytes (a: ArraySpec) (coords: int64 list) : byte[] =
         if d = rank then
             Array.blit (cellBytes a.Data gBase) 0 out (cBase * bs) bs
         else
-            let basePos = coordsArr.[d] * chunksArr.[d]
-            let lim = min chunksArr.[d] (shapeArr.[d] - basePos)
+            let basePos = coordsArr[d] * chunksArr[d]
+            let lim = min chunksArr[d] (shapeArr[d] - basePos)
             for l in 0 .. lim - 1 do
-                go (d + 1) (gBase + (basePos + l) * gStr.[d]) (cBase + l * cStr.[d])
+                go (d + 1) (gBase + (basePos + l) * gStr[d]) (cBase + l * cStr[d])
     if cells > 0 && (shape |> List.fold (*) 1) > 0 then go 0 0 0
     out
 
@@ -909,7 +909,7 @@ let snapshotIdBytes (spec: RepoSpec) (snapshotName: string) : byte[] =
     | Some s -> idOfPlan spec (planSnapshot spec s)
     | None ->
         failwithf "IcechunkWrite: no snapshot named '%s' in this spec (have: %A)"
-                  snapshotName (spec.Snapshots |> List.map (fun s -> s.Name))
+                  snapshotName (spec.Snapshots |> List.map (_.Name))
 
 /// The base32 spelling of `snapshotIdBytes` (20 characters) -- the
 /// `snapshots/` file name, and the string a `@snapshot:<id>` key carries.
@@ -927,7 +927,7 @@ let snapshotId (spec: RepoSpec) (snapshotName: string) : string =
 /// would silently break any test that counts or diffs them).
 let writeRepo (root: string) (spec: RepoSpec) : unit =
     // --- validate the spec before touching the disk -------------------------
-    let snapNames = spec.Snapshots |> List.map (fun s -> s.Name)
+    let snapNames = spec.Snapshots |> List.map (_.Name)
     if (snapNames |> List.distinct |> List.length) <> snapNames.Length then
         failwithf "IcechunkWrite: duplicate snapshot names in %A" snapNames
     for (kind, refs) in [ ("branch", spec.Branches); ("tag", spec.Tags) ] do
@@ -936,7 +936,7 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
                 failwithf "IcechunkWrite: %s '%s' points at snapshot '%s', which the spec does not define (have: %A)"
                           kind refName target snapNames
     for s in spec.Snapshots do
-        let names = s.Arrays |> List.map (fun a -> a.Name)
+        let names = s.Arrays |> List.map (_.Name)
         if (names |> List.distinct |> List.length) <> names.Length then
             failwithf "IcechunkWrite: snapshot '%s' names an array twice: %A" s.Name names
         for a in s.Arrays do validateArray a
@@ -975,7 +975,7 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
     let planIds = plans |> List.map (fun (_, _, id) -> base32Encode id)
     if (planIds |> List.distinct |> List.length) <> planIds.Length then
         failwithf "IcechunkWrite: two snapshots serialize identically and so share the content-derived id (%A for %A). Snapshots are told apart by their CONTENT -- message and timestamp included -- not by their spec names."
-                  planIds (spec.Snapshots |> List.map (fun s -> s.Name))
+                  planIds (spec.Snapshots |> List.map (_.Name))
 
     for (_, plan, idBytes) in plans do
         // Chunk and manifest files are content-addressed: the same name always
@@ -991,7 +991,7 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
     // `Repo.snapshots` is sorted by id bytes, and `Ref.snapshot_index` indexes
     // into THAT order -- so the index map is built after the sort, never from
     // the spec's commit order.
-    let commitOrder = spec.Snapshots |> List.map (fun s -> s.Name)
+    let commitOrder = spec.Snapshots |> List.map (_.Name)
     let sortedNames =
         commitOrder
         |> List.sortWith (fun x y -> byteCompare (idBytesOf x) (idBytesOf y))

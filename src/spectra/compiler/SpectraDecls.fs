@@ -139,18 +139,18 @@ let bluesteinKernel (n: int) (m: int) (sgn: float) : (float * float) list =
     let c = bluesteinChirp n sgn |> Array.ofList
     let b = Array.create m (0.0, 0.0)
     for j in 0 .. n - 1 do
-        let (re, im) = c.[j]
-        b.[j] <- (re, -im)
-        if j > 0 then b.[m - j] <- (re, -im)
+        let (re, im) = c[j]
+        b[j] <- (re, -im)
+        if j > 0 then b[m - j] <- (re, -im)
     let stages = fftStages m
     let q4 = m / 4
     let qc = quarterCos m |> Array.ofList
     let tw =
         [| for j in 0 .. m / 2 - 1 ->
-             let re = if j <= q4 then qc.[j] else -qc.[m / 2 - j]
-             let s0 = if j <= q4 then qc.[q4 - j] else qc.[j - q4]
+             let re = if j <= q4 then qc[j] else -qc[m / 2 - j]
+             let s0 = if j <= q4 then qc[q4 - j] else qc[j - q4]
              (re, -s0) |]
-    let sx = [| for i in 0 .. m - 1 -> b.[bitrev stages i] |]
+    let sx = [| for i in 0 .. m - 1 -> b[bitrev stages i] |]
     let cmulP (ar, ai) (br, bi) = (ar * br - ai * bi, ar * bi + ai * br)
     for st in 1 .. stages do
         let len = 1 <<< st
@@ -160,10 +160,10 @@ let bluesteinKernel (n: int) (m: int) (sgn: float) : (float * float) list =
             for j in 0 .. half - 1 do
                 let p = u * len + j
                 let q = p + half
-                let (tr, ti) = cmulP tw.[j * tstr] sx.[q]
-                let (pr, pi) = sx.[p]
-                sx.[p] <- (pr + tr, pi + ti)
-                sx.[q] <- (pr - tr, pi - ti)
+                let (tr, ti) = cmulP tw[j * tstr] sx[q]
+                let (pr, pi) = sx[p]
+                sx[p] <- (pr + tr, pi + ti)
+                sx[q] <- (pr - tr, pi - ti)
     let inv = 1.0 / float m
     [ for (re, im) in sx -> (re * inv, im * inv) ]
 

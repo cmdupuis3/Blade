@@ -961,7 +961,7 @@ type Subst() =
     member _.TryFind(id) =
         Map.tryFind id map
 
-    member this.LookupOrCreateTypeVar(name: string, arity: int, builder: IRBuilder) : IRType =
+    member this.LookupOrCreateTypeVar(name: string, arity: int, _builder: IRBuilder) : IRType =
         let key = name + "^" + string arity
         match Map.tryFind key typeVarScope with
         | Some (tv, _) -> tv
@@ -1337,6 +1337,7 @@ let rec occursIn (id: int) (ty: IRType) : bool =
 /// Walk an inference variable chain to find the leaf variable bound to a
 /// concrete scalar (or unbound).  Returns its id so we can rebind it to
 /// the promoted type.  Returns None if the type is not an inference chain.
+[<TailCall>]
 let rec findLeafInferScalar (subst: Subst) (ty: IRType) : int option =
     match ty with
     | IRTInfer id ->

@@ -277,13 +277,13 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
     match e.Kind with
     // -- the pack vocabulary -------------------------------------------------
     | ExprKind.ExprArity a when Map.containsKey a env ->
-        Ok (re (ExprLit (LitInt (int64 (List.length env.[a])))))
+        Ok (re (ExprLit (LitInt (int64 (List.length env[a])))))
     | ExprKind.ExprTupleIndex (t, ix) when
         (match t.Kind with ExprKind.ExprVar a -> Map.containsKey a env | _ -> false) ->
-        let view = env.[(match t.Kind with ExprKind.ExprVar a -> a | _ -> "")]
+        let view = env[(match t.Kind with ExprKind.ExprVar a -> a | _ -> "")]
         (match ix.Kind with
          | ExprKind.ExprLit (LitInt k) when int k >= 0 && int k < List.length view ->
-             Ok (re (ExprVar view.[int k]))
+             Ok (re (ExprVar view[int k]))
          | ExprKind.ExprLit (LitInt k) ->
              errPackUnroll fname $"an arity-polymorphic kernel reads element {int k} of a pack that has only {List.length view} element(s) at this arity"
          | _ ->
@@ -309,10 +309,10 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
     // -- a call: to another pack kernel (inline its unrolled body) or plain --
     | ExprKind.ExprApp (fn, args) ->
         (match fn.Kind with
-         | ExprKind.ExprVar g when Map.containsKey g ctx.Decls && isPackDecl ctx ctx.Decls.[g] ->
+         | ExprKind.ExprVar g when Map.containsKey g ctx.Decls && isPackDecl ctx ctx.Decls[g] ->
              (match args with
               | [{ Kind = ExprKind.ExprVar a }] when Map.containsKey a env ->
-                  unrollPackFn ctx fname budget ctx.Decls.[g] env.[a]
+                  unrollPackFn ctx fname budget ctx.Decls[g] env[a]
               | _ ->
                   err fname $"a call to the arity-polymorphic kernel '{g}' inside a differentiated kernel body must pass one whole pack (`{g}(tail)`); an element or expression argument list has no arity to unroll at")
          | _ -> gList args |> Result.map (fun args' -> re (ExprApp (fn, args'))))
@@ -408,7 +408,7 @@ let internal unrollPackShape (ctx: Ctx) (fname: string) (fd: FunctionDecl) (n: i
     | true, hit -> Ok hit
     | _ ->
         unrollPackFn ctx fname (ref packUnrollBudget) fd (List.init n packSlot)
-        |> Result.map (fun b -> ctx.PackMemo.[(fd.Name, n)] <- b; b)
+        |> Result.map (fun b -> ctx.PackMemo[(fd.Name, n)] <- b; b)
 
 /// The shape at `names`. A rename refusal is not a real outcome here (a slot
 /// name cannot be captured by anything a user could write), but rather than
@@ -432,8 +432,8 @@ let internal unrollPackAt (ctx: Ctx) (fname: string) (fd: FunctionDecl) (names: 
 let internal tryUnrollPackKernel (ctx: Ctx) (fname: string) (kern: Expr) (n: int)
     : Result<Expr, string> option =
     match kern.Kind with
-    | ExprKind.ExprVar f when Map.containsKey f ctx.Decls && isPackDecl ctx ctx.Decls.[f] ->
-        let fd = ctx.Decls.[f]
+    | ExprKind.ExprVar f when Map.containsKey f ctx.Decls && isPackDecl ctx ctx.Decls[f] ->
+        let fd = ctx.Decls[f]
         let elemTy = fd.Params |> List.tryPick (fun p -> polyElemTy ctx p.Type)
         let names = List.init n (fun _ -> fresh ctx "__pk")
         let packName = fd.Params |> List.tryPick (fun p -> if (polyElemTy ctx p.Type).IsSome then Some p.Name else None)
@@ -512,7 +512,7 @@ let internal groupRegimeOf (ctx: Ctx) (fd: FunctionDecl) (letTys: Map<string, Ty
                     && es |> List.forall (fun el ->
                         match (stripTypedE el).Kind with
                         | ExprKind.ExprLit (LitInt _) -> true
-                        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
+                        | AstNegIntLit _ -> true
                         | _ -> false)
                 | _ -> false
             match ctx.ModuleLets |> Map.tryFind kn |> Option.map _.Value with
@@ -627,7 +627,7 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
             | other -> stmtMentionsDeep leftovers other))
         || (match final1 with Some fe -> mentionsDeep leftovers fe | None -> false)
     if residual then refuse notFullyReduced else
-    let weight = found.[0]
+    let weight = found[0]
     // -- the empty-group policy (sql.md 10: the empty fold IS the init) -----
     let regime = groupRegimeOf ctx fd letTys (Map.find gkName groupings)
     let initOf = function PKSum i -> i | PKMean i -> i | PKCount -> None

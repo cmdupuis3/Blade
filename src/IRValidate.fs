@@ -226,7 +226,7 @@ let numbersOnlyClashes (e: IRExpr) : string list =
          // result, a stdlib JSON helper's string).
          let rec numericT (t: IRType) =
              match t with
-             | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+             | Tagged inner -> numericT inner
              | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
              | ArrayElem arr -> numericT arr.ElemType
              | _ -> false
@@ -249,7 +249,7 @@ let numbersOnlyClashes (e: IRExpr) : string list =
      | IRBinOp (_, (IREq | IRNeq | IRLt | IRLe | IRGt | IRGe), l, r, _) ->
          let rec numericT (t: IRType) =
              match t with
-             | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> numericT inner
+             | Tagged inner -> numericT inner
              | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
              | IRTNat _ -> true
              | ArrayElem arr -> numericT arr.ElemType
@@ -366,7 +366,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
             @ indexTypesOfType ret
         | IRTTuple ts -> ts |> List.collect indexTypesOfType
         | IRTComputation t | IRTPoly (t, _)
-        | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> indexTypesOfType t
+        | Tagged t -> indexTypesOfType t
         | _ -> []
     let checkKindAgreement ctx (ty: IRType) =
         for ix in indexTypesOfType ty do

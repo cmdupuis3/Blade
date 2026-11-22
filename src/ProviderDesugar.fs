@@ -309,7 +309,7 @@ let private desugarModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>)
         match b.Value.Kind with
         | ExprKind.ExprApp (({ Kind = ExprKind.ExprField (({ Kind = ExprKind.ExprVar recv } as recvE), "checkout") } as headE), args)
             when Map.containsKey recv repos.Value ->
-            let (alias, repoPath) = repos.Value.[recv]
+            let (alias, repoPath) = repos.Value[recv]
             let rewritten (nameE: Expr) (kind: string) (refName: string) =
                 changed.Value <- true
                 { b with Value =
@@ -566,7 +566,7 @@ let private presentOperandError (span: Span) (alias: string) (verb: string) : Bl
 /// Every sub-expression, binders included (the position scan only reports).
 let rec private allChildren (e: Expr) : Expr list =
     match e.Kind with
-    | ExprKind.ExprLambda (parms, _, body) -> (parms |> List.choose (fun p -> p.Default)) @ [ body ]
+    | ExprKind.ExprLambda (parms, _, body) -> (parms |> List.choose (_.Default)) @ [ body ]
     | ExprKind.ExprLet (b, body) -> [ b.Value; body ]
     | ExprKind.ExprMatch (scrutinee, cases) ->
         scrutinee :: (cases |> List.collect (fun c -> Option.toList c.Guard @ [ c.Body ]))
@@ -651,7 +651,7 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
                   ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") },
                                     [ { Kind = ExprKind.ExprLit (LitString path) } ])
                     when aliases.ContainsKey alias ->
-                    stores.Value <- Map.add root (aliases.[alias], path) stores.Value
+                    stores.Value <- Map.add root (aliases[alias], path) stores.Value
                 | _ -> ()
             match d.Value with
             | DeclLet b ->
@@ -663,7 +663,7 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
                     let target =
                         match view.Kind with
                         | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar root }, "vars") }, varName)
-                            when stores.Value.ContainsKey root -> Some (stores.Value.[root], varName)
+                            when stores.Value.ContainsKey root -> Some (stores.Value[root], varName)
                         | _ -> None
                     (match target with
                      | None ->
@@ -682,7 +682,7 @@ let private presentModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>) (m:
                             if not rawSharing.Value then None
                             else match sharedRaw.TryGetValue key with | true, n -> Some n | _ -> None
                         let rawName = earlier |> Option.defaultValue $"__present_raw_{t}"
-                        if earlier.IsNone && rawSharing.Value then sharedRaw.[key] <- rawName
+                        if earlier.IsNone && rawSharing.Value then sharedRaw[key] <- rawName
                         let maskName = $"__present_mask_{t}"
                         let rawValue =
                             mk (ExprKind.ExprApp (mkExpr headE.Span (ExprKind.ExprField (aliasE, rawReadVerb)), [ view ]))

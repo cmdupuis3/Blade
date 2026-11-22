@@ -266,12 +266,13 @@ let mkIrrepsTag (aliasName: string option) (spec: (int * int * int) list) : stri
 
 /// Parse an irreps Tag back into (alias name option, (l, parity, mult) list).
 /// Total: any string not produced by mkIrrepsTag yields None.
-let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) option =
-    if not (tag.StartsWith irrepsTagPrefix) then None
+[<return: Struct>]
+let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) voption =
+    if not (tag.StartsWith irrepsTagPrefix) then ValueNone
     else
         let rest = tag.Substring irrepsTagPrefix.Length
         match rest.IndexOf ':' with
-        | -1 -> None
+        | -1 -> ValueNone
         | sep ->
             let name = rest.Substring(0, sep)
             let entryOf (s: string) =
@@ -283,8 +284,8 @@ let (|IrrepsTag|_|) (tag: string) : (string option * (int * int * int) list) opt
                 | _ -> None
             let entries = rest.Substring(sep + 1).Split '|' |> Array.toList |> List.map entryOf
             if List.forall Option.isSome entries then
-                Some ((if name = "" then None else Some name), List.map Option.get entries)
-            else None
+                ValueSome ((if name = "" then None else Some name), List.map Option.get entries)
+            else ValueNone
 
 // PgIrrepsIdx tag encoding -- the SECOND block-spec member, same discipline
 // as the irreps tag but a DELIBERATELY SEPARATE format (O(3) `__irreps:` is
@@ -308,17 +309,18 @@ let mkPgIrrepsTag (group: string) (aliasName: string option) (spec: (string * in
 
 /// Parse a pg-irreps Tag back into (group, alias name option, (LABEL, mult) list).
 /// Total: any string not produced by mkPgIrrepsTag yields None.
-let (|PgIrrepsTag|_|) (tag: string) : (string * string option * (string * int) list) option =
-    if not (tag.StartsWith pgIrrepsTagPrefix) then None
+[<return: Struct>]
+let (|PgIrrepsTag|_|) (tag: string) : (string * string option * (string * int) list) voption =
+    if not (tag.StartsWith pgIrrepsTagPrefix) then ValueNone
     else
         let rest = tag.Substring pgIrrepsTagPrefix.Length
         match rest.IndexOf ':' with
-        | -1 -> None
+        | -1 -> ValueNone
         | sepG ->
             let group = rest.Substring(0, sepG)
             let rest2 = rest.Substring(sepG + 1)
             match rest2.IndexOf ':' with
-            | -1 -> None
+            | -1 -> ValueNone
             | sepN ->
                 let name = rest2.Substring(0, sepN)
                 let entryOf (s: string) =
@@ -330,8 +332,8 @@ let (|PgIrrepsTag|_|) (tag: string) : (string * string option * (string * int) l
                     | _ -> None
                 let entries = rest2.Substring(sepN + 1).Split '|' |> Array.toList |> List.map entryOf
                 if group <> "" && List.forall Option.isSome entries then
-                    Some (group, (if name = "" then None else Some name), List.map Option.get entries)
-                else None
+                    ValueSome (group, (if name = "" then None else Some name), List.map Option.get entries)
+                else ValueNone
 
 // TreeIdx tag encoding -- the THIRD parameterized-tag member, and the same
 // discipline as the two above for the same reason: tag equality is already
@@ -356,16 +358,17 @@ let mkTreeTag (aliasName: string option) (degrees: int list) : string =
 
 /// Parse a tree Tag back into (alias name option, preorder degree sequence).
 /// Total: any string not produced by mkTreeTag yields None.
-let (|TreeTag|_|) (tag: string) : (string option * int list) option =
-    if not (tag.StartsWith treeTagPrefix) then None
+[<return: Struct>]
+let (|TreeTag|_|) (tag: string) : (string option * int list) voption =
+    if not (tag.StartsWith treeTagPrefix) then ValueNone
     else
         let rest = tag.Substring treeTagPrefix.Length
         match rest.IndexOf ':' with
-        | -1 -> None
+        | -1 -> ValueNone
         | sep ->
             let name = rest.Substring(0, sep)
             let body = rest.Substring(sep + 1)
-            if body = "" then None
+            if body = "" then ValueNone
             else
                 let entries =
                     body.Split ',' |> Array.toList
@@ -374,8 +377,8 @@ let (|TreeTag|_|) (tag: string) : (string option * int list) option =
                         | true, v when v >= 0 -> Some v
                         | _ -> None)
                 if List.forall Option.isSome entries then
-                    Some ((if name = "" then None else Some name), List.map Option.get entries)
-                else None
+                    ValueSome ((if name = "" then None else Some name), List.map Option.get entries)
+                else ValueNone
 
 // Product-frame tag encoding. A COMPACT record deduced over one identity
 // group of a MULTI-DIMENSIONAL array (`object_for(comoment) <@> (G, G, G)`
@@ -419,11 +422,12 @@ let mkProductTag (factors: (string option * int64 option) list) : string =
 
 /// Parse a product Tag back into its factors. Total: any string not produced
 /// by mkProductTag yields None.
-let (|ProductTag|_|) (tag: string) : (string option * int64 option) list option =
-    if not (tag.StartsWith productTagPrefix) then None
+[<return: Struct>]
+let (|ProductTag|_|) (tag: string) : (string option * int64 option) list voption =
+    if not (tag.StartsWith productTagPrefix) then ValueNone
     else
         let body = tag.Substring productTagPrefix.Length
-        if body = "" then None
+        if body = "" then ValueNone
         else
             let entries =
                 body.Split '|' |> Array.toList
@@ -439,7 +443,7 @@ let (|ProductTag|_|) (tag: string) : (string option * int64 option) list option 
                             match System.Int64.TryParse ext with
                             | true, v -> Some (nameOpt, Some v)
                             | _ -> None)
-            if List.forall Option.isSome entries then Some (List.map Option.get entries) else None
+            if List.forall Option.isSome entries then ValueSome (List.map Option.get entries) else ValueNone
 
 /// Does this Tag carry a product frame?
 let isProductTag (tag: string) : bool = tag.StartsWith productTagPrefix
@@ -470,8 +474,9 @@ let indexCastBindingPrefix = "__idxcast"
 
 /// Parse a halo window Tag into (isCompound, inner alias name, offset list).
 /// Total: any string not shaped like a halo tag yields None.
-let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) option =
-    if not (tag.StartsWith haloWinTagPrefix) then None
+[<return: Struct>]
+let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) voption =
+    if not (tag.StartsWith haloWinTagPrefix) then ValueNone
     else
         match tag.Split '|' with
         | [| _; marked; csv |] when marked.Length >= 2 && (marked.[0] = 'd' || marked.[0] = 'c') && marked.[1] = ':' ->
@@ -479,9 +484,9 @@ let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) option =
                 csv.Split ',' |> Array.toList
                 |> List.map (fun s -> match System.Int32.TryParse s with true, v -> Some v | _ -> None)
             if List.forall Option.isSome offs && not offs.IsEmpty then
-                Some (marked.[0] = 'c', marked.Substring 2, List.map Option.get offs)
-            else None
-        | _ -> None
+                ValueSome (marked.[0] = 'c', marked.Substring 2, List.map Option.get offs)
+            else ValueNone
+        | _ -> ValueNone
 
 /// The halo ACCESS DESCRIPTION (docs/plans/structural/02, section 2.1): which
 /// input ordinals one output ordinal's window may read. Parsed ONCE from the
@@ -1421,11 +1426,30 @@ and LoopTypeG<'Ext> = {
     KernelType: IRTypeG<'Ext> option  // Type of bound kernel (for ObjectLoop)
 }
 
+/// ONE unit annotation or index tag around a type: the wrapped type (cleanup
+/// K11). Does NOT strip a second wrapper (`Tagged (Tagged t)` does) and does
+/// not match an unwrapped type.
+[<return: Struct>]
+let (|Tagged|_|) (ty: IRTypeG<'Ext>) : IRTypeG<'Ext> voption =
+    match ty with
+    | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> ValueSome inner
+    | _ -> ValueNone
+
+/// An integer scalar tagged with a NAMED index type, `Nat<I>` over Int64 or
+/// Int32: the index type's name (cleanup K11). Does NOT match an anonymous
+/// index tag, a tagged non-integer scalar, or a unit-annotated integer.
+[<return: Struct>]
+let (|IntTaggedIndex|_|) (ty: IRTypeG<'Ext>) : string voption =
+    match ty with
+    | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed name) -> ValueSome name
+    | _ -> ValueNone
+
 /// Render an IxKIrreps record's identity for diagnostics: the round-trippable
 /// `IrrepsIdx<[(l, p, m), ...]>`, prefixed with the alias if present. None
 /// for non-irreps records (a pre-match arm ahead of Symmetry dispatch).
-let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
-    if ix.IxKind <> IxKIrreps then None
+[<return: Struct>]
+let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string voption =
+    if ix.IxKind <> IxKIrreps then ValueNone
     else
         match ix.Tag with
         | Some (IrrepsTag (nameOpt, triples)) ->
@@ -1434,20 +1458,21 @@ let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
                 |> List.map (fun (l, p, m) -> $"({l}, {p}, {m})")
                 |> String.concat ", "
             let core = $"IrrepsIdx<[{payload}]>"
-            Some (match nameOpt with
-                  | Some n -> $"{n} (= {core})"
-                  | None -> core)
+            ValueSome (match nameOpt with
+                       | Some n -> $"{n} (= {core})"
+                       | None -> core)
         | _ ->
             // Kind says irreps but the tag is missing/unparseable -- a state
             // validateIR rejects; render a placeholder rather than crash.
-            Some "IrrepsIdx<?>"
+            ValueSome "IrrepsIdx<?>"
 
 /// The pg sibling of `IrrepsIdxLike`: renders `PgIrrepsIdx<C4, [("A", 1),
 /// ("E", 2)]>`, prefixed with the alias if present. NOT merged with
 /// IrrepsIdxLike -- they render differently (group is part of pg identity;
 /// labels are names, not (l, parity) integers) and diagnostics show both.
-let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
-    if ix.IxKind <> IxKPgIrreps then None
+[<return: Struct>]
+let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string voption =
+    if ix.IxKind <> IxKPgIrreps then ValueNone
     else
         match ix.Tag with
         | Some (PgIrrepsTag (group, nameOpt, entries)) ->
@@ -1456,29 +1481,30 @@ let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
                 |> List.map (fun (label, m) -> $"(\"{label}\", {m})")
                 |> String.concat ", "
             let core = $"PgIrrepsIdx<{group}, [{payload}]>"
-            Some (match nameOpt with
-                  | Some n -> $"{n} (= {core})"
-                  | None -> core)
-        | _ -> Some "PgIrrepsIdx<?>"
+            ValueSome (match nameOpt with
+                       | Some n -> $"{n} (= {core})"
+                       | None -> core)
+        | _ -> ValueSome "PgIrrepsIdx<?>"
 
 /// Render an IxKTree record's identity for diagnostics and type echo: the
 /// round-trippable `TreeIdx<[2, 2, 0, 0, 3, 0, 0, 0]>`, prefixed with the alias
 /// if present. None for non-tree records (a pre-match arm ahead of Symmetry
 /// dispatch, exactly like the two block-spec projections above).
-let (|TreeIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
-    if ix.IxKind <> IxKTree then None
+[<return: Struct>]
+let (|TreeIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string voption =
+    if ix.IxKind <> IxKTree then ValueNone
     else
         match ix.Tag with
         | Some (TreeTag (nameOpt, degrees)) ->
             let payload = degrees |> List.map string |> String.concat ", "
             let core = $"TreeIdx<[{payload}]>"
-            Some (match nameOpt with
-                  | Some n -> $"{n} (= {core})"
-                  | None -> core)
+            ValueSome (match nameOpt with
+                       | Some n -> $"{n} (= {core})"
+                       | None -> core)
         | _ ->
             // Kind says tree but the tag is missing/unparseable -- a state
             // validateIR rejects; render a placeholder rather than crash.
-            Some "TreeIdx<?>"
+            ValueSome "TreeIdx<?>"
 
 // ---------------------------------------------------------------------------
 // Enumerable constrained domains (docs/plans/structural/06)

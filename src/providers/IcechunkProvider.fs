@@ -232,9 +232,9 @@ let base32Encode (bytes: byte[]) : string =
         bits <- bits + 8
         while bits >= 5 do
             bits <- bits - 5
-            sb.Append(base32Alphabet.[(acc >>> bits) &&& 31]) |> ignore
+            sb.Append(base32Alphabet[(acc >>> bits) &&& 31]) |> ignore
     if bits > 0 then
-        sb.Append(base32Alphabet.[(acc <<< (5 - bits)) &&& 31]) |> ignore
+        sb.Append(base32Alphabet[(acc <<< (5 - bits)) &&& 31]) |> ignore
     sb.ToString()
 
 /// Is `s` shaped like an object id (20 canonical Crockford characters)? The
@@ -366,9 +366,9 @@ let parseHeader (where_: string) (bytes: byte[]) : Result<FileHeader, string> =
         else
             let implName =
                 Text.Encoding.UTF8.GetString(bytes, magicBytes.Length, implNameSize).TrimEnd(' ')
-            let specVersion = int bytes.[magicBytes.Length + implNameSize]
-            let fileType = fileTypeOfByte bytes.[magicBytes.Length + implNameSize + 1]
-            let compByte = int bytes.[magicBytes.Length + implNameSize + 2]
+            let specVersion = int bytes[magicBytes.Length + implNameSize]
+            let fileType = fileTypeOfByte bytes[magicBytes.Length + implNameSize + 1]
+            let compByte = int bytes[magicBytes.Length + implNameSize + 2]
             if specVersion = 1 then
                 Error $"{where_}: Icechunk spec version 1 is not supported -- this reader accepts spec version {supportedSpecVersion} only (which covers formats 2.0 and 2.1); rewrite the repo with an icechunk release that emits spec 2"
             elif specVersion <> supportedSpecVersion then
@@ -1411,14 +1411,14 @@ let load (path: string) : Result<Loaded, string> =
 
 let private isValidIdent (s: string) =
     s <> ""
-    && (Char.IsLetter s.[0] || s.[0] = '_')
+    && (Char.IsLetter s[0] || s[0] = '_')
     && s |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_')
 
 /// The Blade variable name of a node path. v1 mirrors the Zarr provider's
 /// one-level rule: ROOT-LEVEL arrays only, path "/name" with `name` a valid
 /// identifier. Deeper groups refuse BY NAME (§6.1). Pure.
 let nodeVarName (path: string) : Result<string, string> =
-    if path = "" || path.[0] <> '/' then
+    if path = "" || path[0] <> '/' then
         Error $"icechunk node path '{path}' is not absolute (paths start at the root group, '/')"
     elif path = "/" then
         Error "icechunk node path '/' is the root group, not an array"
@@ -1545,7 +1545,7 @@ let findArray (ck: CheckoutHandle) (varName: string) : Result<NodeMeta * ZarrPro
     | Some node ->
         arrayMetaOfNode varName node |> Result.map (fun meta -> (node, meta))
     | None ->
-        match ck.Snapshot.Nodes |> List.tryFind (fun n -> n.Path.EndsWith("/" + varName)) with
+        match ck.Snapshot.Nodes |> List.tryFind (_.Path.EndsWith("/" + varName)) with
         | Some nested ->
             Error (match nodeVarName nested.Path with
                    | Error e -> e
@@ -1584,11 +1584,11 @@ let buildChunkTable (meta: ZarrProvider.ZarrArrayMeta) (manifests: ArrayManifest
                     err <- Some $"icechunk manifest for '{meta.Name}': chunk index {coordText r.Index} is outside the chunk grid {coordText (lens |> List.map int64)}"
                 else
                     let flat = List.fold2 (fun acc (c: int64) (s: int) -> acc + int c * s) 0 r.Index strides
-                    if filled.[flat] then
+                    if filled[flat] then
                         err <- Some $"icechunk manifests for '{meta.Name}' OVERLAP: chunk {coordText r.Index} is covered by more than one manifest (§2 requires each chunk coordinate to be covered at most once)"
                     else
-                        filled.[flat] <- true
-                        table.[flat] <- r.Loc
+                        filled[flat] <- true
+                        table[flat] <- r.Loc
     match err with
     | Some e -> Error e
     | None -> Ok table
@@ -1731,7 +1731,7 @@ let private icechunkChunkSource (ra: ResolvedArray) : ZarrProvider.ChunkSource =
         List.fold2 (fun acc (c: int64) (s: int) -> acc + int c * s) 0 coords strides
     { Label = coordText
       Fetch = fun coords ->
-        match ra.Table.[flatOf coords] with
+        match ra.Table[flatOf coords] with
         | Fill -> None
         | Inline bytes -> Some (ZarrProvider.decodeChunk ra.Meta.Codec bytes)
         | Native nc -> Some (ZarrProvider.decodeChunk ra.Meta.Codec (readNativeChunk ra coords nc)) }
@@ -2264,7 +2264,7 @@ let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHand
     // dim never joins the universe), so the dim list alone cannot decide whether
     // pass 2 is needed -- and that store is exactly the one whose pool axes were
     // the surviving hole. Either kind of identity to resolve earns pass 2.
-    let hasPacked = arrays |> List.exists (fun a -> a.Blade.IsSome)
+    let hasPacked = arrays |> List.exists (_.Blade.IsSome)
     if List.isEmpty mintedDims && not hasPacked then minted
     else
         let dims =
@@ -2536,7 +2536,7 @@ module CppIcechunk =
 
             let tn = max 1 n
             let entry (f: ChunkLoc -> string) (dflt: string) =
-                [ for i in 0 .. tn - 1 -> if i < n then f ra.Table.[i] else dflt ]
+                [ for i in 0 .. tn - 1 -> if i < n then f ra.Table[i] else dflt ]
 
             let anyNative = ra.Table |> Array.exists (function Native _ -> true | _ -> false)
             let anyInline = ra.Table |> Array.exists (function Inline _ -> true | _ -> false)
@@ -2546,10 +2546,10 @@ module CppIcechunk =
             let inlineOrdinal = Collections.Generic.Dictionary<int, int>()
             let inlineBlocks =
                 [ for i in 0 .. n - 1 do
-                    match ra.Table.[i] with
+                    match ra.Table[i] with
                     | Inline bytes ->
                         let k = inlineOrdinal.Count
-                        inlineOrdinal.[i] <- k
+                        inlineOrdinal[i] <- k
                         yield!
                             bakedTable
                                 $"static const unsigned char {v}_icb{k}[{bytes.Length}] ="
@@ -2641,7 +2641,7 @@ module CppIcechunk =
 
             let flatExpr =
                 if rank = 0 then "0"
-                else [ for d in 0 .. rank - 1 -> $"{v}_c{d} * {strides.[d]}" ] |> String.concat " + "
+                else [ for d in 0 .. rank - 1 -> $"{v}_c{d} * {strides[d]}" ] |> String.concat " + "
 
             let identExpr =
                 let parts = [ for d in 0 .. rank - 1 -> $"std::to_string({v}_c{d})" ]
@@ -2676,12 +2676,12 @@ module CppIcechunk =
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
                 let ind = String.replicate d "    "
-                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames[d]}; {iv}++) {{")
         let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
         let flatIdx =
-            let mutable acc = idxVars.[0]
+            let mutable acc = idxVars[0]
             for i in 1 .. rank - 1 do
-                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
+                acc <- $"({acc}) * {extentNames[i]} + {idxVars[i]}"
             acc
         let bodyInd = String.replicate rank "    "
         (if declare then

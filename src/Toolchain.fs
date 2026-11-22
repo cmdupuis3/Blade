@@ -53,7 +53,7 @@ let private fileCache =
 /// beside the executable. Public so `blade setup` writes exactly where the
 /// reader reads, and doctor can name the file it consulted.
 let activePath () : string =
-    match Environment.GetEnvironmentVariable "BLADE_TOOLCHAIN_FILE" with
+    match Knobs.raw Knobs.toolchainFile with
     | null | "" -> Path.Combine(AppContext.BaseDirectory, "blade.toolchain.json")
     | p -> p
 
@@ -77,7 +77,7 @@ type Origin =
 /// sides, matching the `null | ""` convention every existing env gate
 /// already used.
 let getWithOrigin (key: string) : (string * Origin) option =
-    match Environment.GetEnvironmentVariable key with
+    match Knobs.rawNamed key with
     | null | "" ->
         fileValues ()
         |> Map.tryFind key
@@ -103,31 +103,30 @@ type Switch =
     | SwitchUnset
     | SwitchOther of string
 
+/// `Knobs.Parse.Reading` under this type's case names (the grammar lives in
+/// Knobs.Parse; this type predates it and its cases are matched across the
+/// compiler).
+let private ofReading (r: Knobs.Parse.Reading) : Switch =
+    match r with
+    | Knobs.Parse.On -> SwitchOn
+    | Knobs.Parse.Off -> SwitchOff
+    | Knobs.Parse.Unset -> SwitchUnset
+    | Knobs.Parse.Other t -> SwitchOther t
+
 /// Parse one switch value (`None` = unset).
 let parseSwitch (value: string option) : Switch =
-    match value with
-    | None -> SwitchUnset
-    | Some v ->
-        let t = v.Trim()
-        match t.ToLowerInvariant() with
-        | "" -> SwitchUnset
-        | "1" | "on" | "true" -> SwitchOn
-        | "0" | "off" | "false" -> SwitchOff
-        | _ -> SwitchOther t
+    ofReading (Knobs.Parse.switchOf value)
 
 /// The switch named `name`, read from the process environment PER CALL (never
 /// cached: harnesses pin these mid-process).
 let envSwitch (name: string) : Switch =
-    parseSwitch (match Environment.GetEnvironmentVariable name with null -> None | v -> Some v)
+    ofReading (Knobs.Parse.switch (Knobs.rawNamed name))
 
 /// A boolean knob: on or off as spelled, else `defaultOn` -- an unset knob
 /// AND an unrecognized value both read as the default, so a typo never
 /// flips a default-off knob on (or a default-on pass off).
 let envFlag (name: string) (defaultOn: bool) : bool =
-    match envSwitch name with
-    | SwitchOn -> true
-    | SwitchOff -> false
-    | SwitchUnset | SwitchOther _ -> defaultOn
+    Knobs.Parse.flag (Knobs.rawNamed name) defaultOn
 
 /// Does THIS BUILD keep the serial association of every fold
 /// (`BLADE_FP_REPRO=1|on`, or the compatibility spelling `BLADE_FP_REASSOC=0|off`)?
@@ -136,8 +135,8 @@ let envFlag (name: string) (defaultOn: bool) : bool =
 /// (which compiles before the emitters) reads the SAME predicate. Per call,
 /// never cached.
 let fpReproEnabled () : bool =
-    envFlag "BLADE_FP_REPRO" false
-    || envSwitch "BLADE_FP_REASSOC" = SwitchOff
+    Knobs.flag Knobs.fpRepro false
+    || Knobs.switch Knobs.fpReassoc = Knobs.Parse.Off
 
 /// One key of BLADE_TILE_TUNE, the SPEED-ONLY parameter list (`key=value`
 /// pairs separated by commas, spaces or semicolons; unknown keys ignored, a
@@ -146,18 +145,7 @@ let fpReproEnabled () : bool =
 /// (`sel_cap`, Optimize.compactionSelCapBytes) both read it here. Per call,
 /// never cached.
 let tileTune (key: string) (dflt: int64) : int64 =
-    match Environment.GetEnvironmentVariable "BLADE_TILE_TUNE" with
-    | null -> dflt
-    | v ->
-        v.Split([| ','; ' '; ';' |], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.tryPick (fun kv ->
-            match kv.Split('=') with
-            | [| k; x |] when k.Trim().ToLowerInvariant() = key ->
-                match Int64.TryParse(x.Trim()) with
-                | true, n -> Some n
-                | _ -> None
-            | _ -> None)
-        |> Option.defaultValue dflt
+    Knobs.Parse.tileTune key dflt (Knobs.raw Knobs.tileTune)
 
 /// The threaded reduction join (bench gap G7, `CodeGenFusion.joinedFoldThreadPlan`):
 /// `BLADE_JOIN_THREADS` unset / `1` / `on` = an explicitly requested, fully
@@ -166,7 +154,7 @@ let tileTune (key: string) (dflt: int64) : int64 =
 /// Lives here so the sibling-fold pass (which compiles before the emitters)
 /// reads the SAME predicate. Per call, never cached.
 let joinThreadsEnabled () : bool =
-    envFlag "BLADE_JOIN_THREADS" true
+    Knobs.flag Knobs.joinThreads true
 
 /// Does this build emit thread-level OpenMP constructs? `BLADE_OMP_THREADS`
 /// is a THREAD COUNT with off-words: `1` (one thread) suppresses exactly as
@@ -175,11 +163,11 @@ let joinThreadsEnabled () : bool =
 /// `Blade.CodeGenState.ompThreadEmissionEnabled` re-exports it (its doc
 /// comment states the policy). Per call, never cached.
 let ompThreadEmissionEnabled () : bool =
-    match envSwitch "BLADE_OMP_THREADS" with
-    | SwitchOff -> false
-    | SwitchOn ->
-        // `1` reads as SwitchOn in the shared grammar; here it is the count 1.
-        (Environment.GetEnvironmentVariable "BLADE_OMP_THREADS").Trim() <> "1"
+    match Knobs.switch Knobs.ompThreads with
+    | Knobs.Parse.Off -> false
+    | Knobs.Parse.On ->
+        // `1` reads as On in the shared grammar; here it is the count 1.
+        (Knobs.raw Knobs.ompThreads).Trim() <> "1"
     | _ -> true
 
 /// BLADE_POOL_RETAIN -- the RUNTIME allocator's retention policy (round-3 A4,
@@ -251,7 +239,7 @@ let parsePoolRetention (value: string option) (source: string) : PoolRetention =
     let mk arm setting mx bud malformed =
         { Arm = arm; Setting = setting; MaxBlockMB = mx; BudgetMB = bud; Source = source; Malformed = malformed }
     let dflt setting malformed = mk "default" setting dMax dBud malformed
-    match value |> Option.map (fun v -> v.Trim()) with
+    match value |> Option.map (_.Trim()) with
     | None | Some "" -> dflt "default" None
     | Some v ->
         match v.ToLowerInvariant() with
@@ -270,7 +258,7 @@ let parsePoolRetention (value: string option) (source: string) : PoolRetention =
 /// The policy in force for this compile: env BLADE_POOL_RETAIN, else the
 /// toolchain-file key, else the default. Per call, never cached.
 let poolRetention () : PoolRetention =
-    match getWithOrigin "BLADE_POOL_RETAIN" with
+    match getWithOrigin Knobs.poolRetain.Name with
     | Some (v, FromEnv) -> parsePoolRetention (Some v) "env BLADE_POOL_RETAIN"
     | Some (v, FromFile) -> parsePoolRetention (Some v) "blade.toolchain.json"
     | None -> parsePoolRetention None "default"

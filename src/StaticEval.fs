@@ -688,7 +688,7 @@ let private literalMisfitLeaf (fw: Blade.Types.ElemType) (iw: Blade.Types.ElemTy
         match e.Kind with
         | ExprKind.ExprLit (LitInt n) when not (fitsI n) -> Some (e.Span, iw, Blade.Types.LiteralDefaults.intText n)
         | ExprKind.ExprLit (LitFloat f) when not (fitsF f e.Span) -> Some (e.Span, fw, Blade.Types.LiteralDefaults.floatTextAt f e.Span)
-        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt n) }) ->
+        | AstNegIntLit n ->
             if fitsI (-n) then None else Some (e.Span, iw, "-" + Blade.Types.LiteralDefaults.intText n)
         | ExprKind.ExprUnaryOp (OpNeg, ({ Kind = ExprKind.ExprLit (LitFloat f) } as fl)) ->
             if fitsF f fl.Span then None else Some (e.Span, fw, "-" + Blade.Types.LiteralDefaults.floatTextAt f fl.Span)

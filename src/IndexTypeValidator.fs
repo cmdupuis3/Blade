@@ -61,6 +61,7 @@ type Position =
 type AliasEnv = Map<string, TypeExpr>
 
 /// True iff `ty` is an index type, directly or via alias resolution.
+[<TailCall>]
 let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyChunked (inner, _) -> isIndexType env inner
@@ -85,6 +86,7 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
 
 /// True iff `ty` is an aliased index type (a TyNamed resolving to an index).
 /// Bounds are transparent: `A<min=.., max=..>` is as aliased as `A` is.
+[<TailCall>]
 let rec isAliasedIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     match ty with
     | TyNamed (n, _) ->
@@ -265,7 +267,7 @@ let rec extentShapeErrors (declName: string) (span: Span) (ty: TypeExpr) : Valid
             mkErr $"the extent of {what} must be a non-negative integer, but {v} is not an integer. An extent counts positions."
         | ExprLit (LitInt v) when v < 0L ->
             mkErr $"the extent of {what} must be a non-negative integer, but it is {v}."
-        | ExprUnaryOp (OpNeg, { Kind = ExprLit (LitInt v) }) when v > 0L ->
+        | AstNegIntLit v when v > 0L ->
             mkErr $"the extent of {what} must be a non-negative integer, but it is -{v}."
         | ExprUnaryOp (OpNeg, { Kind = ExprLit (LitFloat _) }) ->
             mkErr $"the extent of {what} must be a non-negative integer."

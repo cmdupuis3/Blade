@@ -41,7 +41,7 @@ type WindowRead = {
 let private staticOffset (e: IRExpr) : int option =
     match e with
     | IRLit (IRLitInt k) -> Some (int k)
-    | IRUnaryOp (IRNeg, IRLit (IRLitInt k)) -> Some (int -k)
+    | NegIntLit k -> Some (int -k)
     | _ -> None
 
 /// Every window read in `body`, in traversal order.
@@ -49,7 +49,7 @@ let windowReadsOf (isWindow: IRExpr -> bool) (body: IRExpr) : WindowRead list =
     let found = System.Collections.Generic.List<WindowRead>()
     iterIRExpr (fun e ->
         match e with
-        | IRIndex (IRVar (aid, _), idxs, _) when not (List.isEmpty idxs) ->
+        | IndexOfNamed (aid, _, idxs, _) when not (List.isEmpty idxs) ->
             idxs |> List.iteri (fun d ix ->
                 match ix with
                 | IRBinOp (IRElementwise, IRAdd, wv, offExpr, _) when isWindow wv ->

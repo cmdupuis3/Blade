@@ -85,6 +85,7 @@ let rec typeExprLabel (ty: TypeExpr) : string =
 /// deliberately EXCLUDED: motivating boxes are shifted and carry negative
 /// values (m in [-l, l]), and a non-negative type whose box straddles
 /// zero would be a contradiction the fence cannot see.
+[<TailCall>]
 let rec private isIntFieldType (ty: TypeExpr) : bool =
     match ty with
     | TyInt32 | TyInt64 -> true
@@ -241,7 +242,7 @@ let rec private linOf (env: StaticEnv) (fieldIx: Map<string, int>) (e: Expr) : R
         | Ok v -> Error $"`{ppStaticValue v}` is not an integer"
         | Error why -> Error why
     match e.Kind with
-    | ExprVar f when Map.containsKey f fieldIx -> Ok { Vars = Map.ofList [ (fieldIx.[f], 1L) ]; K = 0L }
+    | ExprVar f when Map.containsKey f fieldIx -> Ok { Vars = Map.ofList [ (fieldIx[f], 1L) ]; K = 0L }
     | ExprLit (LitInt n) -> Ok { Vars = Map.empty; K = n }
     | ExprVar _ -> constOf e
     | ExprUnaryOp (OpNeg, inner) -> linOf env fieldIx inner |> Result.map linNeg
@@ -277,7 +278,7 @@ let rec private constraintsOf (env: StaticEnv) (fieldIx: Map<string, int>) (c: E
     | ExprBinOp (_, OpEq, l, r) -> le l r |> Result.bind (fun a -> le r l |> Result.map (fun b -> a @ b))
     | ExprBinOp (_, OpAnd, a, b) ->
         constraintsOf env fieldIx a |> Result.bind (fun ca -> constraintsOf env fieldIx b |> Result.map (fun cb -> ca @ cb))
-    | ExprApp ({ Kind = ExprVar "abs" }, [ inner ]) ->
+    | ExprApp ({ Kind = ExprVar "abs" }, [ _ ]) ->
         Error "a bare `abs(...)` is not a boolean conjunct"
     | ExprBinOp (_, (OpNeq | OpOr), _, _) -> Error "`!=` and `||` are not closed-form (the solution set is not an interval per prefix)"
     | ExprBinOp (_, OpMod, _, _) -> Error "a congruence is not closed-form in v1"
@@ -292,7 +293,7 @@ let domainPlanOf (env: StaticEnv) (spec: StructBoxSpec) : Result<DomainPlan, str
     let numbered = spec.Conjuncts |> List.mapi (fun i c -> (i + 1, c))
     let emptyPlan () =
         { Name = spec.Name
-          Levels = [ for k in 0 .. r - 1 -> { Field = fields.[k].Field; Lo = [ { Const = 1L; Coefs = [] } ]; Hi = [ { Const = 0L; Coefs = [] } ] } ]
+          Levels = [ for k in 0 .. r - 1 -> { Field = fields[k].Field; Lo = [ { Const = 1L; Coefs = [] } ]; Hi = [ { Const = 0L; Coefs = [] } ] } ]
           Card = 0L }
     numbered
     |> List.fold (fun acc (n, c) ->
@@ -309,12 +310,12 @@ let domainPlanOf (env: StaticEnv) (spec: StructBoxSpec) : Result<DomainPlan, str
         let tighten (a: int) (b: int) (c: int64) =
             match diff.TryGetValue((a, b)) with
             | true, c0 when c0 <= c -> ()
-            | _ -> diff.[(a, b)] <- c
+            | _ -> diff[(a, b)] <- c
         let generalLo = Array.init r (fun _ -> ResizeArray<DomainAffine>())
         let generalHi = Array.init r (fun _ -> ResizeArray<DomainAffine>())
         for k in 0 .. r - 1 do
-            tighten k -1 fields.[k].Hi       // x_k <= Hi
-            tighten -1 k (-fields.[k].Lo)    // -x_k <= -Lo
+            tighten k -1 fields[k].Hi       // x_k <= Hi
+            tighten -1 k (-fields[k].Lo)    // -x_k <= -Lo
         let mutable bad : string option = None
         let mutable infeasible = false
         for f in forms do
@@ -334,14 +335,14 @@ let domainPlanOf (env: StaticEnv) (spec: StructBoxSpec) : Result<DomainPlan, str
                     let k = coefs |> List.map fst |> List.max
                     let ak = coefs |> List.find (fun (v, _) -> v = k) |> snd
                     if abs ak <> 1L then
-                        bad <- Some $"in {spec.Name}, a constraint gives field '{fields.[k].Field}' the coefficient {ak}; a level's bound must have coefficient +-1 on its own field"
+                        bad <- Some $"in {spec.Name}, a constraint gives field '{fields[k].Field}' the coefficient {ak}; a level's bound must have coefficient +-1 on its own field"
                     else
                         // ak*x_k + Σ_j a_j x_j + c <= 0:
                         //   ak = +1 -> x_k <= -c - Σ a_j x_j   (an upper form)
                         //   ak = -1 -> x_k >= c + Σ a_j x_j    (a lower form)
                         let others = coefs |> List.filter (fun (v, _) -> v <> k)
-                        if ak = 1L then generalHi.[k].Add { Const = -f.K; Coefs = others |> List.map (fun (j, a) -> (j, -a)) }
-                        else generalLo.[k].Add { Const = f.K; Coefs = others }
+                        if ak = 1L then generalHi[k].Add { Const = -f.K; Coefs = others |> List.map (fun (j, a) -> (j, -a)) }
+                        else generalLo[k].Add { Const = f.K; Coefs = others }
         match bad with
         | Some why -> Error why
         | None ->
@@ -358,11 +359,11 @@ let domainPlanOf (env: StaticEnv) (spec: StructBoxSpec) : Result<DomainPlan, str
             let lowers = diff |> Seq.filter (fun kv -> snd kv.Key = v && fst kv.Key < v) |> Seq.map (fun kv -> fst kv.Key, kv.Value) |> List.ofSeq   // x_a - x_v <= c  ->  x_v >= x_a - c
             let hiForms =
                 (uppers |> List.map (fun (b, c) -> if b < 0 then { Const = c; Coefs = [] } else { Const = c; Coefs = [ (b, 1L) ] }))
-                @ List.ofSeq generalHi.[v]
+                @ List.ofSeq generalHi[v]
             let loForms =
                 (lowers |> List.map (fun (a, c) -> if a < 0 then { Const = -c; Coefs = [] } else { Const = -c; Coefs = [ (a, 1L) ] }))
-                @ List.ofSeq generalLo.[v]
-            levels.[v] <- { Field = fields.[v].Field; Lo = loForms; Hi = hiForms }
+                @ List.ofSeq generalLo[v]
+            levels[v] <- { Field = fields[v].Field; Lo = loForms; Hi = hiForms }
             for (a, c') in lowers do
                 for (b, c) in uppers do
                     if a = b then (if c + c' < 0L then empty <- true)

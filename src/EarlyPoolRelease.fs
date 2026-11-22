@@ -210,7 +210,7 @@ let private scheduleModule (builder: IRBuilder) (modules: IRModule list) (modul:
             // calls are covered, in every final module.
             let rec directCallsOnly expr =
                 match expr with
-                | IRApp (IRVar (fid, _), args, _) when fid = f.Id -> args |> List.forall directCallsOnly
+                | CallOfNamed (fid, _, args, _) when fid = f.Id -> args |> List.forall directCallsOnly
                 | IRVar (fid, _) when fid = f.Id -> false
                 | ExprShape (children, _) -> children |> List.forall directCallsOnly
             let valueUse =
@@ -243,12 +243,12 @@ let private scheduleModule (builder: IRBuilder) (modules: IRModule list) (modul:
             for id, value in observations do
                 let observation =
                     match value with
-                    | IRReduce (IRVar (source, ty), fold, None) when source = pool && sameShape ty producer.OutputType ->
+                    | ReduceOfNamed (source, ty, fold, None) when source = pool && sameShape ty producer.OutputType ->
                         if kernel 2 snapshots fold then
                             folds <- folds + 1
                             true
                         else false
-                    | IRIndex (IRVar (source, ty), [IRLit (IRLitInt index)], _) when source = pool && sameShape ty producer.OutputType ->
+                    | IndexOfNamed (source, ty, [IRLit (IRLitInt index)], _) when source = pool && sameShape ty producer.OutputType ->
                         match plain ty with
                         | Some ix -> match ix.Extent with IRLit (IRLitInt n) -> index >= 0L && index < n | _ -> false
                         | None -> false

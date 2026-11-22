@@ -66,14 +66,14 @@ module UserCasts =
     /// Mark `span` (the application node's own span object) when `head` names
     /// a numeric cast and the application has exactly one argument.
     let recordIfCast (head: string) (argCount: int) (span: Span) =
-        if argCount = 1 && heads.Contains head then table.AddOrUpdate(span, null)
+        if argCount = 1 && heads.Contains head then table.AddOrUpdate(span, (null: obj))
     let isUserCast (span: Span) : bool =
         match table.TryGetValue span with
         | true, _ -> true
         | _ -> false
     /// The parser re-spans a node (parentheses widen it): the mark follows.
     let transfer (fromSpan: Span) (toSpan: Span) =
-        if isUserCast fromSpan then table.AddOrUpdate(toSpan, null)
+        if isUserCast fromSpan then table.AddOrUpdate(toSpan, (null: obj))
 
 type Located<'T> = {
     Value: 'T
@@ -875,6 +875,7 @@ type Program = {
 /// Strip a statement's StmtSpanned annotation (recursively, defensively --
 /// the parser emits exactly one layer). Walkers that don't report locations
 /// match on `unwrapStmt stmt` instead of adding a StmtSpanned arm.
+[<TailCall>]
 let rec unwrapStmt (s: Stmt) : Stmt =
     match s with
     | StmtSpanned (inner, _) -> unwrapStmt inner
@@ -884,6 +885,17 @@ let rec unwrapStmt (s: Stmt) : Stmt =
 
 let mkExpr (span: Span) (kind: ExprKind) : Expr = { Kind = kind; Span = span }
 let mkPat (span: Span) (kind: PatternKind) : Pattern = { Kind = kind; Span = span }
+
+/// A negative integer literal as the parser spells it, `-n`: a negation whose
+/// operand is an integer literal; answers n, the literal UNDER the negation
+/// (cleanup K11). Does NOT match a negation of any other operand (a float
+/// literal, a name, a computed value) nor a bare integer literal. The typed
+/// AST's spelling is TypedAst.(|TNegIntLit|_|), the IR's IR.(|NegIntLit|_|).
+[<return: Struct>]
+let (|AstNegIntLit|_|) (kind: ExprKind) : int64 voption =
+    match kind with
+    | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt n) }) -> ValueSome n
+    | _ -> ValueNone
 
 /// Rewriters (Unfold/Grad/StaticEval/elaborators) synthesize nodes from an
 /// existing one: the new node inherits the source node's span.

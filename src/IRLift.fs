@@ -1454,7 +1454,7 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
                 resultIsArray || leafIsDeferred body
             | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferred ids))
             | IRTuple elems -> elems |> List.forall (isDeferred ids)
-            | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
+            | ProjOfNamed (pid, _, _, _) -> Set.contains pid ids
             | IRVar (srcId, _) -> Set.contains srcId ids
             | _ -> false
     bindings |> List.fold (fun ids b ->
@@ -1480,7 +1480,7 @@ let deferredAliasClasses (bindings: IRBinding list) (deferredIds: Set<int>) : Ma
         // A projection of a WHOLLY-DEFERRED tuple of named members (`let p =
         // (d1, d2); let v = p[0]`) is that member by substitution (gap G111):
         // the same class, so forcing either prints both (siblings included).
-        | IRTupleProj (IRVar (pid, _), k, _) when deferredIds.Contains b.Id && isArray b.Type ->
+        | ProjOfNamed (pid, _, k, _) when deferredIds.Contains b.Id && isArray b.Type ->
             // through tuple ALIASES (`let q = p`) to the tuple itself
             let rec tupleOf (seen: Set<IRId>) (id: IRId) =
                 match Map.tryFind id valueOf with
@@ -1666,7 +1666,7 @@ let memberMayFailOf (dv: DeferredView) (e: IRExpr) : bool =
     let rec scalarElem (t: IRType) =
         match t with
         | IRTScalar et -> Some et
-        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> scalarElem inner
+        | Tagged inner -> scalarElem inner
         | _ -> None
     let isIntTyped (x: IRExpr) =
         match scalarElem (dv.TypeOfExpr x) with
@@ -1743,6 +1743,5 @@ let isNonExpressionNode (e: IRExpr) : bool =
 /// Does the kernel body render as a single C++ expression? False when a
 /// materializing node appears anywhere in it (including as an `IRLet` RHS, which
 /// is the shape stage S2's Lowering half now produces for a kernel-local array).
-let rec kernelBodyIsExpressionShaped (body: IRExpr) : bool =
-    if isNonExpressionNode body then false
-    else childrenOf body |> List.forall kernelBodyIsExpressionShaped
+let kernelBodyIsExpressionShaped (body: IRExpr) : bool =
+    not (existsIRExpr isNonExpressionNode body)

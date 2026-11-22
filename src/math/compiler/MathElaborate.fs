@@ -239,12 +239,12 @@ let private elabOp (st: GenState) (env: Env) (scope: Scope) (op: string) (args: 
                 Error $"mode_product: MODE must be in 0..{r - 1} for a rank-{r} tensor (got {mode})"
             else
                 match uDims with
-                | [jOut; im] when im = dims.[mode] ->
+                | [jOut; im] when im = dims[mode] ->
                     ensure st (fingerprint "mode_product" (box (dims, mode, jOut))) "mode_product"
                         (fun nm -> Ok (modeProductDecl nm dims mode jOut))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [xE; uE])))
                 | [_; im] ->
-                    Error $"mode_product: U's second extent must match the mode-{mode} extent (U is ..x{im}, mode extent is {dims.[mode]})"
+                    Error $"mode_product: U's second extent must match the mode-{mode} extent (U is ..x{im}, mode extent is {dims[mode]})"
                 | _ -> Error "mode_product: U must be rank-2 (Array<Float64 like Idx<j>, Idx<i_mode>>)")))
     | "mode_product", _ -> Error "mode_product: expected mode_product(X, U, MODE) with a static MODE"
     | "hosvd", (xE :: rankArgs) ->
@@ -273,15 +273,15 @@ let private elabOp (st: GenState) (env: Env) (scope: Scope) (op: string) (args: 
                                 ensureT st (fingerprint "gram" (box (dims, mode))) "hosvd" (fun nm -> gramDecl nm dims mode) ]
                         let eighNames =
                             [ for mode in 0 .. r - 1 ->
-                                ensureT st (fingerprint "eigh" (box (dims.[mode], defaultSweeps))) "eigh" (fun nm -> eighDecl nm dims.[mode] defaultSweeps) ]
+                                ensureT st (fingerprint "eigh" (box (dims[mode], defaultSweeps))) "eigh" (fun nm -> eighDecl nm dims[mode] defaultSweeps) ]
                         // Successive core shapes: mode n contracts against dims-with-earlier-modes-already-truncated.
                         let mutable curDims = dims
                         let mptNames =
                             [ for mode in 0 .. r - 1 ->
                                 let dcur = curDims
-                                let nm = ensureT st (fingerprint "mpt" (box (dcur, mode, ranks.[mode]))) "hosvd"
-                                            (fun nm -> modeProdTDecl nm dcur mode ranks.[mode])
-                                curDims <- dcur |> List.mapi (fun k d -> if k = mode then ranks.[mode] else d)
+                                let nm = ensureT st (fingerprint "mpt" (box (dcur, mode, ranks[mode]))) "hosvd"
+                                            (fun nm -> modeProdTDecl nm dcur mode ranks[mode])
+                                curDims <- dcur |> List.mapi (fun k d -> if k = mode then ranks[mode] else d)
                                 nm ]
                         ensure st (fingerprint "hosvd" (box (dims, ranks))) "hosvd"
                             (fun nm -> Ok (hosvdDecl nm dims ranks gramNames eighNames mptNames))
@@ -314,7 +314,7 @@ let registerShapes () =
                 match a.Idxs, b.Idxs with
                 | [ i0; _ ], [ _; j1 ] ->
                     let elem = match a.Elem with ElemDeclared t -> t | _ -> float64Ty
-                    dense elem [ i0; j1 ] [ a.Extents.[0]; b.Extents.[1] ]
+                    dense elem [ i0; j1 ] [ a.Extents[0]; b.Extents[1] ]
                 | _ -> Error "matmul's operands are not rank-2"))
         | _ -> Error "matmul expects two operands")
     registerMarker "__math_solve" "the result of the nested solve call" (fun env scope args ->
@@ -334,7 +334,7 @@ let registerShapes () =
                 match a.Idxs with
                 | [ i0; _ ] ->
                     Ok (VTuple [ dense float64Ty a.Idxs a.Extents
-                                 dense (TyNamed ("Int64", [])) [ i0 ] [ a.Extents.[0] ] ])
+                                 dense (TyNamed ("Int64", [])) [ i0 ] [ a.Extents[0] ] ])
                 | _ -> Error "lu's operand is not rank-2")
         | _ -> Error "lu expects one operand")
     registerMarker "__math_eigh" "the result of the nested eigh call" (fun env scope args ->
@@ -344,7 +344,7 @@ let registerShapes () =
                 match a.Idxs with
                 | [ i0; _ ] ->
                     let elem = match a.Elem with ElemDeclared t -> t | _ -> float64Ty
-                    Ok (VTuple [ dense elem a.Idxs a.Extents; dense float64Ty [ i0 ] [ a.Extents.[0] ] ])
+                    Ok (VTuple [ dense elem a.Idxs a.Extents; dense float64Ty [ i0 ] [ a.Extents[0] ] ])
                 | _ -> Error "eigh's operand is not a dense rank-2 matrix")
         | _ -> Error "eigh expects one operand")
 

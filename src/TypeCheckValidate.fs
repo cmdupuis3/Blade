@@ -41,7 +41,7 @@ let internal isMixedEnumIdxValues (valuesExpr: Expr) : bool =
     | ExprKind.ExprArrayLit elems ->
         let isInt (e: Expr) =
             match e.Kind with
-            | ExprKind.ExprLit (LitInt _) | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
+            | ExprKind.ExprLit (LitInt _) | AstNegIntLit _ -> true
             | _ -> false
         let isString (e: Expr) = match e.Kind with ExprKind.ExprLit (LitString _) -> true | _ -> false
         let hasInt = elems |> List.exists isInt
@@ -572,7 +572,7 @@ let internal carriesGroupedShape (subst: Subst) (rowsToo: bool) (ty: IRType) : b
     let rec go (fuel: int) (t: IRType) =
         fuel > 0 &&
         match subst.Resolve t with
-        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) | IRTComputation inner -> go (fuel - 1) inner
+        | Tagged inner | IRTComputation inner -> go (fuel - 1) inner
         | ArrayElem at ->
             let has k = at.IndexTypes |> List.exists (fun ix -> ix.IxKind = k)
             (has IxKGroupMember && (rowsToo || has IxKGroupOuter)) || go (fuel - 1) at.ElemType
@@ -646,7 +646,7 @@ let internal collectGroupedReturnEscapes (subst: Subst) (decl: TypedDecl) : Comp
     | TDeclFunction f -> ofFunc f
     | TDeclImpl impl -> impl.Methods |> List.iter ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> ()
-    errs |> Seq.distinctBy (fun e -> e.Span) |> List.ofSeq
+    errs |> Seq.distinctBy (_.Span) |> List.ofSeq
 
 /// POST-ZONK SWEEP FOR ESCAPING SHARED-STATE CLOSURES (BL4005).
 ///
@@ -1116,10 +1116,10 @@ let rec internal collectUnknownEnumKeys (env: TypeEnv) (expr: TypedExpr) : Compi
         let lit =
             match expr.Kind with
             | TExprLit (LitInt v) -> Some v
-            | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt v) }) -> Some (-v)
+            | TNegIntLit v -> Some (-v)
             | _ -> None
         match lit, IR.stripUnits (env.Subst.Resolve expr.Type) with
-        | Some v, IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+        | Some v, IntTaggedIndex tag ->
             (match intEnumKeysOfTag env tag with
              | Some keys when not (List.contains v keys) ->
                  [ { Error = EnumIdxUnknownKey (tag, v, keys |> List.map string); Span = expr.Span; Context = []; Code = None } ]
@@ -1132,7 +1132,7 @@ let rec internal collectUnknownEnumKeys (env: TypeEnv) (expr: TypedExpr) : Compi
         | TExprMatch (scr, cases) ->
             let keysOf (t: IRType) =
                 match IR.stripUnits (env.Subst.Resolve t) with
-                | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), IRefNamed tag) ->
+                | IntTaggedIndex tag ->
                     intEnumKeysOfTag env tag |> Option.map (fun ks -> (tag, ks))
                 | _ -> None
             let rec walk (expected: IRType) (p: TypedPattern) : CompileError list =
@@ -1152,7 +1152,7 @@ let rec internal collectUnknownEnumKeys (env: TypeEnv) (expr: TypedExpr) : Compi
             cases |> List.collect (fun c -> walk scr.Type c.Pattern)
         | _ -> []
     match expr.Kind with
-    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt _) }) -> here
+    | TNegIntLit _ -> here
     | _ -> here @ patterns @ (typedExprChildren expr |> List.collect (collectUnknownEnumKeys env))
 
 /// Every expression a zonked declaration carries, for the sweep above.

@@ -160,7 +160,7 @@ type private PoolInfo = {
 
 /// The pool's prodsum P_S (raw, or about the shifts for a central pool).
 let private poolRead (pool: PoolInfo) (s: int list) : Expr =
-    v pool.Names.[List.sort s]
+    v pool.Names[List.sort s]
 
 /// The pool's moment E[Prod_{l in S} (x_l - c_l)] = P_S / N. For a RAW pool this is the raw moment. For a CENTRAL
 /// pool it is the moment of the shifted rows, which is what every shift-invariant quantity (comoments, cumulants and
@@ -173,7 +173,7 @@ let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
 let private poolMean (pool: PoolInfo) (i: int) : Expr =
     match pool.Shifts with
     | [] -> poolMoment pool [i]
-    | shifts -> addE (v shifts.[i]) (poolMoment pool [i])
+    | shifts -> addE (v shifts[i]) (poolMoment pool [i])
 
 /// Emit the single-pass pool over a shared row list. `uniq` seeds binding names; `rows` = one slice expr per row position; `needed` =
 /// the multisets the caller's cells read (deduped/canonicalized). Returns decls + reader.
@@ -243,13 +243,13 @@ let private isRealElem (elem: TypeExpr) : bool =
 
 /// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
-    if r = 1 then poolMean pool labels.[0] else
+    if r = 1 then poolMean pool labels[0] else
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
             let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
             p |> List.fold (fun acc blk ->
-                mulE acc (poolMoment pool (blk |> List.map (fun pos -> labels.[pos])))) (fLit w))
+                mulE acc (poolMoment pool (blk |> List.map (fun pos -> labels[pos])))) (fLit w))
     terms |> List.reduce addE
 
 // Module context: array annotations, alias resolution, static extents
@@ -757,7 +757,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                             if weight k = 1.0 then v "__w"
                             else mulE (fLit (weight k)) (v "__w")
                         { Value = DeclLet { Pattern = pvar outN; Type = None
-                                            Value = zipMap2 (v d1.Components.[k - 1]) (v d2.Components.[k - 1]) (addE (v "__u") contrib)
+                                            Value = zipMap2 (v d1.Components[k - 1]) (v d2.Components[k - 1]) (addE (v "__u") contrib)
                                             Mutability = BindLet }
                           Span = span } ]
                 let info = { Order = d1.Order
@@ -773,7 +773,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
     | _ ->
         Error $"dist {opName} expects two dist operands"
 
-let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
+let private elabDistScale (_ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
     match args with
@@ -786,7 +786,7 @@ let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
                     let outN = distComponentName dName k
                     let scaled = List.replicate k cExpr |> List.fold mulE (v "__u")
                     { Value = DeclLet { Pattern = pvar outN; Type = None
-                                        Value = map1 (v d.Components.[k - 1]) scaled
+                                        Value = map1 (v d.Components[k - 1]) scaled
                                         Mutability = BindLet }
                       Span = span } ]
             let info = { d with Components = [ for k in 1 .. d.Order -> distComponentName dName k ] }
@@ -828,7 +828,7 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
                 let merged =
                     arrLitE
                         [ for k in 0 .. cells.Length - 1 ->
-                            let (i, j) = (match cells.[k] with [i; j] -> (i, j) | _ -> (0, 0))
+                            let (i, j) = (match cells[k] with [i; j] -> (i, j) | _ -> (0, 0))
                             addE
                                 (divE (addE (mulE (fLit nA) (appE (v cA) [iLit k]))
                                             (mulE (fLit nB) (appE (v cB) [iLit k]))) (fLit n))
@@ -883,7 +883,7 @@ let private mstateComponent (sName: string) (what: string) = $"__mst_{sName}_{wh
 /// Read M_S for |S| >= 2 from a state, representation-aware.
 let private mReadExpr (info: MStateInfo) (labels: int list) : Expr =
     let p = labels.Length
-    let name = info.Ms.[p - 2]
+    let name = info.Ms[p - 2]
     if info.Packed then appE (v name) (labels |> List.map iLit)
     else appE (v name) [iLit (lexOffsetOf info.Dim p labels)]
 
@@ -896,7 +896,7 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
             | Ok (SVInt x) when x >= 2L && x <= 6L -> Ok (int x)
             | _ -> Error "mstate: the order must be a compile-time integer in 2..6"
         r |> Result.bind (fun r ->
-        arrayShape ctx "mstate" aName |> Result.bind (fun (elem, leading, fiber, n) ->
+        arrayShape ctx "mstate" aName |> Result.bind (fun (_, leading, _, n) ->
             match leading with
             | [ix] ->
                 match resolveExtent ctx.Aliases ctx.Statics ix with
@@ -918,8 +918,8 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                                     let labArr = List.toArray labels
                                     let terms =
                                         [ for mask in 0 .. (1 <<< p) - 1 ->
-                                            let inK = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 1 then yield labArr.[i] ]
-                                            let rest = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 0 then yield labArr.[i] ]
+                                            let inK = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 1 then yield labArr[i] ]
+                                            let rest = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 0 then yield labArr[i] ]
                                             let sign = if inK.Length % 2 = 0 then 1.0 else -1.0
                                             let ps = if rest.IsEmpty then fLit (float n) else poolRead pool rest
                                             let muProd = inK |> List.fold (fun acc i -> mulE acc (poolMoment pool [i])) (fLit sign)
@@ -932,7 +932,7 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
     | _ ->
         Error "mstate expects mstate(A, r): an annotated module-level array and a static order in 2..6"
 
-let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
+let private elabMStateMerge (_ctx: Ctx) (span: Span) (outName: string)
     (mstates: Map<string, MStateInfo>) (args: Expr list)
     : Result<Located<Decl> list * MStateInfo, string> =
     match args with
@@ -958,8 +958,8 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
                             let labArr = List.toArray labels
                             let terms =
                                 [ for mask in 0 .. (1 <<< p) - 1 do
-                                    let inK = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 1 then yield labArr.[i] ]
-                                    let rest = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 0 then yield labArr.[i] ]
+                                    let inK = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 1 then yield labArr[i] ]
+                                    let rest = [ for i in 0 .. p - 1 do if (mask >>> i) &&& 1 = 0 then yield labArr[i] ]
                                     if rest.Length <> 1 then  // M_single = 0: pruned at elaboration
                                         let deltaProd (c: float) =
                                             inK |> List.fold (fun acc lbl -> mulE acc (dRead lbl)) (fLit (c ** float inK.Length))
@@ -978,7 +978,7 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
 
 /// Freeze a state into cumulant tensors: central mu_p = M_p / n (mu_1 = 0), then the partition formula restricted to
 /// partitions with no singleton blocks; kappa_1 is the mean. Destructuring surface: `let (k1, ..., kr) = mstate_cumulants(s)`.
-let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
+let private elabMStateCumulants (_ctx: Ctx) (span: Span) (binding: Binding)
     (mstates: Map<string, MStateInfo>) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
@@ -1010,7 +1010,7 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
                                         let b = pt.Length
                                         let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
                                         pt |> List.fold (fun acc blk ->
-                                            mulE acc (muE (blk |> List.map (fun pos -> labArr.[pos])))) (fLit w) ]
+                                            mulE acc (muE (blk |> List.map (fun pos -> labArr[pos])))) (fLit w) ]
                                 terms |> List.reduce addE ]
                         mkDecl name (arrLitE cells)
                 names |> List.mapi (fun i nm -> kDecl (i + 1) nm))
@@ -1029,9 +1029,9 @@ let private distKappaRead (info: DistInfo) (labels: int list) : Expr =
     let q = labels.Length
     if info.Flat && q >= 2 then
         let d = defaultArg info.Dim 1
-        appE (v info.Components.[q - 1]) [iLit (lexOffsetOf d q labels)]
+        appE (v info.Components[q - 1]) [iLit (lexOffsetOf d q labels)]
     else
-        appE (v info.Components.[q - 1]) (labels |> List.map iLit)
+        appE (v info.Components[q - 1]) (labels |> List.map iLit)
 
 /// moments(d, k) on a dist binding: reconstruct the order-k raw moment tensor from carried cumulants -- mu_S = Sum over set
 /// partitions of S: Prod_blocks kappa_|B|(labels at B), kappa beyond the carried order = 0 (order-2 closure = Gaussian =
@@ -1051,7 +1051,7 @@ let private elabMomentsOfDist (ctx: Ctx) (span: Span) (binding: Binding)
                 let terms =
                     [ for pt in parts ->
                         pt |> List.fold (fun acc blk ->
-                            mulE acc (distKappaRead info (blk |> List.map (fun pos -> labArr.[pos])))) (fLit 1.0) ]
+                            mulE acc (distKappaRead info (blk |> List.map (fun pos -> labArr[pos])))) (fLit 1.0) ]
                 match terms with
                 | [] -> fLit 0.0   // every partition needs a block > carried order
                 | _ -> terms |> List.reduce addE ]
@@ -1121,7 +1121,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let needed =
                         cellLabels |> List.collect (fun labArr ->
                             setPartitions r |> List.collect (fun pt ->
-                                pt |> List.map (fun blk -> blk |> List.map (fun pos -> labArr.[pos]) |> List.sort)))
+                                pt |> List.map (fun blk -> blk |> List.map (fun pos -> labArr[pos]) |> List.sort)))
                     let (pd, pool) = poolDecls span outName true rows needed (float nX)
                     let cells = [ for labArr in cellLabels -> cumulantCellExpr pool labArr r ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ])
@@ -1181,7 +1181,7 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                                             let jArr = List.toArray js
                                             let wProd =
                                                 [ 0 .. k - 1 ]
-                                                |> List.fold (fun acc l -> mulE acc (wRead iArr.[l] jArr.[l])) (fLit 1.0)
+                                                |> List.fold (fun acc l -> mulE acc (wRead iArr[l] jArr[l])) (fLit 1.0)
                                             mulE wProd (distKappaRead info (List.sort js)) ]
                                     terms |> List.reduce addE ]
                             { Value = DeclLet { Pattern = pvar nm; Type = None; Value = arrLitE cells; Mutability = BindLet }; Span = span }))
@@ -1238,7 +1238,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let g0Read (a: int) : Expr =
                     match g0Expr.Kind with
-                    | ExprKind.ExprArrayLit cells -> cells.[a]
+                    | ExprKind.ExprArrayLit cells -> cells[a]
                     | _ -> appE g0Expr [iLit a]   // named rank-1 array of extent m
                 let dReadOf (k: int) (dArg: Expr) : Result<(int -> int list -> Expr option), string> =
                     let want = m * cellsOf k
@@ -1246,7 +1246,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                     | ExprKind.ExprArrayLit cells when cells.Length = want ->
                         let cellArr = List.toArray cells
                         Ok (fun a labels ->
-                            let cell = cellArr.[a * cellsOf k + lexOffsetOf dim k labels]
+                            let cell = cellArr[a * cellsOf k + lexOffsetOf dim k labels]
                             match cell.Kind with
                             | ExprKind.ExprLit (LitFloat 0.0) -> None
                             | _ -> Some cell)
@@ -1268,7 +1268,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                     |> List.fold (fun acc r -> acc |> Result.bind (fun rs -> r |> Result.map (fun f -> rs @ [f])))
                                  (Ok [])
                 dReadsRes |> Result.map (fun dReadFns ->
-                    let dRead (k: int) (a: int) (labels: int list) = dReadFns.[k - 1] a labels
+                    let dRead (k: int) (a: int) (labels: int list) = dReadFns[k - 1] a labels
                     let mkDecl name value =
                         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     let kappaName kk ci = $"__ppl_jetk_{dName}_o{kk}_c{ci}"
@@ -1285,7 +1285,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                 let labArr = List.toArray labels
                                 for pt in partsOf t do
                                     for blk in pt do
-                                        yield (blk.Length, blk |> List.map (fun pos -> labArr.[pos]) |> List.sort) ]
+                                        yield (blk.Length, blk |> List.map (fun pos -> labArr[pos]) |> List.sort) ]
                         |> List.distinct
                     let kappaDecls =
                         [ for (kk, sub) in neededKappa ->
@@ -1299,7 +1299,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                 let terms =
                                     [ for pt in partsOf t ->
                                         pt |> List.fold (fun acc blk ->
-                                            mulE acc (kappaRead (blk |> List.map (fun pos -> labArr.[pos]) |> List.sort))) (fLit 1.0) ]
+                                            mulE acc (kappaRead (blk |> List.map (fun pos -> labArr[pos]) |> List.sort))) (fLit 1.0) ]
                                 let value = match terms with [] -> fLit 0.0 | _ -> terms |> List.reduce addE
                                 mkDecl (cmName t ci) value) ]
                     let cmRead (labels: int list) =
@@ -1328,7 +1328,7 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                                 | kj :: rest ->
                                                     let restA = go (fi + 1) rest
                                                     [ for tup in tuples kj do
-                                                        match dRead kj oArr.[fi] tup with
+                                                        match dRead kj oArr[fi] tup with
                                                         | Some de ->
                                                             for (es, ls) in restA do
                                                                 yield (de :: es, tup @ ls)
@@ -1355,9 +1355,9 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                                             let b = pt.Length
                                             let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
                                             pt |> List.fold (fun acc blk ->
-                                                mulE acc (myRead (blk |> List.map (fun pos -> oArr.[pos]) |> List.sort))) (fLit w))
+                                                mulE acc (myRead (blk |> List.map (fun pos -> oArr[pos]) |> List.sort))) (fLit w))
                                         |> List.reduce addE
-                                    if k = 1 then addE mobius (g0Read oArr.[0]) else mobius ]
+                                    if k = 1 then addE mobius (g0Read oArr[0]) else mobius ]
                             mkDecl (distComponentName dName k) (arrLitE cells) ]
                     let outInfo = { Order = q
                                     Components = [ for k in 1 .. q -> distComponentName dName k ]
@@ -1414,7 +1414,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                         | ExprKind.ExprArrayLit cells when cells.Length = cellsOf k ->
                             let cellArr = List.toArray cells
                             Ok (fun labels ->
-                                let cell = cellArr.[lexOffsetOf dim k labels]
+                                let cell = cellArr[lexOffsetOf dim k labels]
                                 match cell.Kind with
                                 | ExprKind.ExprLit (LitFloat 0.0) -> None
                                 | _ -> Some cell)
@@ -1436,7 +1436,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                     |> List.fold (fun acc r -> acc |> Result.bind (fun rs -> r |> Result.map (fun f -> rs @ [f])))
                                  (Ok [])
                 dReadsRes |> Result.map (fun dReadFns ->
-                    let dRead (k: int) (labels: int list) = dReadFns.[k - 1] labels
+                    let dRead (k: int) (labels: int list) = dReadFns[k - 1] labels
                     let mkDecl name value =
                         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     let kappaName kk ci = $"__ppl_jetk_{dName}_o{kk}_c{ci}"
@@ -1454,7 +1454,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                 let labArr = List.toArray labels
                                 for pt in partsOf t do
                                     for blk in pt do
-                                        yield (blk.Length, blk |> List.map (fun pos -> labArr.[pos]) |> List.sort) ]
+                                        yield (blk.Length, blk |> List.map (fun pos -> labArr[pos]) |> List.sort) ]
                         |> List.distinct
                     let kappaDecls =
                         [ for (kk, sub) in neededKappa ->
@@ -1470,7 +1470,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                 let terms =
                                     [ for pt in partsOf t ->
                                         pt |> List.fold (fun acc blk ->
-                                            mulE acc (kappaRead (blk |> List.map (fun pos -> labArr.[pos]) |> List.sort))) (fLit 1.0) ]
+                                            mulE acc (kappaRead (blk |> List.map (fun pos -> labArr[pos]) |> List.sort))) (fLit 1.0) ]
                                 let value = match terms with [] -> fLit 0.0 | _ -> terms |> List.reduce addE
                                 mkDecl (cmName t ci) value) ]
                     let cmRead (labels: int list) =
@@ -1747,8 +1747,8 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                         addE (k1 j) (mulE (divE (k2 j i) (v sN)) (v devN)) ]
                 let covCells =
                     [ for t in canonicalTuples (dim - 1) 2 ->
-                        let a = rest.[t.[0]]
-                        let b = rest.[t.[1]]
+                        let a = rest[t[0]]
+                        let b = rest[t[1]]
                         subE (k2 a b) (divE (mulE (k2 a i) (k2 b i)) (v sN)) ]
                 let comps = [ distComponentName dName 1; distComponentName dName 2 ]
                 let outInfo = { Order = 2
@@ -1759,8 +1759,8 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                 Ok ([ bind xN (asF64 xE)
                       bind sN (k2 i i)
                       bind devN (subE (v xN) (k1 i))
-                      bind comps.[0] (arrLitE meanCells)
-                      bind comps.[1] (arrLitE covCells) ], outInfo)
+                      bind comps[0] (arrLitE meanCells)
+                      bind comps[1] (arrLitE covCells) ], outInfo)
             | Ok (SVInt ii) ->
                 Error $"dist_condition: coordinate {ii} is out of range for the {dim}-dimensional dist '{dn}' (coordinates are 0..{dim - 1})"
             | _ ->
@@ -1800,8 +1800,8 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let bindDecls =
                 [ for i in 0 .. k - 1 do
-                    yield bind (xName i) (asF64 rest.[2 * i])
-                    yield bind (wName i) (asF64 rest.[2 * i + 1]) ]
+                    yield bind (xName i) (asF64 rest[2 * i])
+                    yield bind (wName i) (asF64 rest[2 * i + 1]) ]
             let wsName = $"__ppl_tb_at_{dName}_ws"
             let wsDecl = bind wsName ([ for i in 0 .. k - 1 -> v (wName i) ] |> List.reduce addE)
             let mName j = $"__ppl_tb_at_{dName}_m{j}"
@@ -1837,7 +1837,7 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
             else
                 let xName i = $"__ppl_tb_ng_{outName}_x{i}"
                 let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) (asF64 xs.[i]) ]
+                let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) (asF64 xs[i]) ]
                 let mDecls, mRead = rawMomentDecls span ("ng_" + outName) info (sPts - 1)
                 let cellName j = $"__ppl_tb_ng_{outName}_c{j}"
                 let cellDecls =
@@ -1848,8 +1848,8 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
                             others |> List.fold (fun (acc: Expr list) xk ->
                                 let n = acc.Length
                                 [ for i in 0 .. n ->
-                                    let lower = if i >= 1 then Some acc.[i - 1] else None
-                                    let upper = if i <= n - 1 then Some (mulE xk acc.[i]) else None
+                                    let lower = if i >= 1 then Some acc[i - 1] else None
+                                    let upper = if i <= n - 1 then Some (mulE xk acc[i]) else None
                                     match lower, upper with
                                     | Some l, Some u -> subE l u
                                     | Some l, None -> l
@@ -1913,7 +1913,7 @@ let private familyParams : Map<string, string list> =
 let private familyNames : Set<string> = familyParams |> Map.toList |> List.map fst |> Set.ofList
 
 let private familySig (fam: string) : string =
-    $"""{fam}({(String.concat ", " familyParams.[fam])})"""
+    $"""{fam}({(String.concat ", " familyParams[fam])})"""
 
 /// x * x * ... * x, k >= 1 copies: repeated multiplication keeps arbitrary
 /// scalar parameter exprs inside plain arithmetic (the dist_scale convention).
@@ -1926,7 +1926,7 @@ let private powN (e: Expr) (k: int) : Expr =
 /// (mobiusComponentDecls).
 let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string) (args: Expr list)
     : Result<Located<Decl> list * DistInfo, string> =
-    let pNames = familyParams.[fam]
+    let pNames = familyParams[fam]
     let arity = pNames.Length
     if args.Length <> arity + 1 then
         Error (sprintf "%s: the value-position constructor is %s(%s, r) -- %d parameter(s) then a static order in 1..6, got %d argument(s). (In logpdf/loglik argument position the family takes no order: %s.)"
@@ -2104,12 +2104,12 @@ let private familyArg (former: string) (active: string -> bool) (e: Expr) : Resu
 /// the stray-order-argument steer. `position` names the symbolic slot in the
 /// steering text ("log-density position" / "sample position").
 let private checkSymbolicFamily (ctx: Ctx) (former: string) (position: string) (fam: string) (ps: Expr list) : Result<unit, string> =
-    let arity = familyParams.[fam].Length
+    let arity = familyParams[fam].Length
     if ps.Length = arity then Ok ()
     elif ps.Length = arity + 1 && (match evalExpr ctx.Statics maxSteps (List.last ps) with Ok (SVInt _) -> true | _ -> false) then
         Error $"{former}: {fam} takes no order argument in {position} -- the family is symbolic here ({familySig fam}); the order-r tower is the value-position constructor `let d = {fam}(..., r)`"
     else
-        Error ($"""{former}: {fam} expects {arity} parameter(s) ({(String.concat ", " familyParams.[fam])}), got {ps.Length}""")
+        Error ($"""{former}: {fam} expects {arity} parameter(s) ({(String.concat ", " familyParams[fam])}), got {ps.Length}""")
 
 let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
     checkSymbolicFamily ctx former "log-density position" fam ps
@@ -2369,9 +2369,9 @@ let private bayesPairsText =
 let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr list, string> =
     match e.Kind with
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f likNames && active f ->
-        let arity = likParams.[f].Length
+        let arity = likParams[f].Length
         if ps.Length = arity then Ok (f, ps)
-        else Error ($"""bayes: {f} expects {arity} parameter(s) ({(String.concat ", " likParams.[f])}), got {ps.Length}""")
+        else Error ($"""bayes: {f} expects {arity} parameter(s) ({(String.concat ", " likParams[f])}), got {ps.Length}""")
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f likNames ->
         Error $"bayes: '{f}' is shadowed by a user definition in this module, so the argument is not a likelihood former here"
     | _ ->
@@ -2691,7 +2691,7 @@ let private axMul (a: Map<AxMono, float>) (b: Map<AxMono, float>) : Map<AxMono, 
 let private aeZero (n: int) : Map<AxMono, float>[] = Array.create (n + 1) axZeroP
 let private aeKonst (n: int) (p: Map<AxMono, float>) : Map<AxMono, float>[] =
     let a = aeZero n
-    a.[0] <- p
+    a[0] <- p
     a
 let private aeAdd a b : Map<AxMono, float>[] = Array.map2 axAdd a b
 let private aeSub a b : Map<AxMono, float>[] = Array.map2 axSub a b
@@ -2701,9 +2701,9 @@ let private aeMul (a: Map<AxMono, float>[]) (b: Map<AxMono, float>[]) : Map<AxMo
     let n = a.Length - 1
     let out = aeZero n
     for i in 0 .. n do
-        if not (Map.isEmpty a.[i]) then
+        if not (Map.isEmpty a[i]) then
             for j in 0 .. n - i do
-                out.[i + j] <- axAdd out.[i + j] (axMul a.[i] b.[j])
+                out[i + j] <- axAdd out[i + j] (axMul a[i] b[j])
     out
 /// a / b by forward substitution. b's head must be a single monomial (it is
 /// phi(z) in the Cornish-Fisher solve) and every division must be exact --
@@ -2712,7 +2712,7 @@ let private aeDiv (a: Map<AxMono, float>[]) (b: Map<AxMono, float>[]) : Map<AxMo
     let n = a.Length - 1
     let q = aeZero n
     let (m0, c0) =
-        match Map.toList b.[0] with
+        match Map.toList b[0] with
         | [ one ] -> one
         | _ -> failwith "ppl approx bridge: series division by a non-monomial head (compiler bug)"
     let divMono (p: Map<AxMono, float>) : Map<AxMono, float> =
@@ -2726,10 +2726,10 @@ let private aeDiv (a: Map<AxMono, float>[]) (b: Map<AxMono, float>[]) : Map<AxMo
             ((z2, p2, l2), c / c0))
         |> Map.ofList
     for i in 0 .. n do
-        let mutable s = a.[i]
+        let mutable s = a[i]
         for j in 1 .. i do
-            s <- axSub s (axMul b.[j] q.[i - j])
-        q.[i] <- divMono s
+            s <- axSub s (axMul b[j] q[i - j])
+        q[i] <- divMono s
     q
 /// Substitute eps = 1.
 let private aeCollapse (a: Map<AxMono, float>[]) : Map<AxMono, float> = Array.fold axAdd axZeroP a
@@ -2737,10 +2737,10 @@ let private aeCollapse (a: Map<AxMono, float>[]) : Map<AxMono, float> = Array.fo
 /// Probabilists' Hermite polynomials He_0(z)..He_n(z) in the z symbol.
 let private hermiteZ (n: int) : Map<AxMono, float>[] =
     let h = Array.create (max 1 (n + 1)) axZeroP
-    h.[0] <- axConst 1.0
-    if n >= 1 then h.[1] <- axZ
+    h[0] <- axConst 1.0
+    if n >= 1 then h[1] <- axZ
     for m in 1 .. n - 1 do
-        h.[m + 1] <- axSub (axMul axZ h.[m]) (axScale (float m) h.[m - 1])
+        h[m + 1] <- axSub (axMul axZ h[m]) (axScale (float m) h[m - 1])
     h
 
 /// Coefficients c_j of phi_Z(t) = e^(-t^2/2) sum_j c_j (it)^j as eps-series
@@ -2752,21 +2752,21 @@ let private axCharCoeffs (r: int) : Map<AxMono, float>[][] =
     let s = Array.init (maxJ + 1) (fun _ -> aeZero n)
     for k in 3 .. r do
         if k - 2 <= n && k <= maxJ then
-            s.[k].[k - 2] <- axScale (1.0 / factorial k) (axLam k)
+            s[k][k - 2] <- axScale (1.0 / factorial k) (axLam k)
     let res = Array.init (maxJ + 1) (fun _ -> aeZero n)
-    res.[0].[0] <- axConst 1.0
+    res[0][0] <- axConst 1.0
     let mutable pow = Array.init (maxJ + 1) (fun _ -> aeZero n)
-    pow.[0].[0] <- axConst 1.0
+    pow[0][0] <- axConst 1.0
     for m in 1 .. n do
         let next = Array.init (maxJ + 1) (fun _ -> aeZero n)
         for i in 0 .. maxJ do
             for k in 3 .. maxJ do
                 if i + k <= maxJ then
-                    next.[i + k] <- aeAdd next.[i + k] (aeMul pow.[i] s.[k])
+                    next[i + k] <- aeAdd next[i + k] (aeMul pow[i] s[k])
         pow <- next
         let w = 1.0 / factorial m
         for j in 0 .. maxJ do
-            res.[j] <- aeAdd res.[j] (aeScaleF w pow.[j])
+            res[j] <- aeAdd res[j] (aeScaleF w pow[j])
     res
 
 /// Collapsed (eps = 1) Edgeworth bracket coefficients: index j -> the
@@ -2795,31 +2795,31 @@ let private axCornishFisherU (r: int) : Map<int, (float * int list) list> =
     for _ in 1 .. n + 4 do
         let w = aeAdd (aeKonst n axZ) u
         let heW = Array.init (maxJ + 1) (fun _ -> aeZero n)
-        heW.[0] <- aeKonst n (axConst 1.0)
-        if maxJ >= 1 then heW.[1] <- w
+        heW[0] <- aeKonst n (axConst 1.0)
+        if maxJ >= 1 then heW[1] <- w
         for m in 1 .. maxJ - 1 do
-            heW.[m + 1] <- aeSub (aeMul w heW.[m]) (aeScaleF (float m) heW.[m - 1])
+            heW[m + 1] <- aeSub (aeMul w heW[m]) (aeScaleF (float m) heW[m - 1])
         // Phi(z+u) - Phi(z) = sum_{i>=1} (-1)^(i-1) He_(i-1)(z) phi(z) u^i / i!
         let mutable dPhi = aeZero n
         let mutable up = aeKonst n (axConst 1.0)
         for i in 1 .. n do
             up <- aeMul up u
             let sgn = if (i - 1) % 2 = 0 then 1.0 else -1.0
-            dPhi <- aeAdd dPhi (aeScaleP (axScale (sgn / factorial i) (axMul heZ.[i - 1] axPhi)) up)
+            dPhi <- aeAdd dPhi (aeScaleP (axScale (sgn / factorial i) (axMul heZ[i - 1] axPhi)) up)
         // phi(z+u) = sum_{i>=0} (-1)^i He_i(z) phi(z) u^i / i!
         let mutable phiW = aeZero n
         up <- aeKonst n (axConst 1.0)
         for i in 0 .. n do
             if i > 0 then up <- aeMul up u
             let sgn = if i % 2 = 0 then 1.0 else -1.0
-            phiW <- aeAdd phiW (aeScaleP (axScale (sgn / factorial i) (axMul heZ.[i] axPhi)) up)
+            phiW <- aeAdd phiW (aeScaleP (axScale (sgn / factorial i) (axMul heZ[i] axPhi)) up)
         let mutable tail = aeZero n
         for j in 1 .. maxJ do
-            tail <- aeAdd tail (aeMul c.[j] heW.[j - 1])
+            tail <- aeAdd tail (aeMul c[j] heW[j - 1])
         let g = aeSub dPhi (aeMul phiW tail)
         let mutable dens = aeZero n
         for j in 0 .. maxJ do
-            dens <- aeAdd dens (aeMul c.[j] heW.[j])
+            dens <- aeAdd dens (aeMul c[j] heW[j])
         u <- aeSub u (aeDiv g (aeMul phiW dens))
     aeCollapse u
     |> Map.toList
@@ -2960,7 +2960,7 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
                     bind (heName j) value ]
             let factor =
                 [ for j in 0 .. maxJ do
-                    match cs.[j] with
+                    match cs[j] with
                     | [] -> ()
                     | terms -> yield mulE (axTermsExpr lam terms) (v (heName j)) ]
                 |> List.reduce addE   // c_0 = 1 always survives
@@ -3079,16 +3079,16 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
                 let fN = $"__ppl_sm_{sName}_fill"
                 let affine = addE (v muN) (mulE (v sdN) (v "__u"))
                 let body = if fam = "gaussian" then affine else expE affine
-                [ bind muN (asF64 ps.[0])
-                  bind sdN (sqrtE (asF64 ps.[1]))
+                [ bind muN (asF64 ps[0])
+                  bind sdN (sqrtE (asF64 ps[1]))
                   bind fN (appE (v "__rand_normal") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) body }; Span = span } ]
             | "uniform" ->
                 let aN = $"__ppl_sm_{sName}_a"
                 let wN = $"__ppl_sm_{sName}_w"
                 let fN = $"__ppl_sm_{sName}_fill"
-                [ bind aN (asF64 ps.[0])
-                  bind wN (subE ps.[1] (v aN))
+                [ bind aN (asF64 ps[0])
+                  bind wN (subE ps[1] (v aN))
                   bind fN (appE (v "__rand_uniform") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) (addE (v aN) (mulE (v wN) (v "__u"))) }; Span = span } ]
             | _ -> [])))   // unreachable: familyArg gates on familyNames
@@ -3301,7 +3301,7 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
             let pFillN, uN, stepN, recN = nm "p", nm "u", nm "step", nm "c"
             let prevN, tN = "__prev", "__t"
             let p0N, qN, pmN, lN = "__p0", "__q", "__pm", "__l"
-            let lpaN, gaN, lpbN, gbN, lpnN, gnN, dHN = "__lpa", "__ga", "__lpb", "__gb", "__lpn", "__gn", "__dH"
+            let lpaN, gaN, gbN, lpnN, gnN, dHN = "__lpa", "__ga", "__gb", "__lpn", "__gn", "__dH"
             // (primal, gradient) at x: the ad.grad surface form, expanded by
             // the Grad pass into a `logpost__grad(x)` call.
             let gradCall (x: Expr) = appE (appE (syn (ExprField (v ad, "grad"))) [v f]) [x]
@@ -3664,7 +3664,7 @@ let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>)
         let e = unwrap e
         match e.Kind with
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) when Map.containsKey f funcs ->
-            let fd = funcs.[f]
+            let fd = funcs[f]
             if args.Length <> fd.Params.Length then
                 Error $"{former}: helper '{f}' is called with {args.Length} argument(s) but takes {fd.Params.Length}"
             elif n <= 0 then
@@ -3703,7 +3703,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                 Ok (Some (ps, fd.Body))
             | None -> Ok None
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, prefixArgs) when Map.containsKey f funcs ->
-            let fd = funcs.[f]
+            let fd = funcs[f]
             if prefixArgs.Length >= fd.Params.Length then
                 Error ($"{former}: partial application of '{f}' supplies {prefixArgs.Length} of its {fd.Params.Length} parameter(s) -- leave at least one free to map over")
             else
@@ -3773,8 +3773,8 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
             canonicalTuples dim k
             |> List.fold (fun acc t ->
                 acc |> Result.bind (fun m ->
-                    let parent = if k = 1 then fbody else prev.[List.tail t]
-                    diffExpr paramNames.[List.head t] parent
+                    let parent = if k = 1 then fbody else prev[List.tail t]
+                    diffExpr paramNames[List.head t] parent
                     |> Result.map (fun de -> Map.add t (simplifyExpr de) m)))
                 (Ok Map.empty)
         let allZero (m: Map<int list, Expr>) = m |> Map.forall (fun _ e -> isZeroE e)
@@ -3801,10 +3801,10 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         let muDecls =
             [ for i in 0 .. dim - 1 ->
                 { Value = DeclLet { Pattern = pvar (muName i); Type = None
-                                    Value = appE (v info.Components.[0]) [iLit i]
+                                    Value = appE (v info.Components[0]) [iLit i]
                                     Mutability = BindLet }
                   Span = span } ]
-        let subst = Map.ofList [ for i in 0 .. dim - 1 -> (paramNames.[i], v (muName i)) ]
+        let subst = Map.ofList [ for i in 0 .. dim - 1 -> (paramNames[i], v (muName i)) ]
         let atMean e = simplifyExpr (substVars subst e)
         let g0, dArgs =
             match comps with
@@ -3812,9 +3812,9 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                 let levels = towers.Head
                 let dArgs =
                     [ for k in 1 .. s ->
-                        let lv = levels.[k - 1]
-                        if dim = 1 then atMean lv.[List.replicate k 0]
-                        else arrLitE [ for t in canonicalTuples dim k -> atMean lv.[t] ] ]
+                        let lv = levels[k - 1]
+                        if dim = 1 then atMean lv[List.replicate k 0]
+                        else arrLitE [ for t in canonicalTuples dim k -> atMean lv[t] ] ]
                 (atMean single, dArgs)
             | _ ->
                 // vector: g0 = the m atMean cells; D_k = coordinate-major flat cells, zero-filled where a shorter component
@@ -3840,7 +3840,7 @@ let private isNonCrossing (partition: int list list) : bool =
     let n = partition |> List.sumBy List.length
     let crossing =
         Seq.exists (fun (a, b, c, d) ->
-            blockOf.[a] = blockOf.[c] && blockOf.[b] = blockOf.[d] && blockOf.[a] <> blockOf.[b])
+            blockOf[a] = blockOf[c] && blockOf[b] = blockOf[d] && blockOf[a] <> blockOf[b])
             (seq { for a in 0 .. n - 4 do
                      for b in a + 1 .. n - 3 do
                        for c in b + 1 .. n - 2 do
@@ -3856,7 +3856,7 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
             | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
             | _ -> Error "free_cumulants: the order must be a compile-time integer in 1..6"
         r |> Result.bind (fun r ->
-        arrayShape ctx "free_cumulants" aName |> Result.bind (fun (elem, leading, fiber, n) ->
+        arrayShape ctx "free_cumulants" aName |> Result.bind (fun (_, leading, _, n) ->
             match leading with
             | [ix] ->
                 match resolveExtent ctx.Aliases ctx.Statics ix with
@@ -3877,9 +3877,9 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                         let muDecls = pd
                         let muRead (labels: int list) = poolMoment pool labels
                         // fk tensors ascending; flat lex reads on earlier fk outputs; order-1 blocks read the shifted mean.
-                        let fkRead (kIdx: int) (labels: int list) =
+                        let fkRead (_kIdx: int) (labels: int list) =
                             if labels.Length = 1 then poolMoment pool labels
-                            else appE (v fkNames.[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
+                            else appE (v fkNames[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
                         let fkDecl p nm =
                             if p = 1 then
                                 { Value = DeclLet { Pattern = pvar nm; Type = None
@@ -3895,7 +3895,7 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                                         let subtracted =
                                             [ for pt in ncParts ->
                                                 pt |> List.fold (fun acc blk ->
-                                                    mulE acc (fkRead p (blk |> List.map (fun pos -> labArr.[pos]) |> List.sort))) (fLit 1.0) ]
+                                                    mulE acc (fkRead p (blk |> List.map (fun pos -> labArr[pos]) |> List.sort))) (fLit 1.0) ]
                                         match subtracted with
                                         | [] -> muRead labels
                                         | _ -> subE (muRead labels) (subtracted |> List.reduce addE) ]
@@ -4483,7 +4483,7 @@ let private expandModuleCore (modules: ModuleDecl list) (decls: Located<Decl> li
                     // moments(d, k) on a DIST binding: reconstruction (kappa->mu, Wick under closure), dispatched by registry
                     // membership, ahead of the data-array form.
                     | DeclLet ({ Pattern = { Kind = PatternKind.PatVar _ }; Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "moments" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b) when active "moments" && Map.containsKey dn dists ->
-                        let info = dists.[dn]
+                        let info = dists[dn]
                         distDim ctx info
                         |> Result.bind (fun dim -> elabMomentsOfDist ctx d.Span b info dim kExpr)
                         |> Result.map (fun nds -> (ds @ nds, dists, mstates))
@@ -4511,7 +4511,7 @@ let private expandModuleCore (modules: ModuleDecl list) (decls: Located<Decl> li
                         // shape, and elaborate dist over the wrapper.
                         (match args with
                          | [{ Kind = ExprKind.ExprVar cn }; rExpr] when Map.containsKey cn chainLens ->
-                             let n = chainLens.[cn]
+                             let n = chainLens[cn]
                              let wrapN = $"__ppl_dist_{dName}_chain"
                              let wrapVal =
                                  computeE (applyE
@@ -4624,11 +4624,11 @@ let private expandModuleCore (modules: ModuleDecl list) (decls: Located<Decl> li
                     // Dist-typed projection to see, so project here; the
                     // order guard is an elaboration error instead.
                     | DeclLet ({ Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__ppl_cumulant" }, [{ Kind = ExprKind.ExprVar dn }; kExpr]) } } as b)
-                        when Map.containsKey dn dists && dists.[dn].Flat ->
-                        let info = dists.[dn]
+                        when Map.containsKey dn dists && dists[dn].Flat ->
+                        let info = dists[dn]
                         (match evalExpr ctx.Statics maxSteps kExpr with
                          | Ok (SVInt k) when k >= 1L && int k <= info.Order ->
-                             Ok (ds @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprVar info.Components.[int k - 1]) } } ], dists, mstates)
+                             Ok (ds @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprVar info.Components[int k - 1]) } } ], dists, mstates)
                          | Ok (SVInt k) ->
                              Error $"cumulant: order {k} exceeds the dist's carried order {info.Order} -- insufficient stochastic order. Construct with a higher order or project a carried component."
                          | _ ->

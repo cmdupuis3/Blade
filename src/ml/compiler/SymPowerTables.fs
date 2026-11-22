@@ -185,17 +185,17 @@ let private cellSpace (j: int) (l: int) : CellSpace =
             Q =
                 cells |> Array.map (fun c ->
                     let af = alphas c |> List.fold (fun acc (_, a) -> acc * fact a) BigInteger.One
-                    c |> List.fold (fun acc i -> Rat.mul acc c2.[i]) (Rat.ofBigInt (fact j * af)))
+                    c |> List.fold (fun acc i -> Rat.mul acc c2[i]) (Rat.ofBigInt (fact j * af)))
             CProd =
                 cells |> Array.map (fun c ->
-                    c |> List.fold (fun acc i -> acc * sqrt (Rat.toFloat c2.[i])) 1.0)
+                    c |> List.fold (fun acc i -> acc * sqrt (Rat.toFloat c2[i])) 1.0)
             EAct =
                 cells |> Array.map (fun cell ->
                     alphas cell
                     |> List.choose (fun (i, a) ->
                         if i < 2 * l then
                             let target = List.sort (i + 1 :: removeFirst i cell)
-                            Some (index.[target], a * (2 * l - i))
+                            Some (index[target], a * (2 * l - i))
                         else None)
                     |> List.toArray)
             FAct =
@@ -204,27 +204,27 @@ let private cellSpace (j: int) (l: int) : CellSpace =
                     |> List.choose (fun (i, a) ->
                         if i > 0 then
                             let target = List.sort (i - 1 :: removeFirst i cell)
-                            Some (index.[target], a * i)
+                            Some (index[target], a * i)
                         else None)
                     |> List.toArray)
             Arrs = cells |> Array.map (fun c -> arrangements c |> List.toArray)
         }
-        spaceCache.[(j, l)] <- space
+        spaceCache[(j, l)] <- space
         space
 
 let private applyAct (act: (int * int) [] []) (v: Rat[]) : Rat[] =
     let out = Array.create v.Length Rat.zero
     for i in 0 .. v.Length - 1 do
-        if not (Rat.isZero v.[i]) then
-            for (tgt, c) in act.[i] do
-                out.[tgt] <- Rat.add out.[tgt] (Rat.scaleInt c v.[i])
+        if not (Rat.isZero v[i]) then
+            for (tgt, c) in act[i] do
+                out[tgt] <- Rat.add out[tgt] (Rat.scaleInt c v[i])
     out
 
 let private gramDotSp (sp: CellSpace) (a: Rat[]) (b: Rat[]) : Rat =
     let mutable acc = Rat.zero
     for i in 0 .. a.Length - 1 do
-        if not (Rat.isZero a.[i]) && not (Rat.isZero b.[i]) then
-            acc <- Rat.add acc (Rat.mul sp.Q.[i] (Rat.mul a.[i] b.[i]))
+        if not (Rat.isZero a[i]) && not (Rat.isZero b[i]) then
+            acc <- Rat.add acc (Rat.mul sp.Q[i] (Rat.mul a[i] b[i]))
     acc
 
 // Public exact re-verification hooks: the tests re-derive E.v = 0 and the
@@ -260,7 +260,7 @@ type ExactWeightSpace = {
     RrefRows: Rat[][]
     /// exact Gram-Schmidt of RrefRows in row order (unnormalized)
     GsRows: Rat[][]
-    /// <GsRows r, GsRows r> -- the rational norm^2 factored out at float time
+    /// &lt;GsRows r, GsRows r&gt; -- the rational norm^2 factored out at float time
     Norm2: Rat []
 }
 
@@ -270,7 +270,7 @@ type ExactWeightSpace = {
 let private rref (rows: Rat[][]) : (Rat[] * int) list =
     let rows = rows |> Array.map Array.copy
     let nRows = rows.Length
-    let nCols = if nRows = 0 then 0 else rows.[0].Length
+    let nCols = if nRows = 0 then 0 else rows[0].Length
     let mutable pivRow = 0
     let pivots = ResizeArray<int>()
     for col in 0 .. nCols - 1 do
@@ -279,20 +279,20 @@ let private rref (rows: Rat[][]) : (Rat[] * int) list =
             for r in pivRow .. nRows - 1 do
                 if sel < 0 && not (Rat.isZero rows.[r].[col]) then sel <- r
             if sel >= 0 then
-                let tmp = rows.[pivRow]
-                rows.[pivRow] <- rows.[sel]
-                rows.[sel] <- tmp
-                let piv = rows.[pivRow].[col]
+                let tmp = rows[pivRow]
+                rows[pivRow] <- rows[sel]
+                rows[sel] <- tmp
+                let piv = rows[pivRow][col]
                 for c in 0 .. nCols - 1 do
                     rows.[pivRow].[c] <- Rat.div rows.[pivRow].[c] piv
                 for r in 0 .. nRows - 1 do
                     if r <> pivRow && not (Rat.isZero rows.[r].[col]) then
-                        let f = rows.[r].[col]
+                        let f = rows[r][col]
                         for c in 0 .. nCols - 1 do
                             rows.[r].[c] <- Rat.sub rows.[r].[c] (Rat.mul f rows.[pivRow].[c])
                 pivots.Add col
                 pivRow <- pivRow + 1
-    [ for r in 0 .. pivots.Count - 1 -> (rows.[r], pivots.[r]) ]
+    [ for r in 0 .. pivots.Count - 1 -> (rows[r], pivots[r]) ]
 
 /// Kernel basis of a constraint matrix (rows = constraints), one vector per
 /// free column, via the RREF pivot/free split.
@@ -302,9 +302,9 @@ let private kernelBasis (m: Rat[][]) (nCols: int) : Rat[][] =
     [| for f in 0 .. nCols - 1 do
          if not (pivotCols.Contains f) then
              let v = Array.create nCols Rat.zero
-             v.[f] <- Rat.one
+             v[f] <- Rat.one
              for (row, p) in red do
-                 v.[p] <- Rat.neg row.[f]
+                 v[p] <- Rat.neg row[f]
              yield v |]
 
 let private exactCache = Dictionary<int * int, ExactWeightSpace list>()
@@ -325,12 +325,12 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
             |> Map.ofList
         let spaces = ResizeArray<ExactWeightSpace>()
         for L in j * l .. -1 .. 0 do
-            let cols = [| for i in 0 .. nCells - 1 do if sp.Weight.[i] = L then yield i |]
-            let rowsIdx = [| for i in 0 .. nCells - 1 do if sp.Weight.[i] = L + 1 then yield i |]
+            let cols = [| for i in 0 .. nCells - 1 do if sp.Weight[i] = L then yield i |]
+            let rowsIdx = [| for i in 0 .. nCells - 1 do if sp.Weight[i] = L + 1 then yield i |]
             let rowPos = rowsIdx |> Array.mapi (fun p i -> (i, p)) |> Map.ofArray
             let mat = Array.init rowsIdx.Length (fun _ -> Array.create cols.Length Rat.zero)
             cols |> Array.iteri (fun cPos cellIdx ->
-                for (tgt, coeff) in sp.EAct.[cellIdx] do
+                for (tgt, coeff) in sp.EAct[cellIdx] do
                     mat.[rowPos.[tgt]].[cPos] <- Rat.add mat.[rowPos.[tgt]].[cPos] (Rat.ofInt coeff))
             let canon = rref (kernelBasis mat cols.Length)
             let mult = canon.Length
@@ -340,10 +340,10 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
             if mult > 0 then
                 let toFull (v: Rat[]) =
                     let full = Array.create nCells Rat.zero
-                    cols |> Array.iteri (fun cPos cellIdx -> full.[cellIdx] <- v.[cPos])
+                    cols |> Array.iteri (fun cPos cellIdx -> full[cellIdx] <- v[cPos])
                     full
                 let rrefFull = canon |> List.map (fst >> toFull) |> List.toArray
-                let pivots = canon |> List.map (fun (_, p) -> sp.Cells.[cols.[p]]) |> List.toArray
+                let pivots = canon |> List.map (fun (_, p) -> sp.Cells[cols[p]]) |> List.toArray
                 // Exact Gram-Schmidt in RREF row order (dims <= 3 at j <= 4;
                 // independence is already proved by the pivots).
                 let gs = ResizeArray<Rat[]>()
@@ -351,11 +351,11 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
                 for v0 in rrefFull do
                     let v = Array.copy v0
                     for s in 0 .. gs.Count - 1 do
-                        let coef = Rat.div (gramDotSp sp v gs.[s]) norm2.[s]
+                        let coef = Rat.div (gramDotSp sp v gs[s]) norm2[s]
                         if not (Rat.isZero coef) then
-                            let prev = gs.[s]
+                            let prev = gs[s]
                             for i in 0 .. nCells - 1 do
-                                v.[i] <- Rat.sub v.[i] (Rat.mul coef prev.[i])
+                                v[i] <- Rat.sub v[i] (Rat.mul coef prev[i])
                     let n2 = gramDotSp sp v v
                     if Rat.isZero n2 then
                         failwith $"internal: SymPowerTables({j},{l}) L={L}: Gram-Schmidt hit a zero norm"
@@ -371,7 +371,7 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
         if total <> nCells then
             failwith $"internal: SymPowerTables({j},{l}): occurrences cover {total} of {nCells} dimensions"
         let res = List.ofSeq spaces
-        exactCache.[(j, l)] <- res
+        exactCache[(j, l)] <- res
         res
 
 // Float layer: integer lowering, diagonal unitarization, uMatrix
@@ -425,7 +425,7 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
         let colOpts =
             [| for i in 0 .. 2 * l ->
                  [| for c in 0 .. 2 * l do
-                      let u = ul.[c].[i]
+                      let u = ul[c][i]
                       if u <> Complex.Zero then yield (c, Complex.Conjugate u) |] |]
         let occs = ResizeArray<SymOccurrence>()
         for ws in exact do
@@ -434,7 +434,7 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
             for r in 0 .. ws.GsRows.Length - 1 do
                 // Complex block: rows = real components of V_L, cols = real cells.
                 let cplx = Array.init (2 * L + 1) (fun _ -> Array.zeroCreate<Complex> nCells)
-                let mutable vec = ws.GsRows.[r]
+                let mutable vec = ws.GsRows[r]
                 for step in 0 .. 2 * L do
                     let M = L - step
                     if step > 0 then vec <- applyAct sp.FAct vec  // integer lowering
@@ -445,27 +445,27 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                     // Per-M realization: expand each monomial's arrangements through conj(U).
                     let dM = Array.zeroCreate<Complex> nCells
                     for iA in 0 .. nCells - 1 do
-                        if not (Rat.isZero vec.[iA]) then
+                        if not (Rat.isZero vec[iA]) then
                             // tensor coefficient per ordered arrangement:
                             // a_A * prod a_i! (module doc), w->v rescale prod c_m, unit norm
-                            let beta = Rat.toFloat vec.[iA] * sp.AlphaFact.[iA] * sp.CProd.[iA] * invNorm
-                            for arr in sp.Arrs.[iA] do
+                            let beta = Rat.toFloat vec[iA] * sp.AlphaFact[iA] * sp.CProd[iA] * invNorm
+                            for arr in sp.Arrs[iA] do
                                 let rec go (rest: int list) (acc: Complex) (chosen: int list) =
                                     match rest with
                                     | [] ->
-                                        let idx = sp.Index.[List.sort chosen]
-                                        dM.[idx] <- dM.[idx] + acc
+                                        let idx = sp.Index[List.sort chosen]
+                                        dM[idx] <- dM[idx] + acc
                                     | i :: tl ->
-                                        for (c, w) in colOpts.[i] do
+                                        for (c, w) in colOpts[i] do
                                             go tl (acc * w) (c :: chosen)
                                 go arr (Complex(beta, 0.0)) []
                     // fold into the rows through u_L (plain, output side)
                     for cL in 0 .. 2 * L do
-                        let uu = uL.[cL].[M + L]
+                        let uu = uL[cL][M + L]
                         if uu <> Complex.Zero then
                             for idx in 0 .. nCells - 1 do
-                                if dM.[idx] <> Complex.Zero then
-                                    cplx.[cL].[idx] <- cplx.[cL].[idx] + uu * dM.[idx]
+                                if dM[idx] <> Complex.Zero then
+                                    cplx[cL][idx] <- cplx[cL][idx] + uu * dM[idx]
                 // Phase: apply the DERIVED rule, then assert the residual gap: the
                 // realized branch >= 5 orders below max, else at table scale (unit rows bound max|T| >= 1/sqrt(nCells)).
                 let mutable maxRe = 0.0
@@ -486,10 +486,10 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                 for row in rows do
                     let mutable s = 0.0
                     for i in 0 .. nCells - 1 do
-                        s <- s + row.[i] * row.[i] / float sp.NMult.[i]
+                        s <- s + row[i] * row[i] / float sp.NMult[i]
                     if abs (s - 1.0) > 1e-10 then
                         failwithf "internal: SymPowerTables(%d,%d) L=%d copy %d: realized row norm^2 = %.17g" j l L r s
-                occs.Add { L = L; Copy = r; Pivot = ws.Pivots.[r]
+                occs.Add { L = L; Copy = r; Pivot = ws.Pivots[r]
                            Flipped = flipped; MaxRe = maxRe; MaxIm = maxIm; Rows = rows }
         let res = {
             J = j
@@ -498,5 +498,5 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
             CellMult = sp.NMult |> Array.map float
             Occurrences = List.ofSeq occs
         }
-        tableCache.[(j, l)] <- res
+        tableCache[(j, l)] <- res
         res

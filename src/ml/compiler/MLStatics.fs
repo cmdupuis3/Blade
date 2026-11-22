@@ -253,11 +253,11 @@ let install () =
                             Error $"{name}: block index {b} out of range (spec has {s.Length} blocks)"
                         else Ok (SVInt (int64 (f s (int b)))))
                 | _ -> Error $"{name}: expected (spec, block) static arguments")
-        registerBlockAccessor "irreps_l" (fun s b -> s.[b].L)
-        registerBlockAccessor "irreps_parity" (fun s b -> s.[b].Parity)
-        registerBlockAccessor "irreps_mult" (fun s b -> s.[b].Mult)
-        registerBlockAccessor "irreps_dim" (fun s b -> dim s.[b])
-        registerBlockAccessor "irreps_offset" (fun s b -> (blockStarts s).[b])
+        registerBlockAccessor "irreps_l" (fun s b -> s[b].L)
+        registerBlockAccessor "irreps_parity" (fun s b -> s[b].Parity)
+        registerBlockAccessor "irreps_mult" (fun s b -> s[b].Mult)
+        registerBlockAccessor "irreps_dim" (fun s b -> dim s[b])
+        registerBlockAccessor "irreps_offset" (fun s b -> (blockStarts s)[b])
         // The POINT-GROUP sizing surface. Every builtin takes GROUP (a static
         // string naming a registered group) first and returns an INT. NO pg
         // builtin returns a SPEC: no pg op yet consumes a derived spec, so
@@ -319,7 +319,7 @@ let install () =
                 specOfStatic "pg_restrict SPEC" spec |> Result.map (fun s ->
                     pgSpecToStatic (restrictSpec g (s |> List.map (fun e -> (e.L, e.Parity, e.Mult))))))
             | _ -> Error "pg_restrict: expected (GROUP, SPEC) static arguments -- GROUP a registered point group, SPEC an O(3) irreps spec of (l, parity, mult) triples")
-        registerPgBlockAccessor "pg_irreps_dim" (fun g s b -> (pgIrrep g (fst s.[b])).DimR)
-        registerPgBlockAccessor "pg_irreps_mult" (fun _ s b -> snd s.[b])
-        registerPgBlockAccessor "pg_irreps_fs" (fun g s b -> endDim (pgIrrep g (fst s.[b])).Fs)
-        registerPgBlockAccessor "pg_irreps_offset" (fun g s b -> (pgBlockStarts g s).[b])
+        registerPgBlockAccessor "pg_irreps_dim" (fun g s b -> (pgIrrep g (fst s[b])).DimR)
+        registerPgBlockAccessor "pg_irreps_mult" (fun _ s b -> snd s[b])
+        registerPgBlockAccessor "pg_irreps_fs" (fun g s b -> endDim (pgIrrep g (fst s[b])).Fs)
+        registerPgBlockAccessor "pg_irreps_offset" (fun g s b -> (pgBlockStarts g s)[b])

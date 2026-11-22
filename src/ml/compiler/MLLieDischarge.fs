@@ -263,31 +263,31 @@ let blockGenerator (axis: Axis) (l: int) : Radical [][] =
         match axis with
         | Lz ->
             for k in 1 .. l do
-                m.[l + k].[l - k] <- Radical.ofInt (-k)
-                m.[l - k].[l + k] <- Radical.ofInt k
+                m[l + k][l - k] <- Radical.ofInt (-k)
+                m[l - k][l + k] <- Radical.ofInt k
         | Ly ->
             if l >= 1 then
                 // The m = 0 seam: dR0 = -(a(0)/sqrt(2))*R1, dR1 = +(b(1)/sqrt(2))*R0.
-                m.[l].[l + 1] <- Radical.ofSqrt negHalf (2 * a 0)
-                m.[l + 1].[l] <- Radical.ofSqrt half (2 * b 1)
+                m[l][l + 1] <- Radical.ofSqrt negHalf (2 * a 0)
+                m[l + 1][l] <- Radical.ofSqrt half (2 * b 1)
             for k in 2 .. l do
-                m.[l + k].[l + k - 1] <- Radical.ofSqrt half (b k)
-                m.[l - k].[l - k + 1] <- Radical.ofSqrt half (b k)
+                m[l + k][l + k - 1] <- Radical.ofSqrt half (b k)
+                m[l - k][l - k + 1] <- Radical.ofSqrt half (b k)
             for k in 1 .. l - 1 do
-                m.[l + k].[l + k + 1] <- Radical.ofSqrt negHalf (a k)
-                m.[l - k].[l - k - 1] <- Radical.ofSqrt negHalf (a k)
+                m[l + k][l + k + 1] <- Radical.ofSqrt negHalf (a k)
+                m[l - k][l - k - 1] <- Radical.ofSqrt negHalf (a k)
         | Lx ->
             if l >= 1 then
                 // The m = 0 seam: dR0 = +(a(0)/sqrt(2))*I1, dI1 = -(b(1)/sqrt(2))*R0.
-                m.[l].[l - 1] <- Radical.ofSqrt half (2 * a 0)
-                m.[l - 1].[l] <- Radical.ofSqrt negHalf (2 * b 1)
+                m[l][l - 1] <- Radical.ofSqrt half (2 * a 0)
+                m[l - 1][l] <- Radical.ofSqrt negHalf (2 * b 1)
             for k in 2 .. l do
-                m.[l + k].[l - k + 1] <- Radical.ofSqrt half (b k)
-                m.[l - k].[l + k - 1] <- Radical.ofSqrt negHalf (b k)
+                m[l + k][l - k + 1] <- Radical.ofSqrt half (b k)
+                m[l - k][l + k - 1] <- Radical.ofSqrt negHalf (b k)
             for k in 1 .. l - 1 do
-                m.[l + k].[l - k - 1] <- Radical.ofSqrt half (a k)
-                m.[l - k].[l + k + 1] <- Radical.ofSqrt negHalf (a k)
-        blockCache.[(axis, l)] <- m
+                m[l + k][l - k - 1] <- Radical.ofSqrt half (a k)
+                m[l - k][l + k + 1] <- Radical.ofSqrt negHalf (a k)
+        blockCache[(axis, l)] <- m
         m
 
 let private specCache = Dictionary<Axis * MLS.Spec, Radical [][]>()
@@ -308,11 +308,11 @@ let specGenerator (axis: Axis) (s: MLS.Spec) : Radical [][] =
             let g = blockGenerator axis e.L
             let d = 2 * e.L + 1
             for copy in 0 .. e.Mult - 1 do
-                let st = starts.[bi] + copy * d
+                let st = starts[bi] + copy * d
                 for i in 0 .. d - 1 do
                     for j in 0 .. d - 1 do
                         if not (Radical.isZero g.[i].[j]) then out.[st + i].[st + j] <- g.[i].[j])
-        specCache.[(axis, s)] <- out
+        specCache[(axis, s)] <- out
         out
 
 /// The parity bit (0 even, 1 odd) of every component of an IrrepsIdx<spec>
@@ -323,8 +323,8 @@ let specParity (s: MLS.Spec) : int [] =
     let starts = MLS.blockStarts s |> List.toArray
     s
     |> List.iteri (fun bi (e: MLS.SpecEntry) ->
-        for i in starts.[bi] .. starts.[bi] + MLS.blockDim e - 1 do
-            out.[i] <- e.Parity % 2)
+        for i in starts[bi] .. starts[bi] + MLS.blockDim e - 1 do
+            out[i] <- e.Parity % 2)
     out
 
 // What the discharge is handed
@@ -447,7 +447,7 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
                         let scalar = PX.Rat.mul (PX.Rat.ofInt e) coef
                         for j in 0 .. mat.Length - 1 do
                             if failed.IsNone then
-                                let entry = mat.[i].[j]
+                                let entry = mat[i][j]
                                 if not (Radical.isZero entry) then
                                     let rep = baseRep |> Map.change (pname, j) (fun c -> Some (defaultArg c 0 + 1))
                                     out <- radAdd { mono with Rep = rep } (Radical.scale scalar entry) out
@@ -462,11 +462,11 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
 /// components, where the linearity in A is most visible.
 let private defectRhs (gen: LieGenerator) (form: PX.PolyForm) (c: int) : RPoly =
     let mutable out : RPoly = Map.empty
-    let row = gen.OutMat.[c]
+    let row = gen.OutMat[c]
     for j in 0 .. form.Components.Length - 1 do
-        let entry = row.[j]
+        let entry = row[j]
         if not (Radical.isZero entry) then
-            for KeyValue (m, coef) in form.Components.[j] do
+            for KeyValue (m, coef) in form.Components[j] do
                 out <- radAdd m (Radical.scale coef entry) out
     out
 
@@ -526,23 +526,23 @@ let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: Inver
                     [ for i in 0 .. mat.Length - 1 ->
                         let mutable acc = 0.0
                         for j in 0 .. mat.Length - 1 do
-                            let e = mat.[i].[j]
+                            let e = mat[i][j]
                             if not (Radical.isZero e) then
                                 acc <- acc + Radical.toFloat e * defaultArg (Map.tryFind (pname, j) repVals) 0.0
                         ((pname, i), acc) ])
                 |> Map.ofList
             for c in 0 .. form.Components.Length - 1 do
                 let mutable lhs = 0.0
-                for KeyValue (m, coef) in form.Components.[c] do
+                for KeyValue (m, coef) in form.Components[c] do
                     for KeyValue (key, e) in m.Rep do
                         lhs <- lhs + PX.Rat.toFloat coef * float e
                                      * monoValue repVals invVals (Some key) m
                                      * defaultArg (Map.tryFind key ax) 0.0
                 let mutable rhs = 0.0
                 for j in 0 .. form.Components.Length - 1 do
-                    let e = gen.OutMat.[c].[j]
+                    let e = gen.OutMat[c][j]
                     if not (Radical.isZero e) then
-                        rhs <- rhs + Radical.toFloat e * polyValue repVals invVals form.Components.[j]
+                        rhs <- rhs + Radical.toFloat e * polyValue repVals invVals form.Components[j]
                 let scale = max 1.0 (max (abs lhs) (abs rhs))
                 if abs (lhs - rhs) > 1e-8 * scale then
                     raise (LieGuardFailure
@@ -554,12 +554,12 @@ let private floatGuard (form: PX.PolyForm) (gens: LieGenerator list) (inv: Inver
             let flipped =
                 repVals |> Map.map (fun (pname, i) v ->
                     match Map.tryFind pname ip.InPar with
-                    | Some par when i < par.Length && par.[i] = 1 -> -v
+                    | Some par when i < par.Length && par[i] = 1 -> -v
                     | _ -> v)
             for c in 0 .. form.Components.Length - 1 do
-                let lhs = polyValue flipped invVals form.Components.[c]
-                let sgn = if ip.OutPar.[c] = 1 then -1.0 else 1.0
-                let rhs = sgn * polyValue repVals invVals form.Components.[c]
+                let lhs = polyValue flipped invVals form.Components[c]
+                let sgn = if ip.OutPar[c] = 1 then -1.0 else 1.0
+                let rhs = sgn * polyValue repVals invVals form.Components[c]
                 let scale = max 1.0 (max (abs lhs) (abs rhs))
                 if abs (lhs - rhs) > 1e-8 * scale then
                     raise (LieGuardFailure
@@ -598,7 +598,7 @@ let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck
                     let rec comps (c: int) : Result<unit, LieError> =
                         if c >= n then loopGens rest
                         else
-                            match defectLhs budget gen form.Components.[c] with
+                            match defectLhs budget gen form.Components[c] with
                             | Error e -> Error e
                             | Ok lhs ->
                                 let rhs = defectRhs gen form c
@@ -628,7 +628,7 @@ let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck
                         if c >= n then Ok ()
                         else
                             let offending =
-                                form.Components.[c]
+                                form.Components[c]
                                 |> Map.toList
                                 |> List.map fst
                                 |> List.sortBy (fun m -> (PX.Mono.repDegree m, PX.Mono.render m))
@@ -638,11 +638,11 @@ let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck
                                         |> Map.fold (fun acc (pname, i) e ->
                                             let bit =
                                                 match Map.tryFind pname ip.InPar with
-                                                | Some par when i < par.Length -> par.[i]
+                                                | Some par when i < par.Length -> par[i]
                                                 | _ -> 0
                                             acc + e * bit) 0
                                     let pm = ((p % 2) + 2) % 2
-                                    if pm = ip.OutPar.[c] then None else Some (m, p, pm))
+                                    if pm = ip.OutPar[c] then None else Some (m, p, pm))
                             match offending with
                             | None -> comps (c + 1)
                             | Some (m, p, pm) ->
@@ -651,7 +651,7 @@ let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck
                                       Monomial = PX.Mono.render m
                                       ParitySum = p
                                       MonoParity = pm
-                                      OutParity = ip.OutPar.[c] })
+                                      OutParity = ip.OutPar[c] })
                     comps 0
             match loopGens gens with
             | Error e -> Error e

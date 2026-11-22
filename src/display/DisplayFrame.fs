@@ -136,7 +136,7 @@ let producedCount () = produced.Count
 
 /// The frames delivered since `n`, in emission order.
 let producedSince (n: int) : (string * bool * bool) list =
-    [ for i in n .. produced.Count - 1 -> produced.[i] ]
+    [ for i in n .. produced.Count - 1 -> produced[i] ]
 
 /// Re-deliver frames a binding produced on an EARLIER run of the same session,
 /// without re-running the binding that computed them.
@@ -175,7 +175,7 @@ let quotedFor (mime: string) : bool = encodingFor mime <> "json"
 let isMimeType (s: string) : bool =
     let part (p: string) =
         p.Length > 0
-        && (Char.IsLetterOrDigit p.[0])
+        && (Char.IsLetterOrDigit p[0])
         && p |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '.' || c = '+' || c = '_' || c = '-')
     match s.Split('/') with
     | [| a; b |] -> part a && part b

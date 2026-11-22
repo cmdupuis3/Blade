@@ -170,7 +170,7 @@ let private memoize (p: CellPredicate) : (int64 list -> (string * int64) list ->
         | true, r -> r
         | _ ->
             let r = p cell
-            cache.[key] <- r
+            cache[key] <- r
             r
 
 // ROUTE 1 -- flat filter over the whole box, lex ascending
@@ -191,17 +191,17 @@ let private routeFlat
     let rec go (i: int) =
         if err.IsSome then ()
         elif i = n then
-            let vals = [ for j in 0 .. n - 1 -> arr.[j].Lo + coords.[j] ]
-            let cell = List.zip [ for j in 0 .. n - 1 -> arr.[j].Field ] vals
+            let vals = [ for j in 0 .. n - 1 -> arr[j].Lo + coords[j] ]
+            let cell = List.zip [ for j in 0 .. n - 1 -> arr[j].Field ] vals
             match pred vals cell with
             | Ok true -> out.Add vals
             | Ok false -> ()
             | Error e -> err <- Some e
         else
-            let ext = fieldExtent arr.[i]
+            let ext = fieldExtent arr[i]
             let mutable c = 0L
             while c < ext && err.IsNone do
-                coords.[i] <- c
+                coords[i] <- c
                 go (i + 1)
                 c <- c + 1L
     go 0
@@ -225,23 +225,23 @@ let private hasCompletion
     let n = arr.Length
     let depth = List.length prefix
     let buf : int64[] = Array.zeroCreate n
-    prefix |> List.iteri (fun i v -> buf.[i] <- v)
+    prefix |> List.iteri (fun i v -> buf[i] <- v)
     let mutable err : string option = None
     let rec go (i: int) : bool =
         if err.IsSome then false
         elif i = n then
             let vals = List.ofArray buf
-            let cell = List.zip [ for j in 0 .. n - 1 -> arr.[j].Field ] vals
+            let cell = List.zip [ for j in 0 .. n - 1 -> arr[j].Field ] vals
             match pred vals cell with
             | Ok b -> b
             | Error e -> err <- Some e; false
         else
-            let lo = arr.[i].Lo
-            let ext = fieldExtent arr.[i]
+            let lo = arr[i].Lo
+            let ext = fieldExtent arr[i]
             let mutable c = 0L
             let mutable found = false
             while not found && c < ext && err.IsNone do
-                buf.[i] <- lo + c
+                buf[i] <- lo + c
                 found <- go (i + 1)
                 c <- c + 1L
             found
@@ -273,8 +273,8 @@ let private routeHeads
     let rec level (i: int) (prefixes: int64 list list) : Result<int64 list list, string> =
         if i = n then Ok prefixes
         else
-            let lo = arr.[i].Lo
-            let ext = fieldExtent arr.[i]
+            let lo = arr[i].Lo
+            let ext = fieldExtent arr[i]
             let mutable err : string option = None
             let next = System.Collections.Generic.List<int64 list>()
             for p in prefixes do
@@ -323,8 +323,8 @@ let private certify
         if List.length e <> arr.Length then
             failwith $"internal: solution {i} of {label} has {(List.length e)} coordinates but the box has {arr.Length} fields"
         List.iteri (fun j v ->
-            if v < arr.[j].Lo || v > arr.[j].Hi then
-                failwith $"internal: solution {i} of {label} is outside the box -- field '{arr.[j].Field}' = {v} is not in the inclusive range {arr.[j].Lo} .. {arr.[j].Hi}") e)
+            if v < arr[j].Lo || v > arr[j].Hi then
+                failwith $"internal: solution {i} of {label} is outside the box -- field '{arr[j].Field}' = {v} is not in the inclusive range {arr[j].Lo} .. {arr[j].Hi}") e)
     let rec ascending (xs: int64 list list) =
         match xs with
         | a :: (b :: _ as rest) ->

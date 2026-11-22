@@ -94,7 +94,7 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (programBindingName
         let vetoed =
             c.IsRepro
             || (match c.Body with
-                | IRApp (IRVar (fid, _), _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
+                | CallOfNamed (fid, _, _, _) -> (match Map.tryFind fid funcs with Some g -> g.IsRepro | None -> false)
                 | _ -> false)
         not vetoed && (c.IsCommutative || not c.CommGroups.IsEmpty || (builtinOp c).IsSome)
     let scalarOf (t: IRType) = match stripUnits t with IRTScalar et -> Some et | _ -> None
@@ -160,7 +160,7 @@ let planStreamGroupAggregate (programFuncs: IRCallable list) (programBindingName
                 match info.Arrays, resolve (fst (peelReynolds info.Kernel)) with
                 | [ IRVar (v, _) ], Some kc when v = gid && not info.HasReynolds && kc.Captures.IsEmpty ->
                     (match kc.Params, kc.Body with
-                     | [ p ], IRReduce (IRVar (rv, _), k, seed) when rv = p.VarId ->
+                     | [ p ], ReduceOfNamed (rv, _, k, seed) when rv = p.VarId ->
                          if Set.contains p.VarId (refsOf k) || (seed |> Option.exists (fun s -> Set.contains p.VarId (refsOf s))) then
                              Error $"`{r.Name}`: the fold kernel or seed reads the group row"
                          else Ok { Id = r.Id; Name = r.Name; Kernel = k; Seed = seed }

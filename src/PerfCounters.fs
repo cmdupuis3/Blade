@@ -53,14 +53,14 @@ let private SlotIRNodes = 6
 [<Literal>]
 let private SlotTypeOfMemoHits = 7
 
-let inline private bump (slot: int) = Interlocked.Increment(&slots.[slot]) |> ignore
-let inline private add (slot: int) (n: int64) = Interlocked.Add(&slots.[slot], n) |> ignore
+let inline private bump (slot: int) = Interlocked.Increment(&slots[slot]) |> ignore
+let inline private add (slot: int) (n: int64) = Interlocked.Add(&slots[slot], n) |> ignore
 
 /// Monotone max under concurrency: CAS until the stored value dominates.
 let private bumpMax (slot: int) (v: int64) =
-    let mutable current = Volatile.Read(&slots.[slot])
+    let mutable current = Volatile.Read(&slots[slot])
     while v > current do
-        let seen = Interlocked.CompareExchange(&slots.[slot], v, current)
+        let seen = Interlocked.CompareExchange(&slots[slot], v, current)
         if seen = current then current <- v      // won: stored, loop exits
         else current <- seen                     // lost: retry against the winner
 
@@ -105,12 +105,12 @@ let refresh () =
 
 let reset () =
     for i in 0 .. NSlots - 1 do
-        Volatile.Write(&slots.[i], 0L)
+        Volatile.Write(&slots[i], 0L)
 
 /// `[perf] name: value` lines on stderr, alongside `[phase]`. Only called
 /// when the gate is on.
 let report () =
-    let get slot = Volatile.Read(&slots.[slot])
+    let get slot = Volatile.Read(&slots[slot])
     let calls = get SlotResolveCalls
     let chains = get SlotResolveChains
     let hops = get SlotResolveHops

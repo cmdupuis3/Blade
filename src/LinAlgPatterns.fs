@@ -1493,7 +1493,8 @@ type NestScale =
 /// The scale is admitted as a LITERAL or a plain `IRVar` only. Anything richer
 /// is declined rather than rendered: a general expression could read a kernel
 /// parameter, and a per-CELL factor is not a scale at all.
-let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) option =
+[<return: Struct>]
+let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) voption =
     let scalarOk (s: IRExpr) =
         (match s with
          | IRLit (IRLitFloat _) | IRLit (IRLitFloat32 _) | IRLit (IRLitInt _) | IRVar _ -> true
@@ -1502,11 +1503,11 @@ let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) option =
             | IRTScalar ETFloat64 | IRTScalar ETFloat32 -> true
             | _ -> false)
     match e with
-    | IRProdSum args -> Some (args, None)
-    | IRBinOp (_, IRDiv, IRProdSum args, d, _) when scalarOk d -> Some (args, Some (ScaleDiv d))
-    | IRBinOp (_, IRMul, IRProdSum args, s, _) when scalarOk s -> Some (args, Some (ScaleMul s))
-    | IRBinOp (_, IRMul, s, IRProdSum args, _) when scalarOk s -> Some (args, Some (ScaleMul s))
-    | _ -> None
+    | IRProdSum args -> ValueSome (args, None)
+    | IRBinOp (_, IRDiv, IRProdSum args, d, _) when scalarOk d -> ValueSome (args, Some (ScaleDiv d))
+    | IRBinOp (_, IRMul, IRProdSum args, s, _) when scalarOk s -> ValueSome (args, Some (ScaleMul s))
+    | IRBinOp (_, IRMul, s, IRProdSum args, _) when scalarOk s -> ValueSome (args, Some (ScaleMul s))
+    | _ -> ValueNone
 
 /// `C = method_for(A, A) <@> lambda(ri, rj) where comm(ri, rj) -> prodsum(ri, rj)`
 ///   ->  `blade_gram_same` (`?syrk`).
@@ -1702,7 +1703,7 @@ let private componentPeel (e: IRExpr) : (IRId * int64) option =
         | IRUnaryOp (IRCast _, inner) -> lit inner
         | _ -> None
     match e with
-    | IRIndex (IRVar (id, _), [ ix ], _) -> lit ix |> Option.map (fun c -> (id, c))
+    | IndexOfNamed (id, _, [ ix ], _) -> lit ix |> Option.map (fun c -> (id, c))
     | IRCurry (IRVar (id, _), ix, 1) -> lit ix |> Option.map (fun c -> (id, c))
     | _ -> None
 

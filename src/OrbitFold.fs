@@ -224,23 +224,22 @@ let private compactGroupOf (ty: IRType) =
 
 /// All reads of compact arrays in `e` whose index list consists only of
 /// level variables (by VarId or by the current level's parameter name).
-let rec private collectReads (isLevel: IRExpr -> bool) (e: IRExpr) (acc: ResizeArray<IRId * IRType * IRExpr list>) : unit =
-    match e with
-    | IRIndex (IRVar (gid, gty), idxs, _) when (compactGroupOf gty).IsSome && not idxs.IsEmpty && idxs |> List.forall isLevel ->
-        acc.Add((gid, gty, idxs))
-    | _ ->
-        let kids, _ = irChildren e
-        for k in kids do collectReads isLevel k acc
+let private collectReads (isLevel: IRExpr -> bool) (e: IRExpr) (acc: ResizeArray<IRId * IRType * IRExpr list>) : unit =
+    e |> visitTopDown (fun n ->
+        match n with
+        | IndexOfNamed (gid, gty, idxs, _) when (compactGroupOf gty).IsSome && not idxs.IsEmpty && idxs |> List.forall isLevel ->
+            acc.Add((gid, gty, idxs))
+            false
+        | _ -> true)
 
 /// Replace every read of `gid` AT the recognised coordinate tuple (`sameTuple`)
 /// by the read variable. A read of the same array anywhere else (`g(i, 0)`)
 /// stays an IRIndex, which `pureScalarBody` then refuses.
-let rec private substReads (gid: IRId) (sameTuple: IRExpr list -> bool) (readTy: IRType) (e: IRExpr) : IRExpr =
-    match e with
-    | IRIndex (IRVar (g, _), idxs, _) when g = gid && sameTuple idxs -> IRVar (readVarId, readTy)
-    | _ ->
-        let kids, rebuild = irChildren e
-        if kids.IsEmpty then e else rebuild (kids |> List.map (substReads gid sameTuple readTy))
+let private substReads (gid: IRId) (sameTuple: IRExpr list -> bool) (readTy: IRType) (e: IRExpr) : IRExpr =
+    e |> rewriteTopDown (fun n ->
+        match n with
+        | IndexOfNamed (g, _, idxs, _) when g = gid && sameTuple idxs -> ValueSome (IRVar (readVarId, readTy))
+        | _ -> ValueNone)
 
 /// Is the substituted body a pure scalar function of the read (and of
 /// loop-invariant scalars)? Returns the reason it is not.
@@ -272,11 +271,10 @@ let rec private pureScalarBody (levelIds: Set<IRId>) (levelNames: Set<string>) (
 /// Parity of `e` in the read variable (see `Parity`).
 let rec private parityOf (e: IRExpr) : Parity =
     let mentions (x: IRExpr) =
-        let rec m (x: IRExpr) =
-            match x with
-            | IRVar (id, _) when id = readVarId -> true
-            | _ -> (fst (irChildren x)) |> List.exists m
-        m x
+        x |> existsIRExpr (fun n ->
+            match n with
+            | IRVar (id, _) -> id = readVarId
+            | _ -> false)
     if not (mentions e) then PEven
     else
         match e with
@@ -1012,13 +1010,10 @@ let recordPullDeclined (subject: string) (why: string) : unit =
 /// members), as an expression over the same read variable.
 let negatedBody (p: OrbitPlan) : IRExpr =
     let readTy = IRTScalar p.ElemTy
-    let rec go (e: IRExpr) =
+    p.Body |> rewriteTopDown (fun e ->
         match e with
-        | IRVar (id, _) when id = readVarId -> IRUnaryOp (IRNeg, IRVar (readVarId, readTy))
-        | _ ->
-            let kids, rebuild = irChildren e
-            if kids.IsEmpty then e else rebuild (kids |> List.map go)
-    go p.Body
+        | IRVar (id, _) when id = readVarId -> ValueSome (IRUnaryOp (IRNeg, IRVar (readVarId, readTy)))
+        | _ -> ValueNone)
 
 /// Did any level's fold ask for `omp`?
 let ompRequested (p: OrbitPlan) : bool = p.Levels |> List.exists (fun l -> l.Fold.IsOmpParallel)
@@ -1318,35 +1313,31 @@ let private analyseAction (resolve: IRExpr -> IRExpr) (resolveCl: IRExpr -> IRCa
              | [ ix ], Some wet when levelOk ix -> Some wet
              | _ -> None)
         | _ -> None
-    let rec subst (e: IRExpr) : IRExpr =
+    let weightRead (e: IRExpr) : IRExpr voption =
         match e with
-        | IRIndex (IRVar (wid, wty), [ c ], _) when isCoord c && wid <> gid ->
-            (match weightOk (IR.stripUnits wty) with
-             | None ->
-                 if weightWhy.IsNone then
-                     weightWhy <- Some $"the weight `{sourceName wid}` is not a rank-1 dense array of real numbers over the pool's index ({n} positions)"
-                 e
-             | Some wet ->
-                 let own = coordKey c = Some "i"
-                 let k =
-                     match weights |> Seq.tryFindIndex (fun w -> w.ArrayId = wid) with
-                     | Some k ->
-                         let w = weights.[k]
-                         weights.[k] <- { w with Own = w.Own || own; Partner = w.Partner || not own }
-                         k
-                     | None ->
-                         weights.Add { ArrayId = wid; ArrayName = sourceName wid; ElemTy = wet; ReadTy = IRTScalar wet
-                                       Own = own; Partner = not own; Index = weights.Count }
-                         weights.Count - 1
-                 IRVar ((if own then actionOwnId k else actionPartnerId k), IRTScalar wet))
-        | _ ->
-            let kids, rebuild = irChildren e
-            if kids.IsEmpty then e else rebuild (kids |> List.map subst)
-    let body2 = subst body1
-    let rec hasIndex (e: IRExpr) =
-        match e with
-        | IRIndex _ -> true
-        | _ -> (fst (irChildren e)) |> List.exists hasIndex
+        | IndexOfNamed (wid, wty, [ c ], _) when isCoord c && wid <> gid ->
+            ValueSome (
+                match weightOk (IR.stripUnits wty) with
+                 | None ->
+                     if weightWhy.IsNone then
+                         weightWhy <- Some $"the weight `{sourceName wid}` is not a rank-1 dense array of real numbers over the pool's index ({n} positions)"
+                     e
+                 | Some wet ->
+                     let own = coordKey c = Some "i"
+                     let k =
+                         match weights |> Seq.tryFindIndex (fun w -> w.ArrayId = wid) with
+                         | Some k ->
+                             let w = weights.[k]
+                             weights.[k] <- { w with Own = w.Own || own; Partner = w.Partner || not own }
+                             k
+                         | None ->
+                             weights.Add { ArrayId = wid; ArrayName = sourceName wid; ElemTy = wet; ReadTy = IRTScalar wet
+                                           Own = own; Partner = not own; Index = weights.Count }
+                             weights.Count - 1
+                     IRVar ((if own then actionOwnId k else actionPartnerId k), IRTScalar wet))
+        | _ -> ValueNone
+    let body2 = rewriteTopDown weightRead body1
+    let hasIndex (e: IRExpr) = e |> existsIRExpr (function IRIndex _ -> true | _ -> false)
     match weightWhy with
     | Some why -> decline why
     | None ->
@@ -1428,11 +1419,7 @@ let planAction (resolveCl: IRExpr -> IRCallable option) (deferredOf: IRId -> IRE
     let seed = shape.Level.Seed
     let seedMentionsRow =
         (collectVarRefsIR seed).Contains shape.OwnVarId
-        || (let rec m (e: IRExpr) =
-                match e with
-                | IRParam (name, _, _) -> name = shape.OwnName
-                | _ -> (fst (irChildren e)) |> List.exists m
-            m seed)
+        || (seed |> existsIRExpr (function IRParam (name, _, _) -> name = shape.OwnName | _ -> false))
     if seedMentionsRow then decline "the seed mentions the row coordinate (per-row seeds are v2)"
     else
     let seedWhy =

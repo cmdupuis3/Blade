@@ -584,7 +584,7 @@ let rec hasInfer (t: IRType) : bool =
     | IRTInfer _ -> true
     | IRTTuple ts -> ts |> List.exists hasInfer
     | IRTComputation t | IRTPoly (t, _)
-    | IRTUnitAnnotated (t, _) | IRTIdxTagged (t, _) -> hasInfer t
+    | Tagged t -> hasInfer t
     | IRTDist (_, elem, _) -> hasInfer elem
     | IRTLoop lt ->
         (lt.ArrayTypes |> List.exists hasInfer)
@@ -652,7 +652,7 @@ let private typeVarPool =
 /// `seed` pre-names inference ids recovered from source annotations.
 let abstractRenderer (seed: (int * string) seq) : IRType -> string =
     let named = Dictionary<int, string>()
-    for (id, n) in seed do named.[id] <- n
+    for (id, n) in seed do named[id] <- n
     let used = HashSet<string>(named.Values)
     let nameOf id =
         match named.TryGetValue id with
@@ -660,7 +660,7 @@ let abstractRenderer (seed: (int * string) seq) : IRType -> string =
         | _ ->
             let n = typeVarPool |> Seq.find (fun c -> not (used.Contains c))
             used.Add n |> ignore
-            named.[id] <- n
+            named[id] <- n
             n
     fun t -> ppType (if hasInfer t then nameInfers nameOf t else t)
 
@@ -857,7 +857,7 @@ let private collectCalls (tp: TypedProgram) : CallInfo list =
 /// called inside a function can still type its operands.
 let private moduleBindingTypes (tp: TypedProgram) : Map<string, IRType> =
     let acc = Dictionary<string, IRType>()
-    let addLocal (n: string) (t: IRType) = if not (acc.ContainsKey n) then acc.[n] <- t
+    let addLocal (n: string) (t: IRType) = if not (acc.ContainsKey n) then acc[n] <- t
     let rec localsOf (stmts: TypedStmt list) =
         for s in stmts do
             match s with
@@ -878,8 +878,8 @@ let private moduleBindingTypes (tp: TypedProgram) : Map<string, IRType> =
         for d in m.Decls do
             match d with
             | TDeclLet b | TDeclStatic b ->
-                acc.[b.Name] <- b.Type
-                for (n, _, t) in b.SubBindings do acc.[n] <- t
+                acc[b.Name] <- b.Type
+                for (n, _, t) in b.SubBindings do acc[n] <- t
             | _ -> ()
     for m in tp.Modules do
         for d in m.Decls do
@@ -906,7 +906,7 @@ let private surfaceAliases (prog: Ast.Program) : Map<string, string> =
     let acc = Dictionary<string, string>()
     let consider (qn: string list) (aliasOpt: string option) =
         match List.tryLast qn with
-        | Some m when m = "ppl" || m = "ml" -> acc.[defaultArg aliasOpt m] <- m
+        | Some m when m = "ppl" || m = "ml" -> acc[defaultArg aliasOpt m] <- m
         | _ -> ()
     for m in prog.Modules do
         for imp in m.Imports do consider imp.Module imp.Alias
@@ -925,7 +925,7 @@ let private mlGeneratedArgs (tp: TypedProgram) : Map<(int * int * int * int), IR
         (match te.Kind with
          | TExprApp ({ Kind = TExprVar (fn, _, _) }, args)
              when fn.StartsWith "__ml" && te.Span.StartLine > 0 ->
-             acc.[clampSpan te.Span] <- (args |> List.map _.Type)
+             acc[clampSpan te.Span] <- (args |> List.map _.Type)
          | _ -> ())
         for c in Blade.TypeCheck.typedExprChildren te do walk c
     for m in tp.Modules do
@@ -987,7 +987,7 @@ let private collectFormerCalls (prog: Ast.Program) (tp: TypedProgram) : CallInfo
                             match argType a with
                             | Some s -> s
                             | None when offset >= 0 && i >= offset ->
-                                render generated.[i - offset]
+                                render generated[i - offset]
                             | None -> "_"
                         yield { CName = op; CLine = line; CCol = col
                                 CEndLine = endLine; CEndCol = endCol
@@ -1012,7 +1012,7 @@ let private docAbove (lines: string[]) (line: int) : string =
     let mutable i = line - 2   // 0-based index of the line above the binding
     let mutable go = true
     while go && i >= 0 do
-        let t = lines.[i].TrimStart()
+        let t = lines[i].TrimStart()
         if t.StartsWith "//" then
             acc.Add(t.TrimStart('/').Trim())
             i <- i - 1
@@ -1038,7 +1038,7 @@ let private paramDocIn (doc: string) (pname: string) : string =
         doc.Split('\n')
         |> Array.tryPick (fun l ->
             let m = re.Match l
-            if m.Success then Some (m.Groups.[1].Value.Trim()) else None)
+            if m.Success then Some (m.Groups[1].Value.Trim()) else None)
         |> Option.defaultValue ""
 
 // Untyped-side span collection: (scopeKey, name, span, kind option) in
@@ -1083,7 +1083,7 @@ let private locateName (lines: string[]) (region: Span) (name: string) : Span op
         let rec scan (ln: int) =
             if ln > endLine || ln > lines.Length then None
             else
-                let raw = lines.[ln - 1]
+                let raw = lines[ln - 1]
                 let uncommented = match raw.IndexOf "//" with
                                   | -1 -> raw
                                   | i -> raw.Substring(0, i)
@@ -1194,7 +1194,7 @@ let private parityClauses (names: string list) (parities: Blade.Deduce.Parity li
     let mutable i = 0
     while i < parArr.Length do
         let kw =
-            match parArr.[i] with
+            match parArr[i] with
             | Blade.Deduce.PInv -> Some "comm"
             | Blade.Deduce.PNeg -> Some "anticomm"
             // PConj (Hermitian, f(y,x) = conj(f(x,y))) has no writable
@@ -1205,10 +1205,10 @@ let private parityClauses (names: string list) (parities: Blade.Deduce.Parity li
         | None -> i <- i + 1
         | Some kw ->
             let mutable j = i
-            while j + 1 < parArr.Length && parArr.[j + 1] = parArr.[i] do j <- j + 1
+            while j + 1 < parArr.Length && parArr[j + 1] = parArr[i] do j <- j + 1
             // Pairs i..j span params i..j+1.
             if j + 1 < nameArr.Length then
-                let group = [ for x in i .. j + 1 -> nameArr.[x] ]
+                let group = [ for x in i .. j + 1 -> nameArr[x] ]
                 if group |> List.forall (fun n -> not (n.StartsWith "__")) then
                     clauses.Add($"""{kw}({(String.concat ", " group)})""")
             i <- j + 1
@@ -1320,13 +1320,13 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
             f.Params
             |> List.mapi (fun i p ->
                 let minRank =
-                    if srcAnnotated.[i] then None
+                    if srcAnnotated[i] then None
                     else
                         match p.Type with
                         | ArrayElem arr when not arr.IndexTypes.IsEmpty ->
                             Some arr.IndexTypes.Length
                         | _ -> None
-                (p.Name, pp p.Type, minRank, srcDefaults.[i]))
+                (p.Name, pp p.Type, minRank, srcDefaults[i]))
         let ret = pp f.ReturnType
         let kind = if f.IsStatic then "static function" else "function"
         let deducedComm =
@@ -1350,7 +1350,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
             match d with
             | TDeclLet b ->
                 add "" b.Name "let" (ppVal (bindingType b))
-                moduleLets.[b.Name] <- b.Type
+                moduleLets[b.Name] <- b.Type
                 for (n, _, t) in b.SubBindings do add "" n "let" (ppVal t)
             | TDeclStatic b ->
                 add "" b.Name "static" (ppVal b.Type)
@@ -1383,7 +1383,7 @@ let private providerAliases (prog: Ast.Program) : Map<string, string> =
     let consider (qn: string list) (aliasOpt: string option) =
         match List.tryLast qn with
         | Some modName when (Blade.ProviderRegistry.tryFind modName).IsSome ->
-            acc.[defaultArg aliasOpt modName] <- modName
+            acc[defaultArg aliasOpt modName] <- modName
         | _ -> ()
     for m in prog.Modules do
         for imp in m.Imports do consider imp.Module imp.Alias
@@ -1467,10 +1467,10 @@ let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>)
                             // Both directions feed the chase (a write of a
                             // write still names the array's origin); only the
                             // OUTPUT channel splits.
-                            prior.[name] <- pr
+                            prior[name] <- pr
                             (match dir with
-                             | ProvRead -> reads.[name] <- pr
-                             | ProvWrite -> writes.[name] <- pr)
+                             | ProvRead -> reads[name] <- pr
+                             | ProvWrite -> writes[name] <- pr)
                         | None -> ()
                     | _ -> ()
                 | _ -> ()
@@ -1549,7 +1549,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
         | _ ->
             let q = Queue<Span * string option>()
             q.Enqueue((span, kindOpt))
-            spans.[key] <- q
+            spans[key] <- q
     // Memoize doc blocks per source line: params share their function's line
     // (param-level spans don't exist), so the block is fetched repeatedly.
     let docCache = Dictionary<int, string>()
@@ -1558,7 +1558,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
         | true, d -> d
         | _ ->
             let d = docAbove sourceLines line
-            docCache.[line] <- d
+            docCache[line] <- d
             d
     // Provenance for top-level provider reads (`let x = store.vars.v |>
     // alias.read`) and writes (`let saved = alias.write("out", x)`), attached
@@ -1637,7 +1637,7 @@ let private refSpanOf (s: Span) : RefSpan =
 let private nameAt (lines: string[]) (sp: Span) (fallback: string) : string =
     if sp.StartLine < 1 || sp.StartLine > lines.Length || sp.EndLine <> sp.StartLine then fallback
     else
-        let line = lines.[sp.StartLine - 1]
+        let line = lines[sp.StartLine - 1]
         let a = sp.StartCol - 1
         let b = min line.Length (sp.EndCol - 1)
         if a < 0 || b <= a then fallback
@@ -1645,7 +1645,7 @@ let private nameAt (lines: string[]) (sp: Span) (fallback: string) : string =
             let text = line.Substring(a, b - a)
             let isIdent =
                 text.Length > 0
-                && (System.Char.IsLetter text.[0] || text.[0] = '_')
+                && (System.Char.IsLetter text[0] || text[0] = '_')
                 && text |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
             if isIdent then text else fallback
 
@@ -1675,7 +1675,7 @@ let private collectBinders (prog: Ast.Program) (tp: TypedProgram) (lines: string
         | _ ->
             let q = Queue<Span>()
             q.Enqueue span
-            letSpans.[key] <- q
+            letSpans[key] <- q
     // --- untyped side: name spans, in declaration order
     let rec srcStmts (scope: string) (stmts: Stmt list) (declSpan: Span) =
         for s in stmts do
@@ -1786,7 +1786,7 @@ let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) (instanceOrigi
                  | _ ->
                      let xs = ResizeArray<Span>()
                      xs.Add te.Span
-                     acc.[varId] <- xs
+                     acc[varId] <- xs
          | _ -> ())
         for c in Blade.TypeCheck.typedExprChildren te do walk c
     for m in tp.Modules do

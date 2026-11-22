@@ -28,9 +28,9 @@ let tpPaths (cfg: TPConfig) : (int * int * int) list =
     [ for b1 in 0 .. cfg.Spec1.Length - 1 do
         for b2 in 0 .. cfg.Spec2.Length - 1 do
           for bo in 0 .. cfg.SpecOut.Length - 1 do
-            let e1 = cfg.Spec1.[b1]
-            let e2 = cfg.Spec2.[b2]
-            let eo = cfg.SpecOut.[bo]
+            let e1 = cfg.Spec1[b1]
+            let e2 = cfg.Spec2[b2]
+            let eo = cfg.SpecOut[bo]
             if eo.L >= abs (e1.L - e2.L) && eo.L <= e1.L + e2.L
                && eo.Parity = parityMul e1.Parity e2.Parity then
                 yield (b1, b2, bo) ]
@@ -76,13 +76,13 @@ let homDim (sIn: Spec) (sOut: Spec) : int =
 let homBlocks (sIn: Spec) (sOut: Spec) : (int * int * SpecEntry * SpecEntry) list =
     [ for bo in 0 .. sOut.Length - 1 do
         for bi in 0 .. sIn.Length - 1 do
-          if sIn.[bi].L = sOut.[bo].L && sIn.[bi].Parity = sOut.[bo].Parity then
-            yield (bi, bo, sOut.[bo], sIn.[bi]) ]
+          if sIn[bi].L = sOut[bo].L && sIn[bi].Parity = sOut[bo].Parity then
+            yield (bi, bo, sOut[bo], sIn[bi]) ]
 
 let tpWeightDim (cfg: TPConfig) : int =
     tpPaths cfg
     |> List.sumBy (fun (b1, b2, bo) ->
-        cfg.SpecOut.[bo].Mult * cfg.Spec1.[b1].Mult * cfg.Spec2.[b2].Mult)
+        cfg.SpecOut[bo].Mult * cfg.Spec1[b1].Mult * cfg.Spec2[b2].Mult)
 
 // The S2 compaction of the self-tensor-product.
 
@@ -136,7 +136,7 @@ let symTpKeptPaths (s: Spec) : KeptPath list =
           B2 = b2
           BO = bo
           Mirror = (if b1 < b2 then Some (Map.find ((b2, b1, bo)) index) else None)
-          Sigma = exchangeSign s.[b1].L s.[b2].L cfg.SpecOut.[bo].L })
+          Sigma = exchangeSign s[b1].L s[b2].L cfg.SpecOut[bo].L })
 
 /// The transpose factor: sign the PARTNER dense slot carries, tau = sigma
 /// for Sym^2, -sigma for Lambda^2. Constraint: `c[(b2,b1,bo),mo,u2,u1] =
@@ -174,8 +174,8 @@ let private s2TpSkeleton (comp: S2Component) (s: Spec) : S2Skel list =
     let mutable packed = 0
     for kp in symTpKeptPaths s do
         let tau = transposeFactor comp kp.Sigma
-        let m1 = sA.[kp.B1].Mult
-        let m2 = sA.[kp.B2].Mult
+        let m1 = sA[kp.B1].Mult
+        let m2 = sA[kp.B2].Mult
         let cells =
             match kp.Mirror with
             // Mirror pair: whole m1 x m2 block free (dropped partner's (u2,u1) slot determines it).
@@ -184,7 +184,7 @@ let private s2TpSkeleton (comp: S2Component) (s: Spec) : S2Skel list =
             | None -> [ for u1 in 0 .. m1 - 1 do for u2 in (if tau = 1 then u1 else u1 + 1) .. m1 - 1 -> (u1, u2) ]
         if not cells.IsEmpty then
             out.Add { Kept = kp; Tau = tau; PackedBase = packed; CellsPerMo = cells.Length; Cells = cells }
-        packed <- packed + cells.Length * oA.[kp.BO].Mult
+        packed <- packed + cells.Length * oA[kp.BO].Mult
     List.ofSeq out
 
 /// Packed slot count + dense embedding of one S2 component (computed
@@ -199,20 +199,20 @@ let private s2TpCompaction (comp: S2Component) (s: Spec) : int * (int * int * fl
     let paths = tpPaths cfg |> List.toArray
     let sA = List.toArray s
     let oA = List.toArray cfg.SpecOut
-    let multO = paths |> Array.map (fun (_, _, bo) -> oA.[bo].Mult)
-    let m1s = paths |> Array.map (fun (b1, _, _) -> sA.[b1].Mult)
-    let m2s = paths |> Array.map (fun (_, b2, _) -> sA.[b2].Mult)
+    let multO = paths |> Array.map (fun (_, _, bo) -> oA[bo].Mult)
+    let m1s = paths |> Array.map (fun (b1, _, _) -> sA[b1].Mult)
+    let m2s = paths |> Array.map (fun (_, b2, _) -> sA[b2].Mult)
     // tpDecl's pWOff, recomputed here (not shared) since this must match the contract exactly.
     let wOff = Array.zeroCreate (paths.Length + 1)
     for p in 0 .. paths.Length - 1 do
-        wOff.[p + 1] <- wOff.[p] + multO.[p] * m1s.[p] * m2s.[p]
-    let denseAt p mo u1 u2 = wOff.[p] + (mo * m1s.[p] + u1) * m2s.[p] + u2
+        wOff[p + 1] <- wOff[p] + multO[p] * m1s[p] * m2s[p]
+    let denseAt p mo u1 u2 = wOff[p] + (mo * m1s[p] + u1) * m2s[p] + u2
     let entries = ResizeArray<int * int * float> ()
     let mutable packed = 0
     for sk in s2TpSkeleton comp s do
         let p = sk.Kept.Idx
         let tauF = float sk.Tau
-        for mo in 0 .. multO.[p] - 1 do
+        for mo in 0 .. multO[p] - 1 do
             sk.Cells |> List.iteri (fun ci (u1, u2) ->
                 let slot = sk.PackedBase + mo * sk.CellsPerMo + ci
                 entries.Add (denseAt p mo u1 u2, slot, 1.0)
@@ -220,7 +220,7 @@ let private s2TpCompaction (comp: S2Component) (s: Spec) : int * (int * int * fl
                 // m1s/m2s are SWAPPED at partner path p', so denseAt p' mo u2 u1 = pWOff(p')+(mo*m2+u2)*m1+u1 as required.
                 | Some p' -> entries.Add (denseAt p' mo u2 u1, slot, tauF)
                 | None -> if u2 <> u1 then entries.Add (denseAt p mo u2 u1, slot, tauF))
-        packed <- packed + sk.CellsPerMo * multO.[p]
+        packed <- packed + sk.CellsPerMo * multO[p]
     (packed, List.ofSeq entries)
 
 /// Closed-form dimension of an S2 component: a mirror pair's
@@ -231,11 +231,11 @@ let private s2TpWeightDimClosed (comp: S2Component) (s: Spec) : int =
     let sA = List.toArray s
     symTpKeptPaths s
     |> List.sumBy (fun kp ->
-        let multO = sOut.[kp.BO].Mult
+        let multO = sOut[kp.BO].Mult
         match kp.Mirror with
-        | Some _ -> multO * sA.[kp.B1].Mult * sA.[kp.B2].Mult
+        | Some _ -> multO * sA[kp.B1].Mult * sA[kp.B2].Mult
         | None ->
-            let m = sA.[kp.B1].Mult
+            let m = sA[kp.B1].Mult
             multO * (m * (m + transposeFactor comp kp.Sigma) / 2))
 
 /// Free-parameter count of one S2 component, cross-checked: packed slot
@@ -322,19 +322,19 @@ let s2TpCells (comp: S2Component) (s: Spec) : S2TpCell list =
     [ for sk in s2TpSkeleton comp s do
         let kp = sk.Kept
         let isMirror = kp.Mirror.IsSome
-        let d1 = dim sA.[kp.B1]
-        let d2 = dim sA.[kp.B2]
+        let d1 = dim sA[kp.B1]
+        let d2 = dim sA[kp.B2]
         // sigma*tau on a mirror cell (dropped path's CG sign * its weight sign), tau on a diagonal one.
         let pair = if isMirror then kp.Sigma * sk.Tau else sk.Tau
         for ci in 0 .. sk.CellsPerMo - 1 do
-            let (u1, u2) = sk.Cells.[ci]
+            let (u1, u2) = sk.Cells[ci]
             yield { Path = kp.Idx
                     IsMirror = isMirror
-                    OffA = sIn.[kp.B1] + u1 * d1
-                    OffB = sIn.[kp.B2] + u2 * d2
-                    OutOff = sOut.[kp.BO]
-                    OutDim = dim oA.[kp.BO]
-                    MultO = oA.[kp.BO].Mult
+                    OffA = sIn[kp.B1] + u1 * d1
+                    OffB = sIn[kp.B2] + u2 * d2
+                    OutOff = sOut[kp.BO]
+                    OutDim = dim oA[kp.BO]
+                    MultO = oA[kp.BO].Mult
                     WBase = sk.PackedBase + ci
                     WStride = sk.CellsPerMo
                     PairSign = (if not isMirror && u1 = u2 then 0.0 else float pair) } ]
@@ -383,14 +383,14 @@ let private gradedPowerHist (kind: PowerKind) (s: Spec) (k: int) (off: int) : in
         for _ in 1 .. e.Mult do
             for w in -e.L .. e.L do
                 for j in js do
-                    let src = f.[j - 1]
-                    let dst = f.[j]
+                    let src = f[j - 1]
+                    let dst = f[j]
                     for q in 0 .. 1 do
-                        let sq = src.[q]
-                        let dq = dst.[(q + e.Parity) % 2]
+                        let sq = src[q]
+                        let dq = dst[(q + e.Parity) % 2]
                         for i in 0 .. width - 1 do
-                            if sq.[i] <> 0 then dq.[i + w] <- dq.[i + w] + sq.[i]
-    f.[k]
+                            if sq[i] <> 0 then dq[i + w] <- dq[i + w] + sq[i]
+    f[k]
 
 /// Weight-peel of one parity sector: take the highest weight L with
 /// nonzero multiplicity c, emit c copies of irrep (L,p), subtract c copies
@@ -401,18 +401,18 @@ let private peelSector (what: string) (p: int) (off: int) (hist: int[]) : SpecEn
     let h = Array.copy hist
     let check (stage: string) =
         for i in 0 .. histWidth off - 1 do
-            if h.[i] < 0 then
+            if h[i] < 0 then
                 failwith $"internal: {what} weight histogram went negative (parity {p}, weight {(i - off)}, {stage})"
-            if h.[i] <> h.[histWidth off - 1 - i] then
+            if h[i] <> h[histWidth off - 1 - i] then
                 failwith $"internal: {what} weight histogram is not w <-> -w symmetric (parity {p}, weight {(i - off)}, {stage})"
     check "before the peel"
     let out = ResizeArray<SpecEntry> ()
     for l in off .. -1 .. 0 do
-        let c = h.[off + l]
+        let c = h[off + l]
         if c > 0 then
             out.Add { L = l; Parity = p; Mult = c }
             for w in -l .. l do
-                h.[off + w] <- h.[off + w] - c
+                h[off + w] <- h[off + w] - c
             check $"after peeling l={l}"
     if h |> Array.exists (fun x -> x <> 0) then
         failwithf "internal: %s weight histogram did not peel to zero (parity %d, residue %A)" what p h
@@ -429,7 +429,7 @@ let powerSpec (kind: PowerKind) (s: Spec) (k: int) : Spec =
     let off = lMax * k
     let hist = gradedPowerHist kind s k off
     let res =
-        [ for p in 0 .. 1 do yield! peelSector (powerName kind) p off hist.[p] ]
+        [ for p in 0 .. 1 do yield! peelSector (powerName kind) p off hist[p] ]
         |> List.groupBy (fun e -> (e.L, e.Parity))
         |> List.sortBy fst
         |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy _.Mult })
@@ -507,7 +507,7 @@ type PolyCopy = {
 let polyCopies (s: Spec) : PolyCopy list =
     let mutable i = -1
     [ for b in 0 .. s.Length - 1 do
-        let e = s.[b]
+        let e = s[b]
         for u in 0 .. e.Mult - 1 do
           i <- i + 1
           yield { Copy = i; Block = b; MultIdx = u; L = e.L; Parity = e.Parity } ]
@@ -575,7 +575,7 @@ let polyLabels (s: Spec) (k: int) : PolyLabel list =
     let occ =
         Array.init n (fun c ->
             Array.init (k + 1) (fun j ->
-                if j < 1 then [] else symOccurrences copies.[c].L copies.[c].Parity j))
+                if j < 1 then [] else symOccurrences copies[c].L copies[c].Parity j))
     let factorial (m: int) = Seq.fold (fun acc i -> acc * int64 i) 1L (seq { 2 .. m })
     // Occurrence choices: used copies left to right, copy 0 SLOWEST.
     let rec occChoices (rest: (int * int) list) : PolyCopyUse list list =
@@ -584,7 +584,7 @@ let polyLabels (s: Spec) (k: int) : PolyLabel list =
         | (c, j) :: tl ->
             [ for (oi, (oL, oc)) in List.indexed occ.[c].[j] do
                 for restUses in occChoices tl ->
-                  { Copy = c; CopyL = copies.[c].L; CopyParity = copies.[c].Parity
+                  { Copy = c; CopyL = copies[c].L; CopyParity = copies[c].Parity
                     Degree = j; Occ = oi; OccL = oL; OccCopy = oc } :: restUses ]
     // Left-comb chain: each step ascending, the LAST step varies fastest.
     let rec chains (acc: int) (rest: int list) : int list list =
@@ -598,7 +598,7 @@ let polyLabels (s: Spec) (k: int) : PolyLabel list =
             // `countBy` on the sorted sector gives (copy, degree) in ascending
             // copy order -- the used copies, left to right.
             let uses = sector |> List.countBy id
-            let parity = (uses |> List.sumBy (fun (c, j) -> j * copies.[c].Parity)) % 2
+            let parity = (uses |> List.sumBy (fun (c, j) -> j * copies[c].Parity)) % 2
             let multinomial =
                 uses |> List.fold (fun acc (_, j) -> acc / factorial j) (factorial k)
             for us in occChoices uses do
@@ -648,7 +648,7 @@ let linearBlocks (specIn: Spec) (specOut: Spec) : Result<(int * SpecEntry * Spec
     |> List.fold (fun acc eo ->
         acc |> Result.bind (fun rows ->
             match specIn |> List.tryFindIndex (fun ei -> ei.L = eo.L && ei.Parity = eo.Parity) with
-            | Some bi -> Ok (rows @ [ (bi, eo, specIn.[bi]) ])
+            | Some bi -> Ok (rows @ [ (bi, eo, specIn[bi]) ])
             | None ->
                 Error ($"linear: output irrep (l={eo.L}, parity={eo.Parity}) not present in the input spec (all_irreps_present fails)")))
         (Ok [])

@@ -260,7 +260,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
                 | _ -> false)
         let isPackKernel =
             match kernE.Kind with
-            | ExprKind.ExprVar f when Map.containsKey f ctx.Decls -> packParams ctx.Decls.[f].Params
+            | ExprKind.ExprVar f when Map.containsKey f ctx.Decls -> packParams ctx.Decls[f].Params
             | ExprKind.ExprLambda (lps, _, _) ->
                 lps |> List.exists (fun p ->
                     match p.Type |> Option.map (resolveTy ctx) with
@@ -339,7 +339,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
             | _ ->
                 err fname "reverse mode needs each map operand to be `range<Idx<n>>`, a named array with statically-known extents, or `zip(...)` of such arrays (v1)"
         mv.Ops |> traverseR classify |> Result.bind (fun slots ->
-        let expectedParams = slots |> List.sumBy (fun s -> s.Readers.Length)
+        let expectedParams = slots |> List.sumBy (_.Readers.Length)
         if ps.Length <> expectedParams then
             refuse $"kernel arity {ps.Length} does not match the {expectedParams} cell(s) its {mv.Ops.Length} loop operand(s) supply in differentiated code"
         else
@@ -355,7 +355,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
         | Some p ->
             refuse $"kernel parameter '{p.Name}' is rank-carrying (`T^k` / `Array<...>`), so it is bound to a FIBER rather than a cell; reverse mode lowers rank-0 (scalar-cell) kernels (v1) -- the fiber adjoint is a contraction over the remaining axes, which is `ad.jvp` territory today"
         | None ->
-        let dims = slots |> List.collect (fun s -> s.Axes)
+        let dims = slots |> List.collect (_.Axes)
         let cells = dims |> List.fold (*) 1
         if cells > maxLoweredCells then
             refuse $"this map's iteration space is {cells} cells; reverse mode materializes it as a zero-literal construction buffer, which is capped at {maxLoweredCells} (v1)"
@@ -440,7 +440,7 @@ let private mapIterDims (ctx: Ctx) (denv: Map<string, int list>) (e: Expr) : int
         match k.Kind with
         | ExprKind.ExprLambda (ps, _, body) -> ps |> List.forall (fun p -> rankOfTy p.Type = 0) && notLit body
         | ExprKind.ExprVar f when Map.containsKey f ctx.Decls ->
-            let fd = ctx.Decls.[f]
+            let fd = ctx.Decls[f]
             fd.Params |> List.forall (fun p -> rankOfTy p.Type = 0) && notLit fd.Body
         | ExprKind.ExprVar f -> isMathIntrinsic f
         | _ -> false
@@ -940,7 +940,7 @@ let rec internal normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: Func
     | true, hit -> Ok hit
     | _ ->
     normalizeBodyUncached fname ctx depth fd
-    |> Result.map (fun r -> ctx.NormMemo.[(fd.Name, depth)] <- r; r)
+    |> Result.map (fun r -> ctx.NormMemo[(fd.Name, depth)] <- r; r)
 
 and internal normalizeBodyUncached (fname: string) (ctx: Ctx) (depth: int) (fd: FunctionDecl)
     : Result<NStmt list * Expr, string> =
@@ -993,7 +993,7 @@ and internal inlineCall (fname: string) (ctx: Ctx) (depth: int)
                        (callee: string) (args: Expr list)
                        (target: string) (targetMut: bool)
     : Result<NStmt list, string> =
-    let fd = ctx.Decls.[callee]
+    let fd = ctx.Decls[callee]
     checkInlinable fname fd args.Length |> Result.bind (fun () ->
     normalizeBody fname ctx (depth + 1) fd |> Result.bind (fun (calleeStmts, calleeFinal) ->
         let tag = freshTag ctx "__in"
@@ -1242,7 +1242,7 @@ let internal checkWriteAfterRead (fname: string) (ctx: Ctx) (stmts: NStmt list) 
     // last write position per var, loops opaque
     let lastWrite = System.Collections.Generic.Dictionary<string, int>()
     stmts |> List.iteri (fun i s ->
-        let record n = lastWrite.[n] <- i
+        let record n = lastWrite[n] <- i
         match s with
         | NLet _ -> ()
         | NAssign ({ Kind = ExprKind.ExprVar n }, _) -> record n
@@ -1423,7 +1423,7 @@ let internal checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) 
                              else Ok ())
                      | _ -> err fname "unsupported assignment target")
             | NAssign _ -> Ok ()
-            | CarryLoop (buf, _, _, _, lets, inc) ->
+            | CarryLoop (_, _, _, _, lets, inc) ->
                 // The additive carry: its one element write reads the same
                 // buffer at the previous ordinal BY DESIGN (that is the
                 // recurrence), and its adjoint is exact in the descending

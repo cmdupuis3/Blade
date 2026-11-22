@@ -597,7 +597,7 @@ module Codes =
     let phaseOfCode (code: string) : Phase =
         if code.Length < 3 then PhInternal
         else
-            match code.[2] with
+            match code[2] with
             | '0' -> PhLex
             | '1' -> PhParse
             | '2' -> PhResolve
@@ -709,7 +709,7 @@ module Render =
             let lineNo = span.StartLine
             if lineNo < 1 || lineNo > lines.Length then []
             else
-                let text = lines.[lineNo - 1]
+                let text = lines[lineNo - 1]
                 let width = (string lineNo).Length
                 let pad = String.replicate width " "
                 let startCol = max 1 span.StartCol

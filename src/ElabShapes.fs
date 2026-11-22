@@ -113,9 +113,9 @@ let private domains = ConcurrentDictionary<string, DomainShapeFn>()
 let private markers = ConcurrentDictionary<string, string * MarkerShapeFn>()
 
 /// Register a domain (`import <path>`) whose surface ops this module may be asked about. Idempotent.
-let registerDomain (path: string) (fn: DomainShapeFn) = domains.[path] <- fn
+let registerDomain (path: string) (fn: DomainShapeFn) = domains[path] <- fn
 /// Register an intrinsic marker an elaborator rewrites to, with the label a message quotes for its result. Idempotent.
-let registerMarker (name: string) (label: string) (fn: MarkerShapeFn) = markers.[name] <- (label, fn)
+let registerMarker (name: string) (label: string) (fn: MarkerShapeFn) = markers[name] <- (label, fn)
 
 // Type resolution
 
@@ -214,7 +214,7 @@ let rec typeShapeIn (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (shado
     // Follow a whole-type alias to its body; the body was written at module level, so its extents see no local binder.
     let rec strip (seen: Set<string>) (sh: Set<string>) (ty: TypeExpr) =
         match ty with
-        | TyNamed (n, []) when not (Set.contains n seen) && Map.containsKey n aliases -> strip (Set.add n seen) Set.empty aliases.[n]
+        | TyNamed (n, []) when not (Set.contains n seen) && Map.containsKey n aliases -> strip (Set.add n seen) Set.empty aliases[n]
         | TyBounded (baseTy, _, _) -> strip seen sh baseTy
         | _ -> (ty, sh)
     let (ty, shadowed) = strip Set.empty shadowed ty
@@ -265,7 +265,7 @@ let private isFloatLeaf (e: Expr) =
 let private isIntLeaf (e: Expr) =
     match e.Kind with
     | ExprKind.ExprLit (LitInt _) -> true
-    | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
+    | AstNegIntLit _ -> true
     | _ -> false
 
 /// A rectangular array literal's extents (outermost first) and its leaves; None when ragged or empty.
@@ -301,7 +301,7 @@ let private literalShape (e: Expr) : Shaped =
         let intOf (x: Expr) =
             match x.Kind with
             | ExprKind.ExprLit (LitInt n) -> n
-            | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt n) }) -> -n
+            | AstNegIntLit n -> -n
             | _ -> 0L
         let shaped elem = Ok (VArray { Elem = elem; Idxs = dims |> List.map litIdx; Extents = dims |> List.map Some; UserElem = false })
         if leaves |> List.forall isFloatLeaf then
@@ -388,6 +388,7 @@ let computedAxes (aliases: Map<string, TypeExpr>) (statics: StaticEnv) (shadowed
             else None))
 
 /// Is this application the deferred/computed map form `computedAxes` reads?
+[<TailCall>]
 let rec private isMapForm (e: Expr) =
     match e.Kind with
     | ExprKind.ExprCompute inner -> isMapForm inner
@@ -468,7 +469,7 @@ let rec shapeOf (env: Env) (scope: Scope) (e: Expr) : Shaped =
     | true, s -> s
     | _ ->
         let s = shapeOfUncached env scope e
-        env.Memo.[key] <- s
+        env.Memo[key] <- s
         s
 
 and shapeOfUncached (env: Env) (scope: Scope) (e: Expr) : Shaped =
@@ -493,20 +494,20 @@ and shapeOfUncached (env: Env) (scope: Scope) (e: Expr) : Shaped =
         // A domain op in surface form: its owner answers, whichever pass runs first.
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar a }, op) }, args)
                 when Map.containsKey a env.Domains && not (Map.containsKey a scope) ->
-            match domains.TryGetValue env.Domains.[a] with
+            match domains.TryGetValue env.Domains[a] with
             | true, fn -> fn env scope op args
             | _ -> Error "its domain is not registered"
         // A user module's function / value.
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar a }, f) }, _)
                 when Map.containsKey a env.Modules && not (Map.containsKey a scope) ->
-            match env.Modules.[a].Funcs f with
+            match env.Modules[a].Funcs f with
             | Some s -> s
             | None ->
-                match env.Modules.[a].Values f with
+                match env.Modules[a].Values f with
                 | Some _ -> Error "it is an index read of an imported array (a partial read has no static shape here)"
                 | None -> Error $"module '{a}' exports no function '{f}' with an annotated array return type"
         | ExprKind.ExprField ({ Kind = ExprKind.ExprVar a }, x) when Map.containsKey a env.Modules && not (Map.containsKey a scope) ->
-            match env.Modules.[a].Values x with
+            match env.Modules[a].Values x with
             | Some s -> s
             | None -> Error $"module '{a}' exports no array binding '{x}'"
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) ->
@@ -541,7 +542,7 @@ and shapeOfUncached (env: Env) (scope: Scope) (e: Expr) : Shaped =
             | _ -> Error $"'{f}' is not a function with an annotated array return type"
         | ExprKind.ExprTupleIndex (t, { Kind = ExprKind.ExprLit (LitInt i) }) ->
             match shapeOf env scope t with
-            | Ok (VTuple cs) when int i >= 0 && int i < cs.Length -> cs.[int i]
+            | Ok (VTuple cs) when int i >= 0 && int i < cs.Length -> cs[int i]
             | Ok (VTuple cs) -> Error $"the projection [{i}] is out of range for a {cs.Length}-component tuple"
             | Ok _ -> Error "it projects a value that is not a tuple"
             | Error why -> Error why
@@ -734,10 +735,10 @@ let rec moduleEnvWith (modules: ModuleDecl list) (depth: int) (decls: Located<De
             match Map.tryFind n bindingOf with
             | Some (i, b) ->
                 // Cycle guard: a name being shaped is not yet known.
-                memo.[n] <- Error "its shape depends on itself"
-                let sc = bindBinding (withoutAliases self.Value.Value disabledBefore.[i]) Map.empty b
+                memo[n] <- Error "its shape depends on itself"
+                let sc = bindBinding (withoutAliases self.Value.Value disabledBefore[i]) Map.empty b
                 let s = defaultArg (Map.tryFind n sc) (Error notFollowed)
-                memo.[n] <- s
+                memo[n] <- s
                 Some s
             | None ->
                 match Map.tryFind n selective with

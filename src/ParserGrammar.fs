@@ -103,7 +103,7 @@ and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
         if sCol < baseCol then (if List.isEmpty stmts then None else noValue ())
         else
         match peek toks with
-        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks) ->
+        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks : ParseResult<obj> option) ->
             Some (Option.get (statementLeadingOperatorError toks))
         | Some (TokKeyword KwLet) ->
             (match asStatement toks (fun () ->
@@ -1571,7 +1571,7 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             loop stmts (advance toks)
         // An operator-led line at the statement column after another
         // statement: neither a continuation nor a sensible new statement.
-        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks) ->
+        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks : ParseResult<obj> option) ->
             Option.get (statementLeadingOperatorError toks)
         | Some _ ->
             asStatement toks (fun () -> parseBlockStmt toks) >>= fun stmt remaining ->

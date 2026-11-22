@@ -134,10 +134,11 @@ module ReplTypes =
 
     /// Primitive = annotate inline ("Int64: 5"); everything else goes on the
     /// next line, tabbed.
+    [<TailCall>]
     let rec isPrimitive (t: IRType) : bool =
         match t with
         | IRTScalar _ | IRTNat _ -> true
-        | IRTIdxTagged (inner, _) | IRTUnitAnnotated (inner, _) -> isPrimitive inner
+        | Tagged inner -> isPrimitive inner
         | _ -> false
 
     let private eqLineRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = (.*)$", RegexOptions.Compiled)
@@ -194,8 +195,8 @@ module ReplTypes =
         let m = eqLineRe.Match line
         if not m.Success then line
         else
-            let name = m.Groups.[1].Value
-            let value = elideValue m.Groups.[2].Value
+            let name = m.Groups[1].Value
+            let value = elideValue m.Groups[2].Value
             let isTransient = (transient = Some name)
             match Map.tryFind name info with
             | Some (RVal t) ->
@@ -268,10 +269,10 @@ let firstSignificantLine (s: string) =
 let bindingName (snippet: string) : string option =
     let line = firstSignificantLine snippet
     let m = bindingNameRe.Match line
-    if m.Success then Some m.Groups.[1].Value
+    if m.Success then Some m.Groups[1].Value
     else
     let im = implKeyRe.Match line
-    if im.Success then Some $"impl {im.Groups.[1].Value} for {im.Groups.[2].Value}"
+    if im.Success then Some $"impl {im.Groups[1].Value} for {im.Groups[2].Value}"
     else
         // A destructuring `let (a, b) = ...` declares its LEAVES; its rebind
         // key is the leaf list, `(a,b)`, so re-running the cell supersedes the
@@ -288,8 +289,8 @@ let bindingName (snippet: string) : string option =
         let d = destructureNameRe.Match line
         if d.Success then
             let leaves =
-                d.Groups.[1].Value.Split([| ','; '('; ')' |], System.StringSplitOptions.RemoveEmptyEntries)
-                |> Array.map (fun x -> x.Trim())
+                d.Groups[1].Value.Split([| ','; '('; ')' |], System.StringSplitOptions.RemoveEmptyEntries)
+                |> Array.map (_.Trim())
                 |> Array.filter (fun x -> x <> "" && x <> "_")
             if leaves.Length = 0 then None else Some ("_(" + String.concat "," leaves + ")")
         else None
@@ -315,12 +316,12 @@ let topLevelBindingNames (source: string) : string list =
         let mutable inQuotes = false
         let mutable i = 0
         while i < line.Length do
-            let c = line.[i]
+            let c = line[i]
             if inQuotes then
                 if c = '\\' then i <- i + 1
                 elif c = '"' then inQuotes <- false
             elif c = '"' then inQuotes <- true
-            elif c = '/' && i + 1 < line.Length && line.[i + 1] = '/' then i <- line.Length
+            elif c = '/' && i + 1 < line.Length && line[i + 1] = '/' then i <- line.Length
             elif c = '(' || c = '[' || c = '{' then d <- d + 1
             elif c = ')' || c = ']' || c = '}' then d <- d - 1
             i <- i + 1
@@ -367,25 +368,25 @@ let private stripComments (s: string) : string =
     let mutable inQuotes = false
     let mutable inBlock = false
     while i < s.Length do
-        let c = s.[i]
+        let c = s[i]
         if inBlock then
-            if c = '*' && i + 1 < s.Length && s.[i + 1] = '/' then
+            if c = '*' && i + 1 < s.Length && s[i + 1] = '/' then
                 inBlock <- false
                 i <- i + 1
             elif c = '\n' then sb.Append c |> ignore
         elif inQuotes then
             sb.Append c |> ignore
             if c = '\\' && i + 1 < s.Length then
-                sb.Append s.[i + 1] |> ignore
+                sb.Append s[i + 1] |> ignore
                 i <- i + 1
             elif c = '"' then inQuotes <- false
         elif c = '"' then
             inQuotes <- true
             sb.Append c |> ignore
-        elif c = '/' && i + 1 < s.Length && s.[i + 1] = '/' then
-            while i < s.Length && s.[i] <> '\n' do i <- i + 1
+        elif c = '/' && i + 1 < s.Length && s[i + 1] = '/' then
+            while i < s.Length && s[i] <> '\n' do i <- i + 1
             if i < s.Length then sb.Append '\n' |> ignore
-        elif c = '/' && i + 1 < s.Length && s.[i + 1] = '*' then
+        elif c = '/' && i + 1 < s.Length && s[i + 1] = '*' then
             inBlock <- true
             i <- i + 1
         else sb.Append c |> ignore
@@ -425,7 +426,7 @@ let wrapAtSignificantLine (prefix: string) (text: string) : string * int =
             t <> "" && not (t.StartsWith "//"))
         |> Option.defaultValue 0
     let wrapped = Array.copy lines
-    wrapped.[row] <- prefix + wrapped.[row]
+    wrapped[row] <- prefix + wrapped[row]
     (String.concat "\n" wrapped, row)
 
 /// A reassignment `x = e` (or `x(i) = e`, `x.f = e`, `x += e`, etc.): an
@@ -552,13 +553,13 @@ let splitTopLevelStatements (source: string) : (int * string) list =
             let acc = ResizeArray<int>()
             let mutable prev : Blade.Lexer.TokenKind option = None
             for i in 0 .. toks.Length - 1 do
-                match toks.[i].Kind with
+                match toks[i].Kind with
                 | Blade.Lexer.TokNewline ->
-                    let next = if i + 1 < toks.Length then Some toks.[i + 1].Kind else None
+                    let next = if i + 1 < toks.Length then Some toks[i + 1].Kind else None
                     match prev, next with
                     | Some p, Some n when Segments.canEnd p && Segments.canStart n ->
                         // The newline token sits ON the line it terminates.
-                        acc.Add toks.[i].Line
+                        acc.Add toks[i].Line
                     | _ -> ()
                 | Blade.Lexer.TokEOF -> ()
                 | k -> prev <- Some k
@@ -568,7 +569,7 @@ let splitTopLevelStatements (source: string) : (int * string) list =
     let cur = ResizeArray<string>()
     let mutable startLine = 1
     for i in 0 .. lines.Length - 1 do
-        cur.Add lines.[i]
+        cur.Add lines[i]
         if Set.contains (i + 1) breaks then
             raw.Add (startLine, String.concat "\n" cur)
             cur.Clear()
@@ -580,7 +581,7 @@ let splitTopLevelStatements (source: string) : (int * string) list =
         | None -> ()
         | Some first ->
             let last = ls |> Array.findIndexBack (fun l -> l.Trim() <> "")
-            let body = ls.[first .. last] |> String.concat "\n"
+            let body = ls[first .. last] |> String.concat "\n"
             if Segments.hasCode body then yield (sl + first, body) ]
 
 // The evaluation lanes and their results.
@@ -743,7 +744,7 @@ let private lineCount (s: string) =
 let private startLineOf (candidate: ResizeArray<string>) (idx: int) =
     let mutable line = 1
     for j in 0 .. idx - 1 do
-        line <- line + lineCount candidate.[j] + 1
+        line <- line + lineCount candidate[j] + 1
     line
 
 let private severityText (s: Blade.Diagnostics.Severity) =
@@ -775,7 +776,7 @@ let private remapDiagnostic (candidate: ResizeArray<string>) (ps: Placement list
             ps |> List.tryFind (fun p ->
                 p.Index >= 0 && p.Index < candidate.Count &&
                 let start = startLineOf candidate p.Index
-                sl >= start && sl <= start + lineCount candidate.[p.Index] - 1)
+                sl >= start && sl <= start + lineCount candidate[p.Index] - 1)
     match owner with
     | None when sl <= 0 ->
         { Severity = sev; Line = 1; Col = 1; EndLine = 1; EndCol = 1
@@ -824,13 +825,13 @@ let private ensureFailureDiagnostic (remap: Blade.Diagnostics.Diagnostic -> Eval
         let head =
             lines |> Array.tryPick (fun l ->
                 let m = panicHeadRe.Match l
-                if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value.Trim()) else None)
+                if m.Success then Some (m.Groups[1].Value, m.Groups[2].Value.Trim()) else None)
         match head with
         | Some (code, msg) ->
             let line =
                 lines |> Array.tryPick (fun l ->
                     let m = panicLocRe.Match l
-                    match m.Success, System.Int32.TryParse m.Groups.[1].Value with
+                    match m.Success, System.Int32.TryParse m.Groups[1].Value with
                     | true, (true, n) when n > 0 -> Some n
                     | _ -> None)
             let span =
@@ -893,13 +894,13 @@ let private spliceDeclaration (candidate: ResizeArray<string>) (text: string) : 
             let lastDep =
                 [ idx + 1 .. candidate.Count - 1 ]
                 |> List.filter (fun j ->
-                    match bindingName candidate.[j] with
+                    match bindingName candidate[j] with
                     | Some n -> Set.contains n refs
                     | None -> false)
                 |> List.tryLast
             match lastDep with
             | Some j when [ idx + 1 .. j ] |> List.forall (fun k ->
-                              not (Set.contains name (referencedNames candidate.[k]))) ->
+                              not (Set.contains name (referencedNames candidate[k]))) ->
                 candidate.RemoveAt idx
                 // The removal shifted everything after `idx` down one, so
                 // inserting AT `j` lands immediately after the dependency.
@@ -907,7 +908,7 @@ let private spliceDeclaration (candidate: ResizeArray<string>) (text: string) : 
                 let fix k = if k = idx then j elif k > idx && k <= j then k - 1 else k
                 (j, fix)
             | _ ->
-                candidate.[idx] <- text
+                candidate[idx] <- text
                 (idx, id)
         else
             candidate.Add text
@@ -1114,7 +1115,7 @@ type ReplSession(runCwd: string) =
                 // cell already placed; without this their diagnostics would
                 // rebase against someone else's text.
                 for k in 0 .. slots.Count - 1 do
-                    slots.[k] <- { slots.[k] with Index = fix slots.[k].Index }
+                    slots[k] <- { slots[k] with Index = fix slots[k].Index }
                 slots.Add { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = subLine
                             Names = topLevelBindingNames text |> List.map (fun n -> (n, n))
                             NamedIdent = None
@@ -1135,7 +1136,7 @@ type ReplSession(runCwd: string) =
                         // A reassignment echoes the variable it mutated; a bare
                         // expression echoes its value under the stripped name.
                         (if isAssign then
-                            let root = (assignRe.Match head).Groups.[1].Value
+                            let root = (assignRe.Match head).Groups[1].Value
                             [ (root, root) ]
                          else [ ("", hidden) ])
                       NamedIdent = (if isAssign then None else bareIdentifier text)
@@ -1214,13 +1215,13 @@ type ReplSession(runCwd: string) =
             // wrappers never reach the session, so the next candidate cannot
             // contain them and the comparison skips them (memoTransients).
             let kept = [| for i in 0 .. memoSnippets.Length - 1 do
-                            if not (Set.contains i memoTransients) then memoSnippets.[i] |]
+                            if not (Set.contains i memoTransients) then memoSnippets[i] |]
             let transients = [ for i in Set.toList memoTransients do
-                                 if i < memoSnippets.Length then memoSnippets.[i] ]
+                                 if i < memoSnippets.Length then memoSnippets[i] ]
             let shared =
                 let n = min kept.Length candidate.Count
                 let mutable k = 0
-                while k < n && kept.[k] = candidate.[k] do k <- k + 1
+                while k < n && kept[k] = candidate[k] do k <- k + 1
                 k
             if shared = memoSnippets.Length then
                 // The cached run is a whole prefix of this one: adopt it all.
@@ -1245,7 +1246,7 @@ type ReplSession(runCwd: string) =
                 // under exactly the same two conditions, which are what make
                 // the later kept value independent of it: it names itself, and
                 // it could not have written anything the later snippet reads.
-                let dropped = [ for i in shared .. kept.Length - 1 -> kept.[i] ] @ transients
+                let dropped = [ for i in shared .. kept.Length - 1 -> kept[i] ] @ transients
                 let names = dropped |> List.map topLevelBindingNames
                 let allNamed = names |> List.forall (List.isEmpty >> not)
                 let reassigns = dropped |> List.exists (fun s -> assignRe.IsMatch(s.Trim()))
@@ -1285,7 +1286,7 @@ type ReplSession(runCwd: string) =
                         lines
                         |> Array.tryFind (fun l ->
                             let m = outNameRe.Match l
-                            m.Success && m.Groups.[1].Value = tgt))
+                            m.Success && m.Groups[1].Value = tgt))
                 CandidateRan
                     { ExitCode = code; Lane = lane; ElapsedMs = int watch.ElapsedMilliseconds
                       Stdout = stdout; Stderr = stderr; Lines = lines; Echo = echo
@@ -1381,7 +1382,7 @@ type ReplSession(runCwd: string) =
                     r.Lines
                     |> Array.tryPick (fun l ->
                         let m = outNameRe.Match l
-                        if m.Success && m.Groups.[1].Value = name then
+                        if m.Success && m.Groups[1].Value = name then
                             Some (ReplTypes.elideValue (l.Substring m.Length))
                         else None)
                     |> Option.defaultValue ""
@@ -1436,7 +1437,7 @@ type ReplSession(runCwd: string) =
             let committed =
                 let out = ResizeArray<string>()
                 for i in 0 .. candidate.Count - 1 do
-                    if not (Set.contains i drop) then out.Add candidate.[i]
+                    if not (Set.contains i drop) then out.Add candidate[i]
                 out
             let placements =
                 slots |> List.map (fun s ->
@@ -1599,7 +1600,7 @@ let private wrapCellExpressions (k: int) (src: string) : string * (int * int) li
                 let prefix =
                     if exprRows.Length = 1 then $"let __cell{k} = "
                     else $"let __cell{k}_{j} = "
-                wrapped.[row] <- prefix + wrapped.[row]
+                wrapped[row] <- prefix + wrapped[row]
                 (row, prefix.Length))
         (String.concat "\n" wrapped, wraps)
 
@@ -1638,15 +1639,15 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
                     let lastDep =
                         [ idx + 1 .. slots.Count - 1 ]
                         |> List.filter (fun j ->
-                            match bindingName slots.[j].Text with
+                            match bindingName slots[j].Text with
                             | Some n -> Set.contains n refs
                             | None -> false)
                         |> List.tryLast
-                    let displaced = slots.[idx].Cell
+                    let displaced = slots[idx].Cell
                     let at =
                         match lastDep with
                         | Some j when [ idx + 1 .. j ] |> List.forall (fun m ->
-                                          not (Set.contains name (referencedNames slots.[m].Text))) ->
+                                          not (Set.contains name (referencedNames slots[m].Text))) ->
                             slots.RemoveAt idx
                             // The removal shifted everything after `idx` down
                             // one, so inserting AT `j` lands immediately after
@@ -1654,7 +1655,7 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
                             slots.Insert(j, { Cell = k; Text = src; Wrap = wraps })
                             j
                         | _ ->
-                            slots.[idx] <- { Cell = k; Text = src; Wrap = wraps }
+                            slots[idx] <- { Cell = k; Text = src; Wrap = wraps }
                             idx
                     // The superseded cell still owes the client a window, and
                     // windows may not overlap: an empty slot directly above the
@@ -1695,7 +1696,7 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
               EndLine = endLine
               WrapLine = s.Wrap |> List.tryHead |> Option.map (fun (li, _) -> startLine + li)
               WrapCol = s.Wrap |> List.tryHead |> Option.map snd }
-        byCell.[s.Cell] <- w
+        byCell[s.Cell] <- w
         line <- endLine + 1
     // Back into CELL order, one window each: every cell owns exactly one slot by
     // construction (a superseded one keeps its empty placeholder), so the lookup

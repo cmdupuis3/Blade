@@ -17,7 +17,7 @@ let internal usageTestBlockKeys =
     [ "access"; "alloc"; "attrs"; "cell-epilogue"; "cli"; "closure-capture"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
-      "ide-serve"; "instance-guards"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
+      "ide-serve"; "instance-guards"; "knobs"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"; "print-form"
       "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"; "rec-step"
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "row-tile"; "run-record"

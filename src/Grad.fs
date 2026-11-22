@@ -83,6 +83,14 @@ open Blade.GradPackUnroll
 open Blade.GradNormalize
 open Blade.GradSweeps
 
+/// BLADE_GRAD_DUMP: print each synthesized declaration (F# structural form)
+/// on stderr -- the only view of what the transform emitted. Unset, empty or
+/// `0` is off; any other value is on. Read per call.
+let internal gradDumpEnabled () : bool =
+    match Knobs.raw Knobs.gradDump with
+    | null | "" | "0" -> false
+    | _ -> true
+
 // Re-exported so external modules keep a single Blade.Grad surface
 // (Ide.fs reads the tables; TypeCheck.fs wraps the predicates).
 let mathIntrinsics = GradCommon.mathIntrinsics
@@ -121,7 +129,7 @@ let private float32Mention (ctx: Ctx) (fd: FunctionDecl) : bool =
         | TyNamed ("Float32", _) -> true
         | TyArray (elem, _) -> has elem
         | _ -> false
-    let tys = (fd.Params |> List.choose (fun p -> p.Type)) @ (fd.ReturnType |> Option.toList)
+    let tys = (fd.Params |> List.choose (_.Type)) @ (fd.ReturnType |> Option.toList)
     tys |> List.exists (fun t -> has t || has (resolveTy ctx t))
 
 let private floatOfUnit (u: UnitExpr option) : TypeExpr =
@@ -339,7 +347,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
             | _ -> unitArgOf ctx rt)
     let paramTyOf (pname: string) : TypeExpr =
         fd.Params |> List.tryFind (fun q -> q.Name = pname)
-        |> Option.bind (fun q -> q.Type)
+        |> Option.bind (_.Type)
         |> Option.defaultValue TyFloat64
     // The synthesized name must be free: splicing a second `f__grad` beside a
     // user function of that name would silently shadow one of them.
@@ -569,7 +577,7 @@ let private synthesizeRev (ctx: Ctx) (fd: FunctionDecl) (vjp: bool) : Result<Fun
             | _ -> None)
         |> Set.ofList
     let paramTys = fd.Params |> List.choose (fun p -> p.Type |> Option.map (fun t -> (p.Name, t))) |> Map.ofList
-    let allParams = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let allParams = fd.Params |> List.map (_.Name) |> Set.ofList
     let stmtsCk, finalCk, cotsCk, revCk =
         checkpointCarries rc hasGradBuffers arrayParams scalarParams paramTys allParams
             stmts finalE (localDecls @ scalarCots) (seed @ reverse)
@@ -1027,9 +1035,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                                 // (F# structural form) to stderr -- the only view of
                                 // what the transform emitted, since no surface
                                 // pretty-printer exists.
-                                (match System.Environment.GetEnvironmentVariable "BLADE_GRAD_DUMP" with
-                                 | null | "" | "0" -> ()
-                                 | _ -> eprintfn "[grad dump] %s = %A" synthName gd)
+                                if gradDumpEnabled () then eprintfn "[grad dump] %s = %A" synthName gd
                                 available <- Map.add synthName gd available
                                 madeOrder.Add synthName
                                 madeMap.[synthName] <- (gd, fname))))

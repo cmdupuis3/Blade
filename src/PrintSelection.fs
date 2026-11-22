@@ -40,7 +40,7 @@ let names () : Set<string> option =
     | v ->
         let ns =
             v.Split([| ','; ' '; ';' |], System.StringSplitOptions.RemoveEmptyEntries)
-            |> Array.map (fun s -> s.Trim())
+            |> Array.map (_.Trim())
             |> Array.filter (fun s -> s <> "")
         if ns.Length = 0 then None else Some (Set.ofArray ns)
 

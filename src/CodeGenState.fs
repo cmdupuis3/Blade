@@ -2334,7 +2334,7 @@ let localVarName (id: IRId) : string = avoidUserSpelled $"__v{id}"
 let installCppNameTable (modul: IRModule) : IRModule =
     let rec plainScalar (t: IRType) =
         match t with
-        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> plainScalar inner
+        | Tagged inner -> plainScalar inner
         | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETBool | ETUnit) | IRTNat _ | IRTUnit -> true
         | _ -> false
     let rec functionValued (t: IRType) =

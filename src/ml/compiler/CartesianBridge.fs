@@ -46,7 +46,7 @@ let private s6 = sqrt 6.0
 
 let private row9 (entries: (int * int * float) list) : float list =
     let r = Array.zeroCreate 9
-    for (i, j, c) in entries do r.[3 * i + j] <- c
+    for (i, j, c) in entries do r[3 * i + j] <- c
     List.ofArray r
 
 /// 9x9 orthonormal bridge, rows in irreps order (l=0 | l=1 | l=2), acting

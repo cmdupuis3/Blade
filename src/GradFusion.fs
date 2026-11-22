@@ -44,7 +44,7 @@ let internal asKernelLambda (ctx: Ctx) (k: Expr)
     | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (ps, wc, body) }, isAnti) ->
         Ok (ps, wc, body, Some isAnti)
     | ExprKind.ExprVar f when Map.containsKey f ctx.Decls ->
-        let fd = ctx.Decls.[f]
+        let fd = ctx.Decls[f]
         // G276 (2): a named function's DECLARED parameter and return types are
         // constraints on what flows through the stage, as a lambda's are --
         // carried onto the lambda (a parameter annotation, a return
@@ -54,7 +54,7 @@ let internal asKernelLambda (ctx: Ctx) (k: Expr)
         // that is a module type alias (`type F = Float64`) is a type.
         let isVar (n: string) =
             List.contains n fd.TypeParams
-            || (n.Length = 1 && System.Char.IsUpper n.[0] && not (Map.containsKey n ctx.TypeAliases))
+            || (n.Length = 1 && System.Char.IsUpper n[0] && not (Map.containsKey n ctx.TypeAliases))
         let rec concrete (t: TypeExpr) =
             match t with
             | TyVar (n, _) -> not (isVar n) && Map.containsKey n ctx.TypeAliases
@@ -223,6 +223,7 @@ let internal isArrayish (known: Set<string>) (resolved: Expr) (original: Expr) :
 
 /// Which bound values are worth remembering for pipeline resolution: loop
 /// objects, map applications, unfused pipeline nodes, and kernel lambdas.
+[<TailCall>]
 let rec internal bindsPipelineValue (v: Expr) : bool =
     match v.Kind with
     | ExprKind.ExprObjectFor _ | ExprKind.ExprMethodFor _ | ExprKind.ExprLambda _
@@ -644,6 +645,7 @@ type internal GroupRegime =
     | GRStatic of ngroups: int
     | GRUnknown
 
+[<TailCall>]
 let rec internal stripTypedE (e: Expr) : Expr =
     match e.Kind with
     | ExprKind.ExprTyped (i, _) -> stripTypedE i
@@ -651,6 +653,7 @@ let rec internal stripTypedE (e: Expr) : Expr =
 
 /// Strip the wrappers a peel initializer may carry: `|> compute` and any
 /// ascription. Both are transparent to the shape below them.
+[<TailCall>]
 let rec internal stripPeelWrap (e: Expr) : Expr =
     match e.Kind with
     | ExprKind.ExprTyped (i, _) | ExprKind.ExprCompute i -> stripPeelWrap i

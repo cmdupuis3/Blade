@@ -126,6 +126,7 @@ let mulChecked (a: int64) (b: int64) : Result<int64, string> =
     elif a > Int64.MaxValue / b then Error $"int64 overflow: {a} * {b}"
     else Ok(a * b)
 
+[<TailCall>]
 let rec gcd64 (a: int64) (b: int64) = if b = 0L then a else gcd64 b (a % b)
 
 /// Exact C(m,r) in int64. The gcd reduction makes every intermediate equal to
@@ -205,7 +206,7 @@ let sortParity (keys: int list list) =
     let mutable inv = 0
     for i in 0 .. a.Length - 1 do
         for j in i + 1 .. a.Length - 1 do
-            if compare a.[i] a.[j] > 0 then inv <- inv + 1
+            if compare a[i] a[j] > 0 then inv <- inv + 1
     if inv % 2 = 0 then 1 else -1
 
 /// Canonical form of one raw tuple plus its character. `None` = the tuple is in
@@ -296,7 +297,7 @@ let rec keysFrom (levels: Level list) (n: int) (lo: int list option) (strict: bo
                 // the first difference (upward) happens later.
                 for p in r - 1 .. -1 .. 0 do
                     let prefix = Array.sub ls 0 p |> Array.toList |> List.concat
-                    for k in keysFrom inner n (Some ls.[p]) true do
+                    for k in keysFrom inner n (Some ls[p]) true do
                         for rest in freeTail (r - 1 - p) (Some k) do
                             yield prefix @ k @ rest
             }
@@ -525,7 +526,7 @@ let rec private orbSuccessorRec (levels: Level list) (n: int) (t: int list) : in
             let mutable res : int list option = None
             let mutable i = r - 1
             while res.IsNone && i >= 0 do
-                (match orbSuccessorRec inner n ls.[i] with
+                (match orbSuccessorRec inner n ls[i] with
                  | Some k ->
                      match fillTail k (r - 1 - i) [] with
                      | Some tail ->
@@ -661,7 +662,7 @@ let orbRead (levels: Level list) (n: int) (pool: int64[]) (t: int list) : Result
     | Error e -> Error e
     | Ok OrbZeroCell -> Ok 0L
     | Ok (OrbPoolCell (i, chi)) ->
-        let v = pool.[i]
+        let v = pool[i]
         if chi >= 0 then Ok v
         elif v = Int64.MinValue then
             // The one value whose negation leaves int64. The overflow rule applies to
@@ -706,5 +707,5 @@ let orbWriteCanonical (levels: Level list) (n: int) (pool: int64[]) (t: int list
                 if r < 0L || r >= int64 pool.Length then
                     Error $"orbWriteCanonical: rank {r} outside the pool [0,{pool.Length})"
                 else
-                    pool.[int r] <- v
+                    pool[int r] <- v
                     Ok()

@@ -272,7 +272,7 @@ let rec private substScoped (fresh: (string -> string) option) (m: Map<string, E
     let renameRecName (ren: Map<string, string>) (v: Expr) =
         match v.Kind with
         | ExprKind.ExprRecArray def when Map.containsKey def.Name ren ->
-            inheritSpan v (ExprRecArray { def with Name = ren.[def.Name] })
+            inheritSpan v (ExprRecArray { def with Name = ren[def.Name] })
         | _ -> v
     let rec stmtExprs (s: Stmt) : Expr list =
         match s with
@@ -435,6 +435,7 @@ let rec private isStagedValue (v: UValue) : bool =
 
 /// A lambda-valued `let static` declares a function -- same exemption as
 /// StaticEval's fold assertion (its helper is private there).
+[<TailCall>]
 let rec private isLambdaValued (e: Expr) : bool =
     match e.Kind with
     | ExprKind.ExprLambda _ -> true
@@ -466,13 +467,13 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
     | Error _ ->
         let recur = ueval ctx staged inInline (fuel - 1)
         match expr.Kind with
-        | ExprKind.ExprVar n when Map.containsKey n staged -> staged.[n]
+        | ExprKind.ExprVar n when Map.containsKey n staged -> staged[n]
         | ExprKind.ExprTuple es -> UTuple (es |> List.map recur)
         | ExprKind.ExprTupleIndex (head, idxE) ->
             (match recur head with
              | UTuple vs ->
                  (match evalExpr ctx.Env maxSteps idxE with
-                  | Ok (SVInt i) when int i >= 0 && int i < vs.Length -> vs.[int i]
+                  | Ok (SVInt i) when int i >= 0 && int i < vs.Length -> vs[int i]
                   | Ok (SVInt i) ->
                       raise (UnfoldError $"static unfolding: staged tuple index {i} out of bounds (0..{vs.Length - 1})")
                   | _ ->
@@ -481,7 +482,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar fname }, args) when Map.containsKey fname ctx.Env.Functions ->
             // A static function whose ground evaluation failed: at least one
             // argument (or an intermediate) is staged -- inline the body.
-            let fd = ctx.Env.Functions.[fname]
+            let fd = ctx.Env.Functions[fname]
             if args.Length <> fd.Params.Length then
                 raise (UnfoldError $"static unfolding: '{fname}' expects {fd.Params.Length} argument(s), got {args.Length}")
             let argVals = args |> List.map recur

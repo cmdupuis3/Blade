@@ -29,7 +29,7 @@ let permSign (perm: int list) : int =
     let mutable inv = 0
     for i in 0 .. perm.Length - 2 do
         for j in i + 1 .. perm.Length - 1 do
-            if perm.[i] > perm.[j] then inv <- inv + 1
+            if perm[i] > perm[j] then inv <- inv + 1
     if inv % 2 = 0 then 1 else -1
 
 /// The Reynolds term plan: the deduplicated, coefficient-weighted permutation

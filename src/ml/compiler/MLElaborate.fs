@@ -271,21 +271,21 @@ let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
     let s2 = blockStarts cfg.Spec2
     let so = blockStarts cfg.SpecOut
     // per-path metadata
-    let pMult1 = paths |> List.map (fun (b1, _, _) -> cfg.Spec1.[b1].Mult)
-    let pMult2 = paths |> List.map (fun (_, b2, _) -> cfg.Spec2.[b2].Mult)
-    let pMultO = paths |> List.map (fun (_, _, bo) -> cfg.SpecOut.[bo].Mult)
-    let pD1 = paths |> List.map (fun (b1, _, _) -> dim cfg.Spec1.[b1])
-    let pD2 = paths |> List.map (fun (_, b2, _) -> dim cfg.Spec2.[b2])
-    let pDO = paths |> List.map (fun (_, _, bo) -> dim cfg.SpecOut.[bo])
-    let pS1 = paths |> List.map (fun (b1, _, _) -> s1.[b1])
-    let pS2 = paths |> List.map (fun (_, b2, _) -> s2.[b2])
-    let pSO = paths |> List.map (fun (_, _, bo) -> so.[bo])
+    let pMult1 = paths |> List.map (fun (b1, _, _) -> cfg.Spec1[b1].Mult)
+    let pMult2 = paths |> List.map (fun (_, b2, _) -> cfg.Spec2[b2].Mult)
+    let pMultO = paths |> List.map (fun (_, _, bo) -> cfg.SpecOut[bo].Mult)
+    let pD1 = paths |> List.map (fun (b1, _, _) -> dim cfg.Spec1[b1])
+    let pD2 = paths |> List.map (fun (_, b2, _) -> dim cfg.Spec2[b2])
+    let pDO = paths |> List.map (fun (_, _, bo) -> dim cfg.SpecOut[bo])
+    let pS1 = paths |> List.map (fun (b1, _, _) -> s1[b1])
+    let pS2 = paths |> List.map (fun (_, b2, _) -> s2[b2])
+    let pSO = paths |> List.map (fun (_, _, bo) -> so[bo])
     let pWOff =
         (0, paths) ||> List.scan (fun acc (b1, b2, bo) ->
-            acc + cfg.SpecOut.[bo].Mult * cfg.Spec1.[b1].Mult * cfg.Spec2.[b2].Mult)
+            acc + cfg.SpecOut[bo].Mult * cfg.Spec1[b1].Mult * cfg.Spec2[b2].Mult)
     let cgPerPath =
         paths |> List.map (fun (b1, b2, bo) ->
-            Blade.ML.WignerTables.realCGSparse cfg.Spec1.[b1].L cfg.Spec2.[b2].L cfg.SpecOut.[bo].L)
+            Blade.ML.WignerTables.realCGSparse cfg.Spec1[b1].L cfg.Spec2[b2].L cfg.SpecOut[bo].L)
     let cgOff = (0, cgPerPath) ||> List.scan (fun acc es -> acc + es.Length)
     let cgC1 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.C1)
     let cgC2 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.C2)
@@ -399,8 +399,8 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
     // mirror path, the identity on a diagonal one (S2TpCell).
     let used = cells |> List.map (fun c -> (c.Path, c.IsMirror)) |> List.distinct
     let cgOf (p: int, isMirror: bool) =
-        let (b1, b2, bo) = paths.[p]
-        Blade.ML.WignerTables.realCGSparse s.[b1].L s.[b2].L cfg.SpecOut.[bo].L
+        let (b1, b2, bo) = paths[p]
+        Blade.ML.WignerTables.realCGSparse s[b1].L s[b2].L cfg.SpecOut[bo].L
         |> Array.toList
         |> List.map (fun e ->
             if isMirror then (e.C1, e.C2, e.C3, e.Coef, e.C2, e.C1)
@@ -408,7 +408,7 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
     let cgPerPath = used |> List.map cgOf
     let cgOff = (0, cgPerPath) ||> List.scan (fun acc es -> acc + es.Length)
     let cgRange =
-        used |> List.mapi (fun i (p, _) -> (p, (cgOff.[i], cgOff.[i + 1]))) |> Map.ofList
+        used |> List.mapi (fun i (p, _) -> (p, (cgOff[i], cgOff[i + 1]))) |> Map.ofList
     let flat = List.concat cgPerPath
     let pick f = flat |> List.map f
     let kI f = intArrLit (cells |> List.map f)
@@ -491,7 +491,7 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
     let stmts =
         [ yield sLetMut "out" (zerosLit nCells)
           for j in 0 .. k - 1 do
-            yield sLet $"__m{j}" (intArrLit (tuples |> List.map (fun t -> t.[j])))
+            yield sLet $"__m{j}" (intArrLit (tuples |> List.map (fun t -> t[j])))
           yield StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit nCells)),
                     [ sAssign (idx "out" (v "c"))
                               ([ 0 .. k - 1 ]
@@ -543,13 +543,13 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
     let copies = polyCopies s |> List.toArray
     let inStarts = blockStarts s |> List.toArray
     let outStarts = blockStarts sOut |> List.toArray
-    let copyOff (c: int) = inStarts.[copies.[c].Block] + copies.[c].MultIdx * (2 * copies.[c].L + 1)
+    let copyOff (c: int) = inStarts[copies[c].Block] + copies[c].MultIdx * (2 * copies[c].L + 1)
     // The W copies a label can be mixed into: SOUT blocks of the label's
     // (L, parity), block order, multiplicity index inner.
     let matched (lb: PolyLabel) =
         [ for bo in 0 .. sOut.Length - 1 do
-            if sOut.[bo].L = lb.L && sOut.[bo].Parity = lb.Parity then
-              for mo in 0 .. sOut.[bo].Mult - 1 -> outStarts.[bo] + mo * (2 * lb.L + 1) ]
+            if sOut[bo].L = lb.L && sOut[bo].Parity = lb.Parity then
+              for mo in 0 .. sOut[bo].Mult - 1 -> outStarts[bo] + mo * (2 * lb.L + 1) ]
     // Labels with no matching W copy carry no parameter and are not emitted
     // (Schur: their contribution to every admissible map is zero).
     let used = labels |> Array.filter (fun lb -> not (matched lb).IsEmpty)
@@ -564,7 +564,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
     let lfDim = lfAcc
     let slots =
         [ for lb in used do
-            for oo in matched lb -> (lfOff.[lb.Index], oo, 2 * lb.L + 1, sqrt (float lb.Multinomial)) ]
+            for oo in matched lb -> (lfOff[lb.Index], oo, 2 * lb.L + 1, sqrt (float lb.Multinomial)) ]
     let wDim = slots.Length
     // The convention pin the two files cannot check against each other
     // (MLSpec stays dependency-free): a label's flat occurrence index must be
@@ -577,9 +577,9 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                     let occs = (Blade.ML.SymPowerTables.symPowerTable u.Degree u.CopyL).Occurrences |> List.toArray
                     if u.Occ < 0 || u.Occ >= occs.Length then
                         Some ($"T_{{{u.Degree},{u.CopyL}}} has {occs.Length} occurrences but a label selects index {u.Occ}")
-                    elif occs.[u.Occ].L <> u.OccL || occs.[u.Occ].Copy <> u.OccCopy then
+                    elif occs[u.Occ].L <> u.OccL || occs[u.Occ].Copy <> u.OccCopy then
                         Some (sprintf "T_{%d,%d} occurrence %d is (L=%d, copy=%d) but the label basis says (L=%d, copy=%d)"
-                                  u.Degree u.CopyL u.Occ occs.[u.Occ].L occs.[u.Occ].Copy u.OccL u.OccCopy)
+                                  u.Degree u.CopyL u.Occ occs[u.Occ].L occs[u.Occ].Copy u.OccL u.OccCopy)
                     else None))
     if occProblem.IsSome then
         Error (err5000 $"internal: derive_poly occurrence order drift -- {occProblem.Value}")
@@ -600,14 +600,14 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
         |> List.distinct
     let mutable monNames : Map<int * int, string> = Map.empty
     for (c, j) in monKeys do
-        let d = 2 * copies.[c].L + 1
+        let d = 2 * copies[c].L + 1
         let off = copyOff c
         let tuples = symMultisets d j
         let nm = fresh "mn"
         monNames <- Map.add (c, j) nm monNames
         stmts.Add (sLetMut nm (zerosLit tuples.Length))
         for a in 0 .. j - 1 do
-            stmts.Add (sLet $"{nm}_i{a}" (intArrLit (tuples |> List.map (fun t -> off + t.[a]))))
+            stmts.Add (sLet $"{nm}_i{a}" (intArrLit (tuples |> List.map (fun t -> off + t[a]))))
         stmts.Add (StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit tuples.Length)),
                      [ sAccum (idx nm (v "c"))
                               ([ 0 .. j - 1 ]
@@ -673,27 +673,27 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                 (nm, 0)
     for lb in used do
         let uses = lb.Uses |> List.toArray
-        let dstBase = lfOff.[lb.Index]
+        let dstBase = lfOff[lb.Index]
         if uses.Length = 1 then
             // A single-copy sector has degree K, so its occurrence feature is
             // final and unique to this label: emit it straight into __lf.
-            let u = uses.[0]
+            let u = uses[0]
             if u.Degree = 1 then emitCopySlice dstBase (copyOff u.Copy) (2 * u.OccL + 1)
             else emitMatvec "__lf" dstBase u
         else
             let mutable accName = ""
             let mutable accBase = 0
-            let mutable accL = uses.[0].OccL
-            let a0, b0 = occFeature uses.[0]
+            let mutable accL = uses[0].OccL
+            let a0, b0 = occFeature uses[0]
             accName <- a0
             accBase <- b0
             for i in 1 .. uses.Length - 1 do
-                let bName, bBase = occFeature uses.[i]
-                let lMid = lb.Chain.[i - 1]
+                let bName, bBase = occFeature uses[i]
+                let lMid = lb.Chain[i - 1]
                 if i = uses.Length - 1 then
                     // The last coupling has total degree K, so it is final and
                     // never a prefix of anything: it writes into __lf.
-                    emitCouple "__lf" dstBase (accName, accBase, accL) (bName, bBase, uses.[i].OccL) lMid
+                    emitCouple "__lf" dstBase (accName, accBase, accL) (bName, bBase, uses[i].OccL) lMid
                 else
                     let key = prefixKey lb (i + 1)
                     match Map.tryFind key nodes with
@@ -703,7 +703,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                     | None ->
                         let nm = fresh "ch"
                         stmts.Add (sLetMut nm (zerosLit (2 * lMid + 1)))
-                        emitCouple nm 0 (accName, accBase, accL) (bName, bBase, uses.[i].OccL) lMid
+                        emitCouple nm 0 (accName, accBase, accL) (bName, bBase, uses[i].OccL) lMid
                         nodes <- Map.add key nm nodes
                         accName <- nm
                         accBase <- 0
@@ -754,9 +754,9 @@ let private linearDecl (name: string) (specIn: Spec) (specOut: Spec)
                 [ sFor "mi" 0 ei.Mult
                     [ sLet "wv" (idx "w" (add (iLit thisOff) (add (mul (v "mo") (iLit ei.Mult)) (v "mi"))))
                       sFor "c" 0 d
-                        [ sAccum (idx "out" (add baseOut (add (iLit sOut.[b]) (add (mul (v "mo") (iLit d)) (v "c")))))
+                        [ sAccum (idx "out" (add baseOut (add (iLit sOut[b]) (add (mul (v "mo") (iLit d)) (v "c")))))
                                  (mul (v "wv")
-                                      (idx "x" (add baseIn (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c")))))) ] ] ])
+                                      (idx "x" (add baseIn (add (iLit sIn[bi]) (add (mul (v "mi") (iLit d)) (v "c")))))) ] ] ])
     let body =
         syn (ExprBlock (
             [ sLetMut "out" (zerosLit (nRows * dOut))
@@ -795,20 +795,20 @@ let private gatedDecl (name: string) (sigmoidName: string) (spec: Spec) (nRows: 
     let baseE = mul (v "rr") (iLit dTot)
     let rowStmts =
         [ for b in 0 .. spec.Length - 1 do
-            let e = spec.[b]
+            let e = spec[b]
             let d = dim e
             if e.L = 0 then
                 yield sFor "mu" 0 e.Mult
-                    [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (v "mu"))))
-                              (mul (idx "x" (add baseE (add (iLit starts.[b]) (v "mu"))))
-                                   (sigCall (idx "x" (add baseE (add (iLit starts.[b]) (v "mu")))))) ]
+                    [ sAssign (idx "out" (add baseE (add (iLit starts[b]) (v "mu"))))
+                              (mul (idx "x" (add baseE (add (iLit starts[b]) (v "mu"))))
+                                   (sigCall (idx "x" (add baseE (add (iLit starts[b]) (v "mu")))))) ]
             else
                 yield sFor "mu" 0 e.Mult
                     [ sLet "g" (sigCall (idx "x" (add baseE (syn (ExprBinOp (Elementwise, OpMod, v "mu", iLit numGates))))))
                       sFor "c" 0 d
-                        [ sAssign (idx "out" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))
+                        [ sAssign (idx "out" (add baseE (add (iLit starts[b]) (add (mul (v "mu") (iLit d)) (v "c")))))
                                   (mul (v "g")
-                                       (idx "x" (add baseE (add (iLit starts.[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
+                                       (idx "x" (add baseE (add (iLit starts[b]) (add (mul (v "mu") (iLit d)) (v "c")))))) ] ] ]
     // nRows = 1: x/out ARE the irreps space (same spec in and out) -- stamp.
     let tyVec = if nRows = 1 then tyIrrepsArr spec else tyFloatArr (nRows * dTot)
     let fd =
@@ -853,9 +853,9 @@ let private deriveLinearDecl (name: string) (specIn: Spec) (specOut: Spec) : Fun
                 [ sFor "mi" 0 ei.Mult
                     [ sLet "wv" (idx "w" (add (iLit thisOff) (add (mul (v "mo") (iLit ei.Mult)) (v "mi"))))
                       sFor "c" 0 d
-                        [ sAccum (idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (v "c"))))
+                        [ sAccum (idx "out" (add (iLit sOut[bo]) (add (mul (v "mo") (iLit d)) (v "c"))))
                                  (mul (v "wv")
-                                      (idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ])
+                                      (idx "x" (add (iLit sIn[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ])
     let body =
         syn (ExprBlock (
             [ yield sLetMut "out" (zerosLit dOut)
@@ -938,9 +938,9 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                     [ sFor "mi" 0 mIn
                         [ sLet "wv" (wAt 0)
                           sFor "c" 0 d
-                            [ sAccum (idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (v "c"))))
+                            [ sAccum (idx "out" (add (iLit sOut[bo]) (add (mul (v "mo") (iLit d)) (v "c"))))
                                      (mul (v "wv")
-                                          (idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ] ]
+                                          (idx "x" (add (iLit sIn[bi]) (add (mul (v "mi") (iLit d)) (v "c"))))) ] ] ] ]
             else
                 // e = 2: the two-term form, with J's entries BAKED SPARSE. J
                 // is +/-1-sparse over the shipped roster (matrix rationality
@@ -958,12 +958,12 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                            // negative J entry reuses one binding.
                            if anyNeg then yield sLet "wjn" (sub (fLit 0.0) (v "wj"))
                            for c in 0 .. d - 1 do
-                             let outAt = idx "out" (add (iLit sOut.[bo]) (add (mul (v "mo") (iLit d)) (iLit c)))
+                             let outAt = idx "out" (add (iLit sOut[bo]) (add (mul (v "mo") (iLit d)) (iLit c)))
                              let xAt (k: int) =
-                                 idx "x" (add (iLit sIn.[bi]) (add (mul (v "mi") (iLit d)) (iLit k)))
+                                 idx "x" (add (iLit sIn[bi]) (add (mul (v "mi") (iLit d)) (iLit k)))
                              yield sAccum outAt (mul (v "wid") (xAt c))
                              for k in 0 .. d - 1 do
-                               let jv = j.[c].[k]
+                               let jv = j[c][k]
                                if jv = 1 then yield sAccum outAt (mul (v "wj") (xAt k))
                                elif jv = -1 then yield sAccum outAt (mul (v "wjn") (xAt k))
                                elif jv <> 0 then
@@ -1079,7 +1079,7 @@ let private permNestStmts (k: int) (l: int) (n: int) (coefName: string) (readsX:
             else
                 [ for i in lo .. hi - 1 ->
                     let coef = pown n (hi - 1 - i)
-                    if coef = 1 then v (bv rgs.[i]) else mul (iLit coef) (v (bv rgs.[i])) ]
+                    if coef = 1 then v (bv rgs[i]) else mul (iLit coef) (v (bv rgs[i])) ]
                 |> List.reduce add
         let term =
             if readsX then mul (idx coefName (iLit g)) (idx "x" (flat 0 k))
@@ -1178,14 +1178,14 @@ let private scalarsDecl (name: string) (spec: Spec) : Result<FunctionDecl, ElabE
     let starts = blockStarts spec
     let offs =
         [ for b in 0 .. spec.Length - 1 do
-            if spec.[b].L = 0 then
-                yield! [ starts.[b] .. starts.[b] + spec.[b].Mult - 1 ] ]
+            if spec[b].L = 0 then
+                yield! [ starts[b] .. starts[b] + spec[b].Mult - 1 ] ]
     if offs.IsEmpty then Error (err5000 "scalars: the spec has no l=0 blocks")
     else
         let stmts =
             [ yield sLetMut "out" (zerosLit offs.Length)
               for k in 0 .. offs.Length - 1 do
-                yield sAssign (idx "out" (iLit k)) (idx "x" (iLit offs.[k])) ]
+                yield sAssign (idx "out" (iLit k)) (idx "x" (iLit offs[k])) ]
         // GROUP-CONDITIONAL. The declared return type is a plain Idx array,
         // i.e. the claim is "these entries are INVARIANTS". True of every
         // l = 0 entry under SO(3); true under O(3) only when no l = 0 block
@@ -1207,8 +1207,8 @@ let private normsDecl (name: string) (spec: Spec) : FunctionDecl =
     let starts = blockStarts spec
     let slots =
         [ for b in 0 .. spec.Length - 1 do
-            for mu in 0 .. spec.[b].Mult - 1 ->
-              (starts.[b] + mu * dim spec.[b], dim spec.[b]) ]
+            for mu in 0 .. spec[b].Mult - 1 ->
+              (starts[b] + mu * dim spec[b], dim spec[b]) ]
     let stmts =
         [ yield sLetMut "sq" (zerosLit slots.Length)
           yield sLetMut "out" (zerosLit slots.Length)

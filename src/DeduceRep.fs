@@ -221,6 +221,7 @@ let private pgIrrepsOf (ix: IRIndexType) : (string * (string * int) list) option
 /// the surface classifier had to guess from builtin names; the typed
 /// lattice reads it directly -- deliberately STRONGER than the seam,
 /// soundly: it only turns "unknown shape" into "provably scalar".
+[<TailCall>]
 let rec private shapeOfType (resolve: IRType -> IRType) (ty: IRType) : InvShapeT =
     match resolve ty with
     | IRTScalar _ -> TInvScalar
@@ -287,6 +288,7 @@ let classifyType (g: GroupT) (resolve: IRType -> IRType) (ty: IRType) : RepStatu
 
 /// Still open at decl close? Used only for skipped-polymorphic accounting --
 /// the late/monomorphized tier is not implemented by this module.
+[<TailCall>]
 let rec private isUnresolvedTy (resolve: IRType -> IRType) (ty: IRType) : bool =
     match resolve ty with
     | IRTInfer _ -> true
@@ -727,7 +729,7 @@ let recordCertified (certified: System.Collections.Generic.Dictionary<IRId, RepS
                     (groupName: string) (parms: RepParam list) (retTy: IRType) : unit =
     let g = groupOfName groupName
     match classifySignature g resolve owner parms retTy with
-    | Ok sg -> certified.[funcId] <- sg
+    | Ok sg -> certified[funcId] <- sg
     | Error _ -> ()
 
 // Declared-certificate VALIDATION. The typed walker runs a SECOND,
@@ -855,7 +857,7 @@ module RepCheckCensus =
 /// input and preserves the spec exactly.
 let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, RepSigT>)
                      (resolve: IRType -> IRType)
-                     (owner: string) (funcId: IRId) (groupName: string)
+                     (owner: string) (_funcId: IRId) (groupName: string)
                      (parms: RepParam list) (retTy: IRType)
                      (body: TypedExpr) : CheckVerdict =
     try
@@ -1002,7 +1004,7 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
             let ordered = orderG |> List.map (fun (_, _, n) -> n) |> List.filter (fun n -> closure.Contains n)
             // Record so LATER declarations can rest on it -- single-pass in
             // decl order, no fixpoint (a forward call declines: silence).
-            spec.Sigs.[(gs, funcId)] <- sg
-            spec.Deps.[(gs, funcId)] <- ordered
+            spec.Sigs[(gs, funcId)] <- sg
+            spec.Deps[(gs, funcId)] <- ordered
             spec.Order.Add ((gs, funcId, owner))
             Some { Owner = owner; Group = gs; Signature = sigSummaryT sg; Deps = ordered }

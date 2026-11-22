@@ -3331,7 +3331,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                     | None -> ()
             iterIRExpr (fun e ->
                 match e with
-                | IRIndex (IRVar (id, _), _, _) | IRCurry (IRVar (id, _), _, _) | IRContains (IRVar (id, _), _) -> addChain (Set.singleton id) id
+                | IndexOfNamed (id, _, _, _) | IRCurry (IRVar (id, _), _, _) | IRContains (IRVar (id, _), _) -> addChain (Set.singleton id) id
                 | IRExtent ((IRVar (id, _) as a), dim) when (Core.deferredStaticExtent (VDeferred (a, env)) a dim).IsNone -> addChain (Set.singleton id) id
                 | IRApp (_, args, _) | IRProdSum args -> args |> List.iter (function IRVar (id, _) -> addChain (Set.singleton id) id | _ -> ())
                 | _ -> ()) seedExpr

@@ -239,7 +239,7 @@ let private printDoctorTable (checks: Doctor.CheckResult list) =
 /// BLADE_TOOLCHAIN_FILE points there for the probe's duration. The process
 /// env gets the same updates, so neither source can resurrect a removed key.
 let private verifyAndPersist (updates: (string * string option) list) (persistKeys: (string * string option) list) : int =
-    let priorFileVar = Environment.GetEnvironmentVariable "BLADE_TOOLCHAIN_FILE"
+    let priorFileVar = Knobs.raw Knobs.toolchainFile
     let realPath = Toolchain.activePath ()
     let candidatePath =
         Path.Combine(Path.GetTempPath(), $"blade_setup_candidate_{Process.GetCurrentProcess().Id}.json")
@@ -264,6 +264,17 @@ let private verifyAndPersist (updates: (string * string option) list) (persistKe
         printfn "NOT persisted: the BLAS probe did not pass (%s)" blasRow.Detail
         1
 
+/// The configuration keys bare `blade setup` persists when the environment
+/// supplies them, in the order it reports them. The knob registry marks the
+/// same set `Persisted` (the `knobs` test block checks the two agree).
+let internal persistedToolchainKeys =
+    [ Knobs.openblasDir.Name; Knobs.netcdfDir.Name; Knobs.msmpiBin.Name; Knobs.blas.Name
+      Knobs.blasLink.Name; Knobs.blasInclude.Name; Knobs.lapackLink.Name
+      Knobs.lapackInclude.Name; Knobs.blasFlavor.Name; Knobs.blasPrefer.Name
+      // the runtime pool-retention arm (round-3 A4, gap G52): a policy,
+      // not a machine fact, but the env-wins / file-mirror rule is the same
+      Knobs.poolRetain.Name ]
+
 // ---- modes ----
 
 /// Bare `blade setup`: make today's working env durable. Persists the
@@ -272,15 +283,8 @@ let private verifyAndPersist (updates: (string * string option) list) (persistKe
 /// prints the doctor table so their health is visible. Nothing is invented:
 /// keys the env does not carry are left untouched.
 let private setupPersistCurrent () : int =
-    let keys =
-        [ "OPENBLAS_DIR"; "NETCDF_DIR"; "MSMPI_BIN"; "BLADE_BLAS"
-          "BLADE_BLAS_LINK"; "BLADE_BLAS_INCLUDE"; "BLADE_LAPACK_LINK"
-          "BLADE_LAPACK_INCLUDE"; "BLADE_BLAS_FLAVOR"; "BLADE_BLAS_PREFER"
-          // the runtime pool-retention arm (round-3 A4, gap G52): a policy,
-          // not a machine fact, but the env-wins / file-mirror rule is the same
-          "BLADE_POOL_RETAIN" ]
     let fromEnv =
-        keys
+        persistedToolchainKeys
         |> List.choose (fun k ->
             match Toolchain.getWithOrigin k with
             | Some (v, Toolchain.FromEnv) -> Some (k, Some v)

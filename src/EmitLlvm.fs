@@ -425,7 +425,7 @@ let private computeModuleFacts (m: IRModule) (callables: Map<IRId, IRCallable>) 
                 // A call spells its callee as `IRVar` of a table id, which may
                 // be an ALIAS entry whose id differs from the callable's own
                 // -- so the edge lands on the RESOLVED callable's id.
-                | IRApp (IRVar (fid, _), _, _) ->
+                | CallOfNamed (fid, _, _, _) ->
                     (match Map.tryFind fid callables with
                      | Some target -> outs.Add target.Id |> ignore
                      | None -> ())
@@ -615,7 +615,7 @@ let private computeModuleReads (m: IRModule) (callables: Map<IRId, IRCallable>)
         iterIRExpr
             (fun n ->
                 match n with
-                | IRApp (IRVar (fid, _), _, _) ->
+                | CallOfNamed (fid, _, _, _) ->
                     (match Map.tryFind fid callables with
                      | Some t when List.isEmpty t.Captures -> roots.Add t.Id |> ignore
                      | _ -> ())
@@ -2079,7 +2079,7 @@ let private libmNoFold : Set<string> =
 let private literalIntOf (e: IRExpr) : int64 option =
     match e with
     | IRLit (IRLitInt n) -> Some n
-    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> Some (0L - n)
+    | NegIntLit n -> Some (0L - n)
     | _ -> None
 
 /// Call a shim symbol (declared through shimTable) that returns a value.
@@ -3863,7 +3863,7 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
                 | IRLet (_, v, IRLit IRLitUnit) -> Some v
                 | _ -> None
             (match lastStmt body with
-             | Some (IRAssign (IRIndex (IRVar (b, ArrayElem at), [ _; IRVar (k2, _) ], _), IRVar (sv, svT)))
+             | Some (IRAssign (IndexOfNamed (b, ArrayElem at, [ _; IRVar (k2, _) ], _), IRVar (sv, svT)))
                 when b = entry.BufferId && k2 = vid && sv = entry.StoredVar ->
                  if scalarTyOf at.ElemType <> Some ScF64 then declined entry "the trajectory is not Float64 (v1)"
                  else
@@ -10198,7 +10198,7 @@ and private forcePrivateOperandInputs (c: Ctx) (compExpr: IRExpr) (kernelExpr: I
             isCaptureValue id
             || (match deferredValue id with
                 | Some (IRVar (r, _)) when not (seen.Contains r) -> isMapCapture (seen.Add r) r
-                | Some (IRTupleProj (IRVar (t, _), k, _)) when not (seen.Contains t) ->
+                | Some (ProjOfNamed (t, _, k, _)) when not (seen.Contains t) ->
                     // the tuple parent through its own aliases (`let u = t`)
                     let rec tupleOf (seenT: Set<IRId>) (tid: IRId) =
                         match Map.tryFind tid c.BindingValues with
@@ -10924,7 +10924,7 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     // refuses (the C++ lane takes it). Scalar and array tuple members must
     // fall through to classifyValue: their ordinary call ABI owns scoped
     // cleanup and escaping array results, even when the call is a tuple leaf.
-    | IRApp (IRVar (fid, _), args, retType)
+    | CallOfNamed (fid, _, args, retType)
         when c.Callables.ContainsKey fid && (match stripUnits retType with IRTTuple _ -> true | _ -> false) ->
         let cl = c.Callables.[fid]
         if cl.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{cl.SourceName}'")
@@ -11675,7 +11675,7 @@ let private deferredBindingIds (bindings: IRBinding list) : HashSet<IRId> =
             | IRGuard (_, body) -> resultIsArray || isDeferredExpr body
             | IRSequence elems -> resultIsArray || (elems |> List.exists isDeferredExpr)
             | IRTuple elems -> elems |> List.forall isDeferredExpr
-            | IRTupleProj (IRVar (pid, _), _, _) -> ids.Contains pid || Set.contains pid inner
+            | ProjOfNamed (pid, _, _, _) -> ids.Contains pid || Set.contains pid inner
             | IRVar (srcId, _) -> ids.Contains srcId || Set.contains srcId inner
             | _ -> false
     for b in bindings do
@@ -12338,7 +12338,7 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
         // reads g after f ran.
         let orderedRoot =
             match b.Value with
-            | IRApp (IRVar (fid, _), args, _) when c.Callables.ContainsKey fid -> callArgsNeedOrder c args
+            | CallOfNamed (fid, _, args, _) when c.Callables.ContainsKey fid -> callArgsNeedOrder c args
             | IRTuple elems -> tupleNeedsMemberOrderLl c elems
             | _ -> false
         (match b.Value with

@@ -89,14 +89,14 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 
 /// The `-march=` fragment (leading space included, or "" when disabled).
 let private marchFlag () =
-    match System.Environment.GetEnvironmentVariable("BLADE_MARCH") with
+    match Knobs.raw Knobs.march with
     | null | "" -> " -march=native"
     | v when v.Trim().ToLowerInvariant() = "off" -> ""
     | v -> $" -march={v.Trim()}"
 
 /// The `-ffp-contract=` fragment (leading space included).
 let private fpContractFlag () =
-    match System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT") with
+    match Knobs.raw Knobs.fpContract with
     | null | "" -> " -ffp-contract=fast"
     | v -> $" -ffp-contract={v.Trim()}"
 
@@ -117,7 +117,13 @@ let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno -
 /// Whether `blade run` / `compile` / `emit` try the direct LLVM back end first.
 /// UNSET IS THE DEFAULT AND MEANS OFF: with the variable absent every lane in
 /// the compiler behaves byte-for-byte as it did before the back end existed.
-let llvmEnabled () : bool = Toolchain.envFlag "BLADE_LLVM" false
+let llvmEnabled () : bool = Knobs.flag Knobs.llvm false
+
+/// BLADE_MEMCHECK_CXX, the clang++ the memcheck profile tries before the
+/// MSYS2 clang64 default: the raw value, untrimmed, when it is not empty.
+let internal memcheckCxxOverride () : string option =
+    let overridden = Knobs.raw Knobs.memcheckCxx
+    if String.IsNullOrEmpty overridden then None else Some overridden
 
 /// Optimization flags for the clang lane. `-O3` plus the SAME `BLADE_MARCH`
 /// mapping the g++ lane uses, so an A/B between the two back ends compares
@@ -286,7 +292,7 @@ let capabilities = lazy (detectCapabilities ())
 /// PATH, then the MSYS2 clang64 root the memcheck lane already depends on.
 /// A function, not a value: the override is an environment variable.
 let resolveClang () : string option =
-    match System.Environment.GetEnvironmentVariable("BLADE_LLVM_CLANG") with
+    match Knobs.raw Knobs.llvmClang with
     | null | "" ->
         if clangPathProbe.Value then Some "clang"
         else
@@ -509,8 +515,9 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
             // -fbracket-depth=1024. BLADE_MEMCHECK_CXX overrides the probe
             // for a non-default clang location.
             let clangxx =
-                let overridden = Environment.GetEnvironmentVariable "BLADE_MEMCHECK_CXX"
-                [ if not (String.IsNullOrEmpty overridden) then yield overridden
+                [ match memcheckCxxOverride () with
+                  | Some overridden -> yield overridden
+                  | None -> ()
                   yield @"C:\msys64\clang64\bin\clang++.exe" ]
                 |> List.tryFind File.Exists
             match clangxx with
@@ -590,23 +597,22 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
 ///   an ABSOLUTE path             -> that directory
 ///   anything else                -> disabled (an unreadable setting must not
 ///                                   silently serve stale binaries)
-let private exeCacheDir () : string option =
+let internal exeCacheDir () : string option =
     let defaultDir () =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "exe-cache"))
-    match Toolchain.envSwitch "BLADE_EXE_CACHE" with
-    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
-    | Toolchain.SwitchOff -> None
-    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
-    | Toolchain.SwitchOther _ -> None
+    match Knobs.directory Knobs.exeCache true with
+    | Knobs.Parse.DefaultDirectory -> defaultDir ()
+    | Knobs.Parse.NoDirectory -> None
+    | Knobs.Parse.AtDirectory t -> Some t
 
 /// `[cache] hit/store <hash8>` tracing on stderr. `compileCppWithExtraSource`
 /// takes no verbose parameter (it is reached from the CLI, the REPL and five
 /// test blocks), so the flag travels as a process-level env pin -- the same
 /// spelling `--memcheck` uses for BLADE_MEMCHECK. `blade run --verbose` sets it
 /// during argument parsing (Cli.fs).
-let private exeCacheVerbose () = Toolchain.envFlag "BLADE_EXE_CACHE_VERBOSE" false
+let internal exeCacheVerbose () = Knobs.flag Knobs.exeCacheVerbose false
 
 /// The compiler's identity: resolved g++ path + the first line of
 /// `g++ --version`. Memoized for the process (one subprocess, ~50-170 ms, and
@@ -855,11 +861,10 @@ let tileCacheDir () : string option =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "tile-cache"))
-    match Toolchain.envSwitch "BLADE_TILE_CACHE" with
-    | Toolchain.SwitchUnset | Toolchain.SwitchOff -> None
-    | Toolchain.SwitchOn -> defaultDir ()
-    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
-    | Toolchain.SwitchOther _ -> None
+    match Knobs.directory Knobs.tileCache false with
+    | Knobs.Parse.DefaultDirectory -> defaultDir ()
+    | Knobs.Parse.NoDirectory -> None
+    | Knobs.Parse.AtDirectory t -> Some t
 
 /// The exe cache's caps, applied to tile files: oldest-mtime first, down to
 /// 3/4 of whichever cap tripped. BOTH caps matter and for the exe cache's
@@ -1040,16 +1045,15 @@ let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : un
 // the harnesses that compare a verbose run's stderr already strip.
 // ---------------------------------------------------------------------------
 
-let private pchCacheDir () : string option =
+let internal pchCacheDir () : string option =
     let defaultDir () =
         let root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
         if String.IsNullOrEmpty root then None
         else Some (Path.Combine(root, "Blade", "pch-cache"))
-    match Toolchain.envSwitch "BLADE_PCH" with
-    | Toolchain.SwitchUnset | Toolchain.SwitchOn -> defaultDir ()
-    | Toolchain.SwitchOff -> None
-    | Toolchain.SwitchOther t when Path.IsPathRooted t -> Some t
-    | Toolchain.SwitchOther _ -> None
+    match Knobs.directory Knobs.pch true with
+    | Knobs.Parse.DefaultDirectory -> defaultDir ()
+    | Knobs.Parse.NoDirectory -> None
+    | Knobs.Parse.AtDirectory t -> Some t
 
 /// One line of a leading block: an include and nothing else but a `//` comment.
 let private leadingIncludeRx =
@@ -1300,7 +1304,7 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
         let netcdfFlags =
             if not needsNetcdf then ""
             else
-                (match Toolchain.get "NETCDF_DIR" with
+                (match Toolchain.get Knobs.netcdfDir.Name with
                  | None -> " -lnetcdf"
                  | Some dir ->
                      let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
@@ -1950,7 +1954,7 @@ let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (
 /// dependency set win. Read per call, like the other environment gates.
 let private prependNetcdfBin (psi: ProcessStartInfo) =
     if Platforms.os = Platforms.Windows then
-        match Toolchain.get "NETCDF_DIR" with
+        match Toolchain.get Knobs.netcdfDir.Name with
         | Some dir when dir <> "" ->
             let bin = Path.Combine(dir, "bin")
             if Directory.Exists bin then
@@ -2084,8 +2088,8 @@ let mpiexecPath : Lazy<string option> =
             try
                 let v =
                     match scope with
-                    | Some s -> Environment.GetEnvironmentVariable("MSMPI_BIN", s)
-                    | None -> (match Toolchain.get "MSMPI_BIN" with Some d -> d | None -> null)
+                    | Some s -> Environment.GetEnvironmentVariable(Knobs.msmpiBin.Name, s)
+                    | None -> (match Toolchain.get Knobs.msmpiBin.Name with Some d -> d | None -> null)
                 match v with
                 | null | "" -> None
                 | d -> Some (Path.Combine(d, mpiexecName))
