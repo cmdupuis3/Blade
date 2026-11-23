@@ -170,6 +170,85 @@ let recordGroupView (subject: string) (outcome: Blade.Effects.DecisionOutcome) (
           Span = declSpanOf subject; Subject = subject
           Outcome = outcome; Evidence = evidence }
 
+// ---- the view's admission, one named check per condition (cleanup K9 pilot) --
+// Each check answers Ok (what the later checks read) or Error (the decline
+// text: the first one is the verdict). `groupVerdict` below runs them in
+// order in one `admission { }` block.
+
+let private plainRank1 (t: IRType) : (IRType * int64) option =
+    match stripUnits t with
+    | ArrayElem at when not at.IsVirtual ->
+        match at.IndexTypes with
+        | [ ix ] when ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty ->
+            (match ix.Extent with IRLit (IRLitInt n) -> Some (stripUnits at.ElemType, n) | _ -> None)
+        | _ -> None
+    | _ -> None
+
+// The inline operands forceDeferredArrayInput materializes into a FRESH
+// private temporary: a map (deferred or `|> compute`d). An inline compute
+// of a NAME (`a |> compute` emits `Array<T, 1> tmp = a;`, sharing a's
+// data), a bind, a parallel / fusion / functor form or any other inline
+// value is not proved private.
+let private freshInline (v: IRExpr) : bool =
+    match v with
+    | IRApplyCombinator _ | IRComposeApply _ -> true
+    | IRCompute _ -> isFreshPoolFormWith (fun _ -> false) v
+    | _ -> false
+
+let private gvNotMpi (hasMpi: bool) : Result<unit, string> =
+    require (not hasMpi) "an MPI build (slab-distributed storage is not audited)"
+
+let private gvNotCuda (hasCuda: bool) : Result<unit, string> =
+    require (not hasCuda) "the module holds a CUDA kernel (device copies of the rows are not audited)"
+
+/// The values' (element, extent): a plain dense rank-1 array with a literal extent.
+let private gvValuesPlainRank1 (vals: IRExpr) : Result<IRType * int64, string> =
+    match plainRank1 (typeOf vals) with
+    | None -> Error "the values are not a plain dense rank-1 array with a literal extent"
+    | Some (velem, n) -> Ok (velem, n)
+
+let private gvElementMatches (g: IRBinding) (velem: IRType) : Result<unit, string> =
+    let gelemOk =
+        match stripUnits g.Type with
+        | ArrayElem gat -> stripUnits gat.ElemType = velem
+        | _ -> false
+    require gelemOk "the grouped array's element type is not the values' element type"
+
+let private gvOffsetsPartition (offsets: int64 list) (n: int64) : Result<unit, string> =
+    let offsetsOk =
+        not offsets.IsEmpty && offsets.Head = 0L && List.last offsets = n
+        && (offsets |> List.pairwise |> List.forall (fun (x, y) -> x <= y))
+    require offsetsOk "the run boundaries are not a static partition of the source axis from 0 to its extent"
+
+/// The values' provenance (how, and the alias chain the closure seeds with).
+let private gvStoredAndFresh (byId: Map<IRId, IRBinding>) (indexOf: Map<IRId, int>)
+                             (fresh: IRBinding -> Result<string * IRBinding list, string>)
+                             (g: IRBinding) (vals: IRExpr) : Result<string * Set<IRId>, string> =
+    match vals with
+    | IRVar (vid, _) ->
+        (match Map.tryFind vid byId, Map.tryFind vid indexOf, Map.tryFind g.Id indexOf with
+         | Some vb, Some vi, Some gi when vi < gi ->
+             (match fresh vb with
+              | Ok (how, chain) -> Ok ($"the values `{vb.Name}`: {how}", chain |> List.map (fun c -> c.Id) |> Set.ofList)
+              | Error why -> Error $"the values are not proved stored and fresh: {why}")
+         | _ -> Error "the values are not an earlier top-level binding")
+    | v when freshInline v -> Ok ("the values: an inline map materialized into a private temporary named by nothing else", Set.empty)
+    | _ -> Error "the values are an inline form not proved to materialize a private temporary (an inline `|> compute` of a name, a bind or a parallel form may share storage)"
+
+let private gvNoLifetimeRelease (byId: Map<IRId, IRBinding>) (released: Lazy<Set<IRId>>) : Result<unit, string> =
+    // Any module binding a lifetime-region release names --
+    // not only the seeds: every closure member that holds
+    // storage is a module binding (fail closed; regions
+    // release their own local pools only).
+    let rel = Set.intersect (byId |> Map.keys |> Set.ofSeq) (released.Force())
+    require rel.IsEmpty "an explicit lifetime-region release (IRReleasePools) names a module binding"
+
+/// The never-written closure over the seeds: Ok why, or the snapshot decline.
+let private gvNeverWritten (closure: Lazy<Set<IRId> -> Result<string, string>>) (seeds: Set<IRId>) : Result<string, string> =
+    match closure.Force() seeds with
+    | Error why -> Error $"the copy keeps the grouped rows a snapshot: {why}"
+    | Ok why -> Ok why
+
 /// Plan the views. Every module binding `let g = group_by(v, seg)` whose
 /// grouping is a structural one (IRSegments or IRSegmentsGrid) gets a verdict;
 /// a key grouping gets none (it permutes its members: no candidate).
@@ -192,76 +271,27 @@ let planStructuralGroupView (programFuncs: IRCallable list) (foreignRefs: Set<IR
             for b in arr do visit b.Value
             for f in callables do visit f.Body
             s)
-    let plainRank1 (t: IRType) : (IRType * int64) option =
-        match stripUnits t with
-        | ArrayElem at when not at.IsVirtual ->
-            match at.IndexTypes with
-            | [ ix ] when ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty ->
-                (match ix.Extent with IRLit (IRLitInt n) -> Some (stripUnits at.ElemType, n) | _ -> None)
-            | _ -> None
-        | _ -> None
-    // The inline operands forceDeferredArrayInput materializes into a FRESH
-    // private temporary: a map (deferred or `|> compute`d). An inline compute
-    // of a NAME (`a |> compute` emits `Array<T, 1> tmp = a;`, sharing a's
-    // data), a bind, a parallel / fusion / functor form or any other inline
-    // value is not proved private.
-    let freshInline (v: IRExpr) : bool =
-        match v with
-        | IRApplyCombinator _ | IRComposeApply _ -> true
-        | IRCompute _ -> isFreshPoolFormWith (fun _ -> false) v
-        | _ -> false
     let hasCuda = callables |> List.exists (fun f -> f.IsCudaKernel)
     let hasMpi = callables |> List.exists (fun f -> f.IsMpiParallel)
     let groupVerdict (g: IRBinding) (vals: IRExpr) (segB: IRBinding) : Result<string list, string> =
         match segB.Value with
         | IRSegmentsGrid _ -> Error "a tile grouping (segments(C0, C1)): a tile is a rectangular window of the row-major source, not a run of it"
         | IRSegments (offsets, _) ->
-            if hasMpi then Error "an MPI build (slab-distributed storage is not audited)"
-            elif hasCuda then Error "the module holds a CUDA kernel (device copies of the rows are not audited)"
-            else
-            match plainRank1 (typeOf vals), plainRank1 g.Type with
-            | None, _ -> Error "the values are not a plain dense rank-1 array with a literal extent"
-            | Some (velem, n), gt ->
-                let gelemOk =
-                    match stripUnits g.Type with
-                    | ArrayElem gat -> stripUnits gat.ElemType = velem
-                    | _ -> false
-                ignore gt
-                let offsetsOk =
-                    not offsets.IsEmpty && offsets.Head = 0L && List.last offsets = n
-                    && (offsets |> List.pairwise |> List.forall (fun (x, y) -> x <= y))
-                if not gelemOk then Error "the grouped array's element type is not the values' element type"
-                elif not offsetsOk then Error "the run boundaries are not a static partition of the source axis from 0 to its extent"
-                else
-                let source : Result<string * Set<IRId>, string> =
-                    match vals with
-                    | IRVar (vid, _) ->
-                        (match Map.tryFind vid byId, Map.tryFind vid indexOf, Map.tryFind g.Id indexOf with
-                         | Some vb, Some vi, Some gi when vi < gi ->
-                             (match fresh vb with
-                              | Ok (how, chain) -> Ok ($"the values `{vb.Name}`: {how}", chain |> List.map (fun c -> c.Id) |> Set.ofList)
-                              | Error why -> Error $"the values are not proved stored and fresh: {why}")
-                         | _ -> Error "the values are not an earlier top-level binding")
-                    | v when freshInline v -> Ok ("the values: an inline map materialized into a private temporary named by nothing else", Set.empty)
-                    | _ -> Error "the values are an inline form not proved to materialize a private temporary (an inline `|> compute` of a name, a bind or a parallel form may share storage)"
-                match source with
-                | Error why -> Error why
-                | Ok (how, chain) ->
-                    let seeds = Set.add g.Id chain
-                    // Any module binding a lifetime-region release names --
-                    // not only the seeds: every closure member that holds
-                    // storage is a module binding (fail closed; regions
-                    // release their own local pools only).
-                    let rel = Set.intersect (byId |> Map.keys |> Set.ofSeq) (released.Force())
-                    if not rel.IsEmpty then Error "an explicit lifetime-region release (IRReleasePools) names a module binding"
-                    else
-                    match closure.Force() seeds with
-                    | Error why -> Error $"the copy keeps the grouped rows a snapshot: {why}"
-                    | Ok why ->
-                        Ok [ $"rows view the source's storage: {offsets.Length - 1} contiguous run(s) over {n} cells, identity position accessor (no pool, no copy)"
-                             how
-                             why
-                             "main's top level: no ordinary allocation is scope-freed, and no lifetime-region release names a member" ]
+            admission {
+                do! gvNotMpi hasMpi
+                do! gvNotCuda hasCuda
+                let! (velem, n) = gvValuesPlainRank1 vals
+                do! gvElementMatches g velem
+                do! gvOffsetsPartition offsets n
+                let! (how, chain) = gvStoredAndFresh byId indexOf fresh g vals
+                let seeds = Set.add g.Id chain
+                do! gvNoLifetimeRelease byId released
+                let! why = gvNeverWritten closure seeds
+                return
+                    [ $"rows view the source's storage: {offsets.Length - 1} contiguous run(s) over {n} cells, identity position accessor (no pool, no copy)"
+                      how
+                      why
+                      "main's top level: no ordinary allocation is scope-freed, and no lifetime-region release names a member" ] }
         | _ -> Error "the grouping is not a structural one"
     let disabled (v: Result<string list, string>) =
         match v with

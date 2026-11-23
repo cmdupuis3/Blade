@@ -29,6 +29,16 @@ let private streamedReadOf (modul: IRModule) (streamed: Map<Blade.Types.IRId, Pr
         | _ -> ()) value
     found
 
+/// The SEGMENT-STREAMING decision (docs/plans/structural/07 §3.4; the
+/// principle the user stated: a computation over a streamed, segmented
+/// variable is examined as a whole before `compute`, and the compiler --
+/// not a task graph -- chooses between reading the store one run at a
+/// time and materializing). Today the choice is by consumer SHAPE and is
+/// recorded, not costed: a fold walks the store block by block in storage
+/// order (bitwise the flat fold), a `group_by` under a structural grouping
+/// reads one run per group, a key grouping needs the whole variable. The
+/// emission lives in codegen; this pass only says what it will do, so
+/// `blade plan` shows it.
 let internal recordSegmentStreaming (modul: IRModule) : unit =
     let streamed =
         modul.ProviderReads

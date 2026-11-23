@@ -10,7 +10,6 @@ open Blade.OptimizeGates
 open Blade.OptimizeAnalysis
 open Blade.OptimizeStorage
 
-
 // --- The row-owned pull scatter's five-party audit (round 3, D-P3) ---------
 //
 // The C++ lane's rank-3 ordered orbit scatter may run its LEAF stage on a

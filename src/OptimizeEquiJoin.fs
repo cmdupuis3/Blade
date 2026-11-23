@@ -128,6 +128,269 @@ let joinChooseDirect (m: int64) (lo: int64) (hi: int64) (positional: bool) : boo
         let limit = if uint64 m * 4UL > 4096UL then uint64 m * 4UL else 4096UL
         span < limit
 
+// ---- the join's admission, one named check per condition (cleanup K9) -------
+// Each check answers Ok (what the later checks read) or Error (the decline
+// text: the first one is the verdict). `admit` in planEquiJoin runs them in
+// order in one `admission { }` block. Where the plan computes several
+// conditions before it tests any of them (the two shapes, the three kernels,
+// the two key classes, the three parties), `admit` still computes them
+// together, in the same order, and then tests them in the same order.
+
+let private ejIndexOf (arr: IRBinding[]) (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+let private ejWrote (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (e: IRExpr) = (facts e).MayWrite || writes e
+let private ejAssignsTo (id: IRId) (e: IRExpr) =
+    let mutable hit = false
+    iterIRExpr (fun n ->
+        match n with
+        | IRAssign (target, _) when Set.contains id (collectVarRefsIR target) -> hit <- true
+        | _ -> ()) e
+    hit
+let private ejAssignedAnywhere (modul: IRModule) (arr: IRBinding[]) (id: IRId) =
+    (arr |> Array.exists (fun b -> bindingPayload modul b |> List.exists (ejAssignsTo id)))
+    || (modul.Functions |> List.exists (fun f -> ejAssignsTo id f.Body))
+let private ejPayloadWrites (modul: IRModule) (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (b: IRBinding) =
+    bindingPayload modul b |> List.exists (ejWrote facts writes)
+let private isParamRef (p: IRParam) (e: IRExpr) =
+    match e with
+    | IRVar (v, _) -> v = p.VarId
+    | IRParam (_, i, _) -> i = p.Index
+    | _ -> false
+let private nodeName (e: IRExpr) = (Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(e, typeof<IRExpr>) |> fst).Name
+// An outer product over exactly two plain operands, possibly behind the
+// `|> compute` the user wrote or the trivial `let t = apply; t` a lift
+// may wrap it in. Anything else (a lifted statement ahead of the apply,
+// a zip, a reynolds kernel, a rank-raising kernel) is not the shape.
+let rec private peelApply (e: IRExpr) : ApplyInfo option =
+    match e with
+    | IRCompute inner -> peelApply inner
+    | IRLet (t, v, IRVar (t', _)) when t = t' -> peelApply v
+    | IRApplyCombinator info -> Some info
+    | _ -> None
+let private outerOperands (info: ApplyInfo) : Result<IRExpr * IRExpr, string> =
+    if info.IsCoIteration then Error "a co-iteration (`zip`), not an outer product"
+    elif info.HasReynolds then Error "a reynolds kernel"
+    elif info.KernelOutputRank <> 0 then Error "a kernel with an array-valued cell"
+    else
+    match info.Arrays with
+    | [ (IRVar _ as l); (IRVar _ as r) ] -> Ok (l, r)
+    | [ _; _ ] -> Error "an outer product whose operands are not named stored arrays"
+    | xs -> Error $"an outer product over {xs.Length} operand(s) (v1 joins exactly two axes)"
+let private ejNameOfVar (arr: IRBinding[]) (e: IRExpr) =
+    match e with
+    | IRVar (id, _) -> (match ejIndexOf arr id with Some i -> arr.[i].Name | None -> $"v{id}")
+    | _ -> "?"
+let private ejAxisOf (arr: IRBinding[]) (e: IRExpr) : IRIndexType option =
+    match e with
+    | IRVar (id, _) ->
+        match ejIndexOf arr id with
+        | Some i ->
+            (match stripUnits arr.[i].Type with
+             | ArrayElem a when not a.IsVirtual ->
+                (match a.IndexTypes with
+                 | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1 && ix.Symmetry = SymNone -> Some ix
+                 | _ -> None)
+             | _ -> None)
+        | None -> None
+    | _ -> None
+// Index IDENTITY, never extent: the same named index type (its tag) or
+// the same index record.
+let private sameAxis (a: IRIndexType) (b: IRIndexType) =
+    (a.Tag.IsSome && a.Tag = b.Tag) || a.Id = b.Id
+let private ejElemOfVar (arr: IRBinding[]) (e: IRExpr) : IRType option =
+    match e with
+    | IRVar (id, _) ->
+        (match ejIndexOf arr id with
+         | Some i -> (match stripUnits arr.[i].Type with ArrayElem a -> Some (stripUnits a.ElemType) | _ -> None)
+         | None -> None)
+    | _ -> None
+// A positional index tag's static extent, through aliases; None for an
+// EnumIdx (its cells hold positions in the enumeration) or an unknown tag.
+let rec private ejPositionalExtent (modul: IRModule) (fuel: int) (tag: string) : Result<int64, string> =
+    if fuel <= 0 then Error $"the index tag `{tag}` does not resolve"
+    else
+    match modul.Types |> List.tryPick (fun td ->
+            match td with
+            | IRTDIndexType (n, ix) when n = tag -> Some (Choice1Of3 ix)
+            | IRTDEnumIdx (n, _, _) when n = tag -> Some (Choice2Of3 ())
+            | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t2)) when n = tag && t2 <> tag -> Some (Choice3Of3 t2)
+            | _ -> None) with
+    | Some (Choice1Of3 ix) ->
+        (match ix.Extent with
+         | IRLit (IRLitInt k) when k > 0L && ix.Rank = 1 && ix.IxKind = IxKPlain -> Ok k
+         | _ -> Error $"the positional key type `{tag}` has no static extent")
+    | Some (Choice2Of3 ()) -> Error $"an EnumIdx key `{tag}` (its cells hold positions in the enumeration; v1.1)"
+    | Some (Choice3Of3 t2) -> ejPositionalExtent modul (fuel - 1) t2
+    | None -> Error $"the index tag `{tag}` does not resolve to a declared index type"
+/// The key's class: Ok None = plain Int64, Ok (Some K) = positional Idx<K>.
+let private ejKeyClass (modul: IRModule) (arr: IRBinding[]) (e: IRExpr) : Result<int64 option, string> =
+    match ejElemOfVar arr e with
+    | Some (IRTScalar ETInt64) -> Ok None
+    | Some (IRTIdxTagged (IRTScalar ETInt64, IRefNamed tag)) -> ejPositionalExtent modul 16 tag |> Result.map Some
+    | Some (IRTIdxTagged (IRTScalar ETInt64, IRefAnon (_, IRLit (IRLitInt k)))) when k > 0L -> Ok (Some k)
+    | Some (IRTScalar (ETFloat64 | ETFloat32)) -> Error $"float keys (`{ejNameOfVar arr e}`): v1 joins exact integer keys only"
+    | Some (IRTScalar ETInt32) -> Error $"Int32 keys (`{ejNameOfVar arr e}`): v1 joins Int64 keys"
+    | Some (IRTScalar ETBool) -> Error $"Bool keys (`{ejNameOfVar arr e}`): v1 joins Int64 keys"
+    | Some (IRTScalar ETString) -> Error $"String keys (`{ejNameOfVar arr e}`): v1 joins Int64 keys"
+    | Some _ -> Error $"the key `{ejNameOfVar arr e}` is not an Int64 (plain or positional) element (v1 joins Int64 keys)"
+    | None -> Error $"the key `{ejNameOfVar arr e}` is not a top-level array binding"
+let private (|Fn|_|) (funcs: Map<IRId, IRCallable>) (e: IRExpr) = resolveCallableIn funcs (fst (peelReynolds e))
+let private requests (c: IRCallable) = c.IsOmpParallel || c.IsCudaKernel || c.IsMpiParallel
+
+/// The dense operand: an outer product over two named arrays, written in place.
+let private ejDenseShape (arr: IRBinding[]) (dense: IRExpr) : Result<ApplyInfo * (IRExpr * IRExpr), string> =
+    match dense with
+    | IRVar _ -> Error $"the dense operand is the named array `{ejNameOfVar arr dense}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 array) stays stored (bench protocol), so no N x M representation can disappear"
+    | _ ->
+    match peelApply dense with
+    | None -> Error $"the dense operand is not an outer product written in place (it is {nodeName dense})"
+    | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops)) |> Result.mapError (fun why -> $"the dense operand is {why}")
+
+/// The mask: an inline `mask(..)` whose source is an outer product written in place.
+let private ejMaskShape (arr: IRBinding[]) (mask: IRExpr) : Result<ApplyInfo * (IRExpr * IRExpr) * IRExpr, string> =
+    match mask with
+    | IRVar _ -> Error $"the mask is the named array `{ejNameOfVar arr mask}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 mask) stays stored (bench protocol), so no N x M representation can disappear"
+    | IRMask (src, pred) ->
+        (match peelApply src with
+         | None -> Error $"the mask's source is not an outer product written in place (it is {nodeName src})"
+         | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops, pred)) |> Result.mapError (fun why -> $"the mask's source is {why}"))
+    | other -> Error $"the mask is not an inline `mask(..)` (it is {nodeName other})"
+
+/// The mask predicate: the identity, write-free and capture-free.
+let private ejPredicate (funcs: Map<IRId, IRCallable>) (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (pred: IRExpr) : Result<unit, string> =
+    match pred with
+    | Fn funcs pc when ejWrote facts writes pc.Body -> Error "the mask predicate may write (the shared write analysis): the as-written program evaluates it on every pair"
+    | Fn funcs pc ->
+        (match pc.Params, pc.Captures with
+         | [ p ], [] when isParamRef p pc.Body -> Ok ()
+         | [ _ ], [] -> Error "a non-identity mask predicate (v1 takes `lambda(e) -> e` over the key-equality pool)"
+         | _, _ :: _ -> Error "the mask predicate captures a value"
+         | _ -> Error "the mask predicate is not a one-parameter function")
+    | _ -> Error "the mask predicate does not resolve to a callable"
+
+/// The key kernel: `l == r`, or `l == r` with residual conjuncts that are pure
+/// total scalars of the two key cells; write-free and capture-free.
+let private ejKeyKernel (funcs: Map<IRId, IRCallable>) (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (mInfo: ApplyInfo) : Result<unit, string> =
+    match mInfo.Kernel with
+    | Fn funcs ec when ejWrote facts writes ec.Body -> Error "the key kernel may write (the shared write analysis): the as-written program evaluates it on every pair"
+    | Fn funcs ec ->
+        (match ec.Params, ec.Captures with
+         | _, _ :: _ -> Error "the key kernel captures a value"
+         | [ p0; p1 ], [] ->
+            let isKeyEq (e: IRExpr) =
+                match e with
+                | IRBinOp (_, IREq, x, y, _) -> (isParamRef p0 x && isParamRef p1 y) || (isParamRef p1 x && isParamRef p0 y)
+                | _ -> false
+            let rec conjuncts (e: IRExpr) =
+                match e with
+                | IRBinOp (_, IRAnd, a, b, _) -> conjuncts a @ conjuncts b
+                | _ -> [ e ]
+            (match ec.Body with
+             | b when isKeyEq b -> Ok ()
+             | IRBinOp (_, IRAnd, _, _, _) as b ->
+                // round 4 wave 4 D3 (ST15): `l == r` with RESIDUAL conjuncts.
+                // The as-written mask pass evaluates the whole kernel, left
+                // to right with short circuit, on every pair; the probe
+                // evaluates it on the MATCHED pairs only, so every residual
+                // conjunct must be a pure total scalar of the two key cells
+                // (skipping it on a non-matching pair has no effect).
+                let cs = conjuncts b
+                if not (cs |> List.exists isKeyEq) then Error "the key kernel is not the equality `l == r` of its two parameters (no conjunct is that equality)"
+                elif not (totalScalarOver ec.Params b) then Error "a residual conjunct of the key kernel is not a pure, total scalar of the two key cells (the totalScalar whitelist): the as-written mask pass evaluates it on pairs the probe skips"
+                else Ok ()
+             | _ -> Error "the key kernel is not the equality `l == r` of its two parameters")
+         | _ -> Error "the key kernel is not a two-parameter function")
+    | _ -> Error "the key kernel does not resolve to a callable"
+
+/// The payload kernel pk: a pure, total, capture-free scalar of its two cells.
+let private ejPayloadKernel (funcs: Map<IRId, IRCallable>) (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (dInfo: ApplyInfo) : Result<IRCallable, string> =
+    match dInfo.Kernel with
+    | Fn funcs pk when ejWrote facts writes pk.Body ->
+        Error "the payload kernel pk may write (the shared write analysis, Optimize.scheduleMayWriteIn): the as-written program evaluates it on EVERY pair, so skipping the non-matching ones would drop writes -- the six passes run as written"
+    | Fn funcs pk ->
+        (match pk.Params, pk.Captures with
+         | _, _ :: _ -> Error "the payload kernel captures a value (v1: a pure total scalar of its two cells)"
+         | [ _; _ ], [] when not (totalScalarOver pk.Params pk.Body) ->
+            Error "the payload kernel is not a pure, total scalar of its two cells (the totalScalar whitelist: no call, no integer `/` `%` `^`, no cast)"
+         | [ _; _ ], [] -> Ok pk
+         | _ -> Error "the payload kernel is not a two-parameter function")
+    | _ -> Error "the payload kernel does not resolve to a callable"
+
+/// The axes: each key shares one nominal axis with its payload (index identity, not extent).
+let private ejAxes (arr: IRBinding[]) (a0: IRExpr) (a1: IRExpr) (b0: IRExpr) (b1: IRExpr) : Result<unit, string> =
+    match ejAxisOf arr a0, ejAxisOf arr a1, ejAxisOf arr b0, ejAxisOf arr b1 with
+    | Some l0, Some l1, Some r0, Some r1 ->
+        if not (sameAxis l0 l1) then Error $"the left key `{ejNameOfVar arr a0}` and the left payload `{ejNameOfVar arr a1}` do not share one nominal axis (index identity, not extent)"
+        elif not (sameAxis r0 r1) then Error $"the right key `{ejNameOfVar arr b0}` and the right payload `{ejNameOfVar arr b1}` do not share one nominal axis (index identity, not extent)"
+        else Ok ()
+    | _ -> Error "a source is not a stored rank-1 array over one plain axis"
+
+/// The sources: bound before J, proved stored, never assigned (through their alias chains).
+let private ejSources (modul: IRModule) (arr: IRBinding[]) (storedProof: IRBinding -> Result<string * IRBinding list, string>)
+                      (ji: int) (jName: string) (sources: IRExpr list) : Result<unit, string> =
+    let sourceWhy =
+        sources |> List.tryPick (fun s ->
+            match s with
+            | IRVar (sid, _) ->
+                (match ejIndexOf arr sid with
+                 | None -> Some $"the source `{ejNameOfVar arr s}` is not a top-level binding the write analysis can see"
+                 | Some si when si >= ji -> Some $"the source `{arr.[si].Name}` is bound after `{jName}`"
+                 | Some si ->
+                    match storedProof arr.[si] with
+                    | Error why -> Some $"the source `{arr.[si].Name}` is not proved stored: {why}"
+                    | Ok (_, chain) ->
+                        match chain |> List.tryFind (fun c -> ejAssignedAnywhere modul arr c.Id) with
+                        | Some c -> Some $"the source `{c.Name}` (an alias chain of `{arr.[si].Name}`) is assigned in the program"
+                        | None -> None)
+            | _ -> Some "a source is not a named binding")
+    match sourceWhy with
+    | Some why -> Error why
+    | None -> Ok ()
+
+/// J itself is never assigned.
+let private ejNotAssigned (modul: IRModule) (arr: IRBinding[]) (jb: IRBinding) : Result<unit, string> =
+    if ejAssignedAnywhere modul arr jb.Id then Error $"`{jb.Name}` is assigned in the program" else Ok ()
+
+/// equiJoinAdmits, the producers: the sources' alias chains write nothing in any payload.
+let private ejProducerParty (modul: IRModule) (arr: IRBinding[]) (storedProof: IRBinding -> Result<string * IRBinding list, string>)
+                            (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (sources: IRExpr list) : Result<string, string> =
+    let chains =
+        sources |> List.collect (fun s ->
+            match s with
+            | IRVar (sid, _) ->
+                (match ejIndexOf arr sid with
+                 | Some i -> (match storedProof arr.[i] with Ok (_, ch) -> ch | Error _ -> [ arr.[i] ])
+                 | None -> [])
+            | _ -> [])
+        |> List.distinctBy (fun b -> b.Id)
+    let srcNames = sources |> List.map (fun s -> $"`{ejNameOfVar arr s}`") |> String.concat ", "
+    match chains |> List.tryFind (ejPayloadWrites modul facts writes) with
+    | Some b -> Error $"the producer `{b.Name}` may write (its initializer or side-table payload, through the shared write analysis)"
+    | None -> Ok $"producers {srcNames}: proved stored at their own sites (storedArrayProof, through their alias chains), never assigned, no write in any payload"
+
+/// equiJoinAdmits, the producer kernels: no write, no team or device request.
+let private ejKernelParty (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (ec: IRCallable) (pc: IRCallable) (pk: IRCallable) : Result<string, string> =
+    let ks = [ ("the key kernel `==`", ec); ("the identity predicate", pc); ("the payload kernel pk", pk) ]
+    match ks |> List.tryPick (fun (what, c) -> if ejWrote facts writes c.Body then Some $"{what} may write" elif requests c then Some $"{what} requests a thread team or a device" else None) with
+    | Some why -> Error why
+    | None -> Ok "producer kernels (`==`, the identity predicate, pk): pure, total scalars (the totalScalar whitelist), capture-free, no write, no team or device request -- the skipped evaluations (`==` on every pair, pk on every non-matching pair) have no effect"
+
+/// equiJoinAdmits, the consumer: J's whole payload writes nothing.
+let private ejConsumerParty (modul: IRModule) (facts: IRExpr -> CseFacts) (writes: IRExpr -> bool) (jb: IRBinding) : Result<string, string> =
+    if ejPayloadWrites modul facts writes jb then Error $"`{jb.Name}`'s payload (its value or its compound operands) may write"
+    else Ok $"consumer `{jb.Name}`: its whole payload (value and both compound operands) writes nothing; its stored compact buffer is what every consumer reads, each at its own site"
+
+/// The first party that declines, in party order.
+let private ejParties (parties: Result<string, string> list) : Result<unit, string> =
+    match parties |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
+    | Some why -> Error why
+    | None -> Ok ()
+
+/// The demand census's verdict, as the plan's decline text.
+let private ejDemand (census: Result<'a, string>) : Result<'a, string> =
+    match census with
+    | Error why -> Error $"{why}: it needs the tuple table and the N x M mask, which only the as-written hashed index keeps (v1.1)"
+    | Ok x -> Ok x
+
 /// Plan the hash equijoin over the module's top-level rank-2 compounds
 /// (`compound` is top-level only, BL6002). Records into `EquiJoinTable` and
 /// the decision collector (`hash-join`); the IR is untouched. Every rank >= 2
@@ -136,7 +399,7 @@ let planEquiJoin (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let facts = cseFactsOf funcs
     let writes = scheduleMayWriteIn programFuncs modul
-    let wrote (e: IRExpr) = (facts e).MayWrite || writes e
+    let wrote (e: IRExpr) = ejWrote facts writes e
     let enabled = hashJoinEnabled ()
     let decide (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) =
         Blade.Effects.Decisions.record
@@ -144,102 +407,9 @@ let planEquiJoin (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul
               Span = declSpanOf subject; Subject = subject
               Outcome = outcome; Evidence = evidence }
     let arr = List.toArray modul.Bindings
-    let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
+    let indexOf (id: IRId) = ejIndexOf arr id
     let refs (e: IRExpr) = collectVarRefsIR e
-    let assignsTo (id: IRId) (e: IRExpr) =
-        let mutable hit = false
-        iterIRExpr (fun n ->
-            match n with
-            | IRAssign (target, _) when Set.contains id (refs target) -> hit <- true
-            | _ -> ()) e
-        hit
-    let assignedAnywhere (id: IRId) =
-        (arr |> Array.exists (fun b -> bindingPayload modul b |> List.exists (assignsTo id)))
-        || (modul.Functions |> List.exists (fun f -> assignsTo id f.Body))
-    let payloadWrites (b: IRBinding) = bindingPayload modul b |> List.exists wrote
-    let isParamRef (p: IRParam) (e: IRExpr) =
-        match e with
-        | IRVar (v, _) -> v = p.VarId
-        | IRParam (_, i, _) -> i = p.Index
-        | _ -> false
-    let nodeName (e: IRExpr) = (Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(e, typeof<IRExpr>) |> fst).Name
-    // An outer product over exactly two plain operands, possibly behind the
-    // `|> compute` the user wrote or the trivial `let t = apply; t` a lift
-    // may wrap it in. Anything else (a lifted statement ahead of the apply,
-    // a zip, a reynolds kernel, a rank-raising kernel) is not the shape.
-    let rec peelApply (e: IRExpr) : ApplyInfo option =
-        match e with
-        | IRCompute inner -> peelApply inner
-        | IRLet (t, v, IRVar (t', _)) when t = t' -> peelApply v
-        | IRApplyCombinator info -> Some info
-        | _ -> None
-    let outerOperands (info: ApplyInfo) : Result<IRExpr * IRExpr, string> =
-        if info.IsCoIteration then Error "a co-iteration (`zip`), not an outer product"
-        elif info.HasReynolds then Error "a reynolds kernel"
-        elif info.KernelOutputRank <> 0 then Error "a kernel with an array-valued cell"
-        else
-        match info.Arrays with
-        | [ (IRVar _ as l); (IRVar _ as r) ] -> Ok (l, r)
-        | [ _; _ ] -> Error "an outer product whose operands are not named stored arrays"
-        | xs -> Error $"an outer product over {xs.Length} operand(s) (v1 joins exactly two axes)"
-    let nameOfVar (e: IRExpr) =
-        match e with
-        | IRVar (id, _) -> (match indexOf id with Some i -> arr.[i].Name | None -> $"v{id}")
-        | _ -> "?"
-    let axisOf (e: IRExpr) : IRIndexType option =
-        match e with
-        | IRVar (id, _) ->
-            match indexOf id with
-            | Some i ->
-                (match stripUnits arr.[i].Type with
-                 | ArrayElem a when not a.IsVirtual ->
-                    (match a.IndexTypes with
-                     | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1 && ix.Symmetry = SymNone -> Some ix
-                     | _ -> None)
-                 | _ -> None)
-            | None -> None
-        | _ -> None
-    // Index IDENTITY, never extent: the same named index type (its tag) or
-    // the same index record.
-    let sameAxis (a: IRIndexType) (b: IRIndexType) =
-        (a.Tag.IsSome && a.Tag = b.Tag) || a.Id = b.Id
-    let elemOfVar (e: IRExpr) : IRType option =
-        match e with
-        | IRVar (id, _) ->
-            (match indexOf id with
-             | Some i -> (match stripUnits arr.[i].Type with ArrayElem a -> Some (stripUnits a.ElemType) | _ -> None)
-             | None -> None)
-        | _ -> None
-    // A positional index tag's static extent, through aliases; None for an
-    // EnumIdx (its cells hold positions in the enumeration) or an unknown tag.
-    let rec positionalExtent (fuel: int) (tag: string) : Result<int64, string> =
-        if fuel <= 0 then Error $"the index tag `{tag}` does not resolve"
-        else
-        match modul.Types |> List.tryPick (fun td ->
-                match td with
-                | IRTDIndexType (n, ix) when n = tag -> Some (Choice1Of3 ix)
-                | IRTDEnumIdx (n, _, _) when n = tag -> Some (Choice2Of3 ())
-                | IRTDAlias (n, IRTIdxTagged (_, IRefNamed t2)) when n = tag && t2 <> tag -> Some (Choice3Of3 t2)
-                | _ -> None) with
-        | Some (Choice1Of3 ix) ->
-            (match ix.Extent with
-             | IRLit (IRLitInt k) when k > 0L && ix.Rank = 1 && ix.IxKind = IxKPlain -> Ok k
-             | _ -> Error $"the positional key type `{tag}` has no static extent")
-        | Some (Choice2Of3 ()) -> Error $"an EnumIdx key `{tag}` (its cells hold positions in the enumeration; v1.1)"
-        | Some (Choice3Of3 t2) -> positionalExtent (fuel - 1) t2
-        | None -> Error $"the index tag `{tag}` does not resolve to a declared index type"
-    // The key's class: Ok None = plain Int64, Ok (Some K) = positional Idx<K>.
-    let keyClass (e: IRExpr) : Result<int64 option, string> =
-        match elemOfVar e with
-        | Some (IRTScalar ETInt64) -> Ok None
-        | Some (IRTIdxTagged (IRTScalar ETInt64, IRefNamed tag)) -> positionalExtent 16 tag |> Result.map Some
-        | Some (IRTIdxTagged (IRTScalar ETInt64, IRefAnon (_, IRLit (IRLitInt k)))) when k > 0L -> Ok (Some k)
-        | Some (IRTScalar (ETFloat64 | ETFloat32)) -> Error $"float keys (`{nameOfVar e}`): v1 joins exact integer keys only"
-        | Some (IRTScalar ETInt32) -> Error $"Int32 keys (`{nameOfVar e}`): v1 joins Int64 keys"
-        | Some (IRTScalar ETBool) -> Error $"Bool keys (`{nameOfVar e}`): v1 joins Int64 keys"
-        | Some (IRTScalar ETString) -> Error $"String keys (`{nameOfVar e}`): v1 joins Int64 keys"
-        | Some _ -> Error $"the key `{nameOfVar e}` is not an Int64 (plain or positional) element (v1 joins Int64 keys)"
-        | None -> Error $"the key `{nameOfVar e}` is not a top-level array binding"
+    let nameOfVar (e: IRExpr) = ejNameOfVar arr e
     let storedProof = storedArrayProof modul
     // ---- THE DEMAND CENSUS on J -------------------------------------------
     // Fail-safe: `Ok` only when EVERY occurrence of J anywhere in the program
@@ -388,237 +558,124 @@ let planEquiJoin (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (modul
     let admit (ji: int) (dense: IRExpr) (mask: IRExpr) : Result<EquiJoinPlan * string list, string> =
         let jb = arr.[ji]
         let jName = jb.Name
-        let (|Fn|_|) (e: IRExpr) = resolveCallableIn funcs (fst (peelReynolds e))
-        let requests (c: IRCallable) = c.IsOmpParallel || c.IsCudaKernel || c.IsMpiParallel
-        // ---- the shape ----
-        let denseShape =
-            match dense with
-            | IRVar _ -> Error $"the dense operand is the named array `{nameOfVar dense}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 array) stays stored (bench protocol), so no N x M representation can disappear"
-            | _ ->
-            match peelApply dense with
-            | None -> Error $"the dense operand is not an outer product written in place (it is {nodeName dense})"
-            | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops)) |> Result.mapError (fun why -> $"the dense operand is {why}")
-        let maskShape =
-            match mask with
-            | IRVar _ -> Error $"the mask is the named array `{nameOfVar mask}`: v1 takes the INLINE spelling only -- a named operand (the R4 spelling of a join, or any stored rank-2 mask) stays stored (bench protocol), so no N x M representation can disappear"
-            | IRMask (src, pred) ->
-                (match peelApply src with
-                 | None -> Error $"the mask's source is not an outer product written in place (it is {nodeName src})"
-                 | Some info -> outerOperands info |> Result.map (fun ops -> (info, ops, pred)) |> Result.mapError (fun why -> $"the mask's source is {why}"))
-            | other -> Error $"the mask is not an inline `mask(..)` (it is {nodeName other})"
-        match denseShape, maskShape with
-        | Error why, _ | _, Error why -> Error why
-        | Ok (dInfo, (a1, b1)), Ok (mInfo, (a0, b0), pred) ->
-        // ---- the kernels: identity predicate, `l == r`, pk ----
-        let predWhy =
-            match pred with
-            | Fn pc when wrote pc.Body -> Some "the mask predicate may write (the shared write analysis): the as-written program evaluates it on every pair"
-            | Fn pc ->
-                (match pc.Params, pc.Captures with
-                 | [ p ], [] when isParamRef p pc.Body -> None
-                 | [ _ ], [] -> Some "a non-identity mask predicate (v1 takes `lambda(e) -> e` over the key-equality pool)"
-                 | _, _ :: _ -> Some "the mask predicate captures a value"
-                 | _ -> Some "the mask predicate is not a one-parameter function")
-            | _ -> Some "the mask predicate does not resolve to a callable"
-        let eqWhy =
-            match mInfo.Kernel with
-            | Fn ec when wrote ec.Body -> Some "the key kernel may write (the shared write analysis): the as-written program evaluates it on every pair"
-            | Fn ec ->
-                (match ec.Params, ec.Captures with
-                 | _, _ :: _ -> Some "the key kernel captures a value"
-                 | [ p0; p1 ], [] ->
-                    let isKeyEq (e: IRExpr) =
-                        match e with
-                        | IRBinOp (_, IREq, x, y, _) -> (isParamRef p0 x && isParamRef p1 y) || (isParamRef p1 x && isParamRef p0 y)
-                        | _ -> false
-                    let rec conjuncts (e: IRExpr) =
-                        match e with
-                        | IRBinOp (_, IRAnd, a, b, _) -> conjuncts a @ conjuncts b
-                        | _ -> [ e ]
-                    (match ec.Body with
-                     | b when isKeyEq b -> None
-                     | IRBinOp (_, IRAnd, _, _, _) as b ->
-                        // round 4 wave 4 D3 (ST15): `l == r` with RESIDUAL conjuncts.
-                        // The as-written mask pass evaluates the whole kernel, left
-                        // to right with short circuit, on every pair; the probe
-                        // evaluates it on the MATCHED pairs only, so every residual
-                        // conjunct must be a pure total scalar of the two key cells
-                        // (skipping it on a non-matching pair has no effect).
-                        let cs = conjuncts b
-                        if not (cs |> List.exists isKeyEq) then Some "the key kernel is not the equality `l == r` of its two parameters (no conjunct is that equality)"
-                        elif not (totalScalarOver ec.Params b) then Some "a residual conjunct of the key kernel is not a pure, total scalar of the two key cells (the totalScalar whitelist): the as-written mask pass evaluates it on pairs the probe skips"
-                        else None
-                     | _ -> Some "the key kernel is not the equality `l == r` of its two parameters")
-                 | _ -> Some "the key kernel is not a two-parameter function")
-            | _ -> Some "the key kernel does not resolve to a callable"
-        let pkRes =
-            match dInfo.Kernel with
-            | Fn pk when wrote pk.Body ->
-                Error "the payload kernel pk may write (the shared write analysis, Optimize.scheduleMayWriteIn): the as-written program evaluates it on EVERY pair, so skipping the non-matching ones would drop writes -- the six passes run as written"
-            | Fn pk ->
-                (match pk.Params, pk.Captures with
-                 | _, _ :: _ -> Error "the payload kernel captures a value (v1: a pure total scalar of its two cells)"
-                 | [ _; _ ], [] when not (totalScalarOver pk.Params pk.Body) ->
-                    Error "the payload kernel is not a pure, total scalar of its two cells (the totalScalar whitelist: no call, no integer `/` `%` `^`, no cast)"
-                 | [ _; _ ], [] -> Ok pk
-                 | _ -> Error "the payload kernel is not a two-parameter function")
-            | _ -> Error "the payload kernel does not resolve to a callable"
-        match predWhy, eqWhy, pkRes with
-        | Some why, _, _ | None, Some why, _ -> Error why
-        | None, None, Error why -> Error why
-        | None, None, Ok pk ->
-        let ec = match mInfo.Kernel with Fn c -> c | _ -> pk
-        let pc = match pred with Fn c -> c | _ -> pk
-        // ---- the axes: index identity, not extent ----
-        let axisWhy =
-            match axisOf a0, axisOf a1, axisOf b0, axisOf b1 with
-            | Some l0, Some l1, Some r0, Some r1 ->
-                if not (sameAxis l0 l1) then Some $"the left key `{nameOfVar a0}` and the left payload `{nameOfVar a1}` do not share one nominal axis (index identity, not extent)"
-                elif not (sameAxis r0 r1) then Some $"the right key `{nameOfVar b0}` and the right payload `{nameOfVar b1}` do not share one nominal axis (index identity, not extent)"
-                else None
-            | _ -> Some "a source is not a stored rank-1 array over one plain axis"
-        match axisWhy with
-        | Some why -> Error why
-        | None ->
-        match keyClass a0, keyClass b0 with
-        | Error why, _ | _, Error why -> Error why
-        | Ok _, Ok rightClass ->
-        // ---- the sources: bound before J, proved stored, never assigned ----
-        let sources = [ a0; b0; a1; b1 ] |> List.distinct
-        let sourceWhy =
-            sources |> List.tryPick (fun s ->
-                match s with
-                | IRVar (sid, _) ->
-                    (match indexOf sid with
-                     | None -> Some $"the source `{nameOfVar s}` is not a top-level binding the write analysis can see"
-                     | Some si when si >= ji -> Some $"the source `{arr.[si].Name}` is bound after `{jName}`"
-                     | Some si ->
-                        match storedProof arr.[si] with
-                        | Error why -> Some $"the source `{arr.[si].Name}` is not proved stored: {why}"
-                        | Ok (_, chain) ->
-                            match chain |> List.tryFind (fun c -> assignedAnywhere c.Id) with
-                            | Some c -> Some $"the source `{c.Name}` (an alias chain of `{arr.[si].Name}`) is assigned in the program"
-                            | None -> None)
-                | _ -> Some "a source is not a named binding")
-        match sourceWhy with
-        | Some why -> Error why
-        | None ->
-        if assignedAnywhere jb.Id then Error $"`{jName}` is assigned in the program" else
-        // ---- equiJoinAdmits: the five parties ----
-        let chains =
-            sources |> List.collect (fun s ->
-                match s with
-                | IRVar (sid, _) ->
-                    (match indexOf sid with
-                     | Some i -> (match storedProof arr.[i] with Ok (_, ch) -> ch | Error _ -> [ arr.[i] ])
-                     | None -> [])
-                | _ -> [])
-            |> List.distinctBy (fun b -> b.Id)
-        let srcNames = sources |> List.map (fun s -> $"`{nameOfVar s}`") |> String.concat ", "
-        let producerParty =
-            match chains |> List.tryFind payloadWrites with
-            | Some b -> Error $"the producer `{b.Name}` may write (its initializer or side-table payload, through the shared write analysis)"
-            | None -> Ok $"producers {srcNames}: proved stored at their own sites (storedArrayProof, through their alias chains), never assigned, no write in any payload"
-        let kernelParty =
-            let ks = [ ("the key kernel `==`", ec); ("the identity predicate", pc); ("the payload kernel pk", pk) ]
-            match ks |> List.tryPick (fun (what, c) -> if wrote c.Body then Some $"{what} may write" elif requests c then Some $"{what} requests a thread team or a device" else None) with
-            | Some why -> Error why
-            | None -> Ok "producer kernels (`==`, the identity predicate, pk): pure, total scalars (the totalScalar whitelist), capture-free, no write, no team or device request -- the skipped evaluations (`==` on every pair, pk on every non-matching pair) have no effect"
-        let consumerParty =
-            if payloadWrites jb then Error $"`{jName}`'s payload (its value or its compound operands) may write"
-            else Ok $"consumer `{jName}`: its whole payload (value and both compound operands) writes nothing; its stored compact buffer is what every consumer reads, each at its own site"
-        let parties0 = [ producerParty; kernelParty; consumerParty ]
-        match parties0 |> List.tryPick (function Error s -> Some s | Ok _ -> None) with
-        | Some why -> Error why
-        | None ->
-        match joinDemand jb.Id jName with
-        | Error why -> Error $"{why}: it needs the tuple table and the N x M mask, which only the as-written hashed index keeps (v1.1)"
-        | Ok (uses, folds) ->
-        let foldParty =
-            let writing = folds |> List.tryFind (fun (_, k, _) -> match resolveCallableIn funcs (fst (peelReynolds k)) with Some kc -> wrote kc.Body | None -> true)
-            match folds, writing with
-            | [], _ -> "outer fold kernel(s): none over the relation"
-            | _, Some (h, _, _) -> $"outer fold kernel(s): {folds.Length} over `{jName}`; `{h}`'s may write -- never moved (it reads the stored relation at its own site)"
-            | _, None ->
-                let hosts = folds |> List.map (fun (h, _, _) -> $"`{h}`") |> List.distinct |> String.concat ", "
-                $"outer fold kernel(s): {folds.Length} over `{jName}` ({hosts}), none writes, none moved -- each reads the stored relation at its own site, in lex order"
-        let seedParty =
-            let seeded = folds |> List.choose (fun (h, _, s) -> s |> Option.map (fun e -> (h, e)))
-            match seeded |> List.tryFind (fun (_, e) -> wrote e) with
-            | Some (h, _) -> $"seed(s): `{h}`'s seed may write -- never moved (seeded folds stay at their own sites)"
-            | None -> $"seed(s): {seeded.Length} seeded fold(s), none writes, none moved; an unseeded fold keeps its BL8003 empty check at its own site"
-        let betweenParty = $"intervening: none -- the CSR build, the counting pass and the probe all run at `{jName}`'s own site and read only the four stored sources there, exactly where the six as-written passes read them"
-        let parallelParty = "parallel: none -- every pass is serial; a kernel requesting a team or a device declines above, so no parallel body runs moved work and callbackTable has no candidate set to audit"
-        let matrix =
-            "equiJoinAdmits (five parties, each write query through Optimize.scheduleMayWriteIn): "
-            + String.concat "; " ([ for p in parties0 do match p with Ok s -> yield s | Error s -> yield "DECLINES: " + s ] @ [ foldParty; seedParty; betweenParty; parallelParty ])
-        let regime, regimeLine =
-            match rightClass with
-            | Some k when k <= (1L <<< 20) ->
-                JoinPositional k, $"right keys `{nameOfVar b0}` positional (`Idx<{k}>`): a COUNTING SORT over their measured span [lo, hi] (inside [0, {k}) for every well-typed cell; span <= 2^20)"
-            | _ ->
-                JoinDynamic, $"right keys `{nameOfVar b0}` dynamic Int64: a COUNTING SORT when their span is within max(4 M, 4096) cells (and 2^26), else an open-addressing key -> bucket hash (blade_member.h, chosen at run time from (M, lo, hi) only)"
-        // A LITERAL right key (through its alias chain): the form the build
-        // will take, by the C core's own rule restated (joinChooseDirect).
-        let formLine =
-            // (wrapping Int64 arithmetic, as membership hoisting's literal
-            // reader: `-9223372036854775807 - 1` is Int64's minimum)
-            let rec lit (e: IRExpr) =
-                match e with
-                | IRLit (IRLitInt n) -> Some n
-                | IRUnaryOp (IRNeg, x) -> lit x |> Option.map (fun n -> -n)
-                | IRBinOp (_, IRAdd, l, r, _) -> Option.map2 (+) (lit l) (lit r)
-                | IRBinOp (_, IRSub, l, r, _) -> Option.map2 (-) (lit l) (lit r)
-                | IRBinOp (_, IRMul, l, r, _) -> Option.map2 (*) (lit l) (lit r)
-                | _ -> None
-            let literalKeys =
-                match b0 with
-                | IRVar (sid, _) ->
-                    (match indexOf sid with
-                     | Some si ->
-                        (match storedProof arr.[si] with
-                         | Ok (_, chain) ->
-                            (match (List.last chain).Value with
-                             | IRArrayLit (elems, _) ->
-                                let ks = elems |> List.map lit
-                                if ks |> List.forall Option.isSome then Some (ks |> List.map Option.get) else None
-                             | _ -> None)
-                         | Error _ -> None)
-                     | None -> None)
-                | _ -> None
-            match literalKeys with
-            | Some ks ->
-                let m = int64 ks.Length
-                let positional = match regime with JoinPositional _ -> true | JoinDynamic -> false
-                let direct = ks.IsEmpty || joinChooseDirect m (List.min ks) (List.max ks) positional
-                // the INCLUSIVE span as a bigint: [INT64_MIN, INT64_MAX] spans 2^64
-                let span = if ks.IsEmpty then "no keys" else $"span {bigint (List.max ks) - bigint (List.min ks) + 1I}"
-                let form = if direct then "counting sort" else "hash"
-                $"form at run time: {form} ({span}, M {m}; the literal right keys, by the C core's rule)"
-            | None -> "form at run time: chosen from (M, lo, hi) only, never from timing"
-        let reportLine =
-            if joinReportEnabled () then "report: the `[join]` build report is emitted (BLADE_JOIN_REPORT=1 at compile time; printed on stderr by the executable)"
-            else "report: none emitted (BLADE_JOIN_REPORT unset at compile time; the compile-time gate emits the `[join]` build report)"
-        let plan =
-            { CompoundId = jb.Id; CompoundName = jName
-              LeftKey = a0; RightKey = b0; LeftPay = a1; RightPay = b1
-              LeftKeyName = nameOfVar a0; RightKeyName = nameOfVar b0
-              PayloadKernel = dInfo.Kernel; KeyRegime = regime; EmittedCpp = ref false
-              Residual = (match ec.Body with IRBinOp (_, IRAnd, _, _, _) -> Some mInfo.Kernel | _ -> None) }
-        let evidence =
-            [ $"stable CSR over `{nameOfVar b0}`: {regimeLine}; bucket rows filled FORWARD (every bucket lists its right rows j ascending)"
-              formLine
-              reportLine
-              (match ec.Body with
-               | IRBinOp (_, IRAnd, _, _, _) -> "residual (D3, ST15): the conjunctive key kernel is re-evaluated on each MATCHED pair, in the counting pass and the probe (its equality conjunct holds there; every residual conjunct is a pure total scalar of the key cells, so its skipped evaluations on non-matching pairs have no effect); a pair it rejects is not in the relation"
-               | _ -> "residual: none (the key kernel is the plain `l == r`)")
-              $"probe `{nameOfVar a0}` i ascending, EVERY right row of the bucket ascending: left-major / right-minor = the compound's lex order (BladeLex); bags survive (duplicates on both sides kept); negative keys match like any other; a left key no right row holds matches nothing (no BL8006: equality has no domain check)"
-              $"a COUNTING pass sizes `{jName}` before any store (|J| = the sum over i of the bucket size of `{nameOfVar a0}`[i]; worst case, every key equal, |J| = N x M -- never more than the as-written N x M payload pool); pk evaluated once per match, in that order"
-              $"never built: the N x M payload pool, the N x M Bool `==` pool, the identity-mask pool, its bit vector, the tuple table and the reverse hash (compiler temporaries of the inline spelling); `{jName}` is STORED -- its compact buffer in lex order, with a cardinality-only compound_index_t<2> (dense extents N x M, cardinality |J|; a lookup through the absent table is BL9002)"
-              ("uses of `" + jName + "` (census: every one reads the compact buffer or the cardinality alone): " + String.concat ", " uses)
-              matrix
-              "lanes: C++ v1; the LLVM lane declines (v1.1); the interpreter runs the as-written six passes (the independent oracle)" ]
-        Ok (plan, evidence)
+        admission {
+            // ---- the shape (both computed, then tested: the dense operand first) ----
+            let denseShape = ejDenseShape arr dense
+            let maskShape = ejMaskShape arr mask
+            let! (dInfo, (a1, b1)) = denseShape
+            let! (mInfo, (a0, b0), pred) = maskShape
+            // ---- the kernels: identity predicate, `l == r`, pk (all three computed, then tested in that order) ----
+            let predOk = ejPredicate funcs facts writes pred
+            let eqOk = ejKeyKernel funcs facts writes mInfo
+            let pkRes = ejPayloadKernel funcs facts writes dInfo
+            do! predOk
+            do! eqOk
+            let! pk = pkRes
+            let ec = match mInfo.Kernel with Fn funcs c -> c | _ -> pk
+            let pc = match pred with Fn funcs c -> c | _ -> pk
+            // ---- the axes: index identity, not extent ----
+            do! ejAxes arr a0 a1 b0 b1
+            // ---- the key classes (both computed, then tested: the left key first) ----
+            let leftClass = ejKeyClass modul arr a0
+            let rightClassRes = ejKeyClass modul arr b0
+            let! _ = leftClass
+            let! rightClass = rightClassRes
+            // ---- the sources: bound before J, proved stored, never assigned ----
+            let sources = [ a0; b0; a1; b1 ] |> List.distinct
+            do! ejSources modul arr storedProof ji jName sources
+            do! ejNotAssigned modul arr jb
+            // ---- equiJoinAdmits: the five parties (these three computed, then tested in order) ----
+            let producerParty = ejProducerParty modul arr storedProof facts writes sources
+            let kernelParty = ejKernelParty facts writes ec pc pk
+            let consumerParty = ejConsumerParty modul facts writes jb
+            let parties0 = [ producerParty; kernelParty; consumerParty ]
+            do! ejParties parties0
+            let! (uses, folds) = ejDemand (joinDemand jb.Id jName)
+            let foldParty =
+                let writing = folds |> List.tryFind (fun (_, k, _) -> match resolveCallableIn funcs (fst (peelReynolds k)) with Some kc -> wrote kc.Body | None -> true)
+                match folds, writing with
+                | [], _ -> "outer fold kernel(s): none over the relation"
+                | _, Some (h, _, _) -> $"outer fold kernel(s): {folds.Length} over `{jName}`; `{h}`'s may write -- never moved (it reads the stored relation at its own site)"
+                | _, None ->
+                    let hosts = folds |> List.map (fun (h, _, _) -> $"`{h}`") |> List.distinct |> String.concat ", "
+                    $"outer fold kernel(s): {folds.Length} over `{jName}` ({hosts}), none writes, none moved -- each reads the stored relation at its own site, in lex order"
+            let seedParty =
+                let seeded = folds |> List.choose (fun (h, _, s) -> s |> Option.map (fun e -> (h, e)))
+                match seeded |> List.tryFind (fun (_, e) -> wrote e) with
+                | Some (h, _) -> $"seed(s): `{h}`'s seed may write -- never moved (seeded folds stay at their own sites)"
+                | None -> $"seed(s): {seeded.Length} seeded fold(s), none writes, none moved; an unseeded fold keeps its BL8003 empty check at its own site"
+            let betweenParty = $"intervening: none -- the CSR build, the counting pass and the probe all run at `{jName}`'s own site and read only the four stored sources there, exactly where the six as-written passes read them"
+            let parallelParty = "parallel: none -- every pass is serial; a kernel requesting a team or a device declines above, so no parallel body runs moved work and callbackTable has no candidate set to audit"
+            let matrix =
+                "equiJoinAdmits (five parties, each write query through Optimize.scheduleMayWriteIn): "
+                + String.concat "; " ([ for p in parties0 do match p with Ok s -> yield s | Error s -> yield "DECLINES: " + s ] @ [ foldParty; seedParty; betweenParty; parallelParty ])
+            let regime, regimeLine =
+                match rightClass with
+                | Some k when k <= (1L <<< 20) ->
+                    JoinPositional k, $"right keys `{nameOfVar b0}` positional (`Idx<{k}>`): a COUNTING SORT over their measured span [lo, hi] (inside [0, {k}) for every well-typed cell; span <= 2^20)"
+                | _ ->
+                    JoinDynamic, $"right keys `{nameOfVar b0}` dynamic Int64: a COUNTING SORT when their span is within max(4 M, 4096) cells (and 2^26), else an open-addressing key -> bucket hash (blade_member.h, chosen at run time from (M, lo, hi) only)"
+            // A LITERAL right key (through its alias chain): the form the build
+            // will take, by the C core's own rule restated (joinChooseDirect).
+            let formLine =
+                // (wrapping Int64 arithmetic, as membership hoisting's literal
+                // reader: `-9223372036854775807 - 1` is Int64's minimum)
+                let rec lit (e: IRExpr) =
+                    match e with
+                    | IRLit (IRLitInt n) -> Some n
+                    | IRUnaryOp (IRNeg, x) -> lit x |> Option.map (fun n -> -n)
+                    | IRBinOp (_, IRAdd, l, r, _) -> Option.map2 (+) (lit l) (lit r)
+                    | IRBinOp (_, IRSub, l, r, _) -> Option.map2 (-) (lit l) (lit r)
+                    | IRBinOp (_, IRMul, l, r, _) -> Option.map2 (*) (lit l) (lit r)
+                    | _ -> None
+                let literalKeys =
+                    match b0 with
+                    | IRVar (sid, _) ->
+                        (match indexOf sid with
+                         | Some si ->
+                            (match storedProof arr.[si] with
+                             | Ok (_, chain) ->
+                                (match (List.last chain).Value with
+                                 | IRArrayLit (elems, _) ->
+                                    let ks = elems |> List.map lit
+                                    if ks |> List.forall Option.isSome then Some (ks |> List.map Option.get) else None
+                                 | _ -> None)
+                             | Error _ -> None)
+                         | None -> None)
+                    | _ -> None
+                match literalKeys with
+                | Some ks ->
+                    let m = int64 ks.Length
+                    let positional = match regime with JoinPositional _ -> true | JoinDynamic -> false
+                    let direct = ks.IsEmpty || joinChooseDirect m (List.min ks) (List.max ks) positional
+                    // the INCLUSIVE span as a bigint: [INT64_MIN, INT64_MAX] spans 2^64
+                    let span = if ks.IsEmpty then "no keys" else $"span {bigint (List.max ks) - bigint (List.min ks) + 1I}"
+                    let form = if direct then "counting sort" else "hash"
+                    $"form at run time: {form} ({span}, M {m}; the literal right keys, by the C core's rule)"
+                | None -> "form at run time: chosen from (M, lo, hi) only, never from timing"
+            let reportLine =
+                if joinReportEnabled () then "report: the `[join]` build report is emitted (BLADE_JOIN_REPORT=1 at compile time; printed on stderr by the executable)"
+                else "report: none emitted (BLADE_JOIN_REPORT unset at compile time; the compile-time gate emits the `[join]` build report)"
+            let plan =
+                { CompoundId = jb.Id; CompoundName = jName
+                  LeftKey = a0; RightKey = b0; LeftPay = a1; RightPay = b1
+                  LeftKeyName = nameOfVar a0; RightKeyName = nameOfVar b0
+                  PayloadKernel = dInfo.Kernel; KeyRegime = regime; EmittedCpp = ref false
+                  Residual = (match ec.Body with IRBinOp (_, IRAnd, _, _, _) -> Some mInfo.Kernel | _ -> None) }
+            let evidence =
+                [ $"stable CSR over `{nameOfVar b0}`: {regimeLine}; bucket rows filled FORWARD (every bucket lists its right rows j ascending)"
+                  formLine
+                  reportLine
+                  (match ec.Body with
+                   | IRBinOp (_, IRAnd, _, _, _) -> "residual (D3, ST15): the conjunctive key kernel is re-evaluated on each MATCHED pair, in the counting pass and the probe (its equality conjunct holds there; every residual conjunct is a pure total scalar of the key cells, so its skipped evaluations on non-matching pairs have no effect); a pair it rejects is not in the relation"
+                   | _ -> "residual: none (the key kernel is the plain `l == r`)")
+                  $"probe `{nameOfVar a0}` i ascending, EVERY right row of the bucket ascending: left-major / right-minor = the compound's lex order (BladeLex); bags survive (duplicates on both sides kept); negative keys match like any other; a left key no right row holds matches nothing (no BL8006: equality has no domain check)"
+                  $"a COUNTING pass sizes `{jName}` before any store (|J| = the sum over i of the bucket size of `{nameOfVar a0}`[i]; worst case, every key equal, |J| = N x M -- never more than the as-written N x M payload pool); pk evaluated once per match, in that order"
+                  $"never built: the N x M payload pool, the N x M Bool `==` pool, the identity-mask pool, its bit vector, the tuple table and the reverse hash (compiler temporaries of the inline spelling); `{jName}` is STORED -- its compact buffer in lex order, with a cardinality-only compound_index_t<2> (dense extents N x M, cardinality |J|; a lookup through the absent table is BL9002)"
+                  ("uses of `" + jName + "` (census: every one reads the compact buffer or the cardinality alone): " + String.concat ", " uses)
+                  matrix
+                  "lanes: C++ v1; the LLVM lane declines (v1.1); the interpreter runs the as-written six passes (the independent oracle)" ]
+            return (plan, evidence) }
     for KeyValue (jId, (dense, mask)) in modul.CompoundInits do
         match indexOf jId with
         | None -> ()

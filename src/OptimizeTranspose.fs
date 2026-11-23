@@ -455,6 +455,322 @@ type private TnfOutcome =
     | TnfDecline of why: string * shape: string
     | TnfApply of expr: IRExpr * shape: string * why: string
 
+/// The setup of `normalizeTransposesModule` that its three absorptions read, built once per call (cleanup
+/// item 2). Field names are the bindings' own, so the lifted bodies read them unchanged.
+type private TnContext =
+    { builder: IRBuilder
+      enabled: bool
+      byId: Map<IRId, IRBinding>
+      chainOf: IRBinding -> Result<string * IRBinding list, string>
+      closure: Lazy<Set<IRId> -> Result<string, string>>
+      kernelOf: IRExpr -> IRCallable option
+      mayWrite: IRExpr -> bool
+      readsForeign: IRExpr list -> bool
+      rank2Dense: IRType -> (IRIndexType * IRIndexType) option
+      extentTxt: IRIndexType -> string
+      nameOfExpr: IRExpr -> string
+      storedBase: Set<IRId> -> IRExpr -> Result<string, string>
+      strictRule: string
+      resolveExpr: IRExpr -> IRCallable option
+      deferredOf: IRId -> IRExpr option
+      isDeferredId: IRId -> bool
+      foldLicence: string -> IRCallable option -> IRBinOp option -> bool -> Result<string, string>
+      absorbedRecord: string -> string -> string -> string -> IRIndexType -> IRIndexType -> string -> string -> bool }
+
+/// The POINTWISE-MAP absorption of a transposed operand (lifted from normalizeTransposesModule, cleanup
+/// item 2): the setup through the context, the minted-kernel list as a parameter.
+let private tnAbsorbPointwise (ctx: TnContext) (mintedKernels: ResizeArray<IRId * IRCallable>) (b: IRBinding) (v: IRExpr) : IRExpr =
+    let { nameOfExpr = nameOfExpr; rank2Dense = rank2Dense; kernelOf = kernelOf; byId = byId; chainOf = chainOf;
+          mayWrite = mayWrite; closure = closure; builder = builder; extentTxt = extentTxt; enabled = enabled } = ctx
+    match v with
+    | IRCompute (IRApplyCombinator info)
+        when info.Arrays |> List.exists (function IRTranspose _ -> true | _ -> false) ->
+        let opsTxt = info.Arrays |> List.map (function IRTranspose (x, d1, d2) -> $"transpose({nameOfExpr x}, [{d1}, {d2}])" | a -> nameOfExpr a) |> String.concat ", "
+        let consumer = $"the pointwise map over ({opsTxt})"
+        let decline (why: string) =
+            recordTransposeNF b.Name (Blade.Effects.Declined why) [ $"{consumer} keeps each transposed operand's copy" ]
+            v
+        let outAxes = rank2Dense info.OutputType
+        let kernel = kernelOf info.Kernel
+        let operandProblem =
+            info.Arrays |> List.tryPick (fun a ->
+                match a with
+                | IRTranspose (IRVar (x, xt), d1, d2) when min d1 d2 = 0 && max d1 d2 = 1 && (rank2Dense xt).IsSome && byId.ContainsKey x ->
+                    match chainOf byId.[x] with
+                    | Error why -> Some $"the transposed operand {why}"
+                    | Ok _ -> None
+                | IRTranspose _ -> Some "a transposed operand is not a rank-2 swap of a top-level array"
+                | IRVar (y, yt) when (rank2Dense yt).IsSome && byId.ContainsKey y ->
+                    match chainOf byId.[y] with
+                    | Error why -> Some $"the operand {why}"
+                    | Ok _ -> None
+                | _ -> Some "an operand is not a named dense rank-2 top-level array")
+        match info.Loop, outAxes, kernel with
+        | _, _, _ when info.HasReynolds || info.KernelOutputRank <> 0 || not info.KernelTDims.IsEmpty
+                       || info.KernelInputRanks |> List.exists (fun r -> r <> 0) ->
+            decline "v1 absorbs only a scalar-cell kernel (input ranks 0, output rank 0, no reynolds)"
+        | IRMethodFor _, Some (ix0, ix1), Some c ->
+            let staticAxes = [ ix0; ix1 ] |> List.forall (fun ix -> match ix.Extent with IRLit (IRLitInt _) -> true | _ -> false)
+            if not staticAxes then decline "the output's extents are not literals (v1 builds the range over literal extents)"
+            elif c.Params.Length <> info.Arrays.Length then decline "the kernel's arity is not the operand count"
+            elif not c.Captures.IsEmpty then decline $"the kernel `{c.SourceName}` captures values (v1 calls only a capture-free kernel from the range map)"
+            elif c.IsOmpParallel || not c.Parallelism.IsEmpty || c.IsCudaKernel || c.IsMpiParallel || c.IsStatic then
+                decline $"the kernel `{c.SourceName}` carries an omp / cuda / mpi request or is static (v1 would not carry the request to the range map, and a dropped request is never silent)"
+            elif mayWrite c.Body then decline $"the kernel `{c.SourceName}` may write (the transposed copy was a snapshot taken before it ran)"
+            elif (info.Arrays |> List.exists (fun a -> collectVarRefsIR a |> Set.exists (fun r -> r >= c.Id))) then
+                decline $"the kernel `{c.SourceName}` is declared before an operand (the range kernel is emitted at the kernel's program point, which must follow every array it reads)"
+            else
+            match operandProblem with
+            | Some why -> decline why
+            | None ->
+            // every transposed base must be NEVER WRITTEN: the copy was a
+            // snapshot at this binding, the gather reads the base wherever
+            // the map finally runs (a later pass may move it to its reader)
+            let bases =
+                info.Arrays |> List.choose (function IRTranspose (IRVar (x, _), _, _) -> Some x | _ -> None) |> List.distinct
+            let seeds =
+                bases |> List.collect (fun x -> match chainOf byId.[x] with Ok (_, ch) -> ch |> List.map (fun c -> c.Id) | Error _ -> [ x ])
+                |> Set.ofList
+            match closure.Force() seeds with
+            | Error why -> decline $"a transposed base may be written ({why}): the copy is the snapshot that keeps the earlier cells"
+            | Ok whyNever ->
+            let tagTy (ix: IRIndexType) =
+                match ix.Tag with
+                | Some t -> IRTIdxTagged (IRTScalar ETInt64, IRefNamed t)
+                | None -> IRTScalar ETInt64
+            let rix = [ ix0; ix1 ] |> List.map (fun ix -> { ix with Id = builder.FreshId() })
+            let pi = builder.FreshId()
+            let pj = builder.FreshId()
+            let vi = IRVar (pi, tagTy ix0)
+            let vj = IRVar (pj, tagTy ix1)
+            let reads =
+                info.Arrays |> List.map (fun a ->
+                    match a with
+                    | IRTranspose (x, _, _) -> IRIndex (x, [ vj; vi ], None)
+                    | a -> IRIndex (a, [ vi; vj ], None))
+            // A binder-free kernel body is inlined (its parameters replaced
+            // by the reads: pure subscripts, so a repeated parameter only
+            // repeats a read); any other kernel is called.
+            let binderFree =
+                let mutable ok = true
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRLet _ | IRForRange _ | IRMatch _ | IRApplyCombinator _ | IRComposeApply _ | IRReduce _
+                    | IRReduceCompute _ | IRMethodFor _ | IRObjectFor _ | IRAssign _ -> ok <- false
+                    | _ -> ()) c.Body
+                ok
+            let body =
+                if binderFree then
+                    substituteIRVars (List.zip (c.Params |> List.map (fun p -> p.VarId)) reads |> Map.ofList) c.Body
+                else IRApp (info.Kernel, reads, c.RetType)
+            let parms : IRParam list =
+                [ { Name = "__tnf_i"; Type = tagTy ix0; Index = 0; VarId = pi }
+                  { Name = "__tnf_j"; Type = tagTy ix1; Index = 1; VarId = pj } ]
+            let lam =
+                { mkLambdaCallable builder parms body c.RetType [] false [] [] false false 256 false
+                    with SourceName = anonymousCallableName (Some b.Name) "lambda" }
+            let rangeAt : IRArrayType = { ElemType = tagTy ix1; IndexTypes = rix; IsVirtual = true; Identity = None }
+            let range = IRRange (rix, None)
+            let ident = coIterIdentityOf builder range
+            let mf : MethodForInfo =
+                { Arrays = [ range ]; Identities = [ ident ]; ArrayTypes = [ rangeAt ]; SDimsPerArray = [ 2 ]
+                  TotalSDims = 2; SharedIndexTypes = [] }
+            let apply =
+                IRApplyCombinator
+                    { Loop = IRMethodFor mf
+                      Kernel = IRVar (lam.Id, mkFuncArrow [ tagTy ix0; tagTy ix1 ] c.RetType)
+                      Arrays = [ range ]; Identities = [ ident ]; ArrayTypes = [ rangeAt ]; SharedIndexTypes = []
+                      SymcomStates = [ SCNeither; SCNeither ]; TriangularLevels = [ false; false ]
+                      SDimsPerArray = [ 2 ]; KernelInputRanks = [ 0; 0 ]; KernelOutputRank = 0
+                      KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
+                      OutputType = info.OutputType; IsCoIteration = false }
+            let others =
+                info.Arrays |> List.choose (function IRTranspose _ -> None | a -> Some (nameOfExpr a))
+            let surviving =
+                if others.IsEmpty then "the output's"
+                else $"""the output's (= {others |> String.concat ", "}'s, which share its index space)"""
+            let andOthers = if others.IsEmpty then "" else " and every untransposed operand"
+            let ev =
+                [ $"transpose absorbed into {consumer} (kernel `{c.SourceName}`)"
+                  $"the surviving traversal is {surviving} row-major nest range<{extentTxt ix0}, {extentTxt ix1}>: forward and contiguous over the output{andOthers}; each transposed base is read once per cell at the swapped coordinate (a gather)"
+                  "legal in every build, strict included: no fold, so no order question -- each output cell is the kernel applied to the same operand values, so every cell keeps its bits"
+                  $"the transposed base(s): {whyNever} (the copy's snapshot is unobservable)"
+                  "no transpose copy, no pool" ]
+            if not enabled then
+                recordTransposeNF b.Name (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") ev
+                v
+            else
+                recordTransposeNF b.Name Blade.Effects.Applied ev
+                mintedKernels.Add((c.Id, lam))
+                IRCompute apply
+        | IRMethodFor _, None, _ -> decline "the output is not a dense rank-2 array over two plain axes"
+        | _, _, None -> decline "the map's kernel does not resolve to a callable"
+        | _ -> decline "the map is not a method_for application"
+    | _ -> v
+
+/// FORM B of the fold absorption, the fused terminal (lifted from normalizeTransposesModule, cleanup
+/// item 2): the setup through the context.
+let private tnAbsorbFoldCompute (ctx: TnContext) (subject: string) (inRepro: bool) (prms: Set<IRId>) (comp: IRExpr) (k: IRExpr) (seed: IRExpr) : IRExpr =
+    let { kernelOf = kernelOf; nameOfExpr = nameOfExpr; rank2Dense = rank2Dense; foldLicence = foldLicence;
+          resolveExpr = resolveExpr; deferredOf = deferredOf; isDeferredId = isDeferredId; mayWrite = mayWrite;
+          readsForeign = readsForeign; storedBase = storedBase; absorbedRecord = absorbedRecord; builder = builder } = ctx
+    let asWritten = IRReduceCompute (comp, k, seed)
+    match comp with
+    | IRApplyCombinator mi when (match mi.Arrays with [ IRTranspose _ ] -> true | _ -> false) ->
+        let (x, d1, d2) = match mi.Arrays with [ IRTranspose (x, d1, d2) ] -> (x, d1, d2) | _ -> failwith "unreachable"
+        let kernel = kernelOf k
+        let kname = match kernel with Some c -> $"`{c.SourceName}`" | None -> "its kernel"
+        let consumer = $"the fused fold reduce(method_for(transpose({nameOfExpr x}, [{d1}, {d2}])) <@> .., {kname}, seeded)"
+        let keep (why: string) =
+            recordTransposeNF subject (Blade.Effects.Declined why)
+                [ $"{consumer} keeps the transposed copy and folds it in ITS ascending storage order" ]
+            asWritten
+        match rank2Dense (try typeOf x with _ -> IRTUnit), (match mi.Loop with IRMethodFor mf -> Some mf | _ -> None) with
+        | None, _ -> keep "v1 absorbs a transpose into a fold only over a dense rank-2 operand (two plain axes)"
+        | _, None -> keep "the map is not a method_for application"
+        | Some (ix0, ix1), Some mf ->
+        if mi.IsCoIteration || mi.HasReynolds || mi.KernelInputRanks <> [ 0 ] || mi.KernelOutputRank <> 0 then
+            keep "v1 absorbs only a one-operand scalar-cell map under the fold"
+        else
+        match foldLicence kname kernel None inRepro with
+        | Error why -> keep why
+        | Ok licence ->
+        match kernelOf mi.Kernel with
+        | None -> keep "the map kernel does not resolve to a callable"
+        | Some mk ->
+        match IRTotality.auditCallable resolveExpr deferredOf isDeferredId mk [] with
+        | Error why -> keep $"the map kernel `{mk.SourceName}` is not proved total ({why}): its evaluations would move with the traversal"
+        | Ok () ->
+        if mayWrite mk.Body then keep $"the map kernel `{mk.SourceName}` may write"
+        elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
+        elif readsForeign [ k; mi.Kernel; seed ] then keep "the kernel or seed reads a value bound in another module (its writes are not audited here)"
+        else
+        match storedBase prms x, stripUnits (try typeOf x with _ -> IRTUnit) with
+        | Error why, _ -> keep why
+        | Ok baseHow, ArrayElem xat ->
+            let traversal = $"the map iterates {nameOfExpr x} itself, so the fused fold reads it forward and contiguously in its ascending SOURCE order (the map kernel `{mk.SourceName}` is total, so moving its evaluations moves no failure)"
+            if not (absorbedRecord subject consumer (nameOfExpr x) licence ix0 ix1 baseHow traversal) then asWritten
+            else
+                let ident = coIterIdentityOf builder x
+                let outElem = match stripUnits mi.OutputType with ArrayElem oat -> oat.ElemType | t -> t
+                let out' =
+                    match mi.OutputType with
+                    | IRTUnitAnnotated (_, u) -> IRTUnitAnnotated (mkArrayArrow xat.IndexTypes outElem None, u)
+                    | _ -> mkArrayArrow xat.IndexTypes outElem None
+                let mf' = { mf with Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ] }
+                IRReduceCompute (IRApplyCombinator { mi with Loop = IRMethodFor mf'; Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ]; OutputType = out' }, k, seed)
+        | Ok _, _ -> keep "the transposed base has no array type"
+    | _ -> asWritten
+
+/// FORM A of the fold absorption, the rank-K desugar's nest (lifted from normalizeTransposesModule,
+/// cleanup item 2): the setup through the context.
+let private tnAbsorbFoldNest (ctx: TnContext) (subject: string) (inRepro: bool) (prms: Set<IRId>) (src: IRId) (tv: IRExpr) (body: IRExpr) : IRExpr option =
+    let { kernelOf = kernelOf; nameOfExpr = nameOfExpr; rank2Dense = rank2Dense; foldLicence = foldLicence;
+          mayWrite = mayWrite; readsForeign = readsForeign; storedBase = storedBase; extentTxt = extentTxt;
+          enabled = enabled; strictRule = strictRule; absorbedRecord = absorbedRecord } = ctx
+    match tv, body with
+    | IRTranspose (x, d1, d2),
+      IRLet (acc, seed,
+             IRLet (dA, IRForRange (a, (IRLit (IRLitInt 0L) as loA), hiA,
+                                    IRLet (dB, IRForRange (b, (IRLit (IRLitInt 0L) as loB), hiB,
+                                                           IRLet (dC, IRAssign (IRVar (acc2, accTy), comb), IRLit IRLitUnit)),
+                                           IRLit IRLitUnit)),
+                    (IRVar (acc3, _) as res)))
+        when acc = acc2 && acc = acc3 ->
+        let readOf (e: IRExpr) =
+            match e with
+            | IndexOfNamed (s, _, [ IRVar (ia, ta); IRVar (ib, tb) ], _) when s = src && ia = a && ib = b -> Some (ta, tb)
+            | _ -> None
+        let shape =
+            match comb with
+            | IRBinOp (mode, op, IRVar (acc4, at), rd, loc) when acc4 = acc ->
+                readOf rd |> Option.map (fun (ta, tb) -> (None, Some op, ta, tb, fun (newRead: IRExpr) -> IRBinOp (mode, op, IRVar (acc4, at), newRead, loc)))
+            | IRApp (kf, [ IRVar (acc4, at); rd ], rt) when acc4 = acc ->
+                readOf rd |> Option.map (fun (ta, tb) -> (Some kf, None, ta, tb, fun (newRead: IRExpr) -> IRApp (kf, [ IRVar (acc4, at); newRead ], rt)))
+            | _ -> None
+        match shape with
+        | None -> None
+        | Some (kf, op, ta, tb, rebuildComb) ->
+        let kernel = kf |> Option.bind kernelOf
+        let kname =
+            match kernel, op with
+            | Some c, _ -> $"`{c.SourceName}`"
+            | None, Some o -> $"`{operatorFunctionName o}`"
+            | _ -> "its kernel"
+        let consumer = $"the full fold reduce(transpose({nameOfExpr x}, [{d1}, {d2}]), {kname}) (the rank-2 accumulator nest)"
+        let keep (why: string) =
+            recordTransposeNF subject (Blade.Effects.Declined why)
+                [ $"{consumer} keeps the transposed copy and folds it in ITS ascending storage order" ]
+            Some (IRLet (src, tv, body))
+        match rank2Dense (try typeOf x with _ -> IRTUnit) with
+        | None -> keep "v1 absorbs a transpose into a fold only over a dense rank-2 operand (two plain axes)"
+        | Some (ix0, ix1) ->
+        match foldLicence kname kernel (if kf.IsNone then op else None) inRepro with
+        | Error why ->
+            // PM25 (round 4 wave 3, B2): the STRICT fold's EXACT CHAIN. A
+            // strict fold of transpose(X) must visit the transposed copy's
+            // cells in ITS ascending order -- outer over X's second axis,
+            // inner over its first -- and that sequence is X(b, a) read in
+            // the SAME nest: the same terms, the same order, the same seed
+            // and association, the same kernel applications (so the same
+            // failures, in the same order), bitwise in every build. Only
+            // the copy goes: legal when nothing the fold runs can write X
+            // (the copy shielded the fold from such a write): a
+            // write-free kernel and seed, and a base proved stored.
+            if kf.IsSome && kernel.IsNone then keep why
+            elif (match kernel with Some c -> mayWrite c.Body | None -> false) then
+                keep $"{why}; the exact-chain walk declines too: the kernel {kname} may write (the transposed copy shields the fold from a write to its base)"
+            elif mayWrite seed then
+                keep $"{why}; the exact-chain walk declines too: the fold's seed may write (the transposed copy was taken before it ran)"
+            elif readsForeign ((Option.toList kf) @ [ seed ]) then
+                keep $"{why}; the exact-chain walk declines too: the kernel or seed reads a value bound in another module (its writes are not audited here)"
+            else
+            match storedBase prms x with
+            | Error why2 -> keep $"{why}; the exact-chain walk declines too: {why2}"
+            | Ok baseHow ->
+            let ev =
+                [ $"the strict fold keeps its exact chain: the nest still runs outer {extentTxt ix1} x inner {extentTxt ix0} -- the transposed copy's ascending order -- reading {nameOfExpr x}(b, a) in place (a strided walk); the same terms in the same order from the same seed, with the same association and the same kernel applications, so bitwise the copy's fold in every build (no reorder licence is used: {why})"
+                  baseHow
+                  $"the kernel {kname} and the seed write nothing, so no write can reach {nameOfExpr x} between the copy point and any read"
+                  "no transpose copy, no pool" ]
+            if not enabled then
+                recordTransposeNF subject (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") ev
+                Some (IRLet (src, tv, body))
+            else
+                recordTransposeNF subject Blade.Effects.Applied ($"transpose absorbed into {consumer} (strict exact chain)" :: ev)
+                let xRead = match x with IRVar _ -> x | _ -> IRVar (src, typeOf x)
+                let comb' = rebuildComb (IRIndex (xRead, [ IRVar (b, tb); IRVar (a, ta) ], None))
+                let nest' =
+                    IRLet (dA, IRForRange (a, loA, hiA,
+                                           IRLet (dB, IRForRange (b, loB, hiB,
+                                                                  IRLet (dC, IRAssign (IRVar (acc, accTy), comb'), IRLit IRLitUnit)),
+                                                  IRLit IRLitUnit)),
+                           res)
+                let inner = IRLet (acc, seed, nest')
+                Some (match x with IRVar _ -> inner | _ -> IRLet (src, x, inner))
+        | Ok licence ->
+        if kf.IsSome && kernel.IsNone then keep $"the fold kernel does not resolve to a callable, so its licence cannot be read: {strictRule}"
+        elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
+        elif readsForeign ((Option.toList kf) @ [ seed ]) then keep "the kernel or seed reads a value bound in another module (its writes are not audited here)"
+        else
+        match storedBase prms x with
+        | Error why -> keep why
+        | Ok baseHow ->
+        let traversal = $"the nest runs over {nameOfExpr x}'s own axes, outer {extentTxt ix0} x inner {extentTxt ix1}, reading it forward and contiguously in its ascending SOURCE order instead of the transposed copy's order"
+        if not (absorbedRecord subject consumer (nameOfExpr x) licence ix0 ix1 baseHow traversal) then Some (IRLet (src, tv, body))
+        else
+            let xRead = match x with IRVar _ -> x | _ -> IRVar (src, typeOf x)
+            let comb' = rebuildComb (IRIndex (xRead, [ IRVar (b, tb); IRVar (a, ta) ], None))
+            let nest' =
+                IRLet (dA, IRForRange (b, loB, hiB,
+                                       IRLet (dB, IRForRange (a, loA, hiA,
+                                                              IRLet (dC, IRAssign (IRVar (acc, accTy), comb'), IRLit IRLitUnit)),
+                                              IRLit IRLitUnit)),
+                       res)
+            let inner = IRLet (acc, seed, nest')
+            Some (match x with IRVar _ -> inner | _ -> IRLet (src, x, inner))
+    | _ -> None
+
 /// Rewrite every transpose chain of the module to its normal form (rule 1
 /// above), including a chain THROUGH a named binding (`let C = transpose(M,
 /// ..)` read by `transpose(C, ..)`, rule 1b). `foreignRefs`: the ids other
@@ -649,163 +965,20 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     // X's own axes -- `for b { for a { acc = acc OP X(b, a) } }` -- so X is read
     // forward and contiguously, in its source order. Some = the rewrite or the
     // kept form (with its record); None = not this shape.
-    let absorbFoldNest (subject: string) (inRepro: bool) (prms: Set<IRId>) (src: IRId) (tv: IRExpr) (body: IRExpr) : IRExpr option =
-        match tv, body with
-        | IRTranspose (x, d1, d2),
-          IRLet (acc, seed,
-                 IRLet (dA, IRForRange (a, (IRLit (IRLitInt 0L) as loA), hiA,
-                                        IRLet (dB, IRForRange (b, (IRLit (IRLitInt 0L) as loB), hiB,
-                                                               IRLet (dC, IRAssign (IRVar (acc2, accTy), comb), IRLit IRLitUnit)),
-                                               IRLit IRLitUnit)),
-                        (IRVar (acc3, _) as res)))
-            when acc = acc2 && acc = acc3 ->
-            let readOf (e: IRExpr) =
-                match e with
-                | IndexOfNamed (s, _, [ IRVar (ia, ta); IRVar (ib, tb) ], _) when s = src && ia = a && ib = b -> Some (ta, tb)
-                | _ -> None
-            let shape =
-                match comb with
-                | IRBinOp (mode, op, IRVar (acc4, at), rd, loc) when acc4 = acc ->
-                    readOf rd |> Option.map (fun (ta, tb) -> (None, Some op, ta, tb, fun (newRead: IRExpr) -> IRBinOp (mode, op, IRVar (acc4, at), newRead, loc)))
-                | IRApp (kf, [ IRVar (acc4, at); rd ], rt) when acc4 = acc ->
-                    readOf rd |> Option.map (fun (ta, tb) -> (Some kf, None, ta, tb, fun (newRead: IRExpr) -> IRApp (kf, [ IRVar (acc4, at); newRead ], rt)))
-                | _ -> None
-            match shape with
-            | None -> None
-            | Some (kf, op, ta, tb, rebuildComb) ->
-            let kernel = kf |> Option.bind kernelOf
-            let kname =
-                match kernel, op with
-                | Some c, _ -> $"`{c.SourceName}`"
-                | None, Some o -> $"`{operatorFunctionName o}`"
-                | _ -> "its kernel"
-            let consumer = $"the full fold reduce(transpose({nameOfExpr x}, [{d1}, {d2}]), {kname}) (the rank-2 accumulator nest)"
-            let keep (why: string) =
-                recordTransposeNF subject (Blade.Effects.Declined why)
-                    [ $"{consumer} keeps the transposed copy and folds it in ITS ascending storage order" ]
-                Some (IRLet (src, tv, body))
-            match rank2Dense (try typeOf x with _ -> IRTUnit) with
-            | None -> keep "v1 absorbs a transpose into a fold only over a dense rank-2 operand (two plain axes)"
-            | Some (ix0, ix1) ->
-            match foldLicence kname kernel (if kf.IsNone then op else None) inRepro with
-            | Error why ->
-                // PM25 (round 4 wave 3, B2): the STRICT fold's EXACT CHAIN. A
-                // strict fold of transpose(X) must visit the transposed copy's
-                // cells in ITS ascending order -- outer over X's second axis,
-                // inner over its first -- and that sequence is X(b, a) read in
-                // the SAME nest: the same terms, the same order, the same seed
-                // and association, the same kernel applications (so the same
-                // failures, in the same order), bitwise in every build. Only
-                // the copy goes: legal when nothing the fold runs can write X
-                // (the copy shielded the fold from such a write): a
-                // write-free kernel and seed, and a base proved stored.
-                if kf.IsSome && kernel.IsNone then keep why
-                elif (match kernel with Some c -> mayWrite c.Body | None -> false) then
-                    keep $"{why}; the exact-chain walk declines too: the kernel {kname} may write (the transposed copy shields the fold from a write to its base)"
-                elif mayWrite seed then
-                    keep $"{why}; the exact-chain walk declines too: the fold's seed may write (the transposed copy was taken before it ran)"
-                elif readsForeign ((Option.toList kf) @ [ seed ]) then
-                    keep $"{why}; the exact-chain walk declines too: the kernel or seed reads a value bound in another module (its writes are not audited here)"
-                else
-                match storedBase prms x with
-                | Error why2 -> keep $"{why}; the exact-chain walk declines too: {why2}"
-                | Ok baseHow ->
-                let ev =
-                    [ $"the strict fold keeps its exact chain: the nest still runs outer {extentTxt ix1} x inner {extentTxt ix0} -- the transposed copy's ascending order -- reading {nameOfExpr x}(b, a) in place (a strided walk); the same terms in the same order from the same seed, with the same association and the same kernel applications, so bitwise the copy's fold in every build (no reorder licence is used: {why})"
-                      baseHow
-                      $"the kernel {kname} and the seed write nothing, so no write can reach {nameOfExpr x} between the copy point and any read"
-                      "no transpose copy, no pool" ]
-                if not enabled then
-                    recordTransposeNF subject (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") ev
-                    Some (IRLet (src, tv, body))
-                else
-                    recordTransposeNF subject Blade.Effects.Applied ($"transpose absorbed into {consumer} (strict exact chain)" :: ev)
-                    let xRead = match x with IRVar _ -> x | _ -> IRVar (src, typeOf x)
-                    let comb' = rebuildComb (IRIndex (xRead, [ IRVar (b, tb); IRVar (a, ta) ], None))
-                    let nest' =
-                        IRLet (dA, IRForRange (a, loA, hiA,
-                                               IRLet (dB, IRForRange (b, loB, hiB,
-                                                                      IRLet (dC, IRAssign (IRVar (acc, accTy), comb'), IRLit IRLitUnit)),
-                                                      IRLit IRLitUnit)),
-                               res)
-                    let inner = IRLet (acc, seed, nest')
-                    Some (match x with IRVar _ -> inner | _ -> IRLet (src, x, inner))
-            | Ok licence ->
-            if kf.IsSome && kernel.IsNone then keep $"the fold kernel does not resolve to a callable, so its licence cannot be read: {strictRule}"
-            elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
-            elif readsForeign ((Option.toList kf) @ [ seed ]) then keep "the kernel or seed reads a value bound in another module (its writes are not audited here)"
-            else
-            match storedBase prms x with
-            | Error why -> keep why
-            | Ok baseHow ->
-            let traversal = $"the nest runs over {nameOfExpr x}'s own axes, outer {extentTxt ix0} x inner {extentTxt ix1}, reading it forward and contiguously in its ascending SOURCE order instead of the transposed copy's order"
-            if not (absorbedRecord subject consumer (nameOfExpr x) licence ix0 ix1 baseHow traversal) then Some (IRLet (src, tv, body))
-            else
-                let xRead = match x with IRVar _ -> x | _ -> IRVar (src, typeOf x)
-                let comb' = rebuildComb (IRIndex (xRead, [ IRVar (b, tb); IRVar (a, ta) ], None))
-                let nest' =
-                    IRLet (dA, IRForRange (b, loB, hiB,
-                                           IRLet (dB, IRForRange (a, loA, hiA,
-                                                                  IRLet (dC, IRAssign (IRVar (acc, accTy), comb'), IRLit IRLitUnit)),
-                                                  IRLit IRLitUnit)),
-                           res)
-                let inner = IRLet (acc, seed, nest')
-                Some (match x with IRVar _ -> inner | _ -> IRLet (src, x, inner))
-        | _ -> None
+    let ctx : TnContext =
+        { builder = builder; enabled = enabled; byId = byId; chainOf = chainOf; closure = closure;
+          kernelOf = kernelOf; mayWrite = mayWrite; readsForeign = readsForeign; rank2Dense = rank2Dense;
+          extentTxt = extentTxt; nameOfExpr = nameOfExpr; storedBase = storedBase; strictRule = strictRule;
+          resolveExpr = resolveExpr; deferredOf = deferredOf; isDeferredId = isDeferredId;
+          foldLicence = foldLicence; absorbedRecord = absorbedRecord }
+    let absorbFoldNest = tnAbsorbFoldNest ctx
     // FORM B, THE FUSED TERMINAL: `reduce(transpose(X), k, s, axes = 2)` with
     // a `where omp` (or otherwise deferred-path) kernel is
     // `reduce(method_for(transpose(X)) <@> id, k, s)`: absorbed, the map
     // iterates X itself, so the fused fold reads X forward and contiguously.
     // The map kernel's evaluations move with the traversal, so it must be
     // proved total (a failure's coordinate would otherwise change).
-    let absorbFoldCompute (subject: string) (inRepro: bool) (prms: Set<IRId>) (comp: IRExpr) (k: IRExpr) (seed: IRExpr) : IRExpr =
-        let asWritten = IRReduceCompute (comp, k, seed)
-        match comp with
-        | IRApplyCombinator mi when (match mi.Arrays with [ IRTranspose _ ] -> true | _ -> false) ->
-            let (x, d1, d2) = match mi.Arrays with [ IRTranspose (x, d1, d2) ] -> (x, d1, d2) | _ -> failwith "unreachable"
-            let kernel = kernelOf k
-            let kname = match kernel with Some c -> $"`{c.SourceName}`" | None -> "its kernel"
-            let consumer = $"the fused fold reduce(method_for(transpose({nameOfExpr x}, [{d1}, {d2}])) <@> .., {kname}, seeded)"
-            let keep (why: string) =
-                recordTransposeNF subject (Blade.Effects.Declined why)
-                    [ $"{consumer} keeps the transposed copy and folds it in ITS ascending storage order" ]
-                asWritten
-            match rank2Dense (try typeOf x with _ -> IRTUnit), (match mi.Loop with IRMethodFor mf -> Some mf | _ -> None) with
-            | None, _ -> keep "v1 absorbs a transpose into a fold only over a dense rank-2 operand (two plain axes)"
-            | _, None -> keep "the map is not a method_for application"
-            | Some (ix0, ix1), Some mf ->
-            if mi.IsCoIteration || mi.HasReynolds || mi.KernelInputRanks <> [ 0 ] || mi.KernelOutputRank <> 0 then
-                keep "v1 absorbs only a one-operand scalar-cell map under the fold"
-            else
-            match foldLicence kname kernel None inRepro with
-            | Error why -> keep why
-            | Ok licence ->
-            match kernelOf mi.Kernel with
-            | None -> keep "the map kernel does not resolve to a callable"
-            | Some mk ->
-            match IRTotality.auditCallable resolveExpr deferredOf isDeferredId mk [] with
-            | Error why -> keep $"the map kernel `{mk.SourceName}` is not proved total ({why}): its evaluations would move with the traversal"
-            | Ok () ->
-            if mayWrite mk.Body then keep $"the map kernel `{mk.SourceName}` may write"
-            elif mayWrite seed then keep "the fold's seed may write (the transposed copy was taken before it ran)"
-            elif readsForeign [ k; mi.Kernel; seed ] then keep "the kernel or seed reads a value bound in another module (its writes are not audited here)"
-            else
-            match storedBase prms x, stripUnits (try typeOf x with _ -> IRTUnit) with
-            | Error why, _ -> keep why
-            | Ok baseHow, ArrayElem xat ->
-                let traversal = $"the map iterates {nameOfExpr x} itself, so the fused fold reads it forward and contiguously in its ascending SOURCE order (the map kernel `{mk.SourceName}` is total, so moving its evaluations moves no failure)"
-                if not (absorbedRecord subject consumer (nameOfExpr x) licence ix0 ix1 baseHow traversal) then asWritten
-                else
-                    let ident = coIterIdentityOf builder x
-                    let outElem = match stripUnits mi.OutputType with ArrayElem oat -> oat.ElemType | t -> t
-                    let out' =
-                        match mi.OutputType with
-                        | IRTUnitAnnotated (_, u) -> IRTUnitAnnotated (mkArrayArrow xat.IndexTypes outElem None, u)
-                        | _ -> mkArrayArrow xat.IndexTypes outElem None
-                    let mf' = { mf with Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ] }
-                    IRReduceCompute (IRApplyCombinator { mi with Loop = IRMethodFor mf'; Arrays = [ x ]; Identities = [ ident ]; ArrayTypes = [ xat ]; OutputType = out' }, k, seed)
-            | Ok _, _ -> keep "the transposed base has no array type"
-        | _ -> asWritten
+    let absorbFoldCompute = tnAbsorbFoldCompute ctx
     // POINTWISE ABSORPTION (rule 3b): a computed top-level map whose operands
     // are dense rank-2 arrays, one or more of them `transpose(X, [0, 1])`,
     // read once per cell by a scalar kernel (`transpose(M, [0, 1]) + B` is
@@ -819,132 +992,7 @@ let normalizeTransposesModule (builder: IRBuilder) (programFuncs: IRCallable lis
     // operands share the output's index space); X is gathered. Minted
     // kernels: (origin kernel id, lambda).
     let mintedKernels = ResizeArray<IRId * IRCallable>()
-    let absorbPointwise (b: IRBinding) (v: IRExpr) : IRExpr =
-        match v with
-        | IRCompute (IRApplyCombinator info)
-            when info.Arrays |> List.exists (function IRTranspose _ -> true | _ -> false) ->
-            let opsTxt = info.Arrays |> List.map (function IRTranspose (x, d1, d2) -> $"transpose({nameOfExpr x}, [{d1}, {d2}])" | a -> nameOfExpr a) |> String.concat ", "
-            let consumer = $"the pointwise map over ({opsTxt})"
-            let decline (why: string) =
-                recordTransposeNF b.Name (Blade.Effects.Declined why) [ $"{consumer} keeps each transposed operand's copy" ]
-                v
-            let outAxes = rank2Dense info.OutputType
-            let kernel = kernelOf info.Kernel
-            let operandProblem =
-                info.Arrays |> List.tryPick (fun a ->
-                    match a with
-                    | IRTranspose (IRVar (x, xt), d1, d2) when min d1 d2 = 0 && max d1 d2 = 1 && (rank2Dense xt).IsSome && byId.ContainsKey x ->
-                        match chainOf byId.[x] with
-                        | Error why -> Some $"the transposed operand {why}"
-                        | Ok _ -> None
-                    | IRTranspose _ -> Some "a transposed operand is not a rank-2 swap of a top-level array"
-                    | IRVar (y, yt) when (rank2Dense yt).IsSome && byId.ContainsKey y ->
-                        match chainOf byId.[y] with
-                        | Error why -> Some $"the operand {why}"
-                        | Ok _ -> None
-                    | _ -> Some "an operand is not a named dense rank-2 top-level array")
-            match info.Loop, outAxes, kernel with
-            | _, _, _ when info.HasReynolds || info.KernelOutputRank <> 0 || not info.KernelTDims.IsEmpty
-                           || info.KernelInputRanks |> List.exists (fun r -> r <> 0) ->
-                decline "v1 absorbs only a scalar-cell kernel (input ranks 0, output rank 0, no reynolds)"
-            | IRMethodFor _, Some (ix0, ix1), Some c ->
-                let staticAxes = [ ix0; ix1 ] |> List.forall (fun ix -> match ix.Extent with IRLit (IRLitInt _) -> true | _ -> false)
-                if not staticAxes then decline "the output's extents are not literals (v1 builds the range over literal extents)"
-                elif c.Params.Length <> info.Arrays.Length then decline "the kernel's arity is not the operand count"
-                elif not c.Captures.IsEmpty then decline $"the kernel `{c.SourceName}` captures values (v1 calls only a capture-free kernel from the range map)"
-                elif c.IsOmpParallel || not c.Parallelism.IsEmpty || c.IsCudaKernel || c.IsMpiParallel || c.IsStatic then
-                    decline $"the kernel `{c.SourceName}` carries an omp / cuda / mpi request or is static (v1 would not carry the request to the range map, and a dropped request is never silent)"
-                elif mayWrite c.Body then decline $"the kernel `{c.SourceName}` may write (the transposed copy was a snapshot taken before it ran)"
-                elif (info.Arrays |> List.exists (fun a -> collectVarRefsIR a |> Set.exists (fun r -> r >= c.Id))) then
-                    decline $"the kernel `{c.SourceName}` is declared before an operand (the range kernel is emitted at the kernel's program point, which must follow every array it reads)"
-                else
-                match operandProblem with
-                | Some why -> decline why
-                | None ->
-                // every transposed base must be NEVER WRITTEN: the copy was a
-                // snapshot at this binding, the gather reads the base wherever
-                // the map finally runs (a later pass may move it to its reader)
-                let bases =
-                    info.Arrays |> List.choose (function IRTranspose (IRVar (x, _), _, _) -> Some x | _ -> None) |> List.distinct
-                let seeds =
-                    bases |> List.collect (fun x -> match chainOf byId.[x] with Ok (_, ch) -> ch |> List.map (fun c -> c.Id) | Error _ -> [ x ])
-                    |> Set.ofList
-                match closure.Force() seeds with
-                | Error why -> decline $"a transposed base may be written ({why}): the copy is the snapshot that keeps the earlier cells"
-                | Ok whyNever ->
-                let tagTy (ix: IRIndexType) =
-                    match ix.Tag with
-                    | Some t -> IRTIdxTagged (IRTScalar ETInt64, IRefNamed t)
-                    | None -> IRTScalar ETInt64
-                let rix = [ ix0; ix1 ] |> List.map (fun ix -> { ix with Id = builder.FreshId() })
-                let pi = builder.FreshId()
-                let pj = builder.FreshId()
-                let vi = IRVar (pi, tagTy ix0)
-                let vj = IRVar (pj, tagTy ix1)
-                let reads =
-                    info.Arrays |> List.map (fun a ->
-                        match a with
-                        | IRTranspose (x, _, _) -> IRIndex (x, [ vj; vi ], None)
-                        | a -> IRIndex (a, [ vi; vj ], None))
-                // A binder-free kernel body is inlined (its parameters replaced
-                // by the reads: pure subscripts, so a repeated parameter only
-                // repeats a read); any other kernel is called.
-                let binderFree =
-                    let mutable ok = true
-                    iterIRExpr (fun n ->
-                        match n with
-                        | IRLet _ | IRForRange _ | IRMatch _ | IRApplyCombinator _ | IRComposeApply _ | IRReduce _
-                        | IRReduceCompute _ | IRMethodFor _ | IRObjectFor _ | IRAssign _ -> ok <- false
-                        | _ -> ()) c.Body
-                    ok
-                let body =
-                    if binderFree then
-                        substituteIRVars (List.zip (c.Params |> List.map (fun p -> p.VarId)) reads |> Map.ofList) c.Body
-                    else IRApp (info.Kernel, reads, c.RetType)
-                let parms : IRParam list =
-                    [ { Name = "__tnf_i"; Type = tagTy ix0; Index = 0; VarId = pi }
-                      { Name = "__tnf_j"; Type = tagTy ix1; Index = 1; VarId = pj } ]
-                let lam =
-                    { mkLambdaCallable builder parms body c.RetType [] false [] [] false false 256 false
-                        with SourceName = anonymousCallableName (Some b.Name) "lambda" }
-                let rangeAt : IRArrayType = { ElemType = tagTy ix1; IndexTypes = rix; IsVirtual = true; Identity = None }
-                let range = IRRange (rix, None)
-                let ident = coIterIdentityOf builder range
-                let mf : MethodForInfo =
-                    { Arrays = [ range ]; Identities = [ ident ]; ArrayTypes = [ rangeAt ]; SDimsPerArray = [ 2 ]
-                      TotalSDims = 2; SharedIndexTypes = [] }
-                let apply =
-                    IRApplyCombinator
-                        { Loop = IRMethodFor mf
-                          Kernel = IRVar (lam.Id, mkFuncArrow [ tagTy ix0; tagTy ix1 ] c.RetType)
-                          Arrays = [ range ]; Identities = [ ident ]; ArrayTypes = [ rangeAt ]; SharedIndexTypes = []
-                          SymcomStates = [ SCNeither; SCNeither ]; TriangularLevels = [ false; false ]
-                          SDimsPerArray = [ 2 ]; KernelInputRanks = [ 0; 0 ]; KernelOutputRank = 0
-                          KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
-                          OutputType = info.OutputType; IsCoIteration = false }
-                let others =
-                    info.Arrays |> List.choose (function IRTranspose _ -> None | a -> Some (nameOfExpr a))
-                let surviving =
-                    if others.IsEmpty then "the output's"
-                    else $"""the output's (= {others |> String.concat ", "}'s, which share its index space)"""
-                let andOthers = if others.IsEmpty then "" else " and every untransposed operand"
-                let ev =
-                    [ $"transpose absorbed into {consumer} (kernel `{c.SourceName}`)"
-                      $"the surviving traversal is {surviving} row-major nest range<{extentTxt ix0}, {extentTxt ix1}>: forward and contiguous over the output{andOthers}; each transposed base is read once per cell at the swapped coordinate (a gather)"
-                      "legal in every build, strict included: no fold, so no order question -- each output cell is the kernel applied to the same operand values, so every cell keeps its bits"
-                      $"the transposed base(s): {whyNever} (the copy's snapshot is unobservable)"
-                      "no transpose copy, no pool" ]
-                if not enabled then
-                    recordTransposeNF b.Name (Blade.Effects.Declined "disabled by BLADE_TRANSPOSE_ELIDE") ev
-                    v
-                else
-                    recordTransposeNF b.Name Blade.Effects.Applied ev
-                    mintedKernels.Add((c.Id, lam))
-                    IRCompute apply
-            | IRMethodFor _, None, _ -> decline "the output is not a dense rank-2 array over two plain axes"
-            | _, _, None -> decline "the map's kernel does not resolve to a callable"
-            | _ -> decline "the map is not a method_for application"
-        | _ -> v
+    let absorbPointwise = tnAbsorbPointwise ctx mintedKernels
     // `site`: Some b = a module binding, None = a function body (subject = the
     // function's source name; `locals` = its parameters).
     let rewriteIn (subject: string) (site: IRBinding option) (locals: Set<IRId>) (inRepro: bool) (rootCopy: bool) (root: IRExpr) : IRExpr =

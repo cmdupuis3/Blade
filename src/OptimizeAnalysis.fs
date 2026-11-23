@@ -339,7 +339,6 @@ let internal isDeferredForm (e: IRExpr) : bool =
     | IRApp (IRObjectFor _, _, _) -> true
     | _ -> false
 
-
 /// The deferred computation a read of the OUTER let `id` runs (none when the
 /// let holds a stored value): followed through let aliases, tuple projections,
 /// array views and every deferred wrapper until a materialization boundary

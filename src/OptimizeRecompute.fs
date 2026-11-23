@@ -11,7 +11,6 @@ open Blade.OptimizeAnalysis
 open Blade.OptimizeStorage
 open Blade.OptimizeComputeElision
 
-
 // ===========================================================================
 // RECOMPUTE SELECTION (BLADE_RECOMPUTE, plan rule `recompute v2` -- v2 = cost model v2's bandwidth weight, gap G96;
 // docs/plans/plan-identity-transpose-compute.md section 6 P5, the first

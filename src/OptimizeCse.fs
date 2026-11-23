@@ -9,7 +9,6 @@ open Blade.IRMono
 open Blade.OptimizeGates
 open Blade.OptimizeAnalysis
 
-
 /// A float literal as its bit pattern, for identity only: structural `=` on
 /// floats is IEEE equality, which calls `0.0` and `-0.0` the same value.
 let internal floatBitsLit (n: IRExpr) : IRExpr =

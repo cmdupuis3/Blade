@@ -20,12 +20,6 @@ open Blade.OptimizeInPlace
 open Blade.OptimizeStreaming
 open Blade.OptimizeAssemblyDest
 
-/// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
-/// judges a callee's effects resolves it there, since a generic defined in
-/// one module and called from another (`from stats import mean`) is not in
-/// the calling module's own table.
-/// singleModule: the program is this one module (compute elision's
-/// top-level mode, which reads the print selection's names, runs only then).
 // ===========================================================================
 // SIBLING MAPS (round 4 wave 2, bench PM04; BLADE_SIBLING_MAPS, rule
 // `sibling-maps v1`). Two to eight STORED `|> compute` maps of one spine over

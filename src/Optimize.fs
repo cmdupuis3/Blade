@@ -28,7 +28,11 @@
 // reasons -- foldConstIntMatch is shared with the arity specializer (which
 // needs it DURING specialization for recursion termination), and the fusion
 // pass grew up beside the binop rewrite it runs after. `optimizeModule` is
-// the single pipeline entry over them; new passes land in this file.
+// the single pipeline entry over them. Since the K19 split this file holds
+// only that driver, the two probe cells and the surface other files name as
+// `Optimize.<name>`: a new pass lands in an Optimize<Family>.fs file compiled
+// before this one (Blade.fsproj order), and a name another file needs from it
+// is re-exported at the end of this file.
 module Blade.Optimize
 
 open Blade.Types
@@ -91,17 +95,6 @@ let planLuCompanion (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (mo
 /// specialization), then elementwise-chain fusion. One entry point so the
 /// pipeline reads as a stage, and so a new pass has one obvious place to
 /// join.
-/// The SEGMENT-STREAMING decision (docs/plans/structural/07 Â§3.4; the
-/// principle the user stated: a computation over a streamed, segmented
-/// variable is examined as a whole before `compute`, and the compiler --
-/// not a task graph -- chooses between reading the store one run at a
-/// time and materializing). Today the choice is by consumer SHAPE and is
-/// recorded, not costed: a fold walks the store block by block in storage
-/// order (bitwise the flat fold), a `group_by` under a structural grouping
-/// reads one run per group, a key grouping needs the whole variable. The
-/// emission lives in codegen; this pass only says what it will do, so
-/// `blade plan` shows it.
-
 let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) foreignCensus (modul: IRModule) : IRModule =
     // Normal lowering constructs the events LAST. If a consumer re-applies
     // this stage to optimized IR, retain the established lifetime regions.
@@ -140,6 +133,12 @@ let private optimizeModuleCore (builder: IRBuilder) (programFuncs: IRCallable li
     // becomes the join's shared leaf (no pool)
     |> elideJoinProducersModule programFuncs
 
+/// `programFuncs` is every callable of the PROGRAM (all modules): a pass that
+/// judges a callee's effects resolves it there, since a generic defined in
+/// one module and called from another (`from stats import mean`) is not in
+/// the calling module's own table.
+/// singleModule: the program is this one module (compute elision's
+/// top-level mode, which reads the print selection's names, runs only then).
 let optimizeModule (builder: IRBuilder) (programFuncs: IRCallable list) (singleModule: bool) (modul: IRModule) : IRModule =
     optimizeModuleCore builder programFuncs singleModule None modul
 

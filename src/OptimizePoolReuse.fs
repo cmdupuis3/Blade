@@ -9,7 +9,6 @@ open Blade.IRMono
 open Blade.OptimizeGates
 open Blade.OptimizeAnalysis
 
-
 /// SCRATCH REUSE ACROSS BARRIERS (plan-fortran-killer-2 section 4, gate 2).
 ///
 /// Elementwise fusion removes the temporaries it can; the ones it cannot --

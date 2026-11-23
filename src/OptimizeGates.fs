@@ -27,7 +27,6 @@ let cseEnabled () = gateOn "BLADE_CSE"
 /// by BLADE_POOL_REUSE") with the pairs as evidence.
 let poolReuseEnabled () = gateOn "BLADE_POOL_REUSE"
 
-
 /// A05: exact ordinary-function scratch lifetime, independent of donation.
 /// Read per lowering; the off arm keeps the original scope-exit cleanup.
 let earlyPoolReleaseEnabled () = gateOn "BLADE_POOL_EARLY_RELEASE"
@@ -315,3 +314,28 @@ let recordCellEpilogue (subject: string) (outcome: Blade.Effects.DecisionOutcome
         { Blade.Effects.Rule = "cell-epilogue"; Version = 1
           Span = Blade.Ast.noSpan; Subject = subject
           Outcome = outcome; Evidence = evidence }
+
+/// THE ADMISSION BUILDER (cleanup K9): a plan's admission as a sequence of
+/// named checks, each a `Result<'value, string>` whose Error is the decline
+/// text. `let! x = check` continues with the value of an `Ok` and answers the
+/// FIRST `Error` unchanged, `do! check` the same for a `Result<unit, string>`,
+/// `return v` is `Ok v`. There is no Delay: each step is evaluated when the
+/// block reaches it, so the checks run in the order they are written and a
+/// later one never runs after an earlier one failed. Every member is inline
+/// and every continuation [<InlineIfLambda>], so a block compiles to the nested
+/// matches a staircase was.
+type AdmissionBuilder() =
+    member inline _.Bind(r: Result<'a, string>, [<InlineIfLambda>] f: 'a -> Result<'b, string>) : Result<'b, string> =
+        match r with
+        | Ok x -> f x
+        | Error e -> Error e
+    member inline _.Return(x: 'a) : Result<'a, string> = Ok x
+    member inline _.ReturnFrom(r: Result<'a, string>) : Result<'a, string> = r
+
+/// `admission { ... }`: see AdmissionBuilder.
+let admission = AdmissionBuilder()
+
+/// A boolean condition as an admission step: `Ok ()` when it holds, else the
+/// decline text.
+let inline require (cond: bool) (reason: string) : Result<unit, string> =
+    if cond then Ok () else Error reason
